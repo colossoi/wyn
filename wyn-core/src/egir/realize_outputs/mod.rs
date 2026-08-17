@@ -43,7 +43,7 @@ use crate::flow::{BlockId, ExecutionModel};
 use ExecutionModel as _;
 
 use super::from_tlc::ConvertError;
-use super::ir::{RealizedOutputRoute, UnrealizedOutputRoute};
+use super::ir::{RealizedOutputRoute, ResultBinding, UnrealizedOutputRoute};
 use super::program::{
     Entry, LogicalResourceArena, OutputWriter, Program, RawEntry, SemanticResourceRef, SlotSource,
 };
@@ -99,6 +99,9 @@ fn realize_entry(
     } else {
         realize_graphics_returns(&mut entry, effect_ids)?;
     }
+    entry.result = super::types::by_value_function_result::<super::types::WynLanguage>(
+        polytype::Type::Constructed(crate::ast::TypeName::Unit, Vec::new()),
+    );
     Ok(entry)
 }
 
@@ -237,7 +240,8 @@ fn synthesize_compute_routes(entry: &mut RawEntry<RealizedOutputRoute>) {
     let Some((return_block, result)) = unique_value_return(graph) else {
         return;
     };
-    let sources = output_sources(graph, result, outputs);
+    let sources = output_sources(graph, &result, outputs)
+        .expect("a generated compute return must match its declared output boundary");
     for (slot, source) in sources.into_iter().enumerate() {
         outputs[slot].routes.push(RealizedOutputRoute {
             source: SlotSource {
@@ -260,7 +264,8 @@ fn realize_graphics_returns(
         return Ok(());
     };
     let effect_index = graph.side_effect_index();
-    for (slot, source) in output_sources(graph, result, outputs).into_iter().enumerate() {
+    let sources = output_sources(graph, &result, outputs).map_err(ConvertError::Internal)?;
+    for (slot, source) in sources.into_iter().enumerate() {
         let output = &mut outputs[slot];
         let mut writers = source_value_writers(graph, &effect_index, source);
         writers.push(dispatch::graphics_slot_source(
@@ -285,12 +290,12 @@ fn realize_graphics_returns(
     Ok(())
 }
 
-fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ValueId)> {
+fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<crate::types::Type>)> {
     let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
-        let SkeletonTerminator::Return(Some(value)) = &body.term else {
+        let SkeletonTerminator::Return(Some(result)) = &body.term else {
             return None;
         };
-        Some((block, value.single_value()?))
+        Some((block, result.clone()))
     });
     let result = returns.next();
     assert!(
@@ -330,43 +335,27 @@ fn dedup_output_writers(writers: &mut Vec<OutputWriter>) {
     writers.retain(|writer| seen.insert(*writer));
 }
 
-/// Per-output source nodes: the single result, the operands of a literal
-/// `Tuple(n)` result, or `Project(result, i)` for an opaque tuple.
+/// Materialize each logical entry result field from its canonical binding.
 fn output_sources(
     graph: &mut EGraph<Raw>,
-    result: ValueId,
+    result: &ResultBinding<crate::types::Type>,
     outputs: &[super::ir::EntryOutput<
         SemanticResourceRef,
         RealizedOutputRoute,
         super::types::WynLanguage,
     >],
-) -> Vec<ValueId> {
-    use super::types::{PureOp, ValueKind};
-    use smallvec::smallvec;
-
+) -> Result<Vec<ValueId>, String> {
     let n = outputs.len();
     if n == 1 {
-        return vec![result];
+        return super::graph_ops::pack_result_values(graph, result).map(|source| vec![source]);
     }
-    if let ValueKind::Pure {
-        op: PureOp::Tuple(k),
-        operands,
-    } = &graph.nodes[result].kind
-    {
-        if *k == n && operands.len() == n {
-            return operands.to_vec();
-        }
+    let fields = result.top_level_fields();
+    if fields.len() != n {
+        return Err(format!(
+            "entry result has {} logical fields for {} declared outputs",
+            fields.len(),
+            n
+        ));
     }
-    outputs
-        .iter()
-        .enumerate()
-        .map(|(i, output)| {
-            graph.intern_pure(
-                PureOp::Project { index: i as u32 },
-                smallvec![result],
-                output.ty.clone(),
-                None,
-            )
-        })
-        .collect()
+    fields.iter().map(|field| super::graph_ops::pack_result_values(graph, field)).collect()
 }

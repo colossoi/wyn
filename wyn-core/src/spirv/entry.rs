@@ -12,9 +12,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // value environment; multi-slot storage views are lowered from their pinned
     // bindings and have no single SSA-value replacement.
     let mut input_params = vec![None; entry.inputs.len()];
+    let mut input_places = vec![None; entry.inputs.len()];
     for (parameter_index, slots) in entry.parameter_inputs.iter().enumerate() {
         if slots.len() == 1 {
             input_params[slots[0]] = Some(params[parameter_index]);
+            input_places[slots[0]] = body.parameter_place(parameter_index);
         }
     }
     let is_compute = entry.execution_model.is_compute();
@@ -114,7 +116,13 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // after `begin_function`. Each entry here: (SSA parameter, var_id,
     // value_type, member_types) — member_types is Some for a record
     // uniform whose fields are the block's members.
-    let mut uniform_loads: Vec<(ValueId, spirv::Word, spirv::Word, Option<Vec<spirv::Word>>)> = Vec::new();
+    let mut uniform_loads: Vec<(
+        ValueId,
+        Option<crate::ssa::types::PlaceId>,
+        spirv::Word,
+        spirv::Word,
+        Option<Vec<spirv::Word>>,
+    )> = Vec::new();
     for (input_index, input) in entry.inputs.iter().enumerate() {
         let input_param = input_params[input_index];
         // Push constant inputs are handled separately above
@@ -242,7 +250,13 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             );
             interfaces.push(var_id);
             if let Some(input_param) = input_param {
-                uniform_loads.push((input_param, var_id, input_type, member_types));
+                uniform_loads.push((
+                    input_param,
+                    input_places[input_index],
+                    var_id,
+                    input_type,
+                    member_types,
+                ));
             }
         } else if let Some(br) = input.texture_binding().or(input.sampler_binding()) {
             // `#[texture]` / `#[sampler]` → opaque handle in UniformConstant
@@ -424,6 +438,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let param_types: Vec<spirv::Word> = Vec::new();
     let (entry_func, _, first_code_block) = constructor.begin_function(None, &param_types, void_type)?;
     constructor.entry_functions.insert(entry.id, entry_func);
+    let mut parameter_places = LookupMap::new();
 
     // Load push constant members via AccessChain from the push constant variable.
     if let Some(pc_var_id) = pc_var {
@@ -435,9 +450,13 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             let idx_const = constructor.const_u32(member_idx as u32);
             let access_chain =
                 constructor.builder.access_chain(member_ptr_type, None, pc_var_id, [idx_const])?;
-            let loaded = constructor.builder.load(member_type, None, access_chain, None, [])?;
             if let Some(input_param) = input_params[input_idx] {
-                constructor.env.insert(input_param, loaded);
+                if let Some(place) = input_places[input_idx] {
+                    parameter_places.insert(place, (access_chain, spirv::StorageClass::PushConstant));
+                } else {
+                    let loaded = constructor.builder.load(member_type, None, access_chain, None, [])?;
+                    constructor.env.insert(input_param, loaded);
+                }
             }
         }
     }
@@ -449,7 +468,20 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // rather than OpCopyLogical: naga's SPIR-V frontend — which viz
     // feeds this module through — doesn't handle OpCopyLogical, and the
     // member loop mirrors the push-constant prologue above.)
-    for (input_param, var_id, value_type, member_types) in &uniform_loads {
+    for (input_param, input_place, var_id, value_type, member_types) in &uniform_loads {
+        if let Some(place) = input_place {
+            if member_types.is_some() {
+                return Err(err_spirv!(
+                    "addressable record uniform cannot bind one aggregate parameter place"
+                ));
+            }
+            let member_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::Uniform, *value_type);
+            let zero = constructor.const_i32(0);
+            let access_chain = constructor.builder.access_chain(member_ptr_type, None, *var_id, [zero])?;
+            parameter_places.insert(*place, (access_chain, spirv::StorageClass::Uniform));
+            continue;
+        }
         let loaded = match member_types {
             Some(member_types) => {
                 let mut members = Vec::with_capacity(member_types.len());
@@ -508,8 +540,12 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         };
         if let Some(input_param) = input_params[input_index] {
             if let Some(&var_id) = constructor.env.get(&input_param) {
-                let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
-                constructor.env.insert(input_param, loaded);
+                if let Some(place) = input_places[input_index] {
+                    parameter_places.insert(place, (var_id, spirv::StorageClass::Input));
+                } else {
+                    let loaded = constructor.builder.load(input_type, None, var_id, None, [])?;
+                    constructor.env.insert(input_param, loaded);
+                }
             }
         }
     }
@@ -517,7 +553,16 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // Lower the body — entry points are void functions, so SSA must
     // use OutputPtr+Store then ReturnUnit; a Return(value) terminator
     // will produce an error.
-    lower::LowerCtx::new(constructor, body, true, entry.span, Vec::new(), first_code_block).lower()?;
+    lower::LowerCtx::new(
+        constructor,
+        body,
+        true,
+        entry.span,
+        Vec::new(),
+        parameter_places,
+        first_code_block,
+    )
+    .lower()?;
 
     constructor.end_function()?;
 

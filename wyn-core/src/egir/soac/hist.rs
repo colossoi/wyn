@@ -240,13 +240,8 @@ impl<P: WynSoacPhase> Op<P> {
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        let mut nodes = self
-            .form
-            .bucket
-            .captures()
-            .iter()
-            .filter_map(|capture| capture.value())
-            .collect::<Vec<_>>();
+        let mut nodes =
+            self.form.bucket.captures().iter().filter_map(|capture| capture.value()).collect::<Vec<_>>();
         for operation in &self.form.operations {
             if let Update::Reduce { operator, .. } = &operation.update {
                 nodes.extend(operator.captures().iter().filter_map(|capture| capture.value()));
@@ -255,12 +250,16 @@ impl<P: WynSoacPhase> Op<P> {
         nodes
     }
 
+    pub(crate) fn remap_base_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        self.form.remap_referenced_values(&mut map);
+    }
+
     pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.capture_nodes();
         for operation in &self.form.operations {
             nodes.extend(operation.shape.iter().copied());
             nodes.push(operation.race_factor);
-            nodes.extend(operation.destinations.iter().map(|view| view.value()));
+            nodes.extend(operation.destinations.iter().map(|destination| destination.value()));
             if let Update::Reduce { neutral, .. } = &operation.update {
                 nodes.extend(neutral.iter().copied());
             }
@@ -336,7 +335,7 @@ impl<P: WynSoacPhase> Op<P> {
             }
 
             let value_types = operation.update.value_types();
-            for (component, (&destination, value_type)) in
+            for (component, (destination, value_type)) in
                 operation.destinations.iter().zip(value_types).enumerate()
             {
                 let destination_type = node_type(destination.value());

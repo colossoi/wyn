@@ -5,8 +5,8 @@ use crate::egir::program::{
 };
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, RegionId,
-    SegBody, Semantic, SoacDestination, SoacEffect, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, RegionId, SegBody,
+    Semantic, SoacDestination, SoacEffect, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
 use polytype::Type;

@@ -125,7 +125,11 @@ fn fold_constant_branch_preserves_chosen_args() {
     fold_constant_branches(&mut graph);
     match &graph.skeleton.blocks[entry].term {
         SkeletonTerminator::Branch { args, .. } => {
-            assert_eq!(args.iter().map(|arg| arg.value()).collect::<Vec<_>>(), [x], "should carry then_args only");
+            assert_eq!(
+                args.iter().map(|arg| arg.value()).collect::<Vec<_>>(),
+                [x],
+                "should carry then_args only"
+            );
         }
         other => panic!("{:?}", other),
     }

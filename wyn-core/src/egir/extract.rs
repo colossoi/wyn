@@ -65,7 +65,7 @@ pub fn extract<P: Family>(graph: &EGraph<P>) -> LookupMap<ValueId, ValueId> {
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
             }
-            ValueKind::PlaceLength { .. } => {
+            ValueKind::PlaceLength { .. } | ValueKind::PlaceView { .. } => {
                 best_cost.insert(nid, 0);
                 best_node.insert(nid, nid);
             }

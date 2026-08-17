@@ -206,10 +206,8 @@ pub(super) fn finish(
 ) -> Segmented {
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
         let rewrite = |graph: &mut EGraph| {
-            let operands = input_nodes
-                .iter()
-                .map(|input| graph.operand_ref(*input))
-                .collect::<SmallVec<_>>();
+            let operands =
+                input_nodes.iter().map(|input| graph.operand_ref(*input)).collect::<SmallVec<_>>();
             let block = &mut graph.skeleton.blocks[candidate.block];
             let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,

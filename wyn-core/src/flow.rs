@@ -62,15 +62,9 @@ impl<C, A, R> Terminator<C, A, R> {
             } => Terminator::CondBranch {
                 cond: map_condition(cond)?,
                 then_target: map_block(then_target)?,
-                then_args: then_args
-                    .into_iter()
-                    .map(&mut map_argument)
-                    .collect::<Result<_, _>>()?,
+                then_args: then_args.into_iter().map(&mut map_argument).collect::<Result<_, _>>()?,
                 else_target: map_block(else_target)?,
-                else_args: else_args
-                    .into_iter()
-                    .map(map_argument)
-                    .collect::<Result<_, _>>()?,
+                else_args: else_args.into_iter().map(map_argument).collect::<Result<_, _>>()?,
             },
             Self::Unreachable => Terminator::Unreachable,
         })

@@ -29,8 +29,7 @@ use super::super::from_tlc::ConvertError;
 use super::super::ir::{callable_parameter, Body, BodySite, OperandRef, ProgramShape};
 use super::super::program::{Func, Program};
 use super::super::types::{
-    EGraph, PureOp, RegionId, SideEffectKind, SoacEffect, ValueId, ValueKind, WynLanguage,
-    WynSoacPhase,
+    EGraph, PureOp, RegionId, SideEffectKind, SoacEffect, ValueId, ValueKind, WynLanguage, WynSoacPhase,
 };
 use crate::ast::TypeName;
 
@@ -118,12 +117,14 @@ fn collect_drifts<'a, P: WynSoacPhase + 'a>(
                     let base = region.params.len().saturating_sub(n_caps);
                     for (i, &capture) in body.captures.iter().enumerate() {
                         let param_index = base + i;
-                        let Some(cap_ty) = capture.value().and_then(|capture| {
-                            graph.nodes.get(capture).map(|node| &node.ty)
-                        }) else {
+                        let Some(cap_ty) = capture
+                            .value()
+                            .and_then(|capture| graph.nodes.get(capture).map(|node| &node.ty))
+                        else {
                             continue;
                         };
-                        let Some(param_ty) = region.params.get(param_index).map(|parameter| parameter.ty()) else {
+                        let Some(param_ty) = region.params.get(param_index).map(|parameter| parameter.ty())
+                        else {
                             continue;
                         };
                         if is_view_ward_drift(param_ty, cap_ty) {
@@ -152,9 +153,8 @@ fn collect_call_drifts<P: WynSoacPhase>(
         return;
     };
     for (param_index, &argument) in arguments.iter().enumerate() {
-        let Some(arg_ty) = argument
-            .value()
-            .and_then(|argument| graph.nodes.get(argument).map(|node| &node.ty))
+        let Some(arg_ty) =
+            argument.value().and_then(|argument| graph.nodes.get(argument).map(|node| &node.ty))
         else {
             continue;
         };

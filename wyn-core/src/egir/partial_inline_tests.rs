@@ -30,11 +30,20 @@ fn fixed_u32_array_ty(size: usize) -> Type<TypeName> {
     )
 }
 
-fn physical_params(specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>) -> Vec<FuncParam<crate::BindingRef, Type<TypeName>>> {
+fn physical_params(
+    specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
+) -> Vec<FuncParam<crate::BindingRef, Type<TypeName>>> {
     specs
         .into_iter()
         .map(|(name, ty)| callable_parameter::<crate::BindingRef, WynLanguage>(name.into(), ty))
         .collect()
+}
+
+fn inline_test_body(
+    graph: &mut EGraph<Physical>,
+    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
+) -> Result<InliningStats, String> {
+    inline_body(graph, callees, &mut crate::IdSource::new())
 }
 
 fn add_value_call(
@@ -46,12 +55,14 @@ fn add_value_call(
 ) -> ValueId {
     let result = by_value_function_result::<WynLanguage>(result_ty);
     graph
-        .add_call(
+        .emit_call(
+            graph.skeleton.entry,
             callee,
             params,
             &result,
             arguments.into_iter().map(OperandRef::Value),
             CallEffects::Pure,
+            None,
             None,
         )
         .expect("complete test call")
@@ -80,10 +91,7 @@ fn mixed_callee() -> PhysicalFunc {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
-    let params = physical_params([
-        ("varying", ty.clone()),
-        ("invariant", ty.clone()),
-    ]);
+    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     PhysicalFunc::new(
         region,
         "mixed".into(),
@@ -110,10 +118,7 @@ fn mixed_callee_without_invariant_subexpression() -> PhysicalFunc {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
-    let params = physical_params([
-        ("varying", ty.clone()),
-        ("invariant", ty.clone()),
-    ]);
+    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     PhysicalFunc::new(
         region,
         "mixed".into(),
@@ -165,10 +170,7 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, ValueId, ValueId) {
         CallArgs::AllInvariant => vec![invariant, literal],
         CallArgs::AllVarying => vec![current, current],
     };
-    let params = physical_params([
-        ("varying", ty.clone()),
-        ("invariant", ty.clone()),
-    ]);
+    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     let call = add_value_call(
         &mut graph,
         crate::FunctionId::from_index(0),
@@ -197,10 +199,10 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     let callees = [(callee.region, callee)].into_iter().collect();
     let (mut graph, call, invariant) = loop_caller(CallArgs::Mixed);
 
-    let stats = inline_body(&mut graph, &callees).unwrap();
+    let stats = inline_test_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call].kind, ValueKind::Union { .. }));
+    assert_ne!(graph.canonical_value(call), call);
     assert!(graph.nodes.values().any(|node| matches!(
         &node.kind,
         ValueKind::Pure {
@@ -216,10 +218,10 @@ fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
     let callees = [(callee.region, callee)].into_iter().collect();
     let (mut graph, call, _) = loop_caller(CallArgs::Mixed);
 
-    let stats = inline_body(&mut graph, &callees).unwrap();
+    let stats = inline_test_body(&mut graph, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(graph.nodes[call].kind, ValueKind::Union { .. }));
+    assert_ne!(graph.canonical_value(call), call);
 }
 
 #[test]
@@ -229,12 +231,9 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
 
     for shape in [CallArgs::AllInvariant, CallArgs::AllVarying] {
         let (mut graph, call, _) = loop_caller(shape);
-        let stats = inline_body(&mut graph, &callees).unwrap();
+        let stats = inline_test_body(&mut graph, &callees).unwrap();
         assert_eq!(stats.calls_inlined, 0);
-        assert!(matches!(
-            graph.nodes[call].kind,
-            ValueKind::CallResult { .. }
-        ));
+        assert!(matches!(graph.nodes[call].kind, ValueKind::CallResult { .. }));
     }
 }
 
@@ -268,10 +267,10 @@ fn inlines_fixed_array_parameters_outside_loops() {
     caller.skeleton.blocks[caller.skeleton.entry].term =
         SkeletonTerminator::Return(Some(caller.value_result(call)));
 
-    let stats = inline_body(&mut caller, &callees).unwrap();
+    let stats = inline_test_body(&mut caller, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
-    assert!(matches!(caller.nodes[call].kind, ValueKind::Union { .. }));
+    assert_ne!(caller.canonical_value(call), call);
 }
 
 #[test]
@@ -331,10 +330,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let selected = callee_graph.add_block_param(merge, scalar.clone());
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
-    let params = physical_params([
-        ("index", index_ty.clone()),
-        ("values", array.clone()),
-    ]);
+    let params = physical_params([("index", index_ty.clone()), ("values", array.clone())]);
     let callee = PhysicalFunc::new(
         region,
         "conditional_fixed_array_element".into(),
@@ -360,24 +356,17 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     caller.skeleton.blocks[caller.skeleton.entry].term =
         SkeletonTerminator::Return(Some(caller.value_result(call)));
 
-    let stats = inline_body(&mut caller, &callees).unwrap();
+    let stats = inline_test_body(&mut caller, &callees).unwrap();
 
     assert_eq!(stats.calls_inlined, 1);
     assert_eq!(stats.block_budget, 5);
-    assert!(matches!(
-        caller.nodes[call].kind,
-        ValueKind::CallResult { .. }
-    ));
-    assert!(caller
-        .skeleton
-        .blocks
-        .values()
-        .any(|block| {
-            matches!(
-                &block.term,
-                SkeletonTerminator::Return(Some(result)) if result.single_value() != Some(call)
-            )
-        }));
+    assert!(matches!(caller.nodes[call].kind, ValueKind::CallResult { .. }));
+    assert!(caller.skeleton.blocks.values().any(|block| {
+        matches!(
+            &block.term,
+            SkeletonTerminator::Return(Some(result)) if result.single_value() != Some(call)
+        )
+    }));
     assert!(caller
         .skeleton
         .blocks

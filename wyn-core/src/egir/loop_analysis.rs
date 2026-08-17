@@ -105,7 +105,7 @@ impl<'a, P: Family> LoopInvariance<'a, P> {
         let invariant = match self.graph.nodes[node].kind.clone() {
             ValueKind::Constant(_) | ValueKind::FuncParam { .. } => true,
             ValueKind::CallResult { .. } => true,
-            ValueKind::PlaceLength { place } => self
+            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => self
                 .graph
                 .place_value_dependencies(place)
                 .into_iter()

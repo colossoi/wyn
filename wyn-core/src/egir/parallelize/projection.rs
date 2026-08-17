@@ -29,10 +29,7 @@ impl ProjectionSpec {
             outputs: Vec::new(),
             resource_declarations,
             result: crate::egir::ir::by_value_function_result::<crate::egir::types::WynLanguage>(
-                Type::Constructed(
-                TypeName::Unit,
-                vec![],
-                ),
+                Type::Constructed(TypeName::Unit, vec![]),
             ),
         }
     }
@@ -65,7 +62,14 @@ pub(super) fn project_kernel_body(
     } = spec;
     let route_values =
         outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
-    let projection = graph_projector::GraphProjector::new(&source.graph).all_with_values(route_values)?;
+    let projection = graph_projector::GraphProjector::new(&source.graph)
+        .all_with_values(route_values)
+        .map_err(|error| {
+            format!(
+                "could not project complete kernel body '{}': {error}",
+                source.name
+            )
+        })?;
     program::PlannedEntry::from_projection(
         projection,
         id,
@@ -97,7 +101,13 @@ fn project_kernel_body_effects(
     let route_values =
         outputs.iter().flat_map(|output| &output.routes).map(|route| route.source.value).collect();
     let projection = graph_projector::GraphProjector::new(&source.graph)
-        .selected_component_with_values(selected, route_values)?;
+        .selected_component_with_values(selected, route_values)
+        .map_err(|error| {
+            format!(
+                "could not project selected kernel body '{}': {error}",
+                source.name
+            )
+        })?;
     let effect_sites = projection
         .source_effects()
         .iter()

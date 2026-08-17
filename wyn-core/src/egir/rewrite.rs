@@ -108,7 +108,7 @@ impl<P: Family> RewriteSet<P> {
 
 /// Apply the default rewrite set to every physical body. Elaboration's cost
 /// extraction resolves the unions introduced here.
-pub fn rewrite(program: super::partial_inline::PartiallyInlined) -> Rewritten {
+pub fn rewrite(program: super::materialize::Materialized) -> Rewritten {
     let rules = default_rewrites();
     program
         .map_graphs(|_, mut graph| {

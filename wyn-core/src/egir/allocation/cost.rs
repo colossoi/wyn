@@ -104,7 +104,7 @@ fn prelude_materialization_policy(
                 matches!(effect.kind, SideEffectKind::Effect(EffectOp::Load { .. }))
                     && !graph_ops::read_storage_resources(
                         &recipe.projection.graph,
-                        effect.referenced_nodes(),
+                        graph_ops::effect_value_inputs(&recipe.projection.graph, effect),
                     )
                     .is_empty()
             },
@@ -270,10 +270,10 @@ fn graph_block_costs(
             let roots = block
                 .side_effects
                 .iter()
-                .flat_map(|effect| effect.referenced_nodes())
+                .flat_map(|effect| graph_ops::effect_value_inputs(graph, effect))
                 .chain(block.term.referenced_nodes())
                 .chain(extra_roots.get(&block_id).into_iter().flatten().copied());
-            let mut local = local_value_cost(program, graph, roots, summaries, visiting)?;
+            let mut local = local_value_cost(graph, roots)?;
             for effect in &block.side_effects {
                 local = local.saturating_add(effect_cost(program, graph, effect, summaries, visiting)?);
             }
@@ -282,13 +282,7 @@ fn graph_block_costs(
         .collect()
 }
 
-fn local_value_cost(
-    program: &ResourcesAllocated,
-    graph: &EGraph,
-    roots: impl IntoIterator<Item = ValueId>,
-    summaries: &mut HashMap<crate::FunctionId, u64>,
-    visiting: &mut HashSet<crate::FunctionId>,
-) -> Option<u64> {
+fn local_value_cost(graph: &EGraph, roots: impl IntoIterator<Item = ValueId>) -> Option<u64> {
     let mut pending = roots.into_iter().collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut cost = 0u64;
@@ -307,7 +301,7 @@ fn local_value_cost(
             | ValueKind::Constant(_)
             | ValueKind::SideEffectResult
             | ValueKind::CallResult { .. } => {}
-            ValueKind::PlaceLength { place } => {
+            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
                 pending.extend(graph.place_value_dependencies(*place));
             }
         }
@@ -463,12 +457,7 @@ pub(crate) fn fixed_loop_trip_count(
     let index = operands[0];
     let bound = integer_literal(graph, operands[1])?;
     let parameter =
-        graph
-            .skeleton
-            .blocks[header]
-            .params
-            .iter()
-            .position(|parameter| parameter.value() == index)?;
+        graph.skeleton.blocks[header].params.iter().position(|parameter| parameter.value() == index)?;
     let start = graph
         .skeleton
         .blocks

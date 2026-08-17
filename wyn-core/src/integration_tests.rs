@@ -126,32 +126,16 @@ fn segmented_entry_map_output_fields(program: &crate::egir::reify::Segmented) ->
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let entry = program.entry_points.first().expect("semantic test entry");
-    let result = entry
-        .graph
-        .skeleton
-        .blocks
-        .iter()
-        .flat_map(|(_, block)| &block.side_effects)
-        .find_map(|effect| {
-            matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
-                .then(|| effect.result().map(|result| result.values()))
-                .flatten()
-        })
-        .expect("one observable map result");
+    let results = entry.graph.side_effect_index();
     entry
         .routes()
         .map(|route| {
-            result
-                .iter()
-                .position(|field| {
-                    route.source.value == *field
-                        || crate::egir::graph_ops::root_projection_index(
-                            &entry.graph,
-                            route.source.value,
-                            *field,
-                        )
-                        .is_some()
+            results
+                .effect_result_field(&entry.graph, route.source.value)
+                .filter(|(effect, _, _)| {
+                    matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
                 })
+                .map(|(_, _, field)| field)
                 .expect("entry output route does not select a map result field")
         })
         .collect()
@@ -1571,7 +1555,7 @@ entry dependent_rows(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
 }
 
 #[test]
-fn multiple_bucket_scatter_operations_are_rejected_without_panicking() {
+fn multiple_bucket_scatter_operations_share_one_entry_pipeline() {
     let source = r#"
 entry two_buckets(
     dest1: *[2][4]u32,
@@ -1582,13 +1566,8 @@ entry two_buckets(
   in (first, second)
 "#;
 
-    let Err(error) = crate::compile_thru_spirv(source) else {
-        panic!("multiple bucket scatters in one entry must be rejected")
-    };
-    assert!(
-        error.to_string().contains("bucket_scatter cannot currently share one entry pipeline"),
-        "unexpected multiple-bucket diagnostic: {error}"
-    );
+    crate::compile_thru_spirv(source)
+        .expect("multiple destination-passed bucket scatters compile in one entry");
 }
 
 #[test]
@@ -5900,12 +5879,7 @@ def cumsum(a: *[8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
 }
 
 #[test]
-fn consuming_scan_skips_fresh_allocation() {
-    // Sibling of `consuming_map_skips_fresh_allocation` for Scan.
-    // Same invariant — unique-and-dead input → in-place writeback;
-    // aliased-after input → fresh allocation — expressed at the
-    // use-after-SOAC level rather than via a helper boundary
-    // (which `force_inline_soac_helpers` would collapse).
+fn scan_destinations_do_not_reintroduce_uninitialized_aggregate_values() {
     let dead_after_ssa = compile_to_ssa(
         r#"
 
@@ -5918,7 +5892,7 @@ entry frag(c: vec4f32) vec4f32 =
     assert_eq!(
         count_uninit_in_program(&dead_after_ssa),
         0,
-        "scan over a unique-and-dead input should write back in place, no fresh buffer",
+        "destination-directed scan lowering must not construct an uninitialized aggregate value",
     );
 
     let aliased_ssa = compile_to_ssa(
@@ -5931,9 +5905,10 @@ entry frag(c: vec4f32) vec4f32 =
     @[f32.i32(r[j]), f32.i32(xs[j]), 0.0, 0.0]
 "#,
     );
-    assert!(
-        count_uninit_in_program(&aliased_ssa) >= 1,
-        "scan over an input that's still aliased after the scan should allocate a fresh buffer",
+    assert_eq!(
+        count_uninit_in_program(&aliased_ssa),
+        0,
+        "a Fresh scan destination must be an addressable place",
     );
 }
 
@@ -9966,31 +9941,16 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
     .expect("multi-output (map + indexed read of same map) should compile");
 }
 
-/// Returning the same scan in two output slots — `(offsets, offsets)` —
-/// can't be served by retargeting the scan twice. Slot 0 retargets to
-/// its view; slot 1, also a runtime-sized array, can't retarget the
-/// (already-retargeted) SOAC, so it falls through to the existing
-/// "runtime-sized array not produced by a retargetable map/scan"
-/// `ConvertError::Unsupported`. Pinned here to confirm we surface a
-/// clean diagnostic rather than panicking.
 #[test]
-fn multi_output_returns_scan_in_two_slots_is_rejected() {
-    let result = crate::compile_thru_spirv(
+fn multi_output_returns_scan_in_two_slots() {
+    crate::compile_thru_spirv(
         "\
 entry gen(xs: []i32) ([]i32, []i32) =
   let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
   (offsets, offsets)
 ",
-    );
-    let err = match result {
-        Ok(_) => panic!("expected returning the same scan in two output slots to fail"),
-        Err(e) => e,
-    };
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("runtime-sized array"),
-        "expected runtime-sized-array diagnostic, got: {msg}"
-    );
+    )
+    .expect("one scan result can be published through two explicit destinations");
 }
 
 /// Under `--single-stage` mode, a vec4-emitting map that gathers from a
@@ -11226,8 +11186,8 @@ entry main(root: [2]u32) [4]u32 =
                         }
                     ))
                     .count(),
-                1,
-                "the inlined entry keeps only the one addressable copy required by dynamic extraction"
+                0,
+                "the entry parameter place should make dynamic extraction copy-free"
             );
 
             let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("fixed-array capture lowers to WGSL");
@@ -11290,8 +11250,8 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
                         }
                     ))
                     .count(),
-                1,
-                "the entry keeps only the addressable copy required by root's dynamic index"
+                0,
+                "the root parameter place should make dynamic indexing copy-free"
             );
 
             let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mixed capture lowers to WGSL");
@@ -11364,7 +11324,6 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                     )),
                     "width-{width} owner must not pass root through a per-element helper"
                 );
-                let entry_insts = &owner.body.get_block(owner.body.entry_block()).insts;
                 let materializes = owner
                     .body
                     .inner
@@ -11382,8 +11341,8 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                     })
                     .collect::<Vec<_>>();
                 assert!(
-                    !materializes.is_empty() && materializes.iter().all(|id| entry_insts.contains(id)),
-                    "width-{width} root materialization must be hoisted outside the owner loop"
+                    materializes.is_empty(),
+                    "width-{width} owner must preserve addressable captures without aggregate materialization"
                 );
 
                 let wgsl = crate::lower_ssa_to_wgsl(ssa)
@@ -11467,8 +11426,8 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                 "fused unzip helper must not project through aggregate carriers"
             );
             assert_eq!(
-                tuples, 1,
-                "fused unzip helper constructs only its final ([2]u32, u32) result"
+                tuples, 0,
+                "fused unzip helper writes both destination fields directly"
             );
 
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");

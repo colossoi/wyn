@@ -299,17 +299,16 @@ fn entry_facts(entry: &RawEntry<RealizedOutputRoute>) -> HashMap<(BlockId, usize
     let mut facts_by_location = HashMap::new();
     for (block, contents) in &entry.graph.skeleton.blocks {
         for (index, effect) in contents.side_effects.iter().enumerate() {
-            let placement =
-                if kernel_scope
-                    && !effect
-                        .result
-                        .as_ref()
-                        .is_some_and(|result| result.values().iter().any(|value| consumed.contains(value)))
-                {
-                    screma::Placement::Kernel
-                } else {
-                    screma::Placement::LaneLocal
-                };
+            let placement = if kernel_scope
+                && !effect
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.values().iter().any(|value| consumed.contains(value)))
+            {
+                screma::Placement::Kernel
+            } else {
+                screma::Placement::LaneLocal
+            };
             if let Some(facts) = semantic_facts(&entry.graph, Some(entry), effect, placement) {
                 facts_by_location.insert((block, index), facts);
             }
@@ -404,9 +403,8 @@ fn space(
                     .map(|array_axis| (operand_index, input, array_axis))
             })
             .unwrap_or_else(|| panic!("SOAC domain dimension {logical_dimension} has no input"));
-        let node = effect.operands[operand_index]
-            .value()
-            .expect("SOAC input uses the value or view channel");
+        let node =
+            effect.operands[operand_index].value().expect("SOAC input uses the value or view channel");
         let mut dimension_ty = &input.array;
         while let Some(components) = super::types::as_soa_tuple(dimension_ty) {
             dimension_ty = components.first().expect("structure-of-arrays tuple must have a component");
@@ -479,11 +477,7 @@ fn extent_from_node(
 }
 
 fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
-    let value_writers = effect
-        .result
-        .as_ref()
-        .map(|result| result.values())
-        .unwrap_or_default();
+    let value_writers = effect.result.as_ref().map(|result| result.values()).unwrap_or_default();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
     let mut slots = entry
         .outputs
@@ -491,13 +485,10 @@ fn output_slots(entry: &RawEntry<RealizedOutputRoute>, effect: &SideEffect<Raw>)
         .enumerate()
         .filter(|(_, output)| {
             output.routes.iter().any(|route| {
-                route
-                    .writers
-                    .iter()
-                    .any(|writer| {
-                        matches!(writer, OutputWriter::Value(value) if value_writers.contains(value))
-                            || Some(*writer) == effect_writer
-                    })
+                route.writers.iter().any(|writer| {
+                    matches!(writer, OutputWriter::Value(value) if value_writers.contains(value))
+                        || Some(*writer) == effect_writer
+                })
             })
         })
         .map(|(slot, _)| OutputSlotId(slot))

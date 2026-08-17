@@ -7,8 +7,7 @@ use crate::egir::program::SemanticFunc;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
-    PureOp, RegionId, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId,
-    ValueKind,
+    PureOp, RegionId, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId, ValueKind,
 };
 use crate::LookupMap;
 
@@ -143,6 +142,7 @@ impl<'a> RegionExecutor<'a> {
             }
             ValueKind::BlockParam { .. }
             | ValueKind::PlaceLength { .. }
+            | ValueKind::PlaceView { .. }
             | ValueKind::SideEffectResult => {
                 return Err("effectful/CFG values are outside the pure region executor".into())
             }

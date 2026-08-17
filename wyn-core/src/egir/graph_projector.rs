@@ -10,17 +10,16 @@ use crate::flow::{BlockId, ControlHeader};
 
 use super::graph_ops::ValueUseIndex;
 use super::ir::RealizedOutputRoute;
+use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 use super::program::OutputWriter;
 use super::types::{
     EGraph, EffectToken, Semantic, SideEffect, SideEffectIndex, SideEffectSite, SkeletonTerminator,
     ValueId, ValueKind,
 };
-use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 pub struct GraphProjection {
     pub graph: EGraph<Semantic>,
     nodes: HashMap<ValueId, ValueId>,
     places: HashMap<PlaceId, PlaceId>,
-    calls: HashMap<CallSiteId, CallSiteId>,
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
     source_effects: HashSet<SideEffectSite>,
@@ -72,12 +71,10 @@ impl GraphProjection {
         source.clone().try_map(
             &mut |ty| Ok(ty),
             &mut |value| {
-                self.node(value)
-                    .ok_or_else(|| format!("graph projection omitted result value {value:?}"))
+                self.node(value).ok_or_else(|| format!("graph projection omitted result value {value:?}"))
             },
             &mut |place| {
-                self.place(place)
-                    .ok_or_else(|| format!("graph projection omitted result place {place:?}"))
+                self.place(place).ok_or_else(|| format!("graph projection omitted result place {place:?}"))
             },
         )
     }
@@ -161,6 +158,7 @@ pub(crate) fn remap_output_routes(
 pub struct GraphProjector<'a> {
     source: &'a EGraph<Semantic>,
     uses: ValueUseIndex,
+    effects: SideEffectIndex,
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +198,7 @@ impl<'a> GraphProjector<'a> {
         Self {
             source,
             uses: ValueUseIndex::build(source),
+            effects: SideEffectIndex::build(source),
         }
     }
 
@@ -232,7 +231,7 @@ impl<'a> GraphProjector<'a> {
         if values.is_empty() {
             return Err("value-flow projection requires at least one result".into());
         }
-        if self.source.skeleton.blocks.iter().any(|(_, block)| !block.side_effects.is_empty()) {
+        if self.source.has_ordered_effects() {
             return Err("value-flow projection requires an effect-free graph".into());
         }
         self.project(HashSet::new(), values, ProjectionMode::ValueFlow)
@@ -412,7 +411,7 @@ impl<'a> GraphProjector<'a> {
         let producer_effects = projection.source_effects();
         let mut candidates = producer_effects
             .iter()
-            .filter_map(|site| self.source.skeleton.effect(*site).result.as_ref())
+            .filter_map(|site| self.source.effect_result_binding(self.source.skeleton.effect(*site)))
             .flat_map(|result| result.values())
             .collect::<Vec<_>>();
         candidates.extend(self.source.skeleton.blocks.iter().flat_map(|(_, block)| {
@@ -491,9 +490,12 @@ impl<'a> GraphProjector<'a> {
         let mut selected = roots.clone();
         let mut values = extra_values.to_vec();
         for site in roots {
-            values.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(*site)?));
+            values.extend(super::graph_ops::effect_value_inputs(
+                self.source,
+                self.effect_at(*site)?,
+            ));
         }
-        let values = self.close_producers(&mut selected, &mut values, &self.source.side_effect_index())?;
+        let values = self.close_producers(&mut selected, &mut values, &self.effects)?;
         Ok(selected.iter().all(|site| site.block == block)
             && values
                 .iter()
@@ -530,7 +532,6 @@ impl<'a> GraphProjector<'a> {
             graph: shell.graph,
             nodes: shell.nodes,
             places: shell.places,
-            calls: shell.calls,
             blocks: shell.blocks,
             effects,
             source_effects: selection.effects,
@@ -548,6 +549,16 @@ impl<'a> GraphProjector<'a> {
             .nodes
             .get(source)
             .ok_or_else(|| format!("graph projection references missing value {source:?}"))?;
+        if let Some(alias) = node.alias {
+            let target = self.prepare_value(alias, shell)?;
+            shell.nodes.insert(source, target);
+            return Ok(target);
+        }
+        if let Some(field) = super::graph_ops::projected_tuple_field(self.source, source) {
+            let target = self.prepare_value(field, shell)?;
+            shell.nodes.insert(source, target);
+            return Ok(target);
+        }
         match node.kind() {
             ValueKind::Pure { operands, .. } => {
                 for operand in operands {
@@ -572,9 +583,14 @@ impl<'a> GraphProjector<'a> {
                 shell.nodes.insert(source, target);
                 return Ok(target);
             }
-            ValueKind::FuncParam { .. }
-            | ValueKind::BlockParam { .. }
-            | ValueKind::SideEffectResult => {
+            ValueKind::PlaceView { place } => {
+                let target_place = self.prepare_place(*place, shell)?;
+                let target =
+                    shell.graph.add_place_view(target_place, node.ty().clone(), node.span()).value();
+                shell.nodes.insert(source, target);
+                return Ok(target);
+            }
+            ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::SideEffectResult => {
                 return Err(format!("projection shell omitted boundary value {source:?}"));
             }
             ValueKind::Constant(_) => {}
@@ -608,6 +624,11 @@ impl<'a> GraphProjector<'a> {
             PlaceOp::Index { base, index } => {
                 self.prepare_place(*base, shell)?;
                 self.prepare_value(*index, shell)?;
+            }
+            PlaceOp::Slice { base, start, length } => {
+                self.prepare_place(*base, shell)?;
+                self.prepare_value(*start, shell)?;
+                self.prepare_value(*length, shell)?;
             }
             PlaceOp::ViewIndex { view, index } => {
                 self.prepare_value(view.value(), shell)?;
@@ -685,7 +706,10 @@ impl<'a> GraphProjector<'a> {
                 else {
                     panic!("call result binding contains a non-call value");
                 };
-                assert_eq!(*result_call, source, "call result binding references another call site");
+                assert_eq!(
+                    *result_call, source,
+                    "call result binding references another call site"
+                );
                 (*slot, node.ty().clone(), node.span())
             },
             |place| places[&place],
@@ -715,9 +739,24 @@ impl<'a> GraphProjector<'a> {
             if !closure.effects.is_empty() {
                 return Err("value-flow projection depends on an effect".into());
             }
+            let effects = closure
+                .nodes
+                .iter()
+                .filter_map(|value| match self.source.nodes[*value].kind() {
+                    ValueKind::CallResult { call, .. } => Some(
+                        self.effects
+                            .call_site(*call)
+                            .ok_or_else(|| format!("call {call:?} has no explicit skeleton site")),
+                    ),
+                    _ => None,
+                })
+                .collect::<Result<HashSet<_>, _>>()?;
+            if effects.iter().any(|site| !self.is_pure_call_site(*site)) {
+                return Err("value-flow projection depends on an effectful call".into());
+            }
             return Ok(ProjectionSelection {
                 blocks,
-                effects: HashSet::new(),
+                effects,
                 values: closure.nodes,
             });
         }
@@ -728,9 +767,12 @@ impl<'a> GraphProjector<'a> {
         let mut roots = self.projected_terminator_values(mode, &blocks);
         roots.extend(extra_values);
         for site in selected.clone() {
-            roots.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(site)?));
+            roots.extend(super::graph_ops::effect_value_inputs(
+                self.source,
+                self.effect_at(site)?,
+            ));
         }
-        let values = self.close_producers(&mut selected, &mut roots, &self.source.side_effect_index())?;
+        let values = self.close_producers(&mut selected, &mut roots, &self.effects)?;
         if selected.iter().any(|site| !allowed_effects.contains(site)) {
             return Err("value recipe depends on an effect outside its prefix boundary".into());
         }
@@ -1155,7 +1197,12 @@ impl<'a> GraphProjector<'a> {
             let Some(alias) = self.source.nodes[source].alias else {
                 continue;
             };
-            shell.graph.nodes[target].alias = shell.nodes.get(&alias).copied();
+            let Some(alias) = shell.nodes.get(&alias).copied() else {
+                continue;
+            };
+            if target != alias {
+                shell.graph.nodes[target].alias = Some(alias);
+            }
         }
     }
 
@@ -1166,6 +1213,13 @@ impl<'a> GraphProjector<'a> {
             .get(site.block)
             .and_then(|block| block.side_effects.get(site.index))
             .ok_or_else(|| format!("invalid graph-projection effect site {site:?}"))
+    }
+
+    fn is_pure_call_site(&self, site: SideEffectSite) -> bool {
+        self.source
+            .skeleton
+            .get_effect(site)
+            .is_some_and(|effect| !self.source.effect_requires_ordering(effect))
     }
 
     fn close_producers(
@@ -1184,6 +1238,14 @@ impl<'a> GraphProjector<'a> {
                 .nodes
                 .get(value)
                 .ok_or_else(|| format!("graph projection references missing node {value:?}"))?;
+            if let Some(alias) = node.alias() {
+                values.push(alias);
+                continue;
+            }
+            if let Some(field) = super::graph_ops::projected_tuple_field(self.source, value) {
+                values.push(field);
+                continue;
+            }
             match &node.kind {
                 ValueKind::Pure { operands, .. } => values.extend(operands.iter().copied()),
                 ValueKind::Union { left, right } => values.extend([*left, *right]),
@@ -1192,42 +1254,31 @@ impl<'a> GraphProjector<'a> {
                         .site(value)
                         .ok_or_else(|| format!("side-effect result {value:?} has no producer"))?;
                     if selected.insert(site) {
-                        values.extend(super::graph_ops::effect_value_inputs(self.source, self.effect_at(site)?));
+                        values.extend(super::graph_ops::effect_value_inputs(
+                            self.source,
+                            self.effect_at(site)?,
+                        ));
                     }
                 }
                 ValueKind::CallResult { call, .. } => {
                     values.extend(self.source.call_value_dependencies(*call));
-                    if !matches!(self.source.call(*call).effects(), super::ir::CallEffects::Pure) {
-                        let site = self
-                            .call_effect_site(*call)
-                            .ok_or_else(|| format!("effectful call {call:?} has no skeleton anchor"))?;
-                        if selected.insert(site) {
-                            values.extend(super::graph_ops::effect_value_inputs(
-                                self.source,
-                                self.effect_at(site)?,
-                            ));
-                        }
+                    let site = producers
+                        .call_site(*call)
+                        .ok_or_else(|| format!("call {call:?} has no explicit skeleton site"))?;
+                    if selected.insert(site) {
+                        values.extend(super::graph_ops::effect_value_inputs(
+                            self.source,
+                            self.effect_at(site)?,
+                        ));
                     }
                 }
-                ValueKind::PlaceLength { place } => {
+                ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
                     values.extend(self.source.place_value_dependencies(*place));
                 }
                 ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::Constant(_) => {}
             }
         }
         Ok(seen)
-    }
-
-    fn call_effect_site(&self, call: CallSiteId) -> Option<SideEffectSite> {
-        self.source.skeleton.blocks.iter().find_map(|(block, body)| {
-            body.side_effects.iter().enumerate().find_map(|(index, effect)| {
-                matches!(
-                    effect.kind(),
-                    super::ir::SideEffectKind::Effect(super::ir::EffectOp::Call { site }) if *site == call
-                )
-                .then_some(SideEffectSite { block, index })
-            })
-        })
     }
 }
 

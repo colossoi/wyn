@@ -154,16 +154,12 @@ fn erase_function_resources(
     }
     for place in graph.places.values_mut() {
         if let crate::egir::ir::PlaceOp::Parameter { parameter } = place.op() {
-            let new_index = new_indices
-                .get(parameter.index())
-                .copied()
-                .flatten()
-                .ok_or_else(|| {
-                    ConvertError::Internal(format!(
-                        "addressable parameter {} in `{name}` cannot be erased",
-                        parameter.index()
-                    ))
-                })?;
+            let new_index = new_indices.get(parameter.index()).copied().flatten().ok_or_else(|| {
+                ConvertError::Internal(format!(
+                    "addressable parameter {} in `{name}` cannot be erased",
+                    parameter.index()
+                ))
+            })?;
             place.remap_parameter(|_| ParameterId::new(new_index));
         }
     }
@@ -171,17 +167,12 @@ fn erase_function_resources(
         &mut |ty| Ok::<_, ConvertError>(ty),
         &mut |slot| Ok::<_, ConvertError>(slot),
         &mut |parameter| {
-            new_indices
-                .get(parameter.index())
-                .copied()
-                .flatten()
-                .map(ParameterId::new)
-                .ok_or_else(|| {
-                    ConvertError::Internal(format!(
-                        "result destination parameter {} in `{name}` cannot be erased",
-                        parameter.index()
-                    ))
-                })
+            new_indices.get(parameter.index()).copied().flatten().map(ParameterId::new).ok_or_else(|| {
+                ConvertError::Internal(format!(
+                    "result destination parameter {} in `{name}` cannot be erased",
+                    parameter.index()
+                ))
+            })
         },
     )?;
 
@@ -230,7 +221,9 @@ fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::Val
         out.extend(graph.nodes[node].children());
         match graph.nodes[node].kind() {
             ValueKind::CallResult { call, .. } => out.extend(graph.call_value_dependencies(*call)),
-            ValueKind::PlaceLength { place } => out.extend(graph.place_value_dependencies(*place)),
+            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
+                out.extend(graph.place_value_dependencies(*place))
+            }
             _ => {}
         }
     })

@@ -11,8 +11,8 @@ use smallvec::smallvec;
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc, SemanticResourceRef};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef,
-    ParameterId, PureOp, RegionId, SegBody, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, ParameterId,
+    PureOp, RegionId, ResultBinding, SegBody, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 use crate::flow::BlockId;
 
@@ -26,10 +26,7 @@ pub(crate) fn named_parameters(
         .iter()
         .enumerate()
         .map(|(index, ty)| {
-            callable_parameter::<SemanticResourceRef, WynLanguage>(
-                format!("{prefix}_{index}"),
-                ty.clone(),
-            )
+            callable_parameter::<SemanticResourceRef, WynLanguage>(format!("{prefix}_{index}"), ty.clone())
         })
         .collect()
 }
@@ -41,9 +38,7 @@ pub(crate) fn function_parameters(
     params
         .iter()
         .enumerate()
-        .map(|(index, parameter)| {
-            graph.add_parameter(ParameterId::new(index), parameter.representation())
-        })
+        .map(|(index, parameter)| graph.add_parameter(ParameterId::new(index), parameter.representation()))
         .collect()
 }
 pub(crate) fn result_type(types: &[Type<TypeName>]) -> Type<TypeName> {
@@ -57,12 +52,23 @@ pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Typ
     debug_assert_eq!(results.len(), types.len());
     match results {
         [result] => *result,
-        _ => graph.intern_pure(
-            PureOp::Tuple(results.len()),
-            results.iter().copied().collect(),
-            result_type(types),
-            None,
-        ),
+        _ => {
+            let ty = result_type(types);
+            let binding = ResultBinding::product(
+                ty.clone(),
+                results.iter().zip(types).map(|(&value, ty)| {
+                    crate::egir::graph_ops::bind_physical_result_value(graph, ty.clone(), value)
+                }),
+            );
+            let value = graph.intern_pure(
+                PureOp::Tuple(results.len()),
+                results.iter().copied().collect(),
+                ty,
+                None,
+            );
+            crate::egir::graph_ops::register_result_origin_tree(graph, value, &binding);
+            value
+        }
     }
 }
 
@@ -87,38 +93,76 @@ pub(crate) fn unpack_results(
     }
 }
 
+pub(crate) fn logical_result_fields(
+    result: &ResultBinding<Type<TypeName>>,
+    result_types: &[Type<TypeName>],
+) -> Vec<ResultBinding<Type<TypeName>>> {
+    match result_types {
+        [] => Vec::new(),
+        [_] => vec![result.clone()],
+        _ => {
+            let fields = result.top_level_fields();
+            assert_eq!(fields.len(), result_types.len());
+            fields
+        }
+    }
+}
+
+pub(crate) fn materialize_result_values<P: crate::egir::ir::Family>(
+    graph: &mut EGraph<P>,
+    results: &[ResultBinding<Type<TypeName>>],
+) -> Vec<ValueId> {
+    results
+        .iter()
+        .map(|result| {
+            crate::egir::graph_ops::pack_result_values(graph, result)
+                .expect("lambda result requires an explicit by-value materialization")
+        })
+        .collect()
+}
+
 /// Emit a lambda application whose region name has already been resolved.
 ///
 /// Identity lambdas do not have a callable region and simply return their
 /// arguments. Region-lambda callers must append captures to `arguments`.
 pub(crate) fn emit_call(
     graph: &mut EGraph,
+    block: BlockId,
     lambda: &screma::Lambda,
     callee: Option<&SemanticFunc>,
     arguments: Vec<OperandRef>,
-) -> Vec<ValueId> {
+) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
         return arguments
             .into_iter()
-            .map(|argument| argument.value().expect("identity lambda arguments are values or views"))
+            .zip(&lambda.result_types)
+            .map(|(argument, ty)| {
+                let value = argument.value().expect("identity lambda arguments are values or views");
+                let abi = by_value_function_result::<WynLanguage>(ty.clone());
+                crate::egir::graph_ops::bind_by_value_result(graph, &abi, value)
+            })
             .collect();
     }
     let function = lambda.seg_body().expect("region lambda has no callable body").region;
     let callee = callee.expect("region lambda call requires its canonical function boundary");
-    assert_eq!(callee.region, function, "lambda and function boundary disagree on region identity");
-    assert_eq!(callee.effects(), CallEffects::Pure, "SOAC lambda call must be pure");
+    assert_eq!(
+        callee.region, function,
+        "lambda and function boundary disagree on region identity"
+    );
     let (_, result) = graph
-        .add_call(
+        .emit_call(
+            block,
             function,
             callee.params(),
             callee.result(),
             arguments,
             callee.effects(),
             None,
+            None,
         )
         .expect("lambda call must match its canonical function boundary");
-    result.values()
+    logical_result_fields(&result, &lambda.result_types)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,16 +180,8 @@ pub(crate) fn finish_function(
     let result_abi = by_value_function_result::<WynLanguage>(result_type(result_types));
     let result = crate::egir::graph_ops::bind_by_value_result(&mut graph, &result_abi, result);
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(Some(result));
-    SemanticFunc::new(
-        region,
-        name,
-        span,
-        None,
-        params,
-        result_abi,
-        CallEffects::Pure,
-        graph,
-    )
+    let effects = if graph.has_ordered_effects() { CallEffects::General } else { CallEffects::Pure };
+    SemanticFunc::new(region, name, span, None, params, result_abi, effects, graph)
 }
 
 #[allow(clippy::too_many_arguments)]

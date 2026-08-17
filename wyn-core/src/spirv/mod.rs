@@ -561,6 +561,7 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
             false,
             Span::new(0, 0, 0, 0),
             param_ids,
+            LookupMap::new(),
             first_code_block,
         )
         .lower()
@@ -680,9 +681,17 @@ fn lower_ssa_function(
         &param_types,
         return_type,
     )?;
-    lower::LowerCtx::new(constructor, body, false, func.span, param_ids, first_code_block)
-        .lower()
-        .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
+    lower::LowerCtx::new(
+        constructor,
+        body,
+        false,
+        func.span,
+        param_ids,
+        LookupMap::new(),
+        first_code_block,
+    )
+    .lower()
+    .map_err(|e| err_spirv!("in function '{}': {}", func.name, e))?;
     constructor.end_function()?;
 
     Ok(())

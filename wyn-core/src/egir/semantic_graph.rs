@@ -56,9 +56,10 @@ where
                     continue;
                 };
                 let result_values = result.values();
-                if !result_values.iter().any(|value| {
-                    TypeExt::contains_runtime_sized_composite_array(&graph.nodes[*value].ty)
-                }) {
+                if !result_values
+                    .iter()
+                    .any(|value| TypeExt::contains_runtime_sized_composite_array(&graph.nodes[*value].ty))
+                {
                     continue;
                 }
                 let indexed = graph.nodes.iter().any(|(_, node)| {
@@ -82,12 +83,11 @@ where
                         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
                             return false;
                         };
-                        soac.capture_nodes()
-                            .any(|capture| {
-                                result_values
-                                    .iter()
-                                    .any(|result| graph_ops::value_depends_on(graph, capture, *result))
-                            })
+                        soac.capture_nodes().any(|capture| {
+                            result_values
+                                .iter()
+                                .any(|result| graph_ops::value_depends_on(graph, capture, *result))
+                        })
                     })
                 });
                 if indexed || captured {
@@ -167,9 +167,7 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                             .operations
                             .iter()
                             .flat_map(|operation| &operation.destinations)
-                            .filter_map(|node| {
-                                graph_ops::extract_storage_view_source(graph, node.value())
-                            })
+                            .filter_map(|view| graph_ops::extract_storage_view_source(graph, view.value()))
                         {
                             if let Some(resource) =
                                 resources.iter_mut().find(|resource| resource.resource == destination)
@@ -192,7 +190,11 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
 
     for consumer_index in 0..records.len() {
         let consumer = &records[consumer_index];
-        let reachable = graph_ops::value_producer_closure(graph, consumer.effect.referenced_nodes()).nodes;
+        let reachable = graph_ops::value_producer_closure(
+            graph,
+            graph_ops::effect_value_inputs(graph, consumer.effect),
+        )
+        .nodes;
         for producer in &records[..consumer_index] {
             if producer.results.iter().any(|result| reachable.contains(result)) {
                 push_dependency(
@@ -252,7 +254,7 @@ fn push_dependency(
 }
 
 pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
-    graph_ops::read_storage_resources(graph, se.referenced_nodes())
+    graph_ops::read_storage_resources(graph, graph_ops::effect_value_inputs(graph, se))
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.

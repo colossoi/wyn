@@ -10,7 +10,7 @@ use crate::egir::ir::{Body, SideEffectSite};
 use crate::egir::program::{OutputWriter, RealizedOutputRoute, SemanticEntry, SemanticResourceDecl};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
-use crate::egir::types::{EGraph, OperandRef, PureOp, Semantic, ValueId, ValueKind, WynLanguage};
+use crate::egir::types::{EGraph, OperandRef, ResultBinding, Semantic, ValueId, WynLanguage};
 use crate::flow::BlockId;
 
 type FusionBody = Body<Semantic, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
@@ -21,7 +21,7 @@ pub(super) fn invoke_lambda(
     lambda: &screma::Lambda,
     arguments: &[OperandRef],
     captures: &[OperandRef],
-) -> Vec<ValueId> {
+) -> Vec<ResultBinding<Type<TypeName>>> {
     debug_assert_eq!(captures.len(), lambda.capture_count());
     let mut operands = Vec::with_capacity(arguments.len() + captures.len());
     operands.extend_from_slice(arguments);
@@ -32,7 +32,8 @@ pub(super) fn invoke_lambda(
     } else {
         None
     };
-    lambda_ops::emit_call(graph, lambda, callee, operands)
+    let block = graph.skeleton.entry;
+    lambda_ops::emit_call(graph, block, lambda, callee, operands)
 }
 pub(super) fn result_used_only_by_effect_pair(
     graph: &EGraph,
@@ -70,7 +71,10 @@ pub(super) fn result_used_only_by_effects(
             }) {
                 continue;
             }
-            if effect.referenced_nodes().any(|root| graph_ops::pure_depends_on(graph, root, result)) {
+            if graph_ops::effect_value_inputs(graph, effect)
+                .into_iter()
+                .any(|root| graph_ops::pure_depends_on(graph, root, result))
+            {
                 return false;
             }
         }
@@ -146,65 +150,24 @@ pub(super) fn replace_route_sources(entry: &mut SemanticEntry, replacements: &[(
     }
 }
 
+pub(super) fn replace_route_values(entry: &mut SemanticEntry, replacements: &[(ValueId, ValueId)]) {
+    for route in entry.routes_mut() {
+        if let Some((_, replacement)) = replacements.iter().find(|(old, _)| route.source.value == *old) {
+            route.source.value = *replacement;
+        }
+        for writer in &mut route.writers {
+            let OutputWriter::Value(value) = writer else {
+                continue;
+            };
+            if let Some((_, replacement)) = replacements.iter().find(|(old, _)| *value == *old) {
+                *value = *replacement;
+            }
+        }
+    }
+}
+
 pub(super) fn remove_value_writer(entry: &mut SemanticEntry, result: ValueId) {
     for route in entry.routes_mut() {
         route.writers.retain(|writer| *writer != OutputWriter::Value(result));
     }
-}
-
-/// Retarget direct projections of `old_result` according to a partial field map.
-pub(super) fn retarget_projects(
-    graph: &mut EGraph,
-    old_result: ValueId,
-    new_result: ValueId,
-    mapping: &[Option<usize>],
-) {
-    let projects = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match &definition.kind {
-            ValueKind::Pure {
-                op: PureOp::Project { index },
-                operands,
-            } if operands.first() == Some(&old_result) => Some((node, *index as usize)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (project, field) in projects {
-        let Some(Some(new_field)) = mapping.get(field) else {
-            continue;
-        };
-        graph.update_pure_node(project, |op, operands| {
-            *op = PureOp::Project {
-                index: *new_field as u32,
-            };
-            operands[0] = new_result;
-        });
-    }
-}
-
-pub(super) fn rebuild_result(
-    graph: &mut EGraph,
-    old_result: ValueId,
-    new_result: ValueId,
-    mapping: &[usize],
-    field_types: &[Type<TypeName>],
-) {
-    let fields = field_types
-        .iter()
-        .enumerate()
-        .map(|(field, ty)| {
-            graph.intern_pure(
-                PureOp::Project {
-                    index: mapping[field] as u32,
-                },
-                smallvec::smallvec![new_result],
-                ty.clone(),
-                None,
-            )
-        })
-        .collect();
-    let old_type = graph.nodes[old_result].ty.clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(field_types.len()), fields, old_type, None);
-    graph_ops::replace_all_references(graph, old_result, rebuilt);
 }

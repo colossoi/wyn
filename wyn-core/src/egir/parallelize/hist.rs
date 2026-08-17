@@ -132,9 +132,7 @@ fn recognize_direct_atomic(
     function: &crate::egir::program::SemanticFunc,
     signed: bool,
 ) -> Option<AtomicOp> {
-    if function.graph.skeleton.blocks.len() != 1
-        || function.graph.skeleton.blocks.values().any(|block| !block.side_effects.is_empty())
-    {
+    if function.graph.skeleton.blocks.len() != 1 || function.graph.has_ordered_effects() {
         return None;
     }
     let SkeletonTerminator::Return(Some(result)) =

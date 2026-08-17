@@ -104,6 +104,17 @@ pub enum PlaceAccess {
     ReadWrite,
 }
 
+impl PlaceAccess {
+    pub const fn accepts(self, provided: Self) -> bool {
+        matches!(
+            (self, provided),
+            (Self::ReadOnly, Self::ReadOnly | Self::ReadWrite)
+                | (Self::WriteOnly, Self::WriteOnly | Self::ReadWrite)
+                | (Self::ReadWrite, Self::ReadWrite)
+        )
+    }
+}
+
 /// The pointee and capabilities intrinsically owned by an addressable place.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PlaceType<R, Ty> {
@@ -166,6 +177,22 @@ enum ResultNode<Ty, R, P> {
     },
 }
 
+fn result_node_contains_return_value<Ty>(node: &ResultNode<Ty, ValueId, PlaceId>, value: ValueId) -> bool {
+    match node {
+        ResultNode::Product { fields, .. } => {
+            fields.iter().any(|field| result_node_contains_return_value(field, value))
+        }
+        ResultNode::Destination {
+            destination: ResultDestination::ReturnValue(candidate),
+            ..
+        } => *candidate == value,
+        ResultNode::Destination {
+            destination: ResultDestination::Place(_),
+            ..
+        } => false,
+    }
+}
+
 pub type FunctionResult<Ty> = ResultTree<Ty, ReturnSlotId, ParameterId>;
 pub type ResultBinding<Ty> = ResultTree<Ty, ValueId, PlaceId>;
 
@@ -220,10 +247,7 @@ impl FlowValueId {
         self.0
     }
 
-    pub(crate) fn try_remap<E>(
-        self,
-        map: impl FnOnce(ValueId) -> Result<ValueId, E>,
-    ) -> Result<Self, E> {
+    pub(crate) fn try_remap<E>(self, map: impl FnOnce(ValueId) -> Result<ValueId, E>) -> Result<Self, E> {
         Ok(Self(map(self.0)?))
     }
 }
@@ -238,15 +262,24 @@ impl ViewId {
         Self(value)
     }
 
-    pub(crate) fn try_remap<E>(
-        self,
-        map: impl FnOnce(ValueId) -> Result<ValueId, E>,
-    ) -> Result<Self, E> {
+    pub(crate) fn try_remap<E>(self, map: impl FnOnce(ValueId) -> Result<ValueId, E>) -> Result<Self, E> {
         Ok(Self(map(self.0)?))
     }
 
     pub(crate) fn remap_value(&mut self, map: impl FnOnce(ValueId) -> ValueId) {
         self.0 = map(self.0);
+    }
+}
+
+impl From<ViewId> for OperandRef {
+    fn from(view: ViewId) -> Self {
+        Self::View(view)
+    }
+}
+
+impl From<ValueId> for OperandRef {
+    fn from(value: ValueId) -> Self {
+        Self::Value(value)
     }
 }
 
@@ -397,10 +430,70 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         }
     }
 
+    /// Borrow-independent views of the top-level logical result fields. A
+    /// scalar destination is its own sole field.
+    pub fn top_level_fields(&self) -> Vec<Self>
+    where
+        Ty: Clone,
+        R: Clone,
+        P: Clone,
+    {
+        (0..self.field_count()).filter_map(|field| self.field(field)).collect()
+    }
+
+    pub fn top_level_field_index(&self, field: &Self) -> Option<usize>
+    where
+        Ty: PartialEq,
+        R: PartialEq,
+        P: PartialEq,
+    {
+        match &self.root {
+            ResultNode::Product { fields, .. } => {
+                fields.iter().position(|candidate| candidate == &field.root)
+            }
+            ResultNode::Destination { .. } => (self == field).then_some(0),
+        }
+    }
+
+    /// Borrow-independent views of the physical destination leaves, in ABI
+    /// order. Product structure is retained by `top_level_fields`; this view
+    /// is for consumers that operate once per physical result channel.
+    pub fn destination_leaves(&self) -> Vec<Self>
+    where
+        Ty: Clone,
+        R: Clone,
+        P: Clone,
+    {
+        fn walk<Ty: Clone, R: Clone, P: Clone>(
+            node: &ResultNode<Ty, R, P>,
+            leaves: &mut Vec<ResultTree<Ty, R, P>>,
+        ) {
+            match node {
+                ResultNode::Product { fields, .. } => {
+                    for field in fields {
+                        walk(field, leaves);
+                    }
+                }
+                ResultNode::Destination { .. } => leaves.push(ResultTree { root: node.clone() }),
+            }
+        }
+
+        let mut leaves = Vec::with_capacity(self.destination_count());
+        walk(&self.root, &mut leaves);
+        leaves
+    }
+
     pub fn destination_count(&self) -> usize {
         let mut count = 0;
         self.for_each_destination(|_, _| count += 1);
         count
+    }
+
+    pub fn single_destination(&self) -> Option<(&Ty, &ResultDestination<R, P>)> {
+        match &self.root {
+            ResultNode::Destination { ty, destination } => Some((ty, destination)),
+            ResultNode::Product { .. } => None,
+        }
     }
 
     pub fn for_each_destination(&self, mut visit: impl FnMut(&Ty, &ResultDestination<R, P>)) {
@@ -456,6 +549,34 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         }
 
         walk(&mut self.root, &mut visit);
+    }
+
+    pub fn map_destinations<R2, P2>(
+        &self,
+        mut map: impl FnMut(&Ty, &ResultDestination<R, P>) -> ResultDestination<R2, P2>,
+    ) -> ResultTree<Ty, R2, P2>
+    where
+        Ty: Clone,
+    {
+        fn walk<Ty: Clone, R, P, R2, P2>(
+            node: &ResultNode<Ty, R, P>,
+            map: &mut impl FnMut(&Ty, &ResultDestination<R, P>) -> ResultDestination<R2, P2>,
+        ) -> ResultNode<Ty, R2, P2> {
+            match node {
+                ResultNode::Product { ty, fields } => ResultNode::Product {
+                    ty: ty.clone(),
+                    fields: fields.iter().map(|field| walk(field, map)).collect(),
+                },
+                ResultNode::Destination { ty, destination } => ResultNode::Destination {
+                    ty: ty.clone(),
+                    destination: map(ty, destination),
+                },
+            }
+        }
+
+        ResultTree {
+            root: walk(&self.root, &mut map),
+        }
     }
 
     pub fn try_map<Ty2, R2, P2, E>(
@@ -532,7 +653,16 @@ impl<Ty> ResultBinding<Ty> {
     }
 
     pub fn contains_value(&self, value: ValueId) -> bool {
-        self.values().contains(&value)
+        result_node_contains_return_value(&self.root, value)
+    }
+
+    pub fn top_level_field_containing_value(&self, value: ValueId) -> Option<usize> {
+        match &self.root {
+            ResultNode::Product { fields, .. } => {
+                fields.iter().position(|field| result_node_contains_return_value(field, value))
+            }
+            ResultNode::Destination { .. } => self.contains_value(value).then_some(0),
+        }
     }
 
     pub fn single_value(&self) -> Option<ValueId> {
@@ -581,6 +711,35 @@ impl<Ty> ResultBinding<Ty> {
         walk(&mut self.root, old, new);
     }
 
+    pub fn replace_value_with_place(&mut self, old: ValueId, place: PlaceId) {
+        fn walk<Ty>(node: &mut ResultNode<Ty, ValueId, PlaceId>, old: ValueId, place: PlaceId) {
+            match node {
+                ResultNode::Product { fields, .. } => {
+                    for field in fields {
+                        walk(field, old, place);
+                    }
+                }
+                ResultNode::Destination { destination, .. } => {
+                    if let ResultDestination::ReturnValue(value) = destination {
+                        if *value == old {
+                            *destination = ResultDestination::Place(PlaceDestination::Fixed(place));
+                        }
+                    }
+                }
+            }
+        }
+
+        walk(&mut self.root, old, place);
+    }
+
+    pub fn replace_place(&mut self, old: PlaceId, new: PlaceId) {
+        self.for_each_place_mut(|place| {
+            if *place == old {
+                *place = new;
+            }
+        });
+    }
+
     pub fn for_each_value_mut(&mut self, mut visit: impl FnMut(&mut ValueId)) {
         self.for_each_destination_mut(|_, destination| {
             if let ResultDestination::ReturnValue(value) = destination {
@@ -615,10 +774,7 @@ impl<Ty: Clone> FunctionResult<Ty> {
             match node {
                 ResultNode::Product { ty, fields } => ResultNode::Product {
                     ty: ty.clone(),
-                    fields: fields
-                        .iter()
-                        .map(|field| walk(field, bind_return, bind_place))
-                        .collect(),
+                    fields: fields.iter().map(|field| walk(field, bind_return, bind_place)).collect(),
                 },
                 ResultNode::Destination {
                     ty,
@@ -636,8 +792,7 @@ impl<Ty: Clone> FunctionResult<Ty> {
                 },
                 ResultNode::Destination {
                     ty,
-                    destination:
-                        ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
+                    destination: ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
                 } => ResultNode::Destination {
                     ty: ty.clone(),
                     destination: ResultDestination::Place(PlaceDestination::Bounded {
@@ -754,18 +909,27 @@ impl<Ty> CallSite<Ty> {
         &self.arguments
     }
 
+    pub(crate) fn arguments_mut(&mut self) -> &mut [OperandRef] {
+        &mut self.arguments
+    }
+
+    pub(crate) fn replace_boundary(
+        &mut self,
+        arguments: Vec<OperandRef>,
+        result: ResultBinding<Ty>,
+        effects: CallEffects,
+    ) {
+        self.arguments = arguments.into_boxed_slice();
+        self.result = result;
+        self.effects = effects;
+    }
+
     pub fn result(&self) -> &ResultBinding<Ty> {
         &self.result
     }
 
     pub fn effects(&self) -> CallEffects {
         self.effects
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (RegionId, Box<[OperandRef]>, ResultBinding<Ty>, CallEffects) {
-        (self.callee, self.arguments, self.result, self.effects)
     }
 
     pub(crate) fn try_remap_bindings<E>(
@@ -779,16 +943,14 @@ impl<Ty> CallSite<Ty> {
             .into_iter()
             .map(|argument| match argument {
                 OperandRef::Value(value) => map_value(value).map(OperandRef::Value),
-                OperandRef::View(view) => map_value(view.value()).map(|value| OperandRef::View(ViewId(value))),
+                OperandRef::View(view) => {
+                    map_value(view.value()).map(|value| OperandRef::View(ViewId(value)))
+                }
                 OperandRef::Place(place) => map_place(place).map(OperandRef::Place),
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_boxed_slice();
-        let result = self.result.try_map(
-            &mut |ty| Ok(ty),
-            &mut map_value,
-            &mut map_place,
-        )?;
+        let result = self.result.try_map(&mut |ty| Ok(ty), &mut map_value, &mut map_place)?;
         Ok(Self {
             callee: self.callee,
             arguments,
@@ -857,10 +1019,7 @@ pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<
             let fields = fields.to_vec();
             ResultNode::Product {
                 ty,
-                fields: fields
-                    .into_iter()
-                    .map(|field| build::<Lang>(field, next_slot))
-                    .collect(),
+                fields: fields.into_iter().map(|field| build::<Lang>(field, next_slot)).collect(),
             }
         } else {
             let slot = ReturnSlotId::new(*next_slot);
@@ -875,6 +1034,53 @@ pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<
     let mut next_slot = 0;
     ResultTree {
         root: build::<Lang>(ty, &mut next_slot),
+    }
+}
+
+pub fn destination_passing_function_result<R, Lang: Language>(
+    ty: Lang::Ty,
+    parameters: &mut Vec<FuncParam<R, Lang::Ty>>,
+) -> FunctionResult<Lang::Ty> {
+    fn build<R, Lang: Language>(
+        ty: Lang::Ty,
+        parameters: &mut Vec<FuncParam<R, Lang::Ty>>,
+        next_slot: &mut usize,
+        next_destination: &mut usize,
+    ) -> ResultNode<Lang::Ty, ReturnSlotId, ParameterId> {
+        if let Some(fields) = Lang::product_fields(&ty) {
+            let fields = fields.to_vec();
+            return ResultNode::Product {
+                ty,
+                fields: fields
+                    .into_iter()
+                    .map(|field| build::<R, Lang>(field, parameters, next_slot, next_destination))
+                    .collect(),
+            };
+        }
+        let destination = if Lang::is_materialized_aggregate(&ty) {
+            let parameter = ParameterId::new(parameters.len());
+            parameters.push(FuncParam::place(
+                format!("result_destination_{}", *next_destination),
+                PlaceType {
+                    pointee: ty.clone(),
+                    region: PlaceRegion::Parametric,
+                    access: PlaceAccess::ReadWrite,
+                },
+            ));
+            *next_destination += 1;
+            ResultDestination::Place(PlaceDestination::Fixed(parameter))
+        } else {
+            let slot = ReturnSlotId::new(*next_slot);
+            *next_slot += 1;
+            ResultDestination::ReturnValue(slot)
+        };
+        ResultNode::Destination { ty, destination }
+    }
+
+    let mut next_slot = 0;
+    let mut next_destination = 0;
+    ResultTree {
+        root: build::<R, Lang>(ty, parameters, &mut next_slot, &mut next_destination),
     }
 }
 
@@ -913,6 +1119,11 @@ pub enum PlaceOp {
         base: PlaceId,
         index: ValueId,
     },
+    Slice {
+        base: PlaceId,
+        start: ValueId,
+        length: ValueId,
+    },
     ViewIndex {
         view: ViewId,
         index: ValueId,
@@ -943,16 +1154,36 @@ impl<R, Ty> Place<R, Ty> {
         self.span
     }
 
-    pub(crate) fn into_parts(self) -> (PlaceOp, PlaceType<R, Ty>, Option<Span>) {
-        (self.op, self.ty, self.span)
-    }
-
     pub(crate) fn remap_parameter(&mut self, map: impl FnOnce(ParameterId) -> ParameterId) {
         if let PlaceOp::Parameter { parameter } = &mut self.op {
             *parameter = map(*parameter);
         }
     }
 
+    pub(crate) fn remap_value(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        match &mut self.op {
+            PlaceOp::Index { index, .. } => *index = map(*index),
+            PlaceOp::Slice { start, length, .. } => {
+                *start = map(*start);
+                *length = map(*length);
+            }
+            PlaceOp::ViewIndex { view, index } => {
+                view.remap_value(&mut map);
+                *index = map(*index);
+            }
+            PlaceOp::Parameter { .. } | PlaceOp::AllocaResult | PlaceOp::OutputSlot { .. } => {}
+        }
+    }
+
+    pub(crate) fn remap_place(&mut self, mut map: impl FnMut(PlaceId) -> PlaceId) {
+        match &mut self.op {
+            PlaceOp::Index { base, .. } | PlaceOp::Slice { base, .. } => *base = map(*base),
+            PlaceOp::Parameter { .. }
+            | PlaceOp::AllocaResult
+            | PlaceOp::ViewIndex { .. }
+            | PlaceOp::OutputSlot { .. } => {}
+        }
+    }
 
     pub(crate) fn try_map<S, E>(
         self,
@@ -966,6 +1197,11 @@ impl<R, Ty> Place<R, Ty> {
             PlaceOp::Index { base, index } => PlaceOp::Index {
                 base: map_place(base)?,
                 index: map_value(index)?,
+            },
+            PlaceOp::Slice { base, start, length } => PlaceOp::Slice {
+                base: map_place(base)?,
+                start: map_value(start)?,
+                length: map_value(length)?,
             },
             PlaceOp::ViewIndex { view, index } => PlaceOp::ViewIndex {
                 view: ViewId(map_value(view.value())?),
@@ -1027,6 +1263,10 @@ pub enum ValueKind<R, Lang: Language> {
     PlaceLength {
         place: PlaceId,
     },
+    /// A value-sized addressable handle whose storage is an EGIR place.
+    PlaceView {
+        place: PlaceId,
+    },
     /// Inline constant value.
     Constant(Lang::Const),
     /// Side-effect result — a value produced by an effectful instruction
@@ -1044,6 +1284,7 @@ impl<R, Lang: Language> ValueKind<R, Lang> {
             | ValueKind::BlockParam { .. }
             | ValueKind::CallResult { .. }
             | ValueKind::PlaceLength { .. }
+            | ValueKind::PlaceView { .. }
             | ValueKind::Constant(_)
             | ValueKind::SideEffectResult => SmallVec::new(),
         }
@@ -1060,6 +1301,8 @@ pub struct Value<R, Lang: Language> {
     pub(crate) span: Option<Span>,
     /// Canonical replacement selected by CFG simplification, if any.
     pub(crate) alias: Option<ValueId>,
+    /// Canonical result fields explicitly packed into this value.
+    pub(crate) result_origins: Vec<ResultBinding<Lang::Ty>>,
 }
 
 impl<R, Lang: Language> Value<R, Lang> {
@@ -1082,6 +1325,10 @@ impl<R, Lang: Language> Value<R, Lang> {
 
     pub fn alias(&self) -> Option<ValueId> {
         self.alias
+    }
+
+    pub fn result_origins(&self) -> &[ResultBinding<Lang::Ty>] {
+        &self.result_origins
     }
 }
 
@@ -1184,7 +1431,6 @@ pub enum EffectOp<R> {
     },
     Load {
         place: PlaceId,
-        mode: LoadMode,
     },
     Store {
         place: PlaceId,
@@ -1194,13 +1440,6 @@ pub enum EffectOp<R> {
         op: AtomicOp,
     },
     ControlBarrier,
-}
-
-/// Whole-aggregate loading is a distinct, explicit operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LoadMode {
-    Element,
-    WholeAggregate,
 }
 
 impl<R> EffectOp<R> {
@@ -1224,7 +1463,7 @@ impl<R> EffectOp<R> {
                 tag: tag.try_map_resource(map)?,
             },
             Self::Alloca { result } => EffectOp::Alloca { result },
-            Self::Load { place, mode } => EffectOp::Load { place, mode },
+            Self::Load { place } => EffectOp::Load { place },
             Self::Store { place } => EffectOp::Store { place },
             Self::Atomic { place, op } => EffectOp::Atomic { place, op },
             Self::ControlBarrier => EffectOp::ControlBarrier,
@@ -1247,9 +1486,8 @@ impl<R> EffectOp<R> {
             Self::Alloca { result } => EffectOp::Alloca {
                 result: map_place(result)?,
             },
-            Self::Load { place, mode } => EffectOp::Load {
+            Self::Load { place } => EffectOp::Load {
                 place: map_place(place)?,
-                mode,
             },
             Self::Store { place } => EffectOp::Store {
                 place: map_place(place)?,
@@ -1554,6 +1792,8 @@ impl<R: Copy + Ord> SegResourceAccess<R> {
 pub trait Family: Clone + std::fmt::Debug {
     type Resource: GraphResource;
     type Soac: Clone + std::fmt::Debug;
+
+    fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId);
 }
 
 /// The complete collection of types physically stored by an EGIR program.
@@ -1683,7 +1923,6 @@ impl<Ty> crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
         }
     }
 
-
     pub fn visit_values_mut(&mut self, mut visit: impl FnMut(&mut ValueId)) {
         match self {
             Self::Return(result) => {
@@ -1720,7 +1959,8 @@ impl<Ty> crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
 pub struct SkeletonBlock<P: Family, Lang: Language> {
     /// Materialized aggregates have no representation in this sequence.
     pub params: Vec<FlowValueId>,
-    /// Effectful instructions, in order.
+    /// Explicitly located instructions, in order. Pure calls are anchored here
+    /// even though they do not participate in effect ordering.
     pub side_effects: Vec<SideEffect<P, Lang>>,
     /// Block terminator.
     pub term: SkeletonTerminator<Lang>,
@@ -1739,7 +1979,7 @@ impl<P: Family, Lang: Language> SkeletonBlock<P, Lang> {
     }
 }
 
-/// The skeleton CFG (blocks + effectful instructions).
+/// The skeleton CFG (blocks + explicitly located instructions).
 #[derive(Clone, Debug)]
 pub struct Skeleton<P: Family, Lang: Language> {
     pub entry: BlockId,
@@ -1787,6 +2027,24 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
                 self.blocks[block].side_effects.remove(index);
             }
         }
+    }
+
+    /// Remove one side effect and reconnect every direct effect-token consumer
+    /// to the removed effect's dependency.
+    pub fn remove_effect_splicing_dependencies(&mut self, site: SideEffectSite) -> SideEffect<P, Lang> {
+        let removed = self.blocks[site.block].side_effects.remove(site.index);
+        if let Some((input, output)) = removed.effects() {
+            for (_, block) in &mut self.blocks {
+                for effect in &mut block.side_effects {
+                    if let Some((consumer_input, _)) = effect.effects_mut() {
+                        if *consumer_input == output {
+                            *consumer_input = input;
+                        }
+                    }
+                }
+            }
+        }
+        removed
     }
 
     /// Split a block immediately before one of its side effects.
@@ -1859,24 +2117,34 @@ pub struct SideEffectSite {
     pub index: usize,
 }
 
-/// Read-side index from every `SideEffectResult` node to its producer.
+/// Read-side index for explicitly located instructions and their results.
 ///
 /// Build this once for a graph snapshot and share it across related queries.
 /// Rebuild it after any structural skeleton mutation.
 pub struct SideEffectIndex {
     by_result: LookupMap<ValueId, SideEffectSite>,
+    by_call: LookupMap<CallSiteId, SideEffectSite>,
 }
 
 impl SideEffectIndex {
     pub fn build<P: Family, Lang: Language>(graph: &EGraph<P, Lang>) -> Self {
         let mut by_result = LookupMap::new();
+        let mut by_call = LookupMap::new();
         for (block, skeleton_block) in &graph.skeleton.blocks {
             for (index, effect) in skeleton_block.side_effects.iter().enumerate() {
-                let Some(result) = effect.result() else {
+                let site = SideEffectSite { block, index };
+                if let SideEffectKind::Effect(EffectOp::Call { site: call }) = effect.kind() {
+                    let previous = by_call.insert(*call, site);
+                    assert!(
+                        previous.is_none(),
+                        "call has more than one explicit site: {call:?}"
+                    );
+                }
+                let Some(result) = graph.effect_result_binding(effect) else {
                     continue;
                 };
                 for value in result.values() {
-                    let previous = by_result.insert(value, SideEffectSite { block, index });
+                    let previous = by_result.insert(value, site);
                     assert!(
                         previous.is_none(),
                         "side-effect result has more than one producer: {value:?}"
@@ -1884,11 +2152,15 @@ impl SideEffectIndex {
                 }
             }
         }
-        Self { by_result }
+        Self { by_result, by_call }
     }
 
     pub fn site(&self, result: ValueId) -> Option<SideEffectSite> {
         self.by_result.get(&result).copied()
+    }
+
+    pub fn call_site(&self, call: CallSiteId) -> Option<SideEffectSite> {
+        self.by_call.get(&call).copied()
     }
 
     pub fn effect<'a, P: Family, Lang: Language>(
@@ -1898,7 +2170,28 @@ impl SideEffectIndex {
     ) -> Option<&'a SideEffect<P, Lang>> {
         let site = self.site(result)?;
         let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
-        effect.result().is_some_and(|binding| binding.contains_value(result)).then_some(effect)
+        graph
+            .effect_result_binding(effect)
+            .is_some_and(|binding| binding.contains_value(result))
+            .then_some(effect)
+    }
+
+    pub fn effect_result_field<'a, P: Family, Lang: Language>(
+        &self,
+        graph: &'a EGraph<P, Lang>,
+        value: ValueId,
+    ) -> Option<(&'a SideEffect<P, Lang>, ValueId, usize)> {
+        let value = graph.canonical_value(value);
+        if let Some(effect) = self.effect(graph, value) {
+            let field = graph.effect_result_binding(effect)?.top_level_field_containing_value(value)?;
+            return Some((effect, value, field));
+        }
+        graph.value(value).result_origins().iter().find_map(|origin| {
+            let representative = *origin.values().first()?;
+            let effect = self.effect(graph, representative)?;
+            let field = graph.effect_result_binding(effect)?.top_level_field_index(origin)?;
+            Some((effect, representative, field))
+        })
     }
 
     pub fn effect_mut<'a, P: Family, Lang: Language>(
@@ -1907,8 +2200,15 @@ impl SideEffectIndex {
         result: ValueId,
     ) -> Option<&'a mut SideEffect<P, Lang>> {
         let site = self.site(result)?;
+        let contains_result = {
+            let effect = graph.skeleton.blocks.get(site.block)?.side_effects.get(site.index)?;
+            graph.effect_result_binding(effect).is_some_and(|binding| binding.contains_value(result))
+        };
+        if !contains_result {
+            return None;
+        }
         let effect = graph.skeleton.blocks.get_mut(site.block)?.side_effects.get_mut(site.index)?;
-        effect.result().is_some_and(|binding| binding.contains_value(result)).then_some(effect)
+        Some(effect)
     }
 }
 
@@ -1952,6 +2252,19 @@ pub trait GraphResource: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 impl<T> GraphResource for T where T: Clone + std::fmt::Debug + Eq + std::hash::Hash {}
 
 impl<P: Family, Lang: Language> EGraph<P, Lang> {
+    /// The canonical result binding anchored by a skeleton effect. Call
+    /// results are owned by the complete call boundary; every other effect
+    /// owns its result directly.
+    pub fn effect_result_binding<'a>(
+        &'a self,
+        effect: &'a SideEffect<P, Lang>,
+    ) -> Option<&'a ResultBinding<Lang::Ty>> {
+        match effect.kind() {
+            SideEffectKind::Effect(EffectOp::Call { site }) => Some(self.call(*site).result()),
+            _ => effect.result(),
+        }
+    }
+
     pub fn new() -> Self {
         EGraph {
             nodes: SlotMap::with_key(),
@@ -2028,6 +2341,25 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         &self.calls[id]
     }
 
+    /// Whether a skeleton entry must participate in effect ordering. Pure
+    /// calls retain an explicit anchor so their complete call boundary has a
+    /// unique location, but their value dependencies determine evaluation.
+    pub fn effect_requires_ordering(&self, effect: &SideEffect<P, Lang>) -> bool {
+        !matches!(
+            effect.kind(),
+            SideEffectKind::Effect(EffectOp::Call { site })
+                if self.call(*site).effects() == CallEffects::Pure
+        )
+    }
+
+    pub fn has_ordered_effects(&self) -> bool {
+        self.skeleton
+            .blocks
+            .values()
+            .flat_map(|block| &block.side_effects)
+            .any(|effect| self.effect_requires_ordering(effect))
+    }
+
     pub fn call_value_dependencies(&self, id: CallSiteId) -> Vec<ValueId> {
         let mut values = Vec::new();
         for argument in self.call(id).arguments() {
@@ -2038,6 +2370,17 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             }
         }
         values
+    }
+
+    pub fn value_dependencies(&self, id: ValueId) -> Vec<ValueId> {
+        let id = self.canonical_value(id);
+        match self.value(id).kind() {
+            ValueKind::CallResult { call, .. } => self.call_value_dependencies(*call),
+            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
+                self.place_value_dependencies(*place)
+            }
+            kind => kind.children().into_vec(),
+        }
     }
 
     pub fn effect_boundary_value_dependencies(&self, effect: &SideEffect<P, Lang>) -> Vec<ValueId> {
@@ -2051,7 +2394,10 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
         if let SideEffectKind::Effect(operation) = effect.kind() {
             match operation {
-                EffectOp::Call { site } => values.extend(self.call_value_dependencies(*site)),
+                EffectOp::Call { site } if self.call(*site).effects() != CallEffects::Pure => {
+                    values.extend(self.call_value_dependencies(*site));
+                }
+                EffectOp::Call { .. } => {}
                 EffectOp::Alloca { result }
                 | EffectOp::Load { place: result, .. }
                 | EffectOp::Store { place: result }
@@ -2061,7 +2407,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                 EffectOp::Op { .. } | EffectOp::ControlBarrier => {}
             }
         }
-        if let Some(result) = effect.result() {
+        if let Some(result) = self.effect_result_binding(effect) {
             result.for_each_destination(|_, destination| match destination {
                 ResultDestination::ReturnValue(_) => {}
                 ResultDestination::Place(PlaceDestination::Fixed(place)) => {
@@ -2090,6 +2436,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                     pending.push(*base);
                     values.push(*index);
                 }
+                PlaceOp::Slice { base, start, length } => {
+                    pending.push(*base);
+                    values.push(*start);
+                    values.push(*length);
+                }
                 PlaceOp::ViewIndex { view, index } => {
                     values.push(view.value());
                     values.push(*index);
@@ -2100,6 +2451,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     pub fn admit_flow_value(&self, id: ValueId) -> FlowValueId {
+        let id = self.canonical_value(id);
         assert!(
             !Lang::is_materialized_aggregate(self.value(id).ty()),
             "materialized aggregate cannot enter CFG-carried state"
@@ -2107,22 +2459,23 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         FlowValueId(id)
     }
 
-    pub fn admit_flow_values(
-        &self,
-        values: impl IntoIterator<Item = ValueId>,
-    ) -> Vec<FlowValueId> {
+    pub fn admit_flow_values(&self, values: impl IntoIterator<Item = ValueId>) -> Vec<FlowValueId> {
         values.into_iter().map(|value| self.admit_flow_value(value)).collect()
     }
 
     pub fn view_id(&self, id: ValueId) -> ViewId {
+        let id = self.canonical_value(id);
         assert!(
             Lang::is_view(self.value(id).ty()),
-            "value is not an addressable view"
+            "value {id:?} is not an addressable view: type {:?}, definition {:?}",
+            self.value(id).ty(),
+            self.value(id).kind()
         );
         ViewId(id)
     }
 
     pub fn operand_ref(&self, id: ValueId) -> OperandRef {
+        let id = self.canonical_value(id);
         if Lang::is_view(self.value(id).ty()) {
             OperandRef::View(ViewId(id))
         } else {
@@ -2130,23 +2483,80 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
     }
 
-    pub fn value_result(&self, id: ValueId) -> ResultBinding<Lang::Ty> {
-        ResultBinding::destination(
-            self.value(id).ty().clone(),
-            ResultDestination::ReturnValue(id),
-        )
+    pub fn canonical_operand(&self, operand: OperandRef) -> OperandRef {
+        match operand {
+            OperandRef::Value(value) => self.operand_ref(value),
+            OperandRef::View(view) => self.operand_ref(view.value()),
+            OperandRef::Place(place) => OperandRef::Place(place),
+        }
     }
 
-    pub fn add_call(
+    pub fn canonicalize_boundary_operands(&mut self) {
+        let representations =
+            self.nodes.keys().map(|value| (value, self.operand_ref(value))).collect::<LookupMap<_, _>>();
+        let canonicalize = |operand: &mut OperandRef| {
+            if let Some(value) = operand.value() {
+                *operand = representations[&value];
+            }
+        };
+        for (_, call) in &mut self.calls {
+            for argument in call.arguments_mut() {
+                canonicalize(argument);
+            }
+        }
+        for (_, block) in &mut self.skeleton.blocks {
+            for effect in &mut block.side_effects {
+                for operand in effect.operands_mut() {
+                    canonicalize(operand);
+                }
+            }
+        }
+    }
+
+    /// Follow the graph's canonical value substitutions.
+    pub fn canonical_value(&self, mut id: ValueId) -> ValueId {
+        let mut seen = LookupSet::new();
+        while let Some(alias) = self.value(id).alias() {
+            assert!(seen.insert(id), "value alias cycle at {id:?}");
+            id = alias;
+        }
+        id
+    }
+
+    pub fn value_result(&self, id: ValueId) -> ResultBinding<Lang::Ty> {
+        ResultBinding::destination(self.value(id).ty().clone(), ResultDestination::ReturnValue(id))
+    }
+
+    pub fn register_result_origin(&mut self, value: ValueId, origin: ResultBinding<Lang::Ty>) {
+        assert_eq!(self.value(value).ty(), origin.ty());
+        let origins = &mut self.nodes[value].result_origins;
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+
+    pub fn value_has_result_origin(&self, value: ValueId, origin: &ResultBinding<Lang::Ty>) -> bool {
+        let value = self.canonical_value(value);
+        origin.single_value() == Some(value)
+            || self.nodes[value].result_origins.iter().any(|candidate| candidate == origin)
+    }
+
+    pub fn emit_call(
         &mut self,
+        block: BlockId,
         callee: RegionId,
         parameters: &[FuncParam<P::Resource, Lang::Ty>],
         function_result: &FunctionResult<Lang::Ty>,
         arguments: impl IntoIterator<Item = OperandRef>,
         effects: CallEffects,
+        effect_tokens: Option<(EffectToken, EffectToken)>,
         span: Option<Span>,
     ) -> Result<(CallSiteId, ResultBinding<Lang::Ty>), String> {
-        let arguments = arguments.into_iter().collect::<Box<[_]>>();
+        if !self.skeleton.blocks.contains_key(block) {
+            return Err(format!("call to {callee:?} names missing block {block:?}"));
+        }
+        let arguments =
+            arguments.into_iter().map(|argument| self.canonical_operand(argument)).collect::<Box<[_]>>();
         if arguments.len() != parameters.len() {
             return Err(format!(
                 "call to {callee:?} supplies {} arguments for {} parameters",
@@ -2162,8 +2572,10 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                     | (OperandRef::Place(_), OperandType::Place(_))
             );
             if !matches {
+                let argument_ty = argument.value().and_then(|value| self.nodes.get(value)).map(Value::ty);
                 return Err(format!(
-                    "call to {callee:?} argument {index} does not match its parameter representation"
+                    "call to {callee:?} argument {index} is {argument:?} with type {argument_ty:?}, expected {:?}",
+                    parameter.representation()
                 ));
             }
         }
@@ -2182,9 +2594,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             };
             match destination {
                 ResultDestination::ReturnValue(_) => {}
-                ResultDestination::Place(PlaceDestination::Fixed(parameter)) => {
-                    require_place(*parameter)
-                }
+                ResultDestination::Place(PlaceDestination::Fixed(parameter)) => require_place(*parameter),
                 ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
                     require_place(*storage);
                     require_place(*length);
@@ -2204,6 +2614,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                         ty: ty.clone(),
                         span,
                         alias: None,
+                        result_origins: Vec::new(),
                     })
                 },
                 |parameter| {
@@ -2215,6 +2626,13 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             result = Some(binding.clone());
             CallSite::new(callee, arguments.clone(), binding, effects)
         });
+        self.skeleton.blocks[block].side_effects.push(SideEffect::new(
+            SideEffectKind::Effect(EffectOp::Call { site }),
+            smallvec::smallvec![],
+            None,
+            effect_tokens,
+            span,
+        ));
         Ok((
             site,
             result.expect("call result is constructed with its call site"),
@@ -2228,6 +2646,12 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         mut source_result: impl FnMut(ValueId) -> (ReturnSlotId, Lang::Ty, Option<Span>),
         mut map_place: impl FnMut(PlaceId) -> PlaceId,
     ) -> (CallSiteId, ResultBinding<Lang::Ty>, Vec<(ValueId, ValueId)>) {
+        let arguments = arguments
+            .into_vec()
+            .into_iter()
+            .map(|argument| self.canonical_operand(argument))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let nodes = &mut self.nodes;
         let mut result = None;
         let mut value_map = Vec::new();
@@ -2241,6 +2665,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                         ty,
                         span,
                         alias: None,
+                        result_origins: Vec::new(),
                     });
                     value_map.push((source_value, target));
                     target
@@ -2263,7 +2688,22 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             ty,
             span,
             alias: None,
+            result_origins: Vec::new(),
         })
+    }
+
+    pub fn add_place_view(&mut self, place: PlaceId, ty: Lang::Ty, span: Option<Span>) -> ViewId {
+        assert!(
+            Lang::is_view(&ty),
+            "place view must have an addressable view type"
+        );
+        ViewId(self.nodes.insert(Value {
+            kind: ValueKind::PlaceView { place },
+            ty,
+            span,
+            alias: None,
+            result_origins: Vec::new(),
+        }))
     }
 
     fn insert_place(
@@ -2298,6 +2738,16 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         pointee: Lang::Ty,
         span: Option<Span>,
     ) -> PlaceId {
+        if let PlaceOp::Slice { base, start, .. } = self.place(base).op().clone() {
+            let index_ty = self.value(index).ty().clone();
+            let index = self.intern_pure(
+                OpTag::BinOp(crate::op::BinaryOperator::Add),
+                smallvec::smallvec![start, index],
+                index_ty,
+                span,
+            );
+            return self.add_index_place(base, index, pointee, span);
+        }
         let parent = self.place(base).ty();
         let ty = PlaceType {
             pointee,
@@ -2307,6 +2757,23 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         self.insert_place(PlaceOp::Index { base, index }, ty, span)
     }
 
+    pub fn add_slice_place(
+        &mut self,
+        base: PlaceId,
+        start: ValueId,
+        length: ValueId,
+        pointee: Lang::Ty,
+        span: Option<Span>,
+    ) -> PlaceId {
+        let parent = self.place(base).ty();
+        let ty = PlaceType {
+            pointee,
+            region: parent.region.clone(),
+            access: parent.access,
+        };
+        self.insert_place(PlaceOp::Slice { base, start, length }, ty, span)
+    }
+
     pub fn add_view_index_place(
         &mut self,
         view: ViewId,
@@ -2314,6 +2781,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         pointee: Lang::Ty,
         span: Option<Span>,
     ) -> PlaceId {
+        if let ValueKind::PlaceView { place } = self.value(view.value()).kind() {
+            return self.add_index_place(*place, index, pointee, span);
+        }
         let (region, access) = self.view_region(view.value());
         let ty = PlaceType {
             pointee,
@@ -2324,21 +2794,50 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     fn view_region(&self, view: ValueId) -> (PlaceRegion<P::Resource>, PlaceAccess) {
-        let ValueKind::Pure { op, operands } = self.value(view).kind() else {
-            panic!("view identity is not produced by a pure view operation");
-        };
-        match op {
-            OpTag::StorageView(PureViewSource::Storage(resource)) => {
-                (PlaceRegion::Resource(resource.clone()), PlaceAccess::ReadWrite)
-            }
-            OpTag::StorageView(PureViewSource::Workgroup { .. }) => {
-                (PlaceRegion::Workgroup, PlaceAccess::ReadWrite)
-            }
-            OpTag::StorageView(PureViewSource::Inherited) => {
+        let value = self.value(view);
+        if let Some(alias) = value.alias {
+            return self.view_region(alias);
+        }
+        match value.kind() {
+            ValueKind::Pure {
+                op: OpTag::StorageView(PureViewSource::Storage(resource)),
+                ..
+            } => (PlaceRegion::Resource(resource.clone()), PlaceAccess::ReadWrite),
+            ValueKind::Pure {
+                op: OpTag::StorageView(PureViewSource::Workgroup { .. }),
+                ..
+            } => (PlaceRegion::Workgroup, PlaceAccess::ReadWrite),
+            ValueKind::Pure {
+                op: OpTag::StorageView(PureViewSource::Inherited),
+                operands,
+            } => {
                 let parent = *operands.last().expect("inherited view has a parent operand");
                 self.view_region(parent)
             }
-            _ => panic!("value marked as a view has no addressable view producer"),
+            ValueKind::Pure {
+                op: OpTag::Project { .. },
+                operands,
+            } if operands.len() == 1 => (PlaceRegion::Parametric, PlaceAccess::ReadOnly),
+            ValueKind::FuncParam { .. }
+            | ValueKind::BlockParam { .. }
+            | ValueKind::CallResult { .. }
+            | ValueKind::Union { .. } => (PlaceRegion::Parametric, PlaceAccess::ReadOnly),
+            ValueKind::PlaceView { place } => {
+                let place = self.place(*place).ty();
+                (place.region.clone(), place.access)
+            }
+            ValueKind::Pure { .. } => {
+                panic!(
+                    "value {view:?} is marked as a view but {:?} has no addressable view producer",
+                    value.kind()
+                )
+            }
+            ValueKind::Constant(_) | ValueKind::SideEffectResult | ValueKind::PlaceLength { .. } => {
+                panic!(
+                    "value {view:?} is marked as a view but {:?} has no addressable view producer",
+                    value.kind()
+                )
+            }
         }
     }
 
@@ -2441,6 +2940,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
         let ids: Vec<ValueId> = self.nodes.keys().collect();
         for id in ids {
+            for origin in &mut self.nodes[id].result_origins {
+                origin.replace_value(old, new);
+            }
             if self.nodes[id].alias == Some(old) {
                 self.nodes[id].alias = Some(new);
             }
@@ -2465,6 +2967,126 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    pub fn replace_value_references(&mut self, old: ValueId, new: ValueId) {
+        if old == new {
+            return;
+        }
+        let replacement_operand = self.operand_ref(new);
+        if let OperandRef::View(view) = replacement_operand {
+            if let ValueKind::PlaceView { place } = self.nodes[view.value()].kind() {
+                let place = *place;
+                for (_, node) in &mut self.nodes {
+                    for origin in &mut node.result_origins {
+                        origin.replace_value_with_place(old, place);
+                    }
+                }
+                for (_, call) in &mut self.calls {
+                    call.result.replace_value_with_place(old, place);
+                }
+                for (_, block) in &mut self.skeleton.blocks {
+                    for effect in &mut block.side_effects {
+                        if let Some(result) = &mut effect.result {
+                            result.replace_value_with_place(old, place);
+                        }
+                    }
+                    if let crate::flow::Terminator::Return(Some(result)) = &mut block.term {
+                        result.replace_value_with_place(old, place);
+                    }
+                }
+            }
+        }
+        let swap = |value: ValueId| if value == old { new } else { value };
+        self.replace_node_references(old, new);
+        for (_, place) in &mut self.places {
+            place.remap_value(swap);
+        }
+        for (_, call) in &mut self.calls {
+            for argument in call.arguments_mut() {
+                if argument.value() == Some(old) {
+                    *argument = replacement_operand;
+                }
+            }
+            call.result.replace_value(old, new);
+        }
+        for (_, block) in &mut self.skeleton.blocks {
+            for effect in &mut block.side_effects {
+                for operand in &mut effect.operands {
+                    if operand.value() == Some(old) {
+                        *operand = replacement_operand;
+                    }
+                }
+                if let Some(result) = &mut effect.result {
+                    result.replace_value(old, new);
+                }
+                if let SideEffectKind::Soac(soac) = &mut effect.kind {
+                    P::remap_soac_values(soac, &mut |value| swap(value));
+                }
+            }
+            block.term.visit_values_mut(|value| *value = swap(*value));
+        }
+    }
+
+    pub fn replace_place_references(&mut self, old: PlaceId, new: PlaceId) {
+        if old == new {
+            return;
+        }
+        for (_, place) in &mut self.places {
+            place.remap_place(|place| if place == old { new } else { place });
+        }
+        for (_, node) in &mut self.nodes {
+            match &mut node.kind {
+                ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } if *place == old => {
+                    *place = new;
+                }
+                _ => {}
+            }
+            for origin in &mut node.result_origins {
+                origin.replace_place(old, new);
+            }
+        }
+        for (_, call) in &mut self.calls {
+            for argument in &mut call.arguments {
+                if *argument == OperandRef::Place(old) {
+                    *argument = OperandRef::Place(new);
+                }
+            }
+            call.result.replace_place(old, new);
+        }
+        for (_, block) in &mut self.skeleton.blocks {
+            for effect in &mut block.side_effects {
+                for operand in &mut effect.operands {
+                    if *operand == OperandRef::Place(old) {
+                        *operand = OperandRef::Place(new);
+                    }
+                }
+                if let Some(result) = &mut effect.result {
+                    result.replace_place(old, new);
+                }
+                if let SideEffectKind::Effect(operation) = &mut effect.kind {
+                    match operation {
+                        EffectOp::Load { place, .. }
+                        | EffectOp::Store { place }
+                        | EffectOp::Atomic { place, .. }
+                            if *place == old =>
+                        {
+                            *place = new;
+                        }
+                        EffectOp::Call { .. }
+                        | EffectOp::Alloca { .. }
+                        | EffectOp::Op { .. }
+                        | EffectOp::Load { .. }
+                        | EffectOp::Store { .. }
+                        | EffectOp::Atomic { .. }
+                        | EffectOp::ControlBarrier => {}
+                    }
+                }
+            }
+            if let crate::flow::Terminator::Return(Some(result)) = &mut block.term {
+                result.replace_place(old, new);
             }
         }
     }
@@ -2558,6 +3180,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             ty,
             span,
             alias: None,
+            result_origins: Vec::new(),
         })
     }
 
@@ -2721,11 +3344,13 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         let original_kind = self.nodes[id].kind.clone();
         let original_ty = self.nodes[id].ty.clone();
         let original_span = self.nodes[id].span;
+        let original_origins = self.nodes[id].result_origins.clone();
         let fresh = self.nodes.insert(Value {
             kind: original_kind,
             ty: original_ty,
             span: original_span,
             alias: None,
+            result_origins: original_origins,
         });
         // The hash-cons key for the original node now belongs to its fresh id.
         if let Some(key) = self.pure_node_key(fresh) {
@@ -2738,16 +3363,16 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         fresh
     }
 
-    /// Discard a pure node in favor of `better`, in place: `id` becomes a
+    /// Discard a pure value in favor of `better`, in place: `id` becomes a
     /// degenerate union both of whose sides are `better`, so extraction can
-    /// only pick `better` and existing references follow it. The discarded
-    /// node's hash-cons key is retired.
+    /// only pick `better` and existing references follow it. A discarded
+    /// pure value's hash-cons key is retired.
     pub fn subsume_pure_in_place(&mut self, id: ValueId, better: ValueId) {
         assert_ne!(
             id, better,
-            "subsume_pure_in_place: replacement must differ from the node"
+            "subsume_pure_in_place: replacement must differ from the value"
         );
-        debug_assert!(matches!(&self.nodes[id].kind, ValueKind::Pure { .. }));
+        assert!(matches!(self.nodes[id].kind, ValueKind::Pure { .. }));
         if let Some(key) = self.pure_node_key(id) {
             self.hash_cons.remove(&key);
         }

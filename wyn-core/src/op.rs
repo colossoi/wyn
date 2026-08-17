@@ -314,7 +314,6 @@ impl<R, C> OpTag<R, C> {
     }
 
     pub fn map_call<D>(self, mut map: impl FnMut(C) -> D) -> OpTag<R, D> {
-        self.try_map_call(&mut |call| Ok::<_, std::convert::Infallible>(map(call)))
-            .unwrap()
+        self.try_map_call(&mut |call| Ok::<_, std::convert::Infallible>(map(call))).unwrap()
     }
 }

@@ -512,6 +512,11 @@ entry e(xs: []i32) []i32 = map(wrapper, xs)
         };
         wrapper.graph.call(*call).callee() == choose
     }));
+    let calls = wrapper.graph.calls().keys().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    let effects = wrapper.graph.side_effect_index();
+    assert!(calls.into_iter().all(|call| effects.call_site(call).is_some()));
+    assert!(!wrapper.graph.has_ordered_effects());
 }
 
 #[test]

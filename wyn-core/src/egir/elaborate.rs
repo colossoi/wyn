@@ -26,8 +26,7 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::ir::{
-    CallSiteId, FuncParam, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding,
-    ResultDestination,
+    CallSiteId, FuncParam, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding, ResultDestination,
 };
 use super::loop_analysis::LoopAnalysis;
 use super::program::{PhysicalEGraph, PhysicalPureOp, PhysicalSideEffect, PlannedGlobal};
@@ -221,10 +220,7 @@ pub fn elaborate_graph(
         elaborated_places: ScopedMap::new(),
         elaborated_calls: ScopedMap::new(),
         builder: FuncBuilder::new(
-            params
-                .iter()
-                .map(|parameter| (parameter.ty().clone(), parameter.name().to_owned()))
-                .collect(),
+            params.iter().map(|parameter| (parameter.ty().clone(), parameter.name().to_owned())).collect(),
             return_ty,
         ),
         block_map: LookupMap::new(),
@@ -249,10 +245,9 @@ pub fn elaborate_graph(
         let PlaceOp::Parameter { parameter } = definition.op() else {
             continue;
         };
-        let ssa_place = elab.builder.new_place(definition.ty().pointee.clone());
-        elab
-            .elaborated_places
-            .insert(place, (ssa_place, skel_entry));
+        let ssa_place =
+            elab.builder.new_parameter_place(parameter.index(), definition.ty().pointee.clone());
+        elab.elaborated_places.insert(place, (ssa_place, skel_entry));
         debug_assert!(matches!(
             params.get(parameter.index()).map(FuncParam::representation),
             Some(OperandType::Place(_))
@@ -316,6 +311,12 @@ struct LoopStackEntry {
     hoist_block: SkelBlockId,
     /// ScopedMap depth at which this loop's body scope was pushed.
     scope_depth: usize,
+}
+
+#[derive(Clone, Copy)]
+enum IndexCoordinate {
+    Dynamic(ValueId),
+    Static(u32),
 }
 
 struct Elaborator<'a> {
@@ -434,6 +435,9 @@ impl<'a> Elaborator<'a> {
         }
 
         if let EffectOp::Call { site } = effect {
+            if self.graph.call(*site).effects() == CallEffects::Pure {
+                return;
+            }
             self.elaborate_call(*site, skel_bid);
             return;
         }
@@ -445,19 +449,13 @@ impl<'a> Elaborator<'a> {
             }
             EffectOp::Store { place } => {
                 let place = self.demand_place(*place);
-                let value = self.demand_ref(
-                    se.operands[0]
-                        .value()
-                        .expect("store value must use the value channel"),
-                );
+                let value = self
+                    .demand_ref(se.operands[0].value().expect("store value must use the value channel"));
                 InstKind::Store { place, value }
             }
             EffectOp::Atomic { place, op } => {
                 let place = self.demand_place(*place);
-                let values = se
-                    .operand_values()
-                    .map(|node| self.demand_ref(node))
-                    .collect();
+                let values = se.operand_values().map(|node| self.demand_ref(node)).collect();
                 InstKind::Atomic {
                     place,
                     op: *op,
@@ -465,10 +463,7 @@ impl<'a> Elaborator<'a> {
                 }
             }
             EffectOp::Op { tag } => {
-                let operands = se
-                    .operand_values()
-                    .map(|nid| self.demand_ref(nid))
-                    .collect();
+                let operands = se.operand_values().map(|nid| self.demand_ref(nid)).collect();
                 InstKind::Op {
                     tag: tag.clone().map_call(|call| match call {}),
                     operands,
@@ -502,33 +497,38 @@ impl<'a> Elaborator<'a> {
             return result;
         }
         let call = self.graph.call(site).clone();
-        let mut operands = Vec::with_capacity(call.arguments().len());
+        let mut arguments = Vec::with_capacity(call.arguments().len());
         for argument in call.arguments() {
-            let value = argument
-                .value()
-                .expect("physical SSA calls require destination places to be eliminated before elaboration");
-            operands.push(self.demand_ref(value));
+            let value = argument.value().expect(
+                "physical SSA calls require destination places to be eliminated before elaboration",
+            );
+            arguments.push(self.demand_ref_placed(value));
         }
+        let placed = if call.effects() == CallEffects::Pure {
+            self.choose_placement(&arguments.iter().filter_map(|(_, block)| *block).collect::<Vec<_>>())
+        } else {
+            forced_block
+        };
         let kind = InstKind::Op {
             tag: OpTag::Call(call.callee()),
-            operands,
+            operands: arguments.into_iter().map(|(value, _)| value).collect(),
         };
         let values = call.result().values();
         if values.is_empty() {
-            let out_bid = self.block_map[&forced_block];
+            let out_bid = self.block_map[&placed];
             self.builder.func_mut().append_void_inst(out_bid, kind);
-            self.elaborated_calls.insert(site, None);
+            self.record_call_placement(site, None, placed);
             return None;
         }
 
-        let root = self.emit_at(forced_block, kind, call.result().ty().clone(), None);
-        self.elaborated_calls.insert(site, Some((root, forced_block)));
+        let root = self.emit_at(placed, kind, call.result().ty().clone(), None);
+        self.record_call_placement(site, Some((root, placed)), placed);
         for (value, path, ty) in result_value_paths(call.result()) {
             let mut projected = root;
             for (depth, index) in path.iter().enumerate() {
                 let field_ty = result_type_at_path(call.result(), &path[..=depth]);
                 projected = self.emit_at(
-                    forced_block,
+                    placed,
                     InstKind::Op {
                         tag: OpTag::Project { index: *index },
                         operands: vec![ValueRef::Ssa(projected)],
@@ -540,9 +540,9 @@ impl<'a> Elaborator<'a> {
             if path.is_empty() {
                 debug_assert_eq!(self.graph.value(value).ty(), &ty);
             }
-            self.elaborated.insert(value, (projected, forced_block));
+            self.record_placement(value, projected, placed);
         }
-        Some((root, forced_block))
+        Some((root, placed))
     }
 
     /// Demand a node as an instruction operand. Canonical 32-bit scalar
@@ -667,6 +667,9 @@ impl<'a> Elaborator<'a> {
             PlaceOp::Parameter { .. } | PlaceOp::AllocaResult => {
                 panic!("place {nid:?} should have been registered at its definition")
             }
+            PlaceOp::Slice { .. } => {
+                panic!("slice place {nid:?} must be indexed before SSA elaboration")
+            }
         };
 
         let place = match &kind {
@@ -687,23 +690,23 @@ impl<'a> Elaborator<'a> {
     /// Each entry is `(index-result node, coordinate node)` in base-to-leaf
     /// order. Stopping at the first view-typed base preserves any value
     /// operations that precede the storage address chain.
-    fn view_index_spine(&self, nid: ValueId) -> Option<(ValueId, SmallVec<[(ValueId, ValueId); 4]>)> {
-        let mut steps = SmallVec::<[(ValueId, ValueId); 4]>::new();
+    fn view_index_spine(
+        &self,
+        nid: ValueId,
+    ) -> Option<(ValueId, SmallVec<[(ValueId, IndexCoordinate); 4]>)> {
+        let mut steps = SmallVec::<[(ValueId, IndexCoordinate); 4]>::new();
         let mut current = self.resolve(nid);
         loop {
-            let ValueKind::Pure {
-                op: PureOp::Index,
-                operands,
-            } = &self.graph.nodes[current].kind
-            else {
+            let ValueKind::Pure { op, operands } = &self.graph.nodes[current].kind else {
                 return None;
             };
-            if operands.len() != 2 {
-                return None;
-            }
-            let base = self.resolve(operands[0]);
-            let index = self.resolve(operands[1]);
-            steps.push((current, index));
+            let (base, coordinate) = match (op, operands.as_slice()) {
+                (PureOp::Index, [base, index]) => (*base, IndexCoordinate::Dynamic(*index)),
+                (PureOp::Project { index }, [base]) => (*base, IndexCoordinate::Static(*index)),
+                _ => return None,
+            };
+            let base = self.resolve(base);
+            steps.push((current, coordinate));
             if self.graph.nodes[base].ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
                 steps.reverse();
                 return Some((base, steps));
@@ -719,21 +722,39 @@ impl<'a> Elaborator<'a> {
     fn demand_view_index_spine(
         &mut self,
         view_node: ValueId,
-        steps: SmallVec<[(ValueId, ValueId); 4]>,
+        steps: SmallVec<[(ValueId, IndexCoordinate); 4]>,
     ) -> (SsaValueId, SkelBlockId) {
         let result_node = steps.last().expect("view index spine has at least one coordinate").0;
-        let (view, view_placed) = self.demand_ref_placed(view_node);
+        let (view, root_place, root_placed) = match &self.graph.nodes[view_node].kind {
+            ValueKind::PlaceView { place } => {
+                let (place, placed) = self.demand_place_placed(*place);
+                (None, Some(place), placed)
+            }
+            _ => {
+                let (view, placed) = self.demand_ref_placed(view_node);
+                (
+                    Some(view),
+                    None,
+                    placed.expect("view handle has an SSA definition"),
+                )
+            }
+        };
         let index_values = steps
             .iter()
-            .map(|(_, index)| self.demand_ref_placed(*index))
+            .map(|(_, coordinate)| match coordinate {
+                IndexCoordinate::Dynamic(index) => self.demand_ref_placed(*index),
+                IndexCoordinate::Static(index) => {
+                    (ValueRef::Const(ConstantValue::I32(*index as i32)), None)
+                }
+            })
             .collect::<SmallVec<[(ValueRef, Option<SkelBlockId>); 4]>>();
         let mut operand_placements = SmallVec::<[SkelBlockId; 4]>::new();
-        operand_placements.extend(view_placed);
+        operand_placements.push(root_placed);
         operand_placements.extend(index_values.iter().filter_map(|(_, block)| *block));
         let placed = self.choose_placement(&operand_placements);
         let out_bid = self.block_map[&placed];
 
-        let mut place = None;
+        let mut place = root_place;
         for ((step_node, _), (index, _)) in steps.iter().zip(&index_values) {
             let next = self.builder.new_place(self.graph.nodes[*step_node].ty.clone());
             let kind = if let Some(parent) = place {
@@ -744,7 +765,7 @@ impl<'a> Elaborator<'a> {
                 }
             } else {
                 InstKind::ViewIndex {
-                    view,
+                    view: view.expect("non-place view has an SSA handle"),
                     index: *index,
                     result: next,
                 }
@@ -793,7 +814,7 @@ impl<'a> Elaborator<'a> {
                 (vid, placed)
             }
             ValueKind::Pure { op, operands } => {
-                if matches!(op, PureOp::Index) {
+                if matches!(op, PureOp::Index | PureOp::Project { .. }) {
                     if let Some((view, steps)) = self.view_index_spine(resolved) {
                         return self.demand_view_index_spine(view, steps);
                     }
@@ -813,15 +834,44 @@ impl<'a> Elaborator<'a> {
                 (vid, placed)
             }
             ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } => {
+                let users = self
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter_map(|(user, node)| {
+                        node.kind().children().contains(&resolved).then_some((
+                            user,
+                            node.kind(),
+                            node.alias(),
+                            node.result_origins(),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
                 panic!(
-                    "FuncParam/BlockParam {:?} should have been pre-populated in elaborated map",
-                    resolved
+                    "FuncParam/BlockParam {:?} should have been pre-populated in elaborated map; users {users:?}",
+                    resolved,
                 );
             }
             ValueKind::SideEffectResult => {
+                let node_users = self
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter_map(|(user, node)| {
+                        node.kind().children().contains(&resolved).then_some((user, node.kind()))
+                    })
+                    .collect::<Vec<_>>();
+                let mut boundary_users = Vec::new();
+                for (block, contents) in &self.graph.skeleton.blocks {
+                    for (index, effect) in contents.side_effects.iter().enumerate() {
+                        if self.graph.effect_boundary_value_dependencies(effect).contains(&resolved) {
+                            boundary_users.push((block, index, effect.kind()));
+                        }
+                    }
+                }
                 panic!(
-                    "SideEffectResult {:?} should have been populated during side-effect elaboration",
-                    resolved
+                    "SideEffectResult {:?} should have been populated during side-effect elaboration; node users {node_users:?}; boundary users {boundary_users:?}",
+                    resolved,
                 );
             }
             ValueKind::Union { .. } => {
@@ -829,9 +879,7 @@ impl<'a> Elaborator<'a> {
             }
             ValueKind::CallResult { call, .. } => {
                 self.elaborate_call(*call, self.current_skel_block.expect("current block unset"));
-                self.elaborated
-                    .get(&resolved)
-                    .expect("call elaboration did not bind its by-value result")
+                self.elaborated.get(&resolved).expect("call elaboration did not bind its by-value result")
             }
             ValueKind::PlaceLength { place } => {
                 let (place, placed) = self.demand_place_placed(*place);
@@ -840,6 +888,90 @@ impl<'a> Elaborator<'a> {
                 let value = self.emit_at(placed, InstKind::Load { place }, ty, span);
                 self.record_placement(resolved, value, placed);
                 (value, placed)
+            }
+            ValueKind::PlaceView { .. } => {
+                let value_users = self
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter_map(|(user, node)| {
+                        node.kind().children().contains(&resolved).then_some((user, node.ty(), node.kind()))
+                    })
+                    .collect::<Vec<_>>();
+                let effect_users = self
+                    .graph
+                    .skeleton
+                    .blocks
+                    .iter()
+                    .flat_map(|(block, body)| {
+                        body.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
+                            effect
+                                .operands()
+                                .iter()
+                                .any(|operand| operand.value() == Some(resolved))
+                                .then_some((
+                                    block,
+                                    index,
+                                    effect.kind(),
+                                    effect.operands(),
+                                    match effect.kind() {
+                                        SideEffectKind::Effect(EffectOp::Store { place }) => Some(*place),
+                                        _ => None,
+                                    },
+                                ))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut reached = LookupSet::from([resolved]);
+                loop {
+                    let discovered = self
+                        .graph
+                        .nodes
+                        .iter()
+                        .filter_map(|(user, node)| {
+                            (!reached.contains(&user)
+                                && node.kind().children().iter().any(|value| reached.contains(value)))
+                            .then_some(user)
+                        })
+                        .collect::<Vec<_>>();
+                    if discovered.is_empty() {
+                        break;
+                    }
+                    reached.extend(discovered);
+                }
+                let terminator_users = self
+                    .graph
+                    .skeleton
+                    .blocks
+                    .iter()
+                    .filter_map(|(block, body)| {
+                        body.term
+                            .referenced_nodes()
+                            .into_iter()
+                            .any(|value| reached.contains(&value))
+                            .then_some((block, &body.term))
+                    })
+                    .collect::<Vec<_>>();
+                let call_users = self
+                    .graph
+                    .calls()
+                    .iter()
+                    .filter_map(|(site, call)| {
+                        call.arguments()
+                            .iter()
+                            .any(|argument| argument.value().is_some_and(|value| reached.contains(&value)))
+                            .then_some((site, call.callee(), call.arguments()))
+                    })
+                    .collect::<Vec<_>>();
+                let effect_places = effect_users
+                    .iter()
+                    .filter_map(|(_, _, _, _, place)| place.map(|place| (place, self.graph.place(place))))
+                    .collect::<Vec<_>>();
+                panic!(
+                    "place-backed view {resolved:?} must be consumed through addressing; value users {value_users:?}; effect users {effect_users:?}; effect places {effect_places:?}; call users {call_users:?}; terminator users {terminator_users:?}; length intrinsic {:?}; storage-length intrinsic {:?}",
+                    crate::builtins::catalog().known().length,
+                    crate::builtins::catalog().known().storage_len,
+                )
             }
         }
     }
@@ -881,20 +1013,34 @@ impl<'a> Elaborator<'a> {
     /// it remains visible to siblings inside the loop body but scopes out
     /// with the loop frame.
     fn record_placement(&mut self, nid: ValueId, vid: SsaValueId, placed: SkelBlockId) {
+        if let Some(depth) = self.placement_scope_depth(placed) {
+            self.elaborated.insert_at_depth(depth, nid, (vid, placed));
+        } else {
+            self.elaborated.insert(nid, (vid, placed));
+        }
+    }
+
+    fn record_call_placement(
+        &mut self,
+        site: CallSiteId,
+        result: Option<(SsaValueId, SkelBlockId)>,
+        placed: SkelBlockId,
+    ) {
+        if let Some(depth) = self.placement_scope_depth(placed) {
+            self.elaborated_calls.insert_at_depth(depth, site, result);
+        } else {
+            self.elaborated_calls.insert(site, result);
+        }
+    }
+
+    fn placement_scope_depth(&self, placed: SkelBlockId) -> Option<usize> {
         let current = self.current_skel_block.expect("current skel block unset");
-        // Only consider active loop frames (same filter as choose_placement).
-        let insert_depth = self
-            .loop_stack
+        self.loop_stack
             .iter()
             .rev()
             .filter(|f| self.loop_analysis.is_in_loop(current, f.header))
             .find(|f| f.hoist_block == placed)
-            .map(|f| f.scope_depth);
-        if let Some(d) = insert_depth {
-            self.elaborated.insert_at_depth(d, nid, (vid, placed));
-        } else {
-            self.elaborated.insert(nid, (vid, placed));
-        }
+            .map(|f| f.scope_depth)
     }
 
     /// Emit an instruction into `target_skel`'s output block, bypassing the
@@ -924,10 +1070,8 @@ impl<'a> Elaborator<'a> {
                 crate::ssa::framework::Terminator::Return(self.demand_result_ref(result))
             }
             SkeletonTerminator::Branch { target, args } => {
-                let out_args: Vec<ValueRef> = args
-                    .iter()
-                    .map(|&nid| self.demand_ref(nid.value()))
-                    .collect();
+                let out_args: Vec<ValueRef> =
+                    args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
                 crate::ssa::framework::Terminator::Branch {
                     target: self.block_map[target],
                     args: out_args,
@@ -941,14 +1085,8 @@ impl<'a> Elaborator<'a> {
                 else_args,
             } => {
                 let cond = self.demand_ref(*cond);
-                let ta: Vec<ValueRef> = then_args
-                    .iter()
-                    .map(|&nid| self.demand_ref(nid.value()))
-                    .collect();
-                let ea: Vec<ValueRef> = else_args
-                    .iter()
-                    .map(|&nid| self.demand_ref(nid.value()))
-                    .collect();
+                let ta: Vec<ValueRef> = then_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
+                let ea: Vec<ValueRef> = else_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
                 crate::ssa::framework::Terminator::CondBranch {
                     cond,
                     then_target: self.block_map[then_target],
@@ -963,6 +1101,9 @@ impl<'a> Elaborator<'a> {
     }
 
     fn demand_result_ref(&mut self, result: &ResultBinding<Type<TypeName>>) -> Option<ValueRef> {
+        if result.destination_count() == 0 {
+            return None;
+        }
         if !result.is_product() {
             let mut value = None;
             result.for_each_destination(|_, destination| {
@@ -991,9 +1132,7 @@ impl<'a> Elaborator<'a> {
     }
 }
 
-fn result_value_paths(
-    result: &ResultBinding<Type<TypeName>>,
-) -> Vec<(ValueId, Vec<u32>, Type<TypeName>)> {
+fn result_value_paths(result: &ResultBinding<Type<TypeName>>) -> Vec<(ValueId, Vec<u32>, Type<TypeName>)> {
     fn walk(
         result: &ResultBinding<Type<TypeName>>,
         path: &mut Vec<u32>,
@@ -1002,7 +1141,11 @@ fn result_value_paths(
         if result.is_product() {
             for index in 0..result.field_count() {
                 path.push(index as u32);
-                walk(&result.field(index).expect("result field disappeared"), path, values);
+                walk(
+                    &result.field(index).expect("result field disappeared"),
+                    path,
+                    values,
+                );
                 path.pop();
             }
             return;
@@ -1176,12 +1319,7 @@ mod tests {
         let merge = graph.skeleton.create_block();
         let selected = graph.add_block_param(merge, ty.clone());
         let replacement = graph.intern_constant(ConstantValue::U32(7), ty.clone());
-        let call = graph.intern_pure(
-            PureOp::Materialize,
-            smallvec::smallvec![replacement],
-            ty,
-            None,
-        );
+        let call = graph.intern_pure(PureOp::Materialize, smallvec::smallvec![replacement], ty, None);
         graph.subsume_pure_in_place(call, selected);
         graph.nodes[selected].alias = Some(replacement);
 

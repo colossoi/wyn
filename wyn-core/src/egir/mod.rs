@@ -57,7 +57,10 @@ pub use realize_outputs::realize_outputs;
 pub use reify::reify_soacs;
 pub use resource_erasure::{erase_resources, ResourcesErased};
 pub use rewrite::rewrite;
-pub use semantic_opt::{optimize_semantics, Optimized};
+pub use semantic_opt::{
+    optimize_semantics, optimize_semantics_with_trace, Optimized, SemanticOptimizationRelation,
+    SemanticOptimizationTrace,
+};
 pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
 pub use soac_expand::{expand_soacs, SoacsExpanded};
 

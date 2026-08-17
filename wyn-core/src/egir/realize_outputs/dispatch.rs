@@ -4,7 +4,7 @@
 //!
 //!   * `compute_slot_source` — classifies a slot source ValueId and
 //!     emits the appropriate write into a storage `OutputView`. Handles
-//!     Screma `Project` retargeting, fixed-size aggregates (per-element
+//!     Screma result retargeting, fixed-size aggregates (per-element
 //!     stores), scalars/vectors (single store at index 0), and consuming
 //!     Scan (no-op — already in its input buffer).
 //!   * `graphics_slot_source` — emits one store to the slot's
@@ -26,9 +26,8 @@ use super::super::graph_ops;
 use super::super::program::OutputWriter;
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{
-    EGraph, EffectToken, PlaceAccess, PlaceRegion, PlaceType, PureOp, Raw, SideEffectIndex,
-    SideEffectKind, SkeletonTerminator, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId,
-    ValueKind,
+    EGraph, EffectToken, PlaceAccess, PlaceRegion, PlaceType, PureOp, Raw, SideEffectIndex, SideEffectKind,
+    SkeletonTerminator, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId, ValueKind,
 };
 
 /// The set of Pure nodes reachable from an entry's live outputs — the operand
@@ -156,7 +155,7 @@ pub(super) fn retarget_bucket_aux_output(
 ///
 ///   1. Consuming Scan accumulator → no-op (the Screma already wrote
 ///      into the input buffer).
-///   2. Retargetable `Project(Screma, k)` → flip the Screma's
+///   2. Retargetable Screma result → flip the Screma's
 ///      `map_destinations[k]` / `acc_destinations[k]` to `OutputView`,
 ///      rewrite sibling `Index` consumers to view loads.
 ///   3. Fixed-size aggregate (`[Size(n)]T`) → element stores.
@@ -187,7 +186,7 @@ pub fn compute_slot_source(
 ) -> Result<Vec<OutputWriter>, ConvertError> {
     // 1. Consuming Scan: nothing to emit.
     if result_soac_is_consuming_scan(graph, effect_index, source) {
-        let writer = projected_effect_result(graph, effect_index, source).ok_or_else(|| {
+        let writer = canonical_effect_result(graph, effect_index, source).ok_or_else(|| {
             ConvertError::Internal("consuming scan projection lost its producing effect".into())
         })?;
         return Ok(vec![OutputWriter::Value(writer)]);
@@ -206,10 +205,8 @@ pub fn compute_slot_source(
             rewrite_sibling_index_consumers(graph, block, effect_ids, source, view, elem_ty, slot_index)?;
         }
         retarget_array_projection(graph, effect_index, screma_result, field_idx, view)?;
-        // The Project node operationally produces the view at runtime
-        // (the Screma's loop body wrote field 0 through the view).
-        // Update its type to match so verify_no_abstract doesn't flag
-        // the Composite array type. Also alias for ValueId substitution.
+        // The Screma's loop body now produces this result through the view.
+        // Retype the expression-level result and preserve its substitution.
         if let Some(view_ty) = graph.nodes.get(view).map(|node| node.ty.clone()) {
             graph.retype_node(source, view_ty);
         }
@@ -227,15 +224,24 @@ pub fn compute_slot_source(
     });
     if let (Some(n), Some(et)) = (fixed_size, slot_ty.elem_type().cloned()) {
         let view = graph_ops::intern_resource_view(graph, resource, et.clone(), None);
+        let source = graph.canonical_value(source);
+        let source_is_view = matches!(
+            graph.operand_ref(source),
+            super::super::types::OperandRef::View(_)
+        );
         let mut writers = Vec::with_capacity(n);
         for j in 0..n {
-            let elem = graph.intern_pure(
-                PureOp::Project { index: j as u32 },
-                smallvec![source],
-                et.clone(),
-                None,
-            );
             let idx = graph_ops::intern_u32(graph, j as u32, None);
+            let elem = if source_is_view {
+                graph_ops::emit_view_load(graph, block, source, idx, et.clone(), effect_ids, None)
+            } else {
+                graph.intern_pure(
+                    PureOp::Project { index: j as u32 },
+                    smallvec![source],
+                    et.clone(),
+                    None,
+                )
+            };
             let effect =
                 graph_ops::emit_storage_store(graph, block, view, idx, elem, et.clone(), effect_ids, None);
             writers.push(OutputWriter::Effect(effect));
@@ -293,25 +299,19 @@ pub fn graphics_slot_source(
     ))
 }
 
-fn projected_effect_result(
+fn canonical_effect_result(
     graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
     source: ValueId,
 ) -> Option<ValueId> {
-    let ValueKind::Pure { operands, .. } = &graph.nodes[source].kind else {
-        return effect_index.effect(graph, source).is_some().then_some(source);
-    };
-    let [producer] = operands.as_slice() else {
-        return None;
-    };
-    effect_index.effect(graph, *producer).is_some().then_some(*producer)
+    effect_index.effect_result_field(graph, source).map(|(_, result, _)| result)
 }
 
 // ----------------------------------------------------------------------------
 // Classifier predicates
 // ----------------------------------------------------------------------------
 
-/// True iff `result` is `Project(Screma, k)` where the Screma's k-th
+/// True iff `result` selects a Screma field whose
 /// tuple field is a Scan accumulator with `destination: InputBuffer` —
 /// i.e. a consuming scan. The scan writes its prefix into its input
 /// buffer; the entry's auto-bound output is unused.
@@ -320,55 +320,36 @@ pub(crate) fn result_soac_is_consuming_scan(
     effect_index: &SideEffectIndex,
     result: ValueId,
 ) -> bool {
-    if let ValueKind::Pure {
-        op: PureOp::Project { index },
-        operands,
-    } = &graph.nodes[result].kind
-    {
-        let field_idx = *index as usize;
-        if let [screma_result] = operands.as_slice() {
-            if let Some(se) = effect_index.effect(graph, *screma_result) {
-                if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind {
-                    if matches!(
-                        op.form.result_id(field_idx),
-                        Some(screma::ResultId::Post(post)) if post < op.form.scan_input_count()
-                    ) && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-        }
-    }
-    false
+    let Some((_, screma_result, field_idx)) = effect_index.effect_result_field(graph, result) else {
+        return false;
+    };
+    let Some(se) = effect_index.effect(graph, screma_result) else {
+        return false;
+    };
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
+        return false;
+    };
+    matches!(
+        op.form.result_id(field_idx),
+        Some(screma::ResultId::Post(post)) if post < op.form.scan_input_count()
+    ) && op.destination(field_idx).is_some_and(SoacDestination::is_input_buffer)
 }
 
-/// If `source` is a retargetable array projection of a fresh Screma, return
-/// the underlying Screma result and field index.
+/// If `source` is a retargetable fresh Screma result, return its canonical
+/// result leaf and field index.
 pub(crate) fn result_soac_is_array_projection(
     graph: &EGraph<Raw>,
     effect_index: &SideEffectIndex,
     source: ValueId,
 ) -> Option<(ValueId, usize)> {
-    let ValueKind::Pure {
-        op: PureOp::Project { index },
-        operands,
-    } = &graph.nodes[source].kind
-    else {
-        return None;
-    };
-    let field_idx = *index as usize;
-    let [screma_result] = operands.as_slice() else {
-        return None;
-    };
-    let se = effect_index.effect(graph, *screma_result)?;
+    let (_, screma_result, field_idx) = effect_index.effect_result_field(graph, source)?;
+    let se = effect_index.effect(graph, screma_result)?;
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
         return None;
     };
     let supported = matches!(op.form.result_id(field_idx), Some(screma::ResultId::Post(_)));
     (supported && op.destination(field_idx).is_some_and(SoacDestination::is_unplaced))
-        .then_some((*screma_result, field_idx))
+        .then_some((screma_result, field_idx))
 }
 
 /// True iff `ty` is an Array whose size is a free variable or
@@ -399,9 +380,7 @@ pub(crate) fn retarget_array_projection(
 ) -> Result<(), ConvertError> {
     if effect_index.effect(graph, target_result).is_some() {
         let (base_len, mut views) = {
-            let se = effect_index
-                .effect(graph, target_result)
-                .expect("side-effect site was just resolved");
+            let se = effect_index.effect(graph, target_result).expect("side-effect site was just resolved");
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &se.kind else {
                 return Err(ConvertError::Internal(format!(
                     "output target {target_result:?} is not produced by a Screma"
@@ -417,9 +396,7 @@ pub(crate) fn retarget_array_projection(
             )
         };
         let output_view = graph.operand_ref(output_view);
-        let se = effect_index
-            .effect_mut(graph, target_result)
-            .expect("side-effect site was just resolved");
+        let se = effect_index.effect_mut(graph, target_result).expect("side-effect site was just resolved");
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut se.kind else {
             return Err(ConvertError::Internal(format!(
                 "output target {target_result:?} is not produced by a Screma"

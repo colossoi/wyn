@@ -6,8 +6,8 @@ use crate::egir::program::{
 };
 use crate::egir::reify::Segmented;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, PureOp,
-    SkeletonTerminator, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, PureOp, SkeletonTerminator,
+    WynLanguage,
 };
 use crate::op::BinaryOperator;
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -54,8 +54,7 @@ fn affine_program() -> (RegionId, Segmented) {
     let result = graph.intern_pure(PureOp::Tuple(2), smallvec![out_a, out_b], pair.clone(), None);
     let result_abi = by_value_function_result::<WynLanguage>(pair.clone());
     let return_binding = bind_by_value_result(&mut graph, &result_abi, result);
-    graph.skeleton.blocks[graph.skeleton.entry].term =
-        SkeletonTerminator::Return(Some(return_binding));
+    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(return_binding));
     let mut identities = ProgramIdentities::default();
     let region = identities.alloc_function("affine_compose".into());
     let function = SemanticFunc::new(

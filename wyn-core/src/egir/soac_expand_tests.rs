@@ -1,31 +1,20 @@
 //! Structural tests for `egir::soac_expand`.
 //!
-//! These tests drive the pipeline up to `expand_soacs` and then walk
-//! the resulting `EGraph` to confirm:
-//!   - No `_w_intrinsic_array_with_inplace` node carries a tuple
-//!     result type.
-//!   - For SoA-tuple outputs, exactly N componentwise
-//!     `_w_intrinsic_array_with_inplace` calls exist, each with a
-//!     plain composite array result type.
-//!   - Each component ArrayWith is fed a matching `Project { index: i }`
-//!     on both `arr` and `val`, pinning down operand identity.
-//!   - A `PureOp::Tuple(N)` repack exists with the SoA-tuple type.
-//!
-//! A coarser "N calls of the right intrinsic" check would miss operand
-//! wiring mistakes; these assertions fail loudly if any component's
-//! `arr` or `val` comes from the wrong projection.
+//! These tests drive the pipeline up to `expand_soacs` and inspect the
+//! resulting graph, including its addressable places and CFG state.
 
-use crate::ast::TypeName;
 use crate::ast::Span;
+use crate::ast::TypeName;
 use crate::egir::graph_ops::bind_by_value_result;
+use crate::egir::ir::PlaceOp;
 use crate::egir::program::{
     PhysicalEGraph, PhysicalFunc, PhysicalResourceRef, PhysicalSideEffectKind, ProgramIdentities,
     SemanticOpId,
 };
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, Family, OperandRef, Physical,
-    PureOp, SkeletonTerminator, Soac, SoacEffect, SoacInputType, ValueId, ValueKind, ViewId,
+    by_value_function_result, callable_parameter, CallEffects, EffectOp, Family, Language, OperandRef,
+    Physical, PureOp, SkeletonTerminator, Soac, SoacEffect, SoacInputType, ValueId, ValueKind, ViewId,
     WynLanguage,
 };
 use polytype::Type;
@@ -67,12 +56,6 @@ fn array_with_nodes<P: Family>(graph: &crate::egir::types::EGraph<P>) -> Vec<cra
             _ => None,
         })
         .collect()
-}
-
-fn is_soa_tuple(ty: &Type<TypeName>) -> bool {
-    matches!(ty, Type::Constructed(TypeName::Tuple(_), components)
-        if components.iter().all(|c|
-            matches!(c, Type::Constructed(TypeName::Array, args) if args.len() == 4)))
 }
 
 fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
@@ -121,9 +104,7 @@ fn physical_callable(
     let params = parameter_types
         .into_iter()
         .enumerate()
-        .map(|(index, ty)| {
-            callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{index}"), ty)
-        })
+        .map(|(index, ty)| callable_parameter::<PhysicalResourceRef, WynLanguage>(format!("p{index}"), ty))
         .collect();
     PhysicalFunc::new(
         region,
@@ -215,10 +196,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
             )
         })
         .collect::<Vec<_>>();
-    let destinations = destination_values
-        .into_iter()
-        .map(|view| graph.view_id(view))
-        .collect::<Vec<_>>();
+    let destinations = destination_values.into_iter().map(|view| graph.view_id(view)).collect::<Vec<_>>();
     let mut regions = ProgramIdentities::default();
     let reducer_region = regions.alloc_function("hist_tuple_reducer".into());
     let histogram = hist::Op::<Physical> {
@@ -275,16 +253,14 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         vec![i32_ty.clone(); 2],
     );
     let callables = [(reducer_region, reducer)].into_iter().collect();
-    let graph = super::run_one_body(graph, &callables, &mut effect_ids)
-        .expect("general serial Hist should expand");
+    let graph =
+        super::run_one_body(graph, &callables, &mut effect_ids).expect("general serial Hist should expand");
     let stores = graph
         .skeleton
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| {
-            matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store { .. }))
-        })
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store { .. })))
         .count();
     assert_eq!(
         stores, 12,
@@ -296,9 +272,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     let reducer_calls = graph
         .calls
         .iter()
-        .filter(|(_, call)| {
-            call.callee() == reducer_region && call.arguments().len() == 4
-        })
+        .filter(|(_, call)| call.callee() == reducer_region && call.arguments().len() == 4)
         .count();
     assert_eq!(
         reducer_calls, 4,
@@ -383,8 +357,8 @@ fn serial_hist_ignores_out_of_bounds_indices() {
     );
 
     let callables = Default::default();
-    let graph = super::run_one_body(graph, &callables, &mut effect_ids)
-        .expect("serial histogram should expand");
+    let graph =
+        super::run_one_body(graph, &callables, &mut effect_ids).expect("serial histogram should expand");
     assert!(
         graph.nodes.iter().any(|(_, node)| {
             matches!(
@@ -443,10 +417,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             )
         })
         .collect::<Vec<_>>();
-    let destinations = destination_values
-        .into_iter()
-        .map(|view| graph.view_id(view))
-        .collect::<Vec<_>>();
+    let destinations = destination_values.into_iter().map(|view| graph.view_id(view)).collect::<Vec<_>>();
     let mut regions = ProgramIdentities::default();
     let first_reducer = regions.alloc_function("first_reducer".into());
     let second_reducer = regions.alloc_function("second_reducer".into());
@@ -523,9 +494,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         vec![i32_ty.clone(); 2],
         vec![i32_ty.clone()],
     );
-    let callables = [(first_reducer, first), (second_reducer, second)]
-        .into_iter()
-        .collect();
+    let callables = [(first_reducer, first), (second_reducer, second)].into_iter().collect();
     let graph = super::run_one_body(graph, &callables, &mut effect_ids)
         .expect("multi-operation atomic Hist should expand");
     let atomics = graph
@@ -533,9 +502,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
         .blocks
         .iter()
         .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| {
-            matches!(effect.kind, SideEffectKind::Effect(EffectOp::Atomic { .. }))
-        })
+        .filter(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Atomic { .. })))
         .count();
     assert_eq!(atomics, 2, "one atomic update per histogram operation");
     assert!(graph.skeleton.blocks.iter().all(|(_, block)| {
@@ -567,12 +534,12 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     }));
 }
 #[test]
-fn map_array_of_mixed_tuple_emits_componentwise_array_with() {
+fn map_array_of_mixed_tuple_writes_component_places_without_array_flow() {
     // Map output: [8](f32, i32, vec3f32).
     // After SoA, the output becomes ([8]f32, [8]i32, [8]vec3f32).
-    // soac_expand should split the per-iteration write into three
-    // _w_intrinsic_array_with_inplace calls, one per component,
-    // then repack with a PureOp::Tuple(3).
+    // soac_expand should split the per-iteration write across three
+    // addressable component arrays without carrying any array value through
+    // the loop CFG.
     let source = r#"
 def build(xs: [8]f32) [8](f32, i32, vec3f32) =
     map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
@@ -593,90 +560,49 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     shade(target, covered, fragment_main)
 "#;
     let graph = compile_to_expanded_egraph(source);
-    let aw_nodes = array_with_nodes(&graph);
+    assert!(array_with_nodes(&graph).is_empty());
 
-    // 1. No ArrayWith may have a tuple result type.
-    for id in &aw_nodes {
-        let ty = &graph.nodes[*id].ty;
-        assert!(
-            !matches!(ty, Type::Constructed(TypeName::Tuple(_), _)),
-            "tuple-typed ArrayWith survived: node {:?} has type {:?}",
-            id,
-            ty
-        );
-    }
-
-    // 2. At least 3 ArrayWith nodes — one per SoA-tuple component.
-    //    (Allowing >3 because unrolling or other passes may materialize
-    //    more for other loops; what matters is that the soa-split case
-    //    produced the per-component set.)
-    assert!(
-        aw_nodes.len() >= 3,
-        "expected at least 3 componentwise ArrayWith nodes, got {}",
-        aw_nodes.len()
-    );
-
-    // 3. Each ArrayWith's `arr` operand (operand[0]) is a Project{i}
-    //    onto SOME loop-carried tuple, and the project index lines up
-    //    with the ArrayWith's result type being the i-th component of
-    //    that tuple.
-    //    Each ArrayWith's `val` operand (operand[2]) is a Project{i}
-    //    onto the mapped lambda result, with the same index.
-    //    We assert matching indices per ArrayWith. This catches
-    //    "wired to the wrong component" bugs.
-    for id in &aw_nodes {
-        let ValueKind::Pure { operands, .. } = &graph.nodes[*id].kind else {
-            panic!("ArrayWith should be Pure");
-        };
-        assert_eq!(operands.len(), 3, "ArrayWith takes 3 operands");
-        let arr_op = &graph.nodes[operands[0]].kind;
-        let val_op = &graph.nodes[operands[2]].kind;
-
-        let arr_index = match arr_op {
-            ValueKind::Pure {
-                op: PureOp::Project { index },
-                ..
-            } => Some(*index),
+    let allocated = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .filter_map(|effect| match effect.kind {
+            PhysicalSideEffectKind::Effect(EffectOp::Alloca { result }) => Some(result),
             _ => None,
-        };
-        let val_index = match val_op {
-            ValueKind::Pure {
-                op: PureOp::Project { index },
-                ..
-            } => Some(*index),
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let stored_types = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(_, block)| &block.side_effects)
+        .filter_map(|effect| match effect.kind {
+            PhysicalSideEffectKind::Effect(EffectOp::Store { place }) => {
+                let PlaceOp::Index { base, .. } = graph.place(place).op() else {
+                    return None;
+                };
+                allocated.contains(base).then(|| graph.place(place).ty().pointee.clone())
+            }
             _ => None,
-        };
-        assert!(
-            arr_index.is_some(),
-            "ArrayWith {:?} arr operand is not a Project: {:?}",
-            id,
-            arr_op
-        );
-        assert!(
-            val_index.is_some(),
-            "ArrayWith {:?} val operand is not a Project: {:?}",
-            id,
-            val_op
-        );
-        assert_eq!(
-            arr_index, val_index,
-            "ArrayWith {:?} arr/val indices disagree — operand wiring bug",
-            id
-        );
-    }
+        })
+        .collect::<Vec<_>>();
 
-    // 4. There exists a PureOp::Tuple(3) node with the SoA-tuple
-    //    ([8]f32, [8]i32, [8]vec3f32) as its result type — the
-    //    repack produced by `emit_write_element`.
-    let has_repack = graph.nodes.iter().any(|(_, node)| match &node.kind {
-        ValueKind::Pure {
-            op: PureOp::Tuple(3), ..
-        } => is_soa_tuple(&node.ty),
-        _ => false,
-    });
-    assert!(
-        has_repack,
-        "expected a PureOp::Tuple(3) repack with SoA-tuple type; \
-         ArrayWith split did not complete correctly"
+    let f32_ty = Type::Constructed(TypeName::Float(32), vec![]);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let vec3_ty = Type::Constructed(
+        TypeName::Vec,
+        vec![f32_ty.clone(), Type::Constructed(TypeName::Size(3), vec![])],
     );
+    assert!(stored_types.contains(&f32_ty));
+    assert!(stored_types.contains(&i32_ty));
+    assert!(stored_types.contains(&vec3_ty));
+
+    for (_, block) in &graph.skeleton.blocks {
+        for parameter in &block.params {
+            assert!(!WynLanguage::is_materialized_aggregate(
+                graph.value(parameter.value()).ty()
+            ));
+        }
+    }
 }

@@ -161,7 +161,7 @@ fn used_only_through(
             if block_id == producer_block && index == producer_effect {
                 continue;
             }
-            if effect.referenced_nodes().any(has_unindexed_path) {
+            if graph_ops::effect_value_inputs(graph, effect).into_iter().any(has_unindexed_path) {
                 return false;
             }
         }
@@ -191,9 +191,8 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             effect.value_result().expect("indexed map has no by-value result"),
         )
     };
-    let callee = pre
-        .seg_body()
-        .map(|body| inner.region(body.region).expect("indexed fusion lambda region").clone());
+    let callee =
+        pre.seg_body().map(|body| inner.region(body.region).expect("indexed fusion lambda region").clone());
 
     inner.rewrite_body(candidate.site, |body| {
         let rewrite_graph = |graph: &mut EGraph| {
@@ -214,9 +213,11 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
                     .collect::<Vec<_>>();
                 let mut operands = arguments;
                 operands.extend_from_slice(pre.captures());
-                let results = lambda_ops::emit_call(graph, &pre, callee.as_ref(), operands);
-                let scalar = results[demand.output];
-                graph_ops::replace_all_references(graph, demand.index, scalar);
+                let results =
+                    lambda_ops::emit_call(graph, candidate.block, &pre, callee.as_ref(), operands);
+                let scalar = crate::egir::graph_ops::pack_result_values(graph, &results[demand.output])
+                    .expect("indexed fusion demands a by-value lambda result");
+                graph.replace_value_references(demand.index, scalar);
                 replacements.push((demand.index, scalar));
             }
 

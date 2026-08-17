@@ -42,21 +42,35 @@ pub type Materialized = super::program::Program<
     super::program::PlannedGlobal,
 >;
 
-use super::types::{EGraph, Family, PureOp, ValueId, ValueKind};
+use super::types::{
+    EGraph, EffectOp, EffectToken, Family, PureOp, ResultBinding, ResultDestination, SideEffectKind,
+    ValueId, ValueKind,
+};
 
 /// Make dynamic composite extraction explicit in every body.
-pub fn materialize_dynamic_extracts(program: super::soac_expand::SoacsExpanded) -> Materialized {
+pub fn materialize_dynamic_extracts(program: super::partial_inline::PartiallyInlined) -> Materialized {
     program
-        .map_graphs(|_, mut graph| {
-            run_one_body(&mut graph);
-            graph
+        .try_map_graphs_with_state(|_, mut graph, _, context| {
+            run_one_body(&mut graph, &mut context.effect_ids);
+            Ok::<_, std::convert::Infallible>(graph)
         })
+        .unwrap()
         .retag()
 }
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract.
-fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
+fn run_one_body<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut crate::IdSource<EffectToken>) {
+    normalize_place_backed_stores(graph, effect_ids);
+    let place_backed = graph
+        .nodes
+        .iter()
+        .filter_map(|(value, node)| matches!(node.kind(), ValueKind::PlaceView { .. }).then_some(value))
+        .collect::<Vec<_>>();
+    for value in place_backed {
+        super::graph_ops::normalize_place_backed_value_consumers(graph, value);
+    }
+
     // Snapshot first; we'll mutate node entries and add new Materialize nodes.
     let targets: Vec<(ValueId, ValueId, ValueId)> = graph
         .nodes
@@ -65,10 +79,10 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
             ValueKind::Pure {
                 op: PureOp::Index,
                 operands,
-            } if operands.len() == 2 => {
-                let arr = operands[0];
-                let idx = operands[1];
-                if is_const_int(graph, idx) || index_spine_reaches_view(graph, nid) {
+            } if node.alias().is_none() && operands.len() == 2 => {
+                let arr = graph.canonical_value(operands[0]);
+                let idx = graph.canonical_value(operands[1]);
+                if is_const_int(graph, idx) || index_spine_reaches_addressable_source(graph, nid) {
                     None
                 } else {
                     Some((nid, arr, idx))
@@ -92,25 +106,64 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>) {
     }
 }
 
+fn normalize_place_backed_stores<P: Family>(
+    graph: &mut EGraph<P>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) {
+    loop {
+        let candidate = graph.skeleton.blocks.values().find_map(|contents| {
+            contents.side_effects.iter().find_map(|effect| {
+                let SideEffectKind::Effect(EffectOp::Store { .. }) = effect.kind() else {
+                    return None;
+                };
+                let [source] = effect.operands() else {
+                    return None;
+                };
+                let source = graph.canonical_value(source.value()?);
+                if let Some(origin) =
+                    graph.nodes[source].result_origins().iter().find(|origin| !origin.places().is_empty())
+                {
+                    return Some((source, origin.clone()));
+                }
+                matches!(graph.operand_ref(source), super::types::OperandRef::View(_)).then(|| {
+                    (
+                        source,
+                        ResultBinding::destination(
+                            graph.nodes[source].ty.clone(),
+                            ResultDestination::ReturnValue(source),
+                        ),
+                    )
+                })
+            })
+        });
+        let Some((source, result)) = candidate else {
+            break;
+        };
+        super::graph_ops::rewrite_result_store_consumers(graph, source, &result, effect_ids)
+            .expect("place-backed store must have an addressable physical copy");
+    }
+}
+
 /// Is `nid`'s array type a storage view? `lower_index` reads a view with a
 /// native dynamic `OpAccessChain`, so it must not be spilled to a composite.
 fn is_view<P: Family>(graph: &EGraph<P>, nid: ValueId) -> bool {
+    let nid = graph.canonical_value(nid);
     graph.nodes.get(nid).is_some_and(|node| {
-        matches!(
-            node.ty.array_variant(),
-            Some(Type::Constructed(TypeName::ArrayVariantView, _))
-        )
+        matches!(node.kind(), ValueKind::PlaceView { .. })
+            || matches!(
+                node.ty.array_variant(),
+                Some(Type::Constructed(TypeName::ArrayVariantView, _))
+            )
     })
 }
 
-/// True when `nid` is an `Index` whose base chain eventually reaches a
-/// storage view without crossing any non-index value operation. View
-/// specialization can happen after TLC → EGIR conversion, leaving a helper
-/// body shaped as `Index(Index(view, row), column)`. The outer base has a
-/// composite row type, but materializing it would destroy the storage address
-/// chain before elaboration has a chance to recover it.
-fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: ValueId) -> bool {
+/// True when `nid` is an `Index` whose base chain reaches a storage view or a
+/// callable parameter without crossing a non-index value operation. Both are
+/// already addressable at the physical boundary; spilling an intermediate row
+/// would replace direct indexing with a whole-aggregate copy.
+fn index_spine_reaches_addressable_source<P: Family>(graph: &EGraph<P>, mut nid: ValueId) -> bool {
     loop {
+        nid = graph.canonical_value(nid);
         let Some(ValueKind::Pure {
             op: PureOp::Index,
             operands,
@@ -121,7 +174,8 @@ fn index_spine_reaches_view<P: Family>(graph: &EGraph<P>, mut nid: ValueId) -> b
         let Some(&base) = operands.first() else {
             return false;
         };
-        if is_view(graph, base) {
+        let base = graph.canonical_value(base);
+        if is_view(graph, base) || matches!(graph.nodes[base].kind(), ValueKind::FuncParam { .. }) {
             return true;
         }
         nid = base;

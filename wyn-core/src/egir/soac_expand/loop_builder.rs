@@ -18,10 +18,11 @@ fn build_loop<F>(
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
-    result: &ResultBinding,
+    results: &[LoopResultBinding],
     next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
-) where
+) -> BlockId
+where
     F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     let handles = build_loop_skeleton(
@@ -30,7 +31,7 @@ fn build_loop<F>(
         idx_in_block,
         LoopSkeletonSpec {
             carried: carried.to_vec(),
-            result: result.clone(),
+            results: results.to_vec(),
             len_input: len_input.clone(),
         },
     );
@@ -50,6 +51,7 @@ fn build_loop<F>(
         target: handles.header,
         args,
     };
+    handles.after
 }
 
 /// Try to unroll a small loop; if the trip count isn't statically small (or
@@ -61,26 +63,27 @@ pub(super) fn expand_loop<F>(
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
-    result: &ResultBinding,
+    results: &[LoopResultBinding],
     next_effect: &mut crate::IdSource<EffectToken>,
     allow_unroll: bool,
     mut emit_body: F,
-) where
+) -> BlockId
+where
     F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
-    if allow_unroll
-        && try_unroll(
+    if allow_unroll {
+        if let Some(continuation) = try_unroll(
             graph,
             bid,
             idx_in_block,
             len_input,
             carried,
-            result,
+            results,
             next_effect,
             &mut emit_body,
-        )
-    {
-        return;
+        ) {
+            return continuation;
+        }
     }
     build_loop(
         graph,
@@ -88,16 +91,14 @@ pub(super) fn expand_loop<F>(
         idx_in_block,
         len_input,
         carried,
-        result,
+        results,
         next_effect,
         emit_body,
-    );
+    )
 }
 
-/// Generic small-loop unroller. Returns `true` if the loop was unrolled into
-/// a short CFG chain rooted at `bid`; `false` if the trip count isn't
-/// statically known to be small, and the caller should fall back to emitting a
-/// real loop via `build_loop_skeleton`.
+/// Generic small-loop unroller. Returns the continuation block when the loop
+/// was unrolled, or `None` when the caller should emit a real loop.
 ///
 /// `emit_body(graph, next_effect, block, idx_const_nid, carried_in)` produces
 /// the `carried_out` ValueNodeIds and the block that continues the iteration.
@@ -107,10 +108,10 @@ fn try_unroll<F>(
     idx_in_block: usize,
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
-    result: &ResultBinding,
+    results: &[LoopResultBinding],
     next_effect: &mut crate::IdSource<EffectToken>,
     mut emit_body: F,
-) -> bool
+) -> Option<BlockId>
 where
     F: FnMut(&mut EGraph, &mut crate::IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
@@ -118,17 +119,17 @@ where
 
     // SoA-tuple driving inputs don't have a direct `array_size`; skip.
     if as_soa_tuple(&len_input.1).is_some() {
-        return false;
+        return None;
     }
     let Some(size_ty) = len_input.1.array_size() else {
-        return false;
+        return None;
     };
     let n = match size_ty {
         Type::Constructed(TypeName::Size(n), _) => *n,
-        _ => return false,
+        _ => return None,
     };
     if n > UNROLL_THRESHOLD {
-        return false;
+        return None;
     }
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -152,29 +153,13 @@ where
         current = body.tail;
     }
 
-    // Rebind the original SOAC result ValueId from the carried tuple.
-    match result {
-        ResultBinding::TupleFromCarried {
-            result_node,
-            tuple_ty,
-            indices,
-        } => {
-            let tuple_parts: smallvec::SmallVec<[ValueId; 4]> =
-                indices.iter().map(|idx| carried_nids[*idx]).collect();
-            graph.replace_pure_node(*result_node, PureOp::Tuple(tuple_parts.len()), tuple_parts);
-            graph.retype_node(*result_node, tuple_ty.clone());
-        }
-        ResultBinding::DummyBool { result_node } => {
-            graph.replace_node_preserving_type(
-                *result_node,
-                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
-            );
-        }
+    for binding in results {
+        bind_unrolled_result(graph, binding, &carried_nids);
     }
 
     graph.skeleton.blocks[current].side_effects.extend(suffix);
     graph.skeleton.blocks[current].term = original_term;
-    true
+    Some(current)
 }
 
 /// Description of an accumulator-only SOAC (Reduce, reducing Screma): loop over one or
@@ -189,32 +174,27 @@ struct LoopSkeletonSpec {
     /// These become `header`'s block params, in order, followed by the index.
     carried: Vec<(Type<TypeName>, ValueId)>,
     /// How the original SOAC result ValueId should be rebound after expansion.
-    result: ResultBinding,
+    results: Vec<LoopResultBinding>,
     /// Input array for length calculation: (arr_nid, arr_ty).
     len_input: (ValueId, Type<TypeName>),
 }
 
 #[derive(Clone)]
-pub(super) enum ResultBinding {
-    /// Rebind `result_node` as a tuple of carried values. Used by
-    /// Screma, which produces N maps + N accumulators into one tuple.
-    TupleFromCarried {
-        result_node: ValueId,
-        tuple_ty: Type<TypeName>,
-        indices: Vec<usize>,
-    },
-    /// Rebind `result_node` as a constant `Bool(false)` (dummy) — the SOAC
-    /// produces no consumed value (the OutputView destination's writes
-    /// are effectful and the "result" is discarded by the entry-point
-    /// finalize step).
-    DummyBool {
-        result_node: ValueId,
-    },
+pub(super) struct LoopResultBinding {
+    pub(super) result: ResultBinding<Type<TypeName>>,
+    pub(super) source: LoopResultSource,
+}
+
+#[derive(Clone)]
+pub(super) enum LoopResultSource {
+    Carried(usize),
+    ConstantFalse,
 }
 
 struct LoopHandles {
     header: BlockId,
     body: BlockId,
+    after: BlockId,
     /// One ValueId per loop-carried, matching the order in `spec.carried`.
     /// These are the header block-param ValueNodeIds, available inside body and
     /// on the else branch into `after`.
@@ -240,37 +220,23 @@ fn build_loop_skeleton(
     // whose CondBranch is in `old_term`), that metadata follows to
     // `after`, since `bid`'s new terminator is an unconditional branch to
     // the loop header — `after` is the selection/loop header now.
-    // Rebind the SOAC's original result ValueId:
-    //   - Carried: becomes the `after` block's param, populated from
-    //     `carried[idx]` via the header's else branch below.
-    //   - DummyBool: becomes an inline `Bool(false)` constant node in place.
-    //     Consumers (if any) see a scalar false, matching the SSA pass's
-    //     dummy-result convention for effect-only variants.
-    match &spec.result {
-        ResultBinding::TupleFromCarried {
-            result_node,
-            tuple_ty,
-            indices,
-        } => {
-            let mut operands = smallvec::SmallVec::new();
-            for carried_idx in indices {
-                let Some((part_ty, _)) = spec.carried.get(*carried_idx) else {
-                    continue;
-                };
-                let part_nid = graph.add_block_param(after, part_ty.clone());
-                operands.push(part_nid);
+    let mut after_args = Vec::new();
+    for binding in &spec.results {
+        match &binding.source {
+            LoopResultSource::Carried(index) => {
+                let (ty, _) = &spec.carried[*index];
+                let value = graph.add_block_param(after, ty.clone());
+                super::bind_result_value(graph, &binding.result, value);
+                after_args.push(*index);
             }
-            graph.replace_pure_node(*result_node, PureOp::Tuple(operands.len()), operands);
-            graph.retype_node(*result_node, tuple_ty.clone());
-        }
-        ResultBinding::DummyBool { result_node } => {
-            graph.replace_node_preserving_type(
-                *result_node,
-                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
-            );
+            LoopResultSource::ConstantFalse => {
+                graph.replace_node_preserving_type(
+                    binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
+                    ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+                );
+            }
         }
     }
-
     // Build header with one block-param per carried plus the index.
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -299,13 +265,7 @@ fn build_loop_skeleton(
         bool_ty,
         None,
     );
-    let else_args = match &spec.result {
-        ResultBinding::TupleFromCarried { indices, .. } => {
-            graph.admit_flow_values(indices.iter().map(|idx| carried_nids[*idx]))
-        }
-        // No `after` block param in the dummy case — branch with empty args.
-        ResultBinding::DummyBool { .. } => vec![],
-    };
+    let else_args = graph.admit_flow_values(after_args.iter().map(|idx| carried_nids[*idx]));
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond: cond_nid,
         then_target: body,
@@ -322,8 +282,23 @@ fn build_loop_skeleton(
     LoopHandles {
         header,
         body,
+        after,
         carried: carried_nids,
         idx_nid,
+    }
+}
+
+fn bind_unrolled_result(graph: &mut EGraph, binding: &LoopResultBinding, carried: &[ValueId]) {
+    match &binding.source {
+        LoopResultSource::Carried(index) => {
+            super::bind_result_value(graph, &binding.result, carried[*index]);
+        }
+        LoopResultSource::ConstantFalse => {
+            graph.replace_node_preserving_type(
+                binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
+                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+            );
+        }
     }
 }
 

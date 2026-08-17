@@ -151,7 +151,8 @@ fn emit_hist_atomic_update(
                 continue_block: retry,
             });
 
-            let desired = emit_screma_lambda(graph, regions, operator, vec![expected, incoming])[0];
+            let result = emit_screma_lambda(graph, attempt, regions, operator, vec![expected, incoming]);
+            let desired = super::super::soac::lambda::materialize_result_values(graph, &result)[0];
             let cas_type =
                 Type::Constructed(TypeName::Tuple(2), vec![value_type.clone(), bool_type.clone()]);
             let result = emit_atomic(
@@ -282,7 +283,8 @@ pub(super) fn build_hist_atomic(
             )
         })
         .collect::<Vec<_>>();
-    let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+    let bucket_results = emit_screma_lambda(graph, body, regions, &form.bucket, arguments);
+    let bucket_values = super::super::soac::lambda::materialize_result_values(graph, &bucket_results);
     debug_assert_eq!(
         bucket_values.len(),
         form.guard_count() + form.index_count() + form.value_count()
@@ -325,12 +327,8 @@ pub(super) fn build_hist_atomic(
 
         let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
         let value_type = operation.update.value_types()[0].clone();
-        let place = graph.add_view_index_place(
-            operation.destinations[0],
-            bucket_index,
-            value_type.clone(),
-            None,
-        );
+        let place =
+            graph.add_view_index_place(operation.destinations[0], bucket_index, value_type.clone(), None);
         emit_hist_atomic_update(
             graph,
             update,
@@ -371,7 +369,10 @@ pub(super) fn build_hist_loop(
         result_node,
     } = spec;
 
-    let result = ResultBinding::DummyBool { result_node };
+    let results = [LoopResultBinding {
+        result: graph.value_result(result_node),
+        source: LoopResultSource::ConstantFalse,
+    }];
 
     expand_loop(
         graph,
@@ -379,7 +380,7 @@ pub(super) fn build_hist_loop(
         idx_in_block,
         &len_input,
         &[],
-        &result,
+        &results,
         next_effect,
         true,
         move |graph, next_effect, blk, i_nid, _carried| {
@@ -397,7 +398,9 @@ pub(super) fn build_hist_loop(
                     next_effect,
                 ));
             }
-            let bucket_values = emit_screma_lambda(graph, regions, &form.bucket, arguments);
+            let bucket_results = emit_screma_lambda(graph, blk, regions, &form.bucket, arguments);
+            let bucket_values =
+                super::super::soac::lambda::materialize_result_values(graph, &bucket_results);
             debug_assert_eq!(
                 bucket_values.len(),
                 form.guard_count() + form.index_count() + form.value_count()
@@ -452,7 +455,7 @@ pub(super) fn build_hist_loop(
                     }
                     hist::Update::Reduce { operator, .. } => {
                         let mut reducer_arguments = Vec::with_capacity(operation.value_count() * 2);
-                        for (&destination, value_type) in operation.destinations.iter().zip(value_types) {
+                        for (destination, value_type) in operation.destinations.iter().zip(value_types) {
                             reducer_arguments.push(emit_view_load(
                                 graph,
                                 update,
@@ -464,11 +467,13 @@ pub(super) fn build_hist_loop(
                             ));
                         }
                         reducer_arguments.extend_from_slice(operation_values);
-                        emit_screma_lambda(graph, regions, operator, reducer_arguments)
+                        let results =
+                            emit_screma_lambda(graph, update, regions, operator, reducer_arguments);
+                        super::super::soac::lambda::materialize_result_values(graph, &results)
                     }
                 };
                 debug_assert_eq!(updated_values.len(), operation.destinations.len());
-                for ((&destination, value_type), updated) in
+                for ((destination, value_type), updated) in
                     operation.destinations.iter().zip(value_types).zip(updated_values)
                 {
                     emit_storage_store(
@@ -843,7 +848,8 @@ pub(super) fn build_bucket_insert(
             )
         })
         .collect::<Vec<_>>();
-    let results = emit_screma_lambda(graph, regions, &spec.form.bucket, arguments);
+    let results = emit_screma_lambda(graph, body, regions, &spec.form.bucket, arguments);
+    let results = super::super::soac::lambda::materialize_result_values(graph, &results);
     let [active, key, value] = results.as_slice() else {
         unreachable!("guarded bucket insertion envelope returns active, key, and value")
     };

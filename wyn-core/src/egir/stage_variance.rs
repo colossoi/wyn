@@ -179,15 +179,13 @@ impl StageDependenceAnalysis {
             .blocks
             .iter()
             .flat_map(|(block, body)| {
-                body.side_effects
-                    .iter()
-                    .flat_map(move |effect| {
-                        effect
-                            .result()
-                            .into_iter()
-                            .flat_map(|result| result.values())
-                            .map(move |result| (result, block))
-                    })
+                body.side_effects.iter().flat_map(move |effect| {
+                    effect
+                        .result()
+                        .into_iter()
+                        .flat_map(|result| result.values())
+                        .map(move |result| (result, block))
+                })
             })
             .collect::<LookupMap<_, _>>();
         let call_blocks = graph
@@ -207,17 +205,16 @@ impl StageDependenceAnalysis {
             .map(|(node, definition)| {
                 let dependence = match &definition.kind {
                     ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => {
-                        parameter_dependences
-                            .get(parameter.index())
-                            .cloned()
-                            .unwrap_or_else(unknown_dependence)
-                    }
+                    ValueKind::FuncParam { parameter } => parameter_dependences
+                        .get(parameter.index())
+                        .cloned()
+                        .unwrap_or_else(unknown_dependence),
                     ValueKind::BlockParam { .. }
                     | ValueKind::Pure { .. }
                     | ValueKind::Union { .. }
                     | ValueKind::CallResult { .. }
-                    | ValueKind::PlaceLength { .. } => StageDependence::constant(),
+                    | ValueKind::PlaceLength { .. }
+                    | ValueKind::PlaceView { .. } => StageDependence::constant(),
                     ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
@@ -255,12 +252,10 @@ impl StageDependenceAnalysis {
             for (node, definition) in &graph.nodes {
                 let next = match &definition.kind {
                     ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => {
-                        parameter_dependences
-                            .get(parameter.index())
-                            .cloned()
-                            .unwrap_or_else(unknown_dependence)
-                    }
+                    ValueKind::FuncParam { parameter } => parameter_dependences
+                        .get(parameter.index())
+                        .cloned()
+                        .unwrap_or_else(unknown_dependence),
                     ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
@@ -292,7 +287,7 @@ impl StageDependenceAnalysis {
                         &call_blocks,
                         &block_loop_dependencies,
                     ),
-                    ValueKind::PlaceLength { place } => graph
+                    ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => graph
                         .place_value_dependencies(*place)
                         .into_iter()
                         .fold(StageDependence::constant(), |dependence, value| {
@@ -397,9 +392,7 @@ fn seg_body_parameter_dependences(
         leading
     ];
     parameter_dependences.extend(body.captures.iter().map(|capture| {
-        capture
-            .value()
-            .map_or_else(unknown_dependence, |capture| enclosing.dependence(capture))
+        capture.value().map_or_else(unknown_dependence, |capture| enclosing.dependence(capture))
     }));
     Ok(parameter_dependences)
 }
@@ -495,17 +488,13 @@ fn call_result_dependence<P: Family>(
     block_loop_dependencies: &LookupMap<BlockId, LookupSet<BlockId>>,
 ) -> StageDependence {
     let site = graph.call(call);
-    let arguments = site.arguments().iter().fold(
-        StageDependence::constant(),
-        |dependence, argument| dependence.join(&operand_dependence(graph, *argument, values)),
-    );
+    let arguments = site.arguments().iter().fold(StageDependence::constant(), |dependence, argument| {
+        dependence.join(&operand_dependence(graph, *argument, values))
+    });
     if matches!(site.effects(), CallEffects::Pure) {
         return arguments;
     }
-    let effects = StageDependence::from_source(
-        Uniformity::InvocationVarying,
-        DependenceSource::SideEffect,
-    );
+    let effects = StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::SideEffect);
     let effects = call_blocks
         .get(&call)
         .and_then(|block| block_loop_dependencies.get(block))
@@ -660,14 +649,11 @@ fn record_edge<P: Family>(
         incoming_blocks.entry(target).or_insert_with(Vec::new).push((source, condition));
     }
     for (&parameter, &value) in target_block.params.iter().zip(args) {
-        incoming_values
-            .entry(parameter.value())
-            .or_insert_with(Vec::new)
-            .push(IncomingValue {
+        incoming_values.entry(parameter.value()).or_insert_with(Vec::new).push(IncomingValue {
             source,
             condition,
             value: value.value(),
-            });
+        });
     }
     Ok(())
 }

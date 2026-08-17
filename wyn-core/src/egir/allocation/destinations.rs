@@ -4,13 +4,12 @@
 //! the operation's consumed input would be semantically legal because no
 //! caller-visible alias must retain its old contents. That marker is a
 //! capability, not yet a storage decision. Output realization and semantic
-//! fusion can redirect a result to output storage, combine several consumers
-//! of one input, or otherwise change which values are live at the operation.
+//! fusion can redirect a result to output storage or combine result routes.
 //!
 //! This pass runs over the final semantic use graph. It resolves each remaining
 //! `UniqueInput` candidate to `InputBuffer` only when the input has physical
-//! backing storage, is used by exactly one result of the operation, and has no
-//! observers after that operation. Every other candidate becomes `Fresh`.
+//! backing storage and is used by exactly one result of the operation. Every
+//! other candidate becomes `Fresh`.
 //! Already-resolved destinations such as `OutputView` are preserved. Thus TLC
 //! grants permission to consume an input; this module decides whether doing so
 //! is a valid and useful physical allocation.
@@ -22,8 +21,8 @@
 //!   map(|x: i32| x + 1, a)
 //! ```
 //!
-//! `*` lets TLC grant the map a `UniqueInput` capability. Since `a` has no later
-//! observer, this pass can resolve that capability to `InputBuffer`, allowing
+//! `*` lets TLC grant the map a `UniqueInput` capability after proving `a` is
+//! dead after the map. This pass can resolve that capability to `InputBuffer`, allowing
 //! the map to return `a` after overwriting it.
 //!
 //! A later read of the original array instead requires fresh result storage:
@@ -45,17 +44,11 @@
 //! The range is virtual, so its result must be `Fresh`. Unique ownership
 //! permits reuse; it does not promise mutation or manufacture backing storage.
 
-use polytype::Type;
-
-use super::super::graph_ops;
 use super::super::soac::{filter, screma};
 use super::super::types::{
     EGraph, SideEffectKind, Soac, SoacDestination, SoacEffect, SoacPlacement, ValueId,
 };
 use super::ResourcesAllocated;
-use crate::ast::TypeName;
-use crate::flow::BlockId;
-use crate::types::TypeExt;
 
 /// Resolve every outstanding unique-input capability to a physical destination.
 pub(super) fn resolve_destinations(program: ResourcesAllocated) -> ResourcesAllocated {
@@ -66,26 +59,18 @@ pub(super) fn resolve_destinations(program: ResourcesAllocated) -> ResourcesAllo
 }
 
 fn resolve_graph_destinations(graph: &mut EGraph) {
-    // Multi-block liveness needs block-parameter substitution. Stay sound and
-    // conservative until that representation is needed by a reuse candidate.
-    if graph.skeleton.blocks.len() != 1 {
-        discard_unique_input_candidates(graph);
-        return;
-    }
-    let block_id = graph.skeleton.entry;
-    let uses = graph_ops::ValueUseIndex::build(graph);
-    let effect_count = graph.skeleton.blocks[block_id].side_effects.len();
-    for effect_index in 0..effect_count {
+    let sites = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(block, body)| (0..body.side_effects.len()).map(move |index| (block, index)))
+        .collect::<Vec<_>>();
+    for (block_id, effect_index) in sites {
         let screma_resolution = match &graph.skeleton.blocks[block_id].side_effects[effect_index].kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
-                let input = (op.inputs.len() == 1)
-                    .then(|| effect.operands[0].value())
-                    .flatten();
-                let reusable_input = input.filter(|&node| {
-                    input_has_reusable_storage(&graph.nodes[node].ty)
-                        && input_has_no_later_observers(&uses, block_id, effect_index, node)
-                });
+                let input = (op.inputs.len() == 1).then(|| effect.operands[0].value()).flatten();
+                let reusable_input = input.filter(|&node| input_has_reusable_storage(graph, node));
                 let single_array_result = op.form.post.result_types.len() == 1;
                 Some(
                     op.result_state
@@ -124,10 +109,12 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
             )) => {
                 let effect = &graph.skeleton.blocks[block_id].side_effects[effect_index];
                 destination.is_unplaced_unique_input().then(|| {
-                    if effect.operands.first().and_then(|input| input.value()).is_some_and(|input| {
-                        input_has_reusable_storage(&graph.nodes[input].ty)
-                            && input_has_no_later_observers(&uses, block_id, effect_index, input)
-                    }) {
+                    if effect
+                        .operands
+                        .first()
+                        .and_then(|input| input.value())
+                        .is_some_and(|input| input_has_reusable_storage(graph, input))
+                    {
                         SoacDestination::unique_input().placed(SoacPlacement::InputBuffer)
                     } else {
                         SoacDestination::fresh()
@@ -165,53 +152,6 @@ fn resolve_graph_destinations(graph: &mut EGraph) {
         }
     }
 }
-fn discard_unique_input_candidates(graph: &mut EGraph) {
-    for (_, block) in graph.skeleton.blocks.iter_mut() {
-        for effect in &mut block.side_effects {
-            match &mut effect.kind {
-                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                    for result in &mut op.result_state {
-                        if result.destination.is_unplaced_unique_input() {
-                            result.destination.make_fresh();
-                        }
-                    }
-                }
-                SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(filter::Op {
-                        state:
-                            filter::SemanticState {
-                                storage: filter::Output::Local { destination, .. },
-                                ..
-                            },
-                        ..
-                    }),
-                )) if destination.is_unplaced_unique_input() => {
-                    destination.make_fresh();
-                }
-                _ => {}
-            }
-        }
-    }
-}
-fn input_has_no_later_observers(
-    uses: &graph_ops::ValueUseIndex,
-    block: BlockId,
-    index: usize,
-    input: ValueId,
-) -> bool {
-    let observers = uses.pure_observers(input);
-    !observers.effect_sites().any(|site| site.block == block && site.index > index)
-        && !observers.terminator_blocks().any(|observer| observer == block)
-}
-
-fn input_has_reusable_storage(ty: &Type<TypeName>) -> bool {
-    match ty.array_variant() {
-        Some(Type::Constructed(TypeName::ArrayVariantVirtual, _)) => return false,
-        Some(Type::Constructed(TypeName::ArrayVariantView, _)) => return true,
-        _ => {}
-    }
-    let runtime_sized =
-        ty.array_size().is_some_and(|size| !matches!(size, Type::Constructed(TypeName::Size(_), _)));
-    !runtime_sized || crate::types::array_view_buffer(ty).is_some()
+fn input_has_reusable_storage(graph: &EGraph, input: ValueId) -> bool {
+    matches!(graph.operand_ref(input), super::super::types::OperandRef::View(_))
 }

@@ -52,6 +52,8 @@ impl Language for TestLanguage {
 impl Family for TestPhase {
     type Resource = ();
     type Soac = ();
+
+    fn remap_soac_values(_: &mut Self::Soac, _: &mut dyn FnMut(ValueId) -> ValueId) {}
 }
 
 #[derive(Debug)]
@@ -102,11 +104,7 @@ fn adding_block_params_registers_them_in_order() {
     let second = graph.add_block_param(block, "second".to_string());
 
     assert_eq!(
-        graph.skeleton.blocks[block]
-            .params
-            .iter()
-            .map(|parameter| parameter.value())
-            .collect::<Vec<_>>(),
+        graph.skeleton.blocks[block].params.iter().map(|parameter| parameter.value()).collect::<Vec<_>>(),
         [first, second]
     );
     assert!(matches!(
@@ -135,8 +133,7 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     let args = (0..9)
         .map(|index| graph.add_test_value_parameter(index, format!("arg-{index}")))
         .collect::<Vec<_>>();
-    graph.skeleton.blocks[entry].term =
-        super::super::ir::SkeletonTerminator::<TestLanguage>::CondBranch {
+    graph.skeleton.blocks[entry].term = super::super::ir::SkeletonTerminator::<TestLanguage>::CondBranch {
         cond: args[0],
         then_target: target,
         then_args: graph.admit_flow_values([args[1], args[2], args[3]]),
@@ -145,9 +142,9 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     };
     graph.skeleton.blocks[branch_predecessor].term =
         super::super::ir::SkeletonTerminator::<TestLanguage>::Branch {
-        target,
-        args: graph.admit_flow_values([args[6], args[7], args[8]]),
-    };
+            target,
+            args: graph.admit_flow_values([args[6], args[7], args[8]]),
+        };
 
     let slots = [2, 0, 2].into_iter().collect::<crate::SortedSet<_>>();
     let removed = graph.remove_block_param_slots(target, &slots);
@@ -345,7 +342,7 @@ fn indexes_results_across_skeleton_blocks() {
 
 #[test]
 fn replace_all_references_does_not_leave_stale_hash_cons_key() {
-    let mut graph = EGraph::new();
+    let mut graph: EGraph = EGraph::new();
     let int = i32_ty();
     let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone(), None);
@@ -356,7 +353,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
         None,
     );
 
-    crate::egir::graph_ops::replace_all_references(&mut graph, b, a);
+    graph.replace_value_references(b, a);
 
     let reinterned_old_call = graph.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Add),
@@ -386,21 +383,11 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     let int = i32_ty();
     let uint = u32_ty();
     let arg = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
-    let old_call = graph.intern_pure(
-        PureOp::Materialize,
-        smallvec::smallvec![arg],
-        int.clone(),
-        None,
-    );
+    let old_call = graph.intern_pure(PureOp::Materialize, smallvec::smallvec![arg], int.clone(), None);
 
     graph.retype_node(old_call, uint);
 
-    let reinterned_old_call = graph.intern_pure(
-        PureOp::Materialize,
-        smallvec::smallvec![arg],
-        int,
-        None,
-    );
+    let reinterned_old_call = graph.intern_pure(PureOp::Materialize, smallvec::smallvec![arg], int, None);
 
     assert_ne!(old_call, reinterned_old_call);
     assert!(graph.verify_hash_cons().is_ok());

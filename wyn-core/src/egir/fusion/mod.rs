@@ -266,7 +266,8 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
         assert_eq!(
             scremas.len(),
             1,
-            "independent collective work crosses the scan barrier"
+            "independent collective work crosses the scan barrier:\n{}",
+            crate::egir::semantic_graph::summary(&fused)
         );
         assert_eq!(scremas[0].form.scan_count(), 1);
         assert_eq!(scremas[0].form.reduction_count(), 1);

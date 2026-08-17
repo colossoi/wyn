@@ -19,11 +19,11 @@ use smallvec::SmallVec;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
-    by_value_function_result, callable_parameter, CallEffects, CallSiteId, EffectOp, EffectToken,
-    Family, FlowValueId, FuncParam, FunctionResult, GraphResource, Language, LoadMode, OperandRef,
-    OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, RegionId,
-    ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex, SideEffectSite,
-    SoacDestination, SoacOwnership, SoacPlacement, ValueId, ViewId, ViewType,
+    by_value_function_result, callable_parameter, destination_passing_function_result, CallEffects,
+    CallSiteId, EffectOp, EffectToken, Family, FlowValueId, FuncParam, FunctionResult, GraphResource,
+    Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion,
+    PlaceType, RegionId, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex,
+    SideEffectSite, SoacDestination, SoacOwnership, SoacPlacement, ValueId, ViewId, ViewType,
 };
 pub use crate::ResourceAccess;
 
@@ -274,6 +274,14 @@ pub struct Physical;
 impl<R: GraphResource> Family for Raw<R> {
     type Resource = R;
     type Soac = SoacEffect<Self>;
+
+    fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
+        match &mut soac.1 {
+            Soac::Screma(op) => op.remap_base_referenced_values(map),
+            Soac::Filter(op) => op.remap_base_referenced_values(map),
+            Soac::Hist(op) => op.remap_base_referenced_values(map),
+        }
+    }
 }
 
 impl<R: GraphResource> WynSoacPhase for Raw<R> {
@@ -287,6 +295,10 @@ impl<R: GraphResource> WynSoacPhase for Raw<R> {
 impl<R: GraphResource> Family for Semantic<R> {
     type Resource = R;
     type Soac = SoacEffect<Self>;
+
+    fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
+        soac.1.remap_referenced_values(map)
+    }
 }
 
 impl<R: GraphResource> WynSoacPhase for Semantic<R> {
@@ -300,6 +312,42 @@ impl<R: GraphResource> WynSoacPhase for Semantic<R> {
 impl<R: GraphResource> Family for Scheduled<R> {
     type Resource = R;
     type Soac = SoacEffect<Self>;
+
+    fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
+        match &mut soac.1 {
+            Soac::Screma(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                if let screma::ScheduledState::Segmented(segment) = &mut op.state {
+                    for value in segment.space.referenced_node_slots() {
+                        *value = map(*value);
+                    }
+                }
+            }
+            Soac::Filter(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                let space = match &mut op.state {
+                    filter::ScheduledState::Loop { space, .. }
+                    | filter::ScheduledState::Pipeline { space, .. } => space,
+                };
+                for value in space.referenced_node_slots() {
+                    *value = map(*value);
+                }
+            }
+            Soac::Hist(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                let space = match &mut op.state {
+                    hist::ScheduledState::Serial => None,
+                    hist::ScheduledState::Atomic { space, .. }
+                    | hist::ScheduledState::Bucket { space, .. } => Some(space),
+                };
+                if let Some(space) = space {
+                    for value in space.referenced_node_slots() {
+                        *value = map(*value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
@@ -313,6 +361,42 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
 impl Family for Physical {
     type Resource = super::program::PhysicalResourceRef;
     type Soac = SoacEffect<Self>;
+
+    fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
+        match &mut soac.1 {
+            Soac::Screma(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                if let screma::PhysicalState::Segmented(segment) = &mut op.state {
+                    for value in segment.space.referenced_node_slots() {
+                        *value = map(*value);
+                    }
+                }
+            }
+            Soac::Filter(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                let space = match &mut op.state {
+                    filter::ScheduledState::Loop { space, .. }
+                    | filter::ScheduledState::Pipeline { space, .. } => space,
+                };
+                for value in space.referenced_node_slots() {
+                    *value = map(*value);
+                }
+            }
+            Soac::Hist(op) => {
+                op.remap_base_referenced_values(&mut *map);
+                let space = match &mut op.state {
+                    hist::ScheduledState::Serial => None,
+                    hist::ScheduledState::Atomic { space, .. }
+                    | hist::ScheduledState::Bucket { space, .. } => Some(space),
+                };
+                if let Some(space) = space {
+                    for value in space.referenced_node_slots() {
+                        *value = map(*value);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl WynSoacPhase for Physical {
@@ -476,6 +560,7 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                     ty: node.ty.clone(),
                     span: node.span,
                     alias: None,
+                    result_origins: Vec::new(),
                 }),
             );
         }
@@ -518,17 +603,16 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                     block: block_map[&block],
                     index,
                 },
-                super::ir::ValueKind::CallResult { call, slot } => {
-                    super::ir::ValueKind::CallResult {
-                        call: call_map[&call],
-                        slot,
-                    }
-                }
-                super::ir::ValueKind::PlaceLength { place } => {
-                    super::ir::ValueKind::PlaceLength {
-                        place: place_map[&place],
-                    }
-                }
+                super::ir::ValueKind::CallResult { call, slot } => super::ir::ValueKind::CallResult {
+                    call: call_map[&call],
+                    slot,
+                },
+                super::ir::ValueKind::PlaceLength { place } => super::ir::ValueKind::PlaceLength {
+                    place: place_map[&place],
+                },
+                super::ir::ValueKind::PlaceView { place } => super::ir::ValueKind::PlaceView {
+                    place: place_map[&place],
+                },
                 super::ir::ValueKind::Constant(value) => super::ir::ValueKind::Constant(value),
                 super::ir::ValueKind::SideEffectResult => super::ir::ValueKind::SideEffectResult,
             };
@@ -537,6 +621,11 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                 ty: node.ty,
                 span: node.span,
                 alias: node.alias.map(|alias| node_map[&alias]),
+                result_origins: node
+                    .result_origins
+                    .into_iter()
+                    .map(|origin| origin.map(|ty| ty, |value| node_map[&value], |place| place_map[&place]))
+                    .collect(),
             };
         }
 
@@ -564,9 +653,7 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
                         .map(|operand| {
                             operand.try_map(
                                 |value| Ok::<_, E>(node_map[&value]),
-                                |view| {
-                                    view.try_remap(|value| Ok::<_, E>(node_map[&value]))
-                                },
+                                |view| view.try_remap(|value| Ok::<_, E>(node_map[&value])),
                                 |place| Ok::<_, E>(place_map[&place]),
                             )
                         })
@@ -755,14 +842,11 @@ impl<R: GraphResource> Soac<Semantic<R>> {
 }
 
 impl<R: GraphResource> super::ir::SideEffect<Semantic<R>, WynLanguage> {
-    /// Every graph value used by the effect, including SOAC captures,
-    /// operator metadata, and semantic iteration-space extents.
-    pub fn referenced_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
-        let metadata = match &self.kind {
+    pub(crate) fn semantic_metadata_inputs(&self) -> Vec<ValueId> {
+        match &self.kind {
             SideEffectKind::Soac(SoacEffect(_, soac)) => soac.referenced_nodes(),
             SideEffectKind::Effect(_) => Vec::new(),
-        };
-        self.operand_values().chain(metadata)
+        }
     }
 
     pub fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {

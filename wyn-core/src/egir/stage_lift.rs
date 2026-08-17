@@ -373,6 +373,7 @@ fn cloneable_from_captures(
             ValueKind::BlockParam { .. }
             | ValueKind::CallResult { .. }
             | ValueKind::PlaceLength { .. }
+            | ValueKind::PlaceView { .. }
             | ValueKind::SideEffectResult,
         )
         | None => false,
@@ -429,7 +430,7 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
                 None,
             )
         };
-        graph_ops::replace_all_references(&mut prepared.function.graph, root, replacement);
+        prepared.function.graph.replace_value_references(root, replacement);
     }
 
     prune_dead_captures(&mut prepared.function, &mut body)?;
@@ -438,12 +439,8 @@ fn apply_lift(enclosing: &mut EGraph, mut prepared: StageLiftCandidate) -> Resul
 
 /// Compact only the trailing capture portion of the region ABI. Leading
 /// lane/element parameters are fixed by the SOAC, even when the body ignores
-/// one. Alias-bearing bodies are left unchanged because aliases may preserve
-/// incidental demands outside the skeleton roots.
+/// one.
 fn prune_dead_captures(function: &mut SemanticFunc, body: &mut SegBody) -> Result<()> {
-    if function.graph.nodes.iter().any(|(_, node)| node.alias.is_some()) {
-        return Ok(());
-    }
     let leading_parameters = body.leading_parameter_count(function)?;
     let parameter_count = function.params.len();
     let live = graph_ops::reachable_execution_values(&function.graph);

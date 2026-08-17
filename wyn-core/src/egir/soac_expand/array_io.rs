@@ -185,10 +185,7 @@ pub(super) fn emit_read_element(
         let eff_out = alloc_effect(next_effect);
         let result = graph.value_result(load_result);
         graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: SideEffectKind::Effect(EffectOp::Load {
-                place,
-                mode: super::super::types::LoadMode::Element,
-            }),
+            kind: SideEffectKind::Effect(EffectOp::Load { place }),
             operands: smallvec![],
             result: Some(result),
             effects: Some((eff_in, eff_out)),
@@ -349,12 +346,8 @@ pub(super) fn emit_read_ranked_coordinates(
     if matches!(layout, ArrayLayout::StorageAos) || is_view_node(graph, arr_nid, arr_ty) {
         let mut current_ty = arr_ty.clone();
         let first_ty = current_ty.elem_type().expect("ranked SOAC input must be an array").clone();
-        let mut place = graph.add_view_index_place(
-            graph.view_id(arr_nid),
-            coordinates[0],
-            first_ty.clone(),
-            None,
-        );
+        let mut place =
+            graph.add_view_index_place(graph.view_id(arr_nid), coordinates[0], first_ty.clone(), None);
         current_ty = first_ty;
         for coordinate in coordinates.iter().skip(1) {
             let next_ty = current_ty.elem_type().expect("ranked SOAC input rank exceeds its type").clone();
@@ -412,100 +405,4 @@ fn ranked_inner_extents(arr_ty: &Type<TypeName>, rank: u8) -> Vec<u32> {
         ty = ty.elem_type().expect("ranked SOAC input rank exceeds its type");
     }
     extents
-}
-
-/// Emit a per-iteration write `arr[idx] = val`, producing the new array node.
-///
-/// `elem_ty` must be the logical element type of `arr_ty`:
-/// - Plain composite array: `arr_ty.elem_type()`.
-/// - SoA tuple: `soac_element_type(arr_ty)` (a tuple whose components line
-///   up with `as_soa_tuple(arr_ty)`).
-///
-/// For a SoA tuple, this projects each component array out of `arr_nid`,
-/// projects the matching component out of `val_nid`, recursively writes,
-/// and repacks a `PureOp::Tuple`. For a plain composite array, this emits
-/// `_w_intrinsic_array_with_inplace` directly. Any other `arr_ty` (view,
-/// virtual, tuple whose elements aren't all arrays) is a bug in the caller
-/// — soac_expand's output arrays are always freshly-built composites.
-pub(super) fn emit_write_element(
-    graph: &mut EGraph,
-    arr_nid: ValueId,
-    idx_nid: ValueId,
-    val_nid: ValueId,
-    arr_ty: &Type<TypeName>,
-    elem_ty: &Type<TypeName>,
-) -> ValueId {
-    // Invariant: the supplied elem_ty must match what arr_ty implies.
-    // A mismatch means an upstream pass produced inconsistent types.
-    // Hard panic — emitting silently-wrong IR in release is worse than
-    // crashing loudly.
-    let expected_elem_ty = derive_elem_ty(arr_ty);
-    if elem_ty != &expected_elem_ty {
-        panic!(
-            "emit_write_element: elem_ty {:?} disagrees with arr_ty {:?} (expected elem {:?})",
-            elem_ty, arr_ty, expected_elem_ty
-        );
-    }
-
-    if let Some(components) = as_soa_tuple(arr_ty) {
-        let Type::Constructed(TypeName::Tuple(_), elem_components) = elem_ty else {
-            panic!(
-                "emit_write_element: SoA-tuple arr_ty {:?} paired with non-tuple elem_ty {:?}",
-                arr_ty, elem_ty
-            );
-        };
-        if components.len() != elem_components.len() {
-            panic!(
-                "emit_write_element: SoA tuple arity mismatch — arr_ty has {} components, elem_ty has {}",
-                components.len(),
-                elem_components.len()
-            );
-        }
-        let mut new_component_arrs: SmallVec<[ValueId; 4]> = SmallVec::with_capacity(components.len());
-        for (i, (comp_arr_ty, comp_elem_ty)) in components.iter().zip(elem_components.iter()).enumerate() {
-            let comp_arr = graph.intern_pure(
-                PureOp::Project { index: i as u32 },
-                smallvec![arr_nid],
-                comp_arr_ty.clone(),
-                None,
-            );
-            let comp_val = graph.intern_pure(
-                PureOp::Project { index: i as u32 },
-                smallvec![val_nid],
-                comp_elem_ty.clone(),
-                None,
-            );
-            let new_comp =
-                emit_write_element(graph, comp_arr, idx_nid, comp_val, comp_arr_ty, comp_elem_ty);
-            new_component_arrs.push(new_comp);
-        }
-        return graph.intern_pure(
-            PureOp::Tuple(components.len()),
-            new_component_arrs,
-            arr_ty.clone(),
-            None,
-        );
-    }
-
-    let inplace_id = catalog().known().array_with_in_place;
-    graph.intern_pure(
-        PureOp::Intrinsic {
-            id: inplace_id,
-            overload_idx: 0,
-        },
-        smallvec![arr_nid, idx_nid, val_nid],
-        arr_ty.clone(),
-        None,
-    )
-}
-
-/// The logical element type implied by `arr_ty`: `arr_ty.elem_type()` for
-/// composite arrays, `soac_element_type(arr_ty)` for SoA tuples. Only used
-/// by `emit_write_element`'s debug_assert.
-fn derive_elem_ty(arr_ty: &Type<TypeName>) -> Type<TypeName> {
-    if as_soa_tuple(arr_ty).is_some() {
-        soac_element_type(arr_ty)
-    } else {
-        arr_ty.elem_type().expect("composite array has elem").clone()
-    }
 }

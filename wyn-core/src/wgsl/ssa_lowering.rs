@@ -128,6 +128,17 @@ pub fn wgsl_mangle(name: &str) -> String {
     out
 }
 
+fn uniquify_parameter_name(base: String, used: &mut LookupSet<String>) -> String {
+    let mut candidate = base.clone();
+    let mut suffix = 1usize;
+    while used.contains(&candidate) {
+        candidate = format!("{}__p{}", base, suffix);
+        suffix += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
 /// Validate that a host-contract name is a legal WGSL identifier.
 pub fn validate_wgsl_identifier(name: &str) -> core::result::Result<(), String> {
     if name.is_empty() {
@@ -1197,13 +1208,7 @@ impl<'a> LowerCtx<'a> {
         for (value_id, ty, pname) in body.params() {
             let ty_str = self.type_emitter.type_to_wgsl(ty)?;
             let base_name = self.mangle_tracked(pname)?;
-            let mut emitted_name = base_name.clone();
-            let mut suffix = 1usize;
-            while used_param_names.contains(&emitted_name) {
-                emitted_name = format!("{}__p{}", base_name, suffix);
-                suffix += 1;
-            }
-            used_param_names.insert(emitted_name.clone());
+            let emitted_name = uniquify_parameter_name(base_name, &mut used_param_names);
             params.push(format!("{}: {}", emitted_name, ty_str));
             param_names.push((value_id, emitted_name));
         }
@@ -2130,6 +2135,30 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             self.value_map.insert(value_id, ValueBinding::Alias(mangled.clone()));
             self.declared.insert(mangled.clone());
             self.addressable.insert(mangled);
+        }
+        for (place, info) in &self.body.places {
+            let crate::ssa::types::PlaceOrigin::Parameter { index } = info.origin else {
+                continue;
+            };
+            let (parameter, _, _) = self.body.param(index).ok_or_else(|| {
+                crate::err_wgsl_at!(
+                    self.func_span,
+                    "place parameter {:?} names missing physical parameter {}",
+                    place,
+                    index
+                )
+            })?;
+            let target =
+                self.value_map.get(&parameter).map(|binding| binding.expr().to_owned()).ok_or_else(
+                    || {
+                        crate::err_wgsl_at!(
+                            self.func_span,
+                            "place parameter {:?} has no addressable WGSL binding",
+                            place
+                        )
+                    },
+                )?;
+            self.place_targets.insert(place, target);
         }
 
         // Structured walk via the shared structurize pass.
@@ -3357,7 +3386,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let view_val = self.get_value(view)?;
                     Ok(format!("({}).y", view_val))
                 }
-
             },
 
             // OutputSlot / Alloca / ViewIndex / PlaceIndex / Load / Store are

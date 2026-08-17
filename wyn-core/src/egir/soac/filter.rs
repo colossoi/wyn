@@ -190,6 +190,12 @@ pub struct Op<P: WynSoacPhase> {
     pub state: P::FilterState,
 }
 
+impl<P: WynSoacPhase> Op<P> {
+    pub(crate) fn remap_base_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        self.body.remap_capture_values(&mut map);
+    }
+}
+
 impl<R: GraphResource> Op<Semantic<R>> {
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
         self.body.capture_nodes()

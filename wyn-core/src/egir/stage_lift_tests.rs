@@ -2,15 +2,14 @@ use super::*;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{
-    semantic_program_for_test, ProgramIdentities, SemanticEntry, SemanticOpId,
-    SemanticResourceRef,
+    semantic_program_for_test, ProgramIdentities, SemanticEntry, SemanticOpId, SemanticResourceRef,
 };
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, ParameterId,
-    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination,
-    SoacEffect, SoacInputType, WynLanguage,
+    SegExtent, SegSpace, Semantic, SideEffect, SkeletonTerminator, Soac, SoacDestination, SoacEffect,
+    SoacInputType, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, EntryInputKind, StorageAccess};
@@ -82,17 +81,16 @@ fn calling_body(id: FunctionId, mixed: FunctionId) -> SemanticFunc {
     let mut graph = EGraph::<Semantic>::new();
     let lane = graph.add_test_value_parameter(0, ty.clone());
     let invariant = graph.add_test_value_parameter(1, ty.clone());
-    let params = semantic_params([
-        ("lane".into(), ty.clone()),
-        ("invariant".into(), ty.clone()),
-    ]);
+    let params = semantic_params([("lane".into(), ty.clone()), ("invariant".into(), ty.clone())]);
     let result = graph
-        .add_call(
+        .emit_call(
+            graph.skeleton.entry,
             mixed,
             &params,
             &by_value_function_result::<WynLanguage>(ty.clone()),
             [OperandRef::Value(lane), OperandRef::Value(invariant)],
             CallEffects::Pure,
+            None,
             None,
         )
         .unwrap()
@@ -244,17 +242,16 @@ fn multiple_uniform_frontier_values_share_one_aggregate_capture() {
     let mut body_graph = EGraph::<Semantic>::new();
     let lane = body_graph.add_test_value_parameter(0, u32_ty());
     let invariant = body_graph.add_test_value_parameter(1, u32_ty());
-    let params = semantic_params([
-        ("lane".into(), u32_ty()),
-        ("invariant".into(), u32_ty()),
-    ]);
+    let params = semantic_params([("lane".into(), u32_ty()), ("invariant".into(), u32_ty())]);
     let result = body_graph
-        .add_call(
+        .emit_call(
+            body_graph.skeleton.entry,
             callee_id,
             &params,
             &by_value_function_result::<WynLanguage>(u32_ty()),
             [OperandRef::Value(lane), OperandRef::Value(invariant)],
             CallEffects::Pure,
+            None,
             None,
         )
         .unwrap()
@@ -404,10 +401,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
         ],
         vec![],
         vec![],
-        semantic_params([
-            ("points".into(), input_ty),
-            ("frame".into(), element_ty),
-        ]),
+        semantic_params([("points".into(), input_ty), ("frame".into(), element_ty)]),
         by_value_function_result::<WynLanguage>(result_ty),
         entry_graph,
     );

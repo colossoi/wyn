@@ -12,12 +12,15 @@ use super::screma as fusion_screma;
 use super::space::seg_space_fusable;
 use super::support;
 use crate::ast::{Span, TypeName};
+use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
 use crate::egir::program::{CoreProgramData, OutputSlotId, ProgramIdentities, SemanticFunc};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
-use crate::egir::types::{EGraph, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId};
+use crate::egir::types::{
+    EGraph, ResultBinding, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
+};
 use crate::flow::BlockId;
 use crate::LookupMap;
 
@@ -139,10 +142,11 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     let synthesized = plan.synthesized.clone();
 
     let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            apply_plan(graph, candidate.block, candidate.left, candidate.right, &plan);
-        };
-        support::rewrite_body_graph(body, rewrite)
+        let rewrite =
+            |graph: &mut EGraph| apply_plan(graph, candidate.block, candidate.left, candidate.right, &plan);
+        support::rewrite_body_graph_with_entry(body, rewrite, |entry, replacements| {
+            support::replace_route_values(entry, &replacements);
+        })
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
         identities: identities,
@@ -158,7 +162,7 @@ pub(super) struct ScremaParts {
     pub(super) placement: screma::Placement,
     pub(super) output_slots: Vec<OutputSlotId>,
     pub(super) resources: Vec<SegResourceAccess>,
-    pub(super) result: ValueId,
+    pub(super) results: Vec<ResultBinding<Type<TypeName>>>,
     pub(super) result_types: Vec<Type<TypeName>>,
     pub(super) input_nodes: Vec<ValueId>,
     pub(super) output_nodes: Vec<Option<ValueId>>,
@@ -178,33 +182,20 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
     else {
         unreachable!("horizontal fusion selected a serial Screma");
     };
-    let result = effect.value_result().expect("fusable Screma has no by-value result");
-    let Type::Constructed(TypeName::Tuple(arity), result_types) = graph.nodes[result].ty.clone() else {
-        unreachable!("Screma result is not a tuple");
-    };
-    assert_eq!(arity, op.result_count());
-    assert_eq!(result_types.len(), op.result_count());
+    let operands = screma::ScremaOperands::decode(op, &effect.operands, effect.result.as_ref())
+        .expect("fusable Screma has invalid operands or results");
+    let results = operands.result_fields();
+    let result_types = results.iter().map(|result| result.ty().clone()).collect();
 
     let input_count = op.inputs.len();
     let input_nodes = effect.operands[..input_count]
         .iter()
         .map(|operand| operand.value().expect("Screma inputs are values or views"))
         .collect();
-    let mut output_operands = effect.operands[input_count..].iter().copied();
-    let output_nodes = (0..op.result_count())
-        .map(|field| {
-            op.destination(field)
-                .filter(|destination| destination.is_output_view())
-                .map(|_| {
-                    output_operands
-                        .next()
-                        .expect("missing Screma output-view operand")
-                        .value()
-                        .expect("Screma output is a view")
-                })
-        })
+    let output_nodes = operands
+        .outputs()
+        .map(|output| output.map(|output| output.operand.value().expect("Screma output is a view")))
         .collect::<Vec<_>>();
-    assert!(output_operands.next().is_none());
 
     ScremaParts {
         id: *id,
@@ -213,7 +204,7 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         placement: *placement,
         output_slots: output_slots.clone(),
         resources: resources.clone(),
-        result,
+        results,
         result_types,
         input_nodes,
         output_nodes,
@@ -226,12 +217,10 @@ struct FusionPlan {
     op: screma::Op<Semantic>,
     operands: SmallVec<[ValueId; 4]>,
     result_types: Vec<Type<TypeName>>,
-    left_result: ValueId,
-    right_result: ValueId,
+    left_results: Vec<ResultBinding<Type<TypeName>>>,
+    right_results: Vec<ResultBinding<Type<TypeName>>>,
     left_mapping: Vec<usize>,
     right_mapping: Vec<usize>,
-    left_result_types: Vec<Type<TypeName>>,
-    right_result_types: Vec<Type<TypeName>>,
     synthesized: Vec<SemanticFunc>,
 }
 
@@ -333,38 +322,35 @@ fn build_plan(
         op,
         operands,
         result_types,
-        left_result: left.result,
-        right_result: right.result,
+        left_results: left.results,
+        right_results: right.results,
         left_mapping,
         right_mapping,
-        left_result_types: left.result_types,
-        right_result_types: right.result_types,
         synthesized: normalized.synthesized,
     }
 }
-fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, plan: &FusionPlan) {
+fn apply_plan(
+    graph: &mut EGraph,
+    block: BlockId,
+    left: usize,
+    right: usize,
+    plan: &FusionPlan,
+) -> Vec<(ValueId, ValueId)> {
     let tuple = Type::Constructed(
         TypeName::Tuple(plan.result_types.len()),
         plan.result_types.clone(),
     );
-    let fused_result = graph.alloc_side_effect_result(tuple);
-    reproject_fields(
+    let result = graph_ops::alloc_by_value_effect_result(graph, tuple);
+    let fused_results = result.top_level_fields();
+    let mut replacements = rebind_fields(graph, &plan.left_results, &fused_results, &plan.left_mapping);
+    replacements.extend(rebind_fields(
         graph,
-        plan.left_result,
-        fused_result,
-        &plan.left_mapping,
-        &plan.left_result_types,
-    );
-    reproject_fields(
-        graph,
-        plan.right_result,
-        fused_result,
+        &plan.right_results,
+        &fused_results,
         &plan.right_mapping,
-        &plan.right_result_types,
-    );
+    ));
 
     let operands = plan.operands.iter().map(|operand| graph.operand_ref(*operand)).collect();
-    let result = graph.value_result(fused_result);
     let block = &mut graph.skeleton.blocks[block];
     let effects = splice_effect_tokens(
         block.side_effects[left].effects,
@@ -376,16 +362,22 @@ fn apply_plan(graph: &mut EGraph, block: BlockId, left: usize, right: usize, pla
     block.side_effects[left].result = Some(result);
     block.side_effects[left].effects = effects;
     block.side_effects.remove(right);
+    replacements
 }
 
-pub(super) fn reproject_fields(
+pub(super) fn rebind_fields(
     graph: &mut EGraph,
-    old_result: ValueId,
-    new_result: ValueId,
+    old_results: &[ResultBinding<Type<TypeName>>],
+    new_results: &[ResultBinding<Type<TypeName>>],
     mapping: &[usize],
-    field_types: &[Type<TypeName>],
-) {
-    let partial = mapping.iter().copied().map(Some).collect::<Vec<_>>();
-    support::retarget_projects(graph, old_result, new_result, &partial);
-    support::rebuild_result(graph, old_result, new_result, mapping, field_types);
+) -> Vec<(ValueId, ValueId)> {
+    assert_eq!(old_results.len(), mapping.len());
+    let mut replacements = Vec::new();
+    for (old, field) in old_results.iter().zip(mapping) {
+        replacements.extend(
+            graph_ops::rebind_result_value_references(graph, old, &new_results[*field])
+                .expect("fused Screma result fields must have the same by-value shape"),
+        );
+    }
+    replacements
 }

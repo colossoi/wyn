@@ -1,6 +1,6 @@
 //! WGSL backend unit tests.
 
-use super::{validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
+use super::{uniquify_parameter_name, validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
 use polytype::Type as PolyType;
 
@@ -870,14 +870,16 @@ entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
 
     validate_wgsl(&wgsl);
     assert!(
-        wgsl.contains("w_roots[w_i]"),
+        wgsl.contains("_pc0.w_roots[") && wgsl.matches("_pc0.w_roots[").count() >= 2,
         "the dynamic index should address the captured parameter directly:\n{wgsl}"
     );
     assert!(
         !wgsl.lines().any(|line| {
-            line.trim_start().starts_with("var ") && line.contains("array<") && line.contains(" = w_roots;")
+            (line.trim_start().starts_with("var ") || line.trim_start().starts_with("let "))
+                && line.contains("array<u32, 2>")
+                && line.contains(" = _pc0.w_roots[")
         }),
-        "Materialize must not copy the captured fixed array parameter:\n{wgsl}"
+        "dynamic indexing must not copy an aggregate row out of the captured parameter:\n{wgsl}"
     );
 }
 
@@ -907,21 +909,13 @@ entry check(inputs: [1]([512]u32)) [1]u32 =
         .expect("compile 512-element distinctness check");
 
     validate_wgsl(&wgsl);
-    let start = wgsl
-        .find("fn w_indices_Udistinct")
-        .unwrap_or_else(|| panic!("expected a distinctness helper:\n{wgsl}"));
-    let helper_tail = &wgsl[start..];
-    let end = helper_tail
-        .find("\n}\n")
-        .unwrap_or_else(|| panic!("expected the end of the distinctness helper:\n{helper_tail}"));
-    let helper = &helper_tail[..end];
     assert!(
-        helper.contains("w_indices["),
-        "distinctness should index its parameter directly:\n{helper}"
+        wgsl.matches("_buf_0_0[").count() >= 2,
+        "distinctness should index its storage row directly:\n{wgsl}"
     );
     assert!(
-        !helper.lines().any(|line| line.contains("array<u32, 512> = w_indices;")),
-        "distinctness must not copy its 512-element parameter:\n{helper}"
+        !wgsl.lines().any(|line| line.contains("array<u32, 512> =")),
+        "distinctness must not copy its 512-element parameter:\n{wgsl}"
     );
 }
 
@@ -996,24 +990,9 @@ entry frame(c: block,
     );
 }
 #[test]
-fn wgsl_duplicate_source_parameter_names_are_uniquified() {
-    let wgsl = compile_to_wgsl(
-        r#"
-def advance(p: i32, i: i32, t: f32) i32 = p + i + i32.f32(t)
-
-entry tick(prev: []i32, t: f32) []i32 =
-  if t < 0.1 then
-    map(|i: i32| i, 0i32 ..< 16i32)
-  else
-    let ps = prev[0i32..16i32] in
-    map(|i: i32| advance(ps[i], i, t), 0i32 ..< 16i32)
-"#,
-    )
-    .expect("conditional map envelope must lower");
-
-    validate_wgsl(&wgsl);
-    assert!(
-        wgsl.contains("w_i__p1: i32"),
-        "duplicate source parameter names must be uniquified:\n{wgsl}"
-    );
+fn duplicate_emitted_parameter_names_are_uniquified() {
+    let mut used = crate::LookupSet::new();
+    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i");
+    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p1");
+    assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p2");
 }

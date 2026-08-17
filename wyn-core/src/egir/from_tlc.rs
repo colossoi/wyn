@@ -609,9 +609,7 @@ fn convert_function<'a>(
         let operand = converter.graph.add_parameter(ParameterId::new(i), parameter.representation());
         converter.locals.insert(
             *sym,
-            operand
-                .value()
-                .expect("source function parameters use the value or view channel"),
+            operand.value().expect("source function parameters use the value or view channel"),
         );
     }
     let result = converter.convert_term(inner_body)?;
@@ -644,11 +642,7 @@ fn convert_function<'a>(
         None,
         param_info,
         result_abi,
-        if ctx.pure_definitions.contains(&def.name) {
-            CallEffects::Pure
-        } else {
-            CallEffects::General
-        },
+        if ctx.pure_definitions.contains(&def.name) { CallEffects::Pure } else { CallEffects::General },
         graph,
     )))
 }
@@ -1546,7 +1540,30 @@ impl<'a, 'b> Converter<'a, 'b> {
                 self.convert_output_source(0, term)?;
                 Ok(None)
             }
-            _ => self.convert_term(term).map(Some),
+            _ => {
+                let value = self.convert_term(term)?;
+                let abi = by_value_function_result::<WynLanguage>(term.ty.clone());
+                let binding = super::graph_ops::bind_by_value_result(&mut self.graph, &abi, value);
+                let fields = binding.top_level_fields();
+                if fields.len() != output_count {
+                    return Err(ConvertError::Internal(format!(
+                        "compute result has {} logical fields for {output_count} declared outputs",
+                        fields.len()
+                    )));
+                }
+                for (slot, field) in fields.iter().enumerate() {
+                    let value = super::graph_ops::pack_result_values(&mut self.graph, field)
+                        .map_err(ConvertError::GraphError)?;
+                    while self.output_sources.len() <= slot {
+                        self.output_sources.push(Vec::new());
+                    }
+                    self.output_sources[slot].push(crate::egir::program::SlotSource {
+                        block: self.current_block,
+                        value,
+                    });
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -1645,6 +1662,27 @@ impl<'a, 'b> Converter<'a, 'b> {
                     let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
                     let coord = self.convert_term(&args[1])?;
                     Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
+                } else if *id == known.slice
+                    && args.len() == 3
+                    && ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+                {
+                    let parent = self.convert_term(&args[0])?;
+                    let start = self.convert_term(&args[1])?;
+                    let end = self.convert_term(&args[2])?;
+                    let index_ty = self.graph.nodes[end].ty.clone();
+                    let len = self.intern_pure(
+                        PureOp::BinOp(BinaryOperator::Subtract),
+                        smallvec![end, start],
+                        index_ty,
+                    );
+                    Ok(super::graph_ops::intern_inherited_view(
+                        &mut self.graph,
+                        parent,
+                        start,
+                        len,
+                        ty,
+                        self.current_span,
+                    ))
                 } else {
                     let arg_nids: SmallVec<[ValueId; 4]> =
                         args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1695,37 +1733,26 @@ impl<'a, 'b> Converter<'a, 'b> {
         _ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let function = self.function_id(symbol);
-        let (parameters, result, effects) = self
-            .callable_boundaries
-            .get(&symbol)
-            .cloned()
-            .ok_or_else(|| ConvertError::Internal(format!("missing callable boundary for {symbol:?}")))?;
-        let arguments = operands
-            .into_iter()
-            .map(|value| self.graph.operand_ref(value))
-            .collect::<Vec<_>>();
-        let (site, binding) = self
+        let (parameters, result, effects) =
+            self.callable_boundaries.get(&symbol).cloned().ok_or_else(|| {
+                ConvertError::Internal(format!("missing callable boundary for {symbol:?}"))
+            })?;
+        let arguments = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect::<Vec<_>>();
+        let effect_tokens =
+            (!matches!(effects, CallEffects::Pure)).then(|| (self.alloc_effect(), self.alloc_effect()));
+        let (_, binding) = self
             .graph
-            .add_call(
+            .emit_call(
+                self.current_block,
                 function,
                 &parameters,
                 &result,
                 arguments,
                 effects,
+                effect_tokens,
                 self.current_span,
             )
             .map_err(ConvertError::GraphError)?;
-        if !matches!(effects, CallEffects::Pure) {
-            let effect_in = self.alloc_effect();
-            let effect_out = self.alloc_effect();
-            self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
-                kind: SideEffectKind::Effect(EffectOp::Call { site }),
-                operands: smallvec![],
-                result: None,
-                effects: Some((effect_in, effect_out)),
-                span: self.current_span,
-            });
-        }
         super::graph_ops::pack_result_values(&mut self.graph, &binding).map_err(ConvertError::GraphError)
     }
 
@@ -1832,9 +1859,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let then_result = self.convert_term(then_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: self
-                .graph
-                .admit_flow_values(result_nid.map(|_| then_result)),
+            args: self.graph.admit_flow_values(result_nid.map(|_| then_result)),
         };
 
         // Else branch.
@@ -1842,9 +1867,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let else_result = self.convert_term(else_branch)?;
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Branch {
             target: merge_block,
-            args: self
-                .graph
-                .admit_flow_values(result_nid.map(|_| else_result)),
+            args: self.graph.admit_flow_values(result_nid.map(|_| else_result)),
         };
 
         // Continue from merge.
@@ -2447,7 +2470,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> ValueId {
         let span = self.current_span;
         let operands = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect();
-        super::graph_ops::emit_pending_soac(
+        let result = super::graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
             (),
@@ -2456,7 +2479,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             ty,
             self.effect_ids,
             span,
-        )
+        );
+        super::graph_ops::pack_result_values(&mut self.graph, &result)
+            .expect("a by-value SOAC result can be assembled")
     }
 
     fn convert_soac_map(
@@ -2511,7 +2536,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         // A non-in-place `map` is shape-preserving — inherit the input's
         // representation when `result_ty` carries an unresolved `Skolem` size
         // (see `shape_preserving_result_ty`); otherwise keep `result_ty`.
-        let project_ty = if destination.is_input_buffer() {
+        let project_ty = if destination.is_input_buffer()
+            || destination.is_unplaced_unique_input()
+                && input_arr_types[0].array_variant().is_some_and(crate::types::is_array_variant_view)
+        {
             input_arr_types[0].clone()
         } else {
             input_arr_types
@@ -2824,11 +2852,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             let producers = super::graph_ops::value_producer_closure(&self.graph, [input_node]);
             let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
                 block.side_effects.iter().any(|effect| {
-                    effect
-                        .result
-                        .as_ref()
-                        .is_some_and(|result| result.values().iter().any(|value| producers.nodes.contains(value)))
-                        && matches!(effect.kind, SideEffectKind::Soac(_))
+                    effect.result.as_ref().is_some_and(|result| {
+                        result.values().iter().any(|value| producers.nodes.contains(value))
+                    }) && matches!(effect.kind, SideEffectKind::Soac(_))
                 })
             });
             if materialized_soac {
@@ -3108,7 +3134,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         // Mirror of the `convert_soac_map` guard; without it
         // `scan(op, ne, filter(p, xs))` leaks the filter's Skolem size into the
         // backend.
-        let project_ty = if destination.is_input_buffer() {
+        let project_ty = if destination.is_input_buffer()
+            || destination.is_unplaced_unique_input()
+                && arr_ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+        {
             arr_ty.clone()
         } else {
             result_ty
@@ -3167,10 +3196,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let output_elem_ty = elem_ty.clone();
         let pred_body = SegBody {
             region: self.function_id(predicate_symbol),
-            captures: capture_nids
-                .into_iter()
-                .map(|value| self.graph.operand_ref(value))
-                .collect(),
+            captures: capture_nids.into_iter().map(|value| self.graph.operand_ref(value)).collect(),
         };
 
         // `[input]` only — map/pred captures live on their `SegBody`s.
@@ -3417,13 +3443,11 @@ impl<'a, 'b> Converter<'a, 'b> {
 fn is_purely_constant_graph(graph: &EGraph<Raw>) -> bool {
     let mut memo = LookupMap::new();
     graph.skeleton.blocks.values().all(|block| {
-        block.side_effects.is_empty()
+        block.side_effects.iter().all(|effect| !graph.effect_requires_ordering(effect))
             && match &block.term {
-                SkeletonTerminator::Return(value) => {
-                    value.as_ref().is_none_or(|result| {
-                        result.values().into_iter().all(|node| is_constant_node(graph, node, &mut memo))
-                    })
-                }
+                SkeletonTerminator::Return(value) => value.as_ref().is_none_or(|result| {
+                    result.values().into_iter().all(|node| is_constant_node(graph, node, &mut memo))
+                }),
                 SkeletonTerminator::Branch { args, .. } => {
                     args.iter().all(|node| is_constant_node(graph, node.value(), &mut memo))
                 }
@@ -3472,6 +3496,7 @@ fn is_constant_node(graph: &EGraph<Raw>, mut node: ValueId, memo: &mut LookupMap
         | ValueKind::BlockParam { .. }
         | ValueKind::CallResult { .. }
         | ValueKind::PlaceLength { .. }
+        | ValueKind::PlaceView { .. }
         | ValueKind::SideEffectResult => false,
     };
     memo.insert(node, result);

@@ -24,8 +24,8 @@ use super::super::semantic_graph::SemanticGraph;
 use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
-    EGraph, EffectToken, PureOp, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
-    ResultBinding, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect,
+    EGraph, EffectToken, PureOp, ResourceAccess, ResultBinding, SegExtent, SegResourceAccess, SegSpace,
+    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect,
     SoacPlacement, ValueId, ValueKind, ViewId, WynLanguage,
 };
 use super::ResourcesAllocated;
@@ -114,7 +114,6 @@ struct OutputSpec {
     field: usize,
     storage: OutputStorage,
     elem_ty: Type<TypeName>,
-    result_ty: Type<TypeName>,
     size: LogicalSize,
 }
 
@@ -336,9 +335,7 @@ fn operation_result_residency(
     } else if op.is_reduce()
         && op.form.reductions.len() == 1
         && (has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
-        && result
-            .single_value()
-            .is_some_and(|value| scalar_result_is_used(uses, value, site))
+        && result.single_value().is_some_and(|value| scalar_result_is_used(uses, value, site))
         && invocation_invariant(entry, site.block, &dependencies)
     {
         Some(FixedMaterializationKind::Scalar)
@@ -355,9 +352,7 @@ fn array_result_residency(
 ) -> Option<FixedMaterializationKind> {
     if consumers.map_or(0, HashSet::len) >= 2 {
         Some(FixedMaterializationKind::SharedArray)
-    } else if result.ty().contains_runtime_sized_composite_array()
-        && requires_array_storage
-    {
+    } else if result.ty().contains_runtime_sized_composite_array() && requires_array_storage {
         Some(FixedMaterializationKind::Gather)
     } else {
         None
@@ -805,7 +800,10 @@ fn invocation_invariant(entry: &SemanticEntry, block_id: BlockId, effects: &Hash
     let block = &entry.graph.skeleton.blocks[block_id];
     let mut roots = Vec::new();
     for &index in effects {
-        roots.extend(block.side_effects[index].referenced_nodes());
+        roots.extend(graph_ops::effect_value_inputs(
+            &entry.graph,
+            &block.side_effects[index],
+        ));
     }
     let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
     reachable.into_iter().all(|node| {
@@ -1109,7 +1107,7 @@ fn rewrite_runtime_array_source(
             resource: handoff.data,
         }],
     )?;
-    graph_ops::replace_all_references(&mut entry.graph, result, view);
+    entry.graph.replace_value_references(result, view);
     entry.graph.retype_node(result, handoff.result_ty.clone());
     for route in entry.routes_mut() {
         if route.source.value == result {
@@ -1171,11 +1169,8 @@ fn configure_materialized_soac(
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
 ) -> Result<(), String> {
-    let output_operands = output_views
-        .iter()
-        .copied()
-        .map(|view| graph.operand_ref(view))
-        .collect::<Vec<_>>();
+    let output_operands =
+        output_views.iter().copied().map(|view| graph.operand_ref(view)).collect::<Vec<_>>();
     let producer_effect = graph.skeleton.effect_mut(producer_site);
     let SideEffect {
         kind: SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))),
@@ -1191,8 +1186,7 @@ fn configure_materialized_soac(
         .zip(output_resources)
         .zip(output_specs)
         .filter_map(|(((&_view, &operand), &resource), output)| {
-            (output.storage == OutputStorage::Array)
-                .then_some((output.field, operand, resource))
+            (output.storage == OutputStorage::Array).then_some((output.field, operand, resource))
         })
         .collect::<Vec<_>>();
     for &(field, operand, _) in &array_outputs {
@@ -1283,7 +1277,7 @@ fn rewrite_materialized_operation_source(
     }
     retarget_input_metadata(&mut entry.graph, &array_replacements)?;
     for &(source, value, _) in &replacements {
-        graph_ops::replace_all_references(&mut entry.graph, source, value);
+        entry.graph.replace_value_references(source, value);
         let value_ty = entry.graph.nodes[value].ty.clone();
         entry.graph.retype_node(source, value_ty);
     }
@@ -1392,7 +1386,7 @@ fn materialize_stage_prelude(
             &value.elem_ty,
             &mut global_context.effect_ids,
         );
-        graph_ops::replace_all_references(&mut entry.graph, value.source, loaded);
+        entry.graph.replace_value_references(value.source, loaded);
         loaded_values.push(loaded);
         load_effects.push(load_effect);
     }
@@ -1485,14 +1479,7 @@ fn detached_scalar_handoff_load(
     let zero = graph_ops::intern_u32(graph, 0, None);
     let view = graph.view_id(view);
     let place = graph.add_view_index_place(view, zero, elem_ty.clone(), None);
-    graph_ops::detached_load(
-        graph,
-        place,
-        elem_ty.clone(),
-        super::super::types::LoadMode::Element,
-        effect_ids,
-        None,
-    )
+    graph_ops::detached_load(graph, place, elem_ty.clone(), effect_ids, None)
 }
 
 fn replace_prelude_effects_with_load(
@@ -1560,7 +1547,6 @@ fn output_specs(
         .map(|field| {
             let field_result = result.field(field)?;
             field_result.single_value()?;
-            let result_ty = field_result.ty().clone();
             let elem_ty = op.form.result_element_type(field)?.clone();
             let storage = match op.form.result_id(field)? {
                 screma::ResultId::Reduction { .. } => OutputStorage::Scalar,
@@ -1578,7 +1564,6 @@ fn output_specs(
                 storage,
                 size,
                 elem_ty,
-                result_ty,
             })
         })
         .collect()
@@ -1589,8 +1574,8 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[ValueId]) {
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
             if matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
-                && effect
-                    .referenced_nodes()
+                && graph_ops::effect_value_inputs(graph, effect)
+                    .into_iter()
                     .any(|node| values.iter().any(|value| graph_ops::value_depends_on(graph, node, *value)))
             {
                 sites.push(SideEffectSite {
@@ -1632,8 +1617,8 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[ValueId]) {
 /// must move with the multi-consumer map instead of leaving dangling Project
 /// nodes in the cloned graph.
 fn dependency_effects(graph: &EGraph, root: SideEffectSite) -> Option<HashSet<usize>> {
-    let closure =
-        graph_ops::value_producer_closure(graph, graph.skeleton.get_effect(root)?.referenced_nodes());
+    let effect = graph.skeleton.get_effect(root)?;
+    let closure = graph_ops::value_producer_closure(graph, graph_ops::effect_value_inputs(graph, effect));
     if closure.effects.iter().any(|site| site.block != root.block) {
         return None;
     }
@@ -1650,9 +1635,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                     for (input, input_type) in op.inputs.iter_mut().enumerate() {
                         if let Some(replacement) = replacements
                             .iter()
-                            .find(|replacement| {
-                                effect.operands[input].value() == Some(replacement.project)
-                            })
+                            .find(|replacement| effect.operands[input].value() == Some(replacement.project))
                         {
                             input_type.array = replacement.view_ty.clone();
                             new_resources.push(replacement.resource);

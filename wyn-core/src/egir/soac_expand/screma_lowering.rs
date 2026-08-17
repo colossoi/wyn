@@ -5,32 +5,39 @@ use super::*;
 
 pub(super) fn emit_screma_lambda(
     graph: &mut EGraph,
+    block: BlockId,
     callables: &CallableMap,
     lambda: &screma::Lambda,
     mut arguments: Vec<ValueId>,
-) -> Vec<ValueId> {
+) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
-        return arguments;
+        return arguments
+            .into_iter()
+            .zip(&lambda.result_types)
+            .map(|(argument, ty)| {
+                let abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
+                super::super::graph_ops::bind_by_value_result(graph, &abi, argument)
+            })
+            .collect();
     }
     let body = lambda.seg_body().expect("non-identity Screma lambda has a region");
     let callee = callables.get(&body.region).expect("Screma lambda callable boundary");
-    let mut operands = arguments
-        .drain(..)
-        .map(|argument| graph.operand_ref(argument))
-        .collect::<Vec<_>>();
+    let mut operands = arguments.drain(..).map(|argument| graph.operand_ref(argument)).collect::<Vec<_>>();
     operands.extend(body.captures.iter().copied());
     let (_, result) = graph
-        .add_call(
+        .emit_call(
+            block,
             body.region,
             callee.params(),
             callee.result(),
             operands,
             callee.effects(),
             None,
+            None,
         )
         .expect("Screma lambda call must match its canonical boundary");
-    result.values()
+    super::super::soac::lambda::logical_result_fields(&result, &lambda.result_types)
 }
 
 /// `Scan[OutputView]`: `new_acc = func(acc, elem, ...caps); view[i] = new_acc`
@@ -48,8 +55,7 @@ pub(super) fn build_parallel_screma_map(
     length_input: (ValueId, Type<TypeName>),
     read_inputs: &[(ValueId, Type<TypeName>, Type<TypeName>)],
     pre: &screma::Lambda,
-    output_views: &[ValueId],
-    result_node: ValueId,
+    output_views: &[ResultBinding<Type<TypeName>>],
     next_effect: &mut crate::IdSource<EffectToken>,
     callables: &CallableMap,
 ) {
@@ -57,10 +63,6 @@ pub(super) fn build_parallel_screma_map(
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
-    graph.replace_node_preserving_type(
-        result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
-    );
     let body = graph.skeleton.create_block();
     let known = catalog().known();
     let thread = graph.intern_pure(
@@ -106,28 +108,13 @@ pub(super) fn build_parallel_screma_map(
             emit_read_element(graph, body, *array, lane, array_type, element_type, next_effect)
         })
         .collect::<Vec<_>>();
-    let values = emit_screma_lambda(graph, callables, pre, elements);
-    debug_assert_eq!(values.len(), output_views.len());
-    for ((output, value), element_type) in output_views.iter().zip(values).zip(&pre.result_types) {
-        let view = graph.view_id(*output);
-        let place = graph.add_view_index_place(
-            view,
-            lane,
-            element_type.clone(),
-            None,
-        );
-        let effect_in = alloc_effect(next_effect);
-        let effect_out = alloc_effect(next_effect);
-        let operand = graph.operand_ref(value);
-        graph.skeleton.blocks[body].side_effects.push(SideEffect {
-            kind: SideEffectKind::Effect(EffectOp::Store { place }),
-            operands: smallvec![operand],
-            result: None,
-            effects: Some((effect_in, effect_out)),
-            span: None,
-        });
+    let results = emit_screma_lambda(graph, body, callables, pre, elements);
+    assert_eq!(results.len(), output_views.len());
+    let mut tail = body;
+    for (output, result) in output_views.iter().zip(results) {
+        tail = super::emit_mapped_result_stores(graph, tail, lane, &result, output, next_effect);
     }
-    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
+    graph.skeleton.blocks[tail].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],
     };

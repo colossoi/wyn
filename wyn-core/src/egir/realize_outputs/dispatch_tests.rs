@@ -3,8 +3,7 @@
 use super::*;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
-    EGraph, OperandRef, Raw, RegionId, SegBody, SideEffect, Soac, SoacEffect, SoacInputType,
-    ViewId,
+    EGraph, OperandRef, Raw, RegionId, SegBody, SideEffect, Soac, SoacEffect, SoacInputType, ViewId,
 };
 use smallvec::smallvec;
 

@@ -1321,7 +1321,7 @@ def f(a: [3][4]i32) [3][4]i32 = map(|row| row, a)
 }
 
 #[test]
-fn uniqueness_candidate_does_not_encode_liveness() {
+fn uniqueness_candidate_requires_dead_input_owner() {
     // `*[N]T` input but a borrowing function reads `a` after the
     // map, so the input is live after the SOAC's term.
     let program = compile_to_tlc(
@@ -1334,10 +1334,9 @@ def f(a: *[3][4]i32) i32 =
     );
     let model = analyze(&program);
     let eligible = eligible_unique_input_soacs(&program, &model);
-    assert_eq!(
-        eligible.len(),
-        1,
-        "TLC should preserve uniqueness and defer liveness to EGIR"
+    assert!(
+        eligible.is_empty(),
+        "a live input owner cannot be selected as an in-place destination: {eligible:?}"
     );
 }
 
@@ -1502,6 +1501,22 @@ def f(a: [8]i32) [8]i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
         scan_destination(&program, "f"),
         Some(SoacOwnership::Fresh),
         "Scan over non-unique input should keep destination = Fresh",
+    );
+}
+
+#[test]
+fn consumes_input_flag_not_set_when_scan_input_is_live_afterward() {
+    let program = compile_to_owned(
+        r#"
+def f(a: *[8]i32, i: i32) ([8]i32, i32) =
+  let scanned = scan(|acc: i32, x: i32| acc + x, 0, a) in
+  (scanned, a[i])
+"#,
+    );
+    assert_eq!(
+        scan_destination(&program, "f"),
+        Some(SoacOwnership::Fresh),
+        "a scan cannot reuse an input owner that remains live after the operation",
     );
 }
 

@@ -248,18 +248,21 @@ pub(super) fn synthesize_swap_wrapper(
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut inner_arguments = vec![arguments[1], arguments[0]];
     inner_arguments.extend_from_slice(&arguments[2..]);
+    let entry = graph.skeleton.entry;
     let (_, result) = graph
-        .add_call(
+        .emit_call(
+            entry,
             inner.region,
             inner.params(),
             inner.result(),
             inner_arguments,
             inner.effects(),
             None,
+            None,
         )
         .expect("swap wrapper call must match the operator boundary");
-    let result = result.single_value().expect("swap wrapper operator has one by-value result");
-    let entry = graph.skeleton.entry;
+    let result = graph_ops::pack_result_values(&mut graph, &result)
+        .expect("swap wrapper operator result is returned by value");
     lambda_ops::finish_function(
         graph,
         entry,
@@ -305,9 +308,7 @@ enum ChunkableView {
     },
     StorageSlice {
         view: ValueId,
-        start: ValueId,
-        end: ValueId,
-        overload_idx: usize,
+        len: ValueId,
     },
 }
 
@@ -317,25 +318,22 @@ impl ChunkableView {
             return Some(Self::Storage(resource));
         }
         if let ValueKind::Pure {
-            op: PureOp::Intrinsic { id, overload_idx },
+            op: PureOp::StorageView(crate::op::PureViewSource::Inherited),
             operands,
         } = &graph.nodes[view].kind
         {
-            let is_flat_storage_slice = *id == catalog().known().slice
-                && operands.len() == 3
-                && graph_ops::extract_storage_view_source(graph, operands[0]).is_some()
+            let is_flat_storage_slice = operands.len() == 3
+                && graph_ops::extract_storage_view_source(graph, operands[2]).is_some()
                 && graph.nodes[view].ty.array_variant().is_some_and(crate::types::is_array_variant_view)
-                && graph.nodes[operands[1]].ty == graph.nodes[operands[2]].ty
+                && graph.nodes[operands[0]].ty == graph.nodes[operands[1]].ty
                 && matches!(
-                    &graph.nodes[operands[1]].ty,
+                    &graph.nodes[operands[0]].ty,
                     Type::Constructed(TypeName::UInt(32) | TypeName::Int(32), _)
                 );
             if is_flat_storage_slice {
                 return Some(Self::StorageSlice {
                     view,
-                    start: operands[1],
-                    end: operands[2],
-                    overload_idx: *overload_idx,
+                    len: operands[1],
                 });
             }
         }
@@ -356,17 +354,7 @@ impl ChunkableView {
         match self {
             Self::Storage(resource) => graph_ops::intern_resource_len(graph, resource.0, None),
             Self::Range { len, .. } => len,
-            Self::StorageSlice { start, end, .. } => {
-                let index_ty = graph.nodes[end].ty.clone();
-                graph_ops::intern_binop(
-                    graph,
-                    crate::op::BinaryOperator::Subtract,
-                    end,
-                    start,
-                    index_ty,
-                    None,
-                )
-            }
+            Self::StorageSlice { len, .. } => len,
         }
     }
 
@@ -387,31 +375,14 @@ impl ChunkableView {
                 view_ty,
                 None,
             )),
-            Self::StorageSlice {
+            Self::StorageSlice { view, len: _ } => Ok(graph_ops::intern_inherited_view(
+                graph,
                 view,
-                start: _,
-                end,
-                overload_idx,
-            } => {
-                let index_ty = graph.nodes[end].ty.clone();
-                let chunk_end = graph_ops::intern_binop(
-                    graph,
-                    crate::op::BinaryOperator::Add,
-                    chunk_start,
-                    chunk_len,
-                    index_ty,
-                    None,
-                );
-                Ok(graph.intern_pure(
-                    PureOp::Intrinsic {
-                        id: catalog().known().slice,
-                        overload_idx,
-                    },
-                    smallvec![view, chunk_start, chunk_end],
-                    view_ty,
-                    None,
-                ))
-            }
+                chunk_start,
+                chunk_len,
+                view_ty,
+                None,
+            )),
             Self::Range { start, step, .. } => {
                 let has_step = step.is_some();
                 let start_ty = graph

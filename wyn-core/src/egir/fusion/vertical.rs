@@ -19,8 +19,8 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    EGraph, PureOp, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect, SoacInputType,
-    ValueId, ValueKind,
+    EGraph, PureOp, ResourceAccess, ResultBinding, SegResourceAccess, SideEffectKind, Soac, SoacEffect,
+    SoacInputType, ValueId, ValueKind,
 };
 use crate::flow::BlockId;
 use crate::types::TypeExt;
@@ -36,23 +36,33 @@ struct InputTransform {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SliceTransform {
-    op: PureOp,
     start: ValueId,
-    end: ValueId,
+    extent: SliceExtent,
     size: Type<TypeName>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SliceExtent {
+    End {
+        end: ValueId,
+        op: PureOp,
+    },
+    Length(ValueId),
 }
 
 impl InputTransform {
     fn route(
         graph: &EGraph,
         operand: ValueId,
-        producer_result: ValueId,
+        producer_results: &[ResultBinding<Type<TypeName>>],
         producer_outputs: &[Option<ValueId>],
     ) -> Option<(usize, Self)> {
         let mut current = operand;
         let mut slices = Vec::new();
         loop {
-            if let Some(field) = graph_ops::projection_index(graph, current, producer_result) {
+            if let Some(field) =
+                producer_results.iter().position(|result| graph.value_has_result_origin(current, result))
+            {
                 slices.reverse();
                 return Some((field, Self { slices }));
             }
@@ -60,25 +70,38 @@ impl InputTransform {
                 slices.reverse();
                 return Some((field, Self { slices }));
             }
+            current = graph.canonical_value(current);
             let ValueKind::Pure { op, operands } = &graph.nodes.get(current)?.kind else {
                 return None;
             };
-            let PureOp::Intrinsic { id, .. } = op else {
-                return None;
-            };
-            if *id != crate::builtins::catalog().known().slice {
-                return None;
-            }
-            let [base, start, end] = operands.as_slice() else {
-                return None;
+            let (base, start, extent) = match op {
+                PureOp::StorageView(crate::op::PureViewSource::Inherited) => {
+                    let [start, len, base] = operands.as_slice() else {
+                        return None;
+                    };
+                    (*base, *start, SliceExtent::Length(*len))
+                }
+                PureOp::Intrinsic { id, .. } if *id == crate::builtins::catalog().known().slice => {
+                    let [base, start, end] = operands.as_slice() else {
+                        return None;
+                    };
+                    (
+                        *base,
+                        *start,
+                        SliceExtent::End {
+                            end: *end,
+                            op: op.clone(),
+                        },
+                    )
+                }
+                _ => return None,
             };
             slices.push(SliceTransform {
-                op: op.clone(),
-                start: *start,
-                end: *end,
+                start,
+                extent,
                 size: graph.nodes[current].ty.array_size()?.clone(),
             });
-            current = *base;
+            current = base;
         }
     }
 
@@ -95,12 +118,42 @@ impl InputTransform {
         let mut array = input.array.clone();
         for slice in &self.slices {
             array = array_with_outer_size(&array, &slice.size)?;
-            node = graph.intern_pure(
-                slice.op.clone(),
-                smallvec![node, slice.start, slice.end],
-                array.clone(),
-                None,
-            );
+            if array.array_variant().is_some_and(crate::types::is_array_variant_view) {
+                let len = match &slice.extent {
+                    SliceExtent::Length(len) => *len,
+                    SliceExtent::End { end, .. } => graph_ops::intern_binop(
+                        graph,
+                        crate::op::BinaryOperator::Subtract,
+                        *end,
+                        slice.start,
+                        graph.nodes[*end].ty().clone(),
+                        None,
+                    ),
+                };
+                node = graph_ops::intern_inherited_view(graph, node, slice.start, len, array.clone(), None);
+            } else {
+                let (end, op) = match &slice.extent {
+                    SliceExtent::End { end, op } => (*end, op.clone()),
+                    SliceExtent::Length(len) => {
+                        let end = graph_ops::intern_binop(
+                            graph,
+                            crate::op::BinaryOperator::Add,
+                            slice.start,
+                            *len,
+                            graph.nodes[*len].ty().clone(),
+                            None,
+                        );
+                        (
+                            end,
+                            PureOp::Intrinsic {
+                                id: crate::builtins::catalog().known().slice,
+                                overload_idx: 0,
+                            },
+                        )
+                    }
+                };
+                node = graph.intern_pure(op, smallvec![node, slice.start, end], array.clone(), None);
+            }
         }
         let mut input = input.clone();
         input.array = array;
@@ -154,9 +207,13 @@ fn find_in_graph(
             let screma::SemanticState::Segmented { resources, .. } = producer_op.semantic_state() else {
                 continue;
             };
-            let Some(producer_result) = producer.value_result() else {
+            let Some(producer_result) = producer.result.as_ref() else {
                 continue;
             };
+            let producer_results = producer_result.top_level_fields();
+            if producer_results.len() != producer_op.result_count() {
+                continue;
+            }
             let value_consumers =
                 oracle.value_consumers(producer_id).collect::<std::collections::HashSet<_>>();
             let value_consumer_kinds = block
@@ -230,7 +287,7 @@ fn find_in_graph(
                     .enumerate()
                     .filter_map(|(input, operand)| {
                         let operand = operand.value().expect("Screma inputs are values or views");
-                        InputTransform::route(graph, operand, producer_result, &producer_output_nodes)
+                        InputTransform::route(graph, operand, &producer_results, &producer_output_nodes)
                             .map(|(field, transform)| (input, field, transform))
                     })
                     .collect::<Vec<_>>();
@@ -239,13 +296,11 @@ fn find_in_graph(
                 }
                 let routed_inputs =
                     routed.iter().map(|(input, _, _)| *input).collect::<std::collections::HashSet<_>>();
-                let has_unrouteable_input = consumer.operands[..consumer_input_count]
-                    .iter()
-                    .enumerate()
-                    .any(|(input, operand)| {
+                let has_unrouteable_input =
+                    consumer.operands[..consumer_input_count].iter().enumerate().any(|(input, operand)| {
                         let operand = operand.value().expect("Screma inputs are values or views");
                         !routed_inputs.contains(&input)
-                            && (graph_ops::pure_depends_on(graph, operand, producer_result)
+                            && (depends_on_any_result(graph, operand, &producer_results)
                                 || producer_output_nodes
                                     .iter()
                                     .flatten()
@@ -307,9 +362,7 @@ fn find_in_graph(
                 let routed_roots = routed
                     .iter()
                     .map(|(input, _, _)| {
-                        consumer.operands[*input]
-                            .value()
-                            .expect("Screma inputs are values or views")
+                        consumer.operands[*input].value().expect("Screma inputs are values or views")
                     })
                     .collect::<std::collections::HashSet<_>>();
                 let semantic_roots = consumer_op
@@ -324,8 +377,7 @@ fn find_in_graph(
                             .flat_map(|reduction| reduction.neutral.iter().copied()),
                     );
                 if semantic_roots.into_iter().any(|root| {
-                    graph_ops::pure_depends_on(graph, root, producer_result)
-                        && !routed_roots.contains(&root)
+                    depends_on_any_result(graph, root, &producer_results) && !routed_roots.contains(&root)
                 }) {
                     continue;
                 }
@@ -341,7 +393,7 @@ fn find_in_graph(
                     block_id,
                     producer_index,
                     consumer_index,
-                    producer_result,
+                    &producer_results,
                     producer_op,
                 );
                 let retains_unplaced_fresh = retained_producer_outputs.iter().any(|field| {
@@ -399,55 +451,28 @@ fn retained_producer_outputs(
     producer_block: BlockId,
     producer_index: usize,
     consumer_index: usize,
-    producer_result: crate::egir::types::ValueId,
+    producer_results: &[ResultBinding<Type<TypeName>>],
     producer: &screma::Op<crate::egir::types::Semantic>,
 ) -> Vec<usize> {
-    let projects = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| {
-            let crate::egir::types::ValueKind::Pure {
-                op: crate::egir::types::PureOp::Project { index },
-                operands,
-            } = &definition.kind
-            else {
-                return None;
-            };
-            (operands.first() == Some(&producer_result)).then_some((node, *index as usize))
-        })
-        .collect::<Vec<_>>();
-
     (0..producer.result_count())
         .filter(|field| {
             if producer.destination(*field).is_some_and(|destination| !destination.is_unplaced()) {
                 return true;
             }
-            let field_projects = projects
-                .iter()
-                .filter_map(|(project, project_field)| (*project_field == *field).then_some(*project))
-                .collect::<Vec<_>>();
-            if field_projects.is_empty() {
-                return false;
-            }
+            let results = producer_results[*field].values();
             for (block_id, block) in &graph.skeleton.blocks {
                 for (index, effect) in block.side_effects.iter().enumerate() {
                     if block_id == producer_block && (index == producer_index || index == consumer_index) {
                         continue;
                     }
-                    if effect.referenced_nodes().any(|root| {
-                        graph_ops::projection_index(graph, root, producer_result) == Some(*field)
-                            || field_projects
-                                .iter()
-                                .any(|project| graph_ops::pure_depends_on(graph, root, *project))
+                    if graph_ops::effect_value_inputs(graph, effect).into_iter().any(|root| {
+                        results.iter().any(|result| graph_ops::pure_depends_on(graph, root, *result))
                     }) {
                         return true;
                     }
                 }
                 if block.term.referenced_nodes().into_iter().any(|root| {
-                    graph_ops::projection_index(graph, root, producer_result) == Some(*field)
-                        || field_projects
-                            .iter()
-                            .any(|project| graph_ops::pure_depends_on(graph, root, *project))
+                    results.iter().any(|result| graph_ops::pure_depends_on(graph, root, *result))
                 }) {
                     return true;
                 }
@@ -455,6 +480,12 @@ fn retained_producer_outputs(
             false
         })
         .collect()
+}
+
+fn depends_on_any_result(graph: &EGraph, root: ValueId, results: &[ResultBinding<Type<TypeName>>]) -> bool {
+    results
+        .iter()
+        .any(|result| result.values().iter().any(|result| graph_ops::pure_depends_on(graph, root, *result)))
 }
 pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     let transform = candidate.transform.clone();
@@ -581,36 +612,33 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     operand_values.extend(normalized.input_nodes);
     operand_values.extend(output_nodes.into_iter().flatten());
     let synthesized = normalized.synthesized;
-    let producer_result = producer.result;
-    let consumer_result = consumer.result;
-
-    let consumer_result_types = consumer.result_types;
+    let producer_results = producer.results;
+    let consumer_results = consumer.results;
     let consumer_id = consumer.id;
     let site = candidate.site;
     let rebuilt = inner.rewrite_body(site, |body| {
         let rewrite = |graph: &mut EGraph| {
             let tuple_type = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
-            let fused_result = graph.alloc_side_effect_result(tuple_type);
-            if producer_mapping.iter().any(|field| *field != usize::MAX) {
-                let retained_mapping = producer_mapping
-                    .iter()
-                    .map(|field| (*field != usize::MAX).then_some(*field))
-                    .collect::<Vec<_>>();
-                support::retarget_projects(graph, producer_result, fused_result, &retained_mapping);
+            let result = graph_ops::alloc_by_value_effect_result(graph, tuple_type);
+            let fused_results = result.top_level_fields();
+            let mut replacements = Vec::new();
+            for (old, field) in producer_results.iter().zip(&producer_mapping) {
+                if *field != usize::MAX {
+                    replacements.extend(
+                        graph_ops::rebind_result_value_references(graph, old, &fused_results[*field])
+                            .expect("retained producer result must preserve its by-value shape"),
+                    );
+                }
             }
-            horizontal::reproject_fields(
+            replacements.extend(horizontal::rebind_fields(
                 graph,
-                consumer_result,
-                fused_result,
+                &consumer_results,
+                &fused_results,
                 &consumer_mapping,
-                &consumer_result_types,
-            );
+            ));
 
-            let operands = operand_values
-                .iter()
-                .map(|operand| graph.operand_ref(*operand))
-                .collect::<SmallVec<_>>();
-            let result = graph.value_result(fused_result);
+            let operands =
+                operand_values.iter().map(|operand| graph.operand_ref(*operand)).collect::<SmallVec<_>>();
             let block = &mut graph.skeleton.blocks[candidate.block];
             let effects = splice_effect_tokens(
                 block.side_effects[candidate.producer].effects,
@@ -622,8 +650,11 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
             consumer.result = Some(result);
             consumer.effects = effects;
             block.side_effects.remove(candidate.producer);
+            replacements
         };
-        support::rewrite_body_graph(body, rewrite)
+        support::rewrite_body_graph_with_entry(body, rewrite, |entry, replacements| {
+            support::replace_route_values(entry, &replacements);
+        })
     });
     rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
         identities: identities,

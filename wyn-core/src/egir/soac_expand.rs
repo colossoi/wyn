@@ -27,7 +27,8 @@ use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
 use super::graph_ops::{
-    alloc_effect, emit_alloca, emit_load, emit_place_index_store, emit_storage_store, emit_store,
+    alloc_effect, detached_alloca, emit_alloca, emit_load, emit_place_index_store, emit_storage_store,
+    emit_store,
 };
 use super::program::{
     PhysicalEGraph as EGraph, PhysicalFilterOutput, PhysicalFilterWorkBuffers as FilterWorkBuffers,
@@ -39,27 +40,31 @@ use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array, TypeExt};
 
 use super::types::{
-    as_soa_tuple, soac_element_type, ArrayLayout, EffectOp, EffectToken, PureOp, RegionId,
-    SkeletonTerminator, SoacDestination, SoacEffect, ValueId, ValueKind, PlaceId, ViewId,
+    as_soa_tuple, soac_element_type, ArrayLayout, EffectOp, EffectToken, PlaceDestination, PlaceId, PureOp,
+    RegionId, ResultBinding, ResultDestination, SkeletonTerminator, SoacDestination, SoacEffect, ValueId,
+    ValueKind, ViewId, WynLanguage,
 };
 
 type CallableMap = crate::LookupMap<RegionId, PhysicalFunc>;
 
 mod array_io;
+mod call_abi;
 mod filter_lowering;
+mod flow_normalize;
 mod hist_lowering;
 mod loop_builder;
 mod screma_lowering;
 
-use array_io::{emit_read_element, emit_write_element};
+use array_io::emit_read_element;
 use filter_lowering::{
     build_filter_flags, build_filter_loop, build_filter_scan, build_filter_scatter, FilterLoop,
 };
+use flow_normalize::normalize_place_backed_flow;
 use hist_lowering::{
     build_bucket_finish, build_bucket_init, build_bucket_insert, build_hist_atomic, build_hist_loop,
     HistLoop,
 };
-use loop_builder::{expand_loop, LoopBody, ResultBinding};
+use loop_builder::{expand_loop, LoopBody, LoopResultBinding, LoopResultSource};
 use screma_lowering::{build_parallel_screma_map, emit_screma_lambda};
 
 /// Expand every graph-bearing body and rebuild the program at the
@@ -70,11 +75,10 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
         .iter()
         .map(|function| (function.region, function.clone()))
         .collect::<CallableMap>();
-    program
-        .try_map_graphs_with_state(|_, graph, data, context| {
-            run_one_body(graph, &callables, &mut context.effect_ids)
-        })
-        .map(|program| program.retag())
+    let program = program.try_map_graphs_with_state(|_, graph, _, context| {
+        run_one_body(graph, &callables, &mut context.effect_ids)
+    })?;
+    call_abi::resolve(program).map(|program| program.retag())
 }
 
 /// Expand every physical SOAC in the skeleton.
@@ -83,21 +87,12 @@ pub fn run_one_body(
     callables: &CallableMap,
     effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<EGraph, String> {
-    // Collect (block, index) of every handleable Soac in a stable order.
-    // Process back-to-front within each block so earlier indices stay valid.
-    let mut targets: Vec<(BlockId, usize)> = Vec::new();
-    for (bid, block) in &graph.skeleton.blocks {
-        for (i, se) in block.side_effects.iter().enumerate() {
-            if is_handleable_soac(&se.kind) {
-                targets.push((bid, i));
-            }
-        }
-    }
-    // Sort by (block, descending index) so removals within the same block
-    // don't shift earlier target indices.
-    targets.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-
-    for (bid, idx) in targets {
+    // Re-scan after every expansion because splitting a block moves the
+    // remaining suffix. Selecting the first operation preserves producer to
+    // consumer order, so a resolved destination is visible to later updates.
+    while let Some((bid, idx)) = graph.skeleton.blocks.iter().find_map(|(bid, block)| {
+        block.side_effects.iter().position(|effect| is_handleable_soac(&effect.kind)).map(|idx| (bid, idx))
+    }) {
         expand_one(&mut graph, bid, idx, effect_ids, callables)?;
     }
     if let Some((block, effect)) = graph.skeleton.blocks.iter().find_map(|(block, contents)| {
@@ -112,6 +107,7 @@ pub fn run_one_body(
             effect.kind
         ));
     }
+    normalize_place_backed_flow(&mut graph, effect_ids)?;
     Ok(graph)
 }
 
@@ -183,6 +179,82 @@ fn is_virtual_source(arr_ty: &Type<TypeName>) -> bool {
     is_virtual_array(arr_ty)
 }
 
+fn bind_result_alias(graph: &mut EGraph, result: ValueId, replacement: ValueId) {
+    if result == replacement {
+        return;
+    }
+    graph.replace_value_references(result, replacement);
+    graph.install_aliases([(result, replacement)]);
+}
+
+fn bind_result_value(graph: &mut EGraph, result: &ResultBinding<Type<TypeName>>, replacement: ValueId) {
+    let abi = super::types::by_value_function_result::<WynLanguage>(result.ty().clone());
+    let replacement = super::graph_ops::bind_by_value_result(graph, &abi, replacement);
+    bind_result_binding(graph, result, &replacement);
+}
+
+fn bind_result_binding(
+    graph: &mut EGraph,
+    result: &ResultBinding<Type<TypeName>>,
+    replacement: &ResultBinding<Type<TypeName>>,
+) {
+    assert_eq!(result.ty(), replacement.ty());
+    let results = result.values();
+    let replacements = replacement.values();
+    assert_eq!(
+        results.len(),
+        replacements.len(),
+        "result ABI changed during SOAC expansion"
+    );
+    for (result, replacement) in results.into_iter().zip(replacements) {
+        bind_result_alias(graph, result, replacement);
+    }
+    super::graph_ops::fold_exposed_projections(graph);
+    for replacement in replacement.values() {
+        super::graph_ops::normalize_place_backed_value_consumers(graph, replacement);
+    }
+}
+
+fn value_binding(graph: &mut EGraph, ty: &Type<TypeName>, value: ValueId) -> ResultBinding<Type<TypeName>> {
+    let abi = super::types::by_value_function_result::<WynLanguage>(ty.clone());
+    super::graph_ops::bind_by_value_result(graph, &abi, value)
+}
+
+fn emit_mapped_result_stores(
+    graph: &mut EGraph,
+    block: BlockId,
+    lane: ValueId,
+    produced: &ResultBinding<Type<TypeName>>,
+    destination: &ResultBinding<Type<TypeName>>,
+    next_effect: &mut crate::IdSource<EffectToken>,
+) -> BlockId {
+    if let Some((array_ty, destination)) = destination.single_destination() {
+        let element_ty =
+            crate::types::array_elem(array_ty).expect("mapped result destination is not an array");
+        assert_eq!(element_ty, produced.ty());
+        let place = match destination {
+            ResultDestination::ReturnValue(view) => {
+                graph.add_view_index_place(graph.view_id(*view), lane, element_ty.clone(), None)
+            }
+            ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                graph.add_index_place(*place, lane, element_ty.clone(), None)
+            }
+            ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => {
+                graph.add_index_place(*storage, lane, element_ty.clone(), None)
+            }
+        };
+        return super::graph_ops::emit_result_to_place(graph, block, produced, place, next_effect, None)
+            .expect("mapped result must be writable through its selected destination");
+    }
+
+    let produced_fields = produced.top_level_fields();
+    let destination_fields = destination.top_level_fields();
+    assert_eq!(produced_fields.len(), destination_fields.len());
+    produced_fields.iter().zip(&destination_fields).fold(block, |tail, (produced, destination)| {
+        emit_mapped_result_stores(graph, tail, lane, produced, destination, next_effect)
+    })
+}
+
 fn expand_one(
     graph: &mut EGraph,
     bid: BlockId,
@@ -192,35 +264,23 @@ fn expand_one(
 ) -> Result<(), String> {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
     match &se.kind {
-        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_serial() => {
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+            if op.is_serial()
+                || (matches!(op.state, screma::PhysicalState::Segmented(_))
+                    && (0..op.result_count())
+                        .any(|field| matches!(op.destination(field), Some(SoacDestination::Fresh)))) =>
+        {
             let operands = screma::ScremaOperands::decode(op, &se.operands, se.result.as_ref())?;
             let input_nids = operands
                 .inputs()
                 .map(|operand| {
-                    operand
-                        .operand
-                        .value()
-                        .ok_or_else(|| "Screma input is not a value or view".to_owned())
+                    operand.operand.value().ok_or_else(|| "Screma input is not a value or view".to_owned())
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let Some(first_input) = op.inputs.first() else {
                 return Err("serial Screma has no array input".into());
             };
-            let result_nid = operands
-                .result()
-                .single_value()
-                .ok_or_else(|| "serial Screma requires one by-value result root".to_owned())?;
-            let Type::Constructed(TypeName::Tuple(_), result_fields) = graph.nodes[result_nid].ty.clone()
-            else {
-                return Err("Screma result must be represented as a tuple".into());
-            };
-            if result_fields.len() != op.result_count() {
-                return Err(format!(
-                    "Screma result tuple has {} fields, expected {}",
-                    result_fields.len(),
-                    op.result_count()
-                ));
-            }
+            let result_fields = operands.result_fields();
 
             let read_inputs = input_nids
                 .iter()
@@ -231,49 +291,65 @@ fn expand_one(
             let reduction_components = op.form.reduction_result_count();
             let scan_components = op.form.scan_input_count();
             let post_count = op.form.post.result_types.len();
-            let uninit_id = catalog().known().uninit;
-
-            // Carried order is post-result arrays, scan accumulators, then
-            // reduction accumulators.  The external tuple is independently
-            // rebound in Futhark order: reductions first, post arrays second.
+            // Only scalar accumulators cross the loop edge. Array results are
+            // written through a selected local or external destination.
             let mut carried = Vec::new();
-            let mut post_carried_types = Vec::with_capacity(post_count);
-            let mut post_is_output_view = Vec::with_capacity(post_count);
+            let mut post_sinks = Vec::with_capacity(post_count);
+            let mut loop_results = Vec::with_capacity(op.result_count());
+            let mut prelude = Vec::new();
+            let mut place_backed_results = Vec::new();
             for post in 0..post_count {
                 let field = reduction_components + post;
                 let destination = op
                     .destination(field)
                     .ok_or_else(|| format!("Screma result {field} has no destination"))?;
-                let initial = match destination {
+                let result = &result_fields[field];
+                let sink = match destination {
                     SoacDestination::UniqueInput => {
                         return Err("unresolved UniqueInput destination reached physical expansion".into())
                     }
-                    SoacDestination::Fresh => graph.intern_pure(
-                        PureOp::Intrinsic {
-                            id: uninit_id,
-                            overload_idx: 0,
-                        },
-                        smallvec![],
-                        result_fields[field].clone(),
-                        None,
-                    ),
-                    SoacDestination::OutputView => operands
-                        .output(field)
-                        .and_then(|operand| operand.operand.value())
-                        .ok_or_else(|| format!("Screma post result {post} has no output-view operand"))?,
+                    SoacDestination::Fresh => {
+                        let mut views = Vec::with_capacity(result.destination_count());
+                        let sink = result.map_destinations(|ty, _| {
+                            let (place, effect) = detached_alloca(graph, ty.clone(), next_effect, None);
+                            prelude.push(effect);
+                            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                            let view = graph.add_place_view(place, view_ty, None);
+                            views.push(view.value());
+                            place_backed_results.push(view.value());
+                            ResultDestination::Place(PlaceDestination::Fixed(place))
+                        });
+                        let mut views = views.into_iter();
+                        let binding = result.map_destinations(|_, _| {
+                            ResultDestination::ReturnValue(
+                                views.next().expect("fresh destination view count changed"),
+                            )
+                        });
+                        bind_result_binding(graph, result, &binding);
+                        sink
+                    }
+                    SoacDestination::OutputView => {
+                        let output =
+                            operands.output(field).and_then(|operand| operand.operand.value()).ok_or_else(
+                                || format!("Screma post result {post} has no output-view operand"),
+                            )?;
+                        let binding = output_component_views(graph, result, output)?;
+                        bind_result_binding(graph, result, &binding);
+                        mapped_view_destination(graph, result.ty(), output)?
+                    }
                     SoacDestination::InputBuffer => {
                         if input_nids.len() != 1 {
                             return Err(
                                 "input-buffer Screma result requires exactly one array input".into()
                             );
                         }
-                        input_nids[0]
+                        let output = input_nids[0];
+                        let output = value_binding(graph, result.ty(), output);
+                        bind_result_binding(graph, result, &output);
+                        output
                     }
                 };
-                post_is_output_view.push(destination.is_output_view());
-                let carried_type = graph.nodes[initial].ty.clone();
-                post_carried_types.push(carried_type.clone());
-                carried.push((carried_type, initial));
+                post_sinks.push(sink);
             }
 
             for scan in &op.form.scans {
@@ -287,33 +363,23 @@ fn expand_one(
                 }
             }
 
-            let mut result_indices = (0..reduction_components)
-                .map(|component| post_count + scan_components + component)
-                .collect::<Vec<_>>();
-            result_indices.extend(0..post_count);
-            let mut result_field_types = op
-                .form
-                .reductions
-                .iter()
-                .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
-                .collect::<Vec<_>>();
-            result_field_types.extend(post_carried_types.iter().cloned());
-            let result_tuple_type =
-                Type::Constructed(TypeName::Tuple(op.result_count()), result_field_types);
-            graph.retype_node(result_nid, result_tuple_type.clone());
-            let result = ResultBinding::TupleFromCarried {
-                result_node: result_nid,
-                tuple_ty: result_tuple_type,
-                indices: result_indices,
-            };
+            for component in 0..reduction_components {
+                loop_results.push(LoopResultBinding {
+                    result: result_fields[component].clone(),
+                    source: LoopResultSource::Carried(scan_components + component),
+                });
+            }
 
-            expand_loop(
+            let prelude_count = prelude.len();
+            graph.skeleton.blocks[bid].side_effects.splice(idx..idx, prelude);
+
+            let continuation = expand_loop(
                 graph,
                 bid,
-                idx,
+                idx + prelude_count,
                 &len_input,
                 &carried,
-                &result,
+                &loop_results,
                 next_effect,
                 false,
                 |graph, next_effect, body, lane, carried_values| {
@@ -331,84 +397,62 @@ fn expand_one(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let pre_values = emit_screma_lambda(graph, callables, &op.form.pre, input_elements);
+                    let pre_results =
+                        emit_screma_lambda(graph, body, callables, &op.form.pre, input_elements);
+                    let pre_values = super::soac::lambda::materialize_result_values(graph, &pre_results);
 
                     let mut pre_offset = 0;
-                    let mut scan_offset = post_count;
+                    let mut scan_offset = 0;
                     let mut new_scans = Vec::with_capacity(scan_components);
                     for scan in &op.form.scans {
                         let width = scan.neutral.len();
                         let mut arguments = carried_values[scan_offset..scan_offset + width].to_vec();
                         arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
-                        new_scans.extend(emit_screma_lambda(graph, callables, &scan.operator, arguments));
+                        let results = emit_screma_lambda(graph, body, callables, &scan.operator, arguments);
+                        new_scans.extend(super::soac::lambda::materialize_result_values(graph, &results));
                         pre_offset += width;
                         scan_offset += width;
                     }
 
-                    let mut reduction_offset = post_count + scan_components;
+                    let mut reduction_offset = scan_components;
                     let mut new_reductions = Vec::with_capacity(reduction_components);
                     for reduction in &op.form.reductions {
                         let width = reduction.neutral.len();
                         let mut arguments =
                             carried_values[reduction_offset..reduction_offset + width].to_vec();
                         arguments.extend_from_slice(&pre_values[pre_offset..pre_offset + width]);
-                        new_reductions.extend(emit_screma_lambda(
-                            graph,
-                            callables,
-                            &reduction.operator,
-                            arguments,
-                        ));
+                        let results =
+                            emit_screma_lambda(graph, body, callables, &reduction.operator, arguments);
+                        new_reductions
+                            .extend(super::soac::lambda::materialize_result_values(graph, &results));
                         pre_offset += width;
                         reduction_offset += width;
                     }
 
                     let mut post_arguments = new_scans.clone();
                     post_arguments.extend_from_slice(&pre_values[pre_offset..]);
-                    let post_values = emit_screma_lambda(graph, callables, &op.form.post, post_arguments);
-                    debug_assert_eq!(post_values.len(), post_count);
+                    let post_results =
+                        emit_screma_lambda(graph, body, callables, &op.form.post, post_arguments);
+                    debug_assert_eq!(post_results.len(), post_count);
 
                     let mut next = Vec::with_capacity(carried_values.len());
-                    for post in 0..post_count {
-                        let output = carried_values[post];
-                        let value = post_values[post];
-                        if post_is_output_view[post] {
-                            let view = graph.view_id(output);
-                            let place = graph.add_view_index_place(
-                                view,
-                                lane,
-                                op.form.post.result_types[post].clone(),
-                                None,
-                            );
-                            let effect_in = alloc_effect(next_effect);
-                            let effect_out = alloc_effect(next_effect);
-                            let operand = graph.operand_ref(value);
-                            graph.skeleton.blocks[body].side_effects.push(SideEffect {
-                                kind: SideEffectKind::Effect(EffectOp::Store { place }),
-                                operands: smallvec![operand],
-                                result: None,
-                                effects: Some((effect_in, effect_out)),
-                                span: None,
-                            });
-                            next.push(output);
-                        } else {
-                            next.push(emit_write_element(
-                                graph,
-                                output,
-                                lane,
-                                value,
-                                &post_carried_types[post],
-                                &op.form.post.result_types[post],
-                            ));
-                        }
+                    let mut tail = body;
+                    for (produced, sink) in post_results.iter().zip(&post_sinks) {
+                        tail = emit_mapped_result_stores(graph, tail, lane, produced, sink, next_effect);
                     }
                     next.extend(new_scans);
                     next.extend(new_reductions);
-                    LoopBody {
-                        tail: body,
-                        carried: next,
-                    }
+                    LoopBody { tail, carried: next }
                 },
             );
+            for result in place_backed_results {
+                super::graph_ops::materialize_place_backed_projections(
+                    graph,
+                    result,
+                    continuation,
+                    next_effect,
+                );
+            }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
             let input_count = op.body.inputs.len();
@@ -425,16 +469,13 @@ fn expand_one(
                 })
                 .collect::<Vec<_>>();
             let map_body = op.body.map.seg_body();
-            let map_func = map_body.map(|body| {
-                callables.get(&body.region).expect("Filter map callable boundary").clone()
-            });
+            let map_func = map_body
+                .map(|body| callables.get(&body.region).expect("Filter map callable boundary").clone());
             let output_elem_ty = op.body.output_element_type();
             let predicate_body =
                 op.body.predicate.seg_body().expect("validated Filter predicate has a region");
-            let pred_func = callables
-                .get(&predicate_body.region)
-                .expect("Filter predicate callable boundary")
-                .clone();
+            let pred_func =
+                callables.get(&predicate_body.region).expect("Filter predicate callable boundary").clone();
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
                 filter::ScheduledState::Pipeline { storage, plan, .. } => {
@@ -539,7 +580,9 @@ fn expand_one(
                     ),
                     hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
                 },
-                hist::PhysicalState::Serial => build_hist_loop(graph, bid, idx, hist, next_effect, callables),
+                hist::PhysicalState::Serial => {
+                    build_hist_loop(graph, bid, idx, hist, next_effect, callables)
+                }
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
@@ -566,6 +609,7 @@ fn expand_one(
             let Some(first_input) = read_inputs.first() else {
                 return Err("segmented map has no array input".into());
             };
+            let result_fields = operands.result_fields();
             let mut output_views = Vec::with_capacity(op.result_count());
             for field in 0..op.result_count() {
                 let destination = op
@@ -583,6 +627,16 @@ fn expand_one(
                         "segmented map result {field} has unsupported destination {destination:?}"
                     ));
                 };
+                let result = &result_fields[field];
+                let output = value_binding(graph, result.ty(), output);
+                bind_result_binding(graph, result, &output);
+                if output.destination_count() != result.destination_count() {
+                    return Err(format!(
+                        "segmented map result {field} has {} physical leaves but its output has {}",
+                        result.destination_count(),
+                        output.destination_count()
+                    ));
+                }
                 output_views.push(output);
             }
             build_parallel_screma_map(
@@ -594,10 +648,6 @@ fn expand_one(
                 &read_inputs,
                 &op.form.pre,
                 &output_views,
-                operands
-                    .result()
-                    .single_value()
-                    .ok_or_else(|| "segmented map requires one by-value result root".to_owned())?,
                 next_effect,
                 callables,
             );
@@ -605,6 +655,76 @@ fn expand_one(
         _ => return Err("SOAC expansion target changed after selection".into()),
     }
     Ok(())
+}
+
+fn mapped_view_destination(
+    graph: &EGraph,
+    logical_array: &Type<TypeName>,
+    view: ValueId,
+) -> Result<ResultBinding<Type<TypeName>>, String> {
+    let Type::Constructed(TypeName::Array, arguments) = graph.nodes[view].ty().clone() else {
+        return Err("mapped output destination is not an array view".into());
+    };
+    let mut arguments = arguments;
+    arguments[0] = soac_element_type(logical_array);
+    Ok(ResultBinding::destination(
+        Type::Constructed(TypeName::Array, arguments),
+        ResultDestination::ReturnValue(view),
+    ))
+}
+
+fn output_component_views(
+    graph: &mut EGraph,
+    result: &ResultBinding<Type<TypeName>>,
+    view: ValueId,
+) -> Result<ResultBinding<Type<TypeName>>, String> {
+    let leaves = result.destination_leaves();
+    if leaves.len() == 1 {
+        return Ok(result.map_destinations(|_, _| ResultDestination::ReturnValue(view)));
+    }
+    let parent_ty = graph.nodes[view].ty().clone();
+    let parent_elem = crate::types::array_elem(&parent_ty)
+        .ok_or_else(|| "mapped output destination is not an array view".to_owned())?;
+    let parent_elem_bytes = crate::ssa::layout::type_byte_size(parent_elem)
+        .ok_or_else(|| "mapped output destination has no physical element size".to_owned())?;
+    let region = parent_ty
+        .array_buffer()
+        .cloned()
+        .ok_or_else(|| "mapped output destination has no storage region".to_owned())?;
+    let mut offset_bytes = 0u32;
+    let mut component_views = Vec::with_capacity(leaves.len());
+    for leaf in &leaves {
+        let bytes = crate::ssa::layout::type_byte_size(leaf.ty()).ok_or_else(|| {
+            "a structured mapped output component must have a fixed physical size".to_owned()
+        })?;
+        if offset_bytes % parent_elem_bytes != 0 {
+            return Err("mapped output component is not aligned to its storage element".into());
+        }
+        let Type::Constructed(TypeName::Size(length), _) =
+            leaf.ty().array_size().ok_or_else(|| "mapped output component is not an array".to_owned())?
+        else {
+            return Err("a structured mapped output component must have a fixed length".into());
+        };
+        let offset = super::graph_ops::intern_u32(graph, offset_bytes / parent_elem_bytes, None);
+        let length = super::graph_ops::intern_u32(
+            graph,
+            u32::try_from(*length).map_err(|_| "mapped output length exceeds u32")?,
+            None,
+        );
+        let view_ty = crate::types::view_array_of(leaf.ty(), region.clone());
+        component_views.push(super::graph_ops::intern_inherited_view(
+            graph, view, offset, length, view_ty, None,
+        ));
+        offset_bytes = offset_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "mapped output component offsets overflow u32".to_owned())?;
+    }
+    let mut component_views = component_views.into_iter();
+    Ok(result.map_destinations(|_, _| {
+        ResultDestination::ReturnValue(
+            component_views.next().expect("component view count matches result leaves"),
+        )
+    }))
 }
 
 #[cfg(test)]

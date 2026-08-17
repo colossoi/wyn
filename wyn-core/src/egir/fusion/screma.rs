@@ -15,8 +15,8 @@ use crate::egir::program::{fresh_region_name, ProgramIdentities, SemanticFunc, S
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
-    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, SkeletonTerminator,
-    SoacInputType, ValueId, ValueKind,
+    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, SkeletonTerminator, SoacInputType,
+    ValueId, ValueKind,
 };
 use crate::LookupMap;
 
@@ -589,9 +589,7 @@ fn fuse_across_middle_barrier(
         .chain(consumer_collective[consumer_scan_inputs..].iter().copied())
         .chain(producer_mapped.iter().copied())
         .chain(forwarded_parameters.iter().map(|&index| {
-            pre_arguments[index]
-                .value()
-                .expect("forwarded fusion result is a value or view")
+            pre_arguments[index].value().expect("forwarded fusion result is a value or view")
         }))
         .collect::<Vec<_>>();
     let pre_result_types = producer.form.pre.result_types[..producer_scan_inputs]
@@ -830,7 +828,8 @@ fn lambda_results_depend_on_parameters(
         return Some(results.into_iter().any(|result| parameters.contains(&result)));
     }
     let recipe = build_projection_recipe(program, lambda, &results.collect::<Vec<_>>())?;
-    Some(recipe.input_dependencies().iter().any(|input| parameters.contains(input)))
+    let dependencies = recipe.input_dependencies();
+    Some(dependencies.iter().any(|input| parameters.contains(input)))
 }
 
 fn function_return_site(function: &SemanticFunc) -> Option<(crate::flow::BlockId, Vec<ValueId>)> {
@@ -906,7 +905,7 @@ impl ProjectionBuilder<'_> {
         }
         self.region_stack.push(function.region);
         let result = (|| {
-            if inlining::inlineable_return_root(function).is_some() {
+            if inlining::inlineable_node_count(function).is_some() {
                 let mut memo = LookupMap::new();
                 return roots
                     .iter()
@@ -984,12 +983,22 @@ impl ProjectionBuilder<'_> {
                     }) if *arity == fields.len() => {
                         self.value(function, *fields.get(*index as usize)?, arguments, memo)?
                     }
-                    _ => ProjectedValue::Pure {
-                        op: PureOp::Project { index: *index },
-                        operands: vec![self.value(function, operands[0], arguments, memo)?],
-                        ty: definition.ty.clone(),
-                        span: definition.span,
-                    },
+                    _ => {
+                        let operand = self.value(function, operands[0], arguments, memo)?;
+                        match &operand {
+                            ProjectedValue::Pure {
+                                op: PureOp::Tuple(arity),
+                                operands: fields,
+                                ..
+                            } if *arity == fields.len() => fields.get(*index as usize)?.clone(),
+                            _ => ProjectedValue::Pure {
+                                op: PureOp::Project { index: *index },
+                                operands: vec![operand],
+                                ty: definition.ty.clone(),
+                                span: definition.span,
+                            },
+                        }
+                    }
                 }
             }
             ValueKind::CallResult { call, .. } => {
@@ -1018,6 +1027,7 @@ impl ProjectionBuilder<'_> {
             },
             ValueKind::BlockParam { .. }
             | ValueKind::PlaceLength { .. }
+            | ValueKind::PlaceView { .. }
             | ValueKind::SideEffectResult => return None,
         };
         memo.insert(source, value.clone());
@@ -1041,9 +1051,7 @@ impl ProjectionBuilder<'_> {
         let result_ty = callee.graph.nodes.get(root)?.ty.clone();
         let arguments = call_arguments
             .iter()
-            .map(|argument| {
-                self.value(caller, argument.value()?, caller_arguments, caller_memo)
-            })
+            .map(|argument| self.value(caller, argument.value()?, caller_arguments, caller_memo))
             .collect::<Vec<_>>();
         self.function(callee, &[root], &[result_ty], &arguments)?.into_iter().next()
     }
@@ -1251,12 +1259,14 @@ impl ProjectionEmitter<'_, '_> {
         );
         let (_, result) = self
             .graph
-            .add_call(
+            .emit_call(
+                self.graph.skeleton.entry,
                 region,
                 projected_function.params(),
                 projected_function.result(),
                 call_arguments,
                 projected_function.effects(),
+                None,
                 None,
             )
             .ok()?;
@@ -1286,9 +1296,7 @@ fn append_optional_wrapper_captures(
         wrapper_arguments[*cursor..*cursor + capture_count]
             .iter()
             .copied()
-            .map(|argument| {
-                Some(argument.value().expect("projected lambda captures are values or views"))
-            }),
+            .map(|argument| Some(argument.value().expect("projected lambda captures are values or views"))),
     );
     *cursor += capture_count;
 }
@@ -1299,16 +1307,16 @@ fn invoke_lambda(
     lambda: &screma::Lambda,
     arguments: Vec<OperandRef>,
 ) -> Vec<ValueId> {
-    let callee = lambda
-        .seg_body()
-        .map(|body| program.region(body.region).expect("Screma lambda region"));
-    let results = lambda_ops::emit_call(graph, lambda, callee, arguments);
-    if let (Some(callee), Some(first)) = (callee, results.first().copied()) {
-        if inlining::inlineable_return_root(callee).is_some() {
+    let callee = lambda.seg_body().map(|body| program.region(body.region).expect("Screma lambda region"));
+    let block = graph.skeleton.entry;
+    let bindings = lambda_ops::emit_call(graph, block, lambda, callee, arguments);
+    let first = bindings.first().and_then(|result| result.values().first().copied());
+    if let (Some(callee), Some(first)) = (callee, first) {
+        if inlining::inlineable_node_count(callee).is_some() {
             let _ = inlining::inline_pure_call(graph, first, callee);
         }
     }
-    results
+    lambda_ops::materialize_result_values(graph, &bindings)
 }
 #[derive(Clone, Copy)]
 struct ValueRef {
@@ -1470,7 +1478,9 @@ fn parallel_lambdas(
             call_results.push(
                 call_arguments
                     .into_iter()
-                    .map(|argument| argument.value().expect("identity lambda arguments are values or views"))
+                    .map(|argument| {
+                        argument.value().expect("identity lambda arguments are values or views")
+                    })
                     .collect(),
             );
         }

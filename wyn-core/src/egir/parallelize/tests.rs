@@ -290,16 +290,11 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
                 return None;
             };
             let value = effect.operands.first()?.value()?;
-            let resource = phase2
-                .body
-                .graph
-                .place_value_dependencies(*place)
-                .into_iter()
-                .find_map(|dependency| {
+            let resource =
+                phase2.body.graph.place_value_dependencies(*place).into_iter().find_map(|dependency| {
                     graph_ops::storage_resource_under(&phase2.body.graph, dependency)
                 });
-            (resource == Some(SemanticResourceRef(offsets)))
-            .then_some(value)
+            (resource == Some(SemanticResourceRef(offsets))).then_some(value)
         })
         .expect("block-offset store");
     assert!(matches!(

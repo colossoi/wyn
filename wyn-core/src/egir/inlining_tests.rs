@@ -4,9 +4,8 @@ use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::program::{SemanticFunc, SemanticResourceRef};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef,
-    PureOp, ResultBinding, Semantic, SkeletonTerminator, ValueId, ValueKind,
-    WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, PureOp,
+    ResultBinding, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
@@ -34,12 +33,14 @@ fn add_call(
     arguments: impl IntoIterator<Item = ValueId>,
 ) -> ResultBinding<Type<TypeName>> {
     graph
-        .add_call(
+        .emit_call(
+            graph.skeleton.entry,
             callee,
             params,
             &by_value_function_result::<WynLanguage>(result_ty),
             arguments.into_iter().map(OperandRef::Value),
             CallEffects::Pure,
+            None,
             None,
         )
         .expect("complete test call")
@@ -82,25 +83,12 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let mut caller = EGraph::<Semantic>::new();
     let actual_x = caller.add_test_value_parameter(0, ty.clone());
     let actual_invariant = caller.add_test_value_parameter(1, ty.clone());
-    let call = add_call(
-        &mut caller,
-        region,
-        &params,
-        ty,
-        [actual_x, actual_invariant],
-    )
-    .single_value()
-    .unwrap();
+    let call =
+        add_call(&mut caller, region, &params, ty, [actual_x, actual_invariant]).single_value().unwrap();
 
     let inlined = inline_pure_call(&mut caller, call, &callee).expect("pure call inlines");
 
-    assert!(matches!(
-        caller.nodes[call].kind,
-        ValueKind::Union {
-            left,
-            right
-        } if left == inlined && right == inlined
-    ));
+    assert_eq!(caller.canonical_value(call), inlined);
     let ValueKind::Pure { op, operands } = &caller.nodes[inlined].kind else {
         panic!("inlined root is not pure")
     };
@@ -145,9 +133,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     let mut caller = EGraph::<Semantic>::new();
     let two = caller.intern_constant(ConstantValue::U32(2), ty.clone());
     let seven = caller.intern_constant(ConstantValue::U32(7), ty.clone());
-    let call = add_call(&mut caller, region, &params, ty, [two, seven])
-        .single_value()
-        .unwrap();
+    let call = add_call(&mut caller, region, &params, ty, [two, seven]).single_value().unwrap();
 
     let inlined = inline_pure_call(&mut caller, call, &callee).expect("pure call inlines");
 
@@ -155,10 +141,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
         inlined, seven,
         "aggregate construction and projection fold during substitution"
     );
-    assert!(matches!(
-        caller.nodes[call].kind,
-        ValueKind::Union { left, right } if left == seven && right == seven
-    ));
+    assert_eq!(caller.canonical_value(call), seven);
 }
 
 #[test]
@@ -198,10 +181,7 @@ fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
 
     inline_pure_call(&mut caller, left_result, &callee).expect("product call inlines");
 
-    assert!(matches!(
-        caller.nodes[right_result].kind,
-        ValueKind::Union { left, right } if left == seven && right == seven
-    ));
+    assert_eq!(caller.canonical_value(right_result), seven);
     assert!(caller.verify_hash_cons().is_ok());
 }
 
@@ -252,10 +232,7 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let selected = callee_graph.add_block_param(merge, ty.clone());
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
-    let params = semantic_params([
-        ("value", ty.clone()),
-        ("choose_left", bool_ty.clone()),
-    ]);
+    let params = semantic_params([("value", ty.clone()), ("choose_left", bool_ty.clone())]);
     let callee = SemanticFunc::new(
         region,
         "choose_offset".into(),
@@ -270,9 +247,8 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let mut caller = EGraph::<Semantic>::new();
     let actual = caller.add_test_value_parameter(0, ty.clone());
     let condition = caller.add_test_value_parameter(1, bool_ty);
-    let call = add_call(&mut caller, region, &params, ty.clone(), [actual, condition])
-        .single_value()
-        .unwrap();
+    let call =
+        add_call(&mut caller, region, &params, ty.clone(), [actual, condition]).single_value().unwrap();
     let three = caller.intern_constant(ConstantValue::U32(3), ty.clone());
     let final_value = caller.intern_pure(
         PureOp::BinOp(crate::op::BinaryOperator::Multiply),
@@ -287,10 +263,7 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let inlined =
         inline_call_at_block(&mut caller, call, caller_entry, &callee).expect("selection CFG inlines");
 
-    assert!(matches!(
-        caller.nodes[call].kind,
-        ValueKind::CallResult { .. }
-    ));
+    assert!(matches!(caller.nodes[call].kind, ValueKind::CallResult { .. }));
     assert!(matches!(
         &caller.nodes[final_value].kind,
         ValueKind::Pure { operands, .. } if operands[0] == inlined

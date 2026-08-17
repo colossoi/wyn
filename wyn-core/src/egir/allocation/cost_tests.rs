@@ -4,8 +4,7 @@ use crate::egir::graph_projector::GraphProjector;
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::stage_variance::StageDependenceAnalysis;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, EffectToken, LoadMode, PureOp, SideEffectSite,
-    WynLanguage,
+    by_value_function_result, callable_parameter, EffectToken, PureOp, SideEffectSite, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
@@ -25,9 +24,7 @@ fn u32_ty() -> Type<TypeName> {
 fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     let ty = u32_ty();
     let mut graph = EGraph::new();
-    let params = (0..4)
-        .map(|index| graph.add_test_value_parameter(index, ty.clone()))
-        .collect::<Vec<_>>();
+    let params = (0..4).map(|index| graph.add_test_value_parameter(index, ty.clone())).collect::<Vec<_>>();
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(params[0])));
     let inputs = vec![
@@ -80,9 +77,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
         vec![],
         ["uniform", "read_only", "read_write", "dispatch_size"]
             .into_iter()
-            .map(|name| {
-                callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty.clone())
-            })
+            .map(|name| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty.clone()))
             .collect(),
         by_value_function_result::<WynLanguage>(ty),
         graph,
@@ -128,10 +123,7 @@ fn structured_storage_prefix_requires_materialization() {
     let loaded = graph.alloc_side_effect_result(i32_ty());
     let loaded_binding = graph.value_result(loaded);
     graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load {
-            place,
-            mode: LoadMode::Element,
-        }),
+        kind: SideEffectKind::Effect(EffectOp::Load { place }),
         operands: smallvec![],
         result: Some(loaded_binding),
         effects: Some((EffectToken::from(0), EffectToken::from(1))),

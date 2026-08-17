@@ -28,9 +28,12 @@ use crate::types::TypeExt;
 use crate::LookupMap;
 
 use super::inlining;
+use super::ir::Language;
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
 use super::program::PhysicalFunc;
-use super::types::{EGraph, Physical, ValueId, ValueKind};
+use super::types::{
+    EGraph, EffectOp, EffectToken, Physical, SideEffectKind, SideEffectSite, ValueId, ValueKind,
+};
 
 #[cfg(test)]
 #[path = "partial_inline_tests.rs"]
@@ -65,10 +68,16 @@ struct Candidate {
     callee_blocks: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct EffectfulCandidate {
+    effect: SideEffectSite,
+    callee: crate::FunctionId,
+}
+
 /// Inline profitable mixed-variance calls in every physical body. The ordinary
 /// scoped elaborator then performs CSE and LICM on the exposed DAG.
 pub fn partially_inline_calls(
-    program: super::materialize::Materialized,
+    program: super::soac_expand::SoacsExpanded,
 ) -> Result<PartiallyInlined, String> {
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
@@ -76,8 +85,8 @@ pub fn partially_inline_calls(
     let callees: LookupMap<crate::FunctionId, PhysicalFunc> =
         program.functions.iter().map(|function| (function.region, function.clone())).collect();
     program
-        .try_map_graphs(|site, mut graph| {
-            inline_body(&mut graph, &callees)
+        .try_map_graphs_with_state(|site, mut graph, _, context| {
+            inline_body(&mut graph, &callees, &mut context.effect_ids)
                 .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
             Ok(graph)
         })
@@ -87,8 +96,21 @@ pub fn partially_inline_calls(
 fn inline_body(
     graph: &mut EGraph<Physical>,
     callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
 ) -> Result<InliningStats, String> {
     let mut stats = InliningStats::default();
+    let mut effectful_inlines = 0usize;
+    while let Some(candidate) = find_effectful_candidate(graph, callees) {
+        if effectful_inlines == 1024 {
+            return Err("effectful call inlining exceeded the acyclic call-graph bound".into());
+        }
+        let callee = &callees[&candidate.callee];
+        let cost = inlining::inline_effectful_call(graph, candidate.effect, callee, effect_ids)?;
+        effectful_inlines += 1;
+        stats.calls_inlined += 1;
+        stats.node_budget += cost.nodes;
+        stats.block_budget += cost.blocks;
+    }
     while stats.calls_inlined < MAX_INLINES
         && stats.node_budget < MAX_INLINED_NODES
         && stats.block_budget < MAX_INLINED_BLOCKS
@@ -105,6 +127,36 @@ fn inline_body(
         stats.block_budget += candidate.callee_blocks;
     }
     Ok(stats)
+}
+
+fn find_effectful_candidate(
+    graph: &EGraph<Physical>,
+    callees: &LookupMap<crate::FunctionId, PhysicalFunc>,
+) -> Option<EffectfulCandidate> {
+    for (block, body) in &graph.skeleton.blocks {
+        for (index, effect) in body.side_effects.iter().enumerate() {
+            let SideEffectKind::Effect(EffectOp::Call { site }) = effect.kind() else {
+                continue;
+            };
+            let call = graph.call(*site);
+            if call.effects() == super::types::CallEffects::Pure
+                && call.arguments().iter().all(|argument| argument.place().is_none())
+                && call.result().places().is_empty()
+            {
+                continue;
+            }
+            let callee_id = call.callee();
+            if !callees.contains_key(&callee_id) {
+                continue;
+            }
+            let effect = SideEffectSite { block, index };
+            return Some(EffectfulCandidate {
+                effect,
+                callee: callee_id,
+            });
+        }
+    }
+    None
 }
 
 fn find_candidate(
@@ -127,13 +179,10 @@ fn find_candidate(
             .chain(block.term.referenced_nodes());
         let reachable =
             wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-                if let Some(definition) = graph.nodes.get(node) {
-                    out.extend(definition.children());
-                }
+                out.extend(graph.value_dependencies(node));
             });
         for node in reachable {
-            let ValueKind::CallResult { call, .. } = &graph.nodes[node].kind
-            else {
+            let ValueKind::CallResult { call, .. } = &graph.nodes[node].kind else {
                 continue;
             };
             let boundary = graph.call(*call);
@@ -187,13 +236,10 @@ fn find_candidate(
                 .chain(block.term.referenced_nodes());
             let reachable =
                 wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-                    if let Some(definition) = graph.nodes.get(node) {
-                        out.extend(definition.children());
-                    }
+                    out.extend(graph.value_dependencies(node));
                 });
             for node in reachable {
-                let ValueKind::CallResult { call, .. } = &graph.nodes[node].kind
-                else {
+                let ValueKind::CallResult { call, .. } = &graph.nodes[node].kind else {
                     continue;
                 };
                 let boundary = graph.call(*call);
@@ -241,9 +287,11 @@ fn find_candidate(
 }
 
 fn is_fixed_composite_array(ty: &polytype::Type<crate::ast::TypeName>) -> bool {
-    ty.array_variant().is_some_and(crate::types::is_array_variant_composite)
+    (ty.array_variant().is_some_and(crate::types::is_array_variant_composite)
         && matches!(
             ty.array_size(),
             Some(polytype::Type::Constructed(crate::ast::TypeName::Size(_), _))
-        )
+        ))
+        || super::types::WynLanguage::product_fields(ty)
+            .is_some_and(|fields| fields.iter().any(is_fixed_composite_array))
 }

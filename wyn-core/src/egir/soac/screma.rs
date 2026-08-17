@@ -41,11 +41,14 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
             ));
         }
         let result = result.ok_or_else(|| "Screma has no result binding".to_owned())?;
-        Ok(Self {
-            op,
-            operands,
-            result,
-        })
+        if result.field_count() != op.result_count() {
+            return Err(format!(
+                "Screma produces {} logical results, but its result binding has {} fields",
+                op.result_count(),
+                result.field_count()
+            ));
+        }
+        Ok(Self { op, operands, result })
     }
 
     pub fn input_count(&self) -> usize {
@@ -87,6 +90,10 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
 
     pub fn result(&self) -> &ResultBinding<Type<TypeName>> {
         self.result
+    }
+
+    pub fn result_fields(&self) -> Vec<ResultBinding<Type<TypeName>>> {
+        self.result.top_level_fields()
     }
 }
 /// The implementation of a Screma lambda.
@@ -416,7 +423,6 @@ impl ScremaForm {
         nodes
     }
 
-
     fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
         self.pre.remap_capture_values(map);
         for scan in &mut self.scans {
@@ -621,6 +627,10 @@ impl<P: WynSoacPhase> Op<P> {
 
     fn base_referenced_nodes(&self) -> Vec<ValueId> {
         self.form.base_referenced_nodes()
+    }
+
+    pub(crate) fn remap_base_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
+        self.form.remap_referenced_values(&mut map);
     }
 }
 

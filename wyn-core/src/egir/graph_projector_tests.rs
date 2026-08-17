@@ -1,8 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{
-    EffectOp, EffectToken, LoadMode, OperandRef, PlaceAccess, PlaceId, PlaceRegion, PlaceType,
-    PureOp, SideEffectKind,
+    EffectOp, EffectToken, OperandRef, PlaceAccess, PlaceId, PlaceRegion, PlaceType, PureOp, SideEffectKind,
 };
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
@@ -34,10 +33,7 @@ fn load_effect(
     effects: (EffectToken, EffectToken),
 ) -> SideEffect {
     SideEffect::new(
-        SideEffectKind::Effect(EffectOp::Load {
-            place,
-            mode: LoadMode::Element,
-        }),
+        SideEffectKind::Effect(EffectOp::Load { place }),
         smallvec![],
         Some(graph.value_result(result)),
         Some(effects),
@@ -45,11 +41,7 @@ fn load_effect(
     )
 }
 
-fn store_effect(
-    place: PlaceId,
-    value: ValueId,
-    effects: (EffectToken, EffectToken),
-) -> SideEffect {
+fn store_effect(place: PlaceId, value: ValueId, effects: (EffectToken, EffectToken)) -> SideEffect {
     SideEffect::new(
         SideEffectKind::Effect(EffectOp::Store { place }),
         smallvec![OperandRef::Value(value)],
@@ -104,11 +96,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     );
     graph.skeleton.blocks[entry].side_effects.push(effect);
     let body_param = graph.add_block_param(body, u32_ty());
-    let effect = store_effect(
-        place,
-        body_param,
-        (EffectToken::from(2), EffectToken::from(3)),
-    );
+    let effect = store_effect(place, body_param, (EffectToken::from(2), EffectToken::from(3)));
     graph.skeleton.blocks[body].side_effects.push(effect);
     let produced_args = graph.admit_flow_values([produced]);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
@@ -136,14 +124,15 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
         .expect("projection");
     assert_eq!(
         projected.graph.skeleton.blocks.iter().map(|(_, block)| block.side_effects.len()).sum::<usize>(),
-        2,
-        "selected store and its load producer survive; unrelated load does not"
+        1,
+        "the selected store consumes the canonical alias without retaining either replaced load"
     );
     assert!(projected.node(produced).is_some());
     assert!(projected.node(unrelated).is_none());
+    assert_eq!(projected.node(produced), projected.node(alias));
     assert_eq!(
         projected.graph.nodes[projected.node(produced).unwrap()].alias,
-        projected.node(alias)
+        None
     );
     assert!(matches!(
         projected.graph.skeleton.blocks[projected.block(entry).unwrap()]
@@ -485,11 +474,7 @@ fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
         (EffectToken::from(1), EffectToken::from(2)),
     );
     graph.skeleton.blocks[continuation].side_effects.push(effect);
-    let effect = store_effect(
-        place,
-        result,
-        (EffectToken::from(2), EffectToken::from(3)),
-    );
+    let effect = store_effect(place, result, (EffectToken::from(2), EffectToken::from(3)));
     graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 

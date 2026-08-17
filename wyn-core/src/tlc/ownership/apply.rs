@@ -176,11 +176,7 @@ fn array_with_is_promotable<C: Payload, S: Payload>(
 // =============================================================================
 
 /// Return SOAC term ids whose primary input has a unique owner and whose
-/// pointwise body would permit input-side reuse.
-///
-/// This records an ownership fact, not a physical reuse decision. EGIR may
-/// fuse or reroute the operation before residency planning, and only then
-/// resolves the candidate using the final liveness graph.
+/// pointwise body and remaining liveness permit input-side reuse.
 ///
 /// A Map qualifies only when *all* of:
 ///
@@ -220,29 +216,28 @@ fn is_eligible_unique_input_soac<C: Payload, S: Payload>(term: &Term<C, S>, mode
             // Multi-input map isn't eligible (the body reads parallel
             // streams; the consume rewrite would only own one of them).
             inputs.len() == 1
-                && unique_input_var(&inputs[0], model).is_some_and(|input_sym| {
+                && unique_input_var(term.id, &inputs[0], model).is_some_and(|input_sym| {
                     map_body_ok(&lam.lam) && !body_references_sym(&lam.lam.body, input_sym)
                 })
         }
-        TermKind::Soac(SoacOp::Scan { op, input, .. }) => {
-            unique_input_var(input, model).is_some_and(|input_sym| {
+        TermKind::Soac(SoacOp::Scan { op, input, .. }) => unique_input_var(term.id, input, model)
+            .is_some_and(|input_sym| {
                 scan_body_ok(&op.lam) && !body_references_sym(&op.lam.body, input_sym)
-            })
-        }
-        TermKind::Soac(SoacOp::Filter { pred, input, .. }) => {
-            unique_input_var(input, model).is_some_and(|input_sym| {
+            }),
+        TermKind::Soac(SoacOp::Filter { pred, input, .. }) => unique_input_var(term.id, input, model)
+            .is_some_and(|input_sym| {
                 filter_body_ok(&pred.lam) && !body_references_sym(&pred.lam.body, input_sym)
-            })
-        }
+            }),
         _ => false,
     }
 }
 
 /// Shared ownership-side eligibility check: return the input symbol when the
-/// SOAC sees one buffered variable with a unique mutable owner. Callers add
-/// SOAC-specific body-shape and pointwise-safety checks. Liveness is
-/// deliberately absent here because EGIR owns the physical reuse decision.
+/// SOAC sees one buffered variable with a unique mutable owner that is dead
+/// after the operation. Callers add SOAC-specific body-shape and pointwise
+/// safety checks.
 fn unique_input_var<C: Payload, S: Payload>(
+    soac: TermId,
     input: &ArrayExpr<C, S>,
     model: &AnalysisState,
 ) -> Option<SymbolId> {
@@ -268,6 +263,10 @@ fn unique_input_var<C: Payload, S: Payload>(
     // at this source boundary. EGIR may fuse or materialize the SOAC later, so
     // TLC records only `UniqueInput` and does not commit to `InputBuffer`.
     if !matches!(origin, Origin::Fresh | Origin::UniqueParam | Origin::Entry) {
+        return None;
+    }
+    let live = model.live_out.get(&soac)?;
+    if live.contains(&owner) {
         return None;
     }
     Some(input_sym)

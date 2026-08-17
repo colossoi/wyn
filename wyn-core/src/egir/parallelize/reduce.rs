@@ -4,7 +4,7 @@ use super::kernel::cloneable_capture_inputs;
 use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
 use super::*;
 use crate::egir::soac::lambda as lambda_ops;
-use crate::egir::types::{OperandRef, PlaceId, PlaceRegion};
+use crate::egir::types::{OperandRef, PlaceId, PlaceRegion, ResultBinding};
 /// Complete graph-local reduction recipe, consumed before entry mutation.
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
@@ -12,7 +12,7 @@ pub(super) struct ReduceCandidate {
     serial: SerialScremaRecipe,
     input_views: Vec<(ValueId, Type<TypeName>)>,
     map_output_view_operands: Vec<usize>,
-    result: ValueId,
+    results: Vec<ResultBinding<Type<TypeName>>>,
     accumulators: Vec<ReductionAccumulator>,
     phase1_width: u32,
     phase2_width: u32,
@@ -110,7 +110,7 @@ fn analyze_reduction_operators(
 pub(super) fn analyze_reduction_routing(
     entry: &crate::egir::program::PlannedEntry,
     op: &screma::Op<crate::egir::types::Semantic>,
-    result: ValueId,
+    results: &[ResultBinding<Type<TypeName>>],
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> Option<ReductionRouting> {
     let field_accumulators = op
@@ -129,18 +129,13 @@ pub(super) fn analyze_reduction_routing(
             };
             let place = *place;
             let value = effect.operands.first()?.value()?;
-            let mut accumulator_dependencies = (value == result && op.form.result_count() == 1)
-                .then_some(0)
-                .into_iter()
-                .collect::<Vec<_>>();
-            for node in graph_ops::value_producer_closure(&entry.graph, [value]).nodes {
-                let Some(field) = graph_ops::root_projection_index(&entry.graph, node, result) else {
-                    continue;
-                };
-                let Some(&accumulator) = field_accumulators.get(field) else {
-                    continue;
-                };
-                accumulator_dependencies.push(accumulator);
+            let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
+            let mut accumulator_dependencies = Vec::new();
+            for (field, result) in results.iter().enumerate() {
+                if result.values().iter().any(|result| producers.nodes.contains(result)) {
+                    let accumulator = *field_accumulators.get(field)?;
+                    accumulator_dependencies.push(accumulator);
+                }
             }
             accumulator_dependencies.sort_unstable();
             accumulator_dependencies.dedup();
@@ -152,7 +147,11 @@ pub(super) fn analyze_reduction_routing(
                 .place_value_dependencies(place)
                 .into_iter()
                 .any(|dependency| !can_clone_pure_subgraph(&entry.graph, dependency, &[]))
-                || !can_clone_pure_subgraph(&entry.graph, value, &[result])
+                || !can_clone_pure_subgraph(
+                    &entry.graph,
+                    value,
+                    &results.iter().flat_map(ResultBinding::values).collect::<Vec<_>>(),
+                )
             {
                 return None;
             }
@@ -193,11 +192,11 @@ pub(super) fn analyze_reduction_routing(
 fn analyze_reduction_accumulators(
     entry: &crate::egir::program::PlannedEntry,
     op: &screma::Op<crate::egir::types::Semantic>,
-    result: ValueId,
+    results: &[ResultBinding<Type<TypeName>>],
     resources: &crate::egir::program::LogicalResourceArena,
 ) -> Option<Vec<ReductionAccumulator>> {
     let mut accumulators = analyze_reduction_operators(entry, op)?;
-    let routing = analyze_reduction_routing(entry, op, result, resources)?;
+    let routing = analyze_reduction_routing(entry, op, results, resources)?;
     for store in routing.stores {
         let [accumulator] = store.accumulators.as_slice() else {
             // Independent reduce combine phases cannot jointly rebuild one store.
@@ -256,19 +255,22 @@ pub(super) fn analyze_reduce_candidate(
         map_output_view_operands.push(slot);
     }
 
-    let Some(result) = operands.result().single_value() else {
+    let results = operands.result_fields();
+    if results.len() < reduction_results {
         return Ok(None);
-    };
+    }
+    let reduction_values = results[..reduction_results].to_vec();
     let owner = located.owner;
-    let input_views =
-        operands
-            .inputs()
-            .map(|input| {
-                let input = input.operand.value().expect("reduction input was validated as a value or view");
-                (input, entry.graph.nodes[input].ty.clone())
-            })
-            .collect();
-    let Some(accumulators) = analyze_reduction_accumulators(entry, located.op, result, resources) else {
+    let input_views = operands
+        .inputs()
+        .map(|input| {
+            let input = input.operand.value().expect("reduction input was validated as a value or view");
+            (input, entry.graph.nodes[input].ty.clone())
+        })
+        .collect();
+    let Some(accumulators) =
+        analyze_reduction_accumulators(entry, located.op, &reduction_values, resources)
+    else {
         return Ok(None);
     };
     Ok(Some(ReduceCandidate {
@@ -277,7 +279,7 @@ pub(super) fn analyze_reduce_candidate(
         serial,
         input_views,
         map_output_view_operands,
-        result,
+        results: reduction_values,
         accumulators,
         phase1_width: REDUCE_PHASE1_WIDTH,
         phase2_width: REDUCE_PHASE2_WIDTH,
@@ -312,7 +314,7 @@ impl KernelPlanBuilder<'_, '_> {
             serial,
             input_views: input_view_data,
             map_output_view_operands,
-            result: screma_result_nid,
+            results: screma_results,
             accumulators,
             phase1_width,
             phase2_width,
@@ -363,11 +365,7 @@ impl KernelPlanBuilder<'_, '_> {
         let chunk_start = chunked.chunk_start;
         let chunk_len = chunked.chunk_len;
         {
-            let views = chunked
-                .views
-                .iter()
-                .map(|view| entry.graph.operand_ref(*view))
-                .collect::<Vec<_>>();
+            let views = chunked.views.iter().map(|view| entry.graph.operand_ref(*view)).collect::<Vec<_>>();
             let se = entry.graph.skeleton.effect_mut(site);
             for (i, &new_view) in views.iter().enumerate() {
                 se.operands[i] = new_view;
@@ -397,25 +395,19 @@ impl KernelPlanBuilder<'_, '_> {
         let mut result_field = 0;
         let mut accumulator_values = Vec::with_capacity(n_accs);
         for accumulator in &accumulators {
-            let components = accumulator
-                .component_types
+            let end = result_field + accumulator.component_types.len();
+            let results = screma_results[result_field..end].to_vec();
+            let components = results
                 .iter()
-                .enumerate()
-                .map(|(component, ty)| {
-                    entry.graph.intern_pure(
-                        crate::egir::types::PureOp::Project {
-                            index: (result_field + component) as u32,
-                        },
-                        smallvec![screma_result_nid],
-                        ty.clone(),
-                        None,
-                    )
+                .map(|result| {
+                    graph_ops::pack_result_values(&mut entry.graph, result)
+                        .expect("reduction component is returned by value")
                 })
                 .collect::<Vec<_>>();
             result_field += components.len();
             let packed =
                 lambda_ops::pack_results(&mut entry.graph, &components, &accumulator.component_types);
-            accumulator_values.push((components, packed));
+            accumulator_values.push((results, packed));
         }
         // Drop the decomposed output stores (highest index first per block).
         drop_locations.sort_by_key(|location| std::cmp::Reverse(location.1));
@@ -477,7 +469,7 @@ impl KernelPlanBuilder<'_, '_> {
         // 6. Synthesize one phase 2 entry per accumulator. Dropping the phase-1
         // stores leaves their pure place/value subgraphs available for projection.
         let mut phase2s = Vec::with_capacity(n_accs);
-        for (acc_i, (accumulator, (component_values, _))) in
+        for (acc_i, (accumulator, (accumulator_results, _))) in
             accumulators.iter().zip(accumulator_values).enumerate()
         {
             let phase2_name = if n_accs == 1 {
@@ -495,7 +487,7 @@ impl KernelPlanBuilder<'_, '_> {
                 capture_inputs: &accumulator.capture_inputs,
                 neutrals: &accumulator.neutrals,
                 partials: accumulator.partial,
-                accumulator_components: &component_values,
+                accumulator_results: &accumulator_results,
                 output_stores: &accumulator.stores,
                 output_declarations: &accumulator.outputs,
                 width: phase2_width,
@@ -546,7 +538,7 @@ struct ReduceCombineSpec<'a> {
     capture_inputs: &'a [SemanticResourceDecl],
     neutrals: &'a [ValueId],
     partials: ResourceId,
-    accumulator_components: &'a [ValueId],
+    accumulator_results: &'a [ResultBinding<Type<TypeName>>],
     output_stores: &'a [(PlaceId, ValueId)],
     output_declarations: &'a [(ResourceId, Type<TypeName>, crate::egir::program::LogicalSize)],
     width: u32,
@@ -556,6 +548,7 @@ impl ReduceCombineSpec<'_> {
     fn emit_operator(
         &self,
         graph: &mut EGraph,
+        block: BlockId,
         left: ValueId,
         right: ValueId,
         captures: &[OperandRef],
@@ -571,16 +564,19 @@ impl ReduceCombineSpec<'_> {
         );
         operands.extend_from_slice(captures);
         let (_, result) = graph
-            .add_call(
+            .emit_call(
+                block,
                 self.operator.region,
                 self.operator.params(),
                 self.operator.result(),
                 operands,
                 self.operator.effects(),
                 None,
+                None,
             )
             .expect("reduction operator call must match its canonical boundary");
-        result.single_value().expect("reduction operator has one packed by-value result")
+        graph_ops::pack_result_values(graph, &result)
+            .expect("reduction operator result is returned by value")
     }
 
     fn emit_tree(
@@ -592,7 +588,7 @@ impl ReduceCombineSpec<'_> {
         let elem_ty = self.elem_ty.clone();
         let partials_resource = self.partials;
         let phase1_graph = self.source_graph;
-        let accumulator_components = self.accumulator_components;
+        let accumulator_results = self.accumulator_results;
         let output_stores = self.output_stores;
         let width = self.width;
         let w = width;
@@ -716,7 +712,7 @@ impl ReduceCombineSpec<'_> {
         // grid_body: acc' = op(acc, partials[i]); → grid_cont(acc')
         let elem_i =
             graph_ops::emit_view_load(graph, grid_body, partials_view, i_in, elem_ty.clone(), eff, None);
-        let acc_next = self.emit_operator(graph, acc_in, elem_i, operator_captures);
+        let acc_next = self.emit_operator(graph, grid_body, acc_in, elem_i, operator_captures);
         graph.skeleton.blocks[grid_body].term = SkeletonTerminator::Branch {
             target: grid_cont,
             args: graph.admit_flow_values([acc_next]),
@@ -835,7 +831,7 @@ impl ReduceCombineSpec<'_> {
             eff,
             None,
         );
-        let combined = self.emit_operator(graph, a, bb, operator_captures);
+        let combined = self.emit_operator(graph, tree_then, a, bb, operator_captures);
         graph_ops::emit_storage_store(
             graph,
             tree_then,
@@ -905,8 +901,18 @@ impl ReduceCombineSpec<'_> {
             None,
         );
         let combined_components = lambda_ops::unpack_results(graph, s0, self.component_types);
-        let substitutions =
-            accumulator_components.iter().copied().zip(combined_components).collect::<Vec<_>>();
+        let substitutions = accumulator_results
+            .iter()
+            .zip(&combined_components)
+            .zip(self.component_types)
+            .flat_map(|((old, combined), ty)| {
+                let abi = crate::egir::types::by_value_function_result::<crate::egir::types::WynLanguage>(
+                    ty.clone(),
+                );
+                let new = graph_ops::bind_by_value_result(graph, &abi, *combined);
+                old.values().into_iter().zip(new.values())
+            })
+            .collect::<Vec<_>>();
         for &(place, value) in output_stores {
             let cloned_place = graph_ops::clone_place_subgraph(phase1_graph, graph, place)?;
             let cloned_value =
@@ -992,7 +998,7 @@ impl ReduceCombineSpec<'_> {
         let operator_captures = self
             .operator_captures
             .iter()
-                .map(|capture| graph_ops::clone_operand_subgraph(self.source_graph, b.graph_mut(), *capture))
+            .map(|capture| graph_ops::clone_operand_subgraph(self.source_graph, b.graph_mut(), *capture))
             .collect::<Result<Vec<_>, _>>()?;
         self.emit_tree(&mut b, init_nid, &operator_captures)?;
         Ok(BuiltPhase::new(b.build(), resources))

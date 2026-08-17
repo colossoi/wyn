@@ -20,18 +20,41 @@ pub type Optimized = super::program::Program<
 >;
 
 use super::ir::BodySite;
+use super::program::SemanticOpId;
 use super::reify::Segmented;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
 use super::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect, ValueId};
 use crate::flow::BlockId;
 use crate::LookupMap;
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 #[path = "semantic_opt_tests.rs"]
 mod semantic_opt_tests;
 
+/// One structural relationship observed while semantic optimization rewrote a
+/// single operation or eliminated dead work. A fusion typically has multiple
+/// `before` identities and one `after` identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticOptimizationRelation {
+    pub before: Vec<SemanticOpId>,
+    pub after: Vec<SemanticOpId>,
+}
+
+/// Compiler-authored provenance for consumers that need to relate semantic
+/// operations across the optimization boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SemanticOptimizationTrace {
+    pub relations: Vec<SemanticOptimizationRelation>,
+}
+
 pub fn optimize_semantics(program: Segmented) -> Optimized {
+    optimize_semantics_with_trace(program).0
+}
+
+pub fn optimize_semantics_with_trace(program: Segmented) -> (Optimized, SemanticOptimizationTrace) {
+    let mut trace = SemanticOptimizationTrace::default();
     let mut program = program.map_graphs(|_, mut graph| {
         canonicalize_resource_accesses(&mut graph);
         graph
@@ -45,12 +68,16 @@ pub fn optimize_semantics(program: Segmented) -> Optimized {
         let oracle = SemanticGraph::new(&deps);
 
         if let Some(patch) = analyze_dead_seg_ops(&program) {
+            let before = semantic_operation_fingerprints(&program);
             program = apply_dead_seg_ops(program, patch);
+            trace.record(before, semantic_operation_fingerprints(&program));
             continue;
         }
+        let before = semantic_operation_fingerprints(&program);
         let (rewritten, changed) = super::fusion::rewrite_once(program, &oracle);
         program = rewritten;
         if changed {
+            trace.record(before, semantic_operation_fingerprints(&program));
             continue;
         }
         break;
@@ -64,7 +91,48 @@ pub fn optimize_semantics(program: Segmented) -> Optimized {
             panic!("semantic optimization produced invalid EGIR: {error}");
         }
     }
-    program.retag()
+    (program.retag(), trace)
+}
+
+fn semantic_operation_fingerprints(program: &Segmented) -> BTreeMap<SemanticOpId, String> {
+    program
+        .entry_points
+        .iter()
+        .map(|entry| &entry.graph)
+        .chain(program.functions.iter().map(|function| &function.graph))
+        .chain(program.constants.iter().map(|constant| &constant.graph))
+        .flat_map(|graph| graph.skeleton.blocks.iter().flat_map(|(_, block)| block.side_effects.iter()))
+        .filter_map(|effect| {
+            let SideEffectKind::Soac(SoacEffect(id, soac)) = effect.kind() else {
+                return None;
+            };
+            Some((*id, format!("{soac:#?}")))
+        })
+        .collect()
+}
+
+impl SemanticOptimizationTrace {
+    fn record(&mut self, before: BTreeMap<SemanticOpId, String>, after: BTreeMap<SemanticOpId, String>) {
+        let removed = before.keys().filter(|id| !after.contains_key(id)).copied();
+        let added = after.keys().filter(|id| !before.contains_key(id)).copied();
+        let changed = before.iter().filter_map(|(id, fingerprint)| {
+            after.get(id).filter(|after| *after != fingerprint).map(|_| *id)
+        });
+
+        let mut before_ids = removed.chain(changed.clone()).collect::<Vec<_>>();
+        let mut after_ids = added.chain(changed).collect::<Vec<_>>();
+        before_ids.sort_unstable();
+        before_ids.dedup();
+        after_ids.sort_unstable();
+        after_ids.dedup();
+
+        if !before_ids.is_empty() || !after_ids.is_empty() {
+            self.relations.push(SemanticOptimizationRelation {
+                before: before_ids,
+                after: after_ids,
+            });
+        }
+    }
 }
 
 fn canonicalize_resource_accesses(graph: &mut EGraph) {
@@ -132,7 +200,7 @@ fn dead_seg_ops_in_graph(graph: &EGraph) -> DeadGraphPatch {
     let mut roots = Vec::<ValueId>::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
-            roots.extend(effect.referenced_nodes());
+            roots.extend(super::graph_ops::effect_value_inputs(graph, effect));
         }
         roots.extend(block.term.referenced_nodes());
     }

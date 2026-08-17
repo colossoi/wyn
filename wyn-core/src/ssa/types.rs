@@ -222,11 +222,7 @@ pub enum InstKind<R = crate::BindingRef> {
         result: PlaceId,
     },
 
-    /// Index into a place whose element type is an array — produces a sub-place
-    /// addressing one element. Mirrors `ViewIndex` but takes a `PlaceId` instead
-    /// of a value, avoiding the whole-array `Load` that the value-form would
-    /// require. The natural pair for `Alloca { elem_ty: [T;N] }`: backends
-    /// lower to `OpAccessChain` (SPIR-V) / `var[idx]` (WGSL) directly.
+    /// Index into an array place and produce an addressable element place.
     PlaceIndex {
         place: PlaceId,
         index: ValueRef,
@@ -362,14 +358,22 @@ impl<R> InstKind<R> {
     }
 }
 
+/// The structural origin of an addressable place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceOrigin {
+    Instruction,
+    Parameter {
+        index: usize,
+    },
+}
+
 /// Metadata for a `PlaceId` — addressable locations that `Load` reads
 /// from and `Store` writes to. Places are identity-based (distinct
-/// places never alias); they never flow through block params. The
-/// defining instruction is found by scanning the IR; see
-/// `FuncBody::place_of_inst`.
+/// places never alias); they never flow through block params.
 #[derive(Debug, Clone)]
 pub struct PlaceInfo {
     pub elem_ty: Type<TypeName>,
+    pub origin: PlaceOrigin,
 }
 
 // =============================================================================
@@ -461,6 +465,15 @@ impl FuncBody {
     /// Element type of the place (what `Load` returns / `Store` writes).
     pub fn place_elem_ty(&self, place: PlaceId) -> &Type<TypeName> {
         &self.places[place].elem_ty
+    }
+
+    /// Place occupying a physical parameter slot, when that parameter is
+    /// addressable rather than a by-value SSA operand.
+    pub fn parameter_place(&self, index: usize) -> Option<PlaceId> {
+        self.places.iter().find_map(|(place, info)| {
+            matches!(info.origin, PlaceOrigin::Parameter { index: candidate } if candidate == index)
+                .then_some(place)
+        })
     }
 
     /// `PlaceId` defined by the given instruction, if any.

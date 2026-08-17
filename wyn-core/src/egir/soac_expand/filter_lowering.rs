@@ -48,18 +48,18 @@ fn filter_kept_value(
         .collect::<SmallVec<[ValueId; 4]>>();
     match &spec.map_func {
         Some(function) => {
-            let mut operands = elements
-                .into_iter()
-                .map(|element| graph.operand_ref(element))
-                .collect::<Vec<_>>();
+            let mut operands =
+                elements.into_iter().map(|element| graph.operand_ref(element)).collect::<Vec<_>>();
             operands.extend(spec.map_captures.iter().copied());
             let (_, result) = graph
-                .add_call(
+                .emit_call(
+                    block,
                     function.region,
                     function.params(),
                     function.result(),
                     operands,
                     function.effects(),
+                    None,
                     None,
                 )
                 .expect("Filter map call must match its canonical boundary");
@@ -199,12 +199,14 @@ fn build_serial_filter_cfg(
     let mut pred_operands = vec![graph.operand_ref(kept)];
     pred_operands.extend(spec.captures.iter().copied());
     let (_, predicate) = graph
-        .add_call(
+        .emit_call(
+            body,
             spec.pred_func.region,
             spec.pred_func.params(),
             spec.pred_func.result(),
             pred_operands,
             spec.pred_func.effects(),
+            None,
             None,
         )
         .expect("Filter predicate call must match its canonical boundary");
@@ -334,12 +336,14 @@ pub(super) fn build_filter_flags(
     let mut operands = vec![graph.operand_ref(kept)];
     operands.extend(spec.captures.iter().copied());
     let (_, pred) = graph
-        .add_call(
+        .emit_call(
+            in_range,
             spec.pred_func.region,
             spec.pred_func.params(),
             spec.pred_func.result(),
             operands,
             spec.pred_func.effects(),
+            None,
             None,
         )
         .expect("Filter predicate call must match its canonical boundary");

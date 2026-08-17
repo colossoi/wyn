@@ -55,8 +55,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         is_entry_point: bool,
         func_span: Span,
         param_ids: Vec<spirv::Word>,
+        parameter_places: LookupMap<crate::ssa::types::PlaceId, (spirv::Word, spirv::StorageClass)>,
         first_code_block: spirv::Word,
     ) -> Self {
+        let mut place_ptr_id = LookupMap::new();
+        let mut place_storage_class = LookupMap::new();
+        for (place, (pointer, storage_class)) in parameter_places {
+            place_ptr_id.insert(place, pointer);
+            place_storage_class.insert(place, storage_class);
+        }
         LowerCtx {
             constructor,
             body,
@@ -66,8 +73,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             block_indices: LookupMap::new(),
             phi_inputs: Vec::new(),
             workgroup_view: LookupMap::new(),
-            place_ptr_id: LookupMap::new(),
-            place_storage_class: LookupMap::new(),
+            place_ptr_id,
+            place_storage_class,
             current_span: None,
             func_span,
             param_ids,
@@ -600,7 +607,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     };
                     self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?
                 }
-
             },
 
             InstKind::Alloca { elem_ty, result } => {

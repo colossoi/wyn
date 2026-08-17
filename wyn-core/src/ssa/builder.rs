@@ -7,7 +7,8 @@ use crate::ast::{Span, TypeName};
 use polytype::Type;
 
 use super::types::{
-    BlockId, ControlHeader, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, Terminator, ValueId,
+    BlockId, ControlHeader, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator,
+    ValueId,
 };
 use slotmap::SlotMap;
 
@@ -174,7 +175,30 @@ impl FuncBuilder {
     /// instruction (`OutputSlot` / `ViewIndex` / `Alloca`) carrying the
     /// returned `PlaceId` in its `result` field.
     pub fn new_place(&mut self, elem_ty: Type<TypeName>) -> PlaceId {
-        self.places.insert(PlaceInfo { elem_ty })
+        self.places.insert(PlaceInfo {
+            elem_ty,
+            origin: PlaceOrigin::Instruction,
+        })
+    }
+
+    /// Bind an addressable physical function parameter to a place. The
+    /// generic SSA parameter value remains as its signature identity; uses
+    /// inside the body go through the returned `PlaceId`.
+    pub fn new_parameter_place(&mut self, index: usize, elem_ty: Type<TypeName>) -> PlaceId {
+        assert!(
+            index < self.num_params(),
+            "place parameter index is out of bounds"
+        );
+        assert!(
+            self.places.values().all(
+                |place| !matches!(place.origin, PlaceOrigin::Parameter { index: other } if other == index)
+            ),
+            "physical parameter {index} already has a place"
+        );
+        self.places.insert(PlaceInfo {
+            elem_ty,
+            origin: PlaceOrigin::Parameter { index },
+        })
     }
 
     pub fn set_control_header(&mut self, block: BlockId, control: ControlHeader) {

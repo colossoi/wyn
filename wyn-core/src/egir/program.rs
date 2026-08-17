@@ -126,6 +126,18 @@ pub struct SemanticOpId {
 }
 
 impl SemanticOpId {
+    /// Dense identity of the source semantic operation. This remains stable
+    /// across semantic rewrites and is suitable for diagnostics and tooling.
+    pub const fn source_index(self) -> u32 {
+        self.source
+    }
+
+    /// Compiler-created helper slot, when this operation implements another
+    /// semantic operation rather than corresponding directly to source work.
+    pub const fn implementation_slot(self) -> Option<u32> {
+        self.implementation
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_test(index: u32) -> Self {
         Self {
@@ -711,9 +723,7 @@ fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
         for param in &mut function.params {
             normalize_type_resources(param.representation_mut().ty_mut(), by_binding);
         }
-        function
-            .result
-            .for_each_type_mut(|ty| normalize_type_resources(ty, by_binding));
+        function.result.for_each_type_mut(|ty| normalize_type_resources(ty, by_binding));
     }
 }
 
@@ -825,7 +835,9 @@ fn physicalize_soac(
                         resource,
                         elem_bytes,
                     } => SegExtent::ResourceLength {
-                        view: view.try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value])).unwrap(),
+                        view: view
+                            .try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value]))
+                            .unwrap(),
                         resource: binding(resource, bindings),
                         elem_bytes,
                     },
@@ -1057,9 +1069,7 @@ pub(crate) fn physicalize_graph_resources(
             let resource = reference.0;
             Ok::<_, String>(bindings.binding(resource))
         },
-        |id, soac, nodes, places| {
-            physicalize_soac(soac, nodes, places, bindings).map(|soac| (id, soac))
-        },
+        |id, soac, nodes, places| physicalize_soac(soac, nodes, places, bindings).map(|soac| (id, soac)),
     )?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
@@ -1085,6 +1095,7 @@ pub(crate) fn physicalize_graph_resources(
         }
     }
     rewrite_physical_graph_types(&mut graph, |ty| physicalize_type_resources(ty, bindings));
+    graph.canonicalize_boundary_operands();
     Ok((graph, node_map, block_map))
 }
 
@@ -1308,7 +1319,7 @@ impl SemanticEntry {
                 block
                     .side_effects
                     .iter()
-                    .flat_map(|effect| effect.referenced_nodes())
+                    .flat_map(|effect| super::graph_ops::effect_value_inputs(&self.graph, effect))
                     .chain(block.term.referenced_nodes())
             })
             .collect::<Vec<_>>();
@@ -1416,7 +1427,8 @@ impl PlannedPublication {
 impl SemanticEntry {
     pub fn project(entry: &SemanticEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph)
-            .all_with_values(entry.routes().map(|route| route.source.value).collect())?;
+            .all_with_values(entry.routes().map(|route| route.source.value).collect())
+            .map_err(|error| format!("could not project semantic entry '{}': {error}", entry.name))?;
         Self::from_projection(
             projection,
             entry.id,

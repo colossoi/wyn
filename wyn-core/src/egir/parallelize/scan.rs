@@ -4,7 +4,7 @@ use super::kernel::cloneable_capture_inputs;
 use super::model::REDUCE_PHASE1_WIDTH;
 use super::*;
 use crate::egir::soac::lambda as lambda_ops;
-use crate::egir::types::{OperandRef, PlaceId};
+use crate::egir::types::{OperandRef, PlaceId, ResultBinding};
 
 #[derive(Clone, Copy)]
 pub(super) struct ScanScratch {
@@ -118,7 +118,9 @@ impl ScanPhase2Spec<'_> {
         let operator_captures = self
             .operator_captures
             .iter()
-            .map(|capture| graph_ops::clone_operand_subgraph(self.source_graph, builder.graph_mut(), *capture))
+            .map(|capture| {
+                graph_ops::clone_operand_subgraph(self.source_graph, builder.graph_mut(), *capture)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let phase = self.emit_loop(&mut builder, neutral, &operator_captures);
         if let (Some(len_out), Some(total)) = (self.total_out, phase.total) {
@@ -197,11 +199,7 @@ impl ScanPhase2Spec<'_> {
             then_target: body,
             then_args: vec![],
             else_target: after,
-            else_args: if want_total {
-                graph.admit_flow_values([accumulator])
-            } else {
-                vec![]
-            },
+            else_args: if want_total { graph.admit_flow_values([accumulator]) } else { vec![] },
         };
         graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
             merge: after,
@@ -222,16 +220,19 @@ impl ScanPhase2Spec<'_> {
         let mut operator_arguments = vec![graph.operand_ref(accumulator), graph.operand_ref(value)];
         operator_arguments.extend_from_slice(operator_captures);
         let (_, result) = graph
-            .add_call(
+            .emit_call(
+                body,
                 self.operator.region,
                 self.operator.params(),
                 self.operator.result(),
                 operator_arguments,
                 self.operator.effects(),
                 None,
+                None,
             )
             .expect("scan operator call must match its canonical boundary");
-        let next_accumulator = result.single_value().expect("scan operator has one by-value result");
+        let next_accumulator = graph_ops::pack_result_values(graph, &result)
+            .expect("scan operator result is returned by value");
         graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
             target: continuation,
             args: graph.admit_flow_values([next_accumulator]),
@@ -467,7 +468,7 @@ pub(super) struct ScanCandidate {
     operator_capture_inputs: Vec<SemanticResourceDecl>,
     post: screma::Lambda,
     input_views: Vec<(ValueId, crate::egir::types::SoacInputType)>,
-    result: ValueId,
+    results: Vec<ResultBinding<Type<TypeName>>>,
     outputs: Vec<ScanOutput>,
     direct_output: bool,
     phase1_width: u32,
@@ -519,12 +520,11 @@ pub(super) fn analyze_scan_candidate(
         return Ok(None);
     };
 
-    let operands =
-        screma::ScremaOperands::decode(
-            located.op,
-            &located.effect.operands,
-            located.effect.result.as_ref(),
-        )?;
+    let operands = screma::ScremaOperands::decode(
+        located.op,
+        &located.effect.operands,
+        located.effect.result.as_ref(),
+    )?;
     let mut input_views = Vec::with_capacity(located.op.inputs.len());
     for (operand, input) in operands.inputs().zip(&located.op.inputs) {
         let Some(operand) = operand.operand.value() else {
@@ -594,12 +594,16 @@ pub(super) fn analyze_scan_candidate(
             }
         }
     }
-    let Some(result) = operands.result().single_value() else {
+    let results = operands.result_fields();
+    if results.len() < reduction_results + outputs.len() {
         return Ok(None);
-    };
-    let Some(reduction_routing) =
-        super::reduce::analyze_reduction_routing(entry, located.op, result, resources)
-    else {
+    }
+    let Some(reduction_routing) = super::reduce::analyze_reduction_routing(
+        entry,
+        located.op,
+        &results[..reduction_results],
+        resources,
+    ) else {
         return Ok(None);
     };
     Ok(Some(ScanCandidate {
@@ -614,7 +618,7 @@ pub(super) fn analyze_scan_candidate(
         operator_capture_inputs,
         post: located.op.form.post.clone(),
         input_views,
-        result,
+        results,
         outputs,
         direct_output,
         phase1_width: REDUCE_PHASE1_WIDTH,
@@ -666,7 +670,7 @@ impl KernelPlanBuilder<'_, '_> {
             operator_capture_inputs,
             post,
             input_views,
-            result: screma_result,
+            results: screma_results,
             outputs,
             direct_output,
             phase1_width: total_threads,
@@ -758,19 +762,16 @@ impl KernelPlanBuilder<'_, '_> {
                 .into_iter()
                 .flat_map(|body| body.captures.iter().copied())
                 .collect::<Vec<_>>();
-            let capture_types =
-                captures
-                    .iter()
-                    .map(|capture| {
-                        entry.graph.nodes[capture.value().expect("scan pre capture is a value or view")]
-                            .ty
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+            let capture_types = captures
+                .iter()
+                .map(|capture| {
+                    entry.graph.nodes[capture.value().expect("scan pre capture is a value or view")]
+                        .ty
+                        .clone()
+                })
+                .collect::<Vec<_>>();
             let source = pre.clone();
-            let source_function = source
-                .seg_body()
-                .map(|body| self.callable(body.region).clone());
+            let source_function = source.seg_body().map(|body| self.callable(body.region).clone());
             let parameter_types = pre.parameter_types.clone();
             let result_type = elem_ty.clone();
             let span = entry.span;
@@ -803,23 +804,19 @@ impl KernelPlanBuilder<'_, '_> {
                 .flat_map(|body| body.captures.iter().copied())
                 .chain(post.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
                 .collect::<Vec<_>>();
-            let capture_types =
-                captures
-                    .iter()
-                    .map(|capture| {
-                        entry.graph.nodes[capture.value().expect("scan post capture is a value or view")]
-                            .ty
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+            let capture_types = captures
+                .iter()
+                .map(|capture| {
+                    entry.graph.nodes[capture.value().expect("scan post capture is a value or view")]
+                        .ty
+                        .clone()
+                })
+                .collect::<Vec<_>>();
             let source_pre = pre.clone();
             let source_post = post.clone();
-            let source_pre_function = source_pre
-                .seg_body()
-                .map(|body| self.callable(body.region).clone());
-            let source_post_function = source_post
-                .seg_body()
-                .map(|body| self.callable(body.region).clone());
+            let source_pre_function = source_pre.seg_body().map(|body| self.callable(body.region).clone());
+            let source_post_function =
+                source_post.seg_body().map(|body| self.callable(body.region).clone());
             let mut parameter_types = vec![elem_ty.clone()];
             parameter_types.extend(pre.parameter_types.iter().cloned());
             let result_types = post.result_types.clone();
@@ -853,16 +850,11 @@ impl KernelPlanBuilder<'_, '_> {
             .iter()
             .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
             .collect::<Vec<_>>();
-        let reduction_result_components = reduction_component_types
+        let reduction_result_components = screma_results[..reduction_component_types.len()]
             .iter()
-            .enumerate()
-            .map(|(field, ty)| {
-                entry.graph.intern_pure(
-                    PureOp::Project { index: field as u32 },
-                    smallvec![screma_result],
-                    ty.clone(),
-                    None,
-                )
+            .map(|result| {
+                graph_ops::pack_result_values(&mut entry.graph, result)
+                    .expect("scan reduction component is returned by value")
             })
             .collect::<Vec<_>>();
         let mut drop_locations = Vec::new();
@@ -949,6 +941,15 @@ impl KernelPlanBuilder<'_, '_> {
             prefix_view_type.clone(),
             None,
         );
+        let prefix_result = screma_results[reduction_component_types.len()]
+            .single_value()
+            .expect("scan prefix result has one by-value leaf");
+        let phase1_result_ty = Type::Constructed(TypeName::Tuple(1), vec![prefix_view_type.clone()]);
+        entry.graph.retype_node(prefix_result, prefix_view_type.clone());
+        let phase1_result = crate::egir::types::ResultBinding::product(
+            phase1_result_ty,
+            [entry.graph.value_result(prefix_result)],
+        );
         {
             let operands = chunked
                 .views
@@ -969,14 +970,10 @@ impl KernelPlanBuilder<'_, '_> {
             op.result_state = vec![screma::ResultState {
                 destination: SoacDestination::fresh().placed(crate::egir::types::SoacPlacement::OutputView),
             }];
+            effect.result = Some(phase1_result);
         }
-        entry.graph.retype_node(
-            screma_result,
-            Type::Constructed(TypeName::Tuple(1), vec![prefix_view_type]),
-        );
 
-        let reduce_operands =
-            chunked.views.iter().map(|view| entry.graph.operand_ref(*view)).collect();
+        let reduce_operands = chunked.views.iter().map(|view| entry.graph.operand_ref(*view)).collect();
         let reduce_result = graph_ops::emit_pending_soac(
             &mut entry.graph,
             block_id,
@@ -1003,12 +1000,9 @@ impl KernelPlanBuilder<'_, '_> {
             self.effect_ids,
             None,
         );
-        let block_sum = entry.graph.intern_pure(
-            PureOp::Project { index: 0 },
-            smallvec![reduce_result],
-            elem_ty.clone(),
-            None,
-        );
+        let block_sum_result = reduce_result.field(0).expect("the block reduction has one logical result");
+        let block_sum = graph_ops::pack_result_values(&mut entry.graph, &block_sum_result)
+            .expect("the block reduction result is returned by value");
         let scratch_array_type =
             crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
         let block_sums_view = graph_ops::intern_resource_view(
@@ -1175,17 +1169,15 @@ fn synthesize_packed_operator_function(
             .iter()
             .map(|value| graph.operand_ref(*value))
             .collect::<Vec<_>>();
-        operator_arguments.extend(
-            right[component_cursor..component_end]
-                .iter()
-                .map(|value| graph.operand_ref(*value)),
-        );
+        operator_arguments
+            .extend(right[component_cursor..component_end].iter().map(|value| graph.operand_ref(*value)));
         operator_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
-        results.extend(lambda_ops::emit_call(
+        let entry = graph.skeleton.entry;
+        let operator_results =
+            lambda_ops::emit_call(&mut graph, entry, operator, Some(function), operator_arguments);
+        results.extend(lambda_ops::materialize_result_values(
             &mut graph,
-            operator,
-            Some(function),
-            operator_arguments,
+            &operator_results,
         ));
         component_cursor = component_end;
         capture_cursor = capture_end;
@@ -1222,7 +1214,9 @@ fn synthesize_scan_input_function(
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let results = lambda_ops::emit_call(&mut graph, &pre, pre_function.as_ref(), arguments);
+    let entry = graph.skeleton.entry;
+    let results = lambda_ops::emit_call(&mut graph, entry, &pre, pre_function.as_ref(), arguments);
+    let results = lambda_ops::materialize_result_values(&mut graph, &results);
     let packed = lambda_ops::pack_results(
         &mut graph,
         &results[..component_count],
@@ -1267,7 +1261,9 @@ fn synthesize_scan_post_function(
 
     let mut pre_arguments = arguments[1..element_count].to_vec();
     pre_arguments.extend_from_slice(&arguments[element_count..element_count + pre_capture_count]);
-    let pre_results = lambda_ops::emit_call(&mut graph, &pre, pre_function.as_ref(), pre_arguments);
+    let entry = graph.skeleton.entry;
+    let pre_results = lambda_ops::emit_call(&mut graph, entry, &pre, pre_function.as_ref(), pre_arguments);
+    let pre_results = lambda_ops::materialize_result_values(&mut graph, &pre_results);
     let prefix_components = lambda_ops::unpack_results(
         &mut graph,
         arguments[0].value().expect("scan post prefix is a value"),
@@ -1277,14 +1273,12 @@ fn synthesize_scan_post_function(
         .iter()
         .map(|value| graph.operand_ref(*value))
         .collect::<Vec<_>>();
-    post_arguments.extend(
-        pre_results[component_types.len()..]
-            .iter()
-            .map(|value| graph.operand_ref(*value)),
-    );
+    post_arguments
+        .extend(pre_results[component_types.len()..].iter().map(|value| graph.operand_ref(*value)));
     post_arguments.extend_from_slice(&arguments[element_count + pre_capture_count..]);
     let post_results =
-        lambda_ops::emit_call(&mut graph, &post, post_function.as_ref(), post_arguments);
+        lambda_ops::emit_call(&mut graph, entry, &post, post_function.as_ref(), post_arguments);
+    let post_results = lambda_ops::materialize_result_values(&mut graph, &post_results);
     let entry = graph.skeleton.entry;
     lambda_ops::finish_function(
         graph,

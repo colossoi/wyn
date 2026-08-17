@@ -165,7 +165,7 @@ impl<'a> EntryBuilder<'a> {
             .chain(output_views.iter().map(|(node, _)| self.graph.operand_ref(*node)))
             .collect::<SmallVec<[OperandRef; 4]>>();
         let id = self.semantic_ids.next_id();
-        graph_ops::emit_pending_soac(
+        let result = graph_ops::emit_pending_soac(
             &mut self.graph,
             self.current_block,
             id,
@@ -189,7 +189,9 @@ impl<'a> EntryBuilder<'a> {
             tuple_ty,
             self.effect_ids,
             Some(self.span),
-        )
+        );
+        graph_ops::pack_result_values(&mut self.graph, &result)
+            .expect("a by-value map result can be assembled")
     }
 
     pub fn emit_load(&mut self, place: PlaceId, elem_ty: Type<TypeName>) -> ValueId {

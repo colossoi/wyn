@@ -8,33 +8,37 @@ use std::collections::VecDeque;
 
 use crate::{LookupMap, LookupSet};
 
-use super::graph_ops::{clone_value_subgraph, ConstantCopy, PureCopy};
-use super::ir::{CallEffects, CallSiteId, Family, Func, OperandRef, ResultBinding};
-use super::types::{EGraph, PureOp, SkeletonTerminator, ValueId, ValueKind, WynLanguage};
+use super::graph_ops::{clone_body_substituting, clone_value_subgraph, ConstantCopy, PureCopy};
+use super::ir::{
+    CallEffects, CallSiteId, Family, Func, OperandRef, PlaceDestination, ResultBinding, ResultDestination,
+    SideEffectSite,
+};
+use super::types::{
+    EGraph, EffectOp, EffectToken, SideEffectKind, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+};
 use crate::flow::{BlockId, ControlHeader};
 
 #[cfg(test)]
 #[path = "inlining_tests.rs"]
 mod inlining_tests;
 
-/// Return the result root of a function whose body is a single, effect-free
-/// block. Such a body is a pure value DAG and can be cloned into a caller
-/// without reconstructing control flow or effect ordering.
-pub(crate) fn inlineable_return_root<P: Family>(function: &Func<P, WynLanguage>) -> Option<ValueId> {
-    inlineable_return_binding(function)?.single_value()
-}
-
 fn inlineable_return_binding<P: Family>(
     function: &Func<P, WynLanguage>,
 ) -> Option<&ResultBinding<polytype::Type<crate::ast::TypeName>>> {
     if function.graph.skeleton.blocks.len() != 1
         || function.graph.skeleton.blocks.iter().any(|(_, block)| block.control_header.is_some())
-        || function.graph.nodes.iter().any(|(_, node)| node.alias.is_some())
     {
         return None;
     }
     let block = &function.graph.skeleton.blocks[function.graph.skeleton.entry];
-    if !block.side_effects.is_empty() || !block.params.is_empty() {
+    if !block.params.is_empty()
+        || block.side_effects.iter().any(|effect| {
+            let SideEffectKind::Effect(EffectOp::Call { site }) = effect.kind() else {
+                return true;
+            };
+            function.graph.call(*site).effects() != CallEffects::Pure
+        })
+    {
         return None;
     }
     match &block.term {
@@ -46,10 +50,13 @@ fn inlineable_return_binding<P: Family>(
 /// Number of callee nodes cloned by [`inline_pure_call`] before caller-side
 /// hash-consing. Returns `None` for bodies the generic inliner cannot clone.
 pub(crate) fn inlineable_node_count<P: Family>(function: &Func<P, WynLanguage>) -> Option<usize> {
+    if !matches!(function.effects(), CallEffects::Pure) {
+        return None;
+    }
     let roots = inlineable_return_binding(function)?.values();
     Some(
         wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-            out.extend(function.graph.nodes[node].kind.children())
+            out.extend(function.graph.value_dependencies(node))
         })
         .len(),
     )
@@ -80,15 +87,13 @@ pub(crate) fn inlineable_call_cost_at_block<P: Family>(
     if let Some(nodes) = inlineable_node_count(callee) {
         return Some(InlineCost { nodes, blocks: 0 });
     }
+    let site = call_site_id(caller, call)?;
     if caller.skeleton.blocks.get(block)?.control_header.is_some()
-        || uniquely_observing_terminator(caller, call) != Some(block)
+        || uniquely_observing_call_terminator(caller, site) != Some(block)
     {
         return None;
     }
-    let site = call_site_id(caller, call)?;
-    if validate_call(caller, site, callee).is_err()
-        || caller.call(site).result().single_value() != Some(call)
-    {
+    if validate_call(caller, site, callee).is_err() {
         return None;
     }
     let summary = structured_inline_summary(callee)?;
@@ -108,21 +113,180 @@ pub(crate) fn inline_call_at_block<P: Family>(
     block: BlockId,
     callee: &Func<P, WynLanguage>,
 ) -> Result<ValueId, String> {
-    if inlineable_return_root(callee).is_some() {
+    if inlineable_node_count(callee).is_some() {
         inline_pure_call(caller, call, callee)
     } else {
         inline_structured_call_before_terminator(caller, call, block, callee)
     }
 }
 
+/// Inline one explicitly sequenced call by cloning its whole physical body
+/// and splicing every cloned return into the call continuation.
+pub(crate) fn inline_effectful_call<P: Family>(
+    caller: &mut EGraph<P>,
+    effect: SideEffectSite,
+    callee: &Func<P, WynLanguage>,
+    effect_ids: &mut crate::IdSource<EffectToken>,
+) -> Result<InlineCost, String> {
+    let site = effect_call_site(caller, effect)
+        .ok_or_else(|| format!("inline_effectful_call: {effect:?} is not an explicit call effect"))?;
+    validate_call(caller, site, callee)?;
+    complete_body_summary(callee).map_err(|reason| {
+        format!(
+            "inline_effectful_call: `{}` has an invalid physical body: {reason}",
+            callee.name
+        )
+    })?;
+
+    let boundary = caller.call(site).clone();
+    let call_results = boundary.result().values();
+    let continuation = caller.skeleton.split_block_before_effect(effect.block, effect.index);
+    let continuation_call = SideEffectSite {
+        block: continuation,
+        index: 0,
+    };
+    let removed = caller.skeleton.remove_effect_splicing_dependencies(continuation_call);
+    debug_assert!(matches!(
+        removed.kind(),
+        SideEffectKind::Effect(EffectOp::Call { site: removed_site }) if *removed_site == site
+    ));
+    let cloned = clone_body_substituting(&callee.graph, caller, boundary.arguments(), &[], effect_ids)?;
+    let cost = InlineCost {
+        nodes: cloned.node_count,
+        blocks: cloned.block_count + 1,
+    };
+    if cloned.returns.is_empty() {
+        return Err(format!(
+            "inline_effectful_call: `{}` has no returning path",
+            callee.name
+        ));
+    }
+    for (_, result) in &cloned.returns {
+        validate_cloned_return(result, boundary.result())?;
+    }
+
+    let replacements = if cloned.returns.len() == 1 {
+        cloned.returns[0].1.values()
+    } else {
+        call_results
+            .iter()
+            .map(|result| caller.add_block_param(continuation, caller.nodes[*result].ty.clone()))
+            .collect::<Vec<_>>()
+    };
+    if replacements.len() != call_results.len() {
+        return Err(format!(
+            "inline_effectful_call: `{}` returned {} values for {} call results",
+            callee.name,
+            replacements.len(),
+            call_results.len()
+        ));
+    }
+
+    for (return_block, binding) in &cloned.returns {
+        let args =
+            if cloned.returns.len() == 1 { Vec::new() } else { caller.admit_flow_values(binding.values()) };
+        caller.skeleton.blocks[*return_block].term = SkeletonTerminator::Branch {
+            target: continuation,
+            args,
+        };
+    }
+    caller.skeleton.blocks[effect.block].term = SkeletonTerminator::Branch {
+        target: cloned.entry,
+        args: Vec::new(),
+    };
+
+    for (&call_result, &replacement) in call_results.iter().zip(&replacements) {
+        if caller.nodes[call_result].ty != caller.nodes[replacement].ty {
+            return Err(format!(
+                "inline_effectful_call: `{}` produced result type {:?} for call-boundary type {:?}",
+                callee.name, caller.nodes[replacement].ty, caller.nodes[call_result].ty,
+            ));
+        }
+        caller.replace_value_references(call_result, replacement);
+        caller.install_aliases([(call_result, replacement)]);
+    }
+    super::graph_ops::fold_exposed_projections(caller);
+    for &replacement in &replacements {
+        super::graph_ops::materialize_place_backed_projections(
+            caller,
+            replacement,
+            continuation,
+            effect_ids,
+        );
+    }
+    caller.skeleton.verify_branch_arities()?;
+    caller.verify_hash_cons()?;
+    Ok(cost)
+}
+
+fn effect_call_site<P: Family>(graph: &EGraph<P>, effect: SideEffectSite) -> Option<CallSiteId> {
+    match graph.skeleton.get_effect(effect)?.kind() {
+        SideEffectKind::Effect(EffectOp::Call { site }) => Some(*site),
+        _ => None,
+    }
+}
+
+fn remove_explicit_call_site<P: Family>(
+    graph: &mut EGraph<P>,
+    site: CallSiteId,
+    effect: SideEffectSite,
+) -> Result<(), String> {
+    let removed = graph.skeleton.remove_effect_splicing_dependencies(effect);
+    if !matches!(
+        removed.kind(),
+        SideEffectKind::Effect(EffectOp::Call { site: removed_site }) if *removed_site == site
+    ) {
+        return Err(format!("call {site:?} lost its explicit skeleton site"));
+    }
+    Ok(())
+}
+
+fn validate_cloned_return<Ty: PartialEq + Clone>(
+    returned: &ResultBinding<Ty>,
+    boundary: &ResultBinding<Ty>,
+) -> Result<(), String> {
+    if returned.ty() != boundary.ty() || returned.destination_count() != boundary.destination_count() {
+        return Err("cloned return does not match its call result tree".into());
+    }
+    for (returned, boundary) in returned.destination_leaves().into_iter().zip(boundary.destination_leaves())
+    {
+        let Some((returned_ty, returned)) = returned.single_destination() else {
+            unreachable!()
+        };
+        let Some((boundary_ty, boundary)) = boundary.single_destination() else {
+            unreachable!()
+        };
+        let matches = returned_ty == boundary_ty
+            && match (returned, boundary) {
+                (ResultDestination::ReturnValue(_), ResultDestination::ReturnValue(_)) => true,
+                (
+                    ResultDestination::Place(PlaceDestination::Fixed(left)),
+                    ResultDestination::Place(PlaceDestination::Fixed(right)),
+                ) => left == right,
+                (
+                    ResultDestination::Place(PlaceDestination::Bounded {
+                        storage: left_storage,
+                        length: left_length,
+                    }),
+                    ResultDestination::Place(PlaceDestination::Bounded {
+                        storage: right_storage,
+                        length: right_length,
+                    }),
+                ) => left_storage == right_storage && left_length == right_length,
+                _ => false,
+            };
+        if !matches {
+            return Err("cloned return changes a physical result route".into());
+        }
+    }
+    Ok(())
+}
+
 fn structured_inline_summary<P: Family>(
     function: &Func<P, WynLanguage>,
 ) -> Option<StructuredInlineSummary> {
     let graph = &function.graph;
-    if graph.skeleton.blocks.is_empty()
-        || graph.nodes.iter().any(|(_, node)| node.alias.is_some())
-        || graph.skeleton.verify_branch_arities().is_err()
-    {
+    if graph.skeleton.blocks.is_empty() || graph.skeleton.verify_branch_arities().is_err() {
         return None;
     }
 
@@ -153,8 +317,15 @@ fn structured_inline_summary<P: Family>(
             }
         }
         if let SkeletonTerminator::Return(Some(result)) = &body.term {
-            let value = result.single_value()?;
-            if graph.nodes.get(value)?.ty != *function.result().ty() {
+            if result.ty() != function.result().ty()
+                || result.destination_count() != function.result().destination_count()
+                || result.destination_count() != result.values().len()
+                || result.destination_leaves().iter().any(|leaf| {
+                    leaf.single_value()
+                        .and_then(|value| graph.nodes.get(value))
+                        .is_none_or(|value| value.ty() != leaf.ty())
+                })
+            {
                 return None;
             }
             returns += 1;
@@ -191,9 +362,7 @@ fn structured_inline_summary<P: Family>(
 
     let roots = blocks.iter().flat_map(|block| graph.skeleton.blocks[*block].term.referenced_nodes());
     let values = wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        if let Some(definition) = graph.nodes.get(node) {
-            out.extend(definition.children());
-        }
+        out.extend(graph.value_dependencies(node));
     });
     for value in &values {
         match &graph.nodes.get(*value)?.kind {
@@ -209,7 +378,10 @@ fn structured_inline_summary<P: Family>(
                     return None;
                 }
             }
-            ValueKind::SideEffectResult | ValueKind::CallResult { .. } | ValueKind::PlaceLength { .. } => {
+            ValueKind::SideEffectResult
+            | ValueKind::CallResult { .. }
+            | ValueKind::PlaceLength { .. }
+            | ValueKind::PlaceView { .. } => {
                 return None;
             }
             ValueKind::Pure { .. } | ValueKind::Union { .. } | ValueKind::Constant(_) => {}
@@ -221,30 +393,106 @@ fn structured_inline_summary<P: Family>(
     })
 }
 
-fn roots_reach<P: Family>(
-    graph: &EGraph<P>,
-    roots: impl IntoIterator<Item = ValueId>,
-    target: ValueId,
-) -> bool {
-    wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        if let Some(definition) = graph.nodes.get(node) {
-            out.extend(definition.children());
+fn complete_body_summary<P: Family>(
+    function: &Func<P, WynLanguage>,
+) -> Result<StructuredInlineSummary, String> {
+    let graph = &function.graph;
+    graph.skeleton.verify_branch_arities()?;
+    let blocks = wyn_graph::reachable_from_ordered(
+        [graph.skeleton.entry],
+        wyn_graph::WalkOrder::DepthFirst,
+        |block, out| out.extend(graph.skeleton.blocks[block].term.successors()),
+    );
+    if blocks.len() != graph.skeleton.blocks.len()
+        || !graph.skeleton.blocks[graph.skeleton.entry].params.is_empty()
+    {
+        return Err("the body contains unreachable blocks or an entry block parameter".into());
+    }
+
+    let expected_values = function
+        .result()
+        .destination_leaves()
+        .into_iter()
+        .filter(|leaf| {
+            matches!(
+                leaf.single_destination(),
+                Some((_, ResultDestination::ReturnValue(_)))
+            )
+        })
+        .count();
+    let expected_places = function
+        .result()
+        .destination_leaves()
+        .into_iter()
+        .map(|leaf| match leaf.single_destination() {
+            Some((_, ResultDestination::Place(PlaceDestination::Fixed(_)))) => 1,
+            Some((_, ResultDestination::Place(PlaceDestination::Bounded { .. }))) => 2,
+            _ => 0,
+        })
+        .sum::<usize>();
+    let mut returns = 0usize;
+    for block in &blocks {
+        let body = &graph.skeleton.blocks[*block];
+        if body.side_effects.iter().any(|effect| matches!(effect.kind(), SideEffectKind::Soac(_)))
+            || matches!(body.term, SkeletonTerminator::Return(None))
+        {
+            return Err(format!(
+                "block {block:?} retains a SOAC or has no physical return"
+            ));
         }
+        if let SkeletonTerminator::Return(Some(result)) = &body.term {
+            if result.ty() != function.result().ty()
+                || result.destination_count() != function.result().destination_count()
+                || result.values().len() != expected_values
+                || result.places().len() != expected_places
+            {
+                return Err(format!(
+                    "block {block:?} returns type {:?}, {} destinations, {} values, and {} places; the callable ABI requires type {:?}, {} destinations, {expected_values} values, and {expected_places} places",
+                    result.ty(),
+                    result.destination_count(),
+                    result.values().len(),
+                    result.places().len(),
+                    function.result().ty(),
+                    function.result().destination_count(),
+                ));
+            }
+            returns += 1;
+        }
+    }
+    if returns == 0 {
+        return Err("the body has no returning path".into());
+    }
+    Ok(StructuredInlineSummary {
+        blocks,
+        nodes: graph.nodes.len(),
     })
-    .contains(&target)
 }
 
-fn uniquely_observing_terminator<P: Family>(graph: &EGraph<P>, call: ValueId) -> Option<BlockId> {
+fn roots_reach_any<P: Family>(
+    graph: &EGraph<P>,
+    roots: impl IntoIterator<Item = ValueId>,
+    targets: &LookupSet<ValueId>,
+) -> bool {
+    wyn_graph::reachable_from_ordered(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        out.extend(graph.value_dependencies(node));
+    })
+    .into_iter()
+    .any(|value| targets.contains(&value))
+}
+
+fn uniquely_observing_call_terminator<P: Family>(graph: &EGraph<P>, site: CallSiteId) -> Option<BlockId> {
+    let results = graph.call(site).result().values().into_iter().collect::<LookupSet<_>>();
+    if results.is_empty() {
+        return None;
+    }
     let mut observer = None;
     for (block, body) in &graph.skeleton.blocks {
-        if body
-            .side_effects
-            .iter()
-            .any(|effect| roots_reach(graph, graph.effect_boundary_value_dependencies(effect), call))
-        {
+        if body.side_effects.iter().any(|effect| {
+            roots_reach_any(graph, graph.effect_boundary_value_dependencies(effect), &results)
+        }) {
             return None;
         }
-        if roots_reach(graph, body.term.referenced_nodes(), call) {
+        if roots_reach_any(graph, body.term.referenced_nodes(), &results) {
             if observer.replace(block).is_some() {
                 return None;
             }
@@ -275,50 +523,53 @@ fn inline_structured_call_before_terminator<P: Family>(
             "inline_structured_call_before_terminator: caller block {block:?} is a structured header"
         ));
     }
-    if uniquely_observing_terminator(caller, call) != Some(block) {
+    let site = call_site_id(caller, call).ok_or_else(|| {
+        format!("inline_structured_call_before_terminator: value {call:?} is not a call result")
+    })?;
+    if uniquely_observing_call_terminator(caller, site) != Some(block) {
         return Err(format!(
             "inline_structured_call_before_terminator: call {call:?} is not uniquely observed by {block:?}'s terminator"
         ));
     }
 
-    let site = call_site_id(caller, call).ok_or_else(|| {
-        format!("inline_structured_call_before_terminator: value {call:?} is not a call result")
-    })?;
     validate_call(caller, site, callee)?;
+    let anchor = caller
+        .side_effect_index()
+        .call_site(site)
+        .ok_or_else(|| format!("call {site:?} has no explicit skeleton site"))?;
+    remove_explicit_call_site(caller, site, anchor)?;
     let call_site = caller.call(site);
-    if call_site.result().single_value() != Some(call) {
-        return Err("structured inlining requires one by-value call result".into());
+    let call_results = call_site.result().values();
+    if call_site.result().destination_count() != call_results.len() {
+        return Err("structured inlining requires by-value call results".into());
     }
+    let requested = call_results
+        .iter()
+        .position(|result| *result == call)
+        .ok_or_else(|| "structured inlining trigger is absent from its call boundary".to_string())?;
     let operands = call_site.arguments().to_vec();
-    let call_ty = caller.nodes[call].ty.clone();
-    if &call_ty != callee.result().ty() {
-        return Err(format!(
-            "inline_structured_call_before_terminator: `{}` call has type {call_ty:?}, function returns {:?}",
-            callee.name,
-            callee.result().ty()
-        ));
-    }
 
     let mut block_map = LookupMap::new();
     for source in &summary.blocks {
         block_map.insert(*source, caller.skeleton.create_block());
     }
     let continuation = caller.skeleton.create_block();
-    let result = caller.add_block_param(continuation, call_ty);
+    let results = call_results
+        .iter()
+        .map(|result| caller.add_block_param(continuation, caller.nodes[*result].ty.clone()))
+        .collect::<Vec<_>>();
 
     let mut memo = LookupMap::new();
     for (source, definition) in &callee.graph.nodes {
         if let ValueKind::FuncParam { parameter } = definition.kind {
-            let replacement = operands
-                .get(parameter.index())
-                .and_then(|operand| operand.value())
-                .ok_or_else(|| {
-                format!(
+            let replacement =
+                operands.get(parameter.index()).and_then(|operand| operand.value()).ok_or_else(|| {
+                    format!(
                     "inline_structured_call_before_terminator: `{}` parameter {} is not a value argument",
                     callee.name,
                     parameter.index()
                 )
-            })?;
+                })?;
             memo.insert(source, replacement);
         }
     }
@@ -353,21 +604,17 @@ fn inline_structured_call_before_terminator<P: Family>(
         let term = match &source.term {
             SkeletonTerminator::Return(Some(binding)) => SkeletonTerminator::Branch {
                 target: continuation,
-                args: vec![clone_flow(
-                    caller,
-                    &mut memo,
-                    binding
-                        .single_value()
-                        .ok_or_else(|| "structured inlining requires scalar returns".to_string())?,
-                )?],
+                args: binding
+                    .values()
+                    .into_iter()
+                    .map(|value| clone_flow(caller, &mut memo, value))
+                    .collect::<Result<_, _>>()?,
             },
             SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
                 target: block_map[target],
                 args: args
                     .iter()
-                    .map(|value| {
-                        clone_flow(caller, &mut memo, value.value())
-                    })
+                    .map(|value| clone_flow(caller, &mut memo, value.value()))
                     .collect::<Result<_, _>>()?,
             },
             SkeletonTerminator::CondBranch {
@@ -381,16 +628,12 @@ fn inline_structured_call_before_terminator<P: Family>(
                 then_target: block_map[then_target],
                 then_args: then_args
                     .iter()
-                    .map(|value| {
-                        clone_flow(caller, &mut memo, value.value())
-                    })
+                    .map(|value| clone_flow(caller, &mut memo, value.value()))
                     .collect::<Result<_, _>>()?,
                 else_target: block_map[else_target],
                 else_args: else_args
                     .iter()
-                    .map(|value| {
-                        clone_flow(caller, &mut memo, value.value())
-                    })
+                    .map(|value| clone_flow(caller, &mut memo, value.value()))
                     .collect::<Result<_, _>>()?,
             },
             SkeletonTerminator::Return(None) | SkeletonTerminator::Unreachable => {
@@ -417,16 +660,18 @@ fn inline_structured_call_before_terminator<P: Family>(
     // unioning the original call with that parameter: extraction may otherwise
     // choose the block parameter while elaborating a value placed before its
     // defining continuation.
-    caller.replace_node_references(call, result);
+    for (&call_result, &result) in call_results.iter().zip(&results) {
+        caller.replace_node_references(call_result, result);
+    }
     old_term.visit_values_mut(|node| {
-        if *node == call {
-            *node = result;
+        if let Some(index) = call_results.iter().position(|result| result == node) {
+            *node = results[index];
         }
     });
     caller.skeleton.blocks[continuation].term = old_term;
     caller.skeleton.verify_branch_arities()?;
     caller.verify_hash_cons()?;
-    Ok(result)
+    Ok(results[requested])
 }
 
 /// Inline one pure call by cloning the callee's value DAG into the caller and
@@ -447,7 +692,32 @@ pub(crate) fn inline_pure_call<P: Family>(
         .iter()
         .position(|value| *value == result)
         .ok_or_else(|| "call result is absent from its call-site binding".to_string())?;
+    let anchor = caller
+        .side_effect_index()
+        .call_site(site)
+        .ok_or_else(|| format!("call {site:?} has no explicit skeleton site"))?;
+    let existing_calls = caller.calls().keys().collect::<LookupSet<_>>();
     let inlined = clone_callee_results(caller, site, callee)?;
+    let cloned_calls =
+        caller.calls().keys().filter(|candidate| !existing_calls.contains(candidate)).collect::<Vec<_>>();
+    let cloned_call_effects = cloned_calls
+        .into_iter()
+        .map(|site| {
+            if caller.call(site).effects() != CallEffects::Pure {
+                return Err(format!(
+                    "inline_pure_call: `{}` contains a non-pure nested call",
+                    callee.name
+                ));
+            }
+            Ok(super::ir::SideEffect::new(
+                SideEffectKind::Effect(EffectOp::Call { site }),
+                smallvec::smallvec![],
+                None,
+                None,
+                None,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     if call_results.len() != inlined.len() {
         return Err("callee return binding does not match its call-site binding".into());
     }
@@ -458,42 +728,15 @@ pub(crate) fn inline_pure_call<P: Family>(
                 callee.name
             ));
         }
-        caller.subsume_pure_in_place(call_result, replacement);
-        fold_project_consumers(caller, call_result, replacement);
+        caller.replace_value_references(call_result, replacement);
+        caller.install_aliases([(call_result, replacement)]);
     }
+    remove_explicit_call_site(caller, site, anchor)?;
+    caller.skeleton.blocks[anchor.block]
+        .side_effects
+        .splice(anchor.index..anchor.index, cloned_call_effects);
+    super::graph_ops::fold_exposed_projections(caller);
     Ok(inlined[requested])
-}
-
-/// Revisit projections that already existed in the caller before an aggregate
-/// call was inlined. Substitution can expose a tuple beneath the call, but
-/// those consumers are not rebuilt by [`clone_value_subgraph`], so eagerly
-/// propagate their selected components and any nested projections here.
-fn fold_project_consumers<P: Family>(graph: &mut EGraph<P>, source: ValueId, replacement: ValueId) {
-    let mut pending = vec![(source, replacement)];
-    while let Some((source, replacement)) = pending.pop() {
-        let consumers = graph
-            .nodes
-            .iter()
-            .filter_map(|(node, definition)| match &definition.kind {
-                ValueKind::Pure {
-                    op: PureOp::Project { index },
-                    operands,
-                } if operands.as_slice() == [source] => Some((node, *index, definition.ty.clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for (project, index, ty) in consumers {
-            let Some(selected) = graph.try_algebraic_fold(&PureOp::Project { index }, &[replacement], &ty)
-            else {
-                continue;
-            };
-            if selected == project {
-                continue;
-            }
-            graph.subsume_pure_in_place(project, selected);
-            pending.push((project, selected));
-        }
-    }
 }
 
 fn clone_callee_results<P: Family>(
@@ -506,19 +749,20 @@ fn clone_callee_results<P: Family>(
         return Err(format!("inline_pure_call: `{}` is not pure", callee.name));
     }
 
-    let roots = inlineable_return_binding(callee).ok_or_else(|| {
-        format!(
-            "clone_callee_result: `{}` is not a pure single-block value DAG",
-            callee.name
-        )
-    })?
-    .values();
+    let roots = inlineable_return_binding(callee)
+        .ok_or_else(|| {
+            format!(
+                "clone_callee_result: `{}` is not a pure single-block value DAG",
+                callee.name
+            )
+        })?
+        .values();
     let arguments = caller.call(site).arguments().to_vec();
     let mut memo = LookupMap::new();
     let reachable = wyn_graph::reachable_from_ordered(
         roots.iter().copied(),
         wyn_graph::WalkOrder::DepthFirst,
-        |node, out| out.extend(callee.graph.nodes[node].kind.children()),
+        |node, out| out.extend(callee.graph.value_dependencies(node)),
     );
     for node in reachable {
         let definition = &callee.graph.nodes[node].kind;
@@ -527,12 +771,12 @@ fn clone_callee_results<P: Family>(
                 .get(parameter.index())
                 .and_then(|argument| argument.value())
                 .ok_or_else(|| {
-                format!(
-                    "inline_pure_call: `{}` parameter {} is not a value argument",
-                    callee.name,
-                    parameter.index()
-                )
-            })?;
+                    format!(
+                        "inline_pure_call: `{}` parameter {} is not a value argument",
+                        callee.name,
+                        parameter.index()
+                    )
+                })?;
             memo.insert(node, replacement);
         }
     }
@@ -574,10 +818,16 @@ fn validate_call<P: Family>(
         ));
     }
     if call.effects() != callee.effects() {
-        return Err(format!("inline call to `{}` has inconsistent effects", callee.name));
+        return Err(format!(
+            "inline call to `{}` has inconsistent effects",
+            callee.name
+        ));
     }
     if call.result().ty() != callee.result().ty() {
-        return Err(format!("inline call to `{}` has an inconsistent result tree", callee.name));
+        return Err(format!(
+            "inline call to `{}` has an inconsistent result tree",
+            callee.name
+        ));
     }
     if call.arguments().len() != callee.params().len() {
         return Err(format!(
@@ -597,15 +847,20 @@ fn validate_call<P: Family>(
             }
             (OperandRef::Place(place), super::ir::OperandType::Place(ty)) => {
                 caller.places().get(*place).is_some_and(|place| {
-                    place.ty().pointee == ty.pointee && place.ty().access == ty.access
+                    place.ty().pointee == ty.pointee && ty.access.accepts(place.ty().access)
                 })
             }
             _ => false,
         };
         if !matches {
+            let argument_definition = argument
+                .value()
+                .and_then(|value| caller.nodes.get(value))
+                .map(|value| (value.ty(), value.kind()));
             return Err(format!(
-                "inline call: operand {index} of `{}` does not match its parameter representation",
+                "inline call: operand {index} ({argument:?}, {argument_definition:?}) of `{}` does not match parameter {:?}",
                 callee.name,
+                parameter.representation(),
             ));
         }
     }

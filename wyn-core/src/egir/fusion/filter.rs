@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use polytype::Type;
-use smallvec::{smallvec, SmallVec};
+use smallvec::smallvec;
 
 use super::{capture_types, graph_and_span, support};
 use crate::ast::TypeName;
@@ -23,7 +23,7 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, lambda as lambda_ops, screma};
 use crate::egir::types::{
-    EGraph, PureOp, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
+    EGraph, PureOp, ResultBinding, SegResourceAccess, SegSpace, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::flow::{BlockId, ControlHeader};
@@ -154,9 +154,7 @@ fn is_reduction_of_filter(effect: &SideEffect, filter_result: ValueId) -> bool {
     let input_count = op.inputs.len();
     input_count != 0
         && effect.operands.len() >= input_count
-        && effect.operands[..input_count]
-            .iter()
-            .all(|input| input.value() == Some(filter_result))
+        && effect.operands[..input_count].iter().all(|input| input.value() == Some(filter_result))
 }
 
 fn filter_result_escapes(
@@ -179,8 +177,8 @@ fn filter_result_escapes(
                 }
                 continue;
             }
-            if effect
-                .referenced_nodes()
+            if graph_ops::effect_value_inputs(graph, effect)
+                .into_iter()
                 .any(|root| support::pure_depends_on_avoiding(graph, root, result, &stops))
             {
                 return true;
@@ -370,6 +368,7 @@ fn build_masked_pre(
         &args[..input_types.len()],
         &args[cursor..cursor + mapped_capture_count],
     );
+    let mapped = lambda_ops::materialize_result_values(&mut graph, &mapped);
     cursor += mapped_capture_count;
     let predicate_capture_count = filter.body.predicate.capture_count();
     let mapped_arguments = mapped.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
@@ -380,6 +379,7 @@ fn build_masked_pre(
         &mapped_arguments,
         &args[cursor..cursor + predicate_capture_count],
     );
+    let predicate = lambda_ops::materialize_result_values(&mut graph, &predicate);
     cursor += predicate_capture_count;
     debug_assert_eq!(predicate.len(), 1);
 
@@ -388,18 +388,21 @@ fn build_masked_pre(
     if let Some(consumer) = consumer {
         let consumer_capture_count = consumer.pre.capture_count();
         let consumer_args = vec![graph.operand_ref(mapped[0]); consumer.pre.parameter_types.len()];
-        selected.extend(support::invoke_lambda(
+        let results = support::invoke_lambda(
             &mut graph,
             inner,
             &consumer.pre,
             &consumer_args,
             &args[cursor..cursor + consumer_capture_count],
-        ));
+        );
+        selected.extend(lambda_ops::materialize_result_values(&mut graph, &results));
         cursor += consumer_capture_count;
         let neutral_count = consumer.reduction_input_count();
-        fallback.extend(args[cursor..cursor + neutral_count].iter().map(|argument| {
-            argument.value().expect("reduction neutral capture is a value")
-        }));
+        fallback.extend(
+            args[cursor..cursor + neutral_count]
+                .iter()
+                .map(|argument| argument.value().expect("reduction neutral capture is a value")),
+        );
         cursor += neutral_count;
     }
     if let Some(count_ty) = count_ty {
@@ -484,7 +487,8 @@ fn rewrite_with_consumer(
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(old_op))) = &consumer_effect.kind else {
                 unreachable!();
             };
-            let old_result = consumer_effect.value_result().expect("Filter reduction has no value result");
+            let old_result =
+                consumer_effect.result().cloned().expect("Filter reduction has no result binding");
             let old_result_types = old_op
                 .form
                 .reductions
@@ -497,14 +501,10 @@ fn rewrite_with_consumer(
             {
                 count.neutral = vec![neutral];
                 let field = old_result_types.len() as u32;
-                let new_result = extend_result(graph, old_result, &old_result_types, count_ty.clone());
-                let project = graph.intern_pure(
-                    PureOp::Project { index: field },
-                    smallvec![new_result],
-                    count_ty.clone(),
-                    None,
-                );
-                Some((count, new_result, project))
+                let (new_result, count_value) =
+                    extend_result(graph, &old_result, &old_result_types, count_ty.clone());
+                debug_assert_eq!(field as usize, new_result.field_count() - 1);
+                Some((count, new_result, count_value))
             } else {
                 None
             };
@@ -535,14 +535,9 @@ fn rewrite_with_consumer(
 
             let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
             let consumer_id = consumer_effect.kind.soac_id().copied().expect("consumer SOAC id");
-            let consumer_operands = filter
-                .input_nodes
-                .iter()
-                .map(|value| graph.operand_ref(*value))
-                .collect();
-            let replacement_result = count_project
-                .as_ref()
-                .map(|(_, new_result, _)| graph.value_result(*new_result));
+            let consumer_operands =
+                filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
+            let replacement_result = count_project.as_ref().map(|(_, new_result, _)| new_result.clone());
             {
                 let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
                 consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(op)));
@@ -570,9 +565,7 @@ fn rewrite_with_consumer(
             EntryMetadataPatch {
                 replacement: count_project.as_ref().map(|(_, _, value)| *value),
                 old_writer: filter_effect.value_result(),
-                replacement_writer: Some(
-                    count_project.as_ref().map(|(_, result, _)| *result).unwrap_or(old_result),
-                ),
+                replacement_writer: old_result.values().first().copied(),
                 scratch: filter.scratch,
             }
         };
@@ -597,20 +590,10 @@ fn rewrite_count_only(
             let neutral = integer_literal(graph, "0", &count_ty);
             count.neutral = vec![neutral];
             let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
-            let result = graph.alloc_side_effect_result(tuple_ty);
-            let project = graph.intern_pure(
-                PureOp::Project { index: 0 },
-                smallvec![result],
-                count_ty.clone(),
-                None,
-            );
-            replace_lengths(graph, &candidate.lengths, project);
-            let operands = filter
-                .input_nodes
-                .iter()
-                .map(|value| graph.operand_ref(*value))
-                .collect();
-            let result_binding = graph.value_result(result);
+            let count_value = graph.alloc_side_effect_result(count_ty.clone());
+            let result_binding = ResultBinding::product(tuple_ty, [graph.value_result(count_value)]);
+            replace_lengths(graph, &candidate.lengths, count_value);
+            let operands = filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
             {
                 let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
                 let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
@@ -652,9 +635,9 @@ fn rewrite_count_only(
                 *resources = reads;
             }
             EntryMetadataPatch {
-                replacement: Some(project),
+                replacement: Some(count_value),
                 old_writer: filter_effect.value_result(),
-                replacement_writer: Some(result),
+                replacement_writer: Some(count_value),
                 scratch: filter.scratch,
             }
         };
@@ -698,51 +681,26 @@ fn finish_entry_metadata(
 
 fn replace_lengths(graph: &mut EGraph, lengths: &[ValueId], replacement: ValueId) {
     for &length in lengths {
-        graph_ops::replace_all_references(graph, length, replacement);
+        graph.replace_value_references(length, replacement);
     }
 }
 
 fn extend_result(
     graph: &mut EGraph,
-    old_result: ValueId,
+    old_result: &ResultBinding<Type<TypeName>>,
     old_fields: &[Type<TypeName>],
     extra: Type<TypeName>,
-) -> ValueId {
+) -> (ResultBinding<Type<TypeName>>, ValueId) {
     let mut fields = old_fields.to_vec();
-    fields.push(extra);
-    let new_result =
-        graph.alloc_side_effect_result(Type::Constructed(TypeName::Tuple(fields.len()), fields));
-    let projects = graph
-        .nodes
-        .iter()
-        .filter_map(|(node, definition)| match &definition.kind {
-            ValueKind::Pure {
-                op: PureOp::Project { index },
-                operands,
-            } if operands.first() == Some(&old_result) => Some((node, *index)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for (project, index) in projects {
-        graph.update_pure_node(project, |_, operands| operands[0] = new_result);
-        debug_assert!((index as usize) < old_fields.len());
-    }
-    let rebuilt_fields = old_fields
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| {
-            graph.intern_pure(
-                PureOp::Project { index: index as u32 },
-                smallvec![new_result],
-                ty.clone(),
-                None,
-            )
-        })
-        .collect::<SmallVec<[ValueId; 4]>>();
-    let old_ty = graph.nodes[old_result].ty.clone();
-    let rebuilt = graph.intern_pure(PureOp::Tuple(old_fields.len()), rebuilt_fields, old_ty, None);
-    graph_ops::replace_all_references(graph, old_result, rebuilt);
-    new_result
+    fields.push(extra.clone());
+    let count = graph.alloc_side_effect_result(extra);
+    let mut bindings = old_result.top_level_fields();
+    debug_assert_eq!(bindings.len(), old_fields.len());
+    bindings.push(graph.value_result(count));
+    (
+        ResultBinding::product(Type::Constructed(TypeName::Tuple(fields.len()), fields), bindings),
+        count,
+    )
 }
 
 fn integer_literal(graph: &mut EGraph, value: &str, ty: &Type<TypeName>) -> ValueId {

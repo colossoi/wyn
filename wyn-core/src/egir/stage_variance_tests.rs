@@ -43,17 +43,16 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         ty.clone(),
         None,
     );
-    let project_params = semantic_params([
-        ("value", ty.clone()),
-        ("offset", ty.clone()),
-    ]);
+    let project_params = semantic_params([("value", ty.clone()), ("offset", ty.clone())]);
     let call = graph
-        .add_call(
+        .emit_call(
+            graph.skeleton.entry,
             project,
             &project_params,
             &by_value_function_result::<WynLanguage>(ty.clone()),
             [OperandRef::Value(stage_input), OperandRef::Value(uniform_sum)],
             CallEffects::Pure,
+            None,
             None,
         )
         .unwrap()

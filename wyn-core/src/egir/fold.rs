@@ -72,7 +72,28 @@ impl<P: Family> EGraph<P> {
     }
 
     /// `Project{i}(Tuple/Vector/ArrayLit(e0,…,en)) → e_i`
-    fn fold_project(&self, index: u32, base: ValueId) -> Option<ValueId> {
+    fn fold_project(&mut self, index: u32, base: ValueId) -> Option<ValueId> {
+        let origin_field = self.nodes[base]
+            .result_origins()
+            .iter()
+            .find_map(|origin| origin.field(index as usize))
+            .and_then(|field| {
+                let (ty, destination) = field.single_destination()?;
+                Some((ty.clone(), destination.clone()))
+            });
+        if let Some((ty, destination)) = origin_field {
+            return Some(match destination {
+                super::types::ResultDestination::ReturnValue(value) => self.canonical_value(value),
+                super::types::ResultDestination::Place(
+                    super::types::PlaceDestination::Fixed(place)
+                    | super::types::PlaceDestination::Bounded { storage: place, .. },
+                ) => {
+                    let view_ty = crate::types::view_array_of(&ty, crate::types::no_buffer());
+                    self.add_place_view(place, view_ty, None).value()
+                }
+            });
+        }
+
         let ValueKind::Pure {
             op: base_op,
             operands: base_operands,
