@@ -287,11 +287,7 @@ pub fn build_parameter_block_bytes(
             if verbose {
                 println!(
                     "Parameter '{}' -> storage ({}, {}) offset {}: {} bytes",
-                    member.name,
-                    set,
-                    binding,
-                    member.offset,
-                    member.size
+                    member.name, set, binding, member.offset, member.size
                 );
             }
         }
@@ -431,10 +427,7 @@ pub fn create_binding_buffers(
                     byte_size, name
                 );
             }
-            let data = parameter_bytes
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| vec![0u8; byte_size as usize]);
+            let data = parameter_bytes.get(&key).cloned().unwrap_or_else(|| vec![0u8; byte_size as usize]);
             if data.len() as u64 != byte_size {
                 return Err(anyhow!(
                     "parameter block '{}' provides {} bytes but its descriptor requires {}",
@@ -632,20 +625,15 @@ fn resolve_dispatch_len(
             set,
             binding,
             elem_bytes,
-        } => buffers
-            .get(&(*set, *binding))
-            .map(|(_, size)| (*size / *elem_bytes as u64) as u32)
-            .unwrap_or(0),
+        } => {
+            buffers.get(&(*set, *binding)).map(|(_, size)| (*size / *elem_bytes as u64) as u32).unwrap_or(0)
+        }
         DispatchLen::Fixed { count } => *count,
         DispatchLen::PushConstant { offset } => {
             let o = *offset as usize;
             pc_bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
         }
-        DispatchLen::StorageBuffer {
-            set,
-            binding,
-            offset,
-        } => {
+        DispatchLen::StorageBuffer { set, binding, offset } => {
             let o = *offset as usize;
             parameter_bytes
                 .get(&(*set, *binding))
@@ -1986,64 +1974,5 @@ pub fn build_resource_bind_group_for_set(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use wyn_pipeline_descriptor::{BufferLen, UniformMember};
-
-    #[test]
-    fn packs_wgsl_parameter_blocks_at_descriptor_offsets() {
-        let bindings = vec![Binding::StorageBuffer {
-            set: 1,
-            binding: 0,
-            access: Access::ReadOnly,
-            usage: BufferUsage::Input,
-            name: "params".to_string(),
-            resource: None,
-            length: Some(BufferLen::Fixed { bytes: 32 }),
-            members: vec![
-                UniformMember {
-                    name: "count".to_string(),
-                    offset: 0,
-                    size: 4,
-                },
-                UniformMember {
-                    name: "direction".to_string(),
-                    offset: 16,
-                    size: 12,
-                },
-            ],
-        }];
-        let values = vec![
-            PushConstantSpec {
-                name: "count".to_string(),
-                offset: 0,
-                data: 130u32.to_le_bytes().to_vec(),
-            },
-            PushConstantSpec {
-                name: "direction".to_string(),
-                offset: 0,
-                data: [1.0f32, 2.0, 3.0].into_iter().flat_map(f32::to_le_bytes).collect(),
-            },
-        ];
-
-        let blocks = build_parameter_block_bytes(&bindings, &values, false).unwrap();
-        let block = &blocks[&(1, 0)];
-        assert_eq!(&block[0..4], &130u32.to_le_bytes());
-        assert!(block[4..16].iter().all(|byte| *byte == 0));
-        assert_eq!(&block[16..28], values[1].data.as_slice());
-        assert!(block[28..32].iter().all(|byte| *byte == 0));
-
-        let dispatch = DispatchSize::DerivedFrom {
-            len: DispatchLen::StorageBuffer {
-                set: 1,
-                binding: 0,
-                offset: 0,
-            },
-            workgroup_size: 64,
-        };
-        assert_eq!(
-            resolve_dispatch_size_with_parameters(&dispatch, &StorageBuffers::new(), &[], &blocks),
-            (3, 1, 1)
-        );
-    }
-}
+#[path = "gpu_tests.rs"]
+mod tests;

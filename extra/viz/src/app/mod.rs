@@ -901,10 +901,7 @@ impl State {
         for pair in &buffer_feedback_pairs {
             if let Some(res) = feedback_buffers.get(&(pair.write_set, pair.write_binding)) {
                 let buf = &res.buffers[0];
-                dispatch_buffer_sizes.insert(
-                    (pair.read_set, pair.read_binding),
-                    (buf.clone(), buf.size()),
-                );
+                dispatch_buffer_sizes.insert((pair.read_set, pair.read_binding), (buf.clone(), buf.size()));
             }
         }
         for ((set, binding), res) in &host_buffers {

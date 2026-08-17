@@ -13,9 +13,8 @@ use winit::event_loop::EventLoop;
 
 use crate::app::{App, InteractivePipelineSpec};
 use crate::gpu::{
-    build_bind_groups, build_parameter_block_bytes, build_push_constant_bytes,
-    create_binding_buffers, create_headless_device, readback_buffer,
-    resolve_dispatch_size_with_parameters, ComputeExecutor,
+    build_bind_groups, build_parameter_block_bytes, build_push_constant_bytes, create_binding_buffers,
+    create_headless_device, readback_buffer, resolve_dispatch_size_with_parameters, ComputeExecutor,
 };
 use crate::json::{write_f32_json, Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor};
 use crate::specs::PushConstantSpec;
@@ -456,7 +455,8 @@ fn run_compute(
     }
 
     let parameter_bytes = build_parameter_block_bytes(&mp.bindings, push_constants, verbose)?;
-    let has_native_push_constants = mp.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }));
+    let has_native_push_constants =
+        mp.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }));
     // Preserve the legacy descriptor-less sequential packing path only when
     // this is not a WGSL storage-parameter pipeline.
     let pc_bytes = if has_native_push_constants || parameter_bytes.is_empty() {
