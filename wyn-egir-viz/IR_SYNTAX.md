@@ -1,6 +1,6 @@
 # EGIR Display Syntax
 
-Status: draft display contract, version 0.2. Source audit: 2026-08-17.
+Status: draft display contract, version 0.3. Source audit: 2026-08-17.
 
 This document defines the textual syntax used by the EGIR pass inspector. It is
 a deterministic, typed serialization of compiler-owned EGIR, intended for
@@ -357,6 +357,32 @@ Logical size is one of:
 
 Entry-local semantic resource declarations additionally retain `role`, element
 type, and logical size. Resource arena order is resource identity order.
+
+### `realize_outputs` checkpoint boundary
+
+`egir::realize_outputs` is the first EGIR pass after `from_tlc`. Its two panes
+use the same raw EGIR grammar: the left pane is converted EGIR and the right
+pane is converted EGIR with output publication metadata realized.
+
+The listing distinguishes graph-owned state from sidecars instead of merging
+them into an operation-specific annotation:
+
+- `soac.filter(... state: raw(...))` is in-tree state. A runtime filter may
+  change from `runtime(scratch: $scratch, length: view_only)` to
+  `runtime(scratch: $output, length: stored(resource: $scratch))`.
+- `INTERFACE.outputs`, including `kind`, `$resource`, size policy, output
+  routes, and route writers, are entry sidecars.
+- `INTERFACE.resource_declarations` are entry-local resource-use sidecars.
+- top-level `RESOURCE` declarations are the program-owned logical-resource
+  sidecar.
+
+For a dynamic filter result, the pass can retarget storage views in the graph
+from a compiler scratch resource to the host output resource. The old scratch
+resource then becomes a `u32` four-byte length cell in both resource sidecars.
+The output's physical length policy becomes `like_input(...)` when the source
+input binding supplies the element count. These are references to the same
+`$resource` identities; the display must not assign separate names to their
+in-tree and sidecar occurrences.
 
 ## Floating values and places
 

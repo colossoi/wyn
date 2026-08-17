@@ -5,9 +5,10 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::{NodeCounter, Span};
 use wyn_core::egir::ir::{OperandRef, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
-    CoreProgramData, OutputWriter, RealizedOutputRoute, RewriteGlobal, SemanticOpId, SemanticResourceDecl,
-    SemanticResourceRef,
+    CompilerResourceKind, CoreProgramData, LogicalSize, OutputWriter, RealizedOutputRoute, ResourceId,
+    ResourceOrigin, RewriteGlobal, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
+use wyn_core::egir::soac::filter;
 use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
 use wyn_core::egir::types::{
     EffectOp, PlaceDestination, Raw, RegionId, ResultDestination, Semantic, Soac, SoacEffect, ValueKind,
@@ -82,13 +83,67 @@ pub struct GraphGroup {
     pub label: String,
     pub kind: String,
     pub outputs: Vec<GraphOutput>,
+    pub resource_declarations: Vec<GraphResourceDeclaration>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphOutput {
     pub slot: usize,
     pub ty: String,
+    pub resource: Option<String>,
+    pub kind: GraphOutputKind,
     pub routes: Vec<GraphOutputRoute>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOutputKind {
+    pub variant: String,
+    pub destination: Option<String>,
+    pub exposure: Option<String>,
+    pub binding: Option<GraphBinding>,
+    pub length: Option<GraphSize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct GraphBinding {
+    pub set: u32,
+    pub binding: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphSize {
+    pub variant: String,
+    pub bytes: Option<u64>,
+    pub resource: Option<String>,
+    pub binding: Option<GraphBinding>,
+    pub elem_bytes: Option<u32>,
+    pub src_elem_bytes: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphResourceDeclaration {
+    pub resource: String,
+    pub role: String,
+    pub elem_ty: String,
+    pub size: GraphSize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphResource {
+    pub id: String,
+    pub elem_ty: String,
+    pub origin: GraphResourceOrigin,
+    pub size: GraphSize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphResourceOrigin {
+    pub variant: String,
+    pub binding: Option<GraphBinding>,
+    pub name: Option<String>,
+    pub compiler_kind: Option<String>,
+    pub owner: Option<String>,
+    pub slot: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +207,28 @@ pub struct GraphOperation {
     pub operand_groups: Vec<GraphOperandGroup>,
     pub regions: Vec<GraphRegion>,
     pub results: Vec<GraphResult>,
+    pub filter_state: Option<GraphFilterState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterState {
+    pub phase: String,
+    pub storage: GraphFilterStorage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterStorage {
+    pub variant: String,
+    pub capacity: Option<String>,
+    pub ownership: Option<String>,
+    pub scratch: Option<String>,
+    pub length: Option<GraphFilterLength>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterLength {
+    pub variant: String,
+    pub resource: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,6 +258,7 @@ pub struct GraphBlock {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GraphSnapshot {
+    pub resources: Vec<GraphResource>,
     pub groups: Vec<GraphGroup>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
@@ -422,6 +500,8 @@ trait SnapshotPhase: WynSoacPhase<Resource = SemanticResourceRef> {
         -> String;
 
     fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String;
+
+    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState;
 }
 
 impl SnapshotPhase for Raw {
@@ -436,6 +516,10 @@ impl SnapshotPhase for Raw {
 
     fn soac_detail(_id: &Self::SoacId, soac: &Soac<Self>) -> String {
         format!("{soac:#?}")
+    }
+
+    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState {
+        graph_filter_state("raw", &op.state.storage)
     }
 }
 
@@ -452,6 +536,204 @@ impl SnapshotPhase for Semantic {
     fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String {
         format!("semantic op {}\n\n{soac:#?}", id.source_index())
     }
+
+    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState {
+        graph_filter_state("semantic", &op.state.storage)
+    }
+}
+
+fn graph_filter_state(phase: &str, storage: &filter::Output<SemanticResourceRef>) -> GraphFilterState {
+    let storage = match storage {
+        filter::Output::Local { capacity, ownership } => GraphFilterStorage {
+            variant: "local".to_string(),
+            capacity: Some(wyn_core::diags::format_type(capacity)),
+            ownership: Some(
+                match ownership {
+                    wyn_core::egir::types::SoacOwnership::Fresh => "fresh",
+                    wyn_core::egir::types::SoacOwnership::UniqueInput => "unique_input",
+                }
+                .to_string(),
+            ),
+            scratch: None,
+            length: None,
+        },
+        filter::Output::Runtime { scratch, length } => GraphFilterStorage {
+            variant: "runtime".to_string(),
+            capacity: None,
+            ownership: None,
+            scratch: Some(resource_name(*scratch)),
+            length: Some(match length {
+                filter::RuntimeLength::ViewOnly => GraphFilterLength {
+                    variant: "view_only".to_string(),
+                    resource: None,
+                },
+                filter::RuntimeLength::Stored(resource) => GraphFilterLength {
+                    variant: "stored".to_string(),
+                    resource: Some(resource_name(*resource)),
+                },
+            }),
+        },
+    };
+    GraphFilterState {
+        phase: phase.to_string(),
+        storage,
+    }
+}
+
+fn resource_id_name(resource: ResourceId) -> String {
+    format!("$r{}", resource.index())
+}
+
+fn resource_name(resource: SemanticResourceRef) -> String {
+    resource_id_name(resource.0)
+}
+
+fn graph_binding(binding: wyn_core::BindingRef) -> GraphBinding {
+    GraphBinding {
+        set: binding.set,
+        binding: binding.binding,
+    }
+}
+
+fn graph_logical_size(size: &LogicalSize) -> GraphSize {
+    match size {
+        LogicalSize::FixedBytes(bytes) => GraphSize {
+            variant: "fixed_bytes".to_string(),
+            bytes: Some(*bytes),
+            resource: None,
+            binding: None,
+            elem_bytes: None,
+            src_elem_bytes: None,
+        },
+        LogicalSize::LikeResource {
+            resource,
+            elem_bytes,
+            src_elem_bytes,
+        } => GraphSize {
+            variant: "like_resource".to_string(),
+            bytes: None,
+            resource: Some(resource_id_name(*resource)),
+            binding: None,
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: Some(*src_elem_bytes),
+        },
+        LogicalSize::SameAsDispatch { elem_bytes } => GraphSize {
+            variant: "same_as_dispatch".to_string(),
+            bytes: None,
+            resource: None,
+            binding: None,
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: None,
+        },
+        LogicalSize::Unspecified => GraphSize {
+            variant: "unspecified".to_string(),
+            bytes: None,
+            resource: None,
+            binding: None,
+            elem_bytes: None,
+            src_elem_bytes: None,
+        },
+    }
+}
+
+fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphSize {
+    use wyn_core::pipeline_descriptor::BufferLen;
+    match length {
+        BufferLen::Fixed { bytes } => GraphSize {
+            variant: "fixed_bytes".to_string(),
+            bytes: Some(*bytes),
+            resource: None,
+            binding: None,
+            elem_bytes: None,
+            src_elem_bytes: None,
+        },
+        BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        } => GraphSize {
+            variant: "like_input".to_string(),
+            bytes: None,
+            resource: None,
+            binding: Some(GraphBinding {
+                set: *set,
+                binding: *binding,
+            }),
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: Some(*src_elem_bytes),
+        },
+        BufferLen::SameAsDispatch { elem_bytes } => GraphSize {
+            variant: "same_as_dispatch".to_string(),
+            bytes: None,
+            resource: None,
+            binding: None,
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: None,
+        },
+    }
+}
+
+fn graph_output_kind(kind: &wyn_core::interface::EntryOutputKind) -> GraphOutputKind {
+    use wyn_core::interface::{BindingExposure, EntryOutputDestination, EntryOutputKind};
+    match kind {
+        EntryOutputKind::Value { destination } => GraphOutputKind {
+            variant: "value".to_string(),
+            destination: Some(match destination {
+                EntryOutputDestination::Plain => "plain".to_string(),
+                EntryOutputDestination::BuiltIn(value) => format!("builtin({value:?})"),
+                EntryOutputDestination::Location(value) => format!("location({value})"),
+                EntryOutputDestination::Target(value) => format!("target({value:?})"),
+            }),
+            exposure: None,
+            binding: None,
+            length: None,
+        },
+        EntryOutputKind::Storage { exposure, length } => {
+            let (exposure, binding) = match exposure {
+                BindingExposure::Host(binding) => ("host", Some(graph_binding(*binding))),
+                BindingExposure::Internal => ("internal", None),
+            };
+            GraphOutputKind {
+                variant: "storage".to_string(),
+                destination: None,
+                exposure: Some(exposure.to_string()),
+                binding,
+                length: length.as_ref().map(graph_buffer_len),
+            }
+        }
+    }
+}
+
+fn storage_role(role: wyn_core::interface::StorageRole) -> String {
+    match role {
+        wyn_core::interface::StorageRole::Input => "input",
+        wyn_core::interface::StorageRole::Output => "output",
+        wyn_core::interface::StorageRole::Intermediate => "intermediate",
+    }
+    .to_string()
+}
+
+fn compiler_resource_kind(kind: CompilerResourceKind) -> String {
+    match kind {
+        CompilerResourceKind::Staging => "staging",
+        CompilerResourceKind::GatherHandoff => "gather_handoff",
+        CompilerResourceKind::ReducePartial => "reduce_partial",
+        CompilerResourceKind::ScanBlockSums => "scan_block_sums",
+        CompilerResourceKind::ScanBlockOffsets => "scan_block_offsets",
+        CompilerResourceKind::ScanPrefixes => "scan_prefixes",
+        CompilerResourceKind::FilterScratch => "filter_scratch",
+        CompilerResourceKind::FilterLenCell => "filter_len_cell",
+        CompilerResourceKind::FilterFlags => "filter_flags",
+        CompilerResourceKind::FilterOffsets => "filter_offsets",
+        CompilerResourceKind::FilterScanBlockSums => "filter_scan_block_sums",
+        CompilerResourceKind::FilterScanBlockOffsets => "filter_scan_block_offsets",
+        CompilerResourceKind::BucketCounts => "bucket_counts",
+        CompilerResourceKind::BucketOverflow => "bucket_overflow",
+        CompilerResourceKind::ScalarHandoff => "scalar_handoff",
+        CompilerResourceKind::MultiConsumerArray => "multi_consumer_array",
+    }
+    .to_string()
 }
 
 fn snapshot_program<Tag, P>(
@@ -465,6 +747,37 @@ where
     P: SnapshotPhase,
 {
     let mut snapshot = GraphSnapshot::default();
+    snapshot.resources = program
+        .data
+        .resources
+        .iter()
+        .map(|resource| {
+            let origin = match &resource.origin {
+                ResourceOrigin::Host(host) => GraphResourceOrigin {
+                    variant: "host".to_string(),
+                    binding: Some(graph_binding(host.binding)),
+                    name: host.name.clone(),
+                    compiler_kind: None,
+                    owner: None,
+                    slot: None,
+                },
+                ResourceOrigin::Compiler(compiler) => GraphResourceOrigin {
+                    variant: "compiler".to_string(),
+                    binding: None,
+                    name: None,
+                    compiler_kind: Some(compiler_resource_kind(compiler.kind)),
+                    owner: compiler.owner.map(operation_node_id),
+                    slot: Some(compiler.slot),
+                },
+            };
+            GraphResource {
+                id: resource_id_name(resource.id()),
+                elem_ty: wyn_core::diags::format_type(&resource.elem_ty),
+                origin,
+                size: graph_logical_size(&resource.size),
+            }
+        })
+        .collect();
     let region_names = program
         .functions
         .iter()
@@ -483,6 +796,8 @@ where
                 .map(|(slot, output)| GraphOutput {
                     slot,
                     ty: wyn_core::diags::format_type(&output.ty),
+                    resource: output.resource.map(resource_name),
+                    kind: graph_output_kind(&output.kind),
                     routes: output
                         .routes
                         .iter()
@@ -507,6 +822,16 @@ where
                         .collect(),
                 })
                 .collect(),
+            resource_declarations: entry
+                .resource_declarations
+                .iter()
+                .map(|declaration| GraphResourceDeclaration {
+                    resource: resource_name(declaration.resource),
+                    role: storage_role(declaration.role),
+                    elem_ty: wyn_core::diags::format_type(&declaration.elem_ty),
+                    size: graph_logical_size(&declaration.size),
+                })
+                .collect(),
         });
         snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
     }
@@ -517,6 +842,7 @@ where
             label: format!("fn {}", function.name),
             kind: "function".to_string(),
             outputs: Vec::new(),
+            resource_declarations: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &function.graph, &region_names);
     }
@@ -527,6 +853,7 @@ where
             label: format!("const {}", constant.name),
             kind: "constant".to_string(),
             outputs: Vec::new(),
+            resource_declarations: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &constant.graph, &region_names);
     }
@@ -819,6 +1146,7 @@ fn place_display(group: &str, op: &PlaceOp) -> (String, String, GraphOperation) 
             operand_groups,
             regions: Vec::new(),
             results: Vec::new(),
+            filter_state: None,
         },
     )
 }
@@ -911,6 +1239,7 @@ fn effect_display<P: SnapshotPhase>(
                         .collect(),
                     regions: Vec::new(),
                     results: graph_results(group, graph.effect_result_binding(effect)),
+                    filter_state: None,
                 }),
             }
         }
@@ -989,6 +1318,7 @@ fn screma_operation<P: SnapshotPhase>(
         operand_groups,
         regions,
         results: graph_results(group, effect.result()),
+        filter_state: None,
     }
 }
 
@@ -1014,6 +1344,7 @@ fn filter_operation<P: SnapshotPhase>(
             lambda_region("predicate", &op.body.predicate, group, region_names),
         ],
         results: graph_results(group, effect.result()),
+        filter_state: Some(P::filter_state(op)),
     }
 }
 
@@ -1084,6 +1415,7 @@ fn hist_operation<P: SnapshotPhase>(
         operand_groups,
         regions,
         results: graph_results(group, effect.result()),
+        filter_state: None,
     }
 }
 
@@ -1281,6 +1613,71 @@ entry main(xs: [4]i32) [4]i32 =
             after_output.routes.iter().any(|route| !route.writers.is_empty()),
             "output realization records the semantic values that publish the slot"
         );
+    }
+
+    #[test]
+    fn output_realization_exposes_runtime_filter_resource_changes() {
+        let result = inspect_pass_impl(
+            r#"
+entry evens(xs: []i32) []i32 =
+  filter(|x: i32| x % 2 == 0, xs)
+"#,
+            InspectPass::RealizeOutputs,
+        );
+        assert!(result.success, "{:?}", result.error);
+        let before = result.before.expect("before snapshot");
+        let after = result.after.expect("after snapshot");
+        let before_filter = before
+            .nodes
+            .iter()
+            .find(|node| node.variant == "filter")
+            .and_then(|node| node.operation.as_ref())
+            .and_then(|operation| operation.filter_state.as_ref())
+            .expect("converted filter state");
+        let after_filter = after
+            .nodes
+            .iter()
+            .find(|node| node.variant == "filter")
+            .and_then(|node| node.operation.as_ref())
+            .and_then(|operation| operation.filter_state.as_ref())
+            .expect("realized filter state");
+        let before_scratch = before_filter.storage.scratch.as_ref().expect("converted scratch");
+        assert_eq!(
+            before_filter.storage.length.as_ref().map(|length| length.variant.as_str()),
+            Some("view_only")
+        );
+        assert_eq!(
+            after_filter.storage.length.as_ref().map(|length| length.variant.as_str()),
+            Some("stored")
+        );
+        assert_eq!(
+            after_filter.storage.length.as_ref().and_then(|length| length.resource.as_ref()),
+            Some(before_scratch),
+            "the old compaction buffer becomes the stored length cell"
+        );
+
+        let after_entry = after.groups.iter().find(|group| group.kind == "entry").unwrap();
+        let output = &after_entry.outputs[0];
+        assert_eq!(after_filter.storage.scratch.as_ref(), output.resource.as_ref());
+        assert_eq!(
+            output.kind.length.as_ref().map(|length| length.variant.as_str()),
+            Some("like_input")
+        );
+
+        let length_resource = after
+            .resources
+            .iter()
+            .find(|resource| &resource.id == before_scratch)
+            .expect("stored length resource remains in the arena");
+        assert_eq!(length_resource.elem_ty, "u32");
+        assert_eq!(length_resource.size.variant, "fixed_bytes");
+        assert_eq!(length_resource.size.bytes, Some(4));
+        assert!(after_entry.resource_declarations.iter().any(|declaration| {
+            &declaration.resource == before_scratch
+                && declaration.elem_ty == "u32"
+                && declaration.size.variant == "fixed_bytes"
+                && declaration.size.bytes == Some(4)
+        }));
     }
 
     #[test]

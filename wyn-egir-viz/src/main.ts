@@ -16,7 +16,7 @@ const passInfo: Record<PassId, { before: string; after: string }> = {
   },
   "egir::realize_outputs": {
     before: "Converted EGIR",
-    after: "Output writers recorded",
+    after: "Realized output metadata",
   },
 };
 
@@ -24,7 +24,7 @@ const passStorageKey = "wyn-egir-viz:pass";
 const savedPass = localStorage.getItem(passStorageKey);
 const initialPass: PassId = savedPass && savedPass in passInfo
   ? savedPass as PassId
-  : "egir::optimize_semantics";
+  : "egir::realize_outputs";
 
 interface SourceSpan {
   start_line: number;
@@ -43,12 +43,60 @@ interface GraphGroup {
   label: string;
   kind: string;
   outputs: GraphOutput[];
+  resource_declarations: GraphResourceDeclaration[];
 }
 
 interface GraphOutput {
   slot: number;
   ty: string;
+  resource?: string;
+  kind: GraphOutputKind;
   routes: GraphOutputRoute[];
+}
+
+interface GraphOutputKind {
+  variant: "value" | "storage";
+  destination?: string;
+  exposure?: "host" | "internal";
+  binding?: GraphBinding;
+  length?: GraphSize;
+}
+
+interface GraphBinding {
+  set: number;
+  binding: number;
+}
+
+interface GraphSize {
+  variant: "fixed_bytes" | "like_input" | "like_resource" | "same_as_dispatch" | "unspecified";
+  bytes?: number;
+  resource?: string;
+  binding?: GraphBinding;
+  elem_bytes?: number;
+  src_elem_bytes?: number;
+}
+
+interface GraphResourceDeclaration {
+  resource: string;
+  role: "input" | "output" | "intermediate";
+  elem_ty: string;
+  size: GraphSize;
+}
+
+interface GraphResource {
+  id: string;
+  elem_ty: string;
+  origin: GraphResourceOrigin;
+  size: GraphSize;
+}
+
+interface GraphResourceOrigin {
+  variant: "host" | "compiler";
+  binding?: GraphBinding;
+  name?: string;
+  compiler_kind?: string;
+  owner?: string;
+  slot?: number;
 }
 
 interface GraphOutputRoute {
@@ -104,6 +152,25 @@ interface GraphOperation {
   operand_groups: GraphOperandGroup[];
   regions: GraphRegion[];
   results: GraphResult[];
+  filter_state?: GraphFilterState;
+}
+
+interface GraphFilterState {
+  phase: "raw" | "semantic";
+  storage: GraphFilterStorage;
+}
+
+interface GraphFilterStorage {
+  variant: "local" | "runtime";
+  capacity?: string;
+  ownership?: "fresh" | "unique_input";
+  scratch?: string;
+  length?: GraphFilterLength;
+}
+
+interface GraphFilterLength {
+  variant: "view_only" | "stored";
+  resource?: string;
 }
 
 interface GraphEdge {
@@ -129,6 +196,7 @@ interface GraphBlock {
 }
 
 interface GraphSnapshot {
+  resources: GraphResource[];
   groups: GraphGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -173,8 +241,8 @@ app.innerHTML = `
       <label class="pass-block">
         <span>Pass</span>
         <select id="pass-select" aria-label="Compiler pass">
-          <option value="egir::optimize_semantics"${initialPass === "egir::optimize_semantics" ? " selected" : ""}>egir::optimize_semantics</option>
           <option value="egir::realize_outputs"${initialPass === "egir::realize_outputs" ? " selected" : ""}>egir::realize_outputs</option>
+          <option value="egir::optimize_semantics"${initialPass === "egir::optimize_semantics" ? " selected" : ""}>egir::optimize_semantics</option>
         </select>
       </label>
       <button class="run-button" id="run-button" type="button" disabled>
@@ -447,7 +515,7 @@ function renderListing(side: Side, snapshot: GraphSnapshot): void {
   const listing = listings[side];
   document.querySelector<HTMLElement>(`#${side}-empty`)!.hidden = true;
   listing.hidden = false;
-  listing.innerHTML = snapshot.groups.map((group) => renderBody(snapshot, group)).join("");
+  listing.innerHTML = `${renderProgramResources(snapshot.resources ?? [])}${snapshot.groups.map((group) => renderBody(snapshot, group)).join("")}`;
 }
 
 function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
@@ -474,7 +542,7 @@ function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
     .map((node) => renderPlaceLine(node, names))
     .join("");
   const blockLines = groupBlocks.map((block) => renderBlock(snapshot, block, names)).join("");
-  const outputRoutes = renderOutputRoutes(group.outputs ?? [], names);
+  const entryInterface = group.kind === "entry" ? renderEntryInterface(group, names) : "";
 
   return `
     <section class="ir-body" data-group-id="${escapeHtml(group.id)}">
@@ -485,7 +553,7 @@ function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
         <span class="signature"><span class="punct">(</span>${signature}<span class="punct">)</span></span>
         <span class="brace">{</span>
       </div>
-      ${outputRoutes}
+      ${entryInterface}
       ${valueLines ? `<div class="ir-comment">; pure sea</div>${valueLines}` : ""}
       ${placeLines ? `<div class="ir-comment">; places</div>${placeLines}` : ""}
       ${blockLines}
@@ -661,11 +729,36 @@ function renderFilterFields(operation: GraphOperation, names: Names): string {
   return [
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
     sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
+    ...(operation.filter_state
+      ? [sourceRow(1, comma(irField("state", renderFilterState(operation.filter_state))))]
+      : []),
     sourceRow(1, irField("body", `<span class="punct">{</span>`)),
     sourceRow(2, comma(irField("map", map ? renderRegion(map, names) : missingTerm()))),
     sourceRow(2, irField("predicate", predicate ? renderRegion(predicate, names) : missingTerm())),
     sourceRow(1, `<span class="punct">}</span>`),
   ].join("");
+}
+
+function renderFilterState(state: GraphFilterState): string {
+  return variantTerm(state.phase, [irField("storage", renderFilterStorage(state.storage))]);
+}
+
+function renderFilterStorage(storage: GraphFilterStorage): string {
+  if (storage.variant === "local") {
+    return variantTerm("local", [
+      irField("capacity", typeToken(storage.capacity)),
+      irField("ownership", keywordTerm(storage.ownership ?? "fresh")),
+    ]);
+  }
+  return variantTerm("runtime", [
+    irField("scratch", resourceToken(storage.scratch)),
+    irField("length", renderFilterLength(storage.length)),
+  ]);
+}
+
+function renderFilterLength(length?: GraphFilterLength): string {
+  if (!length || length.variant === "view_only") return keywordTerm("view_only");
+  return variantTerm("stored", [irField("resource", resourceToken(length.resource))]);
 }
 
 function renderHistFields(operation: GraphOperation, names: Names): string {
@@ -721,18 +814,110 @@ function renderResultDestination(result: GraphResult, names: Names): string {
   return missingTerm();
 }
 
-function renderOutputRoutes(outputs: GraphOutput[], names: Names): string {
-  const routes = outputs.flatMap((output) => output.routes.map((route) => {
-    const source = variantTerm("source", [
-      irField("block", refToken(route.source_block, names.blocks.get(route.source_block) ?? "bb?", "block-ref")),
-      irField("value", refToken(route.source_value, names.values.get(route.source_value) ?? "%?", "value-ref")),
+function renderProgramResources(resources: GraphResource[]): string {
+  if (!resources.length) return "";
+  const declarations = resources.map((resource) => [
+    sourceRow(0, `<span class="ir-keyword">RESOURCE</span> ${resourceToken(resource.id)}<span class="punct">:</span> ${typeToken(resource.elem_ty)} <span class="ir-keyword">WITH</span> <span class="punct">{</span>`),
+    sourceRow(1, comma(irField("origin", renderResourceOrigin(resource.origin)))),
+    sourceRow(1, irField("size", renderSize(resource.size))),
+    sourceRow(0, `<span class="punct">}</span>`),
+  ].join("")).join("");
+  return `<section class="ir-program-metadata"><div class="ir-comment">; program logical resources (sidecar)</div><div class="ir-metadata-line">${declarations}</div></section>`;
+}
+
+function renderEntryInterface(group: GraphGroup, names: Names): string {
+  const outputs = group.outputs ?? [];
+  const declarations = group.resource_declarations ?? [];
+  const outputRows = outputs.flatMap((output, index) => {
+    const rows = [
+      sourceRow(2, `<span class="ir-keyword">output</span><span class="punct">(</span>`),
+      sourceRow(3, comma(irField("slot", numberTerm(output.slot)))),
+      sourceRow(3, comma(irField("type", typeToken(output.ty)))),
+      sourceRow(3, comma(irField("resource", resourceToken(output.resource)))),
+      sourceRow(3, comma(irField("kind", renderOutputKind(output.kind)))),
+      sourceRow(3, irField("routes", `<span class="punct">[</span>`)),
+      ...output.routes.flatMap((route, routeIndex) => [
+        sourceRow(4, `<span class="ir-keyword">route</span><span class="punct">(</span>`),
+        sourceRow(5, comma(irField("source", variantTerm("source", [
+          irField("block", refToken(route.source_block, names.blocks.get(route.source_block) ?? "bb?", "block-ref")),
+          irField("value", refToken(route.source_value, names.values.get(route.source_value) ?? "%?", "value-ref")),
+        ])))),
+        sourceRow(5, irField("writers", listTerm(route.writers.map((writer) => writer.kind === "value"
+          ? variantTerm("value", [irField("value", refToken(writer.id, names.values.get(writer.id) ?? "%?", "value-ref"))])
+          : variantTerm("effect", [irField("token", `<span class="effect-token">${escapeHtml(writer.id)}</span>`)]))))),
+        sourceRow(4, `<span class="punct">)</span>${routeIndex + 1 < output.routes.length ? `<span class="punct">,</span>` : ""}`),
+      ]),
+      sourceRow(3, `<span class="punct">]</span>`),
+      sourceRow(2, `<span class="punct">)</span>${index + 1 < outputs.length ? `<span class="punct">,</span>` : ""}`),
+    ];
+    return rows;
+  });
+  const declarationRows = declarations.map((declaration, index) => sourceRow(2,
+    `${variantTerm("resource_decl", [
+      irField("resource", resourceToken(declaration.resource)),
+      irField("role", keywordTerm(declaration.role)),
+      irField("element_type", typeToken(declaration.elem_ty)),
+      irField("size", renderSize(declaration.size)),
+    ])}${index + 1 < declarations.length ? `<span class="punct">,</span>` : ""}`));
+  return `<div class="ir-comment">; entry interface and resource uses (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, comma(`<span class="punct">]</span>`))}${sourceRow(1, irField("resource_declarations", `<span class="punct">[</span>`))}${declarationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
+}
+
+function renderOutputKind(kind: GraphOutputKind): string {
+  if (kind.variant === "value") {
+    return variantTerm("value", [irField("destination", keywordTerm(kind.destination ?? "plain"))]);
+  }
+  const exposure = kind.exposure === "host"
+    ? variantTerm("host", [irField("binding", renderBinding(kind.binding))])
+    : keywordTerm("internal");
+  return variantTerm("storage", [
+    irField("exposure", exposure),
+    irField("length", kind.length ? renderSize(kind.length) : keywordTerm("none")),
+  ]);
+}
+
+function renderResourceOrigin(origin: GraphResourceOrigin): string {
+  if (origin.variant === "host") {
+    return variantTerm("host", [
+      irField("binding", renderBinding(origin.binding)),
+      irField("name", origin.name ? literalTerm(origin.name) : keywordTerm("none")),
     ]);
-    const writers = listTerm(route.writers.map((writer) => writer.kind === "value"
-      ? refToken(writer.id, names.values.get(writer.id) ?? "%?", "value-ref")
-      : `<span class="effect-token">${escapeHtml(writer.id)}</span>`));
-    return `<div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">output</span> <span class="ir-literal">${output.slot}</span><span class="punct">:</span> ${typeToken(output.ty)} <span class="punct">=</span> <span class="ir-keyword">route</span><span class="punct">(</span>`)}${sourceRow(1, comma(irField("source", source)))}${sourceRow(1, irField("writers", writers))}${sourceRow(0, `<span class="punct">)</span>`)}</div>`;
-  }));
-  return routes.length ? `<div class="ir-comment">; output routes</div>${routes.join("")}` : "";
+  }
+  return variantTerm("compiler", [
+    irField("kind", keywordTerm(origin.compiler_kind ?? "unknown")),
+    irField("owner", origin.owner ? literalTerm(origin.owner) : keywordTerm("none")),
+    irField("slot", numberTerm(origin.slot ?? 0)),
+  ]);
+}
+
+function renderBinding(binding?: GraphBinding): string {
+  if (!binding) return missingTerm();
+  return variantTerm("binding", [
+    irField("set", numberTerm(binding.set)),
+    irField("binding", numberTerm(binding.binding)),
+  ]);
+}
+
+function renderSize(size: GraphSize): string {
+  switch (size.variant) {
+    case "fixed_bytes":
+      return variantTerm("fixed_bytes", [irField("value", numberTerm(size.bytes ?? 0))]);
+    case "like_input":
+      return variantTerm("like_input", [
+        irField("binding", renderBinding(size.binding)),
+        irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
+        irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
+      ]);
+    case "like_resource":
+      return variantTerm("like_resource", [
+        irField("resource", resourceToken(size.resource)),
+        irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
+        irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
+      ]);
+    case "same_as_dispatch":
+      return variantTerm("same_as_dispatch", [irField("elem_bytes", numberTerm(size.elem_bytes ?? 0))]);
+    case "unspecified":
+      return keywordTerm("unspecified");
+  }
 }
 
 function groupValues(operation: GraphOperation, role: string): GraphReference[] {
@@ -800,6 +985,16 @@ function variantFields(fields: string[]): string {
 
 function literalTerm(value: string): string {
   return `<span class="ir-literal">${escapeHtml(JSON.stringify(value))}</span>`;
+}
+
+function keywordTerm(value: string): string {
+  return `<span class="ir-keyword">${escapeHtml(value)}</span>`;
+}
+
+function resourceToken(resource?: string): string {
+  return resource
+    ? `<span class="resource-ref">${escapeHtml(resource)}</span>`
+    : keywordTerm("none");
 }
 
 function numberTerm(value: number): string {

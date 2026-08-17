@@ -354,6 +354,12 @@ kbd {
   counter-reset: ir-line;
 }
 
+.ir-program-metadata {
+  min-width: 620px;
+  padding: 8px 20px 16px 90px;
+  border-bottom: 1px solid var(--line);
+}
+
 .ir-body {
   position: relative;
   min-width: 620px;
@@ -463,6 +469,10 @@ kbd {
   color: var(--purple);
 }
 
+.resource-ref {
+  color: #d8c77b;
+}
+
 .code-line {
   cursor: default;
   counter-increment: ir-line;
@@ -567,6 +577,18 @@ kbd {
 
 .ir-indent-2 {
   padding-left: 4ch;
+}
+
+.ir-indent-3 {
+  padding-left: 6ch;
+}
+
+.ir-indent-4 {
+  padding-left: 8ch;
+}
+
+.ir-indent-5 {
+  padding-left: 10ch;
 }
 
 .ir-op.op-segmap,
