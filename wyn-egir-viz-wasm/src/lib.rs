@@ -1,0 +1,1095 @@
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use wasm_bindgen::prelude::*;
+use wyn_core::ast::{NodeCounter, Span};
+use wyn_core::egir::ir::{OperandRef, ProgramFamily, SideEffectKind};
+use wyn_core::egir::program::{
+    CoreProgramData, RewriteGlobal, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
+};
+use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
+use wyn_core::egir::types::{Raw, RegionId, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase};
+use wyn_core::error::CompilerError;
+use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectPass {
+    OptimizeSemantics,
+    RealizeOutputs,
+}
+
+impl InspectPass {
+    const OPTIMIZE_SEMANTICS: &'static str = "egir::optimize_semantics";
+    const REALIZE_OUTPUTS: &'static str = "egir::realize_outputs";
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            Self::OPTIMIZE_SEMANTICS => Some(Self::OptimizeSemantics),
+            Self::REALIZE_OUTPUTS => Some(Self::RealizeOutputs),
+            _ => None,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::OptimizeSemantics => Self::OPTIMIZE_SEMANTICS,
+            Self::RealizeOutputs => Self::REALIZE_OUTPUTS,
+        }
+    }
+}
+
+struct PreludeCache {
+    prelude: PreElaboratedPrelude,
+    start_node_counter: NodeCounter,
+}
+
+thread_local! {
+    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceSpan {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+}
+
+impl From<Span> for SourceSpan {
+    fn from(span: Span) -> Self {
+        Self {
+            start_line: span.start_line,
+            start_col: span.start_col,
+            end_line: span.end_line,
+            end_col: span.end_col,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VizError {
+    pub message: String,
+    pub span: Option<SourceSpan>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphGroup {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub group: String,
+    pub label: String,
+    pub category: String,
+    pub variant: String,
+    pub detail: String,
+    pub ty: Option<String>,
+    pub span: Option<SourceSpan>,
+    pub operation: Option<GraphOperation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphReference {
+    pub id: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphOperandGroup {
+    pub role: String,
+    pub values: Vec<GraphReference>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphRegion {
+    pub role: String,
+    pub symbol: Option<String>,
+    pub identity: bool,
+    pub captures: Vec<GraphReference>,
+    pub parameter_types: Vec<String>,
+    pub result_types: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GraphOperation {
+    pub operand_groups: Vec<GraphOperandGroup>,
+    pub regions: Vec<GraphRegion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub id: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphTerminator {
+    pub kind: String,
+    pub values: Vec<String>,
+    pub targets: Vec<String>,
+    pub target_args: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphBlock {
+    pub id: String,
+    pub group: String,
+    pub params: Vec<String>,
+    pub operations: Vec<String>,
+    pub terminator: GraphTerminator,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GraphSnapshot {
+    pub groups: Vec<GraphGroup>,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub blocks: Vec<GraphBlock>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeRelation {
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InspectResult {
+    pub success: bool,
+    pub pass: String,
+    pub before: Option<GraphSnapshot>,
+    pub after: Option<GraphSnapshot>,
+    pub relations: Vec<NodeRelation>,
+    pub error: Option<VizError>,
+}
+
+impl InspectResult {
+    fn error(pass: impl Into<String>, message: impl Into<String>, span: Option<Span>) -> Self {
+        Self {
+            success: false,
+            pass: pass.into(),
+            before: None,
+            after: None,
+            relations: Vec::new(),
+            error: Some(VizError {
+                message: message.into(),
+                span: span.map(Into::into),
+            }),
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn init_compiler() -> bool {
+    console_error_panic_hook::set_once();
+    PRELUDE_CACHE.with(|cache| {
+        if cache.borrow().is_some() {
+            return true;
+        }
+        let mut node_counter = NodeCounter::new();
+        match ModuleManager::create_prelude(&mut node_counter) {
+            Ok(prelude) => {
+                *cache.borrow_mut() = Some(PreludeCache {
+                    prelude,
+                    start_node_counter: node_counter,
+                });
+                true
+            }
+            Err(error) => {
+                web_sys::console::error_1(&format!("failed to initialize Wyn prelude: {error:?}").into());
+                false
+            }
+        }
+    })
+}
+
+#[wasm_bindgen]
+pub fn inspect_optimize_semantics(source: &str) -> JsValue {
+    inspect_pass(source, InspectPass::OPTIMIZE_SEMANTICS)
+}
+
+#[wasm_bindgen]
+pub fn inspect_pass(source: &str, pass: &str) -> JsValue {
+    console_error_panic_hook::set_once();
+    let Some(pass) = InspectPass::parse(pass) else {
+        return serde_wasm_bindgen::to_value(&InspectResult::error(
+            pass,
+            format!("unknown EGIR pass `{pass}`"),
+            None,
+        ))
+        .expect("serialize unknown EGIR pass error");
+    };
+    let result = inspect_pass_impl(source, pass);
+    serde_wasm_bindgen::to_value(&result).unwrap_or_else(|error| {
+        serde_wasm_bindgen::to_value(&InspectResult::error(
+            pass.id(),
+            format!("failed to serialize EGIR snapshots: {error}"),
+            None,
+        ))
+        .expect("serialize fallback EGIR visualization error")
+    })
+}
+
+fn compiler_init() -> Option<(NodeCounter, ModuleManager)> {
+    PRELUDE_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        let cached = cache.as_ref()?;
+        Some(wyn_core::init_compiler_from_prelude(
+            cached.prelude.clone(),
+            cached.start_node_counter.clone(),
+        ))
+    })
+}
+
+fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
+    let span = error.span();
+    InspectResult::error(pass.id(), format_compiler_error(&error), span)
+}
+
+fn format_compiler_error(error: &CompilerError) -> String {
+    match error {
+        CompilerError::ParseError(message, _) => format!("Parse error: {message}"),
+        CompilerError::TypeError(message, _) => format!("Type error: {message}"),
+        CompilerError::UndefinedVariable(name, _) => format!("Undefined variable: `{name}`"),
+        CompilerError::AliasError(message, _) => format!("Alias error: {message}"),
+        CompilerError::SpirvError(message, _) => format!("SPIR-V error: {message}"),
+        CompilerError::WgslError(message, _) => format!("WGSL error: {message}"),
+        CompilerError::ModuleError(message, _) => format!("Module error: {message}"),
+        CompilerError::FlatteningError(message, _) => format!("Flatten error: {message}"),
+        CompilerError::IoError(error) => format!("I/O error: {error}"),
+        CompilerError::SpirvBuilderError(message) => format!("SPIR-V builder error: {message}"),
+        CompilerError::TypeHole(message) => format!("Type hole: {message}"),
+    }
+}
+
+#[cfg(test)]
+fn inspect_impl(source: &str) -> InspectResult {
+    inspect_pass_impl(source, InspectPass::OptimizeSemantics)
+}
+
+fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
+    if !init_compiler() {
+        return InspectResult::error(pass.id(), "failed to initialize the Wyn compiler", None);
+    }
+    let Some((node_counter, module_manager)) = compiler_init() else {
+        return InspectResult::error(pass.id(), "compiler cache is unavailable", None);
+    };
+
+    macro_rules! try_compiler {
+        ($expression:expr) => {
+            match $expression {
+                Ok(value) => value,
+                Err(error) => return compiler_error(pass, error),
+            }
+        };
+    }
+
+    let program = try_compiler!(wyn_core::parser::parse(source, node_counter, module_manager));
+    let program = try_compiler!(wyn_core::resolve_imports::resolve_imports(
+        program,
+        std::path::Path::new(".")
+    ));
+    let program = try_compiler!(wyn_core::elaborate_modules::elaborate_modules(program));
+    let program = wyn_core::name_resolution::resolve_names(program);
+    let program = try_compiler!(wyn_core::resolve_resources::resolve_resources(program));
+    let program = wyn_core::ast_const_fold::fold_constants(program);
+    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
+    let program = try_compiler!(wyn_core::resolve_opens::resolve_opens(program));
+    let program = try_compiler!(wyn_core::types::run::type_check(program));
+    let program = try_compiler!(wyn_core::ast_type_holes::reject_type_holes(program));
+    let program = try_compiler!(wyn_core::tlc::lower_from_ast(program));
+    let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));
+    let program = try_compiler!(wyn_core::tlc::validate_ownership(program));
+    let program = wyn_core::tlc::partial_eval(program);
+    let program = wyn_core::tlc::normalize_soacs(program);
+    let program = wyn_core::tlc::monomorphize(program);
+    let program = wyn_core::tlc::rep_specialize(program);
+    let program = wyn_core::tlc::inline_small(program);
+    let program = wyn_core::tlc::force_inline_soac_helpers(program);
+    let program = wyn_core::tlc::renormalize_inlined_soa(program);
+    let program = wyn_core::tlc::canonicalize_conditional_producers(program);
+    let program = wyn_core::tlc::normalize_soacs_to_anf(program);
+    let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
+    let program = wyn_core::tlc::defunctionalize(program);
+    let program = wyn_core::tlc::fold_generated_lambdas(program);
+    let program = wyn_core::tlc::apply_ownership(program);
+    let program = wyn_core::tlc::filter_reachable(program);
+    let program = wyn_core::tlc::infer_input_slice_bounds(program);
+    let program = match wyn_core::to_egraph(program) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR conversion error: {error:?}"),
+                None,
+            )
+        }
+    };
+
+    if pass == InspectPass::RealizeOutputs {
+        let before = snapshot_program(&program);
+        let program = match wyn_core::egir::realize_outputs(program) {
+            Ok(program) => program,
+            Err(error) => {
+                return InspectResult::error(
+                    pass.id(),
+                    format!("EGIR output error: {error:?}"),
+                    None,
+                )
+            }
+        };
+        let after = snapshot_program(&program);
+        return InspectResult {
+            success: true,
+            pass: pass.id().to_string(),
+            before: Some(before),
+            after: Some(after),
+            relations: Vec::new(),
+            error: None,
+        };
+    }
+
+    let program = match wyn_core::egir::realize_outputs(program) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR output error: {error:?}"),
+                None,
+            )
+        }
+    };
+    let segmented = wyn_core::egir::reify_soacs(program);
+    let before = snapshot_program(&segmented);
+    let (optimized, trace) = wyn_core::egir::optimize_semantics_with_trace(segmented);
+    let after = snapshot_program(&optimized);
+    let relations = trace
+        .relations
+        .into_iter()
+        .map(|relation| NodeRelation {
+            before: relation.before.into_iter().map(operation_node_id).collect(),
+            after: relation.after.into_iter().map(operation_node_id).collect(),
+        })
+        .collect();
+
+    InspectResult {
+        success: true,
+        pass: pass.id().to_string(),
+        before: Some(before),
+        after: Some(after),
+        relations,
+        error: None,
+    }
+}
+
+fn operation_node_id(id: SemanticOpId) -> String {
+    match id.implementation_slot() {
+        Some(slot) => format!("op:{}:{slot}", id.source_index()),
+        None => format!("op:{}", id.source_index()),
+    }
+}
+
+trait SnapshotPhase: WynSoacPhase<Resource = SemanticResourceRef> {
+    fn soac_node_id(id: &Self::SoacId, group: &str, block: wyn_core::flow::BlockId, index: usize)
+        -> String;
+
+    fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String;
+}
+
+impl SnapshotPhase for Raw {
+    fn soac_node_id(
+        _id: &Self::SoacId,
+        group: &str,
+        block: wyn_core::flow::BlockId,
+        index: usize,
+    ) -> String {
+        format!("{group}/effect/{block:?}/{index}")
+    }
+
+    fn soac_detail(_id: &Self::SoacId, soac: &Soac<Self>) -> String {
+        format!("{soac:#?}")
+    }
+}
+
+impl SnapshotPhase for Semantic {
+    fn soac_node_id(
+        id: &Self::SoacId,
+        _group: &str,
+        _block: wyn_core::flow::BlockId,
+        _index: usize,
+    ) -> String {
+        operation_node_id(*id)
+    }
+
+    fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String {
+        format!("semantic op {}\n\n{soac:#?}", id.source_index())
+    }
+}
+
+fn snapshot_program<Tag, P, Route>(
+    program: &wyn_core::egir::program::Program<
+        Tag,
+        ProgramFamily<P, SemanticResourceDecl, Route, CoreProgramData>,
+        RewriteGlobal,
+    >,
+) -> GraphSnapshot
+where
+    P: SnapshotPhase,
+    Route: Clone + std::fmt::Debug,
+{
+    let mut snapshot = GraphSnapshot::default();
+    let region_names = program
+        .functions
+        .iter()
+        .map(|function| (function.region, function.name.clone()))
+        .collect::<HashMap<_, _>>();
+    for (index, entry) in program.entry_points.iter().enumerate() {
+        let group = format!("entry:{index}");
+        snapshot.groups.push(GraphGroup {
+            id: group.clone(),
+            label: format!("entry {}", entry.name),
+            kind: "entry".to_string(),
+        });
+        snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
+    }
+    for function in &program.functions {
+        let group = format!("function:{:?}", function.region);
+        snapshot.groups.push(GraphGroup {
+            id: group.clone(),
+            label: format!("fn {}", function.name),
+            kind: "function".to_string(),
+        });
+        snapshot_graph(&mut snapshot, &group, &function.graph, &region_names);
+    }
+    for (index, constant) in program.constants.iter().enumerate() {
+        let group = format!("constant:{index}");
+        snapshot.groups.push(GraphGroup {
+            id: group.clone(),
+            label: format!("const {}", constant.name),
+            kind: "constant".to_string(),
+        });
+        snapshot_graph(&mut snapshot, &group, &constant.graph, &region_names);
+    }
+    snapshot
+}
+
+fn snapshot_graph<P: SnapshotPhase>(
+    snapshot: &mut GraphSnapshot,
+    group: &str,
+    graph: &wyn_core::egir::types::EGraph<P>,
+    region_names: &HashMap<RegionId, String>,
+) {
+    for (value_id, value) in graph.values() {
+        let id = value_node_id(group, value_id);
+        let (label, variant) = value_label(value.kind());
+        snapshot.nodes.push(GraphNode {
+            id: id.clone(),
+            group: group.to_string(),
+            label,
+            category: "value".to_string(),
+            variant,
+            detail: format!(
+                "{:#?}\n\ntype: {}",
+                value.kind(),
+                wyn_core::diags::format_type(value.ty())
+            ),
+            ty: Some(wyn_core::diags::format_type(value.ty())),
+            span: value.span().map(Into::into),
+            operation: None,
+        });
+        for dependency in graph.value_dependencies(value_id) {
+            if graph.values().contains_key(dependency) {
+                push_edge(snapshot, value_node_id(group, dependency), id.clone(), "value");
+            }
+        }
+        if let Some(alias) = value.alias() {
+            if graph.values().contains_key(alias) {
+                push_edge(snapshot, value_node_id(group, alias), id.clone(), "equivalent");
+            }
+        }
+    }
+
+    for (block_id, block) in &graph.skeleton.blocks {
+        let block_node = format!("{group}/block/{block_id:?}");
+        snapshot.nodes.push(GraphNode {
+            id: block_node.clone(),
+            group: group.to_string(),
+            label: format!("block {block_id:?}"),
+            category: "block".to_string(),
+            variant: "block".to_string(),
+            detail: format!("{:#?}", block.term),
+            ty: None,
+            span: None,
+            operation: None,
+        });
+
+        let mut operations = Vec::new();
+        let mut previous_effect = None;
+        for (index, effect) in block.side_effects.iter().enumerate() {
+            let display = effect_display(group, block_id, index, effect, graph, region_names);
+            let effect_id = display.id.clone();
+            operations.push(effect_id.clone());
+            snapshot.nodes.push(GraphNode {
+                id: effect_id.clone(),
+                group: group.to_string(),
+                label: display.label,
+                category: "operation".to_string(),
+                variant: display.variant,
+                detail: display.detail,
+                ty: None,
+                span: effect.span().map(Into::into),
+                operation: display.operation,
+            });
+            push_edge(snapshot, block_node.clone(), effect_id.clone(), "block");
+            if let Some(previous) = previous_effect.replace(effect_id.clone()) {
+                push_edge(snapshot, previous, effect_id.clone(), "sequence");
+            }
+            for dependency in graph.effect_boundary_value_dependencies(effect) {
+                if graph.values().contains_key(dependency) {
+                    push_edge(
+                        snapshot,
+                        value_node_id(group, dependency),
+                        effect_id.clone(),
+                        "operand",
+                    );
+                }
+            }
+            if let Some(result) = effect.result() {
+                for value in result.values() {
+                    if graph.values().contains_key(value) {
+                        push_edge(snapshot, effect_id.clone(), value_node_id(group, value), "result");
+                    }
+                }
+            }
+        }
+
+        for value in block.term.referenced_nodes() {
+            if graph.values().contains_key(value) {
+                push_edge(
+                    snapshot,
+                    value_node_id(group, value),
+                    block_node.clone(),
+                    "terminator",
+                );
+            }
+        }
+
+        snapshot.blocks.push(GraphBlock {
+            id: block_node.clone(),
+            group: group.to_string(),
+            params: block.params.iter().map(|parameter| value_node_id(group, parameter.value())).collect(),
+            operations,
+            terminator: graph_terminator(group, &block.term),
+        });
+
+        match &block.term {
+            wyn_core::flow::Terminator::Branch { target, .. } => push_edge(
+                snapshot,
+                block_node.clone(),
+                format!("{group}/block/{target:?}"),
+                "control",
+            ),
+            wyn_core::flow::Terminator::CondBranch {
+                then_target,
+                else_target,
+                ..
+            } => {
+                push_edge(
+                    snapshot,
+                    block_node.clone(),
+                    format!("{group}/block/{then_target:?}"),
+                    "control",
+                );
+                push_edge(
+                    snapshot,
+                    block_node,
+                    format!("{group}/block/{else_target:?}"),
+                    "control",
+                );
+            }
+            wyn_core::flow::Terminator::Return(_) | wyn_core::flow::Terminator::Unreachable => {}
+        }
+    }
+}
+
+fn graph_terminator(
+    group: &str,
+    terminator: &wyn_core::egir::types::SkeletonTerminator,
+) -> GraphTerminator {
+    match terminator {
+        wyn_core::flow::Terminator::Return(result) => GraphTerminator {
+            kind: "return".to_string(),
+            values: result
+                .iter()
+                .flat_map(|binding| binding.values())
+                .map(|value| value_node_id(group, value))
+                .collect(),
+            targets: Vec::new(),
+            target_args: Vec::new(),
+        },
+        wyn_core::flow::Terminator::Branch { target, args } => GraphTerminator {
+            kind: "branch".to_string(),
+            values: Vec::new(),
+            targets: vec![format!("{group}/block/{target:?}")],
+            target_args: vec![args.iter().map(|value| value_node_id(group, value.value())).collect()],
+        },
+        wyn_core::flow::Terminator::CondBranch {
+            cond,
+            then_target,
+            then_args,
+            else_target,
+            else_args,
+        } => GraphTerminator {
+            kind: "cond_branch".to_string(),
+            values: vec![value_node_id(group, *cond)],
+            targets: vec![
+                format!("{group}/block/{then_target:?}"),
+                format!("{group}/block/{else_target:?}"),
+            ],
+            target_args: vec![
+                then_args.iter().map(|value| value_node_id(group, value.value())).collect(),
+                else_args.iter().map(|value| value_node_id(group, value.value())).collect(),
+            ],
+        },
+        wyn_core::flow::Terminator::Unreachable => GraphTerminator {
+            kind: "unreachable".to_string(),
+            values: Vec::new(),
+            targets: Vec::new(),
+            target_args: Vec::new(),
+        },
+    }
+}
+
+fn value_node_id(group: &str, value: wyn_core::egir::types::ValueId) -> String {
+    format!("{group}/value/{value:?}")
+}
+
+fn value_label(kind: &ValueKind<wyn_core::egir::program::SemanticResourceRef>) -> (String, String) {
+    match kind {
+        ValueKind::Pure { op, .. } => (inline_debug(op), "pure".to_string()),
+        ValueKind::Union { .. } => ("union".to_string(), "union".to_string()),
+        ValueKind::FuncParam { parameter } => {
+            (format!("param {}", parameter.index()), "parameter".to_string())
+        }
+        ValueKind::BlockParam { index, .. } => (format!("block param {index}"), "parameter".to_string()),
+        ValueKind::CallResult { slot, .. } => (format!("call result {slot:?}"), "result".to_string()),
+        ValueKind::PlaceLength { .. } => ("place length".to_string(), "place".to_string()),
+        ValueKind::PlaceView { .. } => ("place view".to_string(), "place".to_string()),
+        ValueKind::Constant(value) => (inline_debug(value), "constant".to_string()),
+        ValueKind::SideEffectResult => ("effect result".to_string(), "result".to_string()),
+    }
+}
+
+struct EffectDisplay {
+    id: String,
+    label: String,
+    variant: String,
+    detail: String,
+    operation: Option<GraphOperation>,
+}
+
+fn effect_display<P: SnapshotPhase>(
+    group: &str,
+    block: wyn_core::flow::BlockId,
+    index: usize,
+    effect: &wyn_core::egir::types::SideEffect<P>,
+    graph: &wyn_core::egir::types::EGraph<P>,
+    region_names: &HashMap<RegionId, String>,
+) -> EffectDisplay {
+    match effect.kind() {
+        SideEffectKind::Soac(SoacEffect(id, soac)) => {
+            let (label, variant, operation) = match soac {
+                Soac::Screma(op) => (
+                    "soac.screma".to_string(),
+                    if op.form.scan_count() > 0 {
+                        "segscan"
+                    } else if op.form.reduction_count() > 0 {
+                        "segred"
+                    } else {
+                        "segmap"
+                    }
+                    .to_string(),
+                    screma_operation(group, effect, graph, op, region_names),
+                ),
+                Soac::Filter(op) => (
+                    "soac.filter".to_string(),
+                    "filter".to_string(),
+                    filter_operation(group, effect, op, region_names),
+                ),
+                Soac::Hist(op) => (
+                    "soac.hist".to_string(),
+                    "hist".to_string(),
+                    hist_operation(group, effect, op, region_names),
+                ),
+            };
+            EffectDisplay {
+                id: P::soac_node_id(id, group, block, index),
+                label,
+                variant,
+                detail: P::soac_detail(id, soac),
+                operation: Some(operation),
+            }
+        }
+        SideEffectKind::Effect(operation) => EffectDisplay {
+            id: format!("{group}/effect/{block:?}/{index}"),
+            label: inline_debug(operation),
+            variant: "effect".to_string(),
+            detail: format!("{operation:#?}"),
+            operation: None,
+        },
+    }
+}
+
+fn screma_operation<P: SnapshotPhase>(
+    group: &str,
+    effect: &wyn_core::egir::types::SideEffect<P>,
+    graph: &wyn_core::egir::types::EGraph<P>,
+    op: &wyn_core::egir::soac::screma::Op<P>,
+    region_names: &HashMap<RegionId, String>,
+) -> GraphOperation {
+    let mut operand_groups = Vec::new();
+    if let Ok(operands) = ScremaOperands::decode(op, effect.operands(), graph.effect_result_binding(effect))
+    {
+        operand_groups.push(GraphOperandGroup {
+            role: "inputs".to_string(),
+            values: operands.inputs().map(|operand| graph_reference(group, operand.operand)).collect(),
+        });
+        operand_groups.push(GraphOperandGroup {
+            role: "output_views".to_string(),
+            values: operands
+                .outputs()
+                .flatten()
+                .map(|operand| graph_reference(group, operand.operand))
+                .collect(),
+        });
+    } else {
+        operand_groups.push(GraphOperandGroup {
+            role: "operands".to_string(),
+            values: effect
+                .operands()
+                .iter()
+                .copied()
+                .map(|operand| graph_reference(group, operand))
+                .collect(),
+        });
+    }
+
+    for (index, scan) in op.form.scans.iter().enumerate() {
+        operand_groups.push(GraphOperandGroup {
+            role: format!("scan[{index}].neutral"),
+            values: scan.neutral.iter().copied().map(|value| value_reference(group, value)).collect(),
+        });
+    }
+    for (index, reduction) in op.form.reductions.iter().enumerate() {
+        operand_groups.push(GraphOperandGroup {
+            role: format!("reduce[{index}].neutral"),
+            values: reduction.neutral.iter().copied().map(|value| value_reference(group, value)).collect(),
+        });
+    }
+
+    let mut regions = vec![lambda_region("pre", &op.form.pre, group, region_names)];
+    regions.extend(
+        op.form.scans.iter().enumerate().map(|(index, scan)| {
+            lambda_region(format!("scan[{index}]"), &scan.operator, group, region_names)
+        }),
+    );
+    regions.extend(op.form.reductions.iter().enumerate().map(|(index, reduction)| {
+        lambda_region(
+            format!("reduce[{index}]"),
+            &reduction.operator,
+            group,
+            region_names,
+        )
+    }));
+    regions.push(lambda_region("post", &op.form.post, group, region_names));
+
+    GraphOperation {
+        operand_groups,
+        regions,
+    }
+}
+
+fn filter_operation<P: SnapshotPhase>(
+    group: &str,
+    effect: &wyn_core::egir::types::SideEffect<P>,
+    op: &wyn_core::egir::soac::filter::Op<P>,
+    region_names: &HashMap<RegionId, String>,
+) -> GraphOperation {
+    GraphOperation {
+        operand_groups: vec![GraphOperandGroup {
+            role: "inputs".to_string(),
+            values: effect
+                .operands()
+                .iter()
+                .take(op.body.inputs.len())
+                .copied()
+                .map(|operand| graph_reference(group, operand))
+                .collect(),
+        }],
+        regions: vec![
+            lambda_region("map", &op.body.map, group, region_names),
+            lambda_region("predicate", &op.body.predicate, group, region_names),
+        ],
+    }
+}
+
+fn hist_operation<P: SnapshotPhase>(
+    group: &str,
+    effect: &wyn_core::egir::types::SideEffect<P>,
+    op: &wyn_core::egir::soac::hist::Op<P>,
+    region_names: &HashMap<RegionId, String>,
+) -> GraphOperation {
+    let mut operand_groups = vec![GraphOperandGroup {
+        role: "inputs".to_string(),
+        values: effect
+            .operands()
+            .iter()
+            .take(op.inputs.len())
+            .copied()
+            .map(|operand| graph_reference(group, operand))
+            .collect(),
+    }];
+    let mut regions = vec![lambda_region("bucket", &op.form.bucket, group, region_names)];
+
+    for (index, operation) in op.form.operations.iter().enumerate() {
+        operand_groups.push(GraphOperandGroup {
+            role: format!("operation[{index}].shape"),
+            values: operation.shape.iter().copied().map(|value| value_reference(group, value)).collect(),
+        });
+        operand_groups.push(GraphOperandGroup {
+            role: format!("operation[{index}].race_factor"),
+            values: vec![value_reference(group, operation.race_factor)],
+        });
+        operand_groups.push(GraphOperandGroup {
+            role: format!("operation[{index}].destinations"),
+            values: operation.destinations.iter().map(|view| view_reference(group, *view)).collect(),
+        });
+        match &operation.update {
+            wyn_core::egir::soac::hist::Update::OrderedOverwrite { .. } => {}
+            wyn_core::egir::soac::hist::Update::Reduce { operator, neutral } => {
+                operand_groups.push(GraphOperandGroup {
+                    role: format!("operation[{index}].neutral"),
+                    values: neutral.iter().copied().map(|value| value_reference(group, value)).collect(),
+                });
+                regions.push(lambda_region(
+                    format!("operation[{index}].reduce"),
+                    operator,
+                    group,
+                    region_names,
+                ));
+            }
+            wyn_core::egir::soac::hist::Update::BucketInsert {
+                counts,
+                overflow,
+                capacity,
+                ..
+            } => {
+                operand_groups.push(GraphOperandGroup {
+                    role: format!("operation[{index}].bucket_storage"),
+                    values: vec![
+                        view_reference(group, *counts),
+                        view_reference(group, *overflow),
+                        value_reference(group, *capacity),
+                    ],
+                });
+            }
+        }
+    }
+
+    GraphOperation {
+        operand_groups,
+        regions,
+    }
+}
+
+fn lambda_region(
+    role: impl Into<String>,
+    lambda: &Lambda,
+    group: &str,
+    region_names: &HashMap<RegionId, String>,
+) -> GraphRegion {
+    let (symbol, identity, captures) = match lambda.seg_body() {
+        Some(body) => (
+            Some(
+                region_names
+                    .get(&body.region())
+                    .cloned()
+                    .unwrap_or_else(|| format!("region_{:?}", body.region())),
+            ),
+            false,
+            body.captures().iter().copied().map(|capture| graph_reference(group, capture)).collect(),
+        ),
+        None => (None, true, Vec::new()),
+    };
+    GraphRegion {
+        role: role.into(),
+        symbol,
+        identity,
+        captures,
+        parameter_types: lambda.parameter_types.iter().map(wyn_core::diags::format_type).collect(),
+        result_types: lambda.result_types.iter().map(wyn_core::diags::format_type).collect(),
+    }
+}
+
+fn graph_reference(group: &str, operand: OperandRef) -> GraphReference {
+    match operand {
+        OperandRef::Value(value) => value_reference(group, value),
+        OperandRef::View(view) => view_reference(group, view),
+        OperandRef::Place(place) => GraphReference {
+            id: format!("{group}/place/{place:?}"),
+            kind: "place".to_string(),
+        },
+    }
+}
+
+fn value_reference(group: &str, value: wyn_core::egir::types::ValueId) -> GraphReference {
+    GraphReference {
+        id: value_node_id(group, value),
+        kind: "value".to_string(),
+    }
+}
+
+fn view_reference(group: &str, view: wyn_core::egir::types::ViewId) -> GraphReference {
+    GraphReference {
+        id: value_node_id(group, view.value()),
+        kind: "view".to_string(),
+    }
+}
+
+fn inline_debug(value: &impl std::fmt::Debug) -> String {
+    let text = format!("{value:?}");
+    text.lines().map(str::trim).collect::<Vec<_>>().join(" ")
+}
+
+fn push_edge(snapshot: &mut GraphSnapshot, source: String, target: String, kind: &str) {
+    let id = format!("edge:{}", snapshot.edges.len());
+    snapshot.edges.push(GraphEdge {
+        id,
+        source,
+        target,
+        kind: kind.to_string(),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_chain_produces_structured_before_and_after_snapshots() {
+        let result = inspect_impl(
+            r#"
+entry main(xs: [4]i32) [4]i32 =
+  let a = map(|x: i32| x + 1, xs) in
+  let b = map(|x: i32| x * 2, a) in
+  map(|x: i32| x - 3, b)
+"#,
+        );
+        assert!(result.success, "{:?}", result.error);
+        let before = result.before.expect("before snapshot");
+        let after = result.after.expect("after snapshot");
+        let before_map = before
+            .nodes
+            .iter()
+            .find(|node| node.variant == "segmap")
+            .expect("before snapshot has a map-shaped Screma");
+        let before_operation = before_map.operation.as_ref().expect("Screma display is structured");
+        assert_eq!(before_map.label, "soac.screma");
+        assert_eq!(
+            before_operation
+                .operand_groups
+                .iter()
+                .find(|group| group.role == "inputs")
+                .expect("Screma inputs")
+                .values
+                .len(),
+            1
+        );
+        let pre =
+            before_operation.regions.iter().find(|region| region.role == "pre").expect("Screma pre lambda");
+        assert!(!pre.identity);
+        assert!(pre.symbol.as_deref().is_some_and(|symbol| symbol.starts_with("_w_lambda")));
+        assert!(before_operation.regions.iter().any(|region| region.role == "post" && region.identity));
+
+        let after_map = after
+            .nodes
+            .iter()
+            .find(|node| node.variant == "segmap")
+            .expect("after snapshot has a map-shaped Screma");
+        assert_eq!(after_map.label, "soac.screma");
+        assert!(after_map.operation.is_some());
+        assert!(
+            result.relations.iter().any(|relation| relation.before.len() > relation.after.len()),
+            "expected compiler-authored many-to-one fusion provenance"
+        );
+    }
+
+    #[test]
+    fn output_realization_exposes_destination_passing_rewrite() {
+        let result = inspect_pass_impl(
+            r#"
+entry main(xs: [4]i32) [4]i32 =
+  map(|x: i32| x + 1, xs)
+"#,
+            InspectPass::RealizeOutputs,
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.pass, InspectPass::REALIZE_OUTPUTS);
+        let before = result.before.expect("before snapshot");
+        let after = result.after.expect("after snapshot");
+        let before_map = before
+            .nodes
+            .iter()
+            .find(|node| node.variant == "segmap")
+            .expect("raw snapshot has a map-shaped Screma");
+        let after_map = after
+            .nodes
+            .iter()
+            .find(|node| node.variant == "segmap")
+            .expect("output-realized snapshot has a map-shaped Screma");
+        assert!(
+            before_map
+                .operation
+                .as_ref()
+                .expect("structured before operation")
+                .operand_groups
+                .iter()
+                .find(|group| group.role == "output_views")
+                .is_some_and(|group| group.values.is_empty()),
+            "the raw producer should not already target an output view"
+        );
+        assert!(
+            after_map
+                .operation
+                .as_ref()
+                .expect("structured after operation")
+                .operand_groups
+                .iter()
+                .find(|group| group.role == "output_views")
+                .is_some_and(|group| !group.values.is_empty()),
+            "output realization should retarget the producer into output storage"
+        );
+        assert!(
+            before.blocks.iter().any(|block| block.terminator.kind == "return" && !block.terminator.values.is_empty()),
+            "the raw entry returns its result by value"
+        );
+        assert!(
+            after.blocks.iter().any(|block| block.terminator.kind == "return" && block.terminator.values.is_empty()),
+            "the output-realized entry publishes through its destination"
+        );
+    }
+
+    #[test]
+    fn inline_debug_preserves_long_constructs() {
+        let value = "ResourceLen(SemanticResourceRef(ResourceIdentifierThatMustRemainVisible))";
+        let rendered = inline_debug(&value);
+        assert!(rendered.contains("ResourceIdentifierThatMustRemainVisible"));
+        assert!(!rendered.contains('…'));
+    }
+}
