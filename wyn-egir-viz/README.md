@@ -5,10 +5,9 @@ compiler passes. The current checkpoints are:
 
 - `egir::optimize_semantics`: segmented semantic EGIR to optimized semantic
   EGIR, with compiler-authored operation provenance; and
-- `egir::realize_outputs`: converted raw EGIR before and after output-writer
-  provenance is recorded. Canonical destination-passing result bindings are
-  already present in both panes because TLC-to-EGIR conversion now creates
-  them directly.
+- `egir::reify_soacs`: converted raw EGIR and the resulting segmented semantic
+  EGIR. Conversion already owns complete entry routes; the semantic pane adds
+  linked writer provenance and uniform SOAC publication/resource facts.
 
 The viewer's normative textual display contract is documented in
 [`IR_SYNTAX.md`](IR_SYNTAX.md).

@@ -54,16 +54,16 @@ entry main(xs: [4]i32) [4]i32 =
 }
 
 #[test]
-fn output_realization_records_route_writers() {
+fn reification_records_route_writers() {
     let result = inspect_pass_impl(
         r#"
 entry main(xs: [4]i32) [4]i32 =
   map(|x: i32| x + 1, xs)
 "#,
-        InspectPass::RealizeOutputs,
+        InspectPass::ReifySoacs,
     );
     assert!(result.success, "{:?}", result.error);
-    assert_eq!(result.pass, InspectPass::REALIZE_OUTPUTS);
+    assert_eq!(result.pass, InspectPass::REIFY_SOACS);
     let before = result.before.expect("before snapshot");
     let after = result.after.expect("after snapshot");
     let before_output = &before
@@ -84,18 +84,44 @@ entry main(xs: [4]i32) [4]i32 =
     );
     assert!(
         after_output.routes.iter().any(|route| !route.writers.is_empty()),
-        "output realization records the semantic values that publish the slot"
+        "reification records the semantic values that publish the slot"
     );
+
+    let before_map = before
+        .nodes
+        .iter()
+        .find(|node| node.variant == "segmap")
+        .and_then(|node| node.operation.as_ref())
+        .expect("raw map operation");
+    let after_map = after
+        .nodes
+        .iter()
+        .find(|node| node.variant == "segmap")
+        .and_then(|node| node.operation.as_ref())
+        .expect("semantic map operation");
+    assert!(before_map.semantic_id.is_none());
+    assert!(after_map.semantic_id.as_deref().is_some_and(|id| id.starts_with("op:")));
+    let before_state = before_map.soac_state.as_ref().expect("raw Screma state");
+    let after_state = after_map.soac_state.as_ref().expect("semantic Screma state");
+    assert_eq!(before_state.phase, "raw");
+    assert_eq!(before_state.variant, "raw");
+    assert_eq!(after_state.phase, "semantic");
+    assert_eq!(after_state.variant, "segmented");
+    assert_eq!(after_state.output_slots, [0]);
+    assert_eq!(after_state.space.len(), 1);
+    assert_eq!(after_state.space[0].variant, "fixed");
+    assert_eq!(after_state.space[0].fixed, Some(4));
+    assert!(after_state.resources.iter().any(|access| access.access == "write"));
 }
 
 #[test]
-fn output_realization_exposes_runtime_filter_resource_changes() {
+fn reification_leaves_runtime_filter_allocation_deferred() {
     let result = inspect_pass_impl(
         r#"
 entry evens(xs: []i32) []i32 =
   filter(|x: i32| x % 2 == 0, xs)
 "#,
-        InspectPass::RealizeOutputs,
+        InspectPass::ReifySoacs,
     );
     assert!(result.success, "{:?}", result.error);
     let before = result.before.expect("before snapshot");
@@ -105,52 +131,41 @@ entry evens(xs: []i32) []i32 =
         .iter()
         .find(|node| node.variant == "filter")
         .and_then(|node| node.operation.as_ref())
-        .and_then(|operation| operation.filter_state.as_ref())
+        .and_then(|operation| operation.soac_state.as_ref())
         .expect("converted filter state");
     let after_filter = after
         .nodes
         .iter()
         .find(|node| node.variant == "filter")
         .and_then(|node| node.operation.as_ref())
-        .and_then(|operation| operation.filter_state.as_ref())
-        .expect("realized filter state");
-    let before_scratch = before_filter.storage.scratch.as_ref().expect("converted scratch");
+        .and_then(|operation| operation.soac_state.as_ref())
+        .expect("semantic filter state");
+    assert_eq!(before_filter.phase, "raw");
+    assert_eq!(before_filter.variant, "raw");
+    assert_eq!(after_filter.phase, "semantic");
+    assert_eq!(after_filter.variant, "segmented");
+    assert_eq!(after_filter.output_slots, [0]);
+    let before_output_state = before_filter.filter_output.as_ref().expect("raw Filter output");
+    let after_output_state = after_filter.filter_output.as_ref().expect("semantic Filter output");
+    assert_eq!(before_output_state.capacity.variant, "like_input");
+    assert_eq!(before_output_state.capacity.input, Some(0));
+    assert!(before_output_state.backing.is_none());
+    assert!(before_output_state.length.is_none());
     assert_eq!(
-        before_filter.storage.length.as_ref().map(|length| length.variant.as_str()),
-        Some("view_only")
+        after_output_state.backing.as_ref().map(|backing| backing.variant.as_str()),
+        Some("deferred")
     );
     assert_eq!(
-        after_filter.storage.length.as_ref().map(|length| length.variant.as_str()),
-        Some("stored")
-    );
-    assert_eq!(
-        after_filter.storage.length.as_ref().and_then(|length| length.resource.as_ref()),
-        Some(before_scratch),
-        "the old compaction buffer becomes the stored length cell"
+        after_output_state.length.as_ref().map(|length| length.variant.as_str()),
+        Some("implicit")
     );
 
     let after_entry = after.groups.iter().find(|group| group.kind == "entry").unwrap();
     let output = &after_entry.outputs[0];
-    assert_eq!(after_filter.storage.scratch.as_ref(), output.resource.as_ref());
     assert_eq!(
         output.kind.length.as_ref().map(|length| length.variant.as_str()),
         Some("like_input")
     );
-
-    let length_resource = after
-        .resources
-        .iter()
-        .find(|resource| &resource.id == before_scratch)
-        .expect("stored length resource remains in the arena");
-    assert_eq!(length_resource.elem_ty, "u32");
-    assert_eq!(length_resource.size.variant, "fixed_bytes");
-    assert_eq!(length_resource.size.bytes, Some(4));
-    assert!(after_entry.resource_declarations.iter().any(|declaration| {
-        &declaration.resource == before_scratch
-            && declaration.elem_ty == "u32"
-            && declaration.size.variant == "fixed_bytes"
-            && declaration.size.bytes == Some(4)
-    }));
 }
 
 #[test]

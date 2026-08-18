@@ -5,32 +5,33 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::{NodeCounter, Span};
 use wyn_core::egir::ir::{OperandRef, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
-    CompilerResourceKind, CoreProgramData, LogicalSize, OutputWriter, RealizedOutputRoute, ResourceId,
-    ResourceOrigin, RewriteGlobal, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
+    NoStorageDeclaration, OutputWriter, RealizedOutputRoute, RewriteGlobal, SemanticOpId,
+    SemanticProgramData,
 };
-use wyn_core::egir::soac::filter;
 use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
+use wyn_core::egir::soac::{filter, hist, screma};
 use wyn_core::egir::types::{
-    EffectOp, PlaceDestination, Raw, RegionId, ResultDestination, Semantic, Soac, SoacEffect, ValueKind,
-    WynSoacPhase,
+    EffectOp, PlaceDestination, Raw, ResultDestination, SegExtent, SegResourceAccess, SegSpace, Semantic,
+    Soac, SoacEffect, ValueKind, WynSoacPhase,
 };
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
+use wyn_core::{BindingRef, FunctionId, ResourceAccess};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectPass {
     OptimizeSemantics,
-    RealizeOutputs,
+    ReifySoacs,
 }
 
 impl InspectPass {
     const OPTIMIZE_SEMANTICS: &'static str = "egir::optimize_semantics";
-    const REALIZE_OUTPUTS: &'static str = "egir::realize_outputs";
+    const REIFY_SOACS: &'static str = "egir::reify_soacs";
 
     fn parse(value: &str) -> Option<Self> {
         match value {
             Self::OPTIMIZE_SEMANTICS => Some(Self::OptimizeSemantics),
-            Self::REALIZE_OUTPUTS => Some(Self::RealizeOutputs),
+            Self::REIFY_SOACS => Some(Self::ReifySoacs),
             _ => None,
         }
     }
@@ -38,7 +39,7 @@ impl InspectPass {
     fn id(self) -> &'static str {
         match self {
             Self::OptimizeSemantics => Self::OPTIMIZE_SEMANTICS,
-            Self::RealizeOutputs => Self::REALIZE_OUTPUTS,
+            Self::ReifySoacs => Self::REIFY_SOACS,
         }
     }
 }
@@ -83,14 +84,13 @@ pub struct GraphGroup {
     pub label: String,
     pub kind: String,
     pub outputs: Vec<GraphOutput>,
-    pub resource_declarations: Vec<GraphResourceDeclaration>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphOutput {
     pub slot: usize,
     pub ty: String,
-    pub resource: Option<String>,
+    pub binding: Option<GraphBinding>,
     pub kind: GraphOutputKind,
     pub routes: Vec<GraphOutputRoute>,
 }
@@ -104,7 +104,7 @@ pub struct GraphOutputKind {
     pub length: Option<GraphSize>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphBinding {
     pub set: u32,
     pub binding: u32,
@@ -114,36 +114,9 @@ pub struct GraphBinding {
 pub struct GraphSize {
     pub variant: String,
     pub bytes: Option<u64>,
-    pub resource: Option<String>,
     pub binding: Option<GraphBinding>,
     pub elem_bytes: Option<u32>,
     pub src_elem_bytes: Option<u32>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphResourceDeclaration {
-    pub resource: String,
-    pub role: String,
-    pub elem_ty: String,
-    pub size: GraphSize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphResource {
-    pub id: String,
-    pub elem_ty: String,
-    pub origin: GraphResourceOrigin,
-    pub size: GraphSize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphResourceOrigin {
-    pub variant: String,
-    pub binding: Option<GraphBinding>,
-    pub name: Option<String>,
-    pub compiler_kind: Option<String>,
-    pub owner: Option<String>,
-    pub slot: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -204,31 +177,65 @@ pub struct GraphResult {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GraphOperation {
+    pub semantic_id: Option<String>,
     pub operand_groups: Vec<GraphOperandGroup>,
     pub regions: Vec<GraphRegion>,
     pub results: Vec<GraphResult>,
-    pub filter_state: Option<GraphFilterState>,
+    pub soac_state: Option<GraphSoacState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphFilterState {
+pub struct GraphSoacState {
     pub phase: String,
-    pub storage: GraphFilterStorage,
+    pub variant: String,
+    pub space: Vec<GraphSegExtent>,
+    pub output_slots: Vec<usize>,
+    pub resources: Vec<GraphResourceAccess>,
+    pub filter_output: Option<GraphFilterOutput>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphFilterStorage {
+pub struct GraphSegExtent {
     pub variant: String,
-    pub capacity: Option<String>,
+    pub fixed: Option<u32>,
+    pub value: Option<GraphReference>,
+    pub binding: Option<GraphBinding>,
+    pub offset: Option<u32>,
+    pub elem_bytes: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphResourceAccess {
+    pub binding: GraphBinding,
+    pub access: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterOutput {
+    pub variant: String,
+    pub capacity: GraphFilterCapacity,
     pub ownership: Option<String>,
-    pub scratch: Option<String>,
+    pub backing: Option<GraphFilterBacking>,
     pub length: Option<GraphFilterLength>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterCapacity {
+    pub variant: String,
+    pub ty: Option<String>,
+    pub input: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphFilterBacking {
+    pub variant: String,
+    pub binding: Option<GraphBinding>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphFilterLength {
     pub variant: String,
-    pub resource: Option<String>,
+    pub binding: Option<GraphBinding>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,7 +265,6 @@ pub struct GraphBlock {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GraphSnapshot {
-    pub resources: Vec<GraphResource>,
     pub groups: Vec<GraphGroup>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
@@ -440,14 +446,9 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         }
     };
 
-    if pass == InspectPass::RealizeOutputs {
+    if pass == InspectPass::ReifySoacs {
         let before = snapshot_program(&program);
-        let program = match wyn_core::egir::realize_outputs(program) {
-            Ok(program) => program,
-            Err(error) => {
-                return InspectResult::error(pass.id(), format!("EGIR output error: {error:?}"), None)
-            }
-        };
+        let program = wyn_core::egir::reify_soacs(program);
         let after = snapshot_program(&program);
         return InspectResult {
             success: true,
@@ -459,12 +460,6 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let program = match wyn_core::egir::realize_outputs(program) {
-        Ok(program) => program,
-        Err(error) => {
-            return InspectResult::error(pass.id(), format!("EGIR output error: {error:?}"), None)
-        }
-    };
     let segmented = wyn_core::egir::reify_soacs(program);
     let before = snapshot_program(&segmented);
     let (optimized, trace) = wyn_core::egir::optimize_semantics_with_trace(segmented);
@@ -495,13 +490,19 @@ fn operation_node_id(id: SemanticOpId) -> String {
     }
 }
 
-trait SnapshotPhase: WynSoacPhase<Resource = SemanticResourceRef> {
+trait SnapshotPhase: WynSoacPhase<Resource = BindingRef> {
     fn soac_node_id(id: &Self::SoacId, group: &str, block: wyn_core::flow::BlockId, index: usize)
         -> String;
 
     fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String;
 
-    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState;
+    fn semantic_id(id: &Self::SoacId) -> Option<String>;
+
+    fn screma_state(group: &str, op: &screma::Op<Self>) -> GraphSoacState;
+
+    fn filter_state(group: &str, op: &filter::Op<Self>) -> GraphSoacState;
+
+    fn hist_state(group: &str, op: &hist::Op<Self>) -> GraphSoacState;
 }
 
 impl SnapshotPhase for Raw {
@@ -518,8 +519,114 @@ impl SnapshotPhase for Raw {
         format!("{soac:#?}")
     }
 
-    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState {
-        graph_filter_state("raw", &op.state.storage)
+    fn semantic_id(_id: &Self::SoacId) -> Option<String> {
+        None
+    }
+
+    fn screma_state(_group: &str, _op: &screma::Op<Self>) -> GraphSoacState {
+        graph_raw_soac_state(None)
+    }
+
+    fn filter_state(_group: &str, op: &filter::Op<Self>) -> GraphSoacState {
+        let output = match &op.state.output {
+            filter::RawOutput::Local { capacity, ownership } => {
+                graph_local_filter_output(capacity, *ownership)
+            }
+            filter::RawOutput::Runtime { capacity } => {
+                graph_runtime_filter_output(graph_runtime_capacity(*capacity), None, None)
+            }
+        };
+        graph_raw_soac_state(Some(output))
+    }
+
+    fn hist_state(_group: &str, _op: &hist::Op<Self>) -> GraphSoacState {
+        graph_raw_soac_state(None)
+    }
+}
+
+fn graph_raw_soac_state(filter_output: Option<GraphFilterOutput>) -> GraphSoacState {
+    GraphSoacState {
+        phase: "raw".to_string(),
+        variant: "raw".to_string(),
+        space: Vec::new(),
+        output_slots: Vec::new(),
+        resources: Vec::new(),
+        filter_output,
+    }
+}
+
+fn graph_semantic_soac_state(
+    group: &str,
+    variant: &str,
+    space: Option<&SegSpace<BindingRef>>,
+    output_slots: &[wyn_core::egir::program::OutputSlotId],
+    resources: &[SegResourceAccess<BindingRef>],
+    filter_output: Option<GraphFilterOutput>,
+) -> GraphSoacState {
+    GraphSoacState {
+        phase: "semantic".to_string(),
+        variant: variant.to_string(),
+        space: space.map_or_else(Vec::new, |space| graph_seg_space(group, space)),
+        output_slots: output_slots.iter().map(|slot| slot.0).collect(),
+        resources: resources.iter().map(graph_resource_access).collect(),
+        filter_output,
+    }
+}
+
+fn graph_seg_space(group: &str, space: &SegSpace<BindingRef>) -> Vec<GraphSegExtent> {
+    space
+        .dims()
+        .iter()
+        .map(|extent| match extent {
+            SegExtent::Fixed(value) => GraphSegExtent {
+                variant: "fixed".to_string(),
+                fixed: Some(*value),
+                value: None,
+                binding: None,
+                offset: None,
+                elem_bytes: None,
+            },
+            SegExtent::PushConstant { node, offset } => GraphSegExtent {
+                variant: "push_constant".to_string(),
+                fixed: None,
+                value: Some(value_reference(group, *node)),
+                binding: None,
+                offset: Some(*offset),
+                elem_bytes: None,
+            },
+            SegExtent::ResourceLength {
+                view,
+                resource,
+                elem_bytes,
+            } => GraphSegExtent {
+                variant: "resource_length".to_string(),
+                fixed: None,
+                value: Some(view_reference(group, *view)),
+                binding: Some(graph_binding(*resource)),
+                offset: None,
+                elem_bytes: Some(*elem_bytes),
+            },
+            SegExtent::Value(value) => GraphSegExtent {
+                variant: "value".to_string(),
+                fixed: None,
+                value: Some(value_reference(group, *value)),
+                binding: None,
+                offset: None,
+                elem_bytes: None,
+            },
+        })
+        .collect()
+}
+
+fn graph_resource_access(access: &SegResourceAccess<BindingRef>) -> GraphResourceAccess {
+    GraphResourceAccess {
+        binding: graph_binding(access.resource),
+        access: match access.access {
+            ResourceAccess::Read => "read",
+            ResourceAccess::Write => "write",
+            ResourceAccess::ReadWrite => "read_write",
+        }
+        .to_string(),
     }
 }
 
@@ -537,55 +644,118 @@ impl SnapshotPhase for Semantic {
         format!("semantic op {}\n\n{soac:#?}", id.source_index())
     }
 
-    fn filter_state(op: &filter::Op<Self>) -> GraphFilterState {
-        graph_filter_state("semantic", &op.state.storage)
+    fn semantic_id(id: &Self::SoacId) -> Option<String> {
+        Some(operation_node_id(*id))
+    }
+
+    fn screma_state(group: &str, op: &screma::Op<Self>) -> GraphSoacState {
+        match &op.state {
+            screma::SemanticState::Serial => {
+                graph_semantic_soac_state(group, "serial", None, &[], &[], None)
+            }
+            screma::SemanticState::Segmented {
+                space,
+                output_slots,
+                resources,
+            } => graph_semantic_soac_state(group, "segmented", Some(space), output_slots, resources, None),
+        }
+    }
+
+    fn filter_state(group: &str, op: &filter::Op<Self>) -> GraphSoacState {
+        graph_semantic_soac_state(
+            group,
+            "segmented",
+            Some(&op.state.space),
+            &op.state.output_slots,
+            &op.state.resources,
+            Some(graph_filter_output(&op.state.output)),
+        )
+    }
+
+    fn hist_state(group: &str, op: &hist::Op<Self>) -> GraphSoacState {
+        match &op.state {
+            hist::SemanticState::Serial => graph_semantic_soac_state(group, "serial", None, &[], &[], None),
+            hist::SemanticState::Segmented(space) => {
+                graph_semantic_soac_state(group, "segmented", Some(space), &[], &[], None)
+            }
+        }
     }
 }
 
-fn graph_filter_state(phase: &str, storage: &filter::Output<SemanticResourceRef>) -> GraphFilterState {
-    let storage = match storage {
-        filter::Output::Local { capacity, ownership } => GraphFilterStorage {
-            variant: "local".to_string(),
-            capacity: Some(wyn_core::diags::format_type(capacity)),
-            ownership: Some(
-                match ownership {
-                    wyn_core::egir::types::SoacOwnership::Fresh => "fresh",
-                    wyn_core::egir::types::SoacOwnership::UniqueInput => "unique_input",
-                }
-                .to_string(),
-            ),
-            scratch: None,
-            length: None,
+fn graph_local_filter_output(
+    capacity: &wyn_core::types::Type,
+    ownership: wyn_core::egir::types::SoacOwnership,
+) -> GraphFilterOutput {
+    GraphFilterOutput {
+        variant: "local".to_string(),
+        capacity: GraphFilterCapacity {
+            variant: "type".to_string(),
+            ty: Some(wyn_core::diags::format_type(capacity)),
+            input: None,
         },
-        filter::Output::Runtime { scratch, length } => GraphFilterStorage {
-            variant: "runtime".to_string(),
-            capacity: None,
-            ownership: None,
-            scratch: Some(resource_name(*scratch)),
-            length: Some(match length {
-                filter::RuntimeLength::ViewOnly => GraphFilterLength {
-                    variant: "view_only".to_string(),
-                    resource: None,
+        ownership: Some(
+            match ownership {
+                wyn_core::egir::types::SoacOwnership::Fresh => "fresh",
+                wyn_core::egir::types::SoacOwnership::UniqueInput => "unique_input",
+            }
+            .to_string(),
+        ),
+        backing: None,
+        length: None,
+    }
+}
+
+fn graph_runtime_capacity(capacity: filter::RuntimeCapacity) -> GraphFilterCapacity {
+    match capacity {
+        filter::RuntimeCapacity::LikeInput { input } => GraphFilterCapacity {
+            variant: "like_input".to_string(),
+            ty: None,
+            input: Some(input.0),
+        },
+    }
+}
+
+fn graph_runtime_filter_output(
+    capacity: GraphFilterCapacity,
+    backing: Option<GraphFilterBacking>,
+    length: Option<GraphFilterLength>,
+) -> GraphFilterOutput {
+    GraphFilterOutput {
+        variant: "runtime".to_string(),
+        capacity,
+        ownership: None,
+        backing,
+        length,
+    }
+}
+
+fn graph_filter_output(output: &filter::Output<BindingRef>) -> GraphFilterOutput {
+    match output {
+        filter::Output::Local { capacity, ownership } => graph_local_filter_output(capacity, *ownership),
+        filter::Output::Runtime(runtime) => graph_runtime_filter_output(
+            graph_runtime_capacity(runtime.capacity),
+            Some(match runtime.backing {
+                filter::RuntimeBacking::Deferred => GraphFilterBacking {
+                    variant: "deferred".to_string(),
+                    binding: None,
                 },
-                filter::RuntimeLength::Stored(resource) => GraphFilterLength {
-                    variant: "stored".to_string(),
-                    resource: Some(resource_name(*resource)),
+                filter::RuntimeBacking::Bound(binding) => GraphFilterBacking {
+                    variant: "bound".to_string(),
+                    binding: Some(graph_binding(binding)),
                 },
             }),
-        },
-    };
-    GraphFilterState {
-        phase: phase.to_string(),
-        storage,
+            Some(match runtime.length {
+                filter::RuntimeLength::Implicit => GraphFilterLength {
+                    variant: "implicit".to_string(),
+                    binding: None,
+                },
+                filter::RuntimeLength::Stored(binding) => GraphFilterLength {
+                    variant: "stored".to_string(),
+                    binding: Some(graph_binding(binding)),
+                },
+            }),
+        ),
     }
-}
-
-fn resource_id_name(resource: ResourceId) -> String {
-    format!("$r{}", resource.index())
-}
-
-fn resource_name(resource: SemanticResourceRef) -> String {
-    resource_id_name(resource.0)
 }
 
 fn graph_binding(binding: wyn_core::BindingRef) -> GraphBinding {
@@ -595,54 +765,12 @@ fn graph_binding(binding: wyn_core::BindingRef) -> GraphBinding {
     }
 }
 
-fn graph_logical_size(size: &LogicalSize) -> GraphSize {
-    match size {
-        LogicalSize::FixedBytes(bytes) => GraphSize {
-            variant: "fixed_bytes".to_string(),
-            bytes: Some(*bytes),
-            resource: None,
-            binding: None,
-            elem_bytes: None,
-            src_elem_bytes: None,
-        },
-        LogicalSize::LikeResource {
-            resource,
-            elem_bytes,
-            src_elem_bytes,
-        } => GraphSize {
-            variant: "like_resource".to_string(),
-            bytes: None,
-            resource: Some(resource_id_name(*resource)),
-            binding: None,
-            elem_bytes: Some(*elem_bytes),
-            src_elem_bytes: Some(*src_elem_bytes),
-        },
-        LogicalSize::SameAsDispatch { elem_bytes } => GraphSize {
-            variant: "same_as_dispatch".to_string(),
-            bytes: None,
-            resource: None,
-            binding: None,
-            elem_bytes: Some(*elem_bytes),
-            src_elem_bytes: None,
-        },
-        LogicalSize::Unspecified => GraphSize {
-            variant: "unspecified".to_string(),
-            bytes: None,
-            resource: None,
-            binding: None,
-            elem_bytes: None,
-            src_elem_bytes: None,
-        },
-    }
-}
-
 fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphSize {
     use wyn_core::pipeline_descriptor::BufferLen;
     match length {
         BufferLen::Fixed { bytes } => GraphSize {
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
-            resource: None,
             binding: None,
             elem_bytes: None,
             src_elem_bytes: None,
@@ -655,7 +783,6 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
         } => GraphSize {
             variant: "like_input".to_string(),
             bytes: None,
-            resource: None,
             binding: Some(GraphBinding {
                 set: *set,
                 binding: *binding,
@@ -666,7 +793,6 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
         BufferLen::SameAsDispatch { elem_bytes } => GraphSize {
             variant: "same_as_dispatch".to_string(),
             bytes: None,
-            resource: None,
             binding: None,
             elem_bytes: Some(*elem_bytes),
             src_elem_bytes: None,
@@ -705,41 +831,10 @@ fn graph_output_kind(kind: &wyn_core::interface::EntryOutputKind) -> GraphOutput
     }
 }
 
-fn storage_role(role: wyn_core::interface::StorageRole) -> String {
-    match role {
-        wyn_core::interface::StorageRole::Input => "input",
-        wyn_core::interface::StorageRole::Output => "output",
-        wyn_core::interface::StorageRole::Intermediate => "intermediate",
-    }
-    .to_string()
-}
-
-fn compiler_resource_kind(kind: CompilerResourceKind) -> String {
-    match kind {
-        CompilerResourceKind::Staging => "staging",
-        CompilerResourceKind::GatherHandoff => "gather_handoff",
-        CompilerResourceKind::ReducePartial => "reduce_partial",
-        CompilerResourceKind::ScanBlockSums => "scan_block_sums",
-        CompilerResourceKind::ScanBlockOffsets => "scan_block_offsets",
-        CompilerResourceKind::ScanPrefixes => "scan_prefixes",
-        CompilerResourceKind::FilterScratch => "filter_scratch",
-        CompilerResourceKind::FilterLenCell => "filter_len_cell",
-        CompilerResourceKind::FilterFlags => "filter_flags",
-        CompilerResourceKind::FilterOffsets => "filter_offsets",
-        CompilerResourceKind::FilterScanBlockSums => "filter_scan_block_sums",
-        CompilerResourceKind::FilterScanBlockOffsets => "filter_scan_block_offsets",
-        CompilerResourceKind::BucketCounts => "bucket_counts",
-        CompilerResourceKind::BucketOverflow => "bucket_overflow",
-        CompilerResourceKind::ScalarHandoff => "scalar_handoff",
-        CompilerResourceKind::MultiConsumerArray => "multi_consumer_array",
-    }
-    .to_string()
-}
-
 fn snapshot_program<Tag, P>(
     program: &wyn_core::egir::program::Program<
         Tag,
-        ProgramFamily<P, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
+        ProgramFamily<P, NoStorageDeclaration, RealizedOutputRoute, SemanticProgramData>,
         RewriteGlobal,
     >,
 ) -> GraphSnapshot
@@ -747,37 +842,6 @@ where
     P: SnapshotPhase,
 {
     let mut snapshot = GraphSnapshot::default();
-    snapshot.resources = program
-        .data
-        .resources
-        .iter()
-        .map(|resource| {
-            let origin = match &resource.origin {
-                ResourceOrigin::Host(host) => GraphResourceOrigin {
-                    variant: "host".to_string(),
-                    binding: Some(graph_binding(host.binding)),
-                    name: host.name.clone(),
-                    compiler_kind: None,
-                    owner: None,
-                    slot: None,
-                },
-                ResourceOrigin::Compiler(compiler) => GraphResourceOrigin {
-                    variant: "compiler".to_string(),
-                    binding: None,
-                    name: None,
-                    compiler_kind: Some(compiler_resource_kind(compiler.kind)),
-                    owner: compiler.owner.map(operation_node_id),
-                    slot: Some(compiler.slot),
-                },
-            };
-            GraphResource {
-                id: resource_id_name(resource.id()),
-                elem_ty: wyn_core::diags::format_type(&resource.elem_ty),
-                origin,
-                size: graph_logical_size(&resource.size),
-            }
-        })
-        .collect();
     let region_names = program
         .functions
         .iter()
@@ -796,7 +860,7 @@ where
                 .map(|(slot, output)| GraphOutput {
                     slot,
                     ty: wyn_core::diags::format_type(&output.ty),
-                    resource: output.resource.map(resource_name),
+                    binding: output.resource.map(graph_binding),
                     kind: graph_output_kind(&output.kind),
                     routes: output
                         .routes
@@ -822,16 +886,6 @@ where
                         .collect(),
                 })
                 .collect(),
-            resource_declarations: entry
-                .resource_declarations
-                .iter()
-                .map(|declaration| GraphResourceDeclaration {
-                    resource: resource_name(declaration.resource),
-                    role: storage_role(declaration.role),
-                    elem_ty: wyn_core::diags::format_type(&declaration.elem_ty),
-                    size: graph_logical_size(&declaration.size),
-                })
-                .collect(),
         });
         snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
     }
@@ -842,7 +896,6 @@ where
             label: format!("fn {}", function.name),
             kind: "function".to_string(),
             outputs: Vec::new(),
-            resource_declarations: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &function.graph, &region_names);
     }
@@ -853,7 +906,6 @@ where
             label: format!("const {}", constant.name),
             kind: "constant".to_string(),
             outputs: Vec::new(),
-            resource_declarations: Vec::new(),
         });
         snapshot_graph(&mut snapshot, &group, &constant.graph, &region_names);
     }
@@ -864,7 +916,7 @@ fn snapshot_graph<P: SnapshotPhase>(
     snapshot: &mut GraphSnapshot,
     group: &str,
     graph: &wyn_core::egir::types::EGraph<P>,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) {
     for (value_id, value) in graph.values() {
         let id = value_node_id(group, value_id);
@@ -1143,15 +1195,16 @@ fn place_display(group: &str, op: &PlaceOp) -> (String, String, GraphOperation) 
         label,
         variant.to_string(),
         GraphOperation {
+            semantic_id: None,
             operand_groups,
             regions: Vec::new(),
             results: Vec::new(),
-            filter_state: None,
+            soac_state: None,
         },
     )
 }
 
-fn value_label(kind: &ValueKind<wyn_core::egir::program::SemanticResourceRef>) -> (String, String) {
+fn value_label(kind: &ValueKind<BindingRef>) -> (String, String) {
     match kind {
         ValueKind::Pure { op, .. } => (inline_debug(op), "pure".to_string()),
         ValueKind::Union { .. } => ("union".to_string(), "union".to_string()),
@@ -1181,11 +1234,11 @@ fn effect_display<P: SnapshotPhase>(
     index: usize,
     effect: &wyn_core::egir::types::SideEffect<P>,
     graph: &wyn_core::egir::types::EGraph<P>,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) -> EffectDisplay {
     match effect.kind() {
         SideEffectKind::Soac(SoacEffect(id, soac)) => {
-            let (label, variant, operation) = match soac {
+            let (label, variant, mut operation) = match soac {
                 Soac::Screma(op) => (
                     "soac.screma".to_string(),
                     if op.form.scan_count() > 0 {
@@ -1209,6 +1262,7 @@ fn effect_display<P: SnapshotPhase>(
                     hist_operation(group, effect, op, region_names),
                 ),
             };
+            operation.semantic_id = P::semantic_id(id);
             EffectDisplay {
                 id: P::soac_node_id(id, group, block, index),
                 label,
@@ -1225,6 +1279,7 @@ fn effect_display<P: SnapshotPhase>(
                 variant,
                 detail: format!("{operation:#?}"),
                 operation: Some(GraphOperation {
+                    semantic_id: None,
                     operand_groups: (!effect.operands().is_empty())
                         .then(|| GraphOperandGroup {
                             role: "operands".to_string(),
@@ -1239,14 +1294,14 @@ fn effect_display<P: SnapshotPhase>(
                         .collect(),
                     regions: Vec::new(),
                     results: graph_results(group, graph.effect_result_binding(effect)),
-                    filter_state: None,
+                    soac_state: None,
                 }),
             }
         }
     }
 }
 
-fn effect_operation_name(operation: &EffectOp<SemanticResourceRef>) -> (String, String) {
+fn effect_operation_name(operation: &EffectOp<BindingRef>) -> (String, String) {
     let (label, variant) = match operation {
         EffectOp::Call { .. } => ("func.call".to_string(), "call"),
         EffectOp::Op { tag } => (inline_debug(tag), "op"),
@@ -1264,7 +1319,7 @@ fn screma_operation<P: SnapshotPhase>(
     effect: &wyn_core::egir::types::SideEffect<P>,
     graph: &wyn_core::egir::types::EGraph<P>,
     op: &wyn_core::egir::soac::screma::Op<P>,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) -> GraphOperation {
     let mut operand_groups = Vec::new();
     if let Ok(operands) = ScremaOperands::decode(op, effect.operands(), graph.effect_result_binding(effect))
@@ -1315,10 +1370,11 @@ fn screma_operation<P: SnapshotPhase>(
     regions.push(lambda_region("post", &op.form.post, group, region_names));
 
     GraphOperation {
+        semantic_id: None,
         operand_groups,
         regions,
         results: graph_results(group, effect.result()),
-        filter_state: None,
+        soac_state: Some(P::screma_state(group, op)),
     }
 }
 
@@ -1326,9 +1382,10 @@ fn filter_operation<P: SnapshotPhase>(
     group: &str,
     effect: &wyn_core::egir::types::SideEffect<P>,
     op: &wyn_core::egir::soac::filter::Op<P>,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) -> GraphOperation {
     GraphOperation {
+        semantic_id: None,
         operand_groups: vec![GraphOperandGroup {
             role: "inputs".to_string(),
             values: effect
@@ -1344,7 +1401,7 @@ fn filter_operation<P: SnapshotPhase>(
             lambda_region("predicate", &op.body.predicate, group, region_names),
         ],
         results: graph_results(group, effect.result()),
-        filter_state: Some(P::filter_state(op)),
+        soac_state: Some(P::filter_state(group, op)),
     }
 }
 
@@ -1352,7 +1409,7 @@ fn hist_operation<P: SnapshotPhase>(
     group: &str,
     effect: &wyn_core::egir::types::SideEffect<P>,
     op: &wyn_core::egir::soac::hist::Op<P>,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) -> GraphOperation {
     let mut operand_groups = vec![GraphOperandGroup {
         role: "inputs".to_string(),
@@ -1393,29 +1450,21 @@ fn hist_operation<P: SnapshotPhase>(
                     region_names,
                 ));
             }
-            wyn_core::egir::soac::hist::Update::BucketInsert {
-                counts,
-                overflow,
-                capacity,
-                ..
-            } => {
+            wyn_core::egir::soac::hist::Update::BucketInsert { capacity, .. } => {
                 operand_groups.push(GraphOperandGroup {
-                    role: format!("operation[{index}].bucket_storage"),
-                    values: vec![
-                        view_reference(group, *counts),
-                        view_reference(group, *overflow),
-                        value_reference(group, *capacity),
-                    ],
+                    role: format!("operation[{index}].capacity"),
+                    values: vec![value_reference(group, *capacity)],
                 });
             }
         }
     }
 
     GraphOperation {
+        semantic_id: None,
         operand_groups,
         regions,
         results: graph_results(group, effect.result()),
-        filter_state: None,
+        soac_state: Some(P::hist_state(group, op)),
     }
 }
 
@@ -1454,7 +1503,7 @@ fn lambda_region(
     role: impl Into<String>,
     lambda: &Lambda,
     group: &str,
-    region_names: &HashMap<RegionId, String>,
+    region_names: &HashMap<FunctionId, String>,
 ) -> GraphRegion {
     let (symbol, identity, captures) = match lambda.seg_body() {
         Some(body) => (

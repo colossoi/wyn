@@ -7,16 +7,16 @@ import wasmPackage from "./wasm-pkg/package.json";
 import "./style.css";
 
 type Side = "before" | "after";
-type PassId = "egir::optimize_semantics" | "egir::realize_outputs";
+type PassId = "egir::optimize_semantics" | "egir::reify_soacs";
 
 const passInfo: Record<PassId, { before: string; after: string }> = {
   "egir::optimize_semantics": {
     before: "Segmented EGIR",
     after: "Optimized EGIR",
   },
-  "egir::realize_outputs": {
+  "egir::reify_soacs": {
     before: "Converted EGIR",
-    after: "Realized output metadata",
+    after: "Segmented EGIR",
   },
 };
 
@@ -24,7 +24,7 @@ const passStorageKey = "wyn-egir-viz:pass";
 const savedPass = localStorage.getItem(passStorageKey);
 const initialPass: PassId = savedPass && savedPass in passInfo
   ? savedPass as PassId
-  : "egir::realize_outputs";
+  : "egir::reify_soacs";
 
 interface SourceSpan {
   start_line: number;
@@ -43,13 +43,12 @@ interface GraphGroup {
   label: string;
   kind: string;
   outputs: GraphOutput[];
-  resource_declarations: GraphResourceDeclaration[];
 }
 
 interface GraphOutput {
   slot: number;
   ty: string;
-  resource?: string;
+  binding?: GraphBinding;
   kind: GraphOutputKind;
   routes: GraphOutputRoute[];
 }
@@ -68,35 +67,11 @@ interface GraphBinding {
 }
 
 interface GraphSize {
-  variant: "fixed_bytes" | "like_input" | "like_resource" | "same_as_dispatch" | "unspecified";
+  variant: "fixed_bytes" | "like_input" | "same_as_dispatch";
   bytes?: number;
-  resource?: string;
   binding?: GraphBinding;
   elem_bytes?: number;
   src_elem_bytes?: number;
-}
-
-interface GraphResourceDeclaration {
-  resource: string;
-  role: "input" | "output" | "intermediate";
-  elem_ty: string;
-  size: GraphSize;
-}
-
-interface GraphResource {
-  id: string;
-  elem_ty: string;
-  origin: GraphResourceOrigin;
-  size: GraphSize;
-}
-
-interface GraphResourceOrigin {
-  variant: "host" | "compiler";
-  binding?: GraphBinding;
-  name?: string;
-  compiler_kind?: string;
-  owner?: string;
-  slot?: number;
 }
 
 interface GraphOutputRoute {
@@ -149,28 +124,58 @@ interface GraphResult {
 }
 
 interface GraphOperation {
+  semantic_id?: string;
   operand_groups: GraphOperandGroup[];
   regions: GraphRegion[];
   results: GraphResult[];
-  filter_state?: GraphFilterState;
+  soac_state?: GraphSoacState;
 }
 
-interface GraphFilterState {
+interface GraphSoacState {
   phase: "raw" | "semantic";
-  storage: GraphFilterStorage;
+  variant: "raw" | "serial" | "segmented";
+  space: GraphSegExtent[];
+  output_slots: number[];
+  resources: GraphResourceAccess[];
+  filter_output?: GraphFilterOutput;
 }
 
-interface GraphFilterStorage {
+interface GraphSegExtent {
+  variant: "fixed" | "push_constant" | "resource_length" | "value";
+  fixed?: number;
+  value?: GraphReference;
+  binding?: GraphBinding;
+  offset?: number;
+  elem_bytes?: number;
+}
+
+interface GraphResourceAccess {
+  binding: GraphBinding;
+  access: "read" | "write" | "read_write";
+}
+
+interface GraphFilterOutput {
   variant: "local" | "runtime";
-  capacity?: string;
+  capacity: GraphFilterCapacity;
   ownership?: "fresh" | "unique_input";
-  scratch?: string;
+  backing?: GraphFilterBacking;
   length?: GraphFilterLength;
 }
 
+interface GraphFilterCapacity {
+  variant: "type" | "like_input";
+  ty?: string;
+  input?: number;
+}
+
+interface GraphFilterBacking {
+  variant: "deferred" | "bound";
+  binding?: GraphBinding;
+}
+
 interface GraphFilterLength {
-  variant: "view_only" | "stored";
-  resource?: string;
+  variant: "implicit" | "stored";
+  binding?: GraphBinding;
 }
 
 interface GraphEdge {
@@ -196,7 +201,6 @@ interface GraphBlock {
 }
 
 interface GraphSnapshot {
-  resources: GraphResource[];
   groups: GraphGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -241,7 +245,7 @@ app.innerHTML = `
       <label class="pass-block">
         <span>Pass</span>
         <select id="pass-select" aria-label="Compiler pass">
-          <option value="egir::realize_outputs"${initialPass === "egir::realize_outputs" ? " selected" : ""}>egir::realize_outputs</option>
+          <option value="egir::reify_soacs"${initialPass === "egir::reify_soacs" ? " selected" : ""}>egir::reify_soacs</option>
           <option value="egir::optimize_semantics"${initialPass === "egir::optimize_semantics" ? " selected" : ""}>egir::optimize_semantics</option>
         </select>
       </label>
@@ -515,7 +519,7 @@ function renderListing(side: Side, snapshot: GraphSnapshot): void {
   const listing = listings[side];
   document.querySelector<HTMLElement>(`#${side}-empty`)!.hidden = true;
   listing.hidden = false;
-  listing.innerHTML = `${renderProgramResources(snapshot.resources ?? [])}${snapshot.groups.map((group) => renderBody(snapshot, group)).join("")}`;
+  listing.innerHTML = snapshot.groups.map((group) => renderBody(snapshot, group)).join("");
 }
 
 function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
@@ -712,8 +716,10 @@ function renderScremaFields(operation: GraphOperation, names: Names): string {
     irField("neutral", renderReferenceList(groupValues(operation, `${region.role}.neutral`), names)),
   ]));
   return [
+    ...renderSemanticIdRows(operation),
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
     sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
+    ...renderSoacStateRows(operation.soac_state, names, "screma"),
     sourceRow(1, `${irField("form", `<span class="punct">{</span>`)}`),
     sourceRow(2, comma(irField("pre", pre ? renderRegion(pre, names) : missingTerm()))),
     sourceRow(2, comma(irField("scans", listTerm(scanTerms)))),
@@ -727,11 +733,10 @@ function renderFilterFields(operation: GraphOperation, names: Names): string {
   const map = operation.regions.find((region) => region.role === "map");
   const predicate = operation.regions.find((region) => region.role === "predicate");
   return [
+    ...renderSemanticIdRows(operation),
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
     sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
-    ...(operation.filter_state
-      ? [sourceRow(1, comma(irField("state", renderFilterState(operation.filter_state))))]
-      : []),
+    ...renderSoacStateRows(operation.soac_state, names, "filter"),
     sourceRow(1, irField("body", `<span class="punct">{</span>`)),
     sourceRow(2, comma(irField("map", map ? renderRegion(map, names) : missingTerm()))),
     sourceRow(2, irField("predicate", predicate ? renderRegion(predicate, names) : missingTerm())),
@@ -739,26 +744,142 @@ function renderFilterFields(operation: GraphOperation, names: Names): string {
   ].join("");
 }
 
-function renderFilterState(state: GraphFilterState): string {
-  return variantTerm(state.phase, [irField("storage", renderFilterStorage(state.storage))]);
+function renderSemanticIdRows(operation: GraphOperation): string[] {
+  if (!operation.semantic_id) return [];
+  return [sourceRow(1, comma(irField("id", `<span class="ir-symbol">${escapeHtml(operation.semantic_id)}</span>`)))];
 }
 
-function renderFilterStorage(storage: GraphFilterStorage): string {
-  if (storage.variant === "local") {
-    return variantTerm("local", [
-      irField("capacity", typeToken(storage.capacity)),
-      irField("ownership", keywordTerm(storage.ownership ?? "fresh")),
-    ]);
+function renderSoacStateRows(
+  state: GraphSoacState | undefined,
+  names: Names,
+  family: "screma" | "filter" | "hist",
+): string[] {
+  if (!state) return [];
+  if (state.variant === "raw") {
+    if (!state.filter_output) {
+      return [sourceRow(1, comma(irField("state", keywordTerm("raw"))))];
+    }
+    return [
+      sourceRow(1, irField("state", `<span class="ir-keyword">raw</span><span class="punct">(</span>`)),
+      ...renderFilterOutputRows(state.filter_output, 2, false),
+      sourceRow(1, comma(`<span class="punct">)</span>`)),
+    ];
   }
-  return variantTerm("runtime", [
-    irField("scratch", resourceToken(storage.scratch)),
-    irField("length", renderFilterLength(storage.length)),
+  if (state.variant === "serial") {
+    return [sourceRow(1, comma(irField("state", keywordTerm("serial"))))];
+  }
+
+  const hasPublication = family !== "hist";
+  const hasFilterOutput = family === "filter" && Boolean(state.filter_output);
+  return [
+    sourceRow(1, irField("state", `<span class="ir-keyword">segmented</span><span class="punct">(</span>`)),
+    ...renderVerticalListRows(
+      "space",
+      state.space.map((extent) => renderSegExtent(extent, names)),
+      2,
+      hasPublication,
+    ),
+    ...(hasPublication
+      ? [sourceRow(2, comma(irField("output_slots", listTerm(state.output_slots.map(numberTerm)))))]
+      : []),
+    ...(hasPublication
+      ? renderVerticalListRows(
+          "resources",
+          state.resources.map(renderResourceAccess),
+          2,
+          hasFilterOutput,
+        )
+      : []),
+    ...(hasFilterOutput ? renderFilterOutputRows(state.filter_output!, 2, false) : []),
+    sourceRow(1, comma(`<span class="punct">)</span>`)),
+  ];
+}
+
+function renderVerticalListRows(
+  field: string,
+  items: string[],
+  indent: number,
+  trailingComma: boolean,
+): string[] {
+  if (!items.length) {
+    const value = irField(field, listTerm([]));
+    return [sourceRow(indent, trailingComma ? comma(value) : value)];
+  }
+  return [
+    sourceRow(indent, irField(field, `<span class="punct">[</span>`)),
+    ...items.map((item, index) => sourceRow(
+      indent + 1,
+      `${item}${index + 1 < items.length ? `<span class="punct">,</span>` : ""}`,
+    )),
+    sourceRow(indent, `${`<span class="punct">]</span>`}${trailingComma ? `<span class="punct">,</span>` : ""}`),
+  ];
+}
+
+function renderSegExtent(extent: GraphSegExtent, names: Names): string {
+  switch (extent.variant) {
+    case "fixed":
+      return variantTerm("fixed", [irField("value", numberTerm(extent.fixed ?? 0))]);
+    case "push_constant":
+      return variantTerm("push_constant", [
+        irField("value", extent.value ? renderGraphReference(extent.value, names) : missingTerm()),
+        irField("offset", numberTerm(extent.offset ?? 0)),
+      ]);
+    case "resource_length":
+      return variantTerm("resource_length", [
+        irField("view", extent.value ? renderGraphReference(extent.value, names) : missingTerm()),
+        irField("binding", renderBinding(extent.binding)),
+        irField("elem_bytes", numberTerm(extent.elem_bytes ?? 0)),
+      ]);
+    case "value":
+      return variantTerm("value", [
+        irField("value", extent.value ? renderGraphReference(extent.value, names) : missingTerm()),
+      ]);
+  }
+}
+
+function renderResourceAccess(access: GraphResourceAccess): string {
+  return variantTerm("resource_access", [
+    irField("binding", renderBinding(access.binding)),
+    irField("access", keywordTerm(access.access)),
   ]);
 }
 
-function renderFilterLength(length?: GraphFilterLength): string {
-  if (!length || length.variant === "view_only") return keywordTerm("view_only");
-  return variantTerm("stored", [irField("resource", resourceToken(length.resource))]);
+function renderFilterOutputRows(output: GraphFilterOutput, indent: number, trailingComma: boolean): string[] {
+  const fields = output.variant === "local"
+    ? [
+        irField("capacity", renderFilterCapacity(output.capacity)),
+        irField("ownership", keywordTerm(output.ownership ?? "fresh")),
+      ]
+    : [
+        irField("capacity", renderFilterCapacity(output.capacity)),
+        ...(output.backing ? [irField("backing", renderFilterBacking(output.backing))] : []),
+        ...(output.length ? [irField("length", renderFilterLength(output.length))] : []),
+      ];
+  return [
+    sourceRow(indent, irField("output", `<span class="ir-keyword">${escapeHtml(output.variant)}</span><span class="punct">(</span>`)),
+    ...fields.map((field, index) => sourceRow(
+      indent + 1,
+      index + 1 < fields.length ? comma(field) : field,
+    )),
+    sourceRow(indent, `${`<span class="punct">)</span>`}${trailingComma ? `<span class="punct">,</span>` : ""}`),
+  ];
+}
+
+function renderFilterCapacity(capacity: GraphFilterCapacity): string {
+  if (capacity.variant === "type") return variantTerm("type", [irField("value", typeToken(capacity.ty))]);
+  return variantTerm("like_input", [irField("input", numberTerm(capacity.input ?? 0))]);
+}
+
+function renderFilterBacking(backing: GraphFilterBacking): string {
+  return backing.variant === "bound"
+    ? variantTerm("bound", [irField("binding", renderBinding(backing.binding))])
+    : keywordTerm("deferred");
+}
+
+function renderFilterLength(length: GraphFilterLength): string {
+  return length.variant === "stored"
+    ? variantTerm("stored", [irField("binding", renderBinding(length.binding))])
+    : keywordTerm("implicit");
 }
 
 function renderHistFields(operation: GraphOperation, names: Names): string {
@@ -766,8 +887,10 @@ function renderHistFields(operation: GraphOperation, names: Names): string {
   const otherGroups = operation.operand_groups.filter((group) => group.role !== "inputs");
   const reducers = operation.regions.filter((region) => region.role !== "bucket");
   return [
+    ...renderSemanticIdRows(operation),
     sourceRow(1, comma(irField("inputs", renderReferenceList(groupValues(operation, "inputs"), names)))),
     sourceRow(1, comma(irField("results", renderResultList(operation.results ?? [], names)))),
+    ...renderSoacStateRows(operation.soac_state, names, "hist"),
     sourceRow(1, irField("form", `<span class="punct">{</span>`)),
     sourceRow(2, comma(irField("bucket", bucket ? renderRegion(bucket, names) : missingTerm()))),
     sourceRow(2, comma(irField("operands", recordTerm(otherGroups.map((group) =>
@@ -814,26 +937,14 @@ function renderResultDestination(result: GraphResult, names: Names): string {
   return missingTerm();
 }
 
-function renderProgramResources(resources: GraphResource[]): string {
-  if (!resources.length) return "";
-  const declarations = resources.map((resource) => [
-    sourceRow(0, `<span class="ir-keyword">RESOURCE</span> ${resourceToken(resource.id)}<span class="punct">:</span> ${typeToken(resource.elem_ty)} <span class="ir-keyword">WITH</span> <span class="punct">{</span>`),
-    sourceRow(1, comma(irField("origin", renderResourceOrigin(resource.origin)))),
-    sourceRow(1, irField("size", renderSize(resource.size))),
-    sourceRow(0, `<span class="punct">}</span>`),
-  ].join("")).join("");
-  return `<section class="ir-program-metadata"><div class="ir-comment">; program logical resources (sidecar)</div><div class="ir-metadata-line">${declarations}</div></section>`;
-}
-
 function renderEntryInterface(group: GraphGroup, names: Names): string {
   const outputs = group.outputs ?? [];
-  const declarations = group.resource_declarations ?? [];
   const outputRows = outputs.flatMap((output, index) => {
     const rows = [
       sourceRow(2, `<span class="ir-keyword">output</span><span class="punct">(</span>`),
       sourceRow(3, comma(irField("slot", numberTerm(output.slot)))),
       sourceRow(3, comma(irField("type", typeToken(output.ty)))),
-      sourceRow(3, comma(irField("resource", resourceToken(output.resource)))),
+      sourceRow(3, comma(irField("binding", output.binding ? renderBinding(output.binding) : keywordTerm("none")))),
       sourceRow(3, comma(irField("kind", renderOutputKind(output.kind)))),
       sourceRow(3, irField("routes", `<span class="punct">[</span>`)),
       ...output.routes.flatMap((route, routeIndex) => [
@@ -852,14 +963,7 @@ function renderEntryInterface(group: GraphGroup, names: Names): string {
     ];
     return rows;
   });
-  const declarationRows = declarations.map((declaration, index) => sourceRow(2,
-    `${variantTerm("resource_decl", [
-      irField("resource", resourceToken(declaration.resource)),
-      irField("role", keywordTerm(declaration.role)),
-      irField("element_type", typeToken(declaration.elem_ty)),
-      irField("size", renderSize(declaration.size)),
-    ])}${index + 1 < declarations.length ? `<span class="punct">,</span>` : ""}`));
-  return `<div class="ir-comment">; entry interface and resource uses (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, comma(`<span class="punct">]</span>`))}${sourceRow(1, irField("resource_declarations", `<span class="punct">[</span>`))}${declarationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
+  return `<div class="ir-comment">; entry output interface (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
 }
 
 function renderOutputKind(kind: GraphOutputKind): string {
@@ -872,20 +976,6 @@ function renderOutputKind(kind: GraphOutputKind): string {
   return variantTerm("storage", [
     irField("exposure", exposure),
     irField("length", kind.length ? renderSize(kind.length) : keywordTerm("none")),
-  ]);
-}
-
-function renderResourceOrigin(origin: GraphResourceOrigin): string {
-  if (origin.variant === "host") {
-    return variantTerm("host", [
-      irField("binding", renderBinding(origin.binding)),
-      irField("name", origin.name ? literalTerm(origin.name) : keywordTerm("none")),
-    ]);
-  }
-  return variantTerm("compiler", [
-    irField("kind", keywordTerm(origin.compiler_kind ?? "unknown")),
-    irField("owner", origin.owner ? literalTerm(origin.owner) : keywordTerm("none")),
-    irField("slot", numberTerm(origin.slot ?? 0)),
   ]);
 }
 
@@ -907,16 +997,8 @@ function renderSize(size: GraphSize): string {
         irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
         irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
       ]);
-    case "like_resource":
-      return variantTerm("like_resource", [
-        irField("resource", resourceToken(size.resource)),
-        irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
-        irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
-      ]);
     case "same_as_dispatch":
       return variantTerm("same_as_dispatch", [irField("elem_bytes", numberTerm(size.elem_bytes ?? 0))]);
-    case "unspecified":
-      return keywordTerm("unspecified");
   }
 }
 
@@ -989,12 +1071,6 @@ function literalTerm(value: string): string {
 
 function keywordTerm(value: string): string {
   return `<span class="ir-keyword">${escapeHtml(value)}</span>`;
-}
-
-function resourceToken(resource?: string): string {
-  return resource
-    ? `<span class="resource-ref">${escapeHtml(resource)}</span>`
-    : keywordTerm("none");
 }
 
 function numberTerm(value: number): string {

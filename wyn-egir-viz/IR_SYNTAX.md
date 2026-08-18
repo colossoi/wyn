@@ -358,31 +358,26 @@ Logical size is one of:
 Entry-local semantic resource declarations additionally retain `role`, element
 type, and logical size. Resource arena order is resource identity order.
 
-### `realize_outputs` checkpoint boundary
+### `reify_soacs` checkpoint boundary
 
-`egir::realize_outputs` is the first EGIR pass after `from_tlc`. Its two panes
-use the same raw EGIR grammar: the left pane is converted EGIR and the right
-pane is converted EGIR with output publication metadata realized.
+The left pane is converted raw EGIR: entry interfaces already contain every
+declared output route and ABI size policy, while route writer lists are empty.
+The right pane is segmented semantic EGIR. Reification privately links each
+route to the semantic SOAC/effect producers reachable from its source, then
+records publication uniformly as output slots and resource accesses.
 
-The listing distinguishes graph-owned state from sidecars instead of merging
-them into an operation-specific annotation:
+At these two checkpoints the binding on an entry output and the bindings in a
+SOAC's resource-access list are host interface identities, not allocated
+logical resources. The inspector therefore prints `binding(set: ..., binding:
+...)` directly and does not synthesize `RESOURCE` declarations or `$resource`
+names for them.
 
-- `soac.filter(... state: raw(...))` is in-tree state. A runtime filter may
-  change from `runtime(scratch: $scratch, length: view_only)` to
-  `runtime(scratch: $output, length: stored(resource: $scratch))`.
-- `INTERFACE.outputs`, including `kind`, `$resource`, size policy, output
-  routes, and route writers, are entry sidecars.
-- `INTERFACE.resource_declarations` are entry-local resource-use sidecars.
-- top-level `RESOURCE` declarations are the program-owned logical-resource
-  sidecar.
-
-For a dynamic filter result, the pass can retarget storage views in the graph
-from a compiler scratch resource to the host output resource. The old scratch
-resource then becomes a `u32` four-byte length cell in both resource sidecars.
-The output's physical length policy becomes `like_input(...)` when the source
-input binding supplies the element count. These are references to the same
-`$resource` identities; the display must not assign separate names to their
-in-tree and sidecar occurrences.
+A raw runtime Filter output carries only its capacity rule. Reification adds
+`backing: deferred` and `length: implicit`; these are explicit promises that no
+backing buffer or length cell has been selected yet. A later
+`plan_logical_resources` pass may replace them with `bound(binding: ...)` and
+`stored(binding: ...)` when publication and scheduling actually require those
+representations.
 
 ## Floating values and places
 
@@ -577,11 +572,13 @@ A segmented space is a list of dimensions. Each dimension is exactly one of:
 
 - `fixed(value: n)`;
 - `push_constant(value: %n, offset: bytes)`;
-- `resource_length(view: ~v, resource: $r, elem_bytes: n)`; or
+- `resource_length(view: ~v, binding: binding(...), elem_bytes: n)`; or
 - `value(value: %n)`.
 
 A segmented resource entry is
-`resource_access(resource: $r, access: read | write | read_write)`.
+`resource_access(binding: binding(...), access: read | write | read_write)`.
+These terms name semantic reads and writes of host-visible bindings; they do
+not imply that compiler-owned storage has been allocated.
 
 Every side-effect result uses the canonical result-binding tree. The display
 flattens its destination leaves while retaining each logical product path:
@@ -634,7 +631,6 @@ At the semantic checkpoint, `screma-state` is either `serial` or:
 ```text
 segmented(
   space: [<seg-extent>, ...],
-  placement: kernel | lane_local,
   output_slots: [n, ...],
   resources: [resource_access(...), ...]
 )
@@ -654,9 +650,11 @@ The fixed field schema is:
   inputs: [soac_input(...)],
   results: [result(...)],
   body: filter_body(map: <lambda>, predicate: <lambda>),
-  state: filter_state(
+  state: segmented(
     space: [<seg-extent>, ...],
-    storage: <filter-output>
+    output_slots: [n, ...],
+    resources: [resource_access(...), ...],
+    output: <filter-output>
   ),
   effect: chain(...)
 )
@@ -664,8 +662,16 @@ The fixed field schema is:
 
 `filter-output` is one of:
 
-- `local(capacity: T, ownership: fresh | unique_input)`; or
-- `runtime(scratch: $r, length: view_only | stored(resource: $length))`.
+- `local(capacity: type(value: T), ownership: fresh | unique_input)`; or
+- `runtime(capacity: like_input(input: n), backing: deferred |
+  bound(binding: binding(...)), length: implicit |
+  stored(binding: binding(...)))`.
+
+In converted raw EGIR the same operation has
+`state: raw(output: <filter-output>)`. A raw runtime output contains the
+`capacity` field but omits `backing` and `length`; those two deferral markers
+are established by reification. A local output already owns its complete
+capacity and ownership policy, so reification preserves those fields.
 
 Map and predicate are separate lambda roles. The predicate is not encoded as a
 magic trailing capture or argument.
@@ -722,10 +728,11 @@ scheduled or physical EGIR. Only the stored `state` variant changes:
   `atomic(space: ..., operations: [direct(... ) | compare_exchange])`, or
   `bucket(space: ..., stage: init | insert | finish, topology: ...)`.
 
-Raw phase state is rendered explicitly when it owns data (for example raw
-filter storage); zero-field raw state is the enum atom `raw`. Physical resources
-still use the `$` namespace, with names derived from descriptor set/binding
-rather than semantic resource IDs.
+Raw phase state is rendered explicitly when it owns data (for example a raw
+Filter output); zero-field raw state is the enum atom `raw`. Physical resources
+still use the `$` namespace in checkpoints that actually contain them. A
+descriptor binding at the reification boundary remains a structured
+`binding(...)` term and is never disguised as a physical resource.
 
 ## Basic blocks and control flow
 

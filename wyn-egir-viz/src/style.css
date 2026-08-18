@@ -354,12 +354,6 @@ kbd {
   counter-reset: ir-line;
 }
 
-.ir-program-metadata {
-  min-width: 620px;
-  padding: 8px 20px 16px 90px;
-  border-bottom: 1px solid var(--line);
-}
-
 .ir-body {
   position: relative;
   min-width: 620px;
@@ -467,10 +461,6 @@ kbd {
 
 .effect-token {
   color: var(--purple);
-}
-
-.resource-ref {
-  color: #d8c77b;
 }
 
 .code-line {

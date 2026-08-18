@@ -1582,7 +1582,8 @@ impl<R> SegSpace<R> {
         (!dims.is_empty()).then_some(Self { dims })
     }
 
-    pub(crate) fn dims(&self) -> &[SegExtent<R>] {
+    /// Logical dimensions in row-major order.
+    pub fn dims(&self) -> &[SegExtent<R>] {
         &self.dims
     }
 
