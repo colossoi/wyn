@@ -143,3 +143,6 @@ done
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi

@@ -373,7 +373,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             // the same region as the source, so downstream
                             // consumers recover the buffer from it — the struct
                             // holds only {offset, len}.
-                            self.slice_view_to_view(arr, base_offset, start_id, end_id)
+                            let start_u32 = self.integer_ref_as_u32(value_refs[1])?;
+                            let end_u32 = self.integer_ref_as_u32(value_refs[2])?;
+                            self.slice_view_to_view(arr, base_offset, start_u32, end_u32)
                         }
                     } else {
                         self.slice_composite(arr, start_id, end_id, result_ty)

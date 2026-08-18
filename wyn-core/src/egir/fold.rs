@@ -2,7 +2,7 @@
 //!
 //! Rules:
 //! - `Project{i}(Tuple/Vector/ArrayLit(a,b,…)) → i-th operand`
-//! - `Index(Tuple/Vector/ArrayLit(a,b,…), const k) → k-th operand`
+//! - `Index(Vector/ArrayLit(a,b,…), const k) → k-th operand`
 //! - identity elim: `x+0`, `0+x`, `x-0`, `x*1`, `1*x`, `x/1`
 //! - absorbing:    `x*0 → 0`, `0*x → 0`
 //! - reciprocal:   `x/c → x*(1/c)` for a finite, non-zero f32 constant `c`
@@ -55,7 +55,12 @@ impl<P: Family> EGraph<P> {
         }
     }
 
-    /// `Index(Tuple/Vector/ArrayLit(e0,…,en), const k) → e_k`
+    /// `Index(Vector/ArrayLit(e0,…,en), const k) → e_k`
+    ///
+    /// `Tuple` is deliberately excluded. Physical array representations such
+    /// as bounded arrays also use `PureOp::Tuple(buffer, length)`, but indexing
+    /// them must address the logical buffer rather than select a representation
+    /// field. Source tuple fields use `Project`, not `Index`.
     fn fold_index(&self, base: ValueId, index: ValueId) -> Option<ValueId> {
         let k =
             self.as_i32(index).map(|v| v as usize).or_else(|| self.as_u32(index).map(|v| v as usize))?;
@@ -67,7 +72,7 @@ impl<P: Family> EGraph<P> {
             return None;
         };
         let len = match base_op {
-            PureOp::Tuple(n) | PureOp::Vector(n) | PureOp::ArrayLit(n) => *n,
+            PureOp::Vector(n) | PureOp::ArrayLit(n) => *n,
             _ => return None,
         };
         (k < len).then(|| base_operands[k])

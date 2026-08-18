@@ -465,8 +465,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 op::OpTag::StorageView(src) => {
                     let offset = operands[0];
                     let len = operands[1];
-                    let offset_id = self.get_value_ref(offset)?;
-                    let len_id = self.get_value_ref(len)?;
+                    let offset_id = self.integer_ref_as_u32(offset)?;
+                    let len_id = self.integer_ref_as_u32(len)?;
 
                     match src {
                         op::PureViewSource::Storage(br) => {
@@ -981,6 +981,19 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 ConstantValue::F32(bits) => Ok(self.constructor.const_f32(f32::from_bits(bits))),
                 ConstantValue::Bool(b) => Ok(self.constructor.const_bool(b)),
             },
+        }
+    }
+
+    /// Lower a 32-bit integer reference into the unsigned representation used
+    /// by SPIR-V storage-view offsets and lengths.
+    pub(super) fn integer_ref_as_u32(&mut self, vr: ValueRef) -> Result<spirv::Word> {
+        let id = self.get_value_ref(vr)?;
+        match self.get_value_type_ref(vr) {
+            PolyType::Constructed(TypeName::UInt(32), _) => Ok(id),
+            PolyType::Constructed(TypeName::Int(32), _) => {
+                Ok(self.constructor.builder.bitcast(self.constructor.u32_type, None, id)?)
+            }
+            ty => bail_spirv!("storage-view index must be i32 or u32, got {:?}", ty),
         }
     }
 

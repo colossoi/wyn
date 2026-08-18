@@ -51,6 +51,38 @@ fn vec3f32_ty() -> Type<TypeName> {
     types::vec(3, f32_ty())
 }
 
+#[test]
+fn indexing_bounded_array_does_not_fold_to_representation_field() {
+    with_converter(|converter| {
+        let buffer_ty = types::sized_array(6, i32_ty());
+        let bounded_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                i32_ty(),
+                Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
+                Type::Constructed(TypeName::Size(6), vec![]),
+                types::no_buffer(),
+            ],
+        );
+        let buffer = converter.graph.add_test_value_parameter(0, buffer_ty);
+        let length = converter.graph.add_test_value_parameter(1, i32_ty());
+        let bounded =
+            converter.graph.intern_pure(PureOp::Tuple(2), smallvec![buffer, length], bounded_ty, None);
+        let zero = converter.graph.intern_constant(ConstantValue::I32(0), i32_ty());
+
+        let indexed = converter.intern_pure(PureOp::Index, smallvec![bounded, zero], i32_ty());
+
+        assert_ne!(indexed, buffer);
+        assert!(matches!(
+            converter.graph.nodes[indexed].kind,
+            ValueKind::Pure {
+                op: PureOp::Index,
+                ..
+            }
+        ));
+    });
+}
+
 fn intrinsic(name: &str) -> PureOp {
     let def = catalog().lookup_by_any_name(name).unwrap_or_else(|| panic!("missing test builtin {name}"));
     PureOp::Intrinsic {
