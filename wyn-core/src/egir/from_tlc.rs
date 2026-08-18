@@ -2592,7 +2592,12 @@ impl<'a, 'b> Converter<'a, 'b> {
     ) -> ValueId {
         let result = super::graph_ops::alloc_by_value_effect_result(&mut self.graph, ty);
         let result = self.emit_routed_soac(soac, operands, result);
-        super::graph_ops::pack_result_values(&mut self.graph, &result)
+        let materialized = if result.field_count() == 1 {
+            result.field(0).expect("a one-field result has field zero")
+        } else {
+            result
+        };
+        super::graph_ops::pack_result_values(&mut self.graph, &materialized)
             .expect("a by-value SOAC result can be assembled")
     }
 
@@ -2620,8 +2625,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 return Ok(input);
             }
         }
-        let result = self.emit_soac(soac, operands, tuple_ty);
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![result], result_ty))
+        Ok(self.emit_soac(soac, operands, tuple_ty))
     }
 
     fn convert_soac_map(
@@ -3150,7 +3154,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
         let op_region = self.function_id(operator_symbol);
-        let screma_nid = self.emit_soac(
+        Ok(self.emit_soac(
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType::array(arr_ty)],
                 form: screma::ScremaForm {
@@ -3180,8 +3184,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             }),
             operands,
             tuple_ty,
-        );
-        Ok(self.intern_pure(PureOp::Project { index: 0 }, smallvec![screma_nid], result_ty))
+        ))
     }
 
     fn convert_soac_scan(

@@ -189,6 +189,44 @@ entry chain(xs: []i32) []i32 =
 }
 
 #[test]
+fn reified_map_chain_does_not_materialize_singleton_result_bundles() {
+    use crate::egir::types::{PureOp, ValueKind};
+
+    let source = r#"
+entry chain(xs: []i32) []i32 =
+  let a = map(|x: i32| x + 1, xs) in
+  let b = map(|x: i32| x * 2, a) in
+  map(|x: i32| x - 3, b)
+"#;
+    let program = compile_to_segmented_egir(source);
+    assert_eq!(
+        segmented_entry_maps(&program).len(),
+        3,
+        "the reification checkpoint retains all three maps before fusion"
+    );
+
+    let entry = program.entry_points.first().expect("map-chain entry");
+    let singleton_tuples = entry
+        .graph
+        .nodes
+        .values()
+        .filter(|node| {
+            matches!(
+                node.kind(),
+                ValueKind::Pure {
+                    op: PureOp::Tuple(1),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        singleton_tuples, 0,
+        "one-field SOAC result bundles must remain binding metadata, not pure tuple values"
+    );
+}
+
+#[test]
 fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
     use crate::egir::types::{ResourceAccess, SideEffectKind, Soac, SoacEffect};
 
