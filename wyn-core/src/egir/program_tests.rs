@@ -7,7 +7,7 @@ use crate::egir::allocation::{
     entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
     ResourcesAllocated,
 };
-use crate::egir::types::{by_value_function_result, CallEffects, EGraph, WynLanguage};
+use crate::egir::types::{by_value_function_result, CallEffects, EGraph, Parameters, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::interface;
 use crate::op;
@@ -27,7 +27,7 @@ fn empty_func(id: FunctionId, name: &str) -> Func {
         name.to_string(),
         Span::dummy(),
         None,
-        vec![],
+        Parameters::new(),
         by_value_function_result::<WynLanguage>(unit_ty()),
         CallEffects::Pure,
         EGraph::new(),
@@ -45,7 +45,7 @@ fn empty_entry(id: EntryId, name: &str) -> Entry {
         vec![],
         vec![],
         vec![],
-        vec![],
+        Parameters::new(),
         by_value_function_result::<WynLanguage>(unit_ty()),
         EGraph::new(),
     )

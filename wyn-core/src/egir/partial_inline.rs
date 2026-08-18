@@ -111,7 +111,8 @@ fn inline_body(
             return Err("effectful call inlining exceeded the acyclic call-graph bound".into());
         }
         let callee = &callees[&candidate.callee];
-        let cost = inlining::inline_effectful_call(graph, candidate.effect, callee, effect_ids)?;
+        let cost = inlining::inline_effectful_call(graph, candidate.effect, callee, effect_ids)
+            .map_err(|error| format!("while inlining `{}`: {error}", callee.name))?;
         effectful_inlines += 1;
         stats.calls_inlined += 1;
         stats.node_budget += cost.nodes;
@@ -127,7 +128,8 @@ fn inline_body(
             break;
         };
         let callee = &callees[&candidate.callee];
-        inlining::inline_call_at_block(graph, candidate.call, candidate.block, callee)?;
+        inlining::inline_call_at_block(graph, candidate.call, candidate.block, callee)
+            .map_err(|error| format!("while inlining `{}`: {error}", callee.name))?;
         stats.calls_inlined += 1;
         stats.node_budget += candidate.callee_nodes;
         stats.block_budget += candidate.callee_blocks;
@@ -146,7 +148,7 @@ fn find_effectful_candidate(
             };
             let call = graph.call(*site);
             if call.effects() == super::types::CallEffects::Pure
-                && call.arguments().iter().all(|argument| argument.place().is_none())
+                && call.arguments().all(|argument| argument.place().is_none())
                 && call.result().places().is_empty()
             {
                 continue;
@@ -258,7 +260,6 @@ fn find_candidate(
                     continue;
                 }
                 let invariant_args = operands
-                    .iter()
                     .map(|operand| operand.value().map(|value| invariance.is_invariant(value)))
                     .collect::<Option<Vec<_>>>();
                 let Some(invariant_args) = invariant_args else {

@@ -12,9 +12,9 @@ use smallvec::smallvec;
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, GraphResource,
-    OperandRef, ParameterId, PureOp, ResultBinding, SegBody, Semantic, SkeletonTerminator, ValueId,
-    ValueKind, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, GraphResource, OperandRef,
+    Parameters, PureOp, ResultBinding, SegBody, Semantic, SkeletonTerminator, ValueId, ValueKind,
+    WynLanguage,
 };
 use crate::flow::BlockId;
 use crate::FunctionId;
@@ -24,22 +24,21 @@ use super::screma;
 pub(crate) fn named_parameters<R: GraphResource>(
     types: &[Type<TypeName>],
     prefix: &str,
-) -> Vec<FuncParam<R, Type<TypeName>>> {
-    types
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| callable_parameter::<R, WynLanguage>(format!("{prefix}_{index}"), ty.clone()))
-        .collect()
+) -> Parameters<R, Type<TypeName>> {
+    Parameters::from_ordered(
+        types.iter().enumerate().map(|(index, ty)| {
+            callable_parameter::<R, WynLanguage>(format!("{prefix}_{index}"), ty.clone())
+        }),
+    )
 }
 
 pub(crate) fn function_parameters<R: GraphResource>(
     graph: &mut EGraph<Semantic<R>>,
-    params: &[FuncParam<R, Type<TypeName>>],
+    params: &Parameters<R, Type<TypeName>>,
 ) -> Vec<OperandRef> {
     params
-        .iter()
-        .enumerate()
-        .map(|(index, parameter)| graph.add_parameter(ParameterId::new(index), parameter.representation()))
+        .iter_with_ids()
+        .map(|(id, parameter)| graph.add_parameter(id, parameter.representation()))
         .collect()
 }
 pub(crate) fn result_type(types: &[Type<TypeName>]) -> Type<TypeName> {
@@ -177,7 +176,7 @@ pub(crate) fn finish_function<R: GraphResource>(
     region: FunctionId,
     name: String,
     span: Span,
-    params: Vec<FuncParam<R, Type<TypeName>>>,
+    params: Parameters<R, Type<TypeName>>,
     result_types: &[Type<TypeName>],
     results: &[ValueId],
 ) -> Func<Semantic<R>> {
@@ -197,7 +196,7 @@ pub(crate) fn finish_region_lambda<R: GraphResource>(
     span: Span,
     graph: EGraph<Semantic<R>>,
     return_block: BlockId,
-    params: Vec<FuncParam<R, Type<TypeName>>>,
+    params: Parameters<R, Type<TypeName>>,
     captures: Vec<OperandRef>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
@@ -211,7 +210,8 @@ pub(crate) fn finish_region_lambda<R: GraphResource>(
         && results.iter().enumerate().all(|(index, result)| {
             matches!(
                 graph.nodes.get(*result).map(|node| &node.kind),
-                Some(ValueKind::FuncParam { parameter }) if parameter.index() == index
+                Some(ValueKind::FuncParam { parameter })
+                    if params.id_at_abi_position(index) == Some(*parameter)
             )
         });
     if is_identity {

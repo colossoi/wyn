@@ -416,7 +416,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
 fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
-    let parameter = graph.add_test_value_parameter(0, u32_ty());
+    let parameter = graph.add_block_param(entry, u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let first = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
@@ -683,10 +683,10 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
     let merge = graph.skeleton.create_block();
-    let cond = graph.add_test_value_parameter(0, bool_ty());
-    let then_value = graph.add_test_value_parameter(1, u32_ty());
-    let else_value = graph.add_test_value_parameter(2, u32_ty());
-    let unrelated = graph.add_test_value_parameter(3, u32_ty());
+    let cond = graph.add_block_param(graph.skeleton.entry, bool_ty());
+    let then_value = graph.add_block_param(graph.skeleton.entry, u32_ty());
+    let else_value = graph.add_block_param(graph.skeleton.entry, u32_ty());
+    let unrelated = graph.add_block_param(graph.skeleton.entry, u32_ty());
     let selected = graph.add_block_param(merge, u32_ty());
     let omitted = graph.add_block_param(merge, u32_ty());
 

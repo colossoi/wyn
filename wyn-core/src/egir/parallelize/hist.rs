@@ -230,7 +230,7 @@ fn recognize_direct_atomic(function: &egir::program::Func<Semantic>, signed: boo
     let ValueKind::Pure { op, operands } = &function.graph.nodes[result].kind else {
         return None;
     };
-    if !matches_parameter_pair(&function.graph, operands) {
+    if !matches_parameter_pair(function, operands) {
         return None;
     }
     match op {
@@ -247,17 +247,25 @@ fn recognize_direct_atomic(function: &egir::program::Func<Semantic>, signed: boo
         _ => None,
     }
 }
-fn matches_parameter_pair(graph: &egir::types::EGraph<Semantic>, operands: &[ValueId]) -> bool {
+fn matches_parameter_pair(function: &egir::program::Func<Semantic>, operands: &[ValueId]) -> bool {
     let [left, right] = operands else {
         return false;
     };
+    let mut parameters = function.params().ids();
+    let Some(first) = parameters.next() else {
+        return false;
+    };
+    let Some(second) = parameters.next() else {
+        return false;
+    };
+    let graph = &function.graph;
     matches!(
         (&graph.nodes[*left].kind, &graph.nodes[*right].kind),
         (
             ValueKind::FuncParam { parameter: left },
             ValueKind::FuncParam { parameter: right }
-        ) if (left.index() == 0 && right.index() == 1)
-            || (left.index() == 1 && right.index() == 0)
+        ) if (*left == first && *right == second)
+            || (*left == second && *right == first)
     )
 }
 

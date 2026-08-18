@@ -280,7 +280,7 @@ struct GlobalContext<'a> {
     callable_boundaries: &'a LookupMap<
         SymbolId,
         (
-            Vec<FuncParam<BindingRef, Type<TypeName>>>,
+            Parameters<BindingRef, Type<TypeName>>,
             FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -351,11 +351,10 @@ pub fn convert_program(
         .filter(|definition| matches!(definition.meta, DefMeta::Function | DefMeta::LiftedLambda))
         .map(|definition| {
             let (parameter_types, result_type) = extract_function_signature(&definition.ty);
-            let parameters = parameter_types
-                .into_iter()
-                .enumerate()
-                .map(|(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("arg{index}"), ty))
-                .collect();
+            let parameters =
+                super::types::Parameters::from_ordered(parameter_types.into_iter().enumerate().map(
+                    |(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("arg{index}"), ty),
+                ));
             let result = by_value_function_result::<WynLanguage>(result_type);
             let effects = if pure_definitions.contains(&definition.name) {
                 CallEffects::Pure
@@ -590,20 +589,22 @@ fn convert_function<'a>(
     // Regular functions: extract lambda params and build an EGraph.
     let (inner_body, params) = tlc::extract_lambda_params_ref(&def.body);
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<FuncParam<BindingRef, Type<TypeName>>> = params
-        .iter()
-        .map(|(sym, ty)| {
-            Ok(callable_parameter::<BindingRef, WynLanguage>(
-                symbol_name(symbols, *sym)?.to_string(),
-                ty.clone(),
-            ))
-        })
-        .collect::<Result<_, ConvertError>>()?;
+    let param_info = super::types::Parameters::from_ordered(
+        params
+            .iter()
+            .map(|(sym, ty)| {
+                Ok(callable_parameter::<BindingRef, WynLanguage>(
+                    symbol_name(symbols, *sym)?.to_string(),
+                    ty.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, ConvertError>>()?,
+    );
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
 
-    for (i, ((sym, _), parameter)) in params.iter().zip(&param_info).enumerate() {
-        let operand = converter.graph.add_parameter(ParameterId::new(i), parameter.representation());
+    for ((sym, _), (parameter_id, parameter)) in params.iter().zip(param_info.iter_with_ids()) {
+        let operand = converter.graph.add_parameter(parameter_id, parameter.representation());
         converter.locals.insert(
             *sym,
             operand.value().expect("source function parameters use the value or view channel"),
@@ -688,15 +689,17 @@ fn convert_entry_point(
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<FuncParam<BindingRef, Type<TypeName>>> = params
-        .iter()
-        .map(|(sym, ty)| {
-            Ok(callable_parameter::<BindingRef, WynLanguage>(
-                symbol_name(symbols, *sym)?.to_string(),
-                ty.clone(),
-            ))
-        })
-        .collect::<Result<_, ConvertError>>()?;
+    let param_info = super::types::Parameters::from_ordered(
+        params
+            .iter()
+            .map(|(sym, ty)| {
+                Ok(callable_parameter::<BindingRef, WynLanguage>(
+                    symbol_name(symbols, *sym)?.to_string(),
+                    ty.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, ConvertError>>()?,
+    );
 
     let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
 
@@ -735,10 +738,11 @@ fn convert_entry_point(
 
         // Always register a FuncParam placeholder so param indexing stays
         // stable; the binding below may override it.
-        let parameter = &param_info[i];
+        let parameter_id = param_info.id_at_abi_position(i).expect("entry parameter position exists");
+        let parameter = param_info.get(parameter_id).unwrap();
         let fp_nid = converter
             .graph
-            .add_parameter(ParameterId::new(i), parameter.representation())
+            .add_parameter(parameter_id, parameter.representation())
             .value()
             .expect("source entry parameters use the value or view channel");
         converter.locals.insert(*sym, fp_nid);
@@ -1148,12 +1152,13 @@ fn interface_parameter_representation(ty: &Type<TypeName>) -> OperandType<Bindin
 }
 
 fn normalize_interface_function_parameters(function: &mut Func<Raw>) {
-    for index in 0..function.params.len() {
-        let representation = interface_parameter_representation(function.params[index].ty());
-        if representation == *function.params[index].representation() {
+    let parameter_ids = function.params.ids().collect::<Vec<_>>();
+    for parameter in parameter_ids {
+        let representation =
+            interface_parameter_representation(function.params.get(parameter).unwrap().ty());
+        if representation == *function.params.get(parameter).unwrap().representation() {
             continue;
         }
-        let parameter = ParameterId::new(index);
         let source = function
             .graph
             .nodes
@@ -1167,7 +1172,7 @@ fn normalize_interface_function_parameters(function: &mut Func<Raw>) {
             })
             .expect("function parameter has a graph binding");
         super::graph_ops::retype_projection_tree(&mut function.graph, source, representation.ty());
-        *function.params[index].representation_mut() = representation;
+        *function.params.get_mut(parameter).unwrap().representation_mut() = representation;
     }
     function.graph.canonicalize_boundary_operands();
 }
@@ -1225,7 +1230,7 @@ struct Converter<'a, 'b> {
     callable_boundaries: &'a LookupMap<
         SymbolId,
         (
-            Vec<FuncParam<BindingRef, Type<TypeName>>>,
+            Parameters<BindingRef, Type<TypeName>>,
             FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -1259,7 +1264,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         callable_boundaries: &'a LookupMap<
             SymbolId,
             (
-                Vec<FuncParam<BindingRef, Type<TypeName>>>,
+                Parameters<BindingRef, Type<TypeName>>,
                 FunctionResult<Type<TypeName>>,
                 CallEffects,
             ),

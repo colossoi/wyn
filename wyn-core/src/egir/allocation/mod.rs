@@ -465,18 +465,13 @@ fn allocate_function(
         graph,
     } = function;
     let (graph, _, _) = allocate_graph(graph, resources)?;
-    let params = params
-        .into_iter()
-        .map(|param| {
-            param.try_map(
-                &mut |binding| resource_for_binding(resources, binding),
-                &mut |mut ty| {
-                    allocate_type_resources(&mut ty, resources)?;
-                    Ok(ty)
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let params = params.try_map(
+        &mut |binding| resource_for_binding(resources, binding),
+        &mut |mut ty| {
+            allocate_type_resources(&mut ty, resources)?;
+            Ok(ty)
+        },
+    )?;
     let mut result_error = None;
     result.for_each_type_mut(|ty| {
         if let Err(error) = allocate_type_resources(ty, resources) {
@@ -580,18 +575,13 @@ fn allocate_entry(
             })
         })
         .collect::<Result<Vec<_>, ConvertError>>()?;
-    let params = params
-        .into_iter()
-        .map(|param| {
-            param.try_map(
-                &mut |binding| resource_for_binding(resources, binding),
-                &mut |mut ty| {
-                    allocate_type_resources(&mut ty, resources)?;
-                    Ok(ty)
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let params = params.try_map(
+        &mut |binding| resource_for_binding(resources, binding),
+        &mut |mut ty| {
+            allocate_type_resources(&mut ty, resources)?;
+            Ok(ty)
+        },
+    )?;
     let mut result_error = None;
     result.for_each_type_mut(|ty| {
         if let Err(error) = allocate_type_resources(ty, resources) {

@@ -6,7 +6,7 @@ use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::program::Func;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, PureOp,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, OperandRef, Parameters, PureOp,
     ResultBinding, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 use crate::flow::ControlHeader;
@@ -21,7 +21,7 @@ fn u32_ty() -> Type<TypeName> {
 
 fn semantic_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
+) -> Parameters<BindingRef, Type<TypeName>> {
     specs
         .into_iter()
         .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
@@ -31,7 +31,7 @@ fn semantic_params(
 fn add_call(
     graph: &mut EGraph<Semantic>,
     callee: FunctionId,
-    params: &[FuncParam<BindingRef, Type<TypeName>>],
+    params: &Parameters<BindingRef, Type<TypeName>>,
     result_ty: Type<TypeName>,
     arguments: impl IntoIterator<Item = ValueId>,
 ) -> ResultBinding<Type<TypeName>> {
@@ -54,9 +54,11 @@ fn add_call(
 fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ty = u32_ty();
     let region = FunctionId::from_index(0);
+    let params = semantic_params([("x", ty.clone()), ("invariant", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut callee_graph = EGraph::<Semantic>::new();
-    let x = callee_graph.add_test_value_parameter(0, ty.clone());
-    let invariant = callee_graph.add_test_value_parameter(1, ty.clone());
+    let x = callee_graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let invariant = callee_graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let square = callee_graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
@@ -71,7 +73,6 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     );
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(result)));
-    let params = semantic_params([("x", ty.clone()), ("invariant", ty.clone())]);
     let callee = Func::<Semantic>::new(
         region,
         "mixed".into(),
@@ -84,8 +85,10 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     );
 
     let mut caller = EGraph::<Semantic>::new();
-    let actual_x = caller.add_test_value_parameter(0, ty.clone());
-    let actual_invariant = caller.add_test_value_parameter(1, ty.clone());
+    let caller_params = semantic_params([("x", ty.clone()), ("invariant", ty.clone())]);
+    let caller_parameter_ids = caller_params.ids().collect::<Vec<_>>();
+    let actual_x = caller.add_test_value_parameter(caller_parameter_ids[0], ty.clone());
+    let actual_invariant = caller.add_test_value_parameter(caller_parameter_ids[1], ty.clone());
     let call =
         add_call(&mut caller, region, &params, ty, [actual_x, actual_invariant]).single_value().unwrap();
 
@@ -113,15 +116,16 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     let ty = u32_ty();
     let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
     let region = FunctionId::from_index(0);
+    let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut callee_graph = EGraph::<Semantic>::new();
-    let left = callee_graph.add_test_value_parameter(0, ty.clone());
-    let right = callee_graph.add_test_value_parameter(1, ty.clone());
+    let left = callee_graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let right = callee_graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let pair = callee_graph.intern_pure(PureOp::Tuple(2), smallvec![left, right], pair_ty, None);
     let selected =
         callee_graph.intern_pure(PureOp::Project { index: 1 }, smallvec![pair], ty.clone(), None);
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
-    let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
     let callee = Func::<Semantic>::new(
         region,
         "select_right".into(),
@@ -152,15 +156,16 @@ fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
     let ty = u32_ty();
     let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
     let region = FunctionId::from_index(0);
+    let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut callee_graph = EGraph::<Semantic>::new();
-    let left = callee_graph.add_test_value_parameter(0, ty.clone());
-    let right = callee_graph.add_test_value_parameter(1, ty.clone());
+    let left = callee_graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let right = callee_graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let pair = callee_graph.intern_pure(PureOp::Tuple(2), smallvec![left, right], pair_ty.clone(), None);
     let result_abi = by_value_function_result::<WynLanguage>(pair_ty.clone());
     let return_binding = bind_by_value_result(&mut callee_graph, &result_abi, pair);
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(return_binding));
-    let params = semantic_params([("left", ty.clone()), ("right", ty.clone())]);
     let callee = Func::<Semantic>::new(
         region,
         "make_pair".into(),
@@ -193,9 +198,11 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let region = FunctionId::from_index(0);
+    let params = semantic_params([("value", ty.clone()), ("choose_left", bool_ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut callee_graph = EGraph::<Semantic>::new();
-    let value = callee_graph.add_test_value_parameter(0, ty.clone());
-    let choose_left = callee_graph.add_test_value_parameter(1, bool_ty.clone());
+    let value = callee_graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let choose_left = callee_graph.add_test_value_parameter(parameter_ids[1], bool_ty.clone());
     let entry = callee_graph.skeleton.entry;
     let left = callee_graph.skeleton.create_block();
     let right = callee_graph.skeleton.create_block();
@@ -235,7 +242,6 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let selected = callee_graph.add_block_param(merge, ty.clone());
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
-    let params = semantic_params([("value", ty.clone()), ("choose_left", bool_ty.clone())]);
     let callee = Func::<Semantic>::new(
         region,
         "choose_offset".into(),
@@ -248,8 +254,10 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     );
 
     let mut caller = EGraph::<Semantic>::new();
-    let actual = caller.add_test_value_parameter(0, ty.clone());
-    let condition = caller.add_test_value_parameter(1, bool_ty);
+    let caller_params = semantic_params([("value", ty.clone()), ("choose_left", bool_ty.clone())]);
+    let caller_parameter_ids = caller_params.ids().collect::<Vec<_>>();
+    let actual = caller.add_test_value_parameter(caller_parameter_ids[0], ty.clone());
+    let condition = caller.add_test_value_parameter(caller_parameter_ids[1], bool_ty);
     let call =
         add_call(&mut caller, region, &params, ty.clone(), [actual, condition]).single_value().unwrap();
     let three = caller.intern_constant(ConstantValue::U32(3), ty.clone());

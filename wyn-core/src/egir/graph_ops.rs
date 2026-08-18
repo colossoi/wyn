@@ -20,6 +20,7 @@ use crate::FunctionId;
 use crate::IdSource;
 use crate::LookupMap;
 use crate::ResourceId;
+use crate::StableMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 use std::collections::{HashMap, HashSet};
@@ -33,11 +34,11 @@ use crate::BindingRef;
 
 use super::ir::{Family, Language, PlaceOp, ResultTree, Value};
 use super::types::{
-    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType, Physical,
-    PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw,
-    ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect,
-    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, ViewId,
-    WynLanguage, WynSoacPhase,
+    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType,
+    ParameterId, Physical, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp,
+    PureViewSource, Raw, ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess,
+    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId,
+    ValueKind, ViewId, WynLanguage, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -188,6 +189,12 @@ pub(crate) fn adapt_physical_call_argument(
     let argument = match parameter.representation() {
         OperandType::Value(expected) => match argument {
             OperandRef::Value(value) if graph.nodes[value].ty() == expected => OperandRef::Value(value),
+            argument if WynLanguage::is_materialized_aggregate(expected) => {
+                let (value, loads) =
+                    materialize_fixed_array_argument(graph, argument, expected, callee, index, effect_ids)?;
+                effects.extend(loads);
+                OperandRef::Value(value)
+            }
             _ => {
                 return Err(format!(
                     "call to {callee:?} argument {index} does not match value parameter {expected:?}"
@@ -260,6 +267,49 @@ pub(crate) fn adapt_physical_call_argument(
         }
     };
     Ok((argument, effects))
+}
+
+fn materialize_fixed_array_argument(
+    graph: &mut EGraph<Physical>,
+    argument: OperandRef,
+    expected: &Type<TypeName>,
+    callee: FunctionId,
+    parameter_index: usize,
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<(ValueId, Vec<SideEffect<Physical>>), String> {
+    let Type::Constructed(TypeName::Size(length), _) = expected.array_size().ok_or_else(|| {
+        format!("call to {callee:?} argument {parameter_index} expects a non-array aggregate")
+    })?
+    else {
+        return Err(format!(
+            "call to {callee:?} argument {parameter_index} cannot materialize a runtime-sized array"
+        ));
+    };
+    let element_ty = expected
+        .elem_type()
+        .cloned()
+        .ok_or_else(|| format!("call to {callee:?} argument {parameter_index} has no element type"))?;
+    let source = addressable_operand_place(graph, argument, expected).ok_or_else(|| {
+        format!("call to {callee:?} argument {parameter_index} is not an addressable aggregate")
+    })?;
+    let span = argument.value().and_then(|value| graph.nodes.get(value)).and_then(Value::span);
+    let mut elements = SmallVec::<[ValueId; 4]>::with_capacity(*length);
+    let mut loads = Vec::with_capacity(*length);
+    for index in 0..*length {
+        let coordinate = intern_u32(
+            graph,
+            u32::try_from(index).map_err(|_| {
+                format!("call to {callee:?} argument {parameter_index} is too large to index")
+            })?,
+            span,
+        );
+        let place = graph.add_index_place(source, coordinate, element_ty.clone(), span);
+        let (element, load) = detached_load(graph, place, element_ty.clone(), effect_ids, span);
+        elements.push(element);
+        loads.push(load);
+    }
+    let value = graph.intern_pure(PureOp::ArrayLit(*length), elements, expected.clone(), span);
+    Ok((value, loads))
 }
 
 fn view_type_for_place(
@@ -1075,8 +1125,7 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
                 }
             }
             ValueKind::CallResult { call, .. } => {
-                pending
-                    .extend(graph.call(*call).arguments().iter().filter_map(|argument| argument.value()));
+                pending.extend(graph.call(*call).arguments().filter_map(|argument| argument.value()));
             }
             ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
                 pending.extend(graph.place_value_dependencies(*place));
@@ -1159,8 +1208,8 @@ pub(crate) fn reachable_execution_values_with_roots<P: ValueProducerPhase>(
         execution_value_roots(graph).into_iter().chain(roots),
         wyn_graph::WalkOrder::DepthFirst,
         |node, out| {
-            if let Some(definition) = graph.nodes.get(node) {
-                out.extend(definition.kind.children());
+            if graph.nodes.get(node).is_some() {
+                out.extend(graph.value_dependencies(node));
             }
         },
     )
@@ -2388,12 +2437,12 @@ fn clone_value_subgraph_inner<P: Family>(
                 return Err("clone call requires explicit destination-place substitutions".into());
             }
             let arguments = source_call
-                .arguments()
+                .argument_bindings()
                 .iter()
-                .map(|argument| match *argument {
+                .map(|(parameter, argument)| match *argument {
                     OperandRef::Value(value) => {
                         clone_value_subgraph_inner(src, dst, value, memo, constants, allow_unions, pure)
-                            .map(OperandRef::Value)
+                            .map(|value| (*parameter, OperandRef::Value(value)))
                     }
                     OperandRef::View(view) => clone_value_subgraph_inner(
                         src,
@@ -2404,13 +2453,12 @@ fn clone_value_subgraph_inner<P: Family>(
                         allow_unions,
                         pure,
                     )
-                    .map(|value| OperandRef::View(dst.view_id(value))),
+                    .map(|value| (*parameter, OperandRef::View(dst.view_id(value)))),
                     OperandRef::Place(_) => {
                         Err("clone call requires explicit place-argument substitutions".into())
                     }
                 })
-                .collect::<Result<Vec<_>, String>>()?
-                .into_boxed_slice();
+                .collect::<Result<StableMap<_, _>, String>>()?;
             let (_, _, mappings) = dst.add_projected_call(
                 &source_call,
                 arguments,
@@ -2475,7 +2523,7 @@ pub(crate) struct ClonedBody {
 pub(crate) fn clone_body_substituting<P: Family>(
     source: &EGraph<P>,
     target: &mut EGraph<P>,
-    arguments: &[OperandRef],
+    arguments: &StableMap<ParameterId, OperandRef>,
     place_bindings: &[(PlaceId, PlaceId)],
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<ClonedBody, String> {
@@ -2582,7 +2630,7 @@ pub(crate) fn clone_body_substituting<P: Family>(
 struct BodyCloner<'a, P: Family> {
     source: &'a EGraph<P>,
     target: &'a mut EGraph<P>,
-    arguments: &'a [OperandRef],
+    arguments: &'a StableMap<ParameterId, OperandRef>,
     values: LookupMap<ValueId, ValueId>,
     places: LookupMap<PlaceId, PlaceId>,
     bound_places: HashSet<PlaceId>,
@@ -2610,14 +2658,9 @@ impl<P: Family> BodyCloner<'_, P> {
             .ok_or_else(|| format!("body clone references missing value {source:?}"))?;
         let target = match &definition.kind {
             ValueKind::FuncParam { parameter } => {
-                self.arguments.get(parameter.index()).and_then(|argument| argument.value()).ok_or_else(
-                    || {
-                        format!(
-                            "body clone parameter {} requires a value or view argument",
-                            parameter.index()
-                        )
-                    },
-                )?
+                self.arguments.get(parameter).and_then(|argument| argument.value()).ok_or_else(|| {
+                    format!("body clone parameter {parameter:?} requires a value or view argument",)
+                })?
             }
             ValueKind::BlockParam { .. } => *self
                 .values
@@ -2670,14 +2713,9 @@ impl<P: Family> BodyCloner<'_, P> {
             .ok_or_else(|| format!("body clone references missing place {source:?}"))?;
         let target = match definition.op() {
             PlaceOp::Parameter { parameter } => {
-                self.arguments.get(parameter.index()).and_then(|argument| argument.place()).ok_or_else(
-                    || {
-                        format!(
-                            "body clone parameter {} requires a place argument",
-                            parameter.index()
-                        )
-                    },
-                )?
+                self.arguments.get(parameter).and_then(|argument| argument.place()).ok_or_else(|| {
+                    format!("body clone parameter {parameter:?} requires a place argument",)
+                })?
             }
             PlaceOp::View { view } => {
                 let view = self.clone_value(view.value())?;
@@ -2744,11 +2782,12 @@ impl<P: Family> BodyCloner<'_, P> {
         }
         let call = self.source.call(source).clone();
         let arguments = call
-            .arguments()
+            .argument_bindings()
             .iter()
-            .map(|argument| self.clone_operand(*argument))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+            .map(|(parameter, argument)| {
+                self.clone_operand(*argument).map(|argument| (*parameter, argument))
+            })
+            .collect::<Result<StableMap<_, _>, _>>()?;
         for place in call.result().places() {
             self.clone_place(place)?;
         }

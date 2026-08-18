@@ -8,7 +8,7 @@ use crate::ast::TypeName;
 use crate::builtins;
 use crate::compile_thru_ssa;
 use crate::egir;
-use crate::egir::types::{callable_parameter, FuncParam, WynLanguage};
+use crate::egir::types::{callable_parameter, Parameters, WynLanguage};
 use crate::interface;
 use crate::lower_egir_to_ssa;
 use crate::op;
@@ -64,7 +64,7 @@ fn mk_term(
 
 fn elaborate_converter(
     converter: Converter<'_, '_>,
-    params: &[FuncParam<BindingRef, Type<TypeName>>],
+    params: &Parameters<BindingRef, Type<TypeName>>,
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let graph = converter.into_graph();
@@ -96,7 +96,7 @@ fn convert_simple_def(
         .iter()
         .enumerate()
         .map(|(i, (_, ty))| callable_parameter::<BindingRef, WynLanguage>(format!("p{i}"), ty.clone()))
-        .collect::<Vec<_>>();
+        .collect::<Parameters<_, _>>();
 
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
@@ -110,8 +110,8 @@ fn convert_simple_def(
         &mut effect_ids,
         &mut arenas,
     );
-    for (i, (sym, ty)) in params.iter().enumerate() {
-        let nid = converter.graph.add_test_value_parameter(i, ty.clone());
+    for ((sym, ty), parameter) in params.iter().zip(param_info.ids()) {
+        let nid = converter.graph.add_test_value_parameter(parameter, ty.clone());
         converter.locals.insert(*sym, nid);
     }
     let result = converter.convert_term(&body).expect("conversion failed");
@@ -177,18 +177,21 @@ fn test_add_roundtrip() {
         &mut effect_ids,
         &mut arenas,
     );
-    let a_nid = converter.graph.add_test_value_parameter(0, i32_ty());
+    let params = [
+        callable_parameter::<BindingRef, WynLanguage>("a".into(), i32_ty()),
+        callable_parameter::<BindingRef, WynLanguage>("b".into(), i32_ty()),
+    ]
+    .into_iter()
+    .collect::<Parameters<_, _>>();
+    let parameter_ids = params.ids().collect::<Vec<_>>();
+    let a_nid = converter.graph.add_test_value_parameter(parameter_ids[0], i32_ty());
     converter.locals.insert(a_sym, a_nid);
-    let b_nid = converter.graph.add_test_value_parameter(1, i32_ty());
+    let b_nid = converter.graph.add_test_value_parameter(parameter_ids[1], i32_ty());
     converter.locals.insert(b_sym, b_nid);
 
     let result = converter.convert_term(&app).expect("conversion failed");
     converter.set_return(Some(converter.graph.value_result(result)));
 
-    let params = vec![
-        callable_parameter::<BindingRef, WynLanguage>("a".into(), i32_ty()),
-        callable_parameter::<BindingRef, WynLanguage>("b".into(), i32_ty()),
-    ];
     let func = elaborate_converter(converter, &params, i32_ty());
 
     let entry = func.get_block(func.entry_block());
@@ -268,7 +271,7 @@ fn test_gvn_via_let() {
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(converter.graph.value_result(result)));
 
-    let func = elaborate_converter(converter, &[], pair_ty);
+    let func = elaborate_converter(converter, &Parameters::new(), pair_ty);
 
     let entry = func.get_block(func.entry_block());
     // The hash-consed constant reaches both tuple fields directly; EGIR
@@ -388,16 +391,16 @@ fn test_if_else_roundtrip() {
         &mut effect_ids,
         &mut arenas,
     );
-    let c_nid = converter.graph.add_test_value_parameter(0, bool_ty);
+    let params = Parameters::from_ordered([callable_parameter::<BindingRef, WynLanguage>(
+        "c".into(),
+        Type::Constructed(TypeName::Bool, vec![]),
+    )]);
+    let c_nid = converter.graph.add_test_value_parameter(params.ids().next().unwrap(), bool_ty);
     converter.locals.insert(c_sym, c_nid);
 
     let result = converter.convert_term(&if_term).expect("conversion failed");
     converter.set_return(Some(converter.graph.value_result(result)));
 
-    let params = vec![callable_parameter::<BindingRef, WynLanguage>(
-        "c".into(),
-        Type::Constructed(TypeName::Bool, vec![]),
-    )];
     let func = elaborate_converter(converter, &params, i32_ty());
 
     // Should have 4 blocks: entry, then, else, merge

@@ -14,8 +14,8 @@ use crate::egir::program::{Func, ProgramIdentities, SemanticOpId};
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, EffectOp, Family, Language,
-    OperandRef, Physical, PureOp, SideEffectKind, SkeletonTerminator, Soac, SoacEffect, SoacInputType,
-    ValueId, ValueKind, ViewId, WynLanguage,
+    OperandRef, Parameters, Physical, PureOp, SideEffectKind, SkeletonTerminator, Soac, SoacEffect,
+    SoacInputType, ValueId, ValueKind, ViewId, WynLanguage,
 };
 use crate::flow;
 use crate::op;
@@ -84,11 +84,17 @@ fn physical_callable(
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
 ) -> Func<Physical> {
-    let mut graph = EGraph::<Physical>::new();
-    let parameters = parameter_types
+    let params = parameter_types
         .iter()
+        .cloned()
         .enumerate()
-        .map(|(index, ty)| graph.add_test_value_parameter(index, ty.clone()))
+        .map(|(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("p{index}"), ty))
+        .collect::<Parameters<_, _>>();
+    let mut graph = EGraph::<Physical>::new();
+    let parameters = params
+        .ids()
+        .zip(&parameter_types)
+        .map(|(parameter, ty)| graph.add_test_value_parameter(parameter, ty.clone()))
         .collect::<Vec<_>>();
     let result_ty = if result_types.len() == 1 {
         result_types[0].clone()
@@ -109,11 +115,6 @@ fn physical_callable(
     };
     let binding = bind_by_value_result(&mut graph, &result_abi, result);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(binding));
-    let params = parameter_types
-        .into_iter()
-        .enumerate()
-        .map(|(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("p{index}"), ty))
-        .collect();
     Func::<Physical>::new(
         region,
         name.into(),

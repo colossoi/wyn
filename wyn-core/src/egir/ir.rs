@@ -14,7 +14,7 @@ use crate::interface::{EntryInput as InterfaceEntryInput, EntryOutput as Interfa
 use crate::op::OpTag;
 use crate::ssa::types::AtomicOp;
 use crate::types::ExternDecl;
-use crate::{FunctionId, LookupMap, LookupSet, SortedSet};
+use crate::{FunctionId, LookupMap, LookupSet, SortedSet, StableMap};
 
 pub use crate::op::PureViewSource;
 pub use crate::types::SoacOwnership;
@@ -62,18 +62,18 @@ new_key_type! {
     pub struct PlaceId;
     /// Identity of one complete, explicitly bound region call.
     pub struct CallSiteId;
+    /// Stable identity of one callable parameter. Ordering is owned
+    /// separately by the callable's ABI sequence.
+    pub struct ParameterId;
 }
-
-/// Index into the single physical parameter sequence owned by a callable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParameterId(usize);
 
 /// Index into the by-value portion of a callable's physical results.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReturnSlotId(usize);
 
-/// A value that has been admitted to CFG-carried state. Its constructor is
-/// the boundary at which materialized aggregates are rejected.
+/// A value that has been admitted to CFG-carried state. Materialized
+/// aggregates can occur before physical flow normalization, which replaces
+/// them with scalar or view-backed state before lowering continues.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlowValueId(ValueId);
 
@@ -216,25 +216,23 @@ pub struct FuncParam<R, Ty> {
     representation: OperandType<R, Ty>,
 }
 
+/// Arena-owned parameter declarations plus their explicit ABI order.
+#[derive(Clone, Debug)]
+pub struct Parameters<R, Ty> {
+    identities: SlotMap<ParameterId, ()>,
+    declarations: StableMap<ParameterId, FuncParam<R, Ty>>,
+    abi_order: Vec<ParameterId>,
+}
+
 /// One fully applied call. Arguments align exactly with the callee's physical
 /// parameter sequence; results mirror its typed result tree with concrete
 /// value and place bindings.
 #[derive(Clone, Debug)]
 pub struct CallSite<Ty> {
     callee: FunctionId,
-    arguments: Box<[OperandRef]>,
+    arguments: StableMap<ParameterId, OperandRef>,
     result: ResultBinding<Ty>,
     effects: CallEffects,
-}
-
-impl ParameterId {
-    pub(crate) const fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub const fn index(self) -> usize {
-        self.0
-    }
 }
 
 impl ReturnSlotId {
@@ -908,6 +906,178 @@ impl<R, Ty> FuncParam<R, Ty> {
     }
 }
 
+impl<R, Ty> Parameters<R, Ty> {
+    pub fn new() -> Self {
+        Self {
+            identities: SlotMap::with_key(),
+            declarations: StableMap::new(),
+            abi_order: Vec::new(),
+        }
+    }
+
+    pub fn from_ordered(parameters: impl IntoIterator<Item = FuncParam<R, Ty>>) -> Self {
+        let mut result = Self::new();
+        for parameter in parameters {
+            result.push(parameter);
+        }
+        result
+    }
+
+    pub fn push(&mut self, parameter: FuncParam<R, Ty>) -> ParameterId {
+        let id = self.identities.insert(());
+        self.declarations.insert(id, parameter);
+        self.abi_order.push(id);
+        id
+    }
+
+    pub fn get(&self, id: ParameterId) -> Option<&FuncParam<R, Ty>> {
+        self.declarations.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: ParameterId) -> Option<&mut FuncParam<R, Ty>> {
+        self.declarations.get_mut(&id)
+    }
+
+    pub fn remove(&mut self, id: ParameterId) -> Option<FuncParam<R, Ty>> {
+        self.abi_order.retain(|candidate| *candidate != id);
+        self.identities.remove(id)?;
+        self.declarations.shift_remove(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.abi_order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.abi_order.is_empty()
+    }
+
+    pub fn ids(&self) -> impl ExactSizeIterator<Item = ParameterId> + '_ {
+        self.abi_order.iter().copied()
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &FuncParam<R, Ty>> + '_ {
+        self.abi_order.iter().map(|id| self.declarations.get(id).expect("ABI order names a declaration"))
+    }
+
+    pub fn iter_with_ids(&self) -> impl ExactSizeIterator<Item = (ParameterId, &FuncParam<R, Ty>)> + '_ {
+        self.abi_order.iter().map(|id| {
+            (
+                *id,
+                self.declarations.get(id).expect("ABI order names a declaration"),
+            )
+        })
+    }
+
+    pub(crate) fn id_at_abi_position(&self, position: usize) -> Option<ParameterId> {
+        self.abi_order.get(position).copied()
+    }
+
+    pub(crate) fn abi_position(&self, id: ParameterId) -> Option<usize> {
+        self.abi_order.iter().position(|candidate| *candidate == id)
+    }
+
+    pub(crate) fn retain_abi_positions(&mut self, retain: &[bool]) {
+        let removed = self
+            .abi_order
+            .iter()
+            .copied()
+            .zip(retain)
+            .filter_map(|(id, retain)| (!*retain).then_some(id))
+            .collect::<Vec<_>>();
+        for id in removed {
+            self.remove(id);
+        }
+    }
+
+    pub(crate) fn into_ordered(mut self) -> Vec<(ParameterId, FuncParam<R, Ty>)> {
+        let order = std::mem::take(&mut self.abi_order);
+        order
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    self.declarations.shift_remove(&id).expect("ABI order names a declaration"),
+                )
+            })
+            .collect()
+    }
+
+    /// Remove every declaration while retaining this arena's allocation
+    /// history. Parameters allocated afterwards receive fresh generational
+    /// identities even when the slot map reuses storage.
+    pub(crate) fn drain_ordered(&mut self) -> Vec<(ParameterId, FuncParam<R, Ty>)> {
+        let order = std::mem::take(&mut self.abi_order);
+        order
+            .into_iter()
+            .map(|id| {
+                self.identities.remove(id).expect("ABI order names a live parameter identity");
+                let declaration =
+                    self.declarations.shift_remove(&id).expect("ABI order names a declaration");
+                (id, declaration)
+            })
+            .collect()
+    }
+
+    pub fn try_map<S, U, E>(
+        self,
+        map_resource: &mut impl FnMut(R) -> Result<S, E>,
+        map_ty: &mut impl FnMut(Ty) -> Result<U, E>,
+    ) -> Result<Parameters<S, U>, E> {
+        let mut declarations = StableMap::with_capacity(self.declarations.len());
+        for (id, parameter) in self.declarations {
+            declarations.insert(id, parameter.try_map(map_resource, map_ty)?);
+        }
+        Ok(Parameters {
+            identities: self.identities,
+            declarations,
+            abi_order: self.abi_order,
+        })
+    }
+
+    pub fn map<S, U>(
+        self,
+        mut map_resource: impl FnMut(R) -> S,
+        mut map_ty: impl FnMut(Ty) -> U,
+    ) -> Parameters<S, U> {
+        self.try_map(
+            &mut |resource| Ok::<_, std::convert::Infallible>(map_resource(resource)),
+            &mut |ty| Ok::<_, std::convert::Infallible>(map_ty(ty)),
+        )
+        .unwrap()
+    }
+
+    pub fn append(&mut self, other: Parameters<R, Ty>) {
+        self.extend(other.into_ordered().into_iter().map(|(_, parameter)| parameter));
+    }
+}
+
+impl<R, Ty> Default for Parameters<R, Ty> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R, Ty> From<Vec<FuncParam<R, Ty>>> for Parameters<R, Ty> {
+    fn from(value: Vec<FuncParam<R, Ty>>) -> Self {
+        Self::from_ordered(value)
+    }
+}
+
+impl<R, Ty> FromIterator<FuncParam<R, Ty>> for Parameters<R, Ty> {
+    fn from_iter<T: IntoIterator<Item = FuncParam<R, Ty>>>(iter: T) -> Self {
+        Self::from_ordered(iter)
+    }
+}
+
+impl<R, Ty> Extend<FuncParam<R, Ty>> for Parameters<R, Ty> {
+    fn extend<T: IntoIterator<Item = FuncParam<R, Ty>>>(&mut self, iter: T) {
+        for parameter in iter {
+            self.push(parameter);
+        }
+    }
+}
+
 pub fn callable_parameter<R, Lang: Language>(name: String, ty: Lang::Ty) -> FuncParam<R, Lang::Ty> {
     if Lang::is_view(&ty) {
         FuncParam::view(
@@ -926,7 +1096,7 @@ pub fn callable_parameter<R, Lang: Language>(name: String, ty: Lang::Ty) -> Func
 impl<Ty> CallSite<Ty> {
     fn new(
         callee: FunctionId,
-        arguments: Box<[OperandRef]>,
+        arguments: StableMap<ParameterId, OperandRef>,
         result: ResultBinding<Ty>,
         effects: CallEffects,
     ) -> Self {
@@ -942,21 +1112,29 @@ impl<Ty> CallSite<Ty> {
         self.callee
     }
 
-    pub fn arguments(&self) -> &[OperandRef] {
+    pub fn arguments(&self) -> indexmap::map::Values<'_, ParameterId, OperandRef> {
+        self.arguments.values()
+    }
+
+    pub fn argument(&self, parameter: ParameterId) -> Option<OperandRef> {
+        self.arguments.get(&parameter).copied()
+    }
+
+    pub(crate) fn argument_bindings(&self) -> &StableMap<ParameterId, OperandRef> {
         &self.arguments
     }
 
-    pub(crate) fn arguments_mut(&mut self) -> &mut [OperandRef] {
-        &mut self.arguments
+    pub(crate) fn arguments_mut(&mut self) -> indexmap::map::ValuesMut<'_, ParameterId, OperandRef> {
+        self.arguments.values_mut()
     }
 
     pub(crate) fn replace_boundary(
         &mut self,
-        arguments: Vec<OperandRef>,
+        arguments: StableMap<ParameterId, OperandRef>,
         result: ResultBinding<Ty>,
         effects: CallEffects,
     ) {
-        self.arguments = arguments.into_boxed_slice();
+        self.arguments = arguments;
         self.result = result;
         self.effects = effects;
     }
@@ -976,17 +1154,19 @@ impl<Ty> CallSite<Ty> {
     ) -> Result<Self, E> {
         let arguments = self
             .arguments
-            .into_vec()
             .into_iter()
-            .map(|argument| match argument {
-                OperandRef::Value(value) => map_value(value).map(OperandRef::Value),
-                OperandRef::View(view) => {
-                    map_value(view.value()).map(|value| OperandRef::View(ViewId(value)))
+            .map(|(parameter, argument)| match argument {
+                OperandRef::Value(value) => {
+                    map_value(value).map(|value| (parameter, OperandRef::Value(value)))
                 }
-                OperandRef::Place(place) => map_place(place).map(OperandRef::Place),
+                OperandRef::View(view) => {
+                    map_value(view.value()).map(|value| (parameter, OperandRef::View(ViewId(value))))
+                }
+                OperandRef::Place(place) => {
+                    map_place(place).map(|place| (parameter, OperandRef::Place(place)))
+                }
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+            .collect::<Result<StableMap<_, _>, _>>()?;
         let result = self.result.try_map(&mut |ty| Ok(ty), &mut map_value, &mut map_place)?;
         Ok(Self {
             callee: self.callee,
@@ -1005,12 +1185,10 @@ impl<Ty> CallSite<Ty> {
                 retain.len()
             ));
         }
-        self.arguments = self
-            .arguments
-            .iter()
-            .copied()
+        self.arguments = std::mem::take(&mut self.arguments)
+            .into_iter()
             .zip(retain)
-            .filter_map(|(argument, retain)| (*retain).then_some(argument))
+            .filter_map(|((parameter, argument), retain)| (*retain).then_some((parameter, argument)))
             .collect();
         Ok(())
     }
@@ -1063,11 +1241,11 @@ pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<
 
 pub fn destination_passing_function_result<R, Lang: Language>(
     ty: Lang::Ty,
-    parameters: &mut Vec<FuncParam<R, Lang::Ty>>,
+    parameters: &mut Parameters<R, Lang::Ty>,
 ) -> FunctionResult<Lang::Ty> {
     fn build<R, Lang: Language>(
         ty: Lang::Ty,
-        parameters: &mut Vec<FuncParam<R, Lang::Ty>>,
+        parameters: &mut Parameters<R, Lang::Ty>,
         next_slot: &mut usize,
         next_destination: &mut usize,
     ) -> ResultNode<Lang::Ty, ReturnSlotId, ParameterId> {
@@ -1082,8 +1260,7 @@ pub fn destination_passing_function_result<R, Lang: Language>(
             };
         }
         let destination = if Lang::is_materialized_aggregate(&ty) {
-            let parameter = ParameterId::new(parameters.len());
-            parameters.push(FuncParam::place(
+            let parameter = parameters.push(FuncParam::place(
                 format!("result_destination_{}", *next_destination),
                 PlaceType {
                     pointee: ty.clone(),
@@ -1179,12 +1356,6 @@ impl<R, Ty> Place<R, Ty> {
 
     pub fn span(&self) -> Option<Span> {
         self.span
-    }
-
-    pub(crate) fn remap_parameter(&mut self, map: impl FnOnce(ParameterId) -> ParameterId) {
-        if let PlaceOp::Parameter { parameter } = &mut self.op {
-            *parameter = map(*parameter);
-        }
     }
 
     pub(crate) fn remap_value(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
@@ -1723,13 +1894,15 @@ impl SegBody {
             let ValueKind::FuncParam { parameter } = &definition.kind else {
                 continue;
             };
-            let index = parameter.index();
-            if index < leading || index >= function.params.len() {
+            let Some(position) = function.params.abi_position(*parameter) else {
+                continue;
+            };
+            if position < leading {
                 continue;
             }
-            let capture = self.captures.get(index - leading).copied().ok_or_else(|| {
+            let capture = self.captures.get(position - leading).copied().ok_or_else(|| {
                 format!(
-                    "region `{}` has out-of-range capture parameter {index}",
+                    "region `{}` has out-of-range capture parameter {parameter:?}",
                     function.name
                 )
             })?;
@@ -2447,10 +2620,6 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     pub fn admit_flow_value(&self, id: ValueId) -> FlowValueId {
         let id = self.canonical_value(id);
-        assert!(
-            !Lang::is_materialized_aggregate(self.value(id).ty()),
-            "materialized aggregate cannot enter CFG-carried state"
-        );
         FlowValueId(id)
     }
 
@@ -2540,7 +2709,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         &mut self,
         block: BlockId,
         callee: FunctionId,
-        parameters: &[FuncParam<P::Resource, Lang::Ty>],
+        parameters: &Parameters<P::Resource, Lang::Ty>,
         function_result: &FunctionResult<Lang::Ty>,
         arguments: impl IntoIterator<Item = OperandRef>,
         effects: CallEffects,
@@ -2550,16 +2719,16 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if !self.skeleton.blocks.contains_key(block) {
             return Err(format!("call to {callee:?} names missing block {block:?}"));
         }
-        let arguments =
-            arguments.into_iter().map(|argument| self.canonical_operand(argument)).collect::<Box<[_]>>();
-        if arguments.len() != parameters.len() {
+        let ordered_arguments =
+            arguments.into_iter().map(|argument| self.canonical_operand(argument)).collect::<Vec<_>>();
+        if ordered_arguments.len() != parameters.len() {
             return Err(format!(
                 "call to {callee:?} supplies {} arguments for {} parameters",
-                arguments.len(),
+                ordered_arguments.len(),
                 parameters.len()
             ));
         }
-        for (index, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
+        for (index, (argument, parameter)) in ordered_arguments.iter().zip(parameters.iter()).enumerate() {
             let matches = match (argument, parameter.representation()) {
                 (OperandRef::Value(value), OperandType::Value(ty)) => {
                     self.nodes.get(*value).is_some_and(|value| Lang::view_argument_matches(ty, value.ty()))
@@ -2588,12 +2757,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         function_result.for_each_destination(|_, destination| {
             let mut require_place = |parameter: ParameterId| {
                 let valid = parameters
-                    .get(parameter.index())
+                    .get(parameter)
                     .is_some_and(|parameter| matches!(parameter.representation(), OperandType::Place(_)));
                 if !valid && destination_error.is_none() {
                     destination_error = Some(format!(
-                        "call to {callee:?} result names non-place destination parameter {}",
-                        parameter.index()
+                        "call to {callee:?} result names non-place destination parameter {parameter:?}",
                     ));
                 }
             };
@@ -2609,6 +2777,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if let Some(error) = destination_error {
             return Err(error);
         }
+        let arguments = parameters.ids().zip(ordered_arguments).collect::<StableMap<_, _>>();
         let nodes = &mut self.nodes;
         let mut result = None;
         let site = self.calls.insert_with_key(|site| {
@@ -2623,9 +2792,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                     })
                 },
                 |parameter| {
-                    arguments[parameter.index()]
-                        .place()
-                        .expect("destination parameter requires a place argument")
+                    arguments[&parameter].place().expect("destination parameter requires a place argument")
                 },
             );
             result = Some(binding.clone());
@@ -2647,16 +2814,14 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub(crate) fn add_projected_call(
         &mut self,
         source: &CallSite<Lang::Ty>,
-        arguments: Box<[OperandRef]>,
+        arguments: StableMap<ParameterId, OperandRef>,
         mut source_result: impl FnMut(ValueId) -> (ReturnSlotId, Lang::Ty, Option<Span>),
         mut map_place: impl FnMut(PlaceId) -> PlaceId,
     ) -> (CallSiteId, ResultBinding<Lang::Ty>, Vec<(ValueId, ValueId)>) {
         let arguments = arguments
-            .into_vec()
             .into_iter()
-            .map(|argument| self.canonical_operand(argument))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .map(|(parameter, argument)| (parameter, self.canonical_operand(argument)))
+            .collect::<StableMap<_, _>>();
         let nodes = &mut self.nodes;
         let mut result = None;
         let mut value_map = Vec::new();
@@ -3140,7 +3305,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             }
         }
         for (_, call) in &mut self.calls {
-            for argument in &mut call.arguments {
+            for argument in call.arguments.values_mut() {
                 if *argument == OperandRef::Place(old) {
                     *argument = OperandRef::Place(new);
                 }
@@ -3281,8 +3446,8 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     }
 
     #[cfg(test)]
-    pub(crate) fn add_test_value_parameter(&mut self, index: usize, ty: Lang::Ty) -> ValueId {
-        self.add_parameter(ParameterId::new(index), &OperandType::Value(ty))
+    pub(crate) fn add_test_value_parameter(&mut self, parameter: ParameterId, ty: Lang::Ty) -> ValueId {
+        self.add_parameter(parameter, &OperandType::Value(ty))
             .value()
             .expect("value parameter must use the value channel")
     }
@@ -3516,7 +3681,7 @@ pub struct Func<P: Family, Lang: Language> {
     pub linkage_name: Option<String>,
     /// The single physical parameter sequence. Destination parameters occupy
     /// ordinary positions in this same sequence.
-    pub(crate) params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+    pub(crate) params: Parameters<P::Resource, Lang::Ty>,
     /// The typed logical result tree and the resolved destination of every
     /// indivisible result.
     pub(crate) result: FunctionResult<Lang::Ty>,
@@ -3543,7 +3708,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
         name: String,
         span: Span,
         linkage_name: Option<String>,
-        params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+        params: Parameters<P::Resource, Lang::Ty>,
         result: FunctionResult<Lang::Ty>,
         effects: CallEffects,
         graph: EGraph<P, Lang>,
@@ -3560,7 +3725,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
         }
     }
 
-    pub fn params(&self) -> &[FuncParam<P::Resource, Lang::Ty>] {
+    pub fn params(&self) -> &Parameters<P::Resource, Lang::Ty> {
         &self.params
     }
 
@@ -3584,24 +3749,22 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
         ty: Lang::Ty,
         name: String,
     ) -> ValueId {
-        let index = self.params.len();
-        let parameter_id = ParameterId::new(index);
         let abi_parameter = callable_parameter::<P::Resource, Lang>(name, ty);
+        let parameter_id = self.params.push(abi_parameter);
+        let representation = self.params.get(parameter_id).unwrap().representation();
         let parameter = self
             .graph
-            .add_parameter(parameter_id, abi_parameter.representation())
+            .add_parameter(parameter_id, representation)
             .value()
             .expect("a captured value or view uses the value channel");
-        self.params.push(abi_parameter);
         body.captures.push(capture);
         parameter
     }
 
     /// Retain selected capture slots and compact both sides of the ABI.
     ///
-    /// Leading lane/element parameters are always retained. Removed parameter
-    /// nodes remain as unique out-of-ABI tombstones because dead pure arena
-    /// nodes can still refer to them until demand-driven extraction.
+    /// Leading lane/element parameters are always retained. Parameter
+    /// identities are stable; compaction changes only declaration order.
     pub(crate) fn retain_seg_body_captures(
         &mut self,
         body: &mut SegBody,
@@ -3622,45 +3785,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
             retained[leading + capture] = true;
         }
 
-        let mut next_index = 0;
-        let remapped = retained
-            .iter()
-            .map(|retain| {
-                retain.then(|| {
-                    let index = next_index;
-                    next_index += 1;
-                    index
-                })
-            })
-            .collect::<Vec<_>>();
-        let parameter_nodes = self
-            .graph
-            .nodes
-            .iter()
-            .filter_map(|(node, definition)| match &definition.kind {
-                ValueKind::FuncParam { parameter } => Some((node, parameter.index())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut tombstone_index = next_index;
-        for (node, old_index) in parameter_nodes {
-            if let Some(new_index) = remapped.get(old_index).copied().flatten() {
-                self.graph.nodes[node].kind = ValueKind::FuncParam {
-                    parameter: ParameterId::new(new_index),
-                };
-            } else {
-                self.graph.nodes[node].kind = ValueKind::FuncParam {
-                    parameter: ParameterId::new(tombstone_index),
-                };
-                tombstone_index += 1;
-            }
-        }
-
-        self.params = std::mem::take(&mut self.params)
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, parameter)| retained[index].then_some(parameter))
-            .collect();
+        self.params.retain_abi_positions(&retained);
         body.captures = std::mem::take(&mut body.captures)
             .into_iter()
             .enumerate()
@@ -3824,7 +3949,7 @@ pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
     pub outputs: Vec<EntryOutput<P::Resource, Route, Lang>>,
     pub internal_results: Vec<InternalResultRoute<P::Resource, Route>>,
     pub resource_declarations: Vec<ResourceDecl>,
-    pub(crate) params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+    pub(crate) params: Parameters<P::Resource, Lang::Ty>,
     pub(crate) result: FunctionResult<Lang::Ty>,
     pub graph: EGraph<P, Lang>,
 }
@@ -3878,7 +4003,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
         inputs: Vec<InterfaceEntryInput<Lang::Ty>>,
         outputs: Vec<InterfaceEntryOutput<Lang::Ty>>,
         resource_declarations: Vec<ResourceDecl>,
-        params: Vec<FuncParam<P::Resource, Lang::Ty>>,
+        params: Parameters<P::Resource, Lang::Ty>,
         result: FunctionResult<Lang::Ty>,
         graph: EGraph<P, Lang>,
     ) -> Self {
@@ -3916,7 +4041,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
         }
     }
 
-    pub fn params(&self) -> &[FuncParam<P::Resource, Lang::Ty>] {
+    pub fn params(&self) -> &Parameters<P::Resource, Lang::Ty> {
         &self.params
     }
 
@@ -3931,23 +4056,16 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
     /// Retain selected original parameter indices and compact the entry
     /// interface and corresponding function-parameter nodes together.
     pub fn retain_parameter_indices(&mut self, retained: &SortedSet<usize>) {
-        let mut kept = self
-            .graph
-            .nodes
+        let retain =
+            (0..self.params.len()).map(|position| retained.contains(&position)).collect::<Vec<_>>();
+        let kept_positions = retain
             .iter()
-            .filter_map(|(node, definition)| match &definition.kind {
-                ValueKind::FuncParam { parameter } if retained.contains(&parameter.index()) => {
-                    Some((parameter.index(), node))
-                }
-                _ => None,
-            })
+            .enumerate()
+            .filter_map(|(position, retain)| (*retain).then_some(position))
             .collect::<Vec<_>>();
-        kept.sort_by_key(|(index, _)| *index);
-        kept.dedup_by_key(|(index, _)| *index);
-
-        let kept_slots = kept
+        let kept_slots = kept_positions
             .iter()
-            .flat_map(|(index, _)| self.parameter_inputs[*index].iter().copied())
+            .flat_map(|position| self.parameter_inputs[*position].iter().copied())
             .collect::<LookupSet<_>>();
         let mut remapped_slots = LookupMap::new();
         self.inputs = std::mem::take(&mut self.inputs)
@@ -3962,33 +4080,25 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
                 })
             })
             .collect();
-        self.parameter_inputs = kept
+        self.parameter_inputs = kept_positions
             .iter()
-            .map(|(index, _)| {
-                self.parameter_inputs[*index].iter().map(|slot| remapped_slots[slot]).collect()
+            .map(|position| {
+                self.parameter_inputs[*position].iter().map(|slot| remapped_slots[slot]).collect()
             })
             .collect();
-        self.params = kept.iter().map(|(index, _)| self.params[*index].clone()).collect();
+        self.params.retain_abi_positions(&retain);
 
-        let retained_nodes = kept.iter().map(|(_, node)| *node).collect::<LookupSet<_>>();
         let removed = self
             .graph
             .nodes
             .iter()
-            .filter_map(|(node, definition)| {
-                (matches!(&definition.kind, ValueKind::FuncParam { .. }) && !retained_nodes.contains(&node))
-                    .then_some(node)
+            .filter_map(|(node, definition)| match &definition.kind {
+                ValueKind::FuncParam { parameter } if self.params.get(*parameter).is_none() => Some(node),
+                _ => None,
             })
             .collect::<Vec<_>>();
         for node in removed {
             self.graph.remove_func_param(node);
-        }
-        for (new_index, (_, node)) in kept.into_iter().enumerate() {
-            if let Some(ValueKind::FuncParam { parameter }) =
-                self.graph.nodes.get_mut(node).map(|node| &mut node.kind)
-            {
-                *parameter = ParameterId::new(new_index);
-            }
         }
     }
 

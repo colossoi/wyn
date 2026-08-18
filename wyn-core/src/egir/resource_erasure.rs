@@ -28,7 +28,7 @@ use crate::ast::TypeName;
 use crate::egir;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{Func, Program};
-use crate::egir::types::{EGraph, Family, OperandType, ParameterId, Physical, ValueKind};
+use crate::egir::types::{EGraph, Family, OperandType, Physical, ValueKind};
 use crate::interface;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
@@ -138,44 +138,37 @@ fn erase_function_resources(
         ));
     }
 
-    let mut new_indices = vec![None; erase.len()];
-    let mut next = 0;
-    for (index, should_erase) in erase.iter().copied().enumerate() {
-        if !should_erase {
-            new_indices[index] = Some(next);
-            next += 1;
-        }
-    }
+    let erased_parameters = params
+        .ids()
+        .zip(&erase)
+        .filter_map(|(parameter, erase)| (*erase).then_some(parameter))
+        .collect::<LookupSet<_>>();
 
     let mut erased_nodes = Vec::new();
     for (node_id, node) in &mut graph.nodes {
         let ValueKind::FuncParam { parameter } = &mut node.kind else {
             continue;
         };
-        match new_indices.get(parameter.index()).copied().flatten() {
-            Some(new_index) => *parameter = ParameterId::new(new_index),
-            None => erased_nodes.push(node_id),
+        if erased_parameters.contains(parameter) {
+            erased_nodes.push(node_id);
         }
     }
     for place in graph.places.values_mut() {
         if let egir::ir::PlaceOp::Parameter { parameter } = place.op() {
-            let new_index = new_indices.get(parameter.index()).copied().flatten().ok_or_else(|| {
-                ConvertError::Internal(format!(
-                    "addressable parameter {} in `{name}` cannot be erased",
-                    parameter.index()
-                ))
-            })?;
-            place.remap_parameter(|_| ParameterId::new(new_index));
+            if erased_parameters.contains(parameter) {
+                return Err(ConvertError::Internal(format!(
+                    "addressable parameter {parameter:?} in `{name}` cannot be erased",
+                )));
+            }
         }
     }
     let result = result.try_map(
         &mut |ty| Ok::<_, ConvertError>(ty),
         &mut |slot| Ok::<_, ConvertError>(slot),
         &mut |parameter| {
-            new_indices.get(parameter.index()).copied().flatten().map(ParameterId::new).ok_or_else(|| {
+            (!erased_parameters.contains(&parameter)).then_some(parameter).ok_or_else(|| {
                 ConvertError::Internal(format!(
-                    "result destination parameter {} in `{name}` cannot be erased",
-                    parameter.index()
+                    "result destination parameter {parameter:?} in `{name}` cannot be erased",
                 ))
             })
         },
@@ -192,15 +185,13 @@ fn erase_function_resources(
                 name
             )));
         }
-        // Drop the dead param node: its index is stale after the
-        // renumbering above and can collide with a surviving param's new
-        // index, making elaboration's index-keyed param registration pick
-        // the corpse over the real param.
+        // The declaration is gone, so the dead graph binding must go with it.
         graph.remove_func_param(erased);
     }
 
-    let params =
-        params.into_iter().zip(erase).filter_map(|(param, erase)| (!erase).then_some(param)).collect();
+    let mut params = params;
+    let retain = erase.into_iter().map(|erase| !erase).collect::<Vec<_>>();
+    params.retain_abi_positions(&retain);
     Ok(Func::<Physical>::new(
         region,
         name,

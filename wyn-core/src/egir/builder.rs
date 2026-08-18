@@ -250,7 +250,7 @@ impl<'a> EntryBuilder<'a> {
                 .collect(),
             internal_results: Vec::new(),
             resource_declarations: self.resource_declarations,
-            params: Vec::new(),
+            params: super::ir::Parameters::new(),
             result: super::ir::by_value_function_result::<WynLanguage>(Type::Constructed(
                 TypeName::Unit,
                 vec![],

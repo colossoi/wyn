@@ -826,7 +826,10 @@ fn invocation_invariant(entry: &AllocatedEntry, block_id: BlockId, effects: &Has
             return true;
         };
         dependence.dependence(node).is_stage_invariant()
-            && super::cost::entry_parameter_is_scalar_relocatable(entry, parameter.index())
+            && entry
+                .params()
+                .abi_position(*parameter)
+                .is_some_and(|position| super::cost::entry_parameter_is_scalar_relocatable(entry, position))
     })
 }
 

@@ -855,8 +855,9 @@ impl AllocatedEntry {
             }
             if let Some(ValueKind::FuncParam { parameter }) = graph.nodes.get(node).map(|node| &node.kind) {
                 resources.extend(
-                    self.inputs
-                        .get(parameter.index())
+                    self.params()
+                        .abi_position(*parameter)
+                        .and_then(|position| self.inputs.get(position))
                         .and_then(|input| input.resource.or_else(|| semantic_type_resource(&input.ty)))
                         .map(|resource| resource.0),
                 );
@@ -905,7 +906,7 @@ impl AllocatedEntry {
         let mut parameters = projection
             .source_nodes()
             .filter_map(|node| match self.graph.nodes.get(node).map(|node| &node.kind) {
-                Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
+                Some(ValueKind::FuncParam { parameter }) => self.params().abi_position(*parameter),
                 _ => None,
             })
             .collect::<SortedSet<_>>();
@@ -1005,7 +1006,7 @@ impl AllocatedEntry {
         let mut kept_indices = reachable
             .iter()
             .filter_map(|node| match self.graph.nodes.get(*node).map(|node| &node.kind) {
-                Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
+                Some(ValueKind::FuncParam { parameter }) => self.params().abi_position(*parameter),
                 _ => None,
             })
             .collect::<SortedSet<_>>();
@@ -1233,7 +1234,7 @@ impl PlannedEntry {
         outputs: Vec<super::ir::EntryOutput<SemanticResourceRef, RealizedOutputRoute, WynLanguage>>,
         internal_results: Vec<super::ir::InternalResultRoute<SemanticResourceRef, RealizedOutputRoute>>,
         resource_declarations: Vec<SemanticResourceDecl>,
-        params: Vec<super::ir::FuncParam<SemanticResourceRef, Type<TypeName>>>,
+        params: super::ir::Parameters<SemanticResourceRef, Type<TypeName>>,
         result: super::ir::FunctionResult<Type<TypeName>>,
     ) -> Result<Self, String> {
         let outputs = outputs
@@ -1615,18 +1616,13 @@ fn physicalize_function(
     } = function;
     let (graph, _) = super::parallelize::prepare::graph(graph, serial)?;
     let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
-    let params = params
-        .into_iter()
-        .map(|param| {
-            param.map(
-                |resource| resources.binding(resource.0),
-                |mut ty| {
-                    physicalize_type_resources(&mut ty, resources);
-                    ty
-                },
-            )
-        })
-        .collect();
+    let params = params.map(
+        |resource| resources.binding(resource.0),
+        |mut ty| {
+            physicalize_type_resources(&mut ty, resources);
+            ty
+        },
+    );
     let result = result.map(
         |mut ty| {
             physicalize_type_resources(&mut ty, resources);
@@ -1833,18 +1829,13 @@ fn physicalize_entry(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let params = params
-        .into_iter()
-        .map(|param| {
-            param.map(
-                |resource| resources.binding(resource.0),
-                |mut ty| {
-                    physicalize_type_resources(&mut ty, resources);
-                    ty
-                },
-            )
-        })
-        .collect();
+    let params = params.map(
+        |resource| resources.binding(resource.0),
+        |mut ty| {
+            physicalize_type_resources(&mut ty, resources);
+            ty
+        },
+    );
     let result = result.map(
         |mut ty| {
             physicalize_type_resources(&mut ty, resources);

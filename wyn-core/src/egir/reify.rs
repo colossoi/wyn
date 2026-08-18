@@ -343,7 +343,9 @@ fn extent_from_node(graph: &EGraph<Raw>, entry: Option<&RawEntry>, node: ValueId
             ..
         } => value.parse().map(SegExtent::Fixed).unwrap_or(SegExtent::Value(node)),
         ValueKind::FuncParam { parameter } => entry
-            .and_then(|entry| entry.inputs.get(parameter.index()))
+            .and_then(|entry| {
+                entry.params().abi_position(*parameter).and_then(|position| entry.inputs.get(position))
+            })
             .and_then(|input| input.push_constant())
             .map(|slot| SegExtent::PushConstant {
                 node,

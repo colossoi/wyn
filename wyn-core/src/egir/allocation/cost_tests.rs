@@ -4,7 +4,8 @@ use crate::egir::graph_projector::GraphProjector;
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::stage_variance::StageDependenceAnalysis;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, EffectToken, PureOp, SideEffectSite, WynLanguage,
+    by_value_function_result, callable_parameter, EffectToken, Parameters, PureOp, SideEffectSite,
+    WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
@@ -26,8 +27,15 @@ fn u32_ty() -> Type<TypeName> {
 #[test]
 fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     let ty = u32_ty();
+    let parameters = ["uniform", "read_only", "read_write", "dispatch_size"]
+        .into_iter()
+        .map(|name| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty.clone()))
+        .collect::<Parameters<_, _>>();
     let mut graph = EGraph::new();
-    let params = (0..4).map(|index| graph.add_test_value_parameter(index, ty.clone())).collect::<Vec<_>>();
+    let params = parameters
+        .ids()
+        .map(|parameter| graph.add_test_value_parameter(parameter, ty.clone()))
+        .collect::<Vec<_>>();
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(params[0])));
     let inputs = vec![
@@ -78,10 +86,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
         inputs,
         vec![],
         vec![],
-        ["uniform", "read_only", "read_write", "dispatch_size"]
-            .into_iter()
-            .map(|name| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty.clone()))
-            .collect(),
+        parameters,
         by_value_function_result::<WynLanguage>(ty),
         graph,
     );

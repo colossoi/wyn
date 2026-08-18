@@ -23,9 +23,9 @@ use super::soac::{filter, hist, screma};
 pub use super::ir::{
     by_value_function_result, callable_parameter, destination_passing_function_result, CallEffects,
     CallSiteId, EffectOp, EffectToken, Family, FlowValueId, FuncParam, FunctionResult, GraphResource,
-    Language, OperandRef, OperandType, ParameterId, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion,
-    PlaceType, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex, SideEffectSite,
-    SoacOwnership, ValueId, ViewId, ViewType,
+    Language, OperandRef, OperandType, ParameterId, Parameters, PlaceAccess, PlaceDestination, PlaceId,
+    PlaceRegion, PlaceType, ResultBinding, ResultDestination, ReturnSlotId, SegBody, SideEffectIndex,
+    SideEffectSite, SoacOwnership, ValueId, ViewId, ViewType,
 };
 pub use crate::ResourceAccess;
 

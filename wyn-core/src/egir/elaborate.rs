@@ -96,7 +96,11 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
         .map(|constant| Constant {
             id: constant.id,
             name: constant.name,
-            body: elaborate_one_body(constant.graph, &[], constant.return_ty),
+            body: elaborate_one_body(
+                constant.graph,
+                &super::types::Parameters::new(),
+                constant.return_ty,
+            ),
         })
         .collect();
     let program = Program::bare(functions, entry_points, constants);
@@ -172,7 +176,7 @@ fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {
 
 pub(super) fn elaborate_one_body(
     graph: EGraph<Physical>,
-    params: &[FuncParam<BindingRef, Type<TypeName>>],
+    params: &super::types::Parameters<BindingRef, Type<TypeName>>,
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     let skel_domtree = skeleton_domtree(&graph.skeleton);
@@ -203,7 +207,7 @@ pub(super) fn skeleton_domtree<P: super::types::Family>(
 pub fn elaborate_graph(
     graph: &EGraph<Physical>,
     domtree: &wyn_graph::DominatorTree<SkelBlockId>,
-    params: &[FuncParam<BindingRef, Type<TypeName>>],
+    params: &super::types::Parameters<BindingRef, Type<TypeName>>,
     return_ty: Type<TypeName>,
 ) -> FuncBody {
     // Phase 1: cost-based extraction.
@@ -236,11 +240,11 @@ pub fn elaborate_graph(
     let skel_entry = graph.skeleton.entry;
     for i in 0..elab.builder.num_params() {
         let vid = elab.builder.get_param(i);
+        let parameter_id = params.id_at_abi_position(i).expect("SSA parameter position exists");
         for (nid, node) in &graph.nodes {
-            if matches!(&node.kind, ValueKind::FuncParam { parameter } if parameter.index() == i) {
+            if matches!(&node.kind, ValueKind::FuncParam { parameter } if *parameter == parameter_id) {
                 let resolved = elab.resolve(nid);
                 elab.elaborated.insert(resolved, (vid, skel_entry));
-                break;
             }
         }
     }
@@ -249,11 +253,12 @@ pub fn elaborate_graph(
         let PlaceOp::Parameter { parameter } = definition.op() else {
             continue;
         };
-        let ssa_place =
-            elab.builder.new_parameter_place(parameter.index(), definition.ty().pointee.clone());
+        let position =
+            params.abi_position(*parameter).expect("parameter place belongs to the elaborated boundary");
+        let ssa_place = elab.builder.new_parameter_place(position, definition.ty().pointee.clone());
         elab.elaborated_places.insert(place, (ssa_place, skel_entry));
         debug_assert!(matches!(
-            params.get(parameter.index()).map(FuncParam::representation),
+            params.get(*parameter).map(FuncParam::representation),
             Some(OperandType::Place(_))
         ));
     }
@@ -965,7 +970,6 @@ impl<'a> Elaborator<'a> {
                     .iter()
                     .filter_map(|(site, call)| {
                         call.arguments()
-                            .iter()
                             .any(|argument| argument.value().is_some_and(|value| reached.contains(&value)))
                             .then_some((site, call.callee(), call.arguments()))
                     })

@@ -4,6 +4,7 @@ use crate::flow;
 use crate::interface;
 use crate::op;
 use crate::EntryId;
+use crate::FunctionId;
 use crate::SortedSet;
 
 fn i32_ty() -> Type<TypeName> {
@@ -126,9 +127,7 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
     let second = graph.add_block_param(target, "second".to_string());
     let third = graph.add_block_param(target, "third".to_string());
 
-    let args = (0..9)
-        .map(|index| graph.add_test_value_parameter(index, format!("arg-{index}")))
-        .collect::<Vec<_>>();
+    let args = (0..9).map(|index| graph.add_block_param(entry, format!("arg-{index}"))).collect::<Vec<_>>();
     graph.skeleton.blocks[entry].term = super::super::ir::SkeletonTerminator::<TestLanguage>::CondBranch {
         cond: args[0],
         then_target: target,
@@ -231,7 +230,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
         vec![],
         vec![],
         vec![7],
-        vec![],
+        Parameters::new(),
         by_value_function_result::<TestLanguage>("unit".to_string()),
         graph,
     );
@@ -250,10 +249,15 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
 
 #[test]
 fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
+    let params = ["first", "removed", "third"]
+        .into_iter()
+        .map(|name| FuncParam::value(name.to_string(), name.to_string()))
+        .collect::<Parameters<_, _>>();
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
-    let first = graph.add_test_value_parameter(0, "first".to_string());
-    let removed = graph.add_test_value_parameter(1, "removed".to_string());
-    let third = graph.add_test_value_parameter(2, "third".to_string());
+    let first = graph.add_test_value_parameter(parameter_ids[0], "first".to_string());
+    let removed = graph.add_test_value_parameter(parameter_ids[1], "removed".to_string());
+    let third = graph.add_test_value_parameter(parameter_ids[2], "third".to_string());
     let inputs = ["first", "removed", "third"]
         .into_iter()
         .map(|name| interface::EntryInput {
@@ -262,10 +266,6 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
             size_hint: None,
             kind: interface::EntryInputKind::Value { decoration: None },
         })
-        .collect();
-    let params = ["first", "removed", "third"]
-        .into_iter()
-        .map(|name| FuncParam::value(name.to_string(), name.to_string()))
         .collect();
     let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
@@ -294,13 +294,63 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
     );
     assert!(matches!(
         entry.graph.nodes[first].kind,
-        super::super::ir::ValueKind::FuncParam { parameter } if parameter.index() == 0
+        super::super::ir::ValueKind::FuncParam { parameter } if parameter == parameter_ids[0]
     ));
     assert!(!entry.graph.nodes.contains_key(removed));
     assert!(matches!(
         entry.graph.nodes[third].kind,
-        super::super::ir::ValueKind::FuncParam { parameter } if parameter.index() == 1
+        super::super::ir::ValueKind::FuncParam { parameter } if parameter == parameter_ids[2]
     ));
+}
+
+#[test]
+fn retired_parameter_slots_get_fresh_generational_identities() {
+    let mut params = ["first", "second"]
+        .into_iter()
+        .map(|name| FuncParam::value(name.to_string(), name.to_string()))
+        .collect::<Parameters<(), _>>();
+    let retired = params.ids().collect::<Vec<_>>();
+
+    let drained = params.drain_ordered();
+    let replacement = params.push(FuncParam::value("replacement".into(), "replacement".into()));
+
+    assert_eq!(drained.iter().map(|(id, _)| *id).collect::<Vec<_>>(), retired);
+    assert!(retired.into_iter().all(|id| params.get(id).is_none()));
+    assert!(drained.into_iter().all(|(id, _)| id != replacement));
+}
+
+#[test]
+fn call_arguments_are_bound_by_parameter_identity_in_abi_order() {
+    let params = ["first", "second"]
+        .into_iter()
+        .map(|name| FuncParam::value(name.to_string(), name.to_string()))
+        .collect::<Parameters<(), _>>();
+    let parameter_ids = params.ids().collect::<Vec<_>>();
+    let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
+    let entry = graph.skeleton.entry;
+    let first = graph.add_block_param(entry, "first".into());
+    let second = graph.add_block_param(entry, "second".into());
+
+    let (site, _) = graph
+        .emit_call(
+            entry,
+            FunctionId::from_index(0),
+            &params,
+            &by_value_function_result::<TestLanguage>("result".into()),
+            [OperandRef::Value(first), OperandRef::Value(second)],
+            CallEffects::Pure,
+            None,
+            None,
+        )
+        .unwrap();
+    let call = graph.call(site);
+
+    assert_eq!(call.argument(parameter_ids[0]), Some(OperandRef::Value(first)));
+    assert_eq!(call.argument(parameter_ids[1]), Some(OperandRef::Value(second)));
+    assert_eq!(
+        call.argument_bindings().keys().copied().collect::<Vec<_>>(),
+        parameter_ids
+    );
 }
 
 #[test]
@@ -363,9 +413,13 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
 
 #[test]
 fn removing_func_param_clears_its_metadata() {
+    let params = Parameters::<(), String>::from_ordered([FuncParam::value(
+        "number".to_string(),
+        "number".to_string(),
+    )]);
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let span = ast::Span::new(1, 2, 3, 4);
-    let param = graph.add_test_value_parameter(0, "number".to_string());
+    let param = graph.add_test_value_parameter(params.ids().next().unwrap(), "number".to_string());
     graph.nodes[param].span = Some(span);
 
     assert!(graph.remove_func_param(param));

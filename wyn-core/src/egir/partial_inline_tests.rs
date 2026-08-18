@@ -7,7 +7,7 @@ use crate::IdSource;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, PureOp,
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, Parameters, PureOp,
     SkeletonTerminator, WynLanguage,
 };
 use crate::flow::ControlHeader;
@@ -37,7 +37,7 @@ fn fixed_u32_array_ty(size: usize) -> Type<TypeName> {
 
 fn physical_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
+) -> Parameters<BindingRef, Type<TypeName>> {
     specs
         .into_iter()
         .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
@@ -54,7 +54,7 @@ fn inline_test_body(
 fn add_value_call(
     graph: &mut EGraph<Physical>,
     callee: FunctionId,
-    params: &[FuncParam<BindingRef, Type<TypeName>>],
+    params: &Parameters<BindingRef, Type<TypeName>>,
     result_ty: Type<TypeName>,
     arguments: impl IntoIterator<Item = ValueId>,
 ) -> ValueId {
@@ -79,9 +79,11 @@ fn add_value_call(
 fn mixed_callee() -> Func<Physical> {
     let ty = u32_ty();
     let region = FunctionId::from_index(0);
+    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut graph = EGraph::<Physical>::new();
-    let varying = graph.add_test_value_parameter(0, ty.clone());
-    let invariant = graph.add_test_value_parameter(1, ty.clone());
+    let varying = graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let invariant = graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let invariant_square = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
@@ -96,7 +98,6 @@ fn mixed_callee() -> Func<Physical> {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
-    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     Func::<Physical>::new(
         region,
         "mixed".into(),
@@ -112,9 +113,11 @@ fn mixed_callee() -> Func<Physical> {
 fn mixed_callee_without_invariant_subexpression() -> Func<Physical> {
     let ty = u32_ty();
     let region = FunctionId::from_index(0);
+    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut graph = EGraph::<Physical>::new();
-    let varying = graph.add_test_value_parameter(0, ty.clone());
-    let invariant = graph.add_test_value_parameter(1, ty.clone());
+    let varying = graph.add_test_value_parameter(parameter_ids[0], ty.clone());
+    let invariant = graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let result = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![varying, invariant],
@@ -123,7 +126,6 @@ fn mixed_callee_without_invariant_subexpression() -> Func<Physical> {
     );
     graph.skeleton.blocks[graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(graph.value_result(result)));
-    let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     Func::<Physical>::new(
         region,
         "mixed".into(),
@@ -147,7 +149,8 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, ValueId, ValueId) {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let mut graph = EGraph::<Physical>::new();
-    let invariant = graph.add_test_value_parameter(0, ty.clone());
+    let caller_params = physical_params([("invariant", ty.clone())]);
+    let invariant = graph.add_test_value_parameter(caller_params.ids().next().unwrap(), ty.clone());
     let entry = graph.skeleton.entry;
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -247,13 +250,13 @@ fn inlines_fixed_array_parameters_outside_loops() {
     let scalar = u32_ty();
     let array = fixed_u32_array_ty(4);
     let region = FunctionId::from_index(0);
+    let params = physical_params([("values", array.clone())]);
     let mut callee_graph = EGraph::<Physical>::new();
-    let values = callee_graph.add_test_value_parameter(0, array.clone());
+    let values = callee_graph.add_test_value_parameter(params.ids().next().unwrap(), array.clone());
     let zero = callee_graph.intern_constant(ConstantValue::I32(0), i32_ty());
     let result = callee_graph.intern_pure(PureOp::Index, smallvec![values, zero], scalar.clone(), None);
     callee_graph.skeleton.blocks[callee_graph.skeleton.entry].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(result)));
-    let params = physical_params([("values", array.clone())]);
     let callee = Func::<Physical>::new(
         region,
         "fixed_array_element".into(),
@@ -267,7 +270,8 @@ fn inlines_fixed_array_parameters_outside_loops() {
     let callees = [(region, callee)].into_iter().collect();
 
     let mut caller = EGraph::<Physical>::new();
-    let values = caller.add_test_value_parameter(0, array);
+    let caller_params = physical_params([("values", array.clone())]);
+    let values = caller.add_test_value_parameter(caller_params.ids().next().unwrap(), array);
     let call = add_value_call(&mut caller, region, &params, scalar, [values]);
     caller.skeleton.blocks[caller.skeleton.entry].term =
         SkeletonTerminator::Return(Some(caller.value_result(call)));
@@ -285,9 +289,11 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let array = fixed_u32_array_ty(4);
     let region = FunctionId::from_index(0);
+    let params = physical_params([("index", index_ty.clone()), ("values", array.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut callee_graph = EGraph::<Physical>::new();
-    let index = callee_graph.add_test_value_parameter(0, index_ty.clone());
-    let values = callee_graph.add_test_value_parameter(1, array.clone());
+    let index = callee_graph.add_test_value_parameter(parameter_ids[0], index_ty.clone());
+    let values = callee_graph.add_test_value_parameter(parameter_ids[1], array.clone());
     let materialized =
         callee_graph.intern_pure(PureOp::Materialize, smallvec![values], array.clone(), None);
     let element = callee_graph.intern_pure(
@@ -335,7 +341,6 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let selected = callee_graph.add_block_param(merge, scalar.clone());
     callee_graph.skeleton.blocks[merge].term =
         SkeletonTerminator::Return(Some(callee_graph.value_result(selected)));
-    let params = physical_params([("index", index_ty.clone()), ("values", array.clone())]);
     let callee = Func::<Physical>::new(
         region,
         "conditional_fixed_array_element".into(),
@@ -349,8 +354,10 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let callees = [(region, callee)].into_iter().collect();
 
     let mut caller = EGraph::<Physical>::new();
-    let actual_index = caller.add_test_value_parameter(0, index_ty);
-    let actual_values = caller.add_test_value_parameter(1, array);
+    let caller_params = physical_params([("index", index_ty.clone()), ("values", array.clone())]);
+    let caller_parameter_ids = caller_params.ids().collect::<Vec<_>>();
+    let actual_index = caller.add_test_value_parameter(caller_parameter_ids[0], index_ty);
+    let actual_values = caller.add_test_value_parameter(caller_parameter_ids[1], array);
     let call = add_value_call(
         &mut caller,
         region,

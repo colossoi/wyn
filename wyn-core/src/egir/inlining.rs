@@ -152,7 +152,13 @@ pub(crate) fn inline_effectful_call<P: Family>(
         removed.kind(),
         SideEffectKind::Effect(EffectOp::Call { site: removed_site }) if *removed_site == site
     ));
-    let cloned = clone_body_substituting(&callee.graph, caller, boundary.arguments(), &[], effect_ids)?;
+    let cloned = clone_body_substituting(
+        &callee.graph,
+        caller,
+        boundary.argument_bindings(),
+        &[],
+        effect_ids,
+    )?;
     let cost = InlineCost {
         nodes: cloned.node_count,
         blocks: cloned.block_count + 1,
@@ -369,7 +375,7 @@ fn structured_inline_summary<P: Family>(
     for value in &values {
         match &graph.nodes.get(*value)?.kind {
             ValueKind::FuncParam { parameter } => {
-                if graph.nodes[*value].ty != *function.params().get(parameter.index())?.ty() {
+                if graph.nodes[*value].ty != *function.params().get(*parameter)?.ty() {
                     return None;
                 }
             }
@@ -549,7 +555,7 @@ fn inline_structured_call_before_terminator<P: Family>(
         .iter()
         .position(|result| *result == call)
         .ok_or_else(|| "structured inlining trigger is absent from its call boundary".to_string())?;
-    let operands = call_site.arguments().to_vec();
+    let operands = call_site.argument_bindings().clone();
 
     let mut block_map = LookupMap::new();
     for source in &summary.blocks {
@@ -565,11 +571,10 @@ fn inline_structured_call_before_terminator<P: Family>(
     for (source, definition) in &callee.graph.nodes {
         if let ValueKind::FuncParam { parameter } = definition.kind {
             let replacement =
-                operands.get(parameter.index()).and_then(|operand| operand.value()).ok_or_else(|| {
+                operands.get(&parameter).and_then(|operand| operand.value()).ok_or_else(|| {
                     format!(
-                    "inline_structured_call_before_terminator: `{}` parameter {} is not a value argument",
+                    "inline_structured_call_before_terminator: `{}` parameter {parameter:?} is not a value argument",
                     callee.name,
-                    parameter.index()
                 )
                 })?;
             memo.insert(source, replacement);
@@ -759,7 +764,7 @@ fn clone_callee_results<P: Family>(
             )
         })?
         .values();
-    let arguments = caller.call(site).arguments().to_vec();
+    let arguments = caller.call(site).argument_bindings().clone();
     let mut memo = LookupMap::new();
     let reachable = wyn_graph::reachable_from_ordered(
         roots.iter().copied(),
@@ -769,14 +774,11 @@ fn clone_callee_results<P: Family>(
     for node in reachable {
         let definition = &callee.graph.nodes[node].kind;
         if let ValueKind::FuncParam { parameter } = definition {
-            let replacement = arguments
-                .get(parameter.index())
-                .and_then(|argument| argument.value())
-                .ok_or_else(|| {
+            let replacement =
+                arguments.get(parameter).and_then(|argument| argument.value()).ok_or_else(|| {
                     format!(
-                        "inline_pure_call: `{}` parameter {} is not a value argument",
+                        "inline_pure_call: `{}` parameter {parameter:?} is not a value argument",
                         callee.name,
-                        parameter.index()
                     )
                 })?;
             memo.insert(node, replacement);
@@ -839,8 +841,14 @@ fn validate_call<P: Family>(
             callee.params().len()
         ));
     }
-    for (index, (argument, parameter)) in call.arguments().iter().zip(callee.params()).enumerate() {
-        let matches = match (argument, parameter.representation()) {
+    for (index, (parameter_id, parameter)) in callee.params().iter_with_ids().enumerate() {
+        let argument = call.argument(parameter_id).ok_or_else(|| {
+            format!(
+                "inline call: `{}` has no binding for parameter {parameter_id:?}",
+                callee.name
+            )
+        })?;
+        let matches = match (&argument, parameter.representation()) {
             (OperandRef::Value(value), super::ir::OperandType::Value(ty)) => {
                 caller.nodes.get(*value).is_some_and(|node| node.ty() == ty)
             }

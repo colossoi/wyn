@@ -107,8 +107,14 @@ impl<'a> RegionExecutor<'a> {
         }
         let value = match &region.graph.nodes[node].kind {
             ValueKind::FuncParam { parameter } => {
-                let index = parameter.index();
-                arguments.get(index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
+                let position = region
+                    .params()
+                    .abi_position(*parameter)
+                    .ok_or_else(|| format!("region references undeclared parameter {parameter:?}"))?;
+                arguments
+                    .get(position)
+                    .cloned()
+                    .ok_or_else(|| format!("missing region argument {position}"))?
             }
             ValueKind::Constant(ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
             ValueKind::Constant(ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
@@ -126,10 +132,17 @@ impl<'a> RegionExecutor<'a> {
             }
             ValueKind::CallResult { call, slot } => {
                 let call = region.graph.call(*call);
-                let values = call
-                    .arguments()
-                    .iter()
-                    .map(|argument| {
+                let callee = self
+                    .program
+                    .region(call.callee())
+                    .ok_or_else(|| format!("missing region {:?}", call.callee()))?;
+                let values = callee
+                    .params()
+                    .ids()
+                    .map(|parameter| {
+                        let argument = call.argument(parameter).ok_or_else(|| {
+                            format!("call is missing argument for parameter {parameter:?}")
+                        })?;
                         let argument = argument
                             .value()
                             .ok_or_else(|| "pure region executor cannot pass a place".to_owned())?;

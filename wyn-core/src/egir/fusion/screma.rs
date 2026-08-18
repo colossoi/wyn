@@ -17,11 +17,11 @@ use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
-    CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, Semantic, SkeletonTerminator,
+    CallEffects, EGraph, OperandRef, ParameterId, Parameters, PureOp, Semantic, SkeletonTerminator,
     SoacInputType, ValueId, ValueKind,
 };
 use crate::BindingRef;
-use crate::{FunctionId, LookupMap};
+use crate::{FunctionId, LookupMap, LookupSet, StableMap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutputOrigin {
@@ -502,7 +502,7 @@ fn fuse_across_middle_barrier(
         )
         .collect::<Vec<_>>();
     let mut pre_params = lambda_ops::named_parameters(&input_element_types, "element");
-    pre_params.extend(lambda_ops::named_parameters(
+    pre_params.append(lambda_ops::named_parameters(
         &capture_types(context.outer_types, pre_captures.iter()),
         "capture",
     ));
@@ -655,7 +655,7 @@ fn fuse_across_middle_barrier(
         .chain(consumer.form.post.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
         .collect::<Vec<_>>();
     let mut post_params = lambda_ops::named_parameters(&post_parameter_types, "value");
-    post_params.extend(lambda_ops::named_parameters(
+    post_params.append(lambda_ops::named_parameters(
         &capture_types(context.outer_types, post_captures.iter()),
         "capture",
     ));
@@ -793,7 +793,7 @@ struct RegionProjection {
     region: FunctionId,
     roots: Vec<ValueId>,
     result_types: Vec<Type<TypeName>>,
-    arguments: Vec<(usize, ProjectedValue)>,
+    arguments: Vec<(ParameterId, ProjectedValue)>,
 }
 
 #[derive(Default)]
@@ -884,8 +884,12 @@ impl ProjectionBuilder<'_> {
             .iter()
             .map(|result| lambda.result_types.get(*result).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let arguments =
-            (0..function.params.len()).map(|index| Some(ProjectedValue::Input(index))).collect::<Vec<_>>();
+        let arguments = function
+            .params()
+            .ids()
+            .enumerate()
+            .map(|(index, parameter)| (parameter, ProjectedValue::Input(index)))
+            .collect::<StableMap<_, _>>();
         let values = self.function(function, &roots, &result_types, &arguments)?;
         Some(ProjectionRecipe {
             values,
@@ -898,7 +902,7 @@ impl ProjectionBuilder<'_> {
         function: &Func<Semantic>,
         roots: &[ValueId],
         result_types: &[Type<TypeName>],
-        arguments: &[Option<ProjectedValue>],
+        arguments: &StableMap<ParameterId, ProjectedValue>,
     ) -> Option<Vec<ProjectedValue>> {
         if roots.len() != result_types.len()
             || arguments.len() != function.params().len()
@@ -917,22 +921,22 @@ impl ProjectionBuilder<'_> {
             }
 
             let projection = GraphProjector::new(&function.graph).value_flow(roots.to_vec()).ok()?;
-            let mut parameter_indices = function
+            let projected_parameters = function
                 .graph
                 .nodes
                 .iter()
                 .filter_map(|(source, node)| match &node.kind {
                     ValueKind::FuncParam { parameter } if projection.node(source).is_some() => {
-                        Some(parameter.index())
+                        Some(*parameter)
                     }
                     _ => None,
                 })
-                .collect::<Vec<_>>();
-            parameter_indices.sort_unstable();
-            parameter_indices.dedup();
-            let projected_arguments = parameter_indices
-                .iter()
-                .map(|index| Some((*index, arguments.get(*index)?.clone()?)))
+                .collect::<LookupSet<_>>();
+            let projected_arguments = function
+                .params()
+                .ids()
+                .filter(|parameter| projected_parameters.contains(parameter))
+                .map(|parameter| Some((parameter, arguments.get(&parameter)?.clone())))
                 .collect::<Option<Vec<_>>>()?;
             let projection = self.projections.len();
             self.projections.push(RegionProjection {
@@ -955,7 +959,7 @@ impl ProjectionBuilder<'_> {
         &mut self,
         function: &Func<Semantic>,
         source: ValueId,
-        arguments: &[Option<ProjectedValue>],
+        arguments: &StableMap<ParameterId, ProjectedValue>,
         memo: &mut LookupMap<ValueId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
         if let Some(value) = memo.get(&source) {
@@ -966,7 +970,7 @@ impl ProjectionBuilder<'_> {
             return self.value(function, alias, arguments, memo);
         }
         let value = match &definition.kind {
-            ValueKind::FuncParam { parameter } => arguments.get(parameter.index())?.clone()?,
+            ValueKind::FuncParam { parameter } => arguments.get(parameter)?.clone(),
             ValueKind::Constant(value) => ProjectedValue::Constant {
                 value: value.clone(),
                 ty: definition.ty.clone(),
@@ -1013,7 +1017,7 @@ impl ProjectionBuilder<'_> {
                 self.call(
                     function,
                     &boundary.callee(),
-                    boundary.arguments(),
+                    boundary.argument_bindings(),
                     result,
                     arguments,
                     memo,
@@ -1041,9 +1045,9 @@ impl ProjectionBuilder<'_> {
         &mut self,
         caller: &Func<Semantic>,
         callee: &FunctionId,
-        call_arguments: &[OperandRef],
+        call_arguments: &StableMap<ParameterId, OperandRef>,
         result: usize,
-        caller_arguments: &[Option<ProjectedValue>],
+        caller_arguments: &StableMap<ParameterId, ProjectedValue>,
         caller_memo: &mut LookupMap<ValueId, ProjectedValue>,
     ) -> Option<ProjectedValue> {
         let callee = self.program.region(*callee)?;
@@ -1052,10 +1056,17 @@ impl ProjectionBuilder<'_> {
         }
         let root = function_result_field(callee, result)?;
         let result_ty = callee.graph.nodes.get(root)?.ty.clone();
-        let arguments = call_arguments
-            .iter()
-            .map(|argument| self.value(caller, argument.value()?, caller_arguments, caller_memo))
-            .collect::<Vec<_>>();
+        let arguments = callee
+            .params()
+            .ids()
+            .map(|parameter| {
+                let argument = call_arguments.get(&parameter)?;
+                Some((
+                    parameter,
+                    self.value(caller, argument.value()?, caller_arguments, caller_memo)?,
+                ))
+            })
+            .collect::<Option<StableMap<_, _>>>()?;
         self.function(callee, &[root], &[result_ty], &arguments)?.into_iter().next()
     }
 }
@@ -1218,17 +1229,13 @@ impl ProjectionEmitter<'_, '_> {
             .iter()
             .map(|(_, argument)| self.value(argument).map(|value| self.graph.operand_ref(value)))
             .collect::<Option<Vec<_>>>()?;
-        let params = projected
-            .arguments
-            .iter()
-            .map(|(parameter, _)| function.params().get(*parameter).cloned())
-            .collect::<Option<Vec<_>>>()?;
-        let parameter_remap = projected
-            .arguments
-            .iter()
-            .enumerate()
-            .map(|(new, (old, _))| (*old, new))
-            .collect::<LookupMap<_, _>>();
+        let mut params = Parameters::new();
+        let mut parameter_remap = LookupMap::new();
+        for (source_parameter, _) in &projected.arguments {
+            let declaration = function.params().get(*source_parameter)?.clone();
+            let projected_parameter = params.push(declaration);
+            parameter_remap.insert(*source_parameter, projected_parameter);
+        }
         for (source, node) in &function.graph.nodes {
             let ValueKind::FuncParam { parameter } = &node.kind else {
                 continue;
@@ -1242,7 +1249,7 @@ impl ProjectionEmitter<'_, '_> {
             else {
                 return None;
             };
-            *projected_parameter = ParameterId::new(*parameter_remap.get(&parameter.index())?);
+            *projected_parameter = *parameter_remap.get(parameter)?;
         }
 
         let name = fresh_region_name(
@@ -1460,7 +1467,7 @@ fn parallel_lambdas(
         .collect::<Vec<_>>();
     let capture_types = capture_types(context.outer_types, captures.iter());
     let mut params = lambda_ops::named_parameters(&parameter_types, "element");
-    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
+    params.append(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut capture_cursor = parameter_types.len();
@@ -1531,7 +1538,7 @@ fn vertical_lambda(
         .collect::<Vec<_>>();
     let capture_types = capture_types(context.outer_types, captures.iter());
     let mut params = lambda_ops::named_parameters(parameter_types, "element");
-    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
+    params.append(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
     let mut capture_cursor = parameter_types.len();
@@ -1604,7 +1611,7 @@ fn finish_lambda(
     context: &mut Context<'_>,
     label: &str,
     graph: EGraph,
-    params: Vec<FuncParam<BindingRef, Type<TypeName>>>,
+    params: Parameters<BindingRef, Type<TypeName>>,
     captures: Vec<OperandRef>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,

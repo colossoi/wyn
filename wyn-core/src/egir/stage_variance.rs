@@ -17,7 +17,10 @@ use crate::flow::{BlockId, Terminator};
 use crate::interface::{EntryInputKind, IoDecoration};
 use crate::{FunctionId, LookupMap, LookupSet};
 
-use super::ir::{CallEffects, CallSiteId, EffectOp, Family, FlowValueId, OperandRef, SideEffectKind};
+use super::ir::{
+    CallEffects, CallSiteId, EffectOp, Family, FlowValueId, OperandRef, ParameterId, Parameters,
+    SideEffectKind,
+};
 use super::loop_analysis::LoopAnalysis;
 use super::program::Entry;
 use super::reify::Segmented;
@@ -162,6 +165,13 @@ struct IncomingValue {
     value: ValueId,
 }
 
+pub(crate) fn bind_parameter_dependences<R, Ty>(
+    parameters: &Parameters<R, Ty>,
+    dependences: &[StageDependence],
+) -> LookupMap<ParameterId, StageDependence> {
+    parameters.ids().zip(dependences.iter().cloned()).collect()
+}
+
 impl StageDependenceAnalysis {
     /// Analyze a graph using one dependence seed per function parameter.
     ///
@@ -170,7 +180,7 @@ impl StageDependenceAnalysis {
     /// inspect.
     pub(crate) fn for_graph<P: Family>(
         graph: &EGraph<P>,
-        parameter_dependences: &[StageDependence],
+        parameter_dependences: &LookupMap<ParameterId, StageDependence>,
     ) -> Result<Self, String> {
         let (incoming_blocks, incoming_values) = collect_incoming(graph)?;
         let block_loop_dependencies = block_loop_dependencies(graph);
@@ -205,10 +215,9 @@ impl StageDependenceAnalysis {
             .map(|(node, definition)| {
                 let dependence = match &definition.kind {
                     ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => parameter_dependences
-                        .get(parameter.index())
-                        .cloned()
-                        .unwrap_or_else(unknown_dependence),
+                    ValueKind::FuncParam { parameter } => {
+                        parameter_dependences.get(parameter).cloned().unwrap_or_else(unknown_dependence)
+                    }
                     ValueKind::BlockParam { .. }
                     | ValueKind::Pure { .. }
                     | ValueKind::Union { .. }
@@ -252,10 +261,9 @@ impl StageDependenceAnalysis {
             for (node, definition) in &graph.nodes {
                 let next = match &definition.kind {
                     ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => parameter_dependences
-                        .get(parameter.index())
-                        .cloned()
-                        .unwrap_or_else(unknown_dependence),
+                    ValueKind::FuncParam { parameter } => {
+                        parameter_dependences.get(parameter).cloned().unwrap_or_else(unknown_dependence)
+                    }
                     ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
@@ -322,7 +330,8 @@ impl StageDependenceAnalysis {
         entry: &Entry<EntryP, ResourceDecl, Route>,
         graph: &EGraph<P>,
     ) -> Result<Self, String> {
-        Self::for_graph(graph, &entry_parameter_dependences(entry))
+        let dependences = bind_parameter_dependences(&entry.params, &entry_parameter_dependences(entry));
+        Self::for_graph(graph, &dependences)
     }
 
     /// Analyze one use of a repeated region.
@@ -339,6 +348,7 @@ impl StageDependenceAnalysis {
             .region(body.region)
             .ok_or_else(|| format!("stage-dependence analysis cannot resolve region {}", body.region))?;
         let parameter_dependences = seg_body_parameter_dependences(region.params.len(), enclosing, body)?;
+        let parameter_dependences = bind_parameter_dependences(&region.params, &parameter_dependences);
         Self::for_graph(&region.graph, &parameter_dependences)
     }
 
@@ -367,7 +377,6 @@ impl StageDependenceAnalysis {
             callee: call.callee(),
             arguments: call
                 .arguments()
-                .iter()
                 .filter_map(|argument| argument.value())
                 .map(|argument| (argument, self.dependence(argument)))
                 .collect(),
@@ -495,7 +504,7 @@ fn call_result_dependence<P: Family>(
     block_loop_dependencies: &LookupMap<BlockId, LookupSet<BlockId>>,
 ) -> StageDependence {
     let site = graph.call(call);
-    let arguments = site.arguments().iter().fold(StageDependence::constant(), |dependence, argument| {
+    let arguments = site.arguments().fold(StageDependence::constant(), |dependence, argument| {
         dependence.join(&operand_dependence(graph, *argument, values))
     });
     if matches!(site.effects(), CallEffects::Pure) {

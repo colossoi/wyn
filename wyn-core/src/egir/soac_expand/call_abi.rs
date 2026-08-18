@@ -11,10 +11,10 @@ use super::super::graph_ops::{adapt_physical_call_argument, detached_alloca, emi
 use super::super::ir::PlaceOp;
 use super::super::program::Func;
 use super::super::types::{
-    destination_passing_function_result, CallEffects, CallSiteId, EGraph, EffectOp, EffectToken, FuncParam,
-    FunctionResult, Language, OperandRef, OperandType, ParameterId, Physical, PlaceAccess,
-    PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect, SideEffectKind,
-    SkeletonTerminator, ValueId, ValueKind, ViewType, WynLanguage,
+    by_value_function_result, destination_passing_function_result, CallEffects, CallSiteId, EGraph,
+    EffectOp, EffectToken, FuncParam, FunctionResult, Language, OperandRef, OperandType, Parameters,
+    Physical, PlaceAccess, PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect,
+    SideEffectKind, SkeletonTerminator, ValueId, ValueKind, ViewType, WynLanguage,
 };
 
 pub(super) fn resolve(
@@ -41,20 +41,32 @@ pub(super) fn resolve(
     for function in &mut program.functions {
         resolve_function(function, &mut program.global_context.effect_ids)?;
     }
-    let boundaries = program
+    let mut boundaries = program
         .functions
         .iter()
         .map(|function| {
             (
                 function.region,
                 (
-                    function.params().to_vec(),
+                    function.params().clone(),
                     function.result().clone(),
                     function.effects(),
                 ),
             )
         })
         .collect::<LookupMap<_, _>>();
+    for declaration in &program.externs {
+        boundaries.insert(
+            declaration.id,
+            (
+                Parameters::from_ordered(
+                    declaration.params.iter().map(|(ty, name)| FuncParam::value(name.clone(), ty.clone())),
+                ),
+                by_value_function_result::<WynLanguage>(declaration.return_ty.clone()),
+                CallEffects::Pure,
+            ),
+        );
+    }
     for function in &mut program.functions {
         resolve_calls(
             &mut function.graph,
@@ -148,7 +160,7 @@ pub(super) fn emit_call(
 fn bind_call_boundary(
     graph: &mut EGraph<Physical>,
     callee: FunctionId,
-    parameters: &[FuncParam<BindingRef, Type<TypeName>>],
+    parameters: &Parameters<BindingRef, Type<TypeName>>,
     function_result: &FunctionResult<Type<TypeName>>,
     arguments: impl IntoIterator<Item = OperandRef>,
     routing: CallResultRouting,
@@ -156,9 +168,9 @@ fn bind_call_boundary(
 ) -> Result<BoundCall, String> {
     let destination_parameters = function_result.destination_parameters();
     let ordinary_parameters = parameters
-        .iter()
+        .iter_with_ids()
         .enumerate()
-        .filter(|(index, _)| !destination_parameters.contains(&ParameterId::new(*index)))
+        .filter(|(_, (id, _))| !destination_parameters.contains(id))
         .collect::<Vec<_>>();
     let ordinary_arguments = flatten_call_arguments(graph, arguments)?;
     if ordinary_arguments.len() != ordinary_parameters.len() {
@@ -171,7 +183,7 @@ fn bind_call_boundary(
 
     let mut physical_arguments = vec![None; parameters.len()];
     let mut prelude = Vec::new();
-    for (argument, (index, parameter)) in ordinary_arguments.into_iter().zip(ordinary_parameters) {
+    for (argument, (index, (_, parameter))) in ordinary_arguments.into_iter().zip(ordinary_parameters) {
         let (argument, effects) =
             adapt_physical_call_argument(graph, argument, parameter, callee, index, effect_ids)?;
         prelude.extend(effects);
@@ -276,7 +288,10 @@ fn bind_call_boundary(
             _ => unreachable!("result routing supplies the required source shape"),
         };
         destination_arguments.insert(parameter, place);
-        physical_arguments[parameter.index()] = Some(OperandRef::Place(place));
+        let position = parameters
+            .abi_position(parameter)
+            .ok_or_else(|| format!("call to {callee:?} names an undeclared destination parameter"))?;
+        physical_arguments[position] = Some(OperandRef::Place(place));
     }
 
     let arguments = physical_arguments
@@ -296,22 +311,22 @@ fn bind_call_boundary(
 }
 
 fn resolve_entry_parameter_representations(
-    params: &mut [FuncParam<BindingRef, Type<TypeName>>],
+    params: &mut Parameters<BindingRef, Type<TypeName>>,
     graph: &mut EGraph<Physical>,
     parameter_resources: &[Option<BindingRef>],
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
-    for (index, parameter) in params.iter_mut().enumerate() {
-        let OperandType::Value(ty) = parameter.representation() else {
+    let parameter_ids = params.ids().collect::<Vec<_>>();
+    for (index, parameter_id) in parameter_ids.into_iter().enumerate() {
+        let OperandType::Value(ty) = params.get(parameter_id).unwrap().representation() else {
             continue;
         };
         let ty = ty.clone();
         let resource = parameter_resources.get(index).copied().flatten();
         let representation = physical_parameter_representation(&ty, resource);
-        if representation == *parameter.representation() {
+        if representation == *params.get(parameter_id).unwrap().representation() {
             continue;
         }
-        let parameter_id = ParameterId::new(index);
         let source = graph
             .nodes
             .iter()
@@ -341,21 +356,19 @@ fn resolve_entry_parameter_representations(
         } else {
             super::super::graph_ops::retype_projection_tree(graph, source, representation.ty());
         }
-        *parameter.representation_mut() = representation;
+        *params.get_mut(parameter_id).unwrap().representation_mut() = representation;
     }
     synchronize_soac_input_types(graph);
     Ok(())
 }
 
 fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), String> {
-    let old_params = std::mem::take(&mut function.params);
-    let mut params = Vec::new();
+    let old_params = function.params.drain_ordered();
     let mut old_parameter_nodes = Vec::new();
-    for (old_index, parameter) in old_params.into_iter().enumerate() {
+    for (old_index, (old_parameter, parameter)) in old_params.into_iter().enumerate() {
         let logical_ty = parameter.ty().clone();
         let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(logical_ty.clone());
         let physical_ty = super::super::graph_ops::place_reference_type(&logical_ty);
-        let old_parameter = ParameterId::new(old_index);
         let source = function
             .graph
             .nodes
@@ -376,13 +389,13 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
         old_parameter_nodes.push(source);
         super::super::graph_ops::retype_projection_tree(&mut function.graph, source, &physical_ty);
 
-        let first = params.len();
+        let mut group = Vec::new();
         for (path, leaf) in logical_abi.destination_leaves_with_paths() {
             let name = path.iter().fold(parameter.name().to_owned(), |name, index| {
                 format!("{name}_{index}")
             });
             if WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()) {
-                params.push(FuncParam::place(
+                let id = function.params.push(FuncParam::place(
                     name,
                     super::super::types::PlaceType {
                         pointee: materialized_array_type(leaf.ty()),
@@ -390,13 +403,14 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
                         access: PlaceAccess::ReadOnly,
                     },
                 ));
+                group.push(id);
             } else {
-                params.push(FuncParam::value(name, leaf.ty().clone()));
+                let id = function.params.push(FuncParam::value(name, leaf.ty().clone()));
+                group.push(id);
             }
         }
         let abi = super::super::types::by_value_function_result::<WynLanguage>(physical_ty);
         let leaves = abi.destination_leaves();
-        let group = &params[first..];
         if leaves.len() != group.len() {
             return Err(format!(
                 "function `{}` parameter {old_index} has {} logical leaves but {} physical parameters",
@@ -407,12 +421,11 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
         }
         let values = group
             .iter()
+            .copied()
             .zip(&leaves)
-            .enumerate()
-            .map(|(offset, (parameter, leaf))| {
-                let operand = function
-                    .graph
-                    .add_parameter(ParameterId::new(first + offset), parameter.representation());
+            .map(|(parameter_id, leaf)| {
+                let parameter = function.params.get(parameter_id).unwrap();
+                let operand = function.graph.add_parameter(parameter_id, parameter.representation());
                 match operand {
                     OperandRef::Value(value) => value,
                     OperandRef::View(view) => view.value(),
@@ -436,7 +449,6 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
     for parameter in old_parameter_nodes {
         function.graph.remove_func_param(parameter);
     }
-    function.params = params;
     synchronize_soac_input_types(&mut function.graph);
     Ok(())
 }
@@ -558,7 +570,10 @@ fn resolve_function(
 
     let mut parameter_places = LookupMap::new();
     for parameter in destination_parameters {
-        let representation = params[parameter.index()].representation();
+        let representation = params
+            .get(parameter)
+            .expect("destination parameter belongs to the function boundary")
+            .representation();
         let place = function
             .graph
             .add_parameter(parameter, representation)
@@ -667,7 +682,7 @@ fn resolve_calls(
     boundaries: &LookupMap<
         FunctionId,
         (
-            Vec<FuncParam<BindingRef, Type<TypeName>>>,
+            Parameters<BindingRef, Type<TypeName>>,
             super::super::types::FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -689,7 +704,7 @@ fn resolve_call(
     graph: &mut EGraph<Physical>,
     site: CallSiteId,
     boundary: &(
-        Vec<FuncParam<BindingRef, Type<TypeName>>>,
+        Parameters<BindingRef, Type<TypeName>>,
         super::super::types::FunctionResult<Type<TypeName>>,
         CallEffects,
     ),
@@ -705,7 +720,7 @@ fn resolve_call(
         old.callee(),
         &boundary.0,
         &boundary.1,
-        old.arguments().iter().copied(),
+        old.arguments().copied(),
         CallResultRouting::Existing(old.result().clone()),
         effect_ids,
     )?;
@@ -717,7 +732,7 @@ fn resolve_call(
         .get_mut(site)
         .expect("call site remains live while its ABI is rewritten")
         .replace_boundary(
-            arguments,
+            boundary.0.ids().zip(arguments).collect(),
             result.expect("existing call preserves its logical result bindings"),
             boundary.2,
         );

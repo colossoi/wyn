@@ -10,7 +10,7 @@ use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EffectOp, EffectToken, OperandRef,
-    PlaceAccess, PlaceRegion, PlaceType, WynLanguage,
+    Parameters, PlaceAccess, PlaceRegion, PlaceType, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface;
@@ -58,8 +58,8 @@ fn scan_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Scan {
     }
 }
 
-fn neutral(graph: &mut EGraph, index: usize) -> ValueId {
-    graph.add_test_value_parameter(index, Type::Constructed(TypeName::Unit, vec![]))
+fn neutral(graph: &mut EGraph, _index: usize) -> ValueId {
+    graph.add_block_param(graph.skeleton.entry, Type::Constructed(TypeName::Unit, vec![]))
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
             })
             .collect(),
         vec![],
-        vec![],
+        Parameters::new(),
         by_value_function_result::<WynLanguage>(Type::Constructed(TypeName::Unit, vec![])),
         graph,
     );
@@ -218,7 +218,10 @@ fn screma_form_carries_scan_and_reduction_operators() {
 #[test]
 fn idle_chunk_start_is_clamped_before_remaining_subtraction() {
     let mut graph = EGraph::new();
-    let len = graph.add_test_value_parameter(0, Type::Constructed(TypeName::UInt(32), vec![]));
+    let len = graph.add_block_param(
+        graph.skeleton.entry,
+        Type::Constructed(TypeName::UInt(32), vec![]),
+    );
     let (_, start, _) =
         emit_chunk_arithmetic(&mut graph, REDUCE_PHASE1_WIDTH, len).expect("u32 chunk arithmetic");
     assert!(matches!(
@@ -241,9 +244,16 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let mut effect_ids = IdSource::new();
     let mut identities = egir::program::ProgramIdentities::default();
     let operator_id = identities.alloc_function("combine".into());
+    let operator_params = [
+        callable_parameter::<SemanticResourceRef, WynLanguage>("left".into(), elem_ty.clone()),
+        callable_parameter::<SemanticResourceRef, WynLanguage>("right".into(), elem_ty.clone()),
+    ]
+    .into_iter()
+    .collect::<Parameters<_, _>>();
+    let parameter_ids = operator_params.ids().collect::<Vec<_>>();
     let mut operator_graph = EGraph::new();
-    let left = operator_graph.add_test_value_parameter(0, elem_ty.clone());
-    let right = operator_graph.add_test_value_parameter(1, elem_ty.clone());
+    let left = operator_graph.add_test_value_parameter(parameter_ids[0], elem_ty.clone());
+    let right = operator_graph.add_test_value_parameter(parameter_ids[1], elem_ty.clone());
     let combined = operator_graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![left, right],
@@ -257,10 +267,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
         "combine".into(),
         Span::dummy(),
         None,
-        vec![
-            callable_parameter::<SemanticResourceRef, WynLanguage>("left".into(), elem_ty.clone()),
-            callable_parameter::<SemanticResourceRef, WynLanguage>("right".into(), elem_ty.clone()),
-        ],
+        operator_params,
         by_value_function_result::<WynLanguage>(elem_ty.clone()),
         CallEffects::Pure,
         operator_graph,

@@ -17,7 +17,7 @@ fn scalar_literals_stay_inline_in_ssa_operands() {
     let result = graph.value_result(sum);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
 
-    let body = elaborate_one_body(graph, &[], ty);
+    let body = elaborate_one_body(graph, &Parameters::new(), ty);
     assert_eq!(
         body.num_insts(),
         1,
@@ -44,7 +44,7 @@ fn scalar_literals_stay_inline_in_ssa_terminators() {
     let result = graph.value_result(seven);
     graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Return(Some(result));
 
-    let body = elaborate_one_body(graph, &[], ty);
+    let body = elaborate_one_body(graph, &Parameters::new(), ty);
     assert_eq!(
         body.num_insts(),
         0,
@@ -70,7 +70,7 @@ fn scalar_literals_stay_inline_in_ssa_block_arguments() {
     let result = graph.value_result(target_param);
     graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(result));
 
-    let body = elaborate_one_body(graph, &[], ty);
+    let body = elaborate_one_body(graph, &Parameters::new(), ty);
     assert_eq!(
         body.num_insts(),
         0,

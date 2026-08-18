@@ -73,7 +73,10 @@ pub(crate) fn analyze_prelude(
     for node in reachable {
         if let ValueKind::FuncParam { parameter } = &graph.nodes[node].kind {
             if !dependence.dependence(node).is_stage_invariant()
-                || !entry_parameter_is_scalar_relocatable(entry, parameter.index())
+                || entry
+                    .params()
+                    .abi_position(*parameter)
+                    .is_none_or(|position| !entry_parameter_is_scalar_relocatable(entry, position))
             {
                 return None;
             }

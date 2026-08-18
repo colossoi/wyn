@@ -4,8 +4,8 @@ use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, PureOp, SkeletonTerminator,
-    WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, Parameters, PureOp,
+    SkeletonTerminator, WynLanguage,
 };
 use crate::op::BinaryOperator;
 use crate::pipeline_descriptor::PipelineDescriptor;
@@ -25,9 +25,16 @@ fn compose(left: &(i64, i64), right: &(i64, i64)) -> (i64, i64) {
 fn affine_program() -> (FunctionId, Segmented) {
     let int = Type::Constructed(TypeName::Int(64), vec![]);
     let pair = Type::Constructed(TypeName::Tuple(2), vec![int.clone(), int.clone()]);
+    let params = [
+        callable_parameter::<BindingRef, WynLanguage>("left".into(), pair.clone()),
+        callable_parameter::<BindingRef, WynLanguage>("right".into(), pair.clone()),
+    ]
+    .into_iter()
+    .collect::<Parameters<_, _>>();
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut graph = EGraph::new();
-    let left = graph.add_test_value_parameter(0, pair.clone());
-    let right = graph.add_test_value_parameter(1, pair.clone());
+    let left = graph.add_test_value_parameter(parameter_ids[0], pair.clone());
+    let right = graph.add_test_value_parameter(parameter_ids[1], pair.clone());
     let la = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![left], int.clone(), None);
     let lb = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![left], int.clone(), None);
     let ra = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![right], int.clone(), None);
@@ -61,10 +68,7 @@ fn affine_program() -> (FunctionId, Segmented) {
         "affine_compose".to_string(),
         Span::dummy(),
         None,
-        vec![
-            callable_parameter::<BindingRef, WynLanguage>("left".into(), pair.clone()),
-            callable_parameter::<BindingRef, WynLanguage>("right".into(), pair),
-        ],
+        params,
         result_abi,
         CallEffects::Pure,
         graph,

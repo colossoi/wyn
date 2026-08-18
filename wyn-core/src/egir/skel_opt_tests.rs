@@ -106,7 +106,7 @@ fn fold_constant_branch_false_selects_else() {
 #[test]
 fn fold_constant_branch_nonconst_left_alone() {
     let mut graph = EGraph::new();
-    let cond = graph.add_test_value_parameter(0, bool_ty());
+    let cond = graph.add_block_param(graph.skeleton.entry, bool_ty());
     let (entry, _then_bid, _else_bid) = build_condbranch_skel(&mut graph, cond, None, None);
     let changed = fold_constant_branches(&mut graph);
     assert!(!changed);
@@ -153,7 +153,7 @@ fn build_merge_skel(
     let param = graph.add_block_param(merge, i32_ty());
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(param)));
 
-    let cond = graph.add_test_value_parameter(0, bool_ty());
+    let cond = graph.add_block_param(graph.skeleton.entry, bool_ty());
     graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: b1,
@@ -461,7 +461,7 @@ fn phi_elim_preserves_loop_header_param() {
         args: init_args,
     };
     // Header: condition (non-const function param) → body or exit.
-    let cond = graph.add_test_value_parameter(0, bool_ty());
+    let cond = graph.add_block_param(graph.skeleton.entry, bool_ty());
     graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
         cond,
         then_target: body,
@@ -498,7 +498,7 @@ fn phi_elim_handles_condbranch_with_same_target_both_arms() {
     let param = graph.add_block_param(target, i32_ty());
     graph.skeleton.blocks[target].term = SkeletonTerminator::Return(Some(graph.value_result(param)));
 
-    let cond = graph.add_test_value_parameter(0, bool_ty());
+    let cond = graph.add_block_param(graph.skeleton.entry, bool_ty());
     let x = graph.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty(), None);
     let then_args = graph.admit_flow_values([x]);
     let else_args = graph.admit_flow_values([x]);

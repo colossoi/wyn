@@ -8,7 +8,7 @@ use crate::ast;
 use std::collections::{HashMap, HashSet};
 
 use crate::flow::{BlockId, ControlHeader};
-use crate::BindingRef;
+use crate::{BindingRef, StableMap};
 
 use super::graph_ops::ValueUseIndex;
 use super::ir::RealizedOutputRoute;
@@ -694,18 +694,18 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             self.prepare_place(place, shell)?;
         }
         let arguments = call
-            .arguments()
+            .argument_bindings()
             .iter()
-            .copied()
-            .map(|argument| {
-                argument.try_map(
-                    |value| Ok::<_, String>(shell.nodes[&value]),
-                    |view| view.try_remap(|value| Ok::<_, String>(shell.nodes[&value])),
-                    |place| Ok::<_, String>(shell.places[&place]),
-                )
+            .map(|(&parameter, &argument)| {
+                argument
+                    .try_map(
+                        |value| Ok::<_, String>(shell.nodes[&value]),
+                        |view| view.try_remap(|value| Ok::<_, String>(shell.nodes[&value])),
+                        |place| Ok::<_, String>(shell.places[&place]),
+                    )
+                    .map(|argument| (parameter, argument))
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_boxed_slice();
+            .collect::<Result<StableMap<_, _>, _>>()?;
         let places = &shell.places;
         let (target, _, values) = shell.graph.add_projected_call(
             &call,

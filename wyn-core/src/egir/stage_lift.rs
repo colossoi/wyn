@@ -13,7 +13,7 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::TypeName;
-use crate::{FunctionId, LookupSet, SortedSet};
+use crate::{FunctionId, LookupMap, LookupSet, SortedSet};
 
 use super::graph_ops::{self, ConstantCopy, PureCopy};
 use super::inlining;
@@ -145,7 +145,10 @@ fn analyze_direct_entry_calls(program: &Segmented) -> Result<Option<DirectEntryC
         let calls = inline_mixed_calls_in_graph(
             program,
             &mut graph,
-            &entry_parameter_dependences(entry),
+            &super::stage_variance::bind_parameter_dependences(
+                &entry.params,
+                &entry_parameter_dependences(entry),
+            ),
             &entry.name,
         )?;
         if calls != 0 {
@@ -220,18 +223,21 @@ fn prepare_lift(
                 reason,
             })?;
     let calls_inlined = inline_mixed_calls(program, &mut function, &parameter_dependences)?;
+    let bound_dependences =
+        super::stage_variance::bind_parameter_dependences(&function.params, &parameter_dependences);
     let analysis =
-        StageDependenceAnalysis::for_graph(&function.graph, &parameter_dependences).map_err(|reason| {
+        StageDependenceAnalysis::for_graph(&function.graph, &bound_dependences).map_err(|reason| {
             StageLiftError::Analysis {
                 scope: function.name.clone(),
                 reason,
             }
         })?;
+    let leading = function.params.len().saturating_sub(body.captures.len());
+    let capture_parameters = function.params.ids().skip(leading).collect::<LookupSet<_>>();
     let frontier = invariant_frontier(
         &function.graph,
         &analysis,
-        function.params.len(),
-        body.captures.len(),
+        &capture_parameters,
         calls_inlined != 0,
     );
     if frontier.is_empty() {
@@ -253,7 +259,7 @@ fn inline_mixed_calls(
     inline_mixed_calls_in_graph(
         program,
         &mut function.graph,
-        parameter_dependences,
+        &super::stage_variance::bind_parameter_dependences(&function.params, parameter_dependences),
         &function.name,
     )
 }
@@ -261,7 +267,7 @@ fn inline_mixed_calls(
 fn inline_mixed_calls_in_graph(
     program: &Segmented,
     graph: &mut EGraph,
-    parameter_dependences: &[StageDependence],
+    parameter_dependences: &LookupMap<super::types::ParameterId, StageDependence>,
     scope: &str,
 ) -> Result<usize> {
     let mut calls_inlined = 0;
@@ -302,22 +308,22 @@ fn inline_mixed_calls_in_graph(
 fn invariant_frontier(
     graph: &EGraph,
     analysis: &StageDependenceAnalysis,
-    parameter_count: usize,
-    capture_count: usize,
+    capture_parameters: &LookupSet<super::types::ParameterId>,
     exposed_by_mixed_call: bool,
 ) -> Vec<ValueId> {
-    let leading = parameter_count.saturating_sub(capture_count);
-    graph_ops::maximal_execution_frontier(graph, |node| is_liftable(graph, analysis, node, leading))
-        .into_iter()
-        .filter(|node| exposed_by_mixed_call || subgraph_contains_call(graph, *node))
-        .collect()
+    graph_ops::maximal_execution_frontier(graph, |node| {
+        is_liftable(graph, analysis, node, capture_parameters)
+    })
+    .into_iter()
+    .filter(|node| exposed_by_mixed_call || subgraph_contains_call(graph, *node))
+    .collect()
 }
 
 fn is_liftable(
     graph: &EGraph,
     analysis: &StageDependenceAnalysis,
     node: ValueId,
-    leading_parameters: usize,
+    capture_parameters: &LookupSet<super::types::ParameterId>,
 ) -> bool {
     if !matches!(
         graph.nodes.get(node).map(|node| &node.kind),
@@ -334,7 +340,7 @@ fn is_liftable(
         && dependence.loop_dependencies().is_empty()
         && !types::TypeExt::is_array(ty)
         && ssa::layout::storage_elem_stride(ty).is_some()
-        && cloneable_from_captures(graph, node, leading_parameters, &mut LookupSet::new())
+        && cloneable_from_captures(graph, node, capture_parameters, &mut LookupSet::new())
 }
 
 fn subgraph_contains_call(graph: &EGraph, root: ValueId) -> bool {
@@ -355,7 +361,7 @@ fn subgraph_contains_call(graph: &EGraph, root: ValueId) -> bool {
 fn cloneable_from_captures(
     graph: &EGraph,
     node: ValueId,
-    leading_parameters: usize,
+    capture_parameters: &LookupSet<super::types::ParameterId>,
     visiting: &mut LookupSet<ValueId>,
 ) -> bool {
     if !visiting.insert(node) {
@@ -363,13 +369,13 @@ fn cloneable_from_captures(
     }
     let cloneable = match graph.nodes.get(node).map(|node| &node.kind) {
         Some(ValueKind::Constant(_)) => true,
-        Some(ValueKind::FuncParam { parameter }) => parameter.index() >= leading_parameters,
+        Some(ValueKind::FuncParam { parameter }) => capture_parameters.contains(parameter),
         Some(ValueKind::Pure { operands, .. }) => operands
             .iter()
-            .all(|operand| cloneable_from_captures(graph, *operand, leading_parameters, visiting)),
+            .all(|operand| cloneable_from_captures(graph, *operand, capture_parameters, visiting)),
         Some(ValueKind::Union { left, right }) => {
-            cloneable_from_captures(graph, *left, leading_parameters, visiting)
-                && cloneable_from_captures(graph, *right, leading_parameters, visiting)
+            cloneable_from_captures(graph, *left, capture_parameters, visiting)
+                && cloneable_from_captures(graph, *right, capture_parameters, visiting)
         }
         Some(
             ValueKind::BlockParam { .. }
@@ -447,22 +453,20 @@ fn apply_lift(
 /// one.
 fn prune_dead_captures(function: &mut Func<Semantic>, body: &mut SegBody) -> Result<()> {
     let leading_parameters = body.leading_parameter_count(function)?;
-    let parameter_count = function.params.len();
     let live = graph_ops::reachable_execution_values(&function.graph);
     let mut retained_captures = SortedSet::new();
     for node in live {
         if let Some(ValueKind::FuncParam { parameter }) =
             function.graph.nodes.get(node).map(|node| &node.kind)
         {
-            let index = parameter.index();
-            if index >= parameter_count {
+            let Some(position) = function.params().abi_position(*parameter) else {
                 return Err(StageLiftError::Rewrite(format!(
-                    "region `{}` has out-of-range parameter {index}",
+                    "region `{}` has undeclared parameter {parameter:?}",
                     function.name
                 )));
-            }
-            if index >= leading_parameters {
-                retained_captures.insert(index - leading_parameters);
+            };
+            if position >= leading_parameters {
+                retained_captures.insert(position - leading_parameters);
             }
         }
     }

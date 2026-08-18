@@ -1,18 +1,19 @@
 use super::*;
 use crate::flow;
 use crate::op;
+use crate::types;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, Semantic,
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, Parameters, Semantic,
     SkeletonTerminator, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{EntryInput, IoDecoration};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::ssa::types::ConstantValue;
-use crate::{BindingRef, EntryId, FunctionId};
+use crate::{BindingRef, EntryId, FunctionId, LookupMap};
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -22,20 +23,32 @@ fn u32_ty() -> Type<TypeName> {
 
 fn semantic_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
+) -> Parameters<BindingRef, Type<TypeName>> {
     specs
         .into_iter()
         .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
         .collect()
 }
 
+fn parameter_dependences(
+    params: &Parameters<BindingRef, Type<TypeName>>,
+    dependences: impl IntoIterator<Item = StageDependence>,
+) -> LookupMap<ParameterId, StageDependence> {
+    params.ids().zip(dependences).collect()
+}
+
 #[test]
 fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     let ty = u32_ty();
     let project = FunctionId::from_index(0);
+    let entry_params = semantic_params([
+        ("resolved_uniform", ty.clone()),
+        ("resolved_position", ty.clone()),
+    ]);
+    let entry_parameter_ids = entry_params.ids().collect::<Vec<_>>();
     let mut graph = EGraph::<Semantic>::new();
-    let uniform = graph.add_test_value_parameter(0, ty.clone());
-    let stage_input = graph.add_test_value_parameter(1, ty.clone());
+    let uniform = graph.add_test_value_parameter(entry_parameter_ids[0], ty.clone());
+    let stage_input = graph.add_test_value_parameter(entry_parameter_ids[1], ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let uniform_sum = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
@@ -88,10 +101,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         inputs,
         vec![],
         vec![],
-        semantic_params([
-            ("resolved_uniform", ty.clone()),
-            ("resolved_position", ty.clone()),
-        ]),
+        entry_params,
         by_value_function_result::<WynLanguage>(ty),
         graph,
     );
@@ -131,8 +141,9 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
 fn block_parameters_include_incoming_control_variance() {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+    let params = semantic_params([("condition", bool_ty.clone())]);
     let mut graph = EGraph::<Semantic>::new();
-    let varying_condition = graph.add_test_value_parameter(0, bool_ty);
+    let varying_condition = graph.add_test_value_parameter(params.ids().next().unwrap(), bool_ty);
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
@@ -161,10 +172,13 @@ fn block_parameters_include_incoming_control_variance() {
 
     let analysis = StageDependenceAnalysis::for_graph(
         &graph,
-        &[StageDependence::from_source(
-            Uniformity::InvocationVarying,
-            DependenceSource::StageInput,
-        )],
+        &parameter_dependences(
+            &params,
+            [StageDependence::from_source(
+                Uniformity::InvocationVarying,
+                DependenceSource::StageInput,
+            )],
+        ),
     )
     .unwrap();
     assert!(analysis.dependence(one).is_compile_time_constant());
@@ -214,7 +228,7 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
         merge: exit,
         continue_block: header,
     });
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &[]).unwrap();
+    let analysis = StageDependenceAnalysis::for_graph(&graph, &LookupMap::new()).unwrap();
     for value in [current, next, result] {
         assert!(analysis.dependence(value).is_stage_invariant());
         assert!(!analysis.dependence(value).is_loop_invariant(header));
@@ -225,19 +239,24 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
 #[test]
 fn storage_provenance_is_independent_of_index_uniformity() {
     let ty = u32_ty();
-    let array_ty = Type::Constructed(TypeName::Array, vec![]);
+    let array_ty = types::sized_array(4, ty.clone());
+    let params = semantic_params([("storage", array_ty.clone()), ("index", ty.clone())]);
+    let parameter_ids = params.ids().collect::<Vec<_>>();
     let mut graph = EGraph::<Semantic>::new();
-    let storage = graph.add_test_value_parameter(0, array_ty);
-    let varying_index = graph.add_test_value_parameter(1, ty.clone());
+    let storage = graph.add_test_value_parameter(parameter_ids[0], array_ty);
+    let varying_index = graph.add_test_value_parameter(parameter_ids[1], ty.clone());
     let zero = graph.intern_constant(ConstantValue::U32(0), ty.clone());
     let uniform_load = graph.intern_pure(PureOp::Index, smallvec![storage, zero], ty.clone(), None);
     let varying_load = graph.intern_pure(PureOp::Index, smallvec![storage, varying_index], ty, None);
     let analysis = StageDependenceAnalysis::for_graph(
         &graph,
-        &[
-            StageDependence::from_source(Uniformity::StageUniform, DependenceSource::Storage),
-            StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::StageInput),
-        ],
+        &parameter_dependences(
+            &params,
+            [
+                StageDependence::from_source(Uniformity::StageUniform, DependenceSource::Storage),
+                StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::StageInput),
+            ],
+        ),
     )
     .unwrap();
 
@@ -278,7 +297,7 @@ fn invocation_intrinsics_are_varying_without_operands() {
         None,
     );
 
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &[]).unwrap();
+    let analysis = StageDependenceAnalysis::for_graph(&graph, &LookupMap::new()).unwrap();
     assert_eq!(
         analysis.dependence(thread_id).uniformity(),
         Uniformity::InvocationVarying
@@ -294,9 +313,11 @@ fn invocation_intrinsics_are_varying_without_operands() {
 #[test]
 fn repeated_region_captures_are_analyzed_per_use() {
     let ty = u32_ty();
+    let region_params = semantic_params([("lane", ty.clone()), ("capture", ty.clone())]);
+    let region_parameter_ids = region_params.ids().collect::<Vec<_>>();
     let mut region_graph = EGraph::<Semantic>::new();
-    let lane_value = region_graph.add_test_value_parameter(0, ty.clone());
-    let capture = region_graph.add_test_value_parameter(1, ty.clone());
+    let lane_value = region_graph.add_test_value_parameter(region_parameter_ids[0], ty.clone());
+    let capture = region_graph.add_test_value_parameter(region_parameter_ids[1], ty.clone());
     let result = region_graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![lane_value, capture],
@@ -312,7 +333,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
         "map_body".into(),
         Span::dummy(),
         None,
-        semantic_params([("lane", ty.clone()), ("capture", ty.clone())]),
+        region_params,
         by_value_function_result::<WynLanguage>(ty.clone()),
         CallEffects::Pure,
         region_graph,
@@ -328,13 +349,18 @@ fn repeated_region_captures_are_analyzed_per_use() {
 
     let mut enclosing_graph = EGraph::<Semantic>::new();
     let invariant_capture = enclosing_graph.intern_constant(ConstantValue::U32(7), ty.clone());
-    let varying_capture = enclosing_graph.add_test_value_parameter(0, ty);
+    let enclosing_params = semantic_params([("capture", ty.clone())]);
+    let varying_capture =
+        enclosing_graph.add_test_value_parameter(enclosing_params.ids().next().unwrap(), ty);
     let enclosing = StageDependenceAnalysis::for_graph(
         &enclosing_graph,
-        &[StageDependence::from_source(
-            Uniformity::InvocationVarying,
-            DependenceSource::StageInput,
-        )],
+        &parameter_dependences(
+            &enclosing_params,
+            [StageDependence::from_source(
+                Uniformity::InvocationVarying,
+                DependenceSource::StageInput,
+            )],
+        ),
     )
     .unwrap();
 

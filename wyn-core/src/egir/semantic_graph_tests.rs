@@ -4,8 +4,8 @@ use crate::egir;
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::soac::screma;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, SegBody, Semantic,
-    SoacEffect, SoacOwnership, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, OperandRef, Parameters, PureOp, SegBody,
+    Semantic, SoacEffect, SoacOwnership, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types;
@@ -130,8 +130,12 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let array_type = array(i32_type.clone());
     let result_type = Type::Constructed(TypeName::Tuple(1), vec![array_type.clone()]);
+    let params = Parameters::from_ordered([callable_parameter::<BindingRef, WynLanguage>(
+        "xs".into(),
+        array_type.clone(),
+    )]);
     let mut graph = EGraph::new();
-    let input = graph.add_test_value_parameter(0, array_type.clone());
+    let input = graph.add_test_value_parameter(params.ids().next().unwrap(), array_type.clone());
     let neutral = if neutral_is_bool {
         graph.intern_pure(
             PureOp::Bool(false),
@@ -178,10 +182,7 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
         "malformed_screma".to_string(),
         Span::dummy(),
         None,
-        vec![callable_parameter::<BindingRef, WynLanguage>(
-            "xs".into(),
-            array_type,
-        )],
+        params,
         by_value_function_result::<WynLanguage>(result_type),
         CallEffects::General,
         graph,
@@ -230,7 +231,7 @@ fn verifier_rejects_screma_neutral_type_mismatch() {
 #[test]
 fn scheduled_operations_expose_shared_prelude_inputs() {
     let mut egir = EGraph::<Semantic>::new();
-    let source = egir.add_test_value_parameter(0, Type::Constructed(TypeName::Unit, vec![]));
+    let source = egir.add_block_param(egir.skeleton.entry, Type::Constructed(TypeName::Unit, vec![]));
     append_capturing_map(&mut egir, 10, vec![source, source]);
     append_capturing_map(&mut egir, 11, vec![source]);
 

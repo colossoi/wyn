@@ -360,7 +360,7 @@ fn build_masked_pre(
         result_types.push(count_ty.clone());
     }
     let mut params = lambda_ops::named_parameters(&input_types, "input");
-    params.extend(lambda_ops::named_parameters(&capture_types, "capture"));
+    params.append(lambda_ops::named_parameters(&capture_types, "capture"));
     let mut graph = EGraph::new();
     let args = lambda_ops::function_parameters(&mut graph, &params);
     let mut cursor = input_types.len();
