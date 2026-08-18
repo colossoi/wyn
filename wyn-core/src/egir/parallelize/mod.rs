@@ -206,7 +206,7 @@ fn build_parallel_plan(
     program: ResourcesAllocated,
 ) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
     let analysis = planning::analyze(&program)?;
-    let (mut program, recipes) = analysis.allocate_scratch(program)?;
+    let (mut program, recipes, parallel_scremas) = analysis.allocate_scratch(program)?;
     let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
@@ -216,6 +216,7 @@ fn build_parallel_plan(
         &program.functions,
         flows,
         recipes,
+        parallel_scremas,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
         program.data.core.identities.clone(),
@@ -253,7 +254,7 @@ fn build_serial_plan(
                 .into(),
         ));
     }
-    let recipes = planning::analyze(&program)?.serial_recipes();
+    let (recipes, parallel_scremas) = planning::analyze(&program)?.serial_plan();
     let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
@@ -263,6 +264,7 @@ fn build_serial_plan(
         &program.functions,
         flows,
         recipes,
+        parallel_scremas,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
         program.data.core.identities.clone(),
@@ -289,6 +291,7 @@ struct KernelPlanBuilder<'resources, 'effects> {
     resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
+    parallel_scremas: planning::ParallelScremaPlans,
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut IdSource<EffectToken>,
     generated_callables: Vec<Func<Semantic>>,
@@ -402,13 +405,19 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         functions: &[Func<Semantic>],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
+        parallel_scremas: planning::ParallelScremaPlans,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
         effect_ids: &'effects mut IdSource<EffectToken>,
         identities: super::program::ProgramIdentities,
     ) -> error::Result<Self> {
         let flows = model::ResourceFlowIndex::new(flows);
-        let mut schedule =
-            schedule::KernelPlan::from_descriptor(descriptor, stage_entries, resources, entries)?;
+        let mut schedule = schedule::KernelPlan::from_descriptor(
+            descriptor,
+            stage_entries,
+            resources,
+            entries,
+            &parallel_scremas,
+        )?;
         for entry in entries {
             let source = entry.id;
             let endpoint = CompilerFlowEndpoint::Entry(source);
@@ -421,6 +430,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
             resources,
             flows,
             recipes,
+            parallel_scremas,
             semantic_ids,
             effect_ids,
             generated_callables: Vec::new(),
@@ -492,7 +502,9 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                     "materialization flow references missing requirement {id:?}"
                 ))
             })?;
-            let kernel = self.schedule.add_materialization_before(consumer, id, requirement)?;
+            let parallel_scremas = planning::parallel_scremas_for(&self.parallel_scremas, producer_id)?;
+            let kernel =
+                self.schedule.add_materialization_before(consumer, id, requirement, parallel_scremas)?;
             self.lower_endpoint(CompilerFlowEndpoint::Materialization(id), kernel)?;
             for upstream in self.flows.incoming(producer_id) {
                 ready.insert((*upstream, producer_id));

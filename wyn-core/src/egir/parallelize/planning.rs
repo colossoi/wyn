@@ -5,7 +5,7 @@ use crate::ssa;
 use crate::EntryId;
 use crate::LookupMap;
 use crate::ResourceId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
 
@@ -29,6 +29,54 @@ use super::capabilities::{self, Strategy};
 type Semantic = SemanticFamily<SemanticResourceRef>;
 type EGraph = FamilyGraph<Semantic>;
 type SideEffect = FamilySideEffect<Semantic>;
+
+/// Semantic Scremas selected for parallel execution after optimization and
+/// logical residency have finalized an endpoint graph.
+pub(super) type ParallelScremas = HashSet<SemanticOpId>;
+pub(super) type ParallelScremaPlans = HashMap<CompilerFlowEndpoint, ParallelScremas>;
+
+fn analyze_parallel_scremas(
+    endpoint: CompilerFlowEndpoint,
+    entry: &egir::program::AllocatedEntry,
+) -> ParallelScremas {
+    let semantic_graph =
+        egir::semantic_graph::SemanticGraph::new(&egir::semantic_graph::graph_dependencies(&entry.graph));
+    let mut parallel = HashSet::new();
+    let mut folds = Vec::new();
+    for (_, block) in &entry.graph.skeleton.blocks {
+        for effect in &block.side_effects {
+            let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
+                continue;
+            };
+            let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() else {
+                continue;
+            };
+            if entry.execution_model.is_compute()
+                && (!output_slots.is_empty()
+                    || matches!(endpoint, CompilerFlowEndpoint::Materialization(_)))
+                && semantic_graph.value_consumer_count(owner) == 0
+            {
+                parallel.insert(*owner);
+                if op.form.operator_input_count() != 0 {
+                    folds.push(*owner);
+                }
+            }
+        }
+    }
+    if folds.len() > 1 {
+        parallel.retain(|operation| !folds.contains(operation));
+    }
+    parallel
+}
+
+pub(super) fn parallel_scremas_for(
+    plans: &ParallelScremaPlans,
+    endpoint: CompilerFlowEndpoint,
+) -> Result<&ParallelScremas> {
+    plans.get(&endpoint).ok_or_else(|| {
+        ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no parallel Screma plan"))
+    })
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct LocatedHist<'a> {
@@ -91,7 +139,7 @@ struct RecipeTargets {
 impl RecipeTargets {
     /// Target-relevant sites are classified once on the endpoint projection.
     /// Later output projection only remaps these handles.
-    fn collect(entry: &egir::program::PlannedEntry) -> Self {
+    fn collect(entry: &egir::program::PlannedEntry, parallel: &ParallelScremas) -> Self {
         let mut targets = Self::default();
         for (block, contents) in &entry.graph.skeleton.blocks {
             for (index, effect) in contents.side_effects.iter().enumerate() {
@@ -103,23 +151,21 @@ impl RecipeTargets {
                     {
                         targets.hists.push(site);
                     }
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
-                        screma::SemanticState::Segmented {
-                            placement: screma::Placement::Kernel,
-                            ..
-                        } => targets.kernel_scremas.push(site),
-                        screma::SemanticState::Segmented {
-                            placement: screma::Placement::LaneLocal,
-                            output_slots,
-                            ..
-                        } if !output_slots.is_empty()
-                            && (op.is_reduce() || !op.form.scans.is_empty())
-                            && entry.execution_model.is_compute() =>
-                        {
-                            targets.promoted_folds.push(site);
+                    SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) => {
+                        match op.semantic_state() {
+                            screma::SemanticState::Segmented { .. } if parallel.contains(owner) => {
+                                targets.kernel_scremas.push(site);
+                            }
+                            screma::SemanticState::Segmented { output_slots, .. }
+                                if !output_slots.is_empty()
+                                    && (op.is_reduce() || !op.form.scans.is_empty())
+                                    && entry.execution_model.is_compute() =>
+                            {
+                                targets.promoted_folds.push(site);
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -358,6 +404,7 @@ impl ScratchBindings {
 pub(super) struct AnalyzedPlan {
     recipes: RecipeIndex<AnalyzedRecipe>,
     requests: Vec<ScratchRequest>,
+    parallel_scremas: ParallelScremaPlans,
 }
 
 impl AnalyzedPlan {
@@ -366,7 +413,7 @@ impl AnalyzedPlan {
     pub(super) fn allocate_scratch(
         mut self,
         program: ResourcesAllocated,
-    ) -> Result<(ResourcesAllocated, RecipeIndex)> {
+    ) -> Result<(ResourcesAllocated, RecipeIndex, ParallelScremaPlans)> {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
@@ -397,11 +444,15 @@ impl AnalyzedPlan {
         Ok((
             Program::from_parts(functions, externs, entry_points, constants, data, global_context),
             self.recipes.bind_scratch(&bindings),
+            self.parallel_scremas,
         ))
     }
 
-    pub(super) fn serial_recipes(self) -> RecipeIndex {
-        RecipeIndex::serial(self.recipes.required_elements)
+    pub(super) fn serial_plan(self) -> (RecipeIndex, ParallelScremaPlans) {
+        (
+            RecipeIndex::serial(self.recipes.required_elements),
+            self.parallel_scremas,
+        )
     }
 }
 
@@ -432,16 +483,24 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
+    let parallel_scremas = allocation::entries_with_endpoints(inner)
+        .map(|(endpoint, entry)| (endpoint, analyze_parallel_scremas(endpoint, entry)))
+        .collect::<ParallelScremaPlans>();
     for (endpoint, entry) in allocation::entries_with_endpoints(inner) {
+        let parallel = parallel_scremas_for(&parallel_scremas, endpoint)?;
         let (plan, endpoint_requests, required_elements) =
-            analyze_endpoint(inner, entry, endpoint, &inner.data.core.resources)?;
+            analyze_endpoint(inner, entry, endpoint, &inner.data.core.resources, parallel)?;
         recipes.insert(endpoint, plan)?;
         if let Some(count) = required_elements {
             recipes.required_elements.insert(endpoint, count);
         }
         requests.extend(endpoint_requests);
     }
-    Ok(AnalyzedPlan { recipes, requests })
+    Ok(AnalyzedPlan {
+        recipes,
+        requests,
+        parallel_scremas,
+    })
 }
 
 fn analyze_endpoint(
@@ -449,9 +508,11 @@ fn analyze_endpoint(
     entry: &egir::program::AllocatedEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
+    parallel_scremas: &ParallelScremas,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
-    let projected = egir::program::PlannedEntry::project(entry)?;
-    let targets = RecipeTargets::collect(&projected);
+    let projected = egir::program::PlannedEntry::project(entry)?
+        .with_parallel_scremas(parallel_scremas.iter().copied());
+    let targets = RecipeTargets::collect(&projected, parallel_scremas);
     let required_elements = fixed_required_elements(&projected, &targets);
     let split = match endpoint {
         CompilerFlowEndpoint::Entry(_) => super::partition_entry_output_domains(&projected)?,

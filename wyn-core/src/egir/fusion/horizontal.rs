@@ -90,17 +90,13 @@ fn sibling_fusable(
         return false;
     };
     let screma::SemanticState::Segmented {
-        space: left_space,
-        placement: _,
-        ..
+        space: left_space, ..
     } = left_op.semantic_state()
     else {
         return false;
     };
     let screma::SemanticState::Segmented {
-        space: right_space,
-        placement: _,
-        ..
+        space: right_space, ..
     } = right_op.semantic_state()
     else {
         return false;
@@ -160,7 +156,6 @@ pub(super) struct ScremaParts {
     pub(super) id: egir::program::SemanticOpId,
     pub(super) op: screma::Op<Semantic>,
     pub(super) space: egir::types::SegSpace,
-    pub(super) placement: screma::Placement,
     pub(super) output_slots: Vec<OutputSlotId>,
     pub(super) resources: Vec<SegResourceAccess>,
     pub(super) results: Vec<ResultBinding<Type<TypeName>>>,
@@ -175,7 +170,6 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
     };
     let screma::SemanticState::Segmented {
         space,
-        placement,
         output_slots,
         resources,
     } = op.semantic_state()
@@ -196,7 +190,6 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         id: *id,
         op: op.clone(),
         space: space.clone(),
-        placement: *placement,
         output_slots: output_slots.clone(),
         resources: resources.clone(),
         results,
@@ -286,13 +279,6 @@ fn build_plan(
         result_state,
         state: screma::SemanticState::Segmented {
             space: left.space,
-            placement: if left.placement == screma::Placement::Kernel
-                || right.placement == screma::Placement::Kernel
-            {
-                screma::Placement::Kernel
-            } else {
-                screma::Placement::LaneLocal
-            },
             output_slots,
             resources,
         },

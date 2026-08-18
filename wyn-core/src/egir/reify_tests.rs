@@ -29,7 +29,6 @@ fn raw_map() -> SideEffect<Raw> {
 fn facts() -> Facts {
     Facts {
         space: SegSpace::new(SegExtent::Fixed(1)),
-        placement: screma::Placement::LaneLocal,
         output_slots: vec![],
         resources: vec![],
         entry: false,

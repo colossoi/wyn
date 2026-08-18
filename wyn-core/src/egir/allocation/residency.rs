@@ -1260,7 +1260,6 @@ fn configure_materialized_soac(
         .collect::<Vec<_>>();
 
     let screma::SemanticState::Segmented {
-        placement,
         output_slots,
         resources,
         ..
@@ -1268,7 +1267,6 @@ fn configure_materialized_soac(
     else {
         return Err("fixed materialization Screma was not segmented".to_string());
     };
-    *placement = screma::Placement::Kernel;
     *output_slots = (0..array_outputs.len()).map(super::super::ir::OutputSlotId).collect();
     resources.retain(|access| {
         access.access == ResourceAccess::Read || !source_output_resources.contains(&access.resource.0)

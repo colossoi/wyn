@@ -94,6 +94,7 @@ pub(super) fn project_kernel_body(
         source.params.clone(),
         result,
     )
+    .map(|entry| entry.with_parallel_scremas(source.parallel_scremas().iter().copied()))
 }
 
 fn project_kernel_body_effects(
@@ -147,7 +148,8 @@ fn project_kernel_body_effects(
         resource_declarations,
         source.params.clone(),
         result,
-    )?;
+    )?
+    .with_parallel_scremas(source.parallel_scremas().iter().copied());
     entry.retain_parameter_indices(&retained_parameters);
     entry.resource_declarations.retain(|declaration| match declaration.role {
         interface::StorageRole::Input | interface::StorageRole::Output => {

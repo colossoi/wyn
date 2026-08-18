@@ -40,7 +40,6 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                 }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(egir::types::SegExtent::Fixed(1)),
-                    placement: screma::Placement::LaneLocal,
                     output_slots: vec![],
                     resources: vec![],
                 },

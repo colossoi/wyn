@@ -498,12 +498,6 @@ impl PhaseResults for Vec<ResultState> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Placement {
-    Kernel,
-    LaneLocal,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RawState;
 
@@ -512,7 +506,6 @@ pub enum SemanticState<R> {
     Serial,
     Segmented {
         space: SegSpace<R>,
-        placement: Placement,
         output_slots: Vec<OutputSlotId>,
         resources: Vec<SegResourceAccess<R>>,
     },

@@ -548,6 +548,7 @@ impl KernelPlan {
         stage_entries: &[Vec<EntryId>],
         resources: &LogicalResourceArena,
         entries: &[egir::program::AllocatedEntry],
+        parallel_screma_plans: &super::planning::ParallelScremaPlans,
     ) -> Result<Self, String> {
         let mut seeded = vec![None; entries.len()];
         let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
@@ -588,6 +589,11 @@ impl KernelPlan {
                         group: PhaseGroup::Pipeline(pipeline_id),
                         order: stage_order,
                     },
+                    super::planning::parallel_scremas_for(
+                        parallel_screma_plans,
+                        CompilerFlowEndpoint::Entry(source),
+                    )
+                    .map_err(|error| error.to_string())?,
                 )?;
                 let id = KernelId(phases.len() as u32);
                 record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
@@ -649,6 +655,11 @@ impl KernelPlan {
                     KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                     "serial_compute",
                     placement,
+                    super::planning::parallel_scremas_for(
+                        parallel_screma_plans,
+                        CompilerFlowEndpoint::Entry(source),
+                    )
+                    .map_err(|error| error.to_string())?,
                 )
             } else {
                 graphics_passthrough_phase(source, entry, placement)
@@ -731,6 +742,7 @@ impl KernelPlan {
         consumer: KernelId,
         requirement_id: MaterializationId,
         requirement: &MaterializationRequirement,
+        parallel_scremas: &super::planning::ParallelScremas,
     ) -> Result<KernelId, KernelMutationError> {
         let consumer_placement = self.phase(consumer).placement;
         let generated_pipeline = consumer_placement.group.is_graphics().then(|| {
@@ -761,8 +773,14 @@ impl KernelPlan {
         };
         let dependencies = self.phase(consumer).dependencies.clone();
         let source_entry = self.phase(consumer).source_entry;
-        let phase =
-            phase_from_materialization(requirement_id, requirement, source_entry, dependencies, placement)?;
+        let phase = phase_from_materialization(
+            requirement_id,
+            requirement,
+            source_entry,
+            dependencies,
+            placement,
+            parallel_scremas,
+        )?;
         if let Some((_, pipeline)) = generated_pipeline {
             self.next_pipeline_order += 1;
             self.pipelines.push(pipeline);
@@ -1115,6 +1133,7 @@ fn phase_from_entry(
     mut selection: KernelDispatch,
     label: &'static str,
     placement: PhasePlacement,
+    parallel_scremas: &super::planning::ParallelScremas,
 ) -> Result<KernelPhase, String> {
     if !selection.explicit {
         if let Some(domain) = storage_image_domain_inputs(&entry.inputs, &selection.domain) {
@@ -1122,7 +1141,7 @@ fn phase_from_entry(
         }
     }
     let output_routes = output_projection(entry);
-    let body = PlannedEntry::project(entry)?;
+    let body = PlannedEntry::project(entry)?.with_parallel_scremas(parallel_scremas.iter().copied());
     let mut phase = phase_from_body(
         source_entry.map(CompilerFlowEndpoint::Entry),
         source_entry,
@@ -1162,12 +1181,13 @@ fn phase_from_materialization(
     source_entry: Option<EntryId>,
     dependencies: Vec<KernelId>,
     placement: PhasePlacement,
+    parallel_scremas: &super::planning::ParallelScremas,
 ) -> Result<KernelPhase, String> {
     let kind = requirement.kind();
     let domain =
         requirement.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
     let spec = PhaseSpec::compute(
-        PlannedEntry::project(requirement.entry())?,
+        PlannedEntry::project(requirement.entry())?.with_parallel_scremas(parallel_scremas.iter().copied()),
         KernelDispatch::explicit(domain),
         match kind {
             MaterializationKind::SharedArray => "shared_array_materialization",

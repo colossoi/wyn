@@ -18,7 +18,7 @@ pub type Segmented = super::program::Program<
 >;
 
 use crate::ssa;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 use polytype::Type;
@@ -41,7 +41,6 @@ use super::types::{
 
 struct Facts {
     space: SegSpace<BindingRef>,
-    placement: screma::Placement,
     output_slots: Vec<OutputSlotId>,
     resources: Vec<SegResourceAccess<BindingRef>>,
     entry: bool,
@@ -156,23 +155,16 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             form,
             result_state,
             ..
-        }) => {
-            let mut placement = facts.placement;
-            if placement == screma::Placement::Kernel && facts.output_slots.is_empty() {
-                placement = screma::Placement::LaneLocal;
-            }
-            Soac::Screma(screma::Op {
-                inputs,
-                form,
-                result_state,
-                state: screma::SemanticState::Segmented {
-                    space: facts.space,
-                    placement,
-                    output_slots: facts.output_slots,
-                    resources: facts.resources,
-                },
-            })
-        }
+        }) => Soac::Screma(screma::Op {
+            inputs,
+            form,
+            result_state,
+            state: screma::SemanticState::Segmented {
+                space: facts.space,
+                output_slots: facts.output_slots,
+                resources: facts.resources,
+            },
+        }),
         Soac::Filter(op) => {
             let output = match op.state.output {
                 filter::RawOutput::Local { capacity, ownership } => {
@@ -217,73 +209,30 @@ fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
         .iter()
         .flat_map(|(block, contents)| {
             contents.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
-                semantic_facts(graph, None, effect, screma::Placement::LaneLocal)
-                    .map(|facts| ((block, index), facts))
+                semantic_facts(graph, None, effect).map(|facts| ((block, index), facts))
             })
         })
         .collect()
 }
 
 fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
-    let consumed = soac_consumed_nodes(&entry.graph);
-    let kernel_scope = entry.execution_model.is_compute();
-    let mut facts_by_location = HashMap::new();
-    for (block, contents) in &entry.graph.skeleton.blocks {
-        for (index, effect) in contents.side_effects.iter().enumerate() {
-            let placement = if kernel_scope
-                && !effect
-                    .result
-                    .as_ref()
-                    .is_some_and(|result| result.values().iter().any(|value| consumed.contains(value)))
-            {
-                screma::Placement::Kernel
-            } else {
-                screma::Placement::LaneLocal
-            };
-            if let Some(facts) = semantic_facts(&entry.graph, Some(entry), effect, placement) {
-                facts_by_location.insert((block, index), facts);
-            }
-        }
-    }
-
-    let kernel_accumulators = entry
+    entry
         .graph
         .skeleton
         .blocks
         .iter()
         .flat_map(|(block, contents)| {
-            contents.side_effects.iter().enumerate().map(move |(index, effect)| (block, index, effect))
+            contents.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
+                semantic_facts(&entry.graph, Some(entry), effect).map(|facts| ((block, index), facts))
+            })
         })
-        .filter(|(block, index, effect)| {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-                return false;
-            };
-            op.form.operator_input_count() != 0
-                && matches!(
-                    facts_by_location.get(&(*block, *index)),
-                    Some(Facts {
-                        placement: screma::Placement::Kernel,
-                        ..
-                    })
-                )
-        })
-        .map(|(block, index, _)| (block, index))
-        .collect::<Vec<_>>();
-    if kernel_accumulators.len() > 1 {
-        for location in kernel_accumulators {
-            if let Some(facts) = facts_by_location.get_mut(&location) {
-                facts.placement = screma::Placement::LaneLocal;
-            }
-        }
-    }
-    facts_by_location
+        .collect()
 }
 
 fn semantic_facts(
     graph: &EGraph<Raw>,
     entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
-    requested_placement: screma::Placement,
 ) -> Option<Facts> {
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
@@ -305,7 +254,6 @@ fn semantic_facts(
     };
     Some(Facts {
         space: space(graph, entry, effect, inputs),
-        placement: requested_placement,
         output_slots,
         resources,
         entry: entry.is_some(),
@@ -528,18 +476,6 @@ fn semantic_resources(
 
 fn read_resources(graph: &EGraph<Raw>, effect: &SideEffect<Raw>) -> Vec<SegResourceAccess<BindingRef>> {
     graph_ops::read_storage_resources(graph, referenced_nodes(effect))
-}
-
-fn soac_consumed_nodes(graph: &EGraph<Raw>) -> HashSet<ValueId> {
-    let roots = graph
-        .skeleton
-        .blocks
-        .iter()
-        .flat_map(|(_, block)| &block.side_effects)
-        .filter(|effect| matches!(effect.kind, SideEffectKind::Soac(SoacEffect(_, _))))
-        .flat_map(referenced_nodes)
-        .collect::<Vec<_>>();
-    graph_ops::value_producer_closure(graph, roots).nodes
 }
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<ValueId> {

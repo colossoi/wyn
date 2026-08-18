@@ -538,13 +538,6 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
         result_state,
         state: screma::SemanticState::Segmented {
             space: if candidate.transform.is_identity() { producer.space } else { consumer.space },
-            placement: if producer.placement == screma::Placement::Kernel
-                || consumer.placement == screma::Placement::Kernel
-            {
-                screma::Placement::Kernel
-            } else {
-                screma::Placement::LaneLocal
-            },
             output_slots,
             resources,
         },

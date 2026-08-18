@@ -1045,21 +1045,46 @@ impl AllocatedEntry {
 
 /// A complete, fresh entry projection owned by a kernel recipe.
 #[derive(Clone, Debug)]
-pub struct PlannedEntry<P: Family = Semantic<SemanticResourceRef>>(
-    super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
-);
+pub struct PlannedEntry<P: Family = Semantic<SemanticResourceRef>> {
+    entry: super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
+    parallel_scremas: HashSet<SemanticOpId>,
+}
 
 impl<P: Family> PlannedEntry<P> {
     pub(crate) fn new(
         entry: super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
     ) -> Self {
-        Self(entry)
+        Self {
+            entry,
+            parallel_scremas: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn with_parallel_scremas(
+        mut self,
+        operations: impl IntoIterator<Item = SemanticOpId>,
+    ) -> Self {
+        self.parallel_scremas = operations.into_iter().collect();
+        self
+    }
+
+    pub(crate) fn parallel_scremas(&self) -> &HashSet<SemanticOpId> {
+        &self.parallel_scremas
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
+        HashSet<SemanticOpId>,
+    ) {
+        (self.entry, self.parallel_scremas)
     }
 
     pub(crate) fn into_inner(
         self,
     ) -> super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage> {
-        self.0
+        self.entry
     }
 }
 
@@ -1067,13 +1092,13 @@ impl<P: Family> Deref for PlannedEntry<P> {
     type Target = super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.entry
     }
 }
 
 impl<P: Family> std::ops::DerefMut for PlannedEntry<P> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.entry
     }
 }
 

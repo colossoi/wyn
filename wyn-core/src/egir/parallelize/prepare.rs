@@ -83,10 +83,18 @@ pub(super) fn entry(
     filter_plan: Option<ParallelFilterPlan>,
     hist_plan: Option<ParallelHistPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
+    let (entry, parallel_scremas) = entry.into_parts();
     entry
-        .into_inner()
         .try_map_phase(|_, _, id, soac| {
-            schedule_soac_with_mode(id, soac, filter_plan, hist_plan.clone(), false).map(|soac| (id, soac))
+            schedule_soac_with_mode(
+                id,
+                soac,
+                parallel_scremas.contains(&id),
+                filter_plan,
+                hist_plan.clone(),
+                false,
+            )
+            .map(|soac| (id, soac))
         })
         .map(PlannedEntry::new)
 }
@@ -96,13 +104,14 @@ pub(in crate::egir) fn graph(
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, LookupMap<BlockId, BlockId>), String> {
     graph.try_map_phase(|_, _, id, soac| {
-        schedule_soac_with_mode(id, soac, None, None, serial).map(|soac| (id, soac))
+        schedule_soac_with_mode(id, soac, false, None, None, serial).map(|soac| (id, soac))
     })
 }
 
 fn schedule_soac_with_mode(
     id: super::super::program::SemanticOpId,
     soac: Soac<AllocatedSemantic>,
+    parallel_screma: bool,
     filter_plan: Option<ParallelFilterPlan>,
     hist_plan: Option<ParallelHistPlan>,
     serial: bool,
@@ -117,7 +126,7 @@ fn schedule_soac_with_mode(
             inputs,
             form,
             result_state,
-            state: schedule_screma_state(state, serial),
+            state: schedule_screma_state(state, parallel_screma, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {
             let filter::SemanticState { space, output, .. } = state;
@@ -170,22 +179,20 @@ fn schedule_soac_with_mode(
 
 fn schedule_screma_state(
     state: screma::SemanticState<SemanticResourceRef>,
+    parallel: bool,
     serial: bool,
 ) -> screma::ScheduledState<SemanticResourceRef> {
     match state {
         screma::SemanticState::Serial => screma::ScheduledState::Serial,
         screma::SemanticState::Segmented {
             space,
-            placement,
             output_slots,
             resources,
-        } if !serial && placement == screma::Placement::Kernel => {
-            screma::ScheduledState::Segmented(screma::Segmented {
-                space,
-                output_slots,
-                resources,
-            })
-        }
+        } if !serial && parallel => screma::ScheduledState::Segmented(screma::Segmented {
+            space,
+            output_slots,
+            resources,
+        }),
         screma::SemanticState::Segmented { .. } => screma::ScheduledState::Serial,
     }
 }

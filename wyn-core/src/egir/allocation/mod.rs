@@ -328,7 +328,6 @@ fn allocate_soac(
                 screma::SemanticState::Serial => screma::SemanticState::Serial,
                 screma::SemanticState::Segmented {
                     space,
-                    placement,
                     output_slots,
                     resources: accesses,
                 } => {
@@ -339,7 +338,6 @@ fn allocate_soac(
                     })?;
                     screma::SemanticState::Segmented {
                         space: segment.space,
-                        placement,
                         output_slots: segment.output_slots,
                         resources: segment.resources,
                     }

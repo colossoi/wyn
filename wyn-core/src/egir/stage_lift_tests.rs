@@ -351,7 +351,6 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                 }],
                 state: screma::SemanticState::Segmented {
                     space: SegSpace::new(SegExtent::Fixed(64)),
-                    placement: screma::Placement::Kernel,
                     output_slots: vec![],
                     resources: vec![],
                 },

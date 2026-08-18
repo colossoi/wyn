@@ -612,7 +612,6 @@ fn rewrite_count_only(
                         }],
                         state: screma::SemanticState::Segmented {
                             space: filter.space.clone(),
-                            placement: screma::Placement::LaneLocal,
                             output_slots: vec![],
                             resources: vec![],
                         },

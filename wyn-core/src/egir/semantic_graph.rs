@@ -119,6 +119,16 @@ where
     dependencies
 }
 
+/// Build semantic dependencies for one finalized graph.
+pub(crate) fn graph_dependencies<R>(graph: &EGraph<Semantic<R>>) -> Vec<SemanticDependency>
+where
+    R: GraphResource + Copy + Ord,
+{
+    let mut dependencies = Vec::new();
+    collect_graph_dependencies("", graph, &mut dependencies);
+    dependencies
+}
+
 /// Every edge runs between two ops of `graph`, so duplicates can only arise
 /// within one scope and `seen` need not outlive this call.
 fn collect_graph_dependencies<R>(
