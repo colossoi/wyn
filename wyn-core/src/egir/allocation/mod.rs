@@ -266,15 +266,24 @@ fn allocate_type_resources(
     error.map_or(Ok(()), Err)
 }
 
-fn allocate_filter_length(
+fn allocate_filter_publication(
     owner: super::program::SemanticOpId,
     output: filter::Output<SemanticResourceRef>,
+    output_slots: &[super::program::OutputSlotId],
+    accesses: &mut Vec<super::types::SegResourceAccess<SemanticResourceRef>>,
     resources: &RefCell<LogicalResourceArena>,
 ) -> filter::Output<SemanticResourceRef> {
     let filter::Output::Runtime(mut runtime) = output else {
         return output;
     };
-    if runtime.length == filter::RuntimeLength::Required {
+    if !output_slots.is_empty() {
+        if matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
+            runtime.backing = accesses
+                .iter()
+                .find(|access| access.access != crate::ResourceAccess::Read)
+                .map(|access| filter::RuntimeBacking::Bound(access.resource))
+                .unwrap_or(filter::RuntimeBacking::Deferred);
+        }
         let id = resources.borrow_mut().allocate(
             ResourceOrigin::Compiler(CompilerResource::new(
                 CompilerResourceKind::FilterLenCell,
@@ -284,7 +293,14 @@ fn allocate_filter_length(
             Type::Constructed(TypeName::UInt(32), Vec::new()),
             LogicalSize::FixedBytes(4),
         );
-        runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(id));
+        let length = SemanticResourceRef(id);
+        runtime.length = filter::RuntimeLength::Stored(length);
+        accesses.push(super::types::SegResourceAccess {
+            resource: length,
+            access: crate::ResourceAccess::Write,
+        });
+        accesses.sort_by_key(|access| access.resource);
+        accesses.dedup_by_key(|access| access.resource);
     }
     filter::Output::Runtime(runtime)
 }
@@ -330,13 +346,30 @@ fn allocate_soac(
                 }
             },
         }),
-        Soac::Filter(filter::Op { body, state }) => Soac::Filter(filter::Op {
-            body: remap.filter_body(body),
-            state: filter::SemanticState {
-                space: remap.space(state.space)?,
-                output: allocate_filter_length(owner, remap.filter_output(state.output)?, resources),
-            },
-        }),
+        Soac::Filter(filter::Op { body, state }) => {
+            let segment = remap.segment(screma::Segmented {
+                space: state.space,
+                output_slots: state.output_slots,
+                resources: state.resources,
+            })?;
+            let mut accesses = segment.resources;
+            let output = allocate_filter_publication(
+                owner,
+                remap.filter_output(state.output)?,
+                &segment.output_slots,
+                &mut accesses,
+                resources,
+            );
+            Soac::Filter(filter::Op {
+                body: remap.filter_body(body),
+                state: filter::SemanticState {
+                    space: segment.space,
+                    output,
+                    output_slots: segment.output_slots,
+                    resources: accesses,
+                },
+            })
+        }
         Soac::Hist(hist::Op { inputs, form, state }) => Soac::Hist(hist::Op {
             inputs,
             form: remap.hist_form(form),
@@ -675,6 +708,20 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
             }
             check_size(&declaration.size)?;
         }
+        for (slot, output) in entry.outputs.iter().enumerate() {
+            if output.routes.is_empty() {
+                return Err(format!(
+                    "entry `{}` output slot {slot} has no explicit route",
+                    entry.name
+                ));
+            }
+            if output.routes.iter().any(|route| route.writers.is_empty()) {
+                return Err(format!(
+                    "entry `{}` output slot {slot} has a source value but no producer",
+                    entry.name
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -715,6 +762,7 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
                                         backing: filter::RuntimeBacking::Bound(scratch),
                                         ..
                                     }),
+                                ..
                             },
                     }),
                 )) = &effect.kind

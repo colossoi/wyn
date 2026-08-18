@@ -3,9 +3,11 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::BindingRef;
 
+use super::super::program::OutputSlotId;
 use super::super::program::SemanticResourceRef;
 use super::super::types::{
-    GraphResource, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
+    GraphResource, SegResourceAccess, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId,
+    WynSoacPhase,
 };
 use super::screma;
 
@@ -26,6 +28,20 @@ pub enum Output<R = BindingRef> {
     Runtime(RuntimeOutput<R>),
 }
 
+/// Filter result requirements before semantic publication is linked. Raw
+/// conversion records only filter-specific facts; storage and cardinality
+/// resources are derived later from output routes and scheduling boundaries.
+#[derive(Clone, Debug)]
+pub enum RawOutput {
+    Local {
+        capacity: Type<TypeName>,
+        ownership: SoacOwnership,
+    },
+    Runtime {
+        capacity: RuntimeCapacity,
+    },
+}
+
 /// Upper bound on a data-dependent result before residency is selected.
 /// Input positions refer to the filter body's inputs and survive producer
 /// fusion.
@@ -39,11 +55,9 @@ pub enum RuntimeCapacity {
     },
 }
 
-/// Whether a variable-cardinality result has storage yet.
-///
-/// Before allocation R is an interface BindingRef, so Bound can only mean a
-/// public interface destination. After allocation R is a SemanticResourceRef
-/// and may name an internal materialization.
+/// Whether a variable-cardinality result has storage yet. Semantic
+/// publication and resource planning—not raw filter conversion—introduce a
+/// bound resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeBacking<R> {
     Deferred,
@@ -64,9 +78,6 @@ pub enum RuntimeLength<R = BindingRef> {
     /// Cardinality is a semantic value carried by the result representation;
     /// it has no independently addressable storage.
     Implicit,
-    /// A scheduling or ABI boundary requires addressable cardinality storage,
-    /// but logical-resource allocation has not assigned it yet.
-    Required,
     /// Logical length stored in scalar backing. Public filter outputs and
     /// compiler-internal runtime-array handoffs use the same representation;
     /// publication decides whether the resource belongs to the host ABI.
@@ -155,14 +166,19 @@ fn lambda_capture_values(lambda: &screma::Lambda) -> impl Iterator<Item = ValueI
     lambda.seg_body().into_iter().flat_map(|body| body.capture_values())
 }
 #[derive(Clone, Debug)]
-pub struct RawState<R> {
-    pub output: Output<R>,
+pub struct RawState {
+    pub output: RawOutput,
 }
 
 #[derive(Clone, Debug)]
 pub struct SemanticState<R> {
     pub space: SegSpace<R>,
     pub output: Output<R>,
+    /// Host-visible slots published by this operation, linked from entry
+    /// routes during semantic reification.
+    pub output_slots: Vec<OutputSlotId>,
+    /// Uniform semantic resource effects, including publication writes.
+    pub resources: Vec<SegResourceAccess<R>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

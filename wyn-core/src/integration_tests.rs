@@ -52,7 +52,6 @@ fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
     let program = compile_thru_tlc(input).expect("compile through TLC");
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program).expect("convert to raw semantic EGIR");
-    let program = egir::realize_outputs(program).expect("realize semantic EGIR outputs");
     egir::reify_soacs(program)
 }
 
@@ -9707,7 +9706,8 @@ entry e(xs: []i32) []i32 = map(|x: i32| rsum(x), xs)
 /// Returning a filtered runtime-sized array from a compute entry. The filter
 /// compacts directly into the user-visible output buffer (sized to the input's
 /// element count), and its surviving count is written to a paired `len` cell
-/// the host reads back. `realize_outputs::retarget_filter_output` wires this.
+/// the host reads back. Reification links the output publication and logical
+/// resource planning binds its representation.
 #[test]
 fn filter_result_as_compute_output_compiles() {
     compile_to_spirv(
@@ -10558,8 +10558,7 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
 
 /// `If`-over-two-retargetable-maps with a runtime-sized output:
 /// TLC-to-EGIR conversion records each branch's `SlotSource` at its block;
-/// `realize_outputs` retargets both Maps into the same
-/// output view. Runtime CFG ensures only one fires per execution
+/// both routes retain the same output slot. Runtime CFG ensures only one fires per execution
 /// path.
 #[test]
 fn compute_if_over_two_maps_compiles_runtime_sized() {
@@ -12491,7 +12490,7 @@ entry filt(xs: []u32) ([]u32, [1]u32) =
 ///      any construction site that bypasses #1.
 ///
 /// What this test pins: compilation surfaces the actionable
-/// `realize_outputs` diagnostic ("runtime-sized array … wrap the
+/// buffer-layout diagnostic ("runtime-sized array … wrap the
 /// producer in a `map`") for this source shape. If we ever teach
 /// the compiler to compile `*[]T with [i] = v` returns directly,
 /// flip the assertion to expect clean success.
@@ -12673,10 +12672,8 @@ entry e(fb: *[]vec4f32) () =
 /// A compute entry may both *return* a Screma result and *consume*
 /// it as a downstream side-effect's array input — here `new_pos` is
 /// the entry's output and also the per-element input the scatter
-/// envelope reads. The rewrite in
-/// `egir::realize_outputs::dispatch::rewrite_sibling_index_consumers`
-/// retargets `new_pos` to the entry-output view and substitutes
-/// `source → view` in the scatter's input-region operand.
+/// envelope reads. Output routing preserves `new_pos` as the publication
+/// source while physicalization binds its concrete destination.
 #[test]
 fn compute_entry_returns_screma_result_and_scatters_through_it() {
     compile_thru_spirv(

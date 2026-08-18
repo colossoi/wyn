@@ -362,6 +362,7 @@ pub(super) fn analyze_filter_candidate(
                 filter_soac::SemanticState {
                     space,
                     output: filter_soac::Output::Runtime(runtime),
+                    ..
                 },
             ..
         }),

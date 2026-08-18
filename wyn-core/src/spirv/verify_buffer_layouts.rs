@@ -8,7 +8,7 @@
 //! wrappers, abstract array variants, composites with a runtime size
 //! at the leaf). Construction sites that produce these typed fields
 //! — there are roughly eight, scattered across the EGIR `from_tlc`,
-//! `realize_outputs`, `parallelize`, and `soac_expand` passes — each
+//! `parallelize`, and `soac_expand` passes — each
 //! does its own ad-hoc normalization. This pass is the single
 //! chokepoint they must implicitly satisfy: it walks every
 //! `EntryInput.ty` / `EntryOutput.ty` / `StorageBindingDecl.elem_ty`
@@ -101,7 +101,7 @@ fn check_buffer_elem(
              element type {:?} has no static size — derived from declared field type {:?}. \
              SPIR-V's `create_storage_buffer` requires a fixed-size element layout. \
              A construction site upstream (likely in `egir::from_tlc`, \
-             `egir::realize_outputs`, `egir::parallelize`, or `egir::soac_expand`) is \
+             `egir::parallelize`, or `egir::soac_expand`) is \
              handing through a view-wrapped or composite-element type that didn't get \
              reduced to its concrete leaf. See `spirv/verify_buffer_layouts.rs` for \
              context.",

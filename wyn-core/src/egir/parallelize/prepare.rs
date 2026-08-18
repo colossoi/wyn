@@ -120,7 +120,7 @@ fn schedule_soac_with_mode(
             state: schedule_screma_state(state, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {
-            let filter::SemanticState { space, output } = state;
+            let filter::SemanticState { space, output, .. } = state;
             let state = match filter_plan {
                 None => filter::ScheduledState::Loop {
                     space,

@@ -49,7 +49,7 @@ Several rows below are composite entry points:
   user definitions;
 - `tlc::defunctionalize` composes closure conversion, higher-order
   specialization, and closure-call lowering;
-- `to_egraph`, `egir::realize_outputs`, and `egir::optimize_semantics` each
+- `to_egraph`, `egir::reify_soacs`, and `egir::optimize_semantics` each
   orchestrate the smaller construction, reconciliation, rewrite, lifting, and
   verification steps named in their table descriptions;
 - `egir::plan_logical_resources` and `egir::plan` orchestrate resource
@@ -164,9 +164,8 @@ Each notes how it's enforced; when you move a pass, check it here.
 
 | Pass | Description |
 |------|-------------|
-| `to_egraph` -> `egir::from_tlc::convert_program` | Build entry metadata with `pipeline_seed::build`, then convert TLC definitions and entries to semantic e-graphs with stable output routes; no scheduling or physical resource choice occurs here |
-| `egir::realize_outputs` | Materialize declared output writes, run `reconcile::reconcile_representation_drift` through aggregates and call captures, and clear compute return values |
-| `egir::reify_soacs` | Reify every reachable raw map/reduce/scan Screma as a semantic SegMap/SegRed/SegScan with authoritative spaces, bodies, captures, routes, effects, placement, and dependencies |
+| `to_egraph` -> `egir::from_tlc::convert_program` | Build complete entry interfaces, output routes, and ABI size policies while converting TLC definitions and entries to raw e-graphs; no scheduling or physical resource choice occurs here |
+| `egir::reify_soacs` | Privately link output routes to their semantic producers, then reify every reachable raw SOAC with authoritative spaces, bodies, captures, uniform publication/resource effects, placement, and dependencies |
 | `egir::optimize_semantics` | Canonicalize resource accesses; iterate dead-SegOp elimination and conflict-aware fusion to a fixpoint; run `stage_lift::lift_stage_uniform_values`; verify the semantic dependency graph |
 | `egir::plan_logical_resources` | Classify compiler resources; run `destinations::resolve_destinations` and `residency::resolve_residency`; infer scratch sizes; strip compiler-only ABI entries; verify logical resources |
 | `egir::plan` | Select target-aware serial/parallel recipes, add selected work buffers, split and project physical entries, allocate bindings, validate the physical program and kernel plan, and publish the descriptor |
@@ -180,7 +179,7 @@ Each notes how it's enforced; when you move a pass, check it here.
 
 The EGIR order is also load-bearing:
 
-- **`realize_outputs` before `reify_soacs`** - output routes must become authoritative writes before raw SOACs are wrapped as segmented operations.
+- **`from_tlc` before `reify_soacs`** - conversion constructs every declared output route; reification then links those routes against the completed graph before constructing semantic SOAC state.
 - **`reify_soacs` before `optimize_semantics`** - fusion legality depends on explicit domains, semantic operation IDs, effects, and dependency edges.
 - **`optimize_semantics` before `plan_logical_resources`** - residency and uniqueness resolution use the final fused graph's liveness and demands.
 - **`plan_logical_resources` before `plan`** - target scheduling consumes the final semantic residency manifest, then transactionally adds recipe-owned work buffers before choosing bindings, dispatches, and physical entries.
@@ -288,10 +287,11 @@ to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
   inlining didn't fold into a compute entry) errors — only an entry owns a
   descriptor set to host the scratch buffer; `from_tlc::convert_function`
   guards this.
-- **`filter` as a compute output**: `realize_outputs::retarget_filter_output`
-  makes the filter compact directly into the entry's output buffer and writes
-  the surviving count to a **paired `u32` length cell** (`Fixed{4}`,
-  repurposed from the scratch binding) the host reads back alongside the data.
+- **`filter` as a compute output**: conversion gives the route a host output
+  binding and `LikeInput` capacity policy. Reification records that publication
+  uniformly as an output slot plus resource write; logical resource planning
+  then binds the filter to that output and allocates the paired **`u32` length
+  cell** (`Fixed{4}`) read back by the host.
 
 **Parallelization status.** Semantic EGIR folds non-escaping filters into
 masked reduction steps; `length` becomes one shared count reduction, so no

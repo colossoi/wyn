@@ -350,7 +350,7 @@ impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type SoacId = ();
     type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::RawState;
-    type FilterState = filter::RawState<R>;
+    type FilterState = filter::RawState;
     type HistState = hist::RawState;
 }
 

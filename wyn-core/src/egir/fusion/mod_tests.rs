@@ -11,7 +11,6 @@ fn reified(source: &str) -> egir::reify::Segmented {
     let program = compile_thru_tlc(source).expect("compile through TLC");
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program).expect("convert to raw EGIR");
-    let program = egir::realize_outputs(program).expect("realize EGIR outputs");
     egir::reify_soacs(program)
 }
 

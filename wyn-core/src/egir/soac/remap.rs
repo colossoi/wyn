@@ -116,7 +116,6 @@ where
                 },
                 length: match runtime.length {
                     filter::RuntimeLength::Implicit => filter::RuntimeLength::Implicit,
-                    filter::RuntimeLength::Required => filter::RuntimeLength::Required,
                     filter::RuntimeLength::Stored(resource) => {
                         filter::RuntimeLength::Stored(self.resource(resource)?)
                     }

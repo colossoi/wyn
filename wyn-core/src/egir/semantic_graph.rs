@@ -15,7 +15,7 @@ use crate::types::TypeExt;
 use super::graph_ops;
 use super::ir::{GraphResource, ProgramShape};
 use super::program::{Program, SemanticOpId};
-use super::soac::{filter, hist, screma};
+use super::soac::{hist, screma};
 use super::types::{
     EGraph, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite, Soac,
     SoacEffect, ValueId,
@@ -148,29 +148,7 @@ fn collect_graph_dependencies<R>(
                         screma::SemanticState::Serial => read_resources(graph, effect),
                         screma::SemanticState::Segmented { resources, .. } => resources.clone(),
                     },
-                    Soac::Filter(op) => {
-                        let mut resources = read_resources(graph, effect);
-                        let bindings: Vec<_> = match &op.state.output {
-                            filter::Output::Local { .. } => Vec::new(),
-                            filter::Output::Runtime(runtime) => {
-                                let mut bindings = Vec::new();
-                                if let filter::RuntimeBacking::Bound(backing) = runtime.backing {
-                                    bindings.push(backing);
-                                }
-                                if let filter::RuntimeLength::Stored(length) = runtime.length {
-                                    bindings.push(length);
-                                }
-                                bindings
-                            }
-                        };
-                        for binding in bindings {
-                            resources.push(SegResourceAccess {
-                                resource: binding,
-                                access: ResourceAccess::Write,
-                            });
-                        }
-                        resources
-                    }
+                    Soac::Filter(op) => op.state.resources.clone(),
                     Soac::Hist(op) => {
                         let mut resources = read_resources(graph, effect);
                         for destination in op

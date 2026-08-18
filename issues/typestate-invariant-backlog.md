@@ -75,13 +75,14 @@ unrepresentable in EGIR. **Blast radius:** medium, confined to EGIR + the
 boundary. Also subsumes the `soa.rs` array-field `.expect("Array has …")` cluster
 (`soa.rs:35-38`) via an `as_array() -> Option<ArrayType>` accessor.
 
-## 6. `realize_outputs` postcondition — debug-only validator → proof token
+## 6. Output-route completeness — enforced at construction
 
-**Invariant:** after `realize_outputs`, no runtime-sized `Composite` array is
-reachable from entry outputs/operands. **Enforced by:** `realize_outputs/verify.rs:38`
-`check()`, gated on `cfg!(debug_assertions)`. **Fix:** a marker/newtype on the
-graph proving the pass ran (constructor only reachable through `realize_outputs`).
-**Blast radius:** small, localized post-pass.
+**Invariant:** every declared entry output has a route after TLC conversion,
+and every route has linked producer provenance after semantic reification.
+**Enforced by:** `from_tlc::complete_entry_outputs`, private producer linking
+inside `reify_soacs`, and the allocated-resource verifier. The former public
+`realize_outputs` pass was removed because its `Converted -> Converted`
+signature did not encode a meaningful boundary.
 
 ## 7. CFG reachability — `domtree` `.expect()` with no skeleton validator
 

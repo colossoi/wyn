@@ -35,7 +35,6 @@ fn compile_via_egir(src: &str) -> ssa::stage::Elaborated {
     let tlc = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src));
     let program = convert_program(&tlc, IdSource::<u32>::new(), IdSource::new())
         .expect("egir::from_tlc conversion failed");
-    let program = egir::realize_outputs(program).expect("egir::realize_outputs failed");
     let program = egir::reify_soacs(program);
     let program = egir::optimize_semantics(program);
     let program = egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
@@ -491,6 +490,90 @@ entry vertex_main() vec4f32 =
 "#,
     );
     assert!(!program.entry_points.is_empty(), "Should have entry points");
+}
+
+#[test]
+fn conversion_completes_output_routes_and_filter_abi_policy() {
+    use crate::pipeline_descriptor::BufferLen;
+
+    let source = r#"
+entry evens(xs: []i32) []i32 =
+  filter(|x: i32| x % 2 == 0, xs)
+"#;
+    let tlc = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(source));
+    let raw = convert_program(&tlc, IdSource::<u32>::new(), IdSource::new())
+        .expect("TLC-to-EGIR construction succeeds");
+    let entry = raw.entry_points.iter().find(|entry| entry.name == "evens").unwrap();
+    let output = &entry.outputs[0];
+
+    assert!(
+        !output.routes.is_empty(),
+        "Converted entries own complete output routes"
+    );
+    assert!(output.routes.iter().all(|route| route.writers.is_empty()));
+    assert!(matches!(
+        output.storage_length(),
+        Some(BufferLen::LikeInput {
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+            ..
+        })
+    ));
+    assert!(
+        entry.graph.skeleton.blocks.values().flat_map(|block| &block.side_effects).any(|effect| matches!(
+            effect.kind(),
+            egir::types::SideEffectKind::Soac(egir::types::SoacEffect(
+                (),
+                egir::types::Soac::Filter(filter)
+            )) if matches!(filter.state.output, egir::soac::filter::RawOutput::Runtime { .. })
+        ))
+    );
+}
+
+#[test]
+fn reification_links_filter_publication_uniformly() {
+    use crate::ResourceAccess;
+
+    let source = r#"
+entry evens(xs: []i32) []i32 =
+  filter(|x: i32| x % 2 == 0, xs)
+"#;
+    let tlc = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(source));
+    let raw = convert_program(&tlc, IdSource::<u32>::new(), IdSource::new())
+        .expect("TLC-to-EGIR construction succeeds");
+    let semantic = egir::reify_soacs(raw);
+    let entry = semantic.entry_points.iter().find(|entry| entry.name == "evens").unwrap();
+    let output_resource = entry.outputs[0].resource.expect("compute output is storage-backed");
+
+    assert!(entry.outputs[0].routes.iter().all(|route| !route.writers.is_empty()));
+    let filter = entry
+        .graph
+        .skeleton
+        .blocks
+        .values()
+        .flat_map(|block| &block.side_effects)
+        .find_map(|effect| match effect.kind() {
+            egir::types::SideEffectKind::Soac(egir::types::SoacEffect(
+                _,
+                egir::types::Soac::Filter(filter),
+            )) => Some(filter),
+            _ => None,
+        })
+        .expect("entry retains a semantic Filter");
+    assert_eq!(filter.state.output_slots, [egir::program::OutputSlotId(0)]);
+    assert!(filter
+        .state
+        .resources
+        .iter()
+        .any(|access| { access.resource == output_resource && access.access != ResourceAccess::Read }));
+    assert!(matches!(
+        filter.state.output,
+        egir::soac::filter::Output::Runtime(egir::soac::filter::RuntimeOutput {
+            backing: egir::soac::filter::RuntimeBacking::Deferred,
+            length: egir::soac::filter::RuntimeLength::Implicit,
+            ..
+        })
+    ));
 }
 
 // --- vertex_inputs population from params ------------

@@ -899,12 +899,9 @@ fn convert_entry_point(
         Type::Constructed(TypeName::Unit | TypeName::SideEffect, _)
     ) || is_storage_image_ty(&ret_type);
 
-    // Convert body. Output assignment (storing the result into the bound
-    // storage views / graphics output slots, and retargeting tail
-    // Map/Scan SOACs to stream directly into a runtime-sized output) is a
-    // separate, uniform pass — `egir::realize_outputs`, run right after
-    // this conversion. Here we just leave the body terminating in its
-    // single tail value (or `None` for a unit entry).
+    // Convert the body and retain every control-flow source of each declared
+    // output. Concrete stores remain a physicalization concern, but a
+    // converted entry already owns its complete interface and output routes.
     let output_arity = entry_output_arity(entry, &ret_type);
     let result_nid = if is_compute && output_arity != 0 {
         converter.convert_compute_outputs(inner_body, output_arity)?
@@ -987,7 +984,141 @@ fn convert_entry_point(
         }));
     }
 
+    complete_entry_outputs(&mut entry)?;
+
     Ok(entry)
+}
+
+/// Finish the entry interface while TLC types, bindings, and raw producers are
+/// still available together. Writer provenance is deliberately omitted here:
+/// linking producers requires the completed graph and is the first private
+/// step of semantic reification.
+fn complete_entry_outputs(entry: &mut RawEntry) -> Result<(), ConvertError> {
+    if entry.outputs.is_empty() {
+        return Ok(());
+    }
+    if entry.routes().next().is_none() {
+        synthesize_output_routes(entry)?;
+    }
+
+    for slot in 0..entry.outputs.len() {
+        if entry.outputs[slot].routes.is_empty() {
+            return Err(ConvertError::Unsupported(format!(
+                "entry output #{slot} has no source"
+            )));
+        }
+
+        let [route] = entry.outputs[slot].routes.as_slice() else {
+            continue;
+        };
+        if let Some(source_resource) =
+            super::graph_ops::extract_storage_view_source(&entry.graph, route.source.value)
+        {
+            let length = entry.outputs[slot].storage_length().cloned();
+            entry.outputs[slot].kind = interface::EntryOutputKind::Storage {
+                exposure: interface::BindingExposure::Host(source_resource),
+                length,
+            };
+            entry.outputs[slot].resource = Some(source_resource);
+        }
+
+        if let Some(length) = runtime_filter_output_length(entry, slot)? {
+            *entry.outputs[slot].storage_length_mut().expect("runtime Filter output is storage") = length;
+        }
+    }
+    Ok(())
+}
+
+fn synthesize_output_routes(entry: &mut RawEntry) -> Result<(), ConvertError> {
+    let Some((return_block, result)) = unique_value_return(&entry.graph) else {
+        return Ok(());
+    };
+    let sources = output_route_sources(&mut entry.graph, &result, entry.outputs.len())
+        .map_err(ConvertError::Internal)?;
+    for (output, source) in entry.outputs.iter_mut().zip(sources) {
+        output.routes.push(super::ir::RealizedOutputRoute {
+            source: super::program::SlotSource {
+                block: return_block,
+                value: source,
+            },
+            writers: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
+fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<types::Type>)> {
+    let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
+        let SkeletonTerminator::Return(Some(result)) = &body.term else {
+            return None;
+        };
+        Some((block, result.clone()))
+    });
+    let result = returns.next();
+    assert!(
+        returns.next().is_none(),
+        "entry body has more than one value-returning terminator"
+    );
+    result
+}
+
+fn output_route_sources(
+    graph: &mut EGraph<Raw>,
+    result: &ResultBinding<types::Type>,
+    output_count: usize,
+) -> Result<Vec<ValueId>, String> {
+    if output_count == 1 {
+        return super::graph_ops::pack_result_values(graph, result).map(|source| vec![source]);
+    }
+    let fields = result.top_level_fields();
+    if fields.len() != output_count {
+        return Err(format!(
+            "entry result has {} logical fields for {output_count} declared outputs",
+            fields.len()
+        ));
+    }
+    fields.iter().map(|field| super::graph_ops::pack_result_values(graph, field)).collect()
+}
+
+/// Return `Some(length)` when the route is produced by a runtime Filter.
+/// The nested option preserves the distinction between "not a Filter" and a
+/// Filter whose input representation cannot express a host allocation policy.
+fn runtime_filter_output_length(
+    entry: &RawEntry,
+    slot: usize,
+) -> Result<Option<Option<BufferLen>>, ConvertError> {
+    let [route] = entry.outputs[slot].routes.as_slice() else {
+        return Ok(None);
+    };
+    if entry.outputs[slot].resource.is_none() {
+        return Ok(None);
+    }
+    let effect_index = entry.graph.side_effect_index();
+    let Some((effect, _, _)) = effect_index.effect_result_field(&entry.graph, route.source.value) else {
+        return Ok(None);
+    };
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = effect.kind() else {
+        return Ok(None);
+    };
+    let filter::RawOutput::Runtime { .. } = &op.state.output else {
+        return Ok(None);
+    };
+    let input =
+        op.body.inputs.first().ok_or_else(|| ConvertError::Internal("Filter has no array input".into()))?;
+    let input_element = input.element();
+    let output_element = op.body.output_element_type();
+    let length = input.array.array_buffer().and_then(|region| {
+        let Type::Constructed(TypeName::Buffer(binding), _) = region else {
+            return None;
+        };
+        Some(BufferLen::LikeInput {
+            set: binding.set,
+            binding: binding.binding,
+            elem_bytes: ssa::layout::storage_elem_stride(&output_element)?,
+            src_elem_bytes: ssa::layout::storage_elem_stride(&input_element)?,
+        })
+    });
+    Ok(Some(length))
 }
 
 fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
@@ -1419,7 +1550,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// with `CondBranch`, each arm recursively converts the same route
     /// against its branch, and both arms terminate with
     /// `Branch(merge)` carrying no result args. There's nothing to
-    /// merge; output realization later gives both routes the same destination.
+    /// merge; both routes retain the same declared interface destination.
     ///
     /// `Let { x = rhs, body }` wrapping an output value (e.g. `let n =
     /// length(xs) in if c then map_using_n else map_using_n`) binds
@@ -3169,7 +3300,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         ),
                     },
                     state: filter::RawState {
-                        output: filter::Output::Local {
+                        output: filter::RawOutput::Local {
                             capacity: size,
                             ownership,
                         },
@@ -3195,13 +3326,11 @@ impl<'a, 'b> Converter<'a, 'b> {
                     ),
                 },
                 state: filter::RawState {
-                    output: filter::Output::Runtime(filter::RuntimeOutput {
+                    output: filter::RawOutput::Runtime {
                         capacity: filter::RuntimeCapacity::LikeInput {
                             input: filter::FilterInputId(0),
                         },
-                        backing: filter::RuntimeBacking::Deferred,
-                        length: filter::RuntimeLength::Implicit,
-                    }),
+                    },
                 },
             }),
             operands,

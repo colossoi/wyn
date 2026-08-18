@@ -26,7 +26,7 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::flow::BlockId;
 use crate::types::TypeExt;
-use crate::{BindingRef, LookupMap};
+use crate::{BindingRef, LookupMap, LookupSet};
 
 use super::from_tlc::Converted;
 use super::graph_ops;
@@ -35,8 +35,8 @@ use super::program::{
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic, SideEffect,
-    SideEffectKind, Soac, SoacEffect, SoacInputType, ValueId, ValueKind,
+    EGraph, EffectToken, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace, Semantic,
+    SideEffect, SideEffectKind, Soac, SoacEffect, SoacInputType, ValueId, ValueKind,
 };
 
 struct Facts {
@@ -121,7 +121,8 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
     }
 }
 
-fn reify_entry(entry: RawEntry, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
+fn reify_entry(mut entry: RawEntry, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
+    link_output_producers(&mut entry);
     let mut facts = entry_facts(&entry);
     match entry.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
@@ -173,12 +174,23 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             })
         }
         Soac::Filter(op) => {
-            let output = op.state.output;
+            let output = match op.state.output {
+                filter::RawOutput::Local { capacity, ownership } => {
+                    filter::Output::Local { capacity, ownership }
+                }
+                filter::RawOutput::Runtime { capacity } => filter::Output::Runtime(filter::RuntimeOutput {
+                    capacity,
+                    backing: filter::RuntimeBacking::Deferred,
+                    length: filter::RuntimeLength::Implicit,
+                }),
+            };
             Soac::Filter(filter::Op {
                 body: op.body,
                 state: filter::SemanticState {
                     space: facts.space,
                     output,
+                    output_slots: facts.output_slots,
+                    resources: facts.resources,
                 },
             })
         }
@@ -276,18 +288,21 @@ fn semantic_facts(
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
     };
-    let (inputs, is_screma) = match soac {
-        Soac::Screma(op) => (op.inputs.as_slice(), true),
-        Soac::Filter(op) => (op.body.inputs.as_slice(), false),
-        Soac::Hist(op) => (op.inputs.as_slice(), false),
+    let inputs = match soac {
+        Soac::Screma(op) => op.inputs.as_slice(),
+        Soac::Filter(op) => op.body.inputs.as_slice(),
+        Soac::Hist(op) => op.inputs.as_slice(),
     };
-    let output_slots = if is_screma {
-        entry.map_or_else(Vec::new, |entry| output_slots(entry, effect))
+    let output_slots = match (entry, soac) {
+        (Some(entry), Soac::Screma(_)) => output_slots(entry, effect),
+        (Some(entry), Soac::Filter(_)) => direct_output_slots(entry, effect),
+        _ => Vec::new(),
+    };
+    let resources = if matches!(soac, Soac::Screma(_) | Soac::Filter(_)) {
+        semantic_resources(graph, entry, effect, &output_slots)
     } else {
         Vec::new()
     };
-    let resources =
-        if is_screma { semantic_resources(graph, entry, effect, &output_slots) } else { Vec::new() };
     Some(Facts {
         space: space(graph, entry, effect, inputs),
         placement: requested_placement,
@@ -411,6 +426,76 @@ fn output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<OutputSlotId>
     slots.sort_unstable();
     slots.dedup();
     slots
+}
+
+/// A Filter publishes its compacted representation only when the route's
+/// returned source is the Filter result itself. Route writer provenance is
+/// transitive for DCE and fusion, so using every writer here would make an
+/// upstream Filter claim downstream map or length slots.
+fn direct_output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<OutputSlotId> {
+    let results = effect.result_values();
+    entry
+        .outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.routes.iter().any(|route| results.contains(&route.source.value)))
+        .map(|(slot, _)| OutputSlotId(slot))
+        .collect()
+}
+
+/// Link completed output routes to the raw semantic producers that can fulfil
+/// them. This is intentionally private to the raw-to-semantic boundary: route
+/// construction belongs to conversion, while producer discovery requires the
+/// complete graph and is consumed immediately by reification, fusion, and DCE.
+fn link_output_producers(entry: &mut RawEntry) {
+    let graph = &entry.graph;
+    let effect_index = graph.side_effect_index();
+    let resource_writers = graph_ops::resource_effect_writers(graph);
+    for output in &mut entry.outputs {
+        for route in &mut output.routes {
+            let mut writers =
+                source_value_writers(graph, &effect_index, &resource_writers, route.source.value);
+            writers.push(OutputWriter::Value(route.source.value));
+            let mut seen = LookupSet::new();
+            writers.retain(|writer| seen.insert(*writer));
+            route.writers = writers;
+        }
+    }
+}
+
+fn source_value_writers(
+    graph: &EGraph<Raw>,
+    effect_index: &super::types::SideEffectIndex,
+    resource_writers: &LookupMap<BindingRef, Vec<EffectToken>>,
+    source: ValueId,
+) -> Vec<OutputWriter> {
+    let mut writers = Vec::new();
+    wyn_graph::for_each_reachable(
+        [source],
+        wyn_graph::WalkOrder::DepthFirst,
+        |node, dependencies| {
+            if effect_index.site(node).is_none() {
+                dependencies.extend(graph.nodes[node].kind.children());
+            }
+        },
+        |node| {
+            if effect_index
+                .effect(graph, node)
+                .is_some_and(|effect| matches!(effect.kind, SideEffectKind::Soac(SoacEffect(_, _))))
+            {
+                writers.push(OutputWriter::Value(node));
+            }
+        },
+    );
+    writers.extend(
+        graph_ops::read_storage_resources(graph, [source])
+            .into_iter()
+            .filter_map(|access| resource_writers.get(&access.resource))
+            .flatten()
+            .copied()
+            .map(OutputWriter::Effect),
+    );
+    writers
 }
 
 fn semantic_resources(

@@ -379,9 +379,6 @@ fn compile_file(
         wyn_core::tlc::infer_input_slice_bounds(program)
     });
     let program = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
-    let program = time("egir_realize_outputs", verbose, || {
-        wyn_core::egir::realize_outputs(program)
-    })?;
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)
     });

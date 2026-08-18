@@ -140,9 +140,6 @@ pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAll
         };
         program = apply_materialization(program, plan)?;
     }
-    if cfg!(debug_assertions) {
-        super::super::realize_outputs::verify::check(&program).map_err(|error| error.to_string())?;
-    }
     Ok(program)
 }
 
@@ -267,6 +264,7 @@ fn filter_runtime_array_plan(
     let filter::SemanticState {
         space,
         output: filter::Output::Runtime(runtime),
+        ..
     } = &op.state
     else {
         return Ok(None);
@@ -308,11 +306,6 @@ fn filter_runtime_array_plan(
         length: match runtime.length {
             filter::RuntimeLength::Implicit => None,
             filter::RuntimeLength::Stored(resource) => Some(resource.0),
-            filter::RuntimeLength::Required => {
-                return Err(format!(
-                    "runtime-array producer {producer:?} retained an unresolved required length after allocation"
-                ));
-            }
         },
         size,
         elem_ty,
@@ -1073,7 +1066,13 @@ fn materialize_runtime_array_result(
     let SideEffectKind::Soac(SoacEffect(
         _,
         Soac::Filter(filter::Op {
-            state: filter::SemanticState { output, .. },
+            state:
+                filter::SemanticState {
+                    output,
+                    output_slots,
+                    resources,
+                    ..
+                },
             ..
         }),
     )) = &mut effect.kind
@@ -1085,6 +1084,22 @@ fn materialize_runtime_array_result(
     };
     runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(handoff.data));
     runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(handoff.length));
+    *output_slots = vec![super::super::ir::OutputSlotId(0)];
+    for resource in [handoff.data, handoff.length] {
+        let resource = SemanticResourceRef(resource);
+        if let Some(access) = resources.iter_mut().find(|access| access.resource == resource) {
+            access.access = match access.access {
+                ResourceAccess::Read => ResourceAccess::ReadWrite,
+                ResourceAccess::Write | ResourceAccess::ReadWrite => access.access,
+            };
+        } else {
+            resources.push(SegResourceAccess {
+                resource,
+                access: ResourceAccess::Write,
+            });
+        }
+    }
+    resources.sort_by_key(|access| access.resource);
     producer_entry.compact_interface();
 
     rewrite_runtime_array_source(

@@ -207,9 +207,9 @@ Relevant code:
 
 Relevant code:
 
-- `wyn-core/src/egir/realize_outputs/mod.rs`
-- `wyn-core/src/egir/realize_outputs/dispatch.rs`
 - `wyn-core/src/egir/from_tlc.rs`
+- `wyn-core/src/egir/reify.rs`
+- `wyn-core/src/egir/allocation/mod.rs`
 
 ## Acceptance status
 

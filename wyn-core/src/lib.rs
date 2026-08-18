@@ -551,7 +551,6 @@ pub use polytype::Context as PolytypeContext;
 //       to_egraph(...)                  -> egir::from_tlc::Converted
 //
 // EGIR stages:
-//       egir::realize_outputs(...)       -> Converted
 //       egir::reify_soacs(...)           -> Segmented
 //       egir::optimize_semantics(...)     -> Optimized
 //       egir::plan_logical_resources(...) -> ResourcesAllocated
@@ -985,7 +984,6 @@ fn ssa_from_reachable(
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
-    let program = egir::realize_outputs(program)?;
     let program = egir::reify_soacs(program);
     let program = egir::optimize_semantics(program);
     let program = egir::plan_logical_resources(program)?;

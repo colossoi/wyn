@@ -643,7 +643,6 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     };
     let profile = LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel);
     let lower = || -> Result<_, wyn_core::egir::from_tlc::ConvertError> {
-        let program = wyn_core::egir::realize_outputs(program)?;
         let program = wyn_core::egir::reify_soacs(program);
         let program = wyn_core::egir::optimize_semantics(program);
         let program = wyn_core::egir::plan_logical_resources(program)?;
