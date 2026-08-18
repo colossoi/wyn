@@ -56,8 +56,9 @@ pub use reify::reify_soacs;
 pub use resource_erasure::{erase_resources, ResourcesErased};
 pub use rewrite::rewrite;
 pub use semantic_opt::{
-    optimize_semantics, optimize_semantics_with_trace, Optimized, SemanticOptimizationRelation,
-    SemanticOptimizationTrace,
+    canonicalize_resource_accesses, lift_stage_uniform_values, optimize_semantic_operations,
+    optimize_semantic_operations_with_trace, Optimized, ResourceAccessesCanonicalized,
+    SemanticOperationsOptimized, SemanticOptimizationRelation, SemanticOptimizationTrace,
 };
 pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
 pub use soac_expand::{expand_soacs, SoacsExpanded};

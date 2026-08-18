@@ -40,7 +40,9 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     let program = wyn_core::tlc::infer_input_slice_bounds(program);
     let program = wyn_core::to_egraph(program).expect("to_egraph failed");
     let program = wyn_core::egir::reify_soacs(program);
-    let program = wyn_core::egir::optimize_semantics(program);
+    let program = wyn_core::egir::canonicalize_resource_accesses(program);
+    let program = wyn_core::egir::optimize_semantic_operations(program);
+    let program = wyn_core::egir::lift_stage_uniform_values(program);
     let program = wyn_core::egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
     let program = wyn_core::egir::plan(
         program,

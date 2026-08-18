@@ -5,7 +5,35 @@
 //! so two ops are never fused or reordered across a conflicting resource or
 //! effect.
 
-/// Semantic EGIR after target-independent graph optimization.
+/// Semantic EGIR with canonical resource-access summaries.
+#[derive(Debug, Clone, Copy)]
+pub enum ResourceAccessesCanonicalizedTag {}
+pub type ResourceAccessesCanonicalized = super::program::Program<
+    ResourceAccessesCanonicalizedTag,
+    super::ir::ProgramFamily<
+        super::types::Semantic,
+        super::program::NoStorageDeclaration,
+        super::ir::RealizedOutputRoute,
+        super::program::SemanticProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
+
+/// Semantic EGIR after dead-operation elimination and fusion reach a fixpoint.
+#[derive(Debug, Clone, Copy)]
+pub enum SemanticOperationsOptimizedTag {}
+pub type SemanticOperationsOptimized = super::program::Program<
+    SemanticOperationsOptimizedTag,
+    super::ir::ProgramFamily<
+        super::types::Semantic,
+        super::program::NoStorageDeclaration,
+        super::ir::RealizedOutputRoute,
+        super::program::SemanticProgramData,
+    >,
+    super::program::RewriteGlobal,
+>;
+
+/// Semantic EGIR after target-independent graph optimization and stage lifting.
 #[derive(Debug, Clone, Copy)]
 pub enum OptimizedTag {}
 pub type Optimized = super::program::Program<
@@ -52,16 +80,29 @@ pub struct SemanticOptimizationTrace {
     pub relations: Vec<SemanticOptimizationRelation>,
 }
 
-pub fn optimize_semantics(program: Segmented) -> Optimized {
-    optimize_semantics_with_trace(program).0
+/// Canonicalize resource-access summaries without changing the semantic EGIR
+/// representation.
+pub fn canonicalize_resource_accesses(program: Segmented) -> ResourceAccessesCanonicalized {
+    program
+        .map_graphs(|_, mut graph| {
+            canonicalize_resource_accesses_in_graph(&mut graph);
+            graph
+        })
+        .retag()
 }
 
-pub fn optimize_semantics_with_trace(program: Segmented) -> (Optimized, SemanticOptimizationTrace) {
+/// Eliminate dead segmented operations and fuse legal operations to a single
+/// shared fixpoint.
+pub fn optimize_semantic_operations(program: ResourceAccessesCanonicalized) -> SemanticOperationsOptimized {
+    optimize_semantic_operations_with_trace(program).0
+}
+
+/// The fixpoint transition with compiler-authored rewrite provenance.
+pub fn optimize_semantic_operations_with_trace(
+    program: ResourceAccessesCanonicalized,
+) -> (SemanticOperationsOptimized, SemanticOptimizationTrace) {
     let mut trace = SemanticOptimizationTrace::default();
-    let mut program = program.map_graphs(|_, mut graph| {
-        canonicalize_resource_accesses(&mut graph);
-        graph
-    });
+    let mut program: Segmented = program.retag();
 
     // Fixpoint: rebuild the DAG, take one legal rewrite, repeat. Rebuilding
     // between rewrites keeps the legality oracle sound — a stale DAG is the
@@ -86,7 +127,14 @@ pub fn optimize_semantics_with_trace(program: Segmented) -> (Optimized, Semantic
         break;
     }
 
-    program = super::stage_lift::lift_stage_uniform_values(program)
+    (program.retag(), trace)
+}
+
+/// Lift values that are uniform at their execution stage, then validate the
+/// final semantic dependency graph in debug builds.
+pub fn lift_stage_uniform_values(program: SemanticOperationsOptimized) -> Optimized {
+    let program: Segmented = program.retag();
+    let program = super::stage_lift::lift_stage_uniform_values(program)
         .expect("stage-uniform region lifting must preserve semantic EGIR");
 
     if cfg!(debug_assertions) {
@@ -94,7 +142,7 @@ pub fn optimize_semantics_with_trace(program: Segmented) -> (Optimized, Semantic
             panic!("semantic optimization produced invalid EGIR: {error}");
         }
     }
-    (program.retag(), trace)
+    program.retag()
 }
 
 fn semantic_operation_fingerprints(program: &Segmented) -> BTreeMap<SemanticOpId, String> {
@@ -138,7 +186,7 @@ impl SemanticOptimizationTrace {
     }
 }
 
-fn canonicalize_resource_accesses(graph: &mut EGraph) {
+fn canonicalize_resource_accesses_in_graph(graph: &mut EGraph) {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {

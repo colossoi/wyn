@@ -382,8 +382,14 @@ fn compile_file(
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)
     });
-    let program = time("egir_optimize_semantics", verbose, || {
-        wyn_core::egir::optimize_semantics(program)
+    let program = time("egir_canonicalize_resource_accesses", verbose, || {
+        wyn_core::egir::canonicalize_resource_accesses(program)
+    });
+    let program = time("egir_optimize_semantic_operations", verbose, || {
+        wyn_core::egir::optimize_semantic_operations(program)
+    });
+    let program = time("egir_lift_stage_uniform_values", verbose, || {
+        wyn_core::egir::lift_stage_uniform_values(program)
     });
     let program = time("egir_plan_logical_resources", verbose, || {
         wyn_core::egir::plan_logical_resources(program)

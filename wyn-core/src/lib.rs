@@ -552,7 +552,12 @@ pub use polytype::Context as PolytypeContext;
 //
 // EGIR stages:
 //       egir::reify_soacs(...)           -> Segmented
-//       egir::optimize_semantics(...)     -> Optimized
+//       egir::canonicalize_resource_accesses(...)
+//                                      -> ResourceAccessesCanonicalized
+//       egir::optimize_semantic_operations(...)
+//                                      -> SemanticOperationsOptimized
+//       egir::lift_stage_uniform_values(...)
+//                                      -> Optimized
 //       egir::plan_logical_resources(...) -> ResourcesAllocated
 //       egir::plan(..., profile)          -> Planned
 //       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
@@ -985,7 +990,9 @@ fn ssa_from_reachable(
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
     let program = egir::reify_soacs(program);
-    let program = egir::optimize_semantics(program);
+    let program = egir::canonicalize_resource_accesses(program);
+    let program = egir::optimize_semantic_operations(program);
+    let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program)?;
     let program = egir::plan(program, profile)?;
     Ok(lower_egir_to_ssa(program)?)

@@ -59,7 +59,9 @@ fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
 fn compile_to_semantic_egir(input: &str) -> egir::ResourcesAllocated {
-    let program = egir::optimize_semantics(compile_to_segmented_egir(input));
+    let program = egir::canonicalize_resource_accesses(compile_to_segmented_egir(input));
+    let program = egir::optimize_semantic_operations(program);
+    let program = egir::lift_stage_uniform_values(program);
     egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
 }
 
@@ -361,7 +363,9 @@ entry siblings(xs: []i32) ([]i32, []i32) =
   (plus, times)
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after = egir::canonicalize_resource_accesses(compile_to_segmented_egir(source));
+    let after = egir::optimize_semantic_operations(after);
+    let after: egir::reify::Segmented = egir::lift_stage_uniform_values(after).retag();
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
 
     let before_maps = segmented_entry_maps(&before);
@@ -425,7 +429,9 @@ entry shared(xs: []i32) ([]i32, []i32) =
   (left, right)
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after = egir::canonicalize_resource_accesses(compile_to_segmented_egir(source));
+    let after = egir::optimize_semantic_operations(after);
+    let after: egir::reify::Segmented = egir::lift_stage_uniform_values(after).retag();
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
 
     let before_maps = segmented_entry_maps(&before);
@@ -469,7 +475,9 @@ entry sliced(xs: []i32) [4]i32 =
   map(|x: i32| x * 2, produced[2..6])
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after = egir::canonicalize_resource_accesses(compile_to_segmented_egir(source));
+    let after = egir::optimize_semantic_operations(after);
+    let after: egir::reify::Segmented = egir::lift_stage_uniform_values(after).retag();
 
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
     let before_maps = segmented_entry_maps(&before);

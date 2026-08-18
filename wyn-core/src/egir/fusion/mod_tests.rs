@@ -45,7 +45,9 @@ fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
             )
         });
     let program = vertical::apply(program, vertical);
-    let optimized = egir::optimize_semantics(program);
+    let program = egir::canonicalize_resource_accesses(program);
+    let program = egir::optimize_semantic_operations(program);
+    let optimized = egir::lift_stage_uniform_values(program);
     egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
 }
 
