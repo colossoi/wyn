@@ -1,23 +1,8 @@
-//! Target-independent optimization of semantic EGIR: resource-access
-//! canonicalization, dead-SegOp elimination, indexed-demand scalarization, and
-//! graph-rewriting fusion (same-space horizontal, producer/consumer, envelope,
-//! and filter consumers). Every rewrite is gated by the semantic dependency DAG
-//! so two ops are never fused or reordered across a conflicting resource or
-//! effect.
-
-/// Semantic EGIR with canonical resource-access summaries.
-#[derive(Debug, Clone, Copy)]
-pub enum ResourceAccessesCanonicalizedTag {}
-pub type ResourceAccessesCanonicalized = super::program::Program<
-    ResourceAccessesCanonicalizedTag,
-    super::ir::ProgramFamily<
-        super::types::Semantic,
-        super::program::NoStorageDeclaration,
-        super::ir::RealizedOutputRoute,
-        super::program::SemanticProgramData,
-    >,
-    super::program::RewriteGlobal,
->;
+//! Target-independent optimization of semantic EGIR: dead-SegOp elimination,
+//! indexed-demand scalarization, and graph-rewriting fusion (same-space
+//! horizontal, producer/consumer, envelope, and filter consumers). Every
+//! rewrite is gated by the semantic dependency DAG so two ops are never fused
+//! or reordered across a conflicting resource or effect.
 
 /// Semantic EGIR after dead-operation elimination and fusion reach a fixpoint.
 #[derive(Debug, Clone, Copy)]
@@ -53,8 +38,7 @@ use super::reify::Segmented;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
 use super::types::{
-    EGraph, GraphResource, ResourceAccess, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect,
-    ValueId,
+    EGraph, GraphResource, ResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
 };
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -80,29 +64,18 @@ pub struct SemanticOptimizationTrace {
     pub relations: Vec<SemanticOptimizationRelation>,
 }
 
-/// Canonicalize resource-access summaries without changing the semantic EGIR
-/// representation.
-pub fn canonicalize_resource_accesses(program: Segmented) -> ResourceAccessesCanonicalized {
-    program
-        .map_graphs(|_, mut graph| {
-            canonicalize_resource_accesses_in_graph(&mut graph);
-            graph
-        })
-        .retag()
-}
-
 /// Eliminate dead segmented operations and fuse legal operations to a single
 /// shared fixpoint.
-pub fn optimize_semantic_operations(program: ResourceAccessesCanonicalized) -> SemanticOperationsOptimized {
+pub fn optimize_semantic_operations(program: Segmented) -> SemanticOperationsOptimized {
     optimize_semantic_operations_with_trace(program).0
 }
 
 /// The fixpoint transition with compiler-authored rewrite provenance.
 pub fn optimize_semantic_operations_with_trace(
-    program: ResourceAccessesCanonicalized,
+    program: Segmented,
 ) -> (SemanticOperationsOptimized, SemanticOptimizationTrace) {
     let mut trace = SemanticOptimizationTrace::default();
-    let mut program: Segmented = program.retag();
+    let mut program = program;
 
     // Fixpoint: rebuild the DAG, take one legal rewrite, repeat. Rebuilding
     // between rewrites keeps the legality oracle sound — a stale DAG is the
@@ -182,19 +155,6 @@ impl SemanticOptimizationTrace {
                 before: before_ids,
                 after: after_ids,
             });
-        }
-    }
-}
-
-fn canonicalize_resource_accesses_in_graph(graph: &mut EGraph) {
-    for (_, block) in graph.skeleton.blocks.iter_mut() {
-        for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
-                continue;
-            };
-            if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() {
-                *resources = SegResourceAccess::merge(resources, &[]);
-            }
         }
     }
 }

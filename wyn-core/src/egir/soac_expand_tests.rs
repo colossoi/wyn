@@ -36,7 +36,6 @@ fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program).expect("to_egraph");
     let program = egir::reify_soacs(program);
-    let program = egir::canonicalize_resource_accesses(program);
     let program = egir::optimize_semantic_operations(program);
     let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");

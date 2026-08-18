@@ -69,7 +69,7 @@ need these clarifications:
 - `tlc::defunctionalize` composes closure conversion, higher-order
   specialization, and closure-call lowering;
 - `to_egraph` orchestrates the smaller construction sub-passes named in its
-  table description, while semantic optimization is exposed as three typed
+  table description, while semantic optimization is exposed as two typed
   transitions and `egir::reify_soacs` is one reification sub-pass;
 - `egir::plan_logical_resources` and `egir::plan` orchestrate resource
   allocation and target-aware physical planning respectively;
@@ -184,9 +184,8 @@ Each notes how it's enforced; when you move a sub-pass, check it here.
 | Checkpoint transition | Sub-pass sequence | Established result |
 |-----------------------|-------------------|--------------------|
 | TLC input bounds inferred -> `Converted` | `convert_program` | Discover and hoist pure arity-zero constants; convert the remaining functions and entries to raw per-body e-graphs; normalize callable interface parameters. Entry conversion finalizes complete output routes and ABI size policies; no scheduling or physical resource choice occurs here |
-| `Converted` -> `Segmented` | `reify_soacs` | Link output routes to semantic producers and reify every reachable raw SOAC with authoritative spaces, bodies, captures, uniform publication/resource effects, placement, and dependencies |
-| `Segmented` -> `ResourceAccessesCanonicalized` | `canonicalize_resource_accesses` | Canonicalize resource-access summaries without changing the semantic EGIR representation |
-| `ResourceAccessesCanonicalized` -> `SemanticOperationsOptimized` | (`semantic_graph::dependencies`, `analyze_dead_seg_ops`, (`apply_dead_seg_ops` \| `rewrite_once`)) to fixpoint | Eliminate dead SegOps and fuse conflict-free operations in one shared fixpoint, rebuilding the dependency graph before every attempted rewrite |
+| `Converted` -> `Segmented` | `reify_soacs`, `verify_canonical_resource_accesses` (debug) | Link output routes to semantic producers and reify every reachable raw SOAC with authoritative spaces, bodies, captures, canonical uniform publication/resource effects, placement, and dependencies; in debug builds, verify stored Screma and Filter resource summaries |
+| `Segmented` -> `SemanticOperationsOptimized` | (`semantic_graph::dependencies`, `analyze_dead_seg_ops`, (`apply_dead_seg_ops` \| `rewrite_once`)) to fixpoint | Eliminate dead SegOps and fuse conflict-free operations in one shared fixpoint, rebuilding the dependency graph before every attempted rewrite |
 | `SemanticOperationsOptimized` -> `Optimized` | `lift_stage_uniform_values`, `semantic_graph::verify` (debug) | Lift stage-uniform values and, in debug builds, validate the final semantic dependency graph |
 | `Optimized` -> `ResourcesAllocated` | `allocate_semantic_resources`, `classify_existing_compiler_resources`, `resolve_residency`, `resolve_scratch_sizes`, `strip_compiler_abi`, `verify_allocated_resources` (debug) | Establish target-independent logical resources, residency, output destinations, scratch sizes, and the post-allocation ABI, then validate the result in debug builds |
 | `ResourcesAllocated` -> `Planned` | `bind_mapped_output_destinations`, `planning::analyze`, (`allocate_scratch` \| `serial_plan`), `resource_flows`, (`build_parallel_schedule` \| `build_serial_schedule`), `install_generated_callables`, `KernelPlan::finalize` | Select target-aware recipes, allocate selected work buffers, build the schedule and generated callables, and finalize bindings, physical entries, validation, and the published descriptor |
@@ -201,7 +200,7 @@ Each notes how it's enforced; when you move a sub-pass, check it here.
 The EGIR order is also load-bearing:
 
 - **`from_tlc` before `reify_soacs`** - conversion constructs every declared output route; reification then links those routes against the completed graph before constructing semantic SOAC state.
-- **`reify_soacs` before `canonicalize_resource_accesses` before `optimize_semantic_operations`** - fusion legality depends on explicit domains, canonical resource summaries, semantic operation IDs, effects, and dependency edges.
+- **`reify_soacs` before `optimize_semantic_operations`** - fusion legality depends on explicit domains, canonical resource summaries, semantic operation IDs, effects, and dependency edges.
 - **`optimize_semantic_operations` before `lift_stage_uniform_values` before `plan_logical_resources`** - lifting consumes the final fused graph, while residency and uniqueness resolution use its final liveness and demands.
 - **`plan_logical_resources` before `plan`** - target scheduling consumes the final semantic residency manifest, then transactionally adds recipe-owned work buffers before choosing bindings, dispatches, and physical entries.
 - **`plan` before `expand_soacs` before `partially_inline_calls` before `materialize_dynamic_extracts` before `rewrite` before `optimize_skeleton` before `erase_resources` before `elaborate`** - every physical transition consumes the checkpoint produced by the preceding transition, and expansion accepts only a validated kernel plan.

@@ -382,9 +382,6 @@ fn compile_file(
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)
     });
-    let program = time("egir_canonicalize_resource_accesses", verbose, || {
-        wyn_core::egir::canonicalize_resource_accesses(program)
-    });
     let program = time("egir_optimize_semantic_operations", verbose, || {
         wyn_core::egir::optimize_semantic_operations(program)
     });

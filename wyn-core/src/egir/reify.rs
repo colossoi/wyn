@@ -1,7 +1,8 @@
 //! Raw EGIR to semantic EGIR.
 //!
-//! This is the single boundary that constructs semantic SOAC state. The
-//! operation family is preserved by the direct match in `reify_soac`.
+//! This is the single boundary that constructs semantic SOAC state, including
+//! canonical stored resource summaries. The operation family is preserved by
+//! the direct match in `reify_soac`.
 
 /// EGIR whose higher-order array operations have semantic segmented form.
 #[derive(Debug, Clone, Copy)]
@@ -70,7 +71,51 @@ pub fn reify_soacs(program: Converted) -> Segmented {
         .map(|constant| reify_constant(constant, &mut global_context.semantic_ids))
         .collect();
 
-    Program::from_parts(functions, externs, entry_points, constants, data, global_context)
+    let program = Program::from_parts(functions, externs, entry_points, constants, data, global_context);
+    if cfg!(debug_assertions) {
+        verify_canonical_resource_accesses(&program)
+            .expect("semantic reification produced noncanonical resource accesses");
+    }
+    program
+}
+
+/// Reification owns the canonical stored resource-summary invariant: Screma
+/// and Filter lists contain one access per binding in deterministic order.
+fn verify_canonical_resource_accesses(program: &Segmented) -> Result<(), String> {
+    let graphs = program
+        .entry_points
+        .iter()
+        .map(|entry| (entry.name.as_str(), &entry.graph))
+        .chain(program.functions.iter().map(|function| (function.name.as_str(), &function.graph)))
+        .chain(program.constants.iter().map(|constant| (constant.name.as_str(), &constant.graph)));
+
+    for (scope, graph) in graphs {
+        for block in graph.skeleton.blocks.values() {
+            for effect in &block.side_effects {
+                let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
+                    continue;
+                };
+                let (kind, resources) = match soac {
+                    Soac::Screma(op) => match op.semantic_state() {
+                        screma::SemanticState::Segmented { resources, .. } => ("Screma", resources),
+                        screma::SemanticState::Serial => continue,
+                    },
+                    Soac::Filter(op) => ("Filter", &op.state.resources),
+                    Soac::Hist(_) => continue,
+                };
+                if !resource_accesses_are_canonical(resources) {
+                    return Err(format!(
+                        "{scope}: {kind} {id:?} has noncanonical resource accesses: {resources:?}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resource_accesses_are_canonical(resources: &[SegResourceAccess<BindingRef>]) -> bool {
+    resources.windows(2).all(|pair| pair[0].resource < pair[1].resource)
 }
 
 fn reify_constant(

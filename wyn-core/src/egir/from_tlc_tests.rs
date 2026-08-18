@@ -36,7 +36,6 @@ fn compile_via_egir(src: &str) -> ssa::stage::Elaborated {
     let program = convert_program(&tlc, IdSource::<u32>::new(), IdSource::new())
         .expect("egir::from_tlc conversion failed");
     let program = egir::reify_soacs(program);
-    let program = egir::canonicalize_resource_accesses(program);
     let program = egir::optimize_semantic_operations(program);
     let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
