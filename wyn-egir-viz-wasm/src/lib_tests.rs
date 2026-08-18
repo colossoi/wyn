@@ -1,18 +1,28 @@
 use super::*;
 
 #[test]
-fn map_chain_produces_structured_before_and_after_snapshots() {
+fn semantic_operation_fixpoint_exposes_dead_elimination_and_fusion() {
     let result = inspect_impl(
         r#"
 entry main(xs: [4]i32) [4]i32 =
+  let dead = map(|x: i32| x + 99, xs) in
   let a = map(|x: i32| x + 1, xs) in
   let b = map(|x: i32| x * 2, a) in
   map(|x: i32| x - 3, b)
 "#,
     );
     assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.pass, InspectPass::OPTIMIZE_SEMANTIC_OPERATIONS);
     let before = result.before.expect("before snapshot");
     let after = result.after.expect("after snapshot");
+    assert_eq!(
+        before.nodes.iter().filter(|node| node.variant == "segmap").count(),
+        4
+    );
+    assert_eq!(
+        after.nodes.iter().filter(|node| node.variant == "segmap").count(),
+        1
+    );
     let before_map = before
         .nodes
         .iter()
@@ -50,6 +60,10 @@ entry main(xs: [4]i32) [4]i32 =
     assert!(
         result.relations.iter().any(|relation| relation.before.len() > relation.after.len()),
         "expected compiler-authored many-to-one fusion provenance"
+    );
+    assert!(
+        result.relations.iter().any(|relation| relation.before == ["op:0"] && relation.after.is_empty()),
+        "expected compiler-authored dead-operation provenance"
     );
 }
 
@@ -166,6 +180,102 @@ entry evens(xs: []i32) []i32 =
         output.kind.length.as_ref().map(|length| length.variant.as_str()),
         Some("like_input")
     );
+}
+
+#[test]
+fn logical_resource_planning_exposes_filter_materialization() {
+    let result = inspect_pass_impl(
+        r#"
+entry main(xs: []i32) []i32 =
+  let selected = filter(|x: i32| x % 2 == 0, xs) in
+  map(|x: i32| x * 2, selected)
+"#,
+        InspectPass::PlanLogicalResources,
+    );
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.pass, InspectPass::PLAN_LOGICAL_RESOURCES);
+    let before = result.before.expect("optimized snapshot");
+    let after = result.after.expect("allocated snapshot");
+    assert!(before.resources.is_empty());
+    assert!(before.materializations.is_empty());
+
+    let scratch = after
+        .resources
+        .iter()
+        .find(|resource| resource.origin.compiler_kind.as_deref() == Some("filter_scratch"))
+        .expect("filter scratch resource");
+    let length = after
+        .resources
+        .iter()
+        .find(|resource| resource.origin.compiler_kind.as_deref() == Some("filter_len_cell"))
+        .expect("filter length resource");
+    assert_eq!(scratch.origin.owner.as_deref(), Some("op:0"));
+    assert_eq!(scratch.size.variant, "like_resource");
+    assert_eq!(length.origin.owner.as_deref(), Some("op:0"));
+    assert_eq!(length.size.variant, "fixed_bytes");
+    assert_eq!(length.size.bytes, Some(4));
+
+    let [materialization] = after.materializations.as_slice() else {
+        panic!("expected one Filter materialization")
+    };
+    assert_eq!(materialization.variant, "runtime_array");
+    assert!(materialization.entry_name.starts_with("main_materialize_filter_"));
+
+    let before_filter = before
+        .nodes
+        .iter()
+        .find(|node| node.operation.as_ref().and_then(|op| op.semantic_id.as_deref()) == Some("op:0"))
+        .expect("optimized Filter");
+    let after_filter = after
+        .nodes
+        .iter()
+        .find(|node| node.operation.as_ref().and_then(|op| op.semantic_id.as_deref()) == Some("op:0"))
+        .expect("allocated Filter");
+    assert_eq!(before_filter.group, "entry:0");
+    assert_eq!(after_filter.group, materialization.entry_group);
+    let before_output = before_filter
+        .operation
+        .as_ref()
+        .and_then(|operation| operation.soac_state.as_ref())
+        .and_then(|state| state.filter_output.as_ref())
+        .expect("optimized Filter output state");
+    assert_eq!(
+        before_output.backing.as_ref().map(|value| value.variant.as_str()),
+        Some("deferred")
+    );
+    assert_eq!(
+        before_output.length.as_ref().map(|value| value.variant.as_str()),
+        Some("implicit")
+    );
+    let after_output = after_filter
+        .operation
+        .as_ref()
+        .and_then(|operation| operation.soac_state.as_ref())
+        .and_then(|state| state.filter_output.as_ref())
+        .expect("allocated Filter output state");
+    assert_eq!(
+        after_output.backing.as_ref().and_then(|value| value.resource.as_deref()),
+        Some(scratch.id.as_str())
+    );
+    assert_eq!(
+        after_output.length.as_ref().and_then(|value| value.resource.as_deref()),
+        Some(length.id.as_str())
+    );
+
+    let main = after.groups.iter().find(|group| group.id == "entry:0").expect("main entry");
+    assert!(main
+        .resource_declarations
+        .iter()
+        .any(|decl| { decl.resource == scratch.id && decl.role == "input" }));
+    let producer = after
+        .groups
+        .iter()
+        .find(|group| group.id == materialization.entry_group)
+        .expect("materialization entry");
+    assert!(producer
+        .resource_declarations
+        .iter()
+        .any(|decl| { decl.resource == scratch.id && decl.role == "output" }));
 }
 
 #[test]

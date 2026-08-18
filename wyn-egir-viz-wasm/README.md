@@ -2,10 +2,10 @@
 
 Dedicated WebAssembly boundary for the EGIR pass visualizer. It compiles an
 editor buffer to the selected EGIR checkpoint and returns before/after
-visualization models. It currently exposes semantic optimization (including
-compiler-authored operation provenance) and raw-EGIR output-writer
-realization. Structured snapshots retain canonical result destinations and
-entry-output route metadata.
+visualization models. It currently exposes the semantic-operation optimization
+fixpoint (including compiler-authored operation provenance), logical-resource
+planning, and raw-EGIR output-writer realization. Structured snapshots retain
+canonical result destinations and entry-output route metadata.
 
 Build the browser package with:
 

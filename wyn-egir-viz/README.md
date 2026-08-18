@@ -3,8 +3,12 @@
 A Vite single-page application for comparing EGIR programs across selectable
 compiler passes. The current checkpoints are:
 
-- `egir::optimize_semantics`: segmented semantic EGIR to optimized semantic
-  EGIR, with compiler-authored operation provenance; and
+- `egir::plan_logical_resources`: optimized semantic EGIR to target-independent
+  logical resources, entry-local resource declarations, Filter storage, and
+  materialization requirements;
+- `egir::optimize_semantic_operations`: segmented semantic EGIR through the
+  shared dead-operation-elimination and fusion fixpoint, with compiler-authored
+  operation provenance; and
 - `egir::reify_soacs`: converted raw EGIR and the resulting segmented semantic
   EGIR. Conversion already owns complete entry routes; the semantic pane adds
   linked writer provenance and uniform SOAC publication/resource facts.

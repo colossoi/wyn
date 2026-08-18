@@ -375,9 +375,31 @@ names for them.
 A raw runtime Filter output carries only its capacity rule. Reification adds
 `backing: deferred` and `length: implicit`; these are explicit promises that no
 backing buffer or length cell has been selected yet. A later
-`plan_logical_resources` pass may replace them with `bound(binding: ...)` and
-`stored(binding: ...)` when publication and scheduling actually require those
+`plan_logical_resources` pass may replace them with `bound(resource: $r)` and
+`stored(resource: $r)` when publication and scheduling actually require those
 representations.
+
+### `plan_logical_resources` checkpoint boundary
+
+The left pane is optimized semantic EGIR. Storage identities in graphs and
+SOAC state are still authored host `binding(...)` values, the program has no
+logical-resource arena, and runtime Filter storage may remain `deferred` with
+an `implicit` length.
+
+The right pane is `ResourcesAllocated` EGIR. Every executable storage identity
+has become a target-independent `$resource`; host bindings survive only in
+interface exposure and `RESOURCE ... origin: host(...)` constraints. The pane
+therefore includes program-owned `RESOURCE` declarations and entry-local
+`resource_decl(...)` sidecars. A logical size may be `fixed_bytes(...)`,
+`like_resource(...)`, `same_as_dispatch(...)`, or `unspecified`.
+
+Residency planning may also extract a producer into a compiler-owned
+materialization entry. Such entries use the same body and interface grammar as
+authored entries and are referenced from `PROGRAM WITH { materializations:
+[...] }`. Runtime-array materialization binds a Filter's backing and stored
+length to `filter_scratch` and `filter_len_cell` resources. This pass does not
+choose descriptor bindings for compiler resources, a target recipe, dispatch
+geometry, or a physical schedule; those decisions belong to `egir::plan`.
 
 ## Floating values and places
 

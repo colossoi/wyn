@@ -7,12 +7,19 @@ import wasmPackage from "./wasm-pkg/package.json";
 import "./style.css";
 
 type Side = "before" | "after";
-type PassId = "egir::optimize_semantics" | "egir::reify_soacs";
+type PassId =
+  | "egir::optimize_semantic_operations"
+  | "egir::plan_logical_resources"
+  | "egir::reify_soacs";
 
 const passInfo: Record<PassId, { before: string; after: string }> = {
-  "egir::optimize_semantics": {
+  "egir::optimize_semantic_operations": {
     before: "Segmented EGIR",
-    after: "Optimized EGIR",
+    after: "Semantic operations optimized",
+  },
+  "egir::plan_logical_resources": {
+    before: "Optimized EGIR",
+    after: "Resources allocated",
   },
   "egir::reify_soacs": {
     before: "Converted EGIR",
@@ -43,12 +50,14 @@ interface GraphGroup {
   label: string;
   kind: string;
   outputs: GraphOutput[];
+  resource_declarations: GraphResourceDeclaration[];
 }
 
 interface GraphOutput {
   slot: number;
   ty: string;
   binding?: GraphBinding;
+  resource?: string;
   kind: GraphOutputKind;
   routes: GraphOutputRoute[];
 }
@@ -67,11 +76,35 @@ interface GraphBinding {
 }
 
 interface GraphSize {
-  variant: "fixed_bytes" | "like_input" | "same_as_dispatch";
+  variant: "fixed_bytes" | "like_input" | "like_resource" | "same_as_dispatch" | "unspecified";
   bytes?: number;
   binding?: GraphBinding;
+  resource?: string;
   elem_bytes?: number;
   src_elem_bytes?: number;
+}
+
+interface GraphResourceDeclaration {
+  resource: string;
+  role: "input" | "output" | "intermediate";
+  elem_ty: string;
+  size: GraphSize;
+}
+
+interface GraphResource {
+  id: string;
+  elem_ty: string;
+  origin: GraphResourceOrigin;
+  size: GraphSize;
+}
+
+interface GraphResourceOrigin {
+  variant: "host" | "compiler";
+  binding?: GraphBinding;
+  name?: string;
+  compiler_kind?: string;
+  owner?: string;
+  slot?: number;
 }
 
 interface GraphOutputRoute {
@@ -145,12 +178,14 @@ interface GraphSegExtent {
   fixed?: number;
   value?: GraphReference;
   binding?: GraphBinding;
+  resource?: string;
   offset?: number;
   elem_bytes?: number;
 }
 
 interface GraphResourceAccess {
-  binding: GraphBinding;
+  binding?: GraphBinding;
+  resource?: string;
   access: "read" | "write" | "read_write";
 }
 
@@ -171,11 +206,13 @@ interface GraphFilterCapacity {
 interface GraphFilterBacking {
   variant: "deferred" | "bound";
   binding?: GraphBinding;
+  resource?: string;
 }
 
 interface GraphFilterLength {
   variant: "implicit" | "stored";
   binding?: GraphBinding;
+  resource?: string;
 }
 
 interface GraphEdge {
@@ -201,10 +238,20 @@ interface GraphBlock {
 }
 
 interface GraphSnapshot {
+  resources: GraphResource[];
+  materializations: GraphMaterialization[];
   groups: GraphGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
   blocks: GraphBlock[];
+}
+
+interface GraphMaterialization {
+  id: string;
+  variant: "shared_array" | "gather" | "runtime_array" | "scalar";
+  entry_group: string;
+  entry_name: string;
+  space: GraphSegExtent[];
 }
 
 interface NodeRelation {
@@ -246,7 +293,8 @@ app.innerHTML = `
         <span>Pass</span>
         <select id="pass-select" aria-label="Compiler pass">
           <option value="egir::reify_soacs"${initialPass === "egir::reify_soacs" ? " selected" : ""}>egir::reify_soacs</option>
-          <option value="egir::optimize_semantics"${initialPass === "egir::optimize_semantics" ? " selected" : ""}>egir::optimize_semantics</option>
+          <option value="egir::optimize_semantic_operations"${initialPass === "egir::optimize_semantic_operations" ? " selected" : ""}>egir::optimize_semantic_operations</option>
+          <option value="egir::plan_logical_resources"${initialPass === "egir::plan_logical_resources" ? " selected" : ""}>egir::plan_logical_resources</option>
         </select>
       </label>
       <button class="run-button" id="run-button" type="button" disabled>
@@ -519,7 +567,7 @@ function renderListing(side: Side, snapshot: GraphSnapshot): void {
   const listing = listings[side];
   document.querySelector<HTMLElement>(`#${side}-empty`)!.hidden = true;
   listing.hidden = false;
-  listing.innerHTML = snapshot.groups.map((group) => renderBody(snapshot, group)).join("");
+  listing.innerHTML = `${renderProgramMetadata(snapshot)}${snapshot.groups.map((group) => renderBody(snapshot, group)).join("")}`;
 }
 
 function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
@@ -546,14 +594,16 @@ function renderBody(snapshot: GraphSnapshot, group: GraphGroup): string {
     .map((node) => renderPlaceLine(node, names))
     .join("");
   const blockLines = groupBlocks.map((block) => renderBlock(snapshot, block, names)).join("");
-  const entryInterface = group.kind === "entry" ? renderEntryInterface(group, names) : "";
+  const entryInterface = group.kind === "entry" || group.kind === "materialization"
+    ? renderEntryInterface(group, names)
+    : "";
 
   return `
     <section class="ir-body" data-group-id="${escapeHtml(group.id)}">
       <svg class="dependency-gutter" aria-hidden="true"></svg>
       <div class="body-heading">
         <span class="body-kind">${escapeHtml(group.kind)}</span>
-        <button class="definition-name" type="button" data-definition-group="${escapeHtml(group.id)}">${escapeHtml(group.label.replace(/^(entry|fn|const)\s+/, ""))}</button>
+        <button class="definition-name" type="button" data-definition-group="${escapeHtml(group.id)}">${escapeHtml(group.label.replace(/^(entry|fn|const|materialization)\s+/, ""))}</button>
         <span class="signature"><span class="punct">(</span>${signature}<span class="punct">)</span></span>
         <span class="brace">{</span>
       </div>
@@ -827,7 +877,9 @@ function renderSegExtent(extent: GraphSegExtent, names: Names): string {
     case "resource_length":
       return variantTerm("resource_length", [
         irField("view", extent.value ? renderGraphReference(extent.value, names) : missingTerm()),
-        irField("binding", renderBinding(extent.binding)),
+        extent.resource
+          ? irField("resource", resourceToken(extent.resource))
+          : irField("binding", renderBinding(extent.binding)),
         irField("elem_bytes", numberTerm(extent.elem_bytes ?? 0)),
       ]);
     case "value":
@@ -839,7 +891,9 @@ function renderSegExtent(extent: GraphSegExtent, names: Names): string {
 
 function renderResourceAccess(access: GraphResourceAccess): string {
   return variantTerm("resource_access", [
-    irField("binding", renderBinding(access.binding)),
+    access.resource
+      ? irField("resource", resourceToken(access.resource))
+      : irField("binding", renderBinding(access.binding)),
     irField("access", keywordTerm(access.access)),
   ]);
 }
@@ -872,13 +926,17 @@ function renderFilterCapacity(capacity: GraphFilterCapacity): string {
 
 function renderFilterBacking(backing: GraphFilterBacking): string {
   return backing.variant === "bound"
-    ? variantTerm("bound", [irField("binding", renderBinding(backing.binding))])
+    ? variantTerm("bound", [backing.resource
+        ? irField("resource", resourceToken(backing.resource))
+        : irField("binding", renderBinding(backing.binding))])
     : keywordTerm("deferred");
 }
 
 function renderFilterLength(length: GraphFilterLength): string {
   return length.variant === "stored"
-    ? variantTerm("stored", [irField("binding", renderBinding(length.binding))])
+    ? variantTerm("stored", [length.resource
+        ? irField("resource", resourceToken(length.resource))
+        : irField("binding", renderBinding(length.binding))])
     : keywordTerm("implicit");
 }
 
@@ -939,12 +997,15 @@ function renderResultDestination(result: GraphResult, names: Names): string {
 
 function renderEntryInterface(group: GraphGroup, names: Names): string {
   const outputs = group.outputs ?? [];
+  const declarations = group.resource_declarations ?? [];
   const outputRows = outputs.flatMap((output, index) => {
     const rows = [
       sourceRow(2, `<span class="ir-keyword">output</span><span class="punct">(</span>`),
       sourceRow(3, comma(irField("slot", numberTerm(output.slot)))),
       sourceRow(3, comma(irField("type", typeToken(output.ty)))),
-      sourceRow(3, comma(irField("binding", output.binding ? renderBinding(output.binding) : keywordTerm("none")))),
+      sourceRow(3, comma(output.resource
+        ? irField("resource", resourceToken(output.resource))
+        : irField("binding", output.binding ? renderBinding(output.binding) : keywordTerm("none")))),
       sourceRow(3, comma(irField("kind", renderOutputKind(output.kind)))),
       sourceRow(3, irField("routes", `<span class="punct">[</span>`)),
       ...output.routes.flatMap((route, routeIndex) => [
@@ -963,7 +1024,61 @@ function renderEntryInterface(group: GraphGroup, names: Names): string {
     ];
     return rows;
   });
-  return `<div class="ir-comment">; entry output interface (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
+  const declarationRows = declarations.map((declaration, index) => sourceRow(2,
+    `${variantTerm("resource_decl", [
+      irField("resource", resourceToken(declaration.resource)),
+      irField("role", keywordTerm(declaration.role)),
+      irField("element_type", typeToken(declaration.elem_ty)),
+      irField("size", renderSize(declaration.size)),
+    ])}${index + 1 < declarations.length ? `<span class="punct">,</span>` : ""}`));
+  return `<div class="ir-comment">; entry interface and resource uses (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, comma(`<span class="punct">]</span>`))}${sourceRow(1, irField("resource_declarations", `<span class="punct">[</span>`))}${declarationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
+}
+
+function renderProgramMetadata(snapshot: GraphSnapshot): string {
+  const resources = snapshot.resources ?? [];
+  const materializations = snapshot.materializations ?? [];
+  if (!resources.length && !materializations.length) return "";
+  const resourceRows = resources.map((resource) => [
+    sourceRow(0, `<span class="ir-keyword">RESOURCE</span> ${resourceToken(resource.id)}<span class="punct">:</span> ${typeToken(resource.elem_ty)} <span class="ir-keyword">WITH</span> <span class="punct">{</span>`),
+    sourceRow(1, comma(irField("origin", renderResourceOrigin(resource.origin)))),
+    sourceRow(1, irField("size", renderSize(resource.size))),
+    sourceRow(0, `<span class="punct">}</span>`),
+  ].join("")).join("");
+  const materializationRows = materializations.map((materialization, index) => {
+    const groupNodes = snapshot.nodes.filter((node) => node.group === materialization.entry_group);
+    const groupBlocks = snapshot.blocks.filter((block) => block.group === materialization.entry_group);
+    const names = buildNames(groupNodes, groupBlocks);
+    const fields = materialization.variant === "scalar"
+      ? [irField("entry", `<span class="ir-symbol">@${escapeHtml(materialization.entry_name)}</span>`)]
+      : [
+          irField("space", listTerm(materialization.space.map((extent) => renderSegExtent(extent, names)))),
+          irField("entry", `<span class="ir-symbol">@${escapeHtml(materialization.entry_name)}</span>`),
+        ];
+    return sourceRow(2, `${variantTerm("materialization", [
+      irField("id", `<span class="ir-symbol">${escapeHtml(materialization.id)}</span>`),
+      irField("requirement", variantTerm(materialization.variant, fields)),
+    ])}${index + 1 < materializations.length ? `<span class="punct">,</span>` : ""}`);
+  });
+  const programRows = materializations.length
+    ? `${sourceRow(0, `<span class="ir-keyword">PROGRAM WITH</span> <span class="punct">{</span>`)}${sourceRow(1, irField("materializations", `<span class="punct">[</span>`))}${materializationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}`
+    : "";
+  return `<section class="ir-program-metadata"><div class="ir-comment">; program-owned logical resources and requirements (sidecar)</div><div class="ir-metadata-line">${resourceRows}${programRows}</div></section>`;
+}
+
+function renderResourceOrigin(origin: GraphResourceOrigin): string {
+  if (origin.variant === "host") {
+    return variantTerm("host", [
+      irField("binding", renderBinding(origin.binding)),
+      irField("name", origin.name ? literalTerm(origin.name) : keywordTerm("none")),
+    ]);
+  }
+  return variantTerm("compiler", [
+    irField("kind", keywordTerm(origin.compiler_kind ?? "unknown")),
+    irField("owner", origin.owner
+      ? `<span class="ir-symbol">${escapeHtml(origin.owner)}</span>`
+      : keywordTerm("none")),
+    irField("slot", numberTerm(origin.slot ?? 0)),
+  ]);
 }
 
 function renderOutputKind(kind: GraphOutputKind): string {
@@ -997,9 +1112,23 @@ function renderSize(size: GraphSize): string {
         irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
         irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
       ]);
+    case "like_resource":
+      return variantTerm("like_resource", [
+        irField("resource", resourceToken(size.resource)),
+        irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
+        irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
+      ]);
     case "same_as_dispatch":
       return variantTerm("same_as_dispatch", [irField("elem_bytes", numberTerm(size.elem_bytes ?? 0))]);
+    case "unspecified":
+      return keywordTerm("unspecified");
   }
+}
+
+function resourceToken(resource?: string): string {
+  return resource
+    ? `<span class="ir-symbol resource-ref">${escapeHtml(resource)}</span>`
+    : keywordTerm("none");
 }
 
 function groupValues(operation: GraphOperation, role: string): GraphReference[] {
