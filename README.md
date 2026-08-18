@@ -28,36 +28,55 @@ The project is organized as a Rust workspace:
 
 The compiler uses a multi-stage pipeline with typestate-driven phases. Each
 stage consumes `self` and returns the next stage, enforcing valid ordering at
-compile time.
+compile time. The pipeline descriptions distinguish three related units:
 
-A full compilation has no optional optimization passes. The current CLI, Wasm
-API, and test pipeline invoke every pass in order; `resolve_imports` is simply a
-no-op when the source contains no imports. Variability comes from three branch
-points rather than skipped passes:
+- A **checkpoint** is a named compiler state whose invariant has been
+  established. EGIR inspector checkpoints are snapshots of these states or of
+  explicitly exposed intermediate states.
+- A **checkpoint transition** consumes one checkpoint and produces the next.
+  Its public function may be an orchestrator rather than one indivisible pass.
+- A **sub-pass** is an independently meaningful analysis, rewrite, validation,
+  or other traversal. One transition can run several sub-passes, including
+  multiple sub-passes over the same Rust typestate.
+
+The tables list the actual functions that act as sub-passes inside each
+checkpoint transition. In the **Sub-pass sequence** column, commas mean
+sequential execution and `|` means mutually exclusive alternatives. A repeated
+function name means the transition function is itself the sub-pass. Local
+per-node helpers are omitted. These functions are the unit used for inspector
+rundowns even when the inspector does not yet expose an intermediate snapshot.
+
+A full compilation has no optional optimization sub-passes. The current CLI,
+Wasm API, and test pipeline invoke every checkpoint transition and its required
+sub-passes in order; `resolve_imports` is simply a no-op when the source contains
+no imports. Variability comes from three branch points rather than skipped
+sub-passes:
 
 - type holes are either rejected or filled;
 - `egir::plan` builds a serial or parallel schedule from the selected profile;
 - SSA is prepared and lowered through either the SPIR-V or WGSL backend.
 
-Several rows below are composite entry points:
+Rows whose function boundaries are easy to conflate with sub-pass boundaries
+need these clarifications:
 
 - `types::run::type_check` builds value-name resolution, performs inference and
   checking, and materializes the typed AST;
-- `tlc::normalize_soacs` combines the SoA transform, Map+Zip flattening, and Zip
-  elimination;
+- `tlc::normalize_soacs` performs the SoA transform, Map+Zip flattening, and Zip
+  elimination during one traversal, so those are responsibilities of one
+  sub-pass rather than three sub-passes;
 - `tlc::monomorphize` first specializes intrinsics, then monomorphizes reachable
   user definitions;
 - `tlc::defunctionalize` composes closure conversion, higher-order
   specialization, and closure-call lowering;
-- `to_egraph`, `egir::reify_soacs`, and `egir::optimize_semantics` each
-  orchestrate the smaller construction, reconciliation, rewrite, lifting, and
-  verification steps named in their table descriptions;
+- `to_egraph` and `egir::optimize_semantics` orchestrate the smaller
+  construction, rewrite, lifting, and verification sub-passes named in their
+  table descriptions, while `egir::reify_soacs` is one reification sub-pass;
 - `egir::plan_logical_resources` and `egir::plan` orchestrate resource
   allocation and target-aware physical planning respectively;
 - `lower_egir_to_ssa` is the convenience wrapper over the seven physical EGIR
-  passes listed separately in the EGIR table;
-- `ssa::prepare_spirv` and `ssa::prepare_wgsl` are target-readiness wrappers;
-  SPIR-V preparation composes the abstract-type and buffer-layout verifiers.
+  checkpoint transitions listed separately in the EGIR table;
+- `ssa::prepare_spirv` composes the abstract-type and buffer-layout validation
+  sub-passes, while `ssa::prepare_wgsl` runs only the abstract-type validator.
 
 ### Mid-End: Acyclic E-Graph
 
@@ -89,48 +108,48 @@ passes:
 
 ### Frontend (AST)
 
-| Pass | Description |
-|------|-------------|
-| `parser::parse` | Tokenize and parse source into the AST |
-| `resolve_imports::resolve_imports` | Recursively expand filesystem imports; this is a no-op when the program has no imports |
-| `elaborate_modules::elaborate_modules` | Elaborate inline modules into the module manager and remove module declarations from the source AST |
-| `name_resolution::resolve_names` | Resolve qualified module member syntax |
-| `resolve_resources::resolve_resources` | Replace source resource declarations and `#[view]` attributes with concrete entry binding metadata |
-| `ast_const_fold::fold_constants` | Fold compile-time integer expressions needed by static-size inference |
-| `resolve_placeholders::resolve_type_placeholders` | Replace type and size placeholders with stable inference variables and build module-spec schemes |
-| `resolve_opens::resolve_opens` | Consume `open` declarations and qualify affected identifiers |
-| `types::run::type_check` | Perform Hindley-Milner inference/checking, including one-directional `*T -> T` weakening at coercion sites |
-| `ast_type_holes::reject_type_holes` / `fill_type_holes` | Reject typed holes for checking, or replace them with typed defaults for compilation, before TLC lowering |
+| Checkpoint transition | Sub-pass sequence | Description |
+|-----------------------|-------------------|-------------|
+| `parser::parse` | `tokenize`, `parse` | Tokenize and parse source into the AST |
+| `resolve_imports::resolve_imports` | `resolve_imports` | Recursively expand filesystem imports; this is a no-op when the program has no imports |
+| `elaborate_modules::elaborate_modules` | `elaborate_modules` | Elaborate inline modules into the module manager and remove module declarations from the source AST |
+| `name_resolution::resolve_names` | `resolve_names` | Resolve qualified module member syntax |
+| `resolve_resources::resolve_resources` | `resolve_resources` | Replace source resource declarations and `#[view]` attributes with concrete entry binding metadata |
+| `ast_const_fold::fold_constants` | `fold_constants` | Fold compile-time integer expressions needed by static-size inference |
+| `resolve_placeholders::resolve_type_placeholders` | `resolve_type_placeholders` | Replace type and size placeholders with stable inference variables and build module-spec schemes |
+| `resolve_opens::resolve_opens` | `resolve_opens` | Consume `open` declarations and qualify affected identifiers |
+| `types::run::type_check` | `build_name_resolution`, `check_program`, `materialize`, `stage_context::validate` | Build value-name resolution, perform Hindley-Milner inference/checking (including one-directional `*T -> T` weakening at coercion sites), materialize the typed AST, and validate its context |
+| `ast_type_holes::reject_type_holes` / `fill_type_holes` | `reject_type_holes` \| `fill_type_holes` | Reject typed holes for checking, or replace them with typed defaults for compilation, before TLC lowering |
 
 ### TLC (Typed Lambda Calculus)
 
-| Pass | Description |
-|------|-------------|
-| `tlc::lower_from_ast` | Convert the fully typed AST to minimal typed lambda calculus |
-| `tlc::pin_entry_buffers` | Substitute each storage entry parameter's concrete `Buffer(set, binding)` into its type, so view provenance flows by unification |
-| `tlc::validate_ownership` | Reject source-level use-after-move before simplification or inlining can erase the call boundary carrying the `*T` contract |
-| `tlc::partial_eval` | Apply constant folding and algebraic simplifications |
-| `tlc::normalize_soacs` | Transform `[n](A,B)` to `([n]A, [n]B)`, flatten Map+Zip, and eliminate standalone Zip operations |
-| `tlc::specialize::specialize_intrinsics` -> `tlc::monomorphize` | Specialize polymorphic intrinsics, then emit reachable user-function monomorphs, including separate monomorphs for distinct view buffers |
-| `tlc::rep_specialize` | Clone callees whose abstract array parameters receive producer-known concrete variants, before forced SOAC-helper inlining |
-| `tlc::inline_small` | Inline small user functions and constants |
-| `tlc::force_inline_soac_helpers` | Force-inline functions whose bodies recursively contain a SOAC or `length`, exposing producer/consumer edges to EGIR |
-| `tlc::renormalize_inlined_soa` | Re-run SoA normalization after inlining exposes tuple, zip, and map structure |
-| `tlc::canonicalize_conditional_producers` | Turn eligible array-valued conditionals into pointwise producers without choosing fusion, routes, or storage |
-| `tlc::normalize_soacs_to_anf` | Lift nested SOAC expressions onto flat let chains so EGIR conversion sees every semantic producer/consumer edge |
-| `tlc::float_runtime_index_nested_producers` | Float nested producers used by runtime indexing into let bindings so residency can recognize ordinary gathers |
-| `convert_closures` -> `specialize_higher_order_functions` -> `lower_closure_calls` (inside `tlc::defunctionalize`) | Lift lambdas and make captures explicit, eliminate higher-order parameters by specialization, then thread captures into direct calls; verifiers guard each boundary |
-| `tlc::fold_generated_lambdas` | Inline compiler-generated lambda definitions back at call sites and remove dead definitions |
-| `tlc::apply_ownership` | Promote safe functional updates and attach `UniqueInput` candidates; EGIR later decides physical reuse from post-fusion liveness |
-| `tlc::filter_reachable` | Eliminate unreachable definitions |
-| `tlc::infer_input_slice_bounds` | Infer minimum input-buffer lengths before semantic EGIR conversion |
+| Checkpoint transition | Sub-pass sequence | Description |
+|-----------------------|-------------------|-------------|
+| `tlc::lower_from_ast` | `Transformer::transform_program`, `check_unextracted`, `stage_extract::extract` | Convert the fully typed AST to minimal typed lambda calculus, validate still-unextracted linear pipeline handles, then extract pipeline stages |
+| `tlc::pin_entry_buffers` | `pin_entry_buffers` | Substitute each storage entry parameter's concrete `Buffer(set, binding)` into its type, so view provenance flows by unification |
+| `tlc::validate_ownership` | `validate_ownership` | Reject source-level use-after-move before simplification or inlining can erase the call boundary carrying the `*T` contract |
+| `tlc::partial_eval` | `partial_eval` | Apply constant folding and algebraic simplifications |
+| `tlc::normalize_soacs` | `soa::transform_program` | Transform SoA types, flatten Map+Zip, and eliminate standalone Zip operations during one traversal |
+| `tlc::monomorphize` | `specialize_intrinsics`, `Monomorphizer::monomorphize` | Specialize polymorphic intrinsics, then emit reachable user-function monomorphs, including separate monomorphs for distinct view buffers |
+| `tlc::rep_specialize` | `rep_specialize` | Clone callees whose abstract array parameters receive producer-known concrete variants, before forced SOAC-helper inlining |
+| `tlc::inline_small` | `inline_small` | Inline small user functions and constants |
+| `tlc::force_inline_soac_helpers` | `force_inline_soac_helpers` | Force-inline functions whose bodies recursively contain a SOAC or `length`, exposing producer/consumer edges to EGIR |
+| `tlc::renormalize_inlined_soa` | `soa::transform_program` | Re-run that combined normalization traversal after inlining exposes new structure |
+| `tlc::canonicalize_conditional_producers` | `canonicalize_conditional_producers` | Turn eligible array-valued conditionals into pointwise producers without choosing fusion, routes, or storage |
+| `tlc::normalize_soacs_to_anf` | `normalize_soacs_to_anf` | Lift nested SOAC expressions onto flat let chains so EGIR conversion sees every semantic producer/consumer edge |
+| `tlc::float_runtime_index_nested_producers` | `float_runtime_index_nested_producers` | Float nested producers used by runtime indexing into let bindings so residency can recognize ordinary gathers |
+| `tlc::defunctionalize` | `convert_closures`, `specialize_higher_order_functions`, `lower_closure_calls` | Lift lambdas and make captures explicit, eliminate higher-order parameters by specialization, then thread captures into direct calls; verifiers guard their boundaries |
+| `tlc::fold_generated_lambdas` | `fold_generated_lambdas` | Inline compiler-generated lambda definitions back at call sites and remove dead definitions |
+| `tlc::apply_ownership` | `apply_ownership` | Promote safe functional updates and attach `UniqueInput` candidates; EGIR later decides physical reuse from post-fusion liveness |
+| `tlc::filter_reachable` | `filter_reachable` | Eliminate unreachable definitions |
+| `tlc::infer_input_slice_bounds` | `infer_input_slice_bounds` | Infer minimum input-buffer lengths before semantic EGIR conversion |
 
-#### Pass-ordering dependency assertions
+#### Sub-pass-ordering dependency assertions
 
 The table above is one valid topological sort of the constraints below
 (`optimize_tlc_for_test` in `wyn-core/src/lib.rs` and the CLI pipeline in
 `wyn/src/main.rs` must stay in sync with it). `A ≺ B` means A runs before B.
-Each notes how it's enforced; when you move a pass, check it here.
+Each notes how it's enforced; when you move a sub-pass, check it here.
 
 - **`validate_ownership` ≺ `partial_eval`** — source-level consumption must be
   checked while the call boundary carrying the `*T` contract still exists.
@@ -162,20 +181,20 @@ Each notes how it's enforced; when you move a pass, check it here.
 
 ### EGIR (Acyclic E-Graph IR)
 
-| Pass | Description |
-|------|-------------|
-| `to_egraph` -> `egir::from_tlc::convert_program` | Build complete entry interfaces, output routes, and ABI size policies while converting TLC definitions and entries to raw e-graphs; no scheduling or physical resource choice occurs here |
-| `egir::reify_soacs` | Privately link output routes to their semantic producers, then reify every reachable raw SOAC with authoritative spaces, bodies, captures, uniform publication/resource effects, placement, and dependencies |
-| `egir::optimize_semantics` | Canonicalize resource accesses; iterate dead-SegOp elimination and conflict-aware fusion to a fixpoint; run `stage_lift::lift_stage_uniform_values`; verify the semantic dependency graph |
-| `egir::plan_logical_resources` | Classify compiler resources; run `destinations::resolve_destinations` and `residency::resolve_residency`; infer scratch sizes; strip compiler-only ABI entries; verify logical resources |
-| `egir::plan` | Select target-aware serial/parallel recipes, add selected work buffers, split and project physical entries, allocate bindings, validate the physical program and kernel plan, and publish the descriptor |
-| `egir::expand_soacs` | Expand each selected physical SOAC recipe into explicit loop/kernel operations |
-| `egir::materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control/data flow |
-| `egir::partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops so invariant subgraphs can hoist |
-| `egir::rewrite` | Add cost-arbitrated equivalent e-graph alternatives, such as multiply chains for constant powers |
-| `egir::optimize_skeleton` | Fold branches and eliminate redundant block parameters in the effect skeleton |
-| `egir::erase_resources` | Replace compile-time resource handles with their physical storage representation |
-| `egir::elaborate` | Demand-elaborate the physical e-graphs into backend-bound SSA, naturally applying DCE, scoped CSE, and LICM |
+| Checkpoint transition | Sub-pass sequence | Established result |
+|-----------------------|-------------------|--------------------|
+| TLC input bounds inferred -> `Converted` | `convert_program` | Discover and hoist pure arity-zero constants; convert the remaining functions and entries to raw per-body e-graphs; normalize callable interface parameters. Entry conversion finalizes complete output routes and ABI size policies; no scheduling or physical resource choice occurs here |
+| `Converted` -> `Segmented` | `reify_soacs` | Link output routes to semantic producers and reify every reachable raw SOAC with authoritative spaces, bodies, captures, uniform publication/resource effects, placement, and dependencies |
+| `Segmented` -> `Optimized` | `canonicalize_resource_accesses`, (`semantic_graph::dependencies`, `analyze_dead_seg_ops`, (`apply_dead_seg_ops` \| `rewrite_once`)) to fixpoint, `lift_stage_uniform_values`, `semantic_graph::verify` (debug) | Canonicalize resource accesses; eliminate dead SegOps and fuse conflict-free operations to a fixpoint; lift stage-uniform values; in debug builds, validate the semantic dependency graph |
+| `Optimized` -> `ResourcesAllocated` | `allocate_semantic_resources`, `classify_existing_compiler_resources`, `resolve_residency`, `resolve_scratch_sizes`, `strip_compiler_abi`, `verify_allocated_resources` (debug) | Establish target-independent logical resources, residency, output destinations, scratch sizes, and the post-allocation ABI, then validate the result in debug builds |
+| `ResourcesAllocated` -> `Planned` | `bind_mapped_output_destinations`, `planning::analyze`, (`allocate_scratch` \| `serial_plan`), `resource_flows`, (`build_parallel_schedule` \| `build_serial_schedule`), `install_generated_callables`, `KernelPlan::finalize` | Select target-aware recipes, allocate selected work buffers, build the schedule and generated callables, and finalize bindings, physical entries, validation, and the published descriptor |
+| `Planned` -> `SoacsExpanded` | `expand_soacs` | Expand each selected physical SOAC recipe into explicit loop/kernel operations |
+| `SoacsExpanded` -> `PartiallyInlined` | `partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops to a bounded fixpoint so invariant subgraphs can hoist |
+| `PartiallyInlined` -> `Materialized` | `materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control/data flow |
+| `Materialized` -> `Rewritten` | `rewrite` | Add cost-arbitrated equivalent e-graph alternatives, such as multiply chains for constant powers |
+| `Rewritten` -> `SkeletonOptimized` | `optimize_skeleton` | Fold branches and eliminate redundant block parameters in the effect skeleton |
+| `SkeletonOptimized` -> `ResourcesErased` | `erase_resources` | Replace compile-time resource handles with their physical storage representation |
+| `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the physical e-graphs into backend-bound SSA, naturally applying DCE, scoped CSE, and LICM |
 
 The EGIR order is also load-bearing:
 
@@ -183,20 +202,22 @@ The EGIR order is also load-bearing:
 - **`reify_soacs` before `optimize_semantics`** - fusion legality depends on explicit domains, semantic operation IDs, effects, and dependency edges.
 - **`optimize_semantics` before `plan_logical_resources`** - residency and uniqueness resolution use the final fused graph's liveness and demands.
 - **`plan_logical_resources` before `plan`** - target scheduling consumes the final semantic residency manifest, then transactionally adds recipe-owned work buffers before choosing bindings, dispatches, and physical entries.
-- **`plan` before `expand_soacs` before `materialize_dynamic_extracts` before `partially_inline_calls` before `rewrite` before `optimize_skeleton` before `erase_resources` before `elaborate`** - every physical pass consumes the typestate produced by the preceding pass, and expansion accepts only a validated kernel plan.
+- **`plan` before `expand_soacs` before `partially_inline_calls` before `materialize_dynamic_extracts` before `rewrite` before `optimize_skeleton` before `erase_resources` before `elaborate`** - every physical transition consumes the checkpoint produced by the preceding transition, and expansion accepts only a validated kernel plan.
 
 Every dependency above is enforced by the top-level typestate chain; each
-typestate exposes only its single next pass.
+checkpoint typestate exposes only its single next transition. Internal
+sub-passes within an orchestrator are ordered by that transition's body rather
+than by additional public typestates.
 
 ### SSA (codegen only)
 
-| Pass | Description |
-|------|-------------|
-| `egir::elaborate` | The validated physical program has been demand-elaborated to SSA while retaining its published schedule and descriptor |
-| `ssa::filter_reachable` | Remove final SSA functions and constants not reachable from an entry point |
-| `ssa::prepare_spirv` | Run `verify_no_abstract_types` and `verify_buffer_layouts`, recording both checks in the typestate |
-| `ssa::prepare_wgsl` | Run `verify_no_abstract_types` and record WGSL readiness in the typestate |
-| `spirv::lower_ssa_program` / `wgsl::lower` | Emit SPIR-V words or WGSL source from backend-ready SSA |
+| Checkpoint transition | Sub-pass sequence | Description |
+|-----------------------|-------------------|-------------|
+| EGIR `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the validated physical program to SSA while retaining its published schedule and descriptor |
+| `Elaborated` -> `Reachable` | `filter_reachable` | Remove final SSA functions and constants not reachable from an entry point |
+| `Reachable` -> `SpirvReady` | `verify_no_abstract_types`, `verify_buffer_layouts` | Validate abstract types and buffer layouts, recording both checks in the typestate |
+| `Reachable` -> `WgslReady` | `verify_no_abstract_types` | Validate abstract types and record WGSL readiness in the typestate |
+| Backend-ready -> emitted module | `lower_ssa_program` \| `wgsl::lower` | Emit SPIR-V words or WGSL source from the selected backend-ready SSA checkpoint |
 
 SSA is intentionally minimal: optimization and canonicalization live in EGIR;
 SSA performs only final definition reachability and target validation. A
@@ -340,7 +361,7 @@ last type argument) holds `Buffer(set, binding)`. Thus a rank-one view has
 four type arguments, `[elem, ArrayVariantView, dim_0, buffer]`; the runtime
 `{offset, len}` value is separate from this static type-level buffer slot.
 
-- **Born at entry params.** `pin_entry_buffers` (the first TLC pass)
+- **Born at entry params.** `pin_entry_buffers` (the first TLC sub-pass)
   computes each storage entry-param's binding (auto-allocated `set 0,
   0..N`, or an explicit `#[storage(set, binding)]`) and substitutes the
   param's buffer *variable* → `Buffer(set, binding)` throughout the entry.
@@ -364,7 +385,8 @@ four type arguments, `[elem, ArrayVariantView, dim_0, buffer]`; the runtime
 
 ### Defunctionalization
 
-The `defunctionalize()` typestate transition composes three sequential passes.
+The `defunctionalize()` typestate transition composes three sequential
+sub-passes.
 No analysis sidecar crosses their boundaries: closure environments live directly
 on closure terms and SOAC bodies.
 
@@ -396,8 +418,8 @@ underlying carrier is `Type::Constructed(TypeName, Vec<Type>)` — the
 `Vec<Type>` (the "args") means different things per variant. This
 schema is the canonical mapping. Helpers in `wyn-core/src/types/mod.rs`
 (`array_elem`, `array_size`, `array_variant`, `strip_unique`,
-`extract_function_signature`) centralize the position queries so passes
-don't pattern-match on args indices directly.
+`extract_function_signature`) centralize the position queries so compiler
+sub-passes don't pattern-match on args indices directly.
 
 | Variant | args[0] | args[1] | args[2…] | Notes |
 |---|---|---|---|---|
