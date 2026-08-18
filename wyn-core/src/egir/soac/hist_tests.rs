@@ -1,5 +1,6 @@
 use super::*;
 use crate::egir::types::{Raw, SegBody};
+use crate::types;
 use crate::FunctionId;
 use std::collections::HashMap;
 
@@ -18,7 +19,7 @@ fn array(element: Type<TypeName>) -> Type<TypeName> {
             element,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(8), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }

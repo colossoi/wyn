@@ -1,8 +1,15 @@
 use super::super::SoacOp;
 use super::{analyze, build, eligible_unique_input_soacs, AnalysisState, Origin, VarRef};
+use crate::ast_type_holes;
+use crate::builtins;
 use crate::builtins::catalog;
+use crate::compile_thru_frontend;
+use crate::compile_thru_tlc;
+use crate::error;
 use crate::tlc::{self, Program, Term, TermKind};
+use crate::types;
 use crate::types::SoacOwnership;
+use crate::SymbolId;
 use crate::SymbolTable;
 
 #[test]
@@ -27,8 +34,8 @@ fn empty_model_lookups() {
 }
 
 fn compile_to_tlc(source: &str) -> tlc::stage::SoaNormalized {
-    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
-    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let type_checked = compile_thru_frontend(source).expect("type_check");
+    let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
@@ -39,7 +46,7 @@ fn compile_to_tlc(source: &str) -> tlc::stage::SoaNormalized {
 fn find_def<'a, Tag, F: tlc::Family, GlobalContext>(
     program: &'a Program<Tag, F, GlobalContext>,
     name: &str,
-) -> &'a crate::tlc::Def<F> {
+) -> &'a tlc::Def<F> {
     program
         .defs
         .iter()
@@ -49,7 +56,7 @@ fn find_def<'a, Tag, F: tlc::Family, GlobalContext>(
 
 fn param_origin(
     model: &AnalysisState,
-    def: &crate::tlc::Def<tlc::family::Polymorphic>,
+    def: &tlc::Def<tlc::family::Polymorphic>,
     param_index: usize,
 ) -> Origin {
     let lam = match &def.body.kind {
@@ -105,7 +112,7 @@ def f(x: i32) i32 = x + 1
 /// Build a Let term by hand and run `build` on a synthesized program.
 /// Bypasses partial_eval, which would otherwise inline trivial
 /// `let x = y in body` aliases away before they reach our pass.
-fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, crate::SymbolId, crate::SymbolId) {
+fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, SymbolId, SymbolId) {
     use crate::ast::{Span, TypeName};
     use crate::tlc::{Def, DefMeta, Lambda, Term, TermIdSource, TermKind};
     use polytype::Type;
@@ -125,7 +132,7 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, crate::SymbolId
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     // `*` is a signature diet now, not part of the type; the consuming
@@ -171,14 +178,14 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, crate::SymbolId
     };
 
     let def = Def {
-        data: crate::tlc::data::PolymorphicDefinition { scheme: None },
+        data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
         ty: lambda_term.ty.clone(),
         body: lambda_term,
         meta: DefMeta::Function,
         arity: 1,
-        param_diets: vec![crate::types::Diet::Leaf(true)],
-        return_diet: crate::types::Diet::observing(),
+        param_diets: vec![types::Diet::Leaf(true)],
+        return_diet: types::Diet::observing(),
     };
     let program = Program::from_parts(
         vec![def],
@@ -323,7 +330,7 @@ fn find_app_call_to<'a>(
                 program.symbols.get(*sym).map(|s| names.contains(&s.as_str())).unwrap_or(false)
             }
             TermKind::Var(VarRef::Builtin { id, .. }) => {
-                let def = crate::builtins::by_id(*id);
+                let def = builtins::by_id(*id);
                 names.contains(&def.raw.surface_name)
                     || def.intrinsic_source_names().iter().any(|n| names.contains(n))
                     || def.impl_source_names().iter().any(|n| names.contains(n))
@@ -541,8 +548,8 @@ def f(a: [4]i32, n: i32) i32 =
 /// can be invoked, then return whether the program has a
 /// use-after-move violation.
 fn has_use_after_move(source: &str) -> bool {
-    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
-    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let type_checked = compile_thru_frontend(source).expect("type_check");
+    let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     super::check(&program).is_err()
@@ -944,11 +951,11 @@ fn compile_pipeline_checks_consumption_before_optimization() {
 def consume(arr: *[4]i32) i32 = arr[0]
 def main(arr: [4]i32) i32 = consume(arr)
 "#;
-    let error = match crate::compile_thru_tlc(source) {
+    let error = match compile_thru_tlc(source) {
         Ok(_) => panic!("compile must reject observing consumption"),
         Err(error) => error,
     };
-    assert!(matches!(error, crate::error::CompilerError::AliasError(_, _)));
+    assert!(matches!(error, error::CompilerError::AliasError(_, _)));
 }
 
 #[test]
@@ -1051,11 +1058,7 @@ fn binder_origin(
     fn_name: &str,
     var_name: &str,
 ) -> (super::OwnerId, Origin) {
-    fn find_let_sym(
-        t: &Term,
-        var_name: &str,
-        program: &tlc::stage::SoaNormalized,
-    ) -> Option<crate::SymbolId> {
+    fn find_let_sym(t: &Term, var_name: &str, program: &tlc::stage::SoaNormalized) -> Option<SymbolId> {
         if let TermKind::Let { name, .. } = &t.kind {
             if program.symbols.get(*name).map(|s| s.as_str()) == Some(var_name) {
                 return Some(*name);
@@ -1219,7 +1222,7 @@ def main(arr: *[3][4]i32) [3][4]i32 = map(|row| row, arr)
     );
     let model = build(&program);
     let main_def = find_def(&program, "main");
-    fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
+    fn first_map_elem_param(t: &Term) -> Option<SymbolId> {
         if let TermKind::Soac(SoacOp::Map { lam, .. }) = &t.kind {
             return Some(lam.lam.params[0].0);
         }
@@ -1256,7 +1259,7 @@ def main(arr: [3][4]i32) [3][4]i32 = map(|row| row, arr)
     let main_def = find_def(&program, "main");
     // Walk main's body looking for a Soac::Map and inspect its
     // first lambda param's owner.
-    fn first_map_elem_param(t: &Term) -> Option<crate::SymbolId> {
+    fn first_map_elem_param(t: &Term) -> Option<SymbolId> {
         if let TermKind::Soac(SoacOp::Map { lam, .. }) = &t.kind {
             return Some(lam.lam.params[0].0);
         }
@@ -1636,7 +1639,7 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     let outer_arr_ty = Type::Constructed(
@@ -1645,7 +1648,7 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
             inner_arr_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     let unique_outer_ty = outer_arr_ty.clone();
@@ -1737,14 +1740,14 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
         kind: TermKind::Lambda(lambda),
     };
     let f_def = Def {
-        data: crate::tlc::data::PolymorphicDefinition { scheme: None },
+        data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
         ty: f_ty,
         body: lambda_term,
         meta: DefMeta::Function,
         arity: 1,
-        param_diets: vec![crate::types::Diet::Leaf(true)],
-        return_diet: crate::types::Diet::observing(),
+        param_diets: vec![types::Diet::Leaf(true)],
+        return_diet: types::Diet::observing(),
     };
 
     Program::from_parts(
@@ -1844,7 +1847,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     let unique_arr_ty = arr_ty.clone();
@@ -1874,8 +1877,8 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
         body: consume_lam_term,
         meta: DefMeta::Function,
         arity: 1,
-        param_diets: vec![crate::types::Diet::Leaf(true)],
-        return_diet: crate::types::Diet::observing(),
+        param_diets: vec![types::Diet::Leaf(true)],
+        return_diet: types::Diet::observing(),
     };
 
     let var_consume = Term {
@@ -1925,7 +1928,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
         span: Span::dummy(),
         kind: TermKind::IntLit("1".to_string()),
     };
-    let range_input = crate::tlc::ArrayExpr::Range {
+    let range_input = tlc::ArrayExpr::Range {
         start: Box::new(zero_lit),
         len: Box::new(one_lit),
         step: None,
@@ -1941,7 +1944,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
                 i32_ty.clone(),
                 Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 Type::Variable(0),
-                crate::types::no_buffer(),
+                types::no_buffer(),
             ],
         ),
         span: Span::dummy(),
@@ -1994,7 +1997,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+        kind: TermKind::ArrayExpr(tlc::ArrayExpr::Literal(vec![
             int_lit(&mut ids, "1"),
             int_lit(&mut ids, "2"),
             int_lit(&mut ids, "3"),
@@ -2021,7 +2024,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     };
 
     Program::from_parts(
@@ -2083,7 +2086,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
             i32_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
 
@@ -2120,7 +2123,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         span: Span::dummy(),
         kind: TermKind::IntLit("1".to_string()),
     };
-    let range_input = crate::tlc::ArrayExpr::Range {
+    let range_input = tlc::ArrayExpr::Range {
         start: Box::new(zero_lit),
         len: Box::new(one_lit),
         step: None,
@@ -2172,7 +2175,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         id: ids.next_id(),
         ty: arr_ty.clone(),
         span: Span::dummy(),
-        kind: TermKind::ArrayExpr(crate::tlc::ArrayExpr::Literal(vec![
+        kind: TermKind::ArrayExpr(tlc::ArrayExpr::Literal(vec![
             int_lit(&mut ids, "1"),
             int_lit(&mut ids, "2"),
             int_lit(&mut ids, "3"),
@@ -2199,7 +2202,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     };
 
     let program: tlc::stage::GeneratedLambdasFolded = Program::from_parts(

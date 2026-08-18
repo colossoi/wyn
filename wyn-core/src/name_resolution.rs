@@ -17,7 +17,14 @@
 //! top-level defs, module values) are absent from the side table — the
 //! type checker handles them via scope/module lookup.
 
+use crate::ast;
+use crate::elaborate_modules;
+use crate::error;
+use crate::module_manager;
+use crate::resolve_opens;
+use crate::resolve_placeholders;
 use crate::LookupMap;
+use crate::LookupSet;
 use crate::{SymbolId, SymbolTable};
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
@@ -29,12 +36,12 @@ use crate::scope::{for_each_pattern_name, ScopeStack};
 #[derive(Debug, Clone, Copy)]
 pub enum NamesResolvedTag {}
 pub type NamesResolved =
-    Program<NamesResolvedTag, crate::elaborate_modules::ModulesElaboratedFamily, ModuleManager>;
+    Program<NamesResolvedTag, elaborate_modules::ModulesElaboratedFamily, ModuleManager>;
 
 /// Insert every name bound by `pattern` into `scope`.
-fn collect_pattern_bindings<T, A>(pattern: &crate::ast::Pattern<T, A>, scope: &mut ScopeStack<()>)
+fn collect_pattern_bindings<T, A>(pattern: &ast::Pattern<T, A>, scope: &mut ScopeStack<()>)
 where
-    T: crate::ast::TreeFamily,
+    T: ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
     for_each_pattern_name(pattern, &mut |name| {
@@ -82,7 +89,7 @@ pub fn walk_expr<C: ResolveContext>(
     expression: &mut Expression,
     context: &C,
     scope: &mut ScopeStack<()>,
-) -> crate::error::Result<()> {
+) -> error::Result<()> {
     match &mut expression.kind {
         ExprKind::Identifier(identifier) => {
             context.resolve_identifier(&mut identifier.qualifiers, &mut identifier.name, scope);
@@ -165,16 +172,16 @@ pub fn walk_expr<C: ResolveContext>(
                 walk_expr(init, context, scope)?;
             }
             match &mut loop_expr.form {
-                crate::ast::LoopForm::For(_, bound) => walk_expr(bound, context, scope)?,
-                crate::ast::LoopForm::ForIn(_, iterable) => walk_expr(iterable, context, scope)?,
-                crate::ast::LoopForm::While(_) => {}
+                ast::LoopForm::For(_, bound) => walk_expr(bound, context, scope)?,
+                ast::LoopForm::ForIn(_, iterable) => walk_expr(iterable, context, scope)?,
+                ast::LoopForm::While(_) => {}
             }
 
             scope.push_scope();
             collect_pattern_bindings(&loop_expr.pattern, scope);
             match &mut loop_expr.form {
-                crate::ast::LoopForm::While(condition) => walk_expr(condition, context, scope)?,
-                crate::ast::LoopForm::For(pattern, _) | crate::ast::LoopForm::ForIn(pattern, _) => {
+                ast::LoopForm::While(condition) => walk_expr(condition, context, scope)?,
+                ast::LoopForm::For(pattern, _) | ast::LoopForm::ForIn(pattern, _) => {
                     collect_pattern_bindings(pattern, scope);
                 }
             }
@@ -240,7 +247,7 @@ pub fn rewrite_expr<C: ResolveContext>(
 /// `mod.name` to `Identifier([mod], name)` when `mod` is a registered
 /// module.
 struct ProgramResolver<'a> {
-    known_modules: &'a crate::LookupSet<String>,
+    known_modules: &'a LookupSet<String>,
 }
 
 impl<'a> ResolveContext for ProgramResolver<'a> {
@@ -252,7 +259,7 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
         _scope: &ScopeStack<()>,
     ) -> Option<ExprKind> {
         if obj_quals.is_empty() && self.known_modules.contains(obj_name) {
-            Some(ExprKind::Identifier(crate::ast::Identifier {
+            Some(ExprKind::Identifier(ast::Identifier {
                 qualifiers: vec![obj_name.to_string()],
                 name: field.to_string(),
             }))
@@ -263,7 +270,7 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
 }
 
 /// Resolve qualified field accesses while consuming the old program stage.
-pub fn resolve_names(mut program: crate::elaborate_modules::ModulesElaborated) -> NamesResolved {
+pub fn resolve_names(mut program: elaborate_modules::ModulesElaborated) -> NamesResolved {
     {
         let context = ProgramResolver {
             known_modules: program.global_context.known_module_names(),
@@ -287,10 +294,7 @@ pub fn resolve_names(mut program: crate::elaborate_modules::ModulesElaborated) -
 }
 
 /// Resolve names in a single Decl (for prelude functions).
-pub fn resolve_decl(
-    mut decl: crate::ast::Decl,
-    known_modules: &crate::LookupSet<String>,
-) -> crate::ast::Decl {
+pub fn resolve_decl(mut decl: ast::Decl, known_modules: &LookupSet<String>) -> ast::Decl {
     let context = ProgramResolver { known_modules };
     let mut scope = ScopeStack::new();
     walk_expr(&mut decl.body, &context, &mut scope).expect("name resolution visitor is infallible");
@@ -369,7 +373,7 @@ pub enum ResolvedValueRef {
         arity: usize,
         /// Structurally resolved per-component target type. Conversion
         /// dispatch never reconstructs a catalog name from this value.
-        target_elem: crate::ast::TypeName,
+        target_elem: ast::TypeName,
         /// Filled by type checking once the source component type is known.
         /// Materialization rejects `None`.
         component_conversion: Option<BuiltinId>,
@@ -387,10 +391,9 @@ pub enum ResolvedValueRef {
 /// is the sole allocator and diagnostic-name table for source-level bindings.
 #[derive(Debug)]
 pub struct BindingsResolvedGlobal {
-    pub source: crate::resolve_placeholders::PlaceholdersResolvedGlobal,
+    pub source: resolve_placeholders::PlaceholdersResolvedGlobal,
     pub symbols: SymbolTable,
-    pub support_definitions:
-        Vec<crate::ast::SupportDefinition<crate::ast::NameResolvedDefinition, crate::ast::ResolvedTree>>,
+    pub support_definitions: Vec<ast::SupportDefinition<ast::NameResolvedDefinition, ast::ResolvedTree>>,
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier
@@ -409,7 +412,7 @@ pub struct NameResolution {
     pub bindings: LookupMap<(NodeId, String), SymbolId>,
     /// Definition-node identity, kept separate from lexical name lookup so a
     /// shadowed prelude definition never shares a `SymbolId` with user code.
-    pub declarations: LookupMap<(String, crate::ast::Span), SymbolId>,
+    pub declarations: LookupMap<(String, ast::Span), SymbolId>,
 }
 
 impl NameResolution {
@@ -457,7 +460,7 @@ impl NameResolution {
 /// `module_manager::elaborate_decl_signature`), so per-instance bodies
 /// have their own NodeId space and the previous collision risk is gone.
 pub fn build_name_resolution(
-    program: &crate::resolve_opens::OpensResolved,
+    program: &resolve_opens::OpensResolved,
     module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {
@@ -495,12 +498,12 @@ pub fn build_name_resolution(
             collect_top_level_names(&program.declarations, &mut module_scope);
         }
         for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(d) = item {
+            if let module_manager::ElaboratedItem::Decl(d) = item {
                 module_scope.insert(d.name.clone(), ());
             }
         }
         for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(d) = item {
+            if let module_manager::ElaboratedItem::Decl(d) = item {
                 let mut scope = module_scope.clone();
                 scope.push_scope();
                 for p in &d.params {
@@ -545,22 +548,22 @@ fn intern_definition(nr: &mut NameResolution, name: String) -> SymbolId {
     symbol
 }
 
-fn alloc_declaration(nr: &mut NameResolution, name: String, span: crate::ast::Span) -> SymbolId {
+fn alloc_declaration(nr: &mut NameResolution, name: String, span: ast::Span) -> SymbolId {
     let symbol = nr.symbols.alloc(name.clone());
     nr.declarations.insert((name, span), symbol);
     symbol
 }
 
 fn bind_symbol_pattern<T, A>(
-    pattern: &crate::ast::Pattern<T, A>,
+    pattern: &ast::Pattern<T, A>,
     scope: &mut ScopeStack<SymbolId>,
     nr: &mut NameResolution,
 ) where
-    T: crate::ast::TreeFamily<
-        Header = crate::ast::Header,
-        Identifier = crate::ast::Identifier,
+    T: ast::TreeFamily<
+        Header = ast::Header,
+        Identifier = ast::Identifier,
         Binding = String,
-        TypeHole = crate::ast::TypeHole,
+        TypeHole = ast::TypeHole,
     >,
     A: Clone + std::fmt::Debug + PartialEq,
 {
@@ -599,7 +602,7 @@ fn bind_symbol_pattern<T, A>(
 }
 
 fn assign_symbol_identities(
-    program: &crate::resolve_opens::OpensResolved,
+    program: &resolve_opens::OpensResolved,
     module_manager: &ModuleManager,
     nr: &mut NameResolution,
 ) {
@@ -656,13 +659,13 @@ fn assign_symbol_identities(
     for (module, elaborated) in module_manager.elaborated_modules.iter() {
         let mut module_scope = ScopeStack::new();
         for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(definition) = item {
+            if let module_manager::ElaboratedItem::Decl(definition) = item {
                 let symbol = intern_definition(nr, format!("{}.{}", module, definition.name));
                 module_scope.insert(definition.name.clone(), symbol);
             }
         }
         for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(definition) = item {
+            if let module_manager::ElaboratedItem::Decl(definition) = item {
                 let mut scope = module_scope.clone();
                 scope.push_scope();
                 for pattern in &definition.params {
@@ -693,11 +696,11 @@ fn assign_expr_symbols<T>(
     scope: &mut ScopeStack<SymbolId>,
     nr: &mut NameResolution,
 ) where
-    T: crate::ast::TreeFamily<
-        Header = crate::ast::Header,
-        Identifier = crate::ast::Identifier,
+    T: ast::TreeFamily<
+        Header = ast::Header,
+        Identifier = ast::Identifier,
         Binding = String,
-        TypeHole = crate::ast::TypeHole,
+        TypeHole = ast::TypeHole,
     >,
 {
     use crate::ast::LoopForm;
@@ -845,7 +848,7 @@ fn assign_expr_symbols<T>(
 /// shadowing context (top-level user names, or surrounding module's
 /// scope plus its sibling decls).
 fn walk_decls(
-    decls: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    decls: &[Declaration<resolve_opens::OpensResolvedFamily>],
     outer_scope: &ScopeStack<()>,
     catalog: &BuiltinCatalog,
     nr: &mut NameResolution,
@@ -882,7 +885,7 @@ fn walk_decls(
 }
 
 fn collect_top_level_names(
-    decls: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+    decls: &[Declaration<resolve_opens::OpensResolvedFamily>],
     scope: &mut ScopeStack<()>,
 ) {
     for decl in decls {
@@ -906,11 +909,7 @@ fn walk_resolution<T>(
     scope: &mut ScopeStack<()>,
     nr: &mut NameResolution,
 ) where
-    T: crate::ast::TreeFamily<
-        Header = crate::ast::Header,
-        Identifier = crate::ast::Identifier,
-        TypeHole = crate::ast::TypeHole,
-    >,
+    T: ast::TreeFamily<Header = ast::Header, Identifier = ast::Identifier, TypeHole = ast::TypeHole>,
 {
     match &expr.kind {
         ExprKind::Identifier(identifier) => {

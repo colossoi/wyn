@@ -22,7 +22,10 @@ use super::{
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{by_id, catalog};
+use crate::tlc;
+use crate::types;
 use crate::types::TypeExt;
+use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
@@ -254,7 +257,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         span: Span,
     ) -> Option<Term<Empty, Empty>> {
         let known = catalog().known();
-        if let Some(id) = crate::tlc::var_term_builtin_id(func, &self.symbols) {
+        if let Some(id) = tlc::var_term_builtin_id(func, &self.symbols) {
             // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
                 let arr_orig_ty = &args[0].ty;
@@ -433,7 +436,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     fn rewrite_uninit_aot(
         &mut self,
         soa_ty: &Type<TypeName>,
-        uninit_sym: crate::SymbolId,
+        uninit_sym: SymbolId,
         span: Span,
     ) -> Term<Empty, Empty> {
         match soa_ty {
@@ -456,7 +459,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
     fn rewrite_length_aot(
         &mut self,
         arr: &Term<Empty, Empty>,
-        length_sym: crate::SymbolId,
+        length_sym: SymbolId,
         result_ty: Type<TypeName>,
         span: Span,
     ) -> Term<Empty, Empty> {
@@ -494,9 +497,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                 let components: Vec<Term<Empty, Empty>> = exprs
                     .iter()
                     .map(|inner_ae| match inner_ae {
-                        ArrayExpr::Var(vr, ty) => {
-                            crate::tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids)
-                        }
+                        ArrayExpr::Var(vr, ty) => tlc::atom_var_term(*vr, ty.clone(), &mut self.term_ids),
                         _ => self.mk_term(new_ty.clone(), span, TermKind::ArrayExpr(inner_ae.clone())),
                     })
                     .collect();
@@ -648,7 +649,7 @@ impl MapNormalizer<'_, '_> {
         &mut self,
         body: SoacBody<Empty, Empty>,
         inputs: Vec<ArrayExpr<Empty, Empty>>,
-        destination: crate::types::SoacOwnership,
+        destination: types::SoacOwnership,
     ) -> Option<SoacOp<Empty, Empty>> {
         if inputs.len() <= 1 || body.lam.params.len() != 1 {
             return None;
@@ -664,7 +665,7 @@ impl MapNormalizer<'_, '_> {
         }
 
         let SoacBody { lam, data } = body;
-        let new_params: Vec<(crate::SymbolId, Type<TypeName>)> = flat_types
+        let new_params: Vec<(SymbolId, Type<TypeName>)> = flat_types
             .into_iter()
             .enumerate()
             .map(|(index, ty)| (self.symbols.alloc(format!("_sn_{index}")), ty))
@@ -718,7 +719,7 @@ impl TermRewriter<Empty, Empty> for MapNormalizer<'_, '_> {
 /// made for one substituted occurrence, so every inserted term receives IDs
 /// from the owning program.
 fn build_tuple_reconstruction(
-    new_params: &[(crate::SymbolId, Type<TypeName>)],
+    new_params: &[(SymbolId, Type<TypeName>)],
     tuple_ty: &Type<TypeName>,
     span: Span,
     term_ids: &mut TermIdSource,

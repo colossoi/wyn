@@ -9,15 +9,15 @@
 /// Physical EGIR with compile-time-only resource handles erased.
 #[derive(Debug, Clone, Copy)]
 pub enum ResourcesErasedTag {}
-pub type ResourcesErased = crate::egir::program::Program<
+pub type ResourcesErased = egir::program::Program<
     ResourcesErasedTag,
-    crate::egir::ir::ProgramFamily<
-        crate::egir::types::Physical,
-        crate::interface::StorageBindingDecl,
-        crate::egir::ir::RealizedOutputRoute,
-        crate::egir::program::CoreProgramData,
+    egir::ir::ProgramFamily<
+        egir::types::Physical,
+        interface::StorageBindingDecl,
+        egir::ir::RealizedOutputRoute,
+        egir::program::CoreProgramData,
     >,
-    crate::egir::program::PlannedGlobal,
+    egir::program::PlannedGlobal,
 >;
 
 #[cfg(test)]
@@ -25,16 +25,19 @@ pub type ResourcesErased = crate::egir::program::Program<
 mod resource_erasure_tests;
 
 use crate::ast::TypeName;
+use crate::egir;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{Func, Program};
 use crate::egir::types::{EGraph, Family, OperandType, ParameterId, Physical, ValueKind};
+use crate::interface;
+use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
 
 pub fn erase_resources(
     program: super::skel_opt::SkeletonOptimized,
 ) -> Result<ResourcesErased, ConvertError> {
-    let erasures: LookupMap<crate::FunctionId, Vec<bool>> = program
+    let erasures: LookupMap<FunctionId, Vec<bool>> = program
         .functions
         .iter()
         .map(|function| {
@@ -88,7 +91,7 @@ fn is_storage_image(ty: &Type<TypeName>) -> bool {
 
 fn rewrite_graph<P: Family>(
     mut graph: EGraph<P>,
-    erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
+    erasures: &LookupMap<FunctionId, Vec<bool>>,
 ) -> Result<EGraph<P>, ConvertError> {
     let calls = graph.side_effect_index().calls().map(|(call, _)| call).collect::<Vec<_>>();
     for site in calls {
@@ -103,9 +106,9 @@ fn rewrite_graph<P: Family>(
 
 fn erase_function_resources(
     function: Func<Physical>,
-    erasures: &LookupMap<crate::FunctionId, Vec<bool>>,
+    erasures: &LookupMap<FunctionId, Vec<bool>>,
 ) -> Result<Func<Physical>, ConvertError> {
-    let crate::egir::ir::Func {
+    let egir::ir::Func {
         region,
         name,
         span,
@@ -155,7 +158,7 @@ fn erase_function_resources(
         }
     }
     for place in graph.places.values_mut() {
-        if let crate::egir::ir::PlaceOp::Parameter { parameter } = place.op() {
+        if let egir::ir::PlaceOp::Parameter { parameter } = place.op() {
             let new_index = new_indices.get(parameter.index()).copied().flatten().ok_or_else(|| {
                 ConvertError::Internal(format!(
                     "addressable parameter {} in `{name}` cannot be erased",
@@ -210,7 +213,7 @@ fn erase_function_resources(
     ))
 }
 
-fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<crate::egir::types::ValueId> {
+fn live_nodes<P: Family>(graph: &EGraph<P>) -> LookupSet<egir::types::ValueId> {
     let mut roots = Vec::new();
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {

@@ -17,11 +17,13 @@
 //! operand values first, then interns the result.
 
 use crate::ast::TypeName;
+use crate::builtins;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::scalar_eval::{self, Scalar};
 use crate::ssa::types::ConstantValue;
+use crate::types;
 use crate::types::TypeExt;
 use polytype::Type;
 use smallvec::smallvec;
@@ -88,7 +90,7 @@ impl<P: Family> EGraph<P> {
                     super::types::PlaceDestination::Fixed(place)
                     | super::types::PlaceDestination::Bounded { storage: place, .. },
                 ) => {
-                    let view_ty = crate::types::view_array_of(&ty, crate::types::no_buffer());
+                    let view_ty = types::view_array_of(&ty, types::no_buffer());
                     self.add_place_view(place, view_ty, None).value()
                 }
             });
@@ -213,7 +215,7 @@ impl<P: Family> EGraph<P> {
 
     fn fold_intrinsic(
         &mut self,
-        id: crate::builtins::BuiltinId,
+        id: builtins::BuiltinId,
         overload_idx: usize,
         operands: &[ValueId],
         result_ty: &Type<TypeName>,

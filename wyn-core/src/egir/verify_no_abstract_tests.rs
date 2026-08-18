@@ -1,9 +1,13 @@
+use crate::ast;
 use crate::ast::TypeName;
 use crate::egir::verify_no_abstract;
 use crate::error::CompilerError;
 use crate::flow::ExecutionModel;
+use crate::ssa;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{EntryPoint, Function, Program};
+use crate::EntryId;
+use crate::FunctionId;
 use crate::{types, LookupMap};
 use polytype::Type;
 
@@ -35,17 +39,17 @@ fn composite_array_ty() -> Type<TypeName> {
     )
 }
 
-fn empty_program() -> crate::ssa::stage::Bare {
+fn empty_program() -> ssa::stage::Bare {
     Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 
 fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {
     let builder = FuncBuilder::new(params, return_ty);
     Function {
-        id: crate::FunctionId::from_index(0),
+        id: FunctionId::from_index(0),
         name: "f".into(),
         body: builder.finish_unchecked(),
-        span: crate::ast::Span::dummy(),
+        span: ast::Span::dummy(),
         linkage_name: None,
     }
 }
@@ -53,7 +57,7 @@ fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName
 fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> EntryPoint {
     let builder = FuncBuilder::new(params, return_ty);
     EntryPoint {
-        id: crate::EntryId::from_index(0),
+        id: EntryId::from_index(0),
         name: "main".into(),
         body: builder.finish_unchecked(),
         execution_model: ExecutionModel::Compute {
@@ -64,7 +68,7 @@ fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) 
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),
-        span: crate::ast::Span::dummy(),
+        span: ast::Span::dummy(),
     }
 }
 

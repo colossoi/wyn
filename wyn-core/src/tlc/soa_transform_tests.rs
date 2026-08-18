@@ -1,4 +1,5 @@
 use crate::tlc::soa::*;
+use crate::types;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
@@ -19,12 +20,7 @@ fn composite_variant() -> Type<TypeName> {
 fn array_ty(elem: Type<TypeName>, size: usize) -> Type<TypeName> {
     Type::Constructed(
         TypeName::Array,
-        vec![
-            elem,
-            composite_variant(),
-            size_ty(size),
-            crate::types::no_buffer(),
-        ],
+        vec![elem, composite_variant(), size_ty(size), types::no_buffer()],
     )
 }
 

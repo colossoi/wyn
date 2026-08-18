@@ -1,14 +1,17 @@
 use super::*;
 use crate::ast::TypeName;
+use crate::ast_type_holes;
+use crate::compile_thru_frontend;
 use crate::tlc::{self, DefMeta};
 use crate::types::TypeExt;
+use crate::BindingRef;
 use polytype::Type;
 
 /// Compile `src` through type-check → TLC → region-pinning and return the
 /// pinned program.
 fn pin(src: &str) -> tlc::stage::BuffersPinned {
-    let type_checked = crate::compile_thru_frontend(src).expect("type_check");
-    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let type_checked = compile_thru_frontend(src).expect("type_check");
+    let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
     tlc::pin_entry_buffers(program).expect("pin_entry_buffers")
 }
@@ -36,7 +39,7 @@ fn single_view_param_pins_to_binding_zero() {
     let region = entry_param_buffer(&program, 0);
     assert_eq!(
         region,
-        Type::Constructed(TypeName::Buffer(crate::BindingRef::new(0, 0)), vec![]),
+        Type::Constructed(TypeName::Buffer(BindingRef::new(0, 0)), vec![]),
         "view param region should be pinned to its auto-allocated binding"
     );
 }
@@ -50,10 +53,10 @@ fn two_view_params_pin_to_distinct_bindings() {
          \x20   reduce(|a: f32, b: f32| a + b, 0.0, xs) + reduce(|a: f32, b: f32| a + b, 0.0, ys)\n");
     assert_eq!(
         entry_param_buffer(&program, 0),
-        Type::Constructed(TypeName::Buffer(crate::BindingRef::new(0, 0)), vec![]),
+        Type::Constructed(TypeName::Buffer(BindingRef::new(0, 0)), vec![]),
     );
     assert_eq!(
         entry_param_buffer(&program, 1),
-        Type::Constructed(TypeName::Buffer(crate::BindingRef::new(0, 1)), vec![]),
+        Type::Constructed(TypeName::Buffer(BindingRef::new(0, 1)), vec![]),
     );
 }

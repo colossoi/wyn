@@ -13,6 +13,8 @@ use super::{
     Term, TermId, TermIdSource, TermKind, TermRewriter,
 };
 use crate::ast::{Span, TypeName};
+use crate::builtins;
+use crate::map_in_place;
 use crate::{LookupMap, LookupSet};
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
@@ -122,7 +124,7 @@ fn force_inline_array_work_helpers_to_fixpoint(program: &mut SmallInlined) {
             return;
         }
         let term_ids = &mut program.term_ids;
-        crate::map_in_place(&mut program.defs, |def| {
+        map_in_place(&mut program.defs, |def| {
             let body = inline_term(def.body, &candidates, term_ids);
             Def { body, ..def }
         });
@@ -230,7 +232,7 @@ fn is_length_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     let TermKind::Var(super::VarRef::Builtin { id, .. }) = &func.kind else {
         return false;
     };
-    *id == crate::builtins::catalog().known().length
+    *id == builtins::catalog().known().length
 }
 
 fn any_def_calls_candidate(
@@ -284,7 +286,7 @@ pub fn inline_small(mut program: RepSpecialized) -> SmallInlined {
         .collect();
 
     let term_ids = &mut program.term_ids;
-    crate::map_in_place(&mut program.defs, |def| {
+    map_in_place(&mut program.defs, |def| {
         // Constants are pure — inline them everywhere, including lambda bodies.
         let body = inline_constants(def.body, &all_constants, term_ids);
         let body = inline_term(body, &small_candidates, term_ids);
@@ -300,7 +302,7 @@ pub fn fold_generated_lambdas(mut program: Defunctionalized) -> GeneratedLambdas
     let inline_candidates = find_inline_candidates(&program.defs, &program.symbols);
 
     let term_ids = &mut program.term_ids;
-    crate::map_in_place(&mut program.defs, |def| {
+    map_in_place(&mut program.defs, |def| {
         let body = inline_term(def.body, &inline_candidates, term_ids);
         Def { body, ..def }
     });

@@ -5,6 +5,7 @@
 //! calls, packing and unpacking multi-result values, and finalising generated
 //! callable regions.
 
+use crate::egir;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -58,7 +59,7 @@ pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Typ
             let binding = ResultBinding::product(
                 ty.clone(),
                 results.iter().zip(types).map(|(&value, ty)| {
-                    crate::egir::graph_ops::bind_physical_result_value(graph, ty.clone(), value)
+                    egir::graph_ops::bind_physical_result_value(graph, ty.clone(), value)
                 }),
             );
             let value = graph.intern_pure(
@@ -67,7 +68,7 @@ pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Typ
                 ty,
                 None,
             );
-            crate::egir::graph_ops::register_result_origin_tree(graph, value, &binding);
+            egir::graph_ops::register_result_origin_tree(graph, value, &binding);
             value
         }
     }
@@ -109,14 +110,14 @@ pub(crate) fn logical_result_fields(
     }
 }
 
-pub(crate) fn result_argument_values<P: crate::egir::ir::Family>(
+pub(crate) fn result_argument_values<P: egir::ir::Family>(
     graph: &mut EGraph<P>,
     results: &[ResultBinding<Type<TypeName>>],
 ) -> Vec<ValueId> {
     results
         .iter()
         .map(|result| {
-            crate::egir::graph_ops::result_argument_value(graph, result)
+            egir::graph_ops::result_argument_value(graph, result)
                 .expect("lambda result must have an argument representation")
         })
         .collect()
@@ -141,7 +142,7 @@ pub(crate) fn emit_call(
             .map(|(argument, ty)| {
                 let value = argument.value().expect("identity lambda arguments are values or views");
                 let abi = by_value_function_result::<WynLanguage>(ty.clone());
-                crate::egir::graph_ops::bind_by_value_result(graph, &abi, value)
+                egir::graph_ops::bind_by_value_result(graph, &abi, value)
             })
             .collect();
     }
@@ -179,7 +180,7 @@ pub(crate) fn finish_function(
 ) -> Func {
     let result = pack_results(&mut graph, results, result_types);
     let result_abi = by_value_function_result::<WynLanguage>(result_type(result_types));
-    let result = crate::egir::graph_ops::bind_by_value_result(&mut graph, &result_abi, result);
+    let result = egir::graph_ops::bind_by_value_result(&mut graph, &result_abi, result);
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(Some(result));
     let effects = if graph.has_ordered_effects() { CallEffects::General } else { CallEffects::Pure };
     Func::<Semantic>::new(region, name, span, None, params, result_abi, effects, graph)

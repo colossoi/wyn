@@ -5,6 +5,13 @@
 // `builder::TypeId` / `builder::ConstId` / etc. path literals
 // throughout this module reach the typed wrapper that lives in the
 // `wyn-spirv` crate (renamed to `wspirv` in our `Cargo.toml`).
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::EntryId;
+use crate::FunctionId;
+use crate::GlobalId;
+use crate::ResourceAccess;
 use wspirv as builder;
 mod entry;
 mod lower;
@@ -94,19 +101,19 @@ struct Constructor {
     interface_block_cache: LookupMap<InterfaceBlockKey, spirv::Word>,
 
     // Entry point interface tracking
-    entry_point_interfaces: LookupMap<crate::EntryId, Vec<spirv::Word>>,
+    entry_point_interfaces: LookupMap<EntryId, Vec<spirv::Word>>,
 
     /// Access-qualified storage-buffer globals. The same descriptor slot can
     /// be writable in a compute prepass and read-only in a graphics entry.
     storage_buffers: LookupMap<StorageBufferUse, (spirv::Word, spirv::Word, spirv::Word)>,
-    current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
+    current_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     /// Per-entry bindings keyed by the SSA parameter they initialize.
     /// Names are emitted/debug metadata only; they are never identity here.
     env: LookupMap<ValueId, spirv::Word>,
-    current_functions: LookupMap<crate::FunctionId, spirv::Word>,
+    current_functions: LookupMap<FunctionId, spirv::Word>,
     emitted_functions: LookupMap<FunctionEmissionId, spirv::Word>,
-    entry_functions: LookupMap<crate::EntryId, spirv::Word>,
-    globals: LookupMap<crate::GlobalId, spirv::Word>,
+    entry_functions: LookupMap<EntryId, spirv::Word>,
+    globals: LookupMap<GlobalId, spirv::Word>,
 
     /// Storage-image globals: (set, binding) -> (image `OpVariable`, image type).
     /// Predeclared from entry resource metadata before function bodies are
@@ -127,7 +134,7 @@ struct Constructor {
     push_constant_var: Option<spirv::Word>,
 
     /// Imported SPIR-V functions keyed by compiler-internal callable identity.
-    linked_functions: LookupMap<crate::FunctionId, spirv::Word>,
+    linked_functions: LookupMap<FunctionId, spirv::Word>,
     /// Imported functions indexed by their explicit external ABI linkage symbol.
     linked_functions_by_linkage: LookupMap<String, spirv::Word>,
 
@@ -197,7 +204,7 @@ impl Constructor {
         }
     }
 
-    fn select_storage_accesses(&mut self, accesses: &LookupMap<BindingRef, crate::ResourceAccess>) {
+    fn select_storage_accesses(&mut self, accesses: &LookupMap<BindingRef, ResourceAccess>) {
         self.current_storage_accesses.clone_from(accesses);
     }
 
@@ -212,7 +219,7 @@ impl Constructor {
         self.storage_buffers.get(&self.storage_use(binding)).copied()
     }
 
-    fn select_functions(&mut self, functions: &LookupMap<crate::FunctionId, FunctionEmissionId>) {
+    fn select_functions(&mut self, functions: &LookupMap<FunctionId, FunctionEmissionId>) {
         let externs = self.linked_functions.clone();
         self.current_functions = externs;
         for (&id, &emission) in functions {
@@ -332,7 +339,7 @@ impl Constructor {
         self.builder
             .array_element_type(builder::TypeId::new(array_type))
             .map(|t| *t)
-            .ok_or_else(|| crate::err_spirv!("Array element type not found for type ID: {}", array_type))
+            .ok_or_else(|| err_spirv!("Array element type not found for type ID: {}", array_type))
     }
 
     /// Thin delegator over `SpirvBuilder::composite_or_construct`.
@@ -362,7 +369,7 @@ impl Constructor {
 /// SPIR-V `ImageFormat` literal used in `OpTypeImage`. Kept in lock-step
 /// with the wgpu side: every format we emit here must also be allocated
 /// by the host with the matching `wgpu::TextureFormat`.
-fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageFormat) -> spirv::ImageFormat {
+fn storage_image_format_to_spirv(f: pipeline_descriptor::StorageImageFormat) -> spirv::ImageFormat {
     use crate::pipeline_descriptor::StorageImageFormat as F;
     match f {
         F::Rgba8Unorm => spirv::ImageFormat::Rgba8,
@@ -379,7 +386,7 @@ fn storage_image_format_to_spirv(f: crate::pipeline_descriptor::StorageImageForm
 /// Lower an SSA program directly to SPIR-V.
 ///
 /// This is the new direct path: TLC → SSA → SPIR-V, bypassing MIR.
-pub fn lower_ssa_program(program: &crate::ssa::stage::SpirvReady) -> Result<Vec<u32>> {
+pub fn lower_ssa_program(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> {
     // Use a thread with larger stack size for complex shaders
     const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
@@ -406,17 +413,12 @@ pub fn lower_ssa_program(program: &crate::ssa::stage::SpirvReady) -> Result<Vec<
     }
 }
 
-fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec<u32>> {
+fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
     let function_variants = StorageFunctionVariants::new(program);
 
     // Collect entry point info for later
-    let mut entry_info: Vec<(
-        crate::EntryId,
-        String,
-        spirv::ExecutionModel,
-        Option<(u32, u32, u32)>,
-    )> = Vec::new();
+    let mut entry_info: Vec<(EntryId, String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
 
     // Forward-declare all functions first (so they can call each other in any order)
     for emission in function_variants.emissions() {
@@ -508,7 +510,7 @@ fn lower_ssa_program_impl(program: &crate::ssa::stage::SpirvReady) -> Result<Vec
     // must be the *union* of every view's access. Compute the union first (map
     // values, so iteration order doesn't matter), then create in deterministic
     // entry/input order (`create_storage_image` is idempotent).
-    let mut image_access: LookupMap<BindingRef, crate::interface::StorageAccess> = LookupMap::new();
+    let mut image_access: LookupMap<BindingRef, interface::StorageAccess> = LookupMap::new();
     for entry in &program.entry_points {
         for input in &entry.inputs {
             if let Some((br, _format, access, _size)) = input.storage_image_binding() {

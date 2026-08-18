@@ -11,6 +11,7 @@ use super::{
     VarRef,
 };
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
+use crate::builtins;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
 use crate::op::BinaryOperator;
@@ -595,7 +596,7 @@ impl<'a> PartialEvaluator<'a> {
     /// calls. Operations not listed here remain ordinary residual calls.
     fn eval_builtin(
         &self,
-        id: crate::builtins::BuiltinId,
+        id: builtins::BuiltinId,
         overload_idx: usize,
         args: &[(Value, Type<TypeName>)],
         result_ty: &Type<TypeName>,

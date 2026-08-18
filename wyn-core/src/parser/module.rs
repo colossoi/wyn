@@ -1,3 +1,4 @@
+use crate::ast;
 use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::Token;
@@ -20,11 +21,11 @@ impl Parser<'_> {
             }
             Some(Token::TypeSizeLifted) => {
                 self.advance();
-                Some(crate::ast::TypeLifting::SizeLifted)
+                Some(ast::TypeLifting::SizeLifted)
             }
             Some(Token::TypeFullyLifted) => {
                 self.advance();
-                Some(crate::ast::TypeLifting::FullyLifted)
+                Some(ast::TypeLifting::FullyLifted)
             }
             _ => bail_parse!("Expected 'type', 'type~', or 'type^' keyword"),
         };

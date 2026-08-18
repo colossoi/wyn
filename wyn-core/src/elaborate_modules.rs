@@ -1,12 +1,16 @@
 //! AST checkpoint after source modules have been elaborated.
 
 use crate::ast;
+use crate::error;
+use crate::interface;
+use crate::module_manager;
+use crate::resolve_imports;
 
 pub type ModulesElaboratedFamily = ast::AstFamily<
     ast::SourceTree,
     ast::DefinitionSyntax,
     ast::EntrySyntax,
-    crate::interface::Attribute,
+    interface::Attribute,
     ast::ExternSyntax,
     ast::ModulesElaboratedFrontend<ast::NestedDeclaration>,
 >;
@@ -17,13 +21,11 @@ pub type ModulesElaboratedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum ModulesElaboratedTag {}
 pub type ModulesElaborated =
-    ast::Program<ModulesElaboratedTag, ModulesElaboratedFamily, crate::module_manager::ModuleManager>;
+    ast::Program<ModulesElaboratedTag, ModulesElaboratedFamily, module_manager::ModuleManager>;
 
 /// Elaborate modules into `module_manager` and remove module declarations
 /// from the ordinary program tree.
-pub fn elaborate_modules(
-    program: crate::resolve_imports::ImportsResolved,
-) -> crate::error::Result<ModulesElaborated> {
+pub fn elaborate_modules(program: resolve_imports::ImportsResolved) -> error::Result<ModulesElaborated> {
     program.try_rebuild(|declarations, mut global_context, node_ids| {
         global_context.elaborate_modules(&declarations, node_ids)?;
         let declarations = declarations

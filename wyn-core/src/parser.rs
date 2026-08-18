@@ -1,7 +1,10 @@
 use crate::ast::*;
 use crate::error::Result;
 use crate::interface::{Attribute, EntryKind, EntryOutputDecl};
+use crate::lexer;
 use crate::lexer::{LocatedToken, Token};
+use crate::module_manager;
+use crate::op;
 use crate::types;
 use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
@@ -25,16 +28,16 @@ pub type ParsedFamily = AstFamily<
 /// AST produced directly by parsing.
 #[derive(Debug, Clone, Copy)]
 pub enum ParsedTag {}
-pub type Parsed = Program<ParsedTag, ParsedFamily, crate::module_manager::ModuleManager>;
+pub type Parsed = Program<ParsedTag, ParsedFamily, module_manager::ModuleManager>;
 
 /// Parse source into the first phase-typed AST while transferring ownership of
 /// the sole node allocator and module state into the resulting program.
 pub fn parse(
     source: &str,
     mut node_ids: NodeCounter,
-    module_manager: crate::module_manager::ModuleManager,
+    module_manager: module_manager::ModuleManager,
 ) -> Result<Parsed> {
-    let tokens = crate::lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
+    let tokens = lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
     let declarations = {
         let mut parser = Parser::new(tokens, &mut node_ids);
         parser.parse()?
@@ -1554,7 +1557,7 @@ impl<'a> Parser<'a> {
                         ),
                     };
                     self.advance();
-                    if !crate::types::is_swizzle_field(&swizzle_str) {
+                    if !types::is_swizzle_field(&swizzle_str) {
                         bail_parse_at!(
                             swizzle_span,
                             "`.{}` is not a valid swizzle (must be 1-4 chars from `xyzw` or `rgba`)",
@@ -1563,7 +1566,7 @@ impl<'a> Parser<'a> {
                     }
                     let mut components: Vec<u8> = Vec::with_capacity(swizzle_str.len());
                     for c in swizzle_str.chars() {
-                        let idx = crate::types::swizzle_component_index(c)
+                        let idx = types::swizzle_component_index(c)
                             .expect("is_swizzle_field accepted this letter");
                         if components.contains(&(idx as u8)) {
                             bail_parse_at!(
@@ -1597,14 +1600,15 @@ impl<'a> Parser<'a> {
                         } =>
                         {
                             let prefix = match self.peek() {
-                                Some(Token::BinOp(s)) => crate::op::BinaryOperator::try_from(s.as_str())
-                                    .map_err(|_| {
+                                Some(Token::BinOp(s)) => {
+                                    op::BinaryOperator::try_from(s.as_str()).map_err(|_| {
                                         err_parse_at!(
                                             self.current_span(),
                                             "Unsupported compound operator '{}'",
                                             s
                                         )
-                                    })?,
+                                    })?
+                                }
                                 _ => unreachable!("peek2 just matched BinOp"),
                             };
                             self.advance(); // consume binop
@@ -1729,7 +1733,7 @@ impl<'a> Parser<'a> {
                 }
             } else {
                 // Regular binary operation
-                let op = crate::op::BinaryOperator::try_from(op_string.as_str()).map_err(|_| {
+                let op = op::BinaryOperator::try_from(op_string.as_str()).map_err(|_| {
                     err_parse_at!(
                         self.previous_span(),
                         "Unsupported primitive operator '{}'",
@@ -1934,7 +1938,7 @@ impl<'a> Parser<'a> {
                     None => self.node_counter.mk_node(
                         ExprKind::UnaryOp(
                             UnaryOp {
-                                op: crate::op::UnaryOperator::Negate,
+                                op: op::UnaryOperator::Negate,
                             },
                             Box::new(operand),
                         ),
@@ -1950,7 +1954,7 @@ impl<'a> Parser<'a> {
                 Ok(self.node_counter.mk_node(
                     ExprKind::UnaryOp(
                         UnaryOp {
-                            op: crate::op::UnaryOperator::LogicalNot,
+                            op: op::UnaryOperator::LogicalNot,
                         },
                         Box::new(operand),
                     ),
@@ -2055,7 +2059,7 @@ impl<'a> Parser<'a> {
                 // Use peek2 to check if we have (BinOp, RightParen) pattern
                 // Desugar to lambda: (+) => \x y -> x + y
                 if let Some((Token::BinOp(op), Token::RightParen)) = self.peek2() {
-                    let op = crate::op::BinaryOperator::try_from(op.as_str()).map_err(|_| {
+                    let op = op::BinaryOperator::try_from(op.as_str()).map_err(|_| {
                         err_parse_at!(self.current_span(), "Unsupported primitive operator '{}'", op)
                     })?;
                     self.advance(); // consume operator

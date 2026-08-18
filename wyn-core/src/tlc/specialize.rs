@@ -6,7 +6,9 @@
 use super::data::Empty;
 use super::soa::SoaNormalized;
 use super::{RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
+use crate::ast;
 use crate::builtins::catalog;
+use crate::op;
 use crate::types::TypeExt;
 use polytype::Type;
 
@@ -45,8 +47,8 @@ impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_> {
         // Multiplication becomes a structural binary operator and needs no
         // overload-bearing callee.
         if *id == known.mul && args.len() == 2 {
-            func.kind = TermKind::BinOp(crate::ast::BinaryOp {
-                op: crate::op::BinaryOperator::Multiply,
+            func.kind = TermKind::BinOp(ast::BinaryOp {
+                op: op::BinaryOperator::Multiply,
             });
             func.id = self.term_ids.next_id();
             return RewriteDecision::Changed;

@@ -6,6 +6,7 @@
 //! lowering has finished; it is not mutated while an individual lowering is
 //! still speculative.
 
+use crate::egir;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -191,7 +192,7 @@ impl PhaseSpec {
         body: PlannedEntry,
         dispatch: KernelDispatch,
         owner: super::super::program::SemanticOpId,
-        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
+        operations: Vec<egir::soac::hist::AtomicUpdate>,
     ) -> Self {
         let resources = declared_resources(&body.resource_declarations);
         Self {
@@ -211,13 +212,13 @@ impl PhaseSpec {
         body: PlannedEntry,
         dispatch: KernelDispatch,
         owner: super::super::program::SemanticOpId,
-        stage: crate::egir::soac::hist::ParallelStage,
-        topology: Option<crate::egir::soac::hist::DispatchTopology>,
+        stage: egir::soac::hist::ParallelStage,
+        topology: Option<egir::soac::hist::DispatchTopology>,
     ) -> Self {
         let label = match stage {
-            crate::egir::soac::hist::ParallelStage::Init => "bucket_init",
-            crate::egir::soac::hist::ParallelStage::Insert => "bucket_insert",
-            crate::egir::soac::hist::ParallelStage::Finish => "bucket_finish",
+            egir::soac::hist::ParallelStage::Init => "bucket_init",
+            egir::soac::hist::ParallelStage::Insert => "bucket_insert",
+            egir::soac::hist::ParallelStage::Finish => "bucket_finish",
         };
         let resources = declared_resources(&body.resource_declarations);
         Self {
@@ -402,7 +403,7 @@ impl KernelPlanSummary {
 #[derive(Clone, Debug)]
 pub struct KernelPhaseSummary {
     pub id: KernelId,
-    pub entry: crate::EntryId,
+    pub entry: EntryId,
     pub entry_point: String,
     pub label: String,
     pub source_entry: Option<EntryId>,
@@ -541,7 +542,7 @@ impl KernelPlan {
 
     pub(super) fn from_descriptor(
         descriptor: &PipelineDescriptor,
-        stage_entries: &[Vec<crate::EntryId>],
+        stage_entries: &[Vec<EntryId>],
         resources: &LogicalResourceArena,
         entries: &[Entry<Semantic>],
     ) -> Result<Self, String> {
@@ -1223,7 +1224,7 @@ fn output_projection(entry: &Entry<Semantic>) -> Vec<OutputRouteProjection> {
 /// placeholder domain; an explicit fixed grid stays as scheduled.
 ///
 fn storage_image_domain_inputs(
-    inputs: &[crate::egir::ir::EntryInput<SemanticResourceRef, crate::egir::types::WynLanguage>],
+    inputs: &[egir::ir::EntryInput<SemanticResourceRef, egir::types::WynLanguage>],
     baseline: &KernelDomain,
 ) -> Option<KernelDomain> {
     if !matches!(baseline, KernelDomain::Fixed { x: 1, y: 1, z: 1 }) {
@@ -1282,7 +1283,7 @@ fn domain_selection_from_stage(
     })
 }
 
-pub(super) fn domain_from_space(space: &crate::egir::types::SegSpace) -> Option<KernelDomain> {
+pub(super) fn domain_from_space(space: &egir::types::SegSpace) -> Option<KernelDomain> {
     if space.dims().iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
         let count = space.dims().iter().try_fold(1u32, |product, extent| match extent {
             SegExtent::Fixed(n) => product.checked_mul(*n),

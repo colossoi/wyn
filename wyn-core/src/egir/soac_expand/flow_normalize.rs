@@ -1,5 +1,8 @@
 use super::super::ir::Language;
 use super::*;
+use crate::types;
+use crate::IdSource;
+use crate::SortedSet;
 
 #[derive(Clone, Copy)]
 enum EdgeArm {
@@ -24,7 +27,7 @@ struct ArrayLeaf {
 
 pub(super) fn normalize_place_backed_flow(
     graph: &mut EGraph<Physical>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     while let Some((block, slot, ty)) = next_materialized_flow_parameter(graph) {
         normalize_parameter(graph, block, slot, ty, effect_ids)?;
@@ -53,7 +56,7 @@ fn normalize_parameter(
     block: BlockId,
     slot: usize,
     ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let incoming = incoming_edges(graph, block, slot)?;
     if incoming.is_empty() {
@@ -104,7 +107,7 @@ fn normalize_parameter(
 
             let (place, effect) = detached_alloca(graph, leaf_ty.clone(), effect_ids, None);
             graph.skeleton.blocks[graph.skeleton.entry].side_effects.insert(0, effect);
-            let view_ty = crate::types::view_array_of(leaf_ty, crate::types::no_buffer());
+            let view_ty = types::view_array_of(leaf_ty, types::no_buffer());
             let view = graph.add_place_view(place, view_ty, None).value();
             replacements.push(view);
             array_leaves.push(Some(ArrayLeaf {
@@ -169,7 +172,7 @@ fn normalize_parameter(
         };
     }
 
-    graph.remove_block_param_slots(block, &crate::SortedSet::from([slot]));
+    graph.remove_block_param_slots(block, &SortedSet::from([slot]));
     super::super::graph_ops::fold_exposed_projections(graph);
     Ok(())
 }
@@ -282,7 +285,7 @@ fn emit_array_transfer(
     block: BlockId,
     source: ValueId,
     destination: &ArrayLeaf,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<BlockId, String> {
     let source = graph.canonical_value(source);
     let result = ResultBinding::destination(destination.ty.clone(), ResultDestination::ReturnValue(source));

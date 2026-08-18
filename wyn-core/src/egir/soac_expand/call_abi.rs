@@ -1,5 +1,9 @@
 use crate::ast::TypeName;
+use crate::flow;
+use crate::types;
 use crate::types::TypeExt;
+use crate::FunctionId;
+use crate::IdSource;
 use crate::{BindingRef, LookupMap};
 use polytype::Type;
 
@@ -92,11 +96,11 @@ type BoundCall = (
 
 pub(super) fn emit_call(
     graph: &mut EGraph<Physical>,
-    block: crate::flow::BlockId,
+    block: flow::BlockId,
     callee: &Func<Physical>,
     arguments: impl IntoIterator<Item = OperandRef>,
     mapped_destinations: Option<(&[ResultBinding<Type<TypeName>>], ValueId)>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<ResultBinding<Type<TypeName>>, String> {
     let routing = match mapped_destinations {
         Some((destinations, lane)) => {
@@ -143,12 +147,12 @@ pub(super) fn emit_call(
 
 fn bind_call_boundary(
     graph: &mut EGraph<Physical>,
-    callee: crate::FunctionId,
+    callee: FunctionId,
     parameters: &[FuncParam<BindingRef, Type<TypeName>>],
     function_result: &FunctionResult<Type<TypeName>>,
     arguments: impl IntoIterator<Item = OperandRef>,
     routing: CallResultRouting,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<BoundCall, String> {
     let destination_parameters = function_result.destination_parameters();
     let ordinary_parameters = parameters
@@ -225,7 +229,7 @@ fn bind_call_boundary(
                 let (array_ty, destination) = source
                     .single_destination()
                     .ok_or_else(|| "mapped result leaf has no destination".to_owned())?;
-                let element_ty = crate::types::array_elem(array_ty)
+                let element_ty = types::array_elem(array_ty)
                     .ok_or_else(|| "mapped result destination is not an array".to_owned())?;
                 if element_ty != ty {
                     return Err(format!(
@@ -260,7 +264,7 @@ fn bind_call_boundary(
                             let span = graph.nodes[value].span();
                             let (place, effect) = detached_alloca(graph, ty.clone(), effect_ids, span);
                             prelude.push(effect);
-                            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                            let view_ty = types::view_array_of(ty, types::no_buffer());
                             let view = graph.add_place_view(place, view_ty, span).value();
                             graph.replace_value_references(value, view);
                             graph.install_aliases([(value, view)]);
@@ -295,7 +299,7 @@ fn resolve_entry_parameter_representations(
     params: &mut [FuncParam<BindingRef, Type<TypeName>>],
     graph: &mut EGraph<Physical>,
     parameter_resources: &[Option<BindingRef>],
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     for (index, parameter) in params.iter_mut().enumerate() {
         let OperandType::Value(ty) = parameter.representation() else {
@@ -442,8 +446,8 @@ fn materialized_array_type(ty: &Type<TypeName>) -> Type<TypeName> {
         return ty.clone();
     };
     let mut args = args.clone();
-    args[1] = crate::types::array_variant_composite();
-    *args.last_mut().expect("array has a buffer argument") = crate::types::no_buffer();
+    args[1] = types::array_variant_composite();
+    *args.last_mut().expect("array has a buffer argument") = types::no_buffer();
     Type::Constructed(TypeName::Array, args)
 }
 
@@ -454,7 +458,7 @@ fn physical_parameter_representation(
     if WynLanguage::is_materialized_aggregate(ty) {
         return match resource {
             Some(resource) => OperandType::View(ViewType {
-                array: crate::types::view_array_of(ty, crate::types::buffer_tag(resource)),
+                array: types::view_array_of(ty, types::buffer_tag(resource)),
                 region: PlaceRegion::Resource(resource),
                 access: PlaceAccess::ReadOnly,
             }),
@@ -540,7 +544,7 @@ fn synchronize_soac_input_types(graph: &mut EGraph<Physical>) {
 
 fn resolve_function(
     function: &mut Func<Physical>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let mut params = std::mem::take(&mut function.params);
     let result =
@@ -661,14 +665,14 @@ fn resolve_function(
 fn resolve_calls(
     graph: &mut EGraph<Physical>,
     boundaries: &LookupMap<
-        crate::FunctionId,
+        FunctionId,
         (
             Vec<FuncParam<BindingRef, Type<TypeName>>>,
             super::super::types::FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
     >,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let calls = graph.side_effect_index().calls().map(|(call, _)| call).collect::<Vec<_>>();
     for site in calls {
@@ -689,7 +693,7 @@ fn resolve_call(
         super::super::types::FunctionResult<Type<TypeName>>,
         CallEffects,
     ),
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let old = graph.call(site).clone();
     let anchor = graph

@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{EffectOp, EffectToken, OperandRef, SkeletonTerminator};
+use crate::op;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 
@@ -36,7 +37,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let current = graph.add_block_param(header, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let next = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![current, one],
         ty.clone(),
         None,
@@ -58,7 +59,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     };
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(merged)));
     let tail = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![merged, one],
         ty,
         None,

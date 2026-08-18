@@ -25,7 +25,9 @@
 //! - `StorageView(Inherited)`: `[offset, len, parent]`
 //! - `StorageViewLen`: `[view]`
 
+use crate::builtins;
 use crate::BindingRef;
+use crate::GlobalId;
 
 /// Structurally resolved binary operator.
 ///
@@ -170,7 +172,7 @@ pub enum OpTag<R, C> {
     Float(String),
     Bool(bool),
     Unit,
-    Global(crate::GlobalId),
+    Global(GlobalId),
     BinOp(BinaryOperator),
     UnaryOp(UnaryOperator),
     Tuple(usize),
@@ -191,7 +193,7 @@ pub enum OpTag<R, C> {
     DynamicExtract,
     Call(C),
     Intrinsic {
-        id: crate::builtins::BuiltinId,
+        id: builtins::BuiltinId,
         overload_idx: usize,
     },
     /// Read a storage image whose resource is fixed by region

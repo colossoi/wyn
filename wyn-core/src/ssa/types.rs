@@ -30,6 +30,11 @@
 use crate::ast::{Span, TypeName};
 use crate::interface::{self, StorageAccess};
 use crate::op::OpTag;
+use crate::ssa;
+use crate::BindingRef;
+use crate::EntryId;
+use crate::FunctionId;
+use crate::GlobalId;
 use crate::{LookupMap, ResourceAccess};
 use polytype::Type;
 use slotmap::SlotMap;
@@ -176,11 +181,11 @@ impl AtomicOp {
 /// variants stay separate because they carry a `PlaceId`, which can't
 /// fold into an operand list.
 #[derive(Debug, Clone)]
-pub enum InstKind<R = crate::BindingRef> {
+pub enum InstKind<R = BindingRef> {
     /// A pure operation. Operand layout per tag is documented on
     /// `OpTag` in `crate::op`.
     Op {
-        tag: OpTag<R, crate::FunctionId>,
+        tag: OpTag<R, FunctionId>,
         operands: Vec<ValueRef>,
     },
 
@@ -381,9 +386,9 @@ pub struct PlaceInfo {
 // =============================================================================
 
 /// The concrete wyn-ssa Function type used throughout wyn-core.
-pub type WynFunction = crate::ssa::framework::Function<InstKind, Type<TypeName>>;
+pub type WynFunction = ssa::framework::Function<InstKind, Type<TypeName>>;
 /// The concrete wyn-ssa InstNode type.
-pub type WynInstNode = crate::ssa::framework::InstNode<InstKind>;
+pub type WynInstNode = ssa::framework::InstNode<InstKind>;
 
 /// An SSA function body.
 #[derive(Debug, Clone)]
@@ -500,12 +505,16 @@ impl FuncBody {
 // =============================================================================
 
 pub mod context {
+    use crate::egir::parallelize::KernelPlanSummary;
+    use crate::pipeline_descriptor::PipelineDescriptor;
+    use crate::LoweringProfile;
+
     /// Pipeline and planning data carried alongside a backend-bound SSA tree.
     #[derive(Clone, Debug)]
     pub struct BackendGlobal {
-        pub pipeline: crate::pipeline_descriptor::PipelineDescriptor,
-        pub profile: crate::LoweringProfile,
-        pub kernel_plan: crate::egir::parallelize::KernelPlanSummary,
+        pub pipeline: PipelineDescriptor,
+        pub profile: LoweringProfile,
+        pub kernel_plan: KernelPlanSummary,
     }
 }
 
@@ -598,7 +607,7 @@ impl Program<stage::BareTag, ()> {
 /// A program-level constant definition.
 #[derive(Debug, Clone)]
 pub struct Constant {
-    pub id: crate::GlobalId,
+    pub id: GlobalId,
     /// Diagnostic and emitted-symbol metadata.
     pub name: String,
     pub body: FuncBody,
@@ -607,7 +616,7 @@ pub struct Constant {
 /// A function definition.
 #[derive(Debug, Clone)]
 pub struct Function {
-    pub id: crate::FunctionId,
+    pub id: FunctionId,
     /// Diagnostic and emitted-symbol metadata.
     pub name: String,
     pub body: FuncBody,
@@ -619,7 +628,7 @@ pub struct Function {
 /// An entry point definition.
 #[derive(Debug, Clone)]
 pub struct EntryPoint {
-    pub id: crate::EntryId,
+    pub id: EntryId,
     /// Host-facing entry symbol and diagnostic metadata.
     pub name: String,
     pub body: FuncBody,
@@ -636,15 +645,15 @@ pub struct EntryPoint {
     /// Storage access required by the physical pipeline layout containing
     /// this entry. Unlike the entry-local interface above, this is unioned
     /// across every stage that shares the pipeline's binding table.
-    pub pipeline_storage_accesses: LookupMap<crate::BindingRef, ResourceAccess>,
+    pub pipeline_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     pub span: Span,
 }
 
 impl EntryPoint {
     /// Access each storage-buffer slot has in this entry alone. This folds
     /// existing interface metadata; it does not inspect the SSA body.
-    pub(crate) fn stage_storage_accesses(&self) -> LookupMap<crate::BindingRef, ResourceAccess> {
-        let mut accesses: LookupMap<crate::BindingRef, ResourceAccess> = LookupMap::new();
+    pub(crate) fn stage_storage_accesses(&self) -> LookupMap<BindingRef, ResourceAccess> {
+        let mut accesses: LookupMap<BindingRef, ResourceAccess> = LookupMap::new();
         let mut record = |binding, access| {
             accesses
                 .entry(binding)
@@ -675,7 +684,7 @@ impl EntryPoint {
     /// entry. Descriptor-backed entries use the access union of their physical
     /// pipeline; bindings absent from that descriptor retain their local
     /// access as a conservative fallback for directly constructed SSA.
-    pub(crate) fn shader_storage_accesses(&self) -> LookupMap<crate::BindingRef, ResourceAccess> {
+    pub(crate) fn shader_storage_accesses(&self) -> LookupMap<BindingRef, ResourceAccess> {
         let mut accesses = self.stage_storage_accesses();
         for (&binding, &access) in &self.pipeline_storage_accesses {
             accesses

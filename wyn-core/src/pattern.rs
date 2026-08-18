@@ -4,6 +4,7 @@
 //! which can be used in type checking, code generation, and other passes.
 
 use crate::ast::{BindingName, Pattern, PatternKind, RecordPatternTarget, TreeFamily};
+use crate::SymbolId;
 
 /// Trait for values that can be decomposed according to patterns.
 ///
@@ -133,7 +134,7 @@ pub struct BindingPath {
     /// Empty if the pattern is just a name (no projection needed).
     /// Stable semantic identity after name resolution. Source-only patterns
     /// carry `None`; downstream semantic consumers require `Some`.
-    pub symbol: Option<crate::SymbolId>,
+    pub symbol: Option<SymbolId>,
     /// Tuple indices from the root value to this binding.
     pub path: Vec<usize>,
 }

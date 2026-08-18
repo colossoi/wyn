@@ -75,7 +75,10 @@ fn test_manual_scope_management() {
 // ---------------------------------------------------------------------------
 
 mod pattern_bound_names {
-    use crate::ast::{Header, NodeId, Pattern, PatternKind, RecordPatternField, RecordPatternTarget, Span};
+    use crate::ast::{
+        Header, NodeId, Pattern, PatternKind, PatternLiteral, RecordPatternField, RecordPatternTarget,
+        Span, TypeName,
+    };
     use crate::scope::pattern_bound_names;
     use polytype::Type;
 
@@ -96,8 +99,8 @@ mod pattern_bound_names {
     fn wild() -> Pattern {
         pat(PatternKind::Wildcard)
     }
-    fn i32_ty() -> Type<crate::ast::TypeName> {
-        Type::Constructed(crate::ast::TypeName::Int(32), vec![])
+    fn i32_ty() -> Type<TypeName> {
+        Type::Constructed(TypeName::Int(32), vec![])
     }
 
     #[test]
@@ -109,10 +112,7 @@ mod pattern_bound_names {
     fn wildcard_unit_and_literal_yield_no_names() {
         assert!(pattern_bound_names(&wild()).is_empty());
         assert!(pattern_bound_names(&pat(PatternKind::Unit)).is_empty());
-        assert!(
-            pattern_bound_names(&pat(PatternKind::Literal(crate::ast::PatternLiteral::Bool(true))))
-                .is_empty()
-        );
+        assert!(pattern_bound_names(&pat(PatternKind::Literal(PatternLiteral::Bool(true)))).is_empty());
     }
 
     #[test]

@@ -6,44 +6,70 @@
 //!
 //! All tests include entry points to ensure monomorphization can find reachable code.
 
+use crate::ast;
+use crate::ast_type_holes;
+use crate::builtins;
+use crate::compile_thru_frontend;
+use crate::compile_thru_spirv;
+use crate::compile_thru_spirv_single_stage;
+use crate::compile_thru_ssa;
+use crate::compile_thru_tlc;
+use crate::egir;
 use crate::egir::soac::screma;
+use crate::error;
+use crate::interface;
+use crate::lower_egir_to_ssa;
+use crate::lower_ssa_to_spirv;
+use crate::lower_ssa_to_wgsl;
+use crate::lower_ssa_to_wgsl_with_pipeline;
+use crate::op;
+use crate::pipeline_descriptor;
+use crate::ssa;
 use crate::ssa::types::Program;
+use crate::test_pipeline;
+use crate::tlc;
 use crate::tlc::extract_lambda_params;
 use crate::tlc::VarRef;
+use crate::to_egraph;
+use crate::CodegenTarget;
+use crate::Lowered;
+use crate::LoweringProfile;
+use crate::ResourceAccess;
+use crate::SchedulePolicy;
 use crate::SymbolTable;
 
 /// Run source through the pipeline up to SSA.
-fn compile_to_ssa(input: &str) -> crate::ssa::stage::Elaborated {
-    crate::compile_thru_ssa(input).expect("compile to SSA")
+fn compile_to_ssa(input: &str) -> ssa::stage::Elaborated {
+    compile_thru_ssa(input).expect("compile to SSA")
 }
 
 /// Helper to check that code fails type checking (for testing error cases).
 fn should_fail_type_check(input: &str) -> bool {
-    crate::compile_thru_frontend(input).is_err()
+    compile_thru_frontend(input).is_err()
 }
 
-fn compile_to_segmented_egir(input: &str) -> crate::egir::reify::Segmented {
-    let program = crate::compile_thru_tlc(input).expect("compile through TLC");
-    let program = crate::tlc::infer_input_slice_bounds(program);
-    let program = crate::to_egraph(program).expect("convert to raw semantic EGIR");
-    let program = crate::egir::realize_outputs(program).expect("realize semantic EGIR outputs");
-    crate::egir::reify_soacs(program)
+fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
+    let program = compile_thru_tlc(input).expect("compile through TLC");
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program).expect("convert to raw semantic EGIR");
+    let program = egir::realize_outputs(program).expect("realize semantic EGIR outputs");
+    egir::reify_soacs(program)
 }
 
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
 /// `module_manager` covers both `type_check` and `to_tlc`.
-fn compile_to_semantic_egir(input: &str) -> crate::egir::ResourcesAllocated {
-    let program = crate::egir::optimize_semantics(compile_to_segmented_egir(input));
-    crate::egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
+fn compile_to_semantic_egir(input: &str) -> egir::ResourcesAllocated {
+    let program = egir::optimize_semantics(compile_to_segmented_egir(input));
+    egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
 }
 
 fn lower_semantic_egir(
-    allocated: crate::egir::ResourcesAllocated,
-    profile: crate::LoweringProfile,
-) -> crate::ssa::stage::Elaborated {
-    let program = crate::egir::plan(allocated, profile).expect("plan semantic EGIR");
-    crate::lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
+    allocated: egir::ResourcesAllocated,
+    profile: LoweringProfile,
+) -> ssa::stage::Elaborated {
+    let program = egir::plan(allocated, profile).expect("plan semantic EGIR");
+    lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -59,7 +85,7 @@ struct SemanticSoacStats {
     scan_operators: usize,
 }
 
-fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticSoacStats {
+fn semantic_soac_stats(allocated: &egir::ResourcesAllocated) -> SemanticSoacStats {
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
     fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
@@ -104,9 +130,7 @@ fn semantic_soac_stats(allocated: &crate::egir::ResourcesAllocated) -> SemanticS
     stats
 }
 
-fn segmented_entry_maps(
-    program: &crate::egir::reify::Segmented,
-) -> Vec<&screma::Op<crate::egir::types::Semantic>> {
+fn segmented_entry_maps(program: &egir::reify::Segmented) -> Vec<&screma::Op<egir::types::Semantic>> {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     program
@@ -122,7 +146,7 @@ fn segmented_entry_maps(
         .collect()
 }
 
-fn segmented_entry_map_output_fields(program: &crate::egir::reify::Segmented) -> Vec<usize> {
+fn segmented_entry_map_output_fields(program: &egir::reify::Segmented) -> Vec<usize> {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     let entry = program.entry_points.first().expect("semantic test entry");
@@ -297,8 +321,7 @@ entry siblings(xs: []i32) ([]i32, []i32) =
   (plus, times)
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: crate::egir::reify::Segmented =
-        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
 
     let before_maps = segmented_entry_maps(&before);
@@ -362,8 +385,7 @@ entry shared(xs: []i32) ([]i32, []i32) =
   (left, right)
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: crate::egir::reify::Segmented =
-        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
 
     let before_maps = segmented_entry_maps(&before);
@@ -407,8 +429,7 @@ entry sliced(xs: []i32) [4]i32 =
   map(|x: i32| x * 2, produced[2..6])
 "#;
     let before = compile_to_segmented_egir(source);
-    let after: crate::egir::reify::Segmented =
-        crate::egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
+    let after: egir::reify::Segmented = egir::optimize_semantics(compile_to_segmented_egir(source)).retag();
 
     let input = (0..8).map(Value::Int).collect::<Vec<_>>();
     let before_maps = segmented_entry_maps(&before);
@@ -765,7 +786,7 @@ entry accumulate(indices: []i32,
         histogram.form.operations[0].update,
         hist::Update::Reduce { .. }
     ));
-    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan direct-atomic histogram");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -784,9 +805,9 @@ entry accumulate(indices: []i32,
         "integer-add histogram must emit OpAtomicIAdd"
     );
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("atomic histogram lowers to WGSL");
     assert!(
@@ -805,7 +826,7 @@ entry accumulate(indices: []i32,
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
   ()
 "#;
-    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan compare-exchange histogram");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -827,9 +848,9 @@ entry accumulate(indices: []i32,
         "general scalar reducer must emit OpAtomicCompareExchange"
     );
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("CAS histogram lowers to WGSL");
     assert!(
@@ -872,8 +893,7 @@ entry accumulate(indices: []i32,
         smallvec![],
     );
 
-    let planned = crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE)
-        .expect("plan high-contention histogram");
+    let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan high-contention histogram");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["serial_compute"],
@@ -899,9 +919,9 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
   in bucket_scatter_3d(dest, items)
 "#;
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("ranked bucket scatter lowers to WGSL");
     assert!(
@@ -926,7 +946,7 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga validation rejected bucket WGSL: {error:?}\n{wgsl}"));
 
-    let lowered = crate::compile_thru_spirv(source).expect("ranked bucket scatter emits SPIR-V");
+    let lowered = compile_thru_spirv(source).expect("ranked bucket scatter emits SPIR-V");
     let compute = lowered
         .pipeline
         .pipelines
@@ -1009,9 +1029,9 @@ entry scatter_with_named_shape(
   bucket_scatter_1d(dest, items)
 "#;
 
-            let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+            let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             ))
             .expect("named bucket dimensions lower to WGSL");
             let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|error| {
@@ -1038,9 +1058,9 @@ entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
   bucket_scatter_1d(dest, [(0, 10u32), (1, 20u32)])
 "#;
 
-    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+    let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("bucket scatter lowers to WGSL with its descriptor");
 
@@ -1058,9 +1078,9 @@ fn wgsl_descriptor_publishes_scalar_inputs_as_the_emitted_storage_block() {
     let source = r#"
 entry scalar_parameters(index: u32) u32 = index + 1u32
 "#;
-    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+    let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("scalar input lowers to WGSL with a WebGPU descriptor");
 
@@ -1111,7 +1131,7 @@ entry scalar_parameters(index: u32) u32 = index + 1u32
     );
     assert_eq!(compute.stages[0].reads, vec![1]);
 
-    let spirv = crate::compile_thru_spirv(source).expect("SPIR-V still accepts the scalar entry");
+    let spirv = compile_thru_spirv(source).expect("SPIR-V still accepts the scalar entry");
     let Pipeline::Compute(compute) = &spirv.pipeline.pipelines[0] else {
         panic!("scalar entry must publish a compute pipeline");
     };
@@ -1132,9 +1152,9 @@ fn wgsl_descriptor_reads_dynamic_dispatch_length_from_the_parameter_block() {
 entry dynamic_parameter(n: u32) []u32 =
   map(|i: u32| i + 1u32, 0u32..<n)
 "#;
-    let lowered = crate::lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+    let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("dynamic scalar input lowers to a WebGPU descriptor");
     let Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
@@ -1181,9 +1201,9 @@ entry named_storage_helper(
   in bucket_scatter_2d(dest, items)
 "#;
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("named helper over a fixed storage array lowers to WGSL");
 
@@ -1196,7 +1216,7 @@ entry named_storage_helper(
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga validation rejected named-helper WGSL: {error:?}\n{wgsl}"));
 
-    let lowered = crate::compile_thru_spirv(source).expect("named helper emits a pipeline descriptor");
+    let lowered = compile_thru_spirv(source).expect("named helper emits a pipeline descriptor");
     let Pipeline::Compute(compute) = lowered.pipeline.pipelines.first().expect("compute pipeline") else {
         panic!("named helper must publish a compute pipeline")
     };
@@ -1239,9 +1259,9 @@ entry collision_shape_2d_bound(
   bucket_scatter_2d(dest, items)
 "#;
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("bound ranked bucket scatter lowers to WGSL");
     assert!(
@@ -1256,11 +1276,11 @@ entry collision_shape_2d_bound(
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga rejected bound bucket layout: {error:?}\n{wgsl}"));
-    crate::compile_thru_spirv(source).expect("bound ranked bucket scatter emits SPIR-V");
+    compile_thru_spirv(source).expect("bound ranked bucket scatter emits SPIR-V");
 
-    let serial = crate::egir::plan(
+    let serial = egir::plan(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Serial),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Serial),
     );
     let Err(error) = serial else {
         panic!("single-stage bucket scatter must report its required pipeline")
@@ -1310,8 +1330,7 @@ entry generated_layout(dest: *[4][8]u32, offset: u32)
         bucket_layouts(generated),
         [ArrayLayout::Generated, ArrayLayout::Generated]
     );
-    crate::compile_thru_spirv(generated)
-        .expect("generated layout with a mixed scalar capture emits SPIR-V");
+    compile_thru_spirv(generated).expect("generated layout with a mixed scalar capture emits SPIR-V");
 
     let literal = r#"
 entry literal_layout(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
@@ -1320,10 +1339,10 @@ entry literal_layout(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
   in bucket_scatter_2d(dest, items)
 "#;
     assert_eq!(bucket_layouts(literal), [ArrayLayout::StructureOfArrays]);
-    crate::compile_thru_spirv(literal).expect("literal SoA layout emits SPIR-V");
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    compile_thru_spirv(literal).expect("literal SoA layout emits SPIR-V");
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(literal),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("literal SoA layout emits WGSL");
     let module = naga::front::wgsl::parse_str(&wgsl)
@@ -1355,7 +1374,7 @@ entry bucket_rank_4(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
   in bucket_scatter_4d(dest, items)
 "#;
 
-    crate::compile_thru_spirv(source).expect("rank-one and rank-four bucket domains emit SPIR-V");
+    compile_thru_spirv(source).expect("rank-one and rank-four bucket domains emit SPIR-V");
 }
 
 #[test]
@@ -1375,7 +1394,7 @@ entry regrouped_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
   in bucket_scatter_4d(dest, items)
 "#;
 
-    let lowered = crate::compile_thru_spirv(source).expect("regrouped bucket domain emits SPIR-V");
+    let lowered = compile_thru_spirv(source).expect("regrouped bucket domain emits SPIR-V");
     let insert = lowered
         .pipeline
         .pipelines
@@ -1410,9 +1429,9 @@ entry strided_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
   bucket_scatter_1d(dest, items)
 "#;
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("grid-stride bucket scatter lowers to WGSL");
     assert!(
@@ -1428,7 +1447,7 @@ entry strided_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
     .validate(&module)
     .unwrap_or_else(|error| panic!("Naga validation rejected grid-stride bucket WGSL: {error:?}\n{wgsl}"));
 
-    let lowered = crate::compile_thru_spirv(source).expect("grid-stride bucket domain emits SPIR-V");
+    let lowered = compile_thru_spirv(source).expect("grid-stride bucket domain emits SPIR-V");
     let insert = lowered
         .pipeline
         .pipelines
@@ -1545,7 +1564,7 @@ entry dependent_rows(dest: *[4][8]i32) ([4][8]i32, [4]u32, u32) =
       iota(4))
   in bucket_scatter_2d(dest, items)
 "#;
-    let Err(error) = crate::compile_thru_spirv(source) else {
+    let Err(error) = compile_thru_spirv(source) else {
         panic!("a non-composable generated candidate array must not be materialized")
     };
     assert!(
@@ -1566,8 +1585,7 @@ entry two_buckets(
   in (first, second)
 "#;
 
-    crate::compile_thru_spirv(source)
-        .expect("multiple destination-passed bucket scatters compile in one entry");
+    compile_thru_spirv(source).expect("multiple destination-passed bucket scatters compile in one entry");
 }
 
 #[test]
@@ -1613,7 +1631,7 @@ fn semantic_segops_survive_optimization_and_logical_allocation() {
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     );
-    crate::egir::semantic_graph::verify(&allocated).expect("complete semantic EGIR");
+    egir::semantic_graph::verify(&allocated).expect("complete semantic EGIR");
     let seg = allocated
         .entry_points
         .iter()
@@ -1654,8 +1672,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .count();
     assert_eq!(partials, 0, "pre-target allocation has no reduce scratch");
-    let planned =
-        crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE).expect("plan parallel reduction");
+    let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan parallel reduction");
     assert!(planned.logical_resources().iter().any(|resource| matches!(
         resource.origin,
         ResourceOrigin::Compiler(ref compiler)
@@ -1791,15 +1808,15 @@ entry e() [2]i32 =
         operators[1].operator.seg_body().unwrap().region,
         "deduplicated inputs may share a column, but composed map bodies must remain distinct"
     );
-    crate::lower_ssa_to_spirv(lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE))
+    lower_ssa_to_spirv(lower_semantic_egir(allocated, LoweringProfile::PORTABLE))
         .expect("distinct composed steps lower to SPIR-V");
     let base: Vec<i32> = (0..8).collect();
-    let xs = crate::egir::semantic_exec::map(&base, |value| value + 1);
-    let ys = crate::egir::semantic_exec::map(&base, |value| value * 2);
+    let xs = egir::semantic_exec::map(&base, |value| value + 1);
+    let ys = egir::semantic_exec::map(&base, |value| value * 2);
     assert_eq!(
         [
-            crate::egir::semantic_exec::reduce(&xs, 0, |a, b| a + b),
-            crate::egir::semantic_exec::reduce(&ys, 0, |a, b| a + b),
+            egir::semantic_exec::reduce(&xs, 0, |a, b| a + b),
+            egir::semantic_exec::reduce(&ys, 0, |a, b| a + b),
         ],
         [36, 56]
     );
@@ -1809,7 +1826,7 @@ entry e() [2]i32 =
 fn target_planning_owns_parallel_work_scratch() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
-    let kinds = |resources: &[crate::egir::program::LogicalResource]| {
+    let kinds = |resources: &[egir::program::LogicalResource]| {
         resources
             .iter()
             .filter_map(|resource| match &resource.origin {
@@ -1824,7 +1841,7 @@ fn target_planning_owns_parallel_work_scratch() {
     let scan_kinds = kinds(scan.logical_resources());
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
-    let scan = crate::egir::plan(scan, crate::LoweringProfile::PORTABLE).expect("plan parallel scan");
+    let scan = egir::plan(scan, LoweringProfile::PORTABLE).expect("plan parallel scan");
     let scan_kinds = kinds(scan.logical_resources());
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
@@ -1867,7 +1884,7 @@ fn target_planning_owns_parallel_work_scratch() {
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
-    let filter = crate::egir::plan(filter, crate::LoweringProfile::PORTABLE).expect("plan parallel filter");
+    let filter = egir::plan(filter, LoweringProfile::PORTABLE).expect("plan parallel filter");
     assert_eq!(
         filter
             .logical_resources()
@@ -1898,9 +1915,9 @@ entry add_sum(xs: []i32) []i32 =
         )
     }));
 
-    let single = crate::egir::plan(
+    let single = egir::plan(
         compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
-        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
+        LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     )
     .expect("plan sequential reduction");
     assert!(
@@ -1911,8 +1928,8 @@ entry add_sum(xs: []i32) []i32 =
     let fallback = compile_to_semantic_egir(
         " entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
     );
-    let fallback = crate::egir::plan(fallback, crate::LoweringProfile::PORTABLE)
-        .expect("plan reduction with a runtime neutral");
+    let fallback =
+        egir::plan(fallback, LoweringProfile::PORTABLE).expect("plan reduction with a runtime neutral");
     assert!(
         !kinds(fallback.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
         "a reduction rejected before mutation must not retain speculative scratch"
@@ -1928,7 +1945,7 @@ entry add_sum(xs: []i32) []i32 =
 fn selected_recipes_allocate_exact_ordered_scratch() {
     use crate::egir::program::{CompilerResourceKind as Kind, LogicalSize, ResourceOrigin};
 
-    let planned_scratch = |resources: &[crate::egir::program::LogicalResource]| {
+    let planned_scratch = |resources: &[egir::program::LogicalResource]| {
         resources
             .iter()
             .filter_map(|resource| match &resource.origin {
@@ -1956,9 +1973,9 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
             .collect::<Vec<_>>()
     };
 
-    let scalar_reduce = crate::egir::plan(
+    let scalar_reduce = egir::plan(
         compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
-        crate::LoweringProfile::PORTABLE,
+        LoweringProfile::PORTABLE,
     )
     .expect("plan scalar reduction");
     let scratch = planned_scratch(scalar_reduce.logical_resources());
@@ -1977,8 +1994,8 @@ entry sums() (i32, i32) =
    reduce(|a: i32, b: i32| a + b, 0, ys))
 "#,
     );
-    let multi_reduce = crate::egir::plan(multi_reduce, crate::LoweringProfile::PORTABLE)
-        .expect("plan multi-accumulator reduction");
+    let multi_reduce =
+        egir::plan(multi_reduce, LoweringProfile::PORTABLE).expect("plan multi-accumulator reduction");
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
@@ -2007,9 +2024,9 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let scan = crate::egir::plan(
+    let scan = egir::plan(
         compile_to_semantic_egir(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)"),
-        crate::LoweringProfile::PORTABLE,
+        LoweringProfile::PORTABLE,
     )
     .expect("plan scan");
     let scratch = planned_scratch(scan.logical_resources());
@@ -2032,9 +2049,9 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let filter = crate::egir::plan(
+    let filter = egir::plan(
         compile_to_semantic_egir(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)"),
-        crate::LoweringProfile::PORTABLE,
+        LoweringProfile::PORTABLE,
     )
     .expect("plan runtime filter");
     let scratch = planned_scratch(filter.logical_resources());
@@ -2064,9 +2081,8 @@ entry sums() (i32, i32) =
 fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
     use crate::egir::parallelize::KernelDomain;
 
-    let reduce =
-        crate::compile_thru_ssa(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)")
-            .expect("parallel reduction reaches SSA");
+    let reduce = compile_thru_ssa(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)")
+        .expect("parallel reduction reaches SSA");
     let phases = reduce.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -2079,9 +2095,8 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
-    let scan =
-        crate::compile_thru_ssa(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)")
-            .expect("parallel scan reaches SSA");
+    let scan = compile_thru_ssa(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)")
+        .expect("parallel scan reaches SSA");
     let phases = scan.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -2119,7 +2134,7 @@ fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
     ];
 
     for (source, expected) in cases {
-        let lowered = crate::compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
+        let lowered = compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
         assert_eq!(
             lowered.global_context.kernel_plan.phases().next().map(|phase| phase.label.as_str()),
             Some(expected),
@@ -2144,16 +2159,16 @@ fn associative_noncommutative_reduce_and_scan_keep_parallel_ordered_recipes() {
         rotation + 3 * ((left_reflected + right_reflected) % 2)
     };
     let values = [3, 1];
-    let forward = crate::egir::semantic_exec::reduce(&values, 0, compose);
+    let forward = egir::semantic_exec::reduce(&values, 0, compose);
     let mut reversed = values;
     reversed.reverse();
     assert_ne!(
         forward,
-        crate::egir::semantic_exec::reduce(&reversed, 0, compose),
+        egir::semantic_exec::reduce(&reversed, 0, compose),
         "the characterization operator must actually be non-commutative"
     );
 
-    let reduce = crate::compile_thru_ssa(
+    let reduce = compile_thru_ssa(
         r#"
 entry compose_all(xs: []i32) i32 =
   reduce(
@@ -2176,7 +2191,7 @@ entry compose_all(xs: []i32) i32 =
         ["reduce_phase1", "reduce_combine"]
     );
 
-    let scan = crate::compile_thru_ssa(
+    let scan = compile_thru_ssa(
         r#"
 entry compose_prefix(xs: []i32) []i32 =
   scan(
@@ -2210,7 +2225,7 @@ fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
     let r4 = r#"
 entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
-    let converted = crate::compile_thru_ssa(r4).expect("runtime filter reaches SSA");
+    let converted = compile_thru_ssa(r4).expect("runtime filter reaches SSA");
     let phases: Vec<_> = converted.global_context.kernel_plan.phases().collect();
     assert_eq!(phases.len(), 5);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
@@ -2226,14 +2241,14 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
     assert!(matches!(
         phases[1].domain,
         KernelDomain::Fixed {
-            x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
+            x: egir::parallelize::tests::FILTER_SCAN_GROUPS,
             y: 1,
             z: 1
         }
     ));
     assert_eq!(
         phases[1].workgroup_size,
-        (crate::egir::parallelize::tests::REDUCE_PHASE1_WIDTH, 1, 1)
+        (egir::parallelize::tests::REDUCE_PHASE1_WIDTH, 1, 1)
     );
     assert!(matches!(
         phases[2].domain,
@@ -2264,7 +2279,7 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
             })
         }));
     }
-    crate::compile_thru_spirv(r4).expect("three-stage filter emits SPIR-V");
+    compile_thru_spirv(r4).expect("three-stage filter emits SPIR-V");
 
     let r5 = r#"
 entry r(xs: []u32) (?k. [k]u32, [1]u32) =
@@ -2272,13 +2287,13 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
   let n = length(v) in
   (v, [u32(n)])
 "#;
-    let lowered = crate::compile_thru_spirv(r5).expect("filter count path emits SPIR-V");
+    let lowered = compile_thru_spirv(r5).expect("filter count path emits SPIR-V");
     let compute = lowered
         .pipeline
         .pipelines
         .iter()
         .find_map(|pipeline| match pipeline {
-            crate::pipeline_descriptor::Pipeline::Compute(compute) => Some(compute),
+            pipeline_descriptor::Pipeline::Compute(compute) => Some(compute),
             _ => None,
         })
         .expect("filter compute pipeline");
@@ -2301,7 +2316,7 @@ entry mixed() ([]i32, []i32) =
   let compacted = filter(|i| true, iota(1)) in
   (mapped, compacted)
 "#;
-    let converted = crate::compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
+    let converted = compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
     let phases = converted.global_context.kernel_plan.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -2328,7 +2343,7 @@ entry mixed() ([]i32, []i32) =
             physical_slot: OutputSlotId(0),
         }]
     );
-    assert!(!crate::compile_thru_spirv(source).expect("mixed map/filter emits SPIR-V").spirv.is_empty());
+    assert!(!compile_thru_spirv(source).expect("mixed map/filter emits SPIR-V").spirv.is_empty());
 }
 
 fn assert_naga_accepts_spirv(words: &[u32]) {
@@ -2372,7 +2387,7 @@ fn spirv_has_builtin(words: &[u32], builtin: spirv::BuiltIn) -> bool {
 
 #[test]
 fn filter_over_iota_emits_well_typed_length_and_index_operations() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry compact_i32() []i32 =
   filter(|i| i % 2 == 0, iota(128))
@@ -2386,7 +2401,7 @@ entry compact_i32() []i32 =
 fn filter_iota_scan_apply_offsets_reuses_phase1_worker_grid() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry compact_iota() []i32 =
   filter(|i| i % 2 == 0, iota(39592))
@@ -2418,7 +2433,7 @@ entry compact_iota() []i32 =
     assert!(matches!(
         phase1.dispatch_size,
         DispatchSize::Fixed {
-            x: crate::egir::parallelize::tests::FILTER_SCAN_GROUPS,
+            x: egir::parallelize::tests::FILTER_SCAN_GROUPS,
             y: 1,
             z: 1,
             explicit: true,
@@ -2428,7 +2443,7 @@ entry compact_iota() []i32 =
 
 #[test]
 fn map_over_filtered_array_emits_well_typed_dynamic_extent() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry compact_then_map() ([]i32, [1]u32) =
   let visible_indices = filter(|i| i % 2 == 0, iota(128))
@@ -2444,7 +2459,7 @@ entry compact_then_map() ([]i32, [1]u32) =
 fn filter_then_map_publishes_runtime_array_handoff() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry filter_then_map() []i32 =
   let kept = filter(|i| i % 2 == 0, iota(4096)) in
@@ -2526,7 +2541,7 @@ entry filter_then_map() []i32 =
 
 #[test]
 fn filter_after_serial_prefix_detaches_its_parallel_producer() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
   let prefix =
@@ -2565,7 +2580,7 @@ entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
 fn fixed_output_serial_prefix_is_not_cloned_into_parallel_output_stage() {
     use crate::pipeline_descriptor::{Binding, BufferUsage};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
   let prefix =
@@ -2651,7 +2666,7 @@ entry filter_after_serial_prefix(xs: []i32) ([1]i32, []i32, i32) =
 fn widened_filter_output_uses_output_element_size() {
     use crate::pipeline_descriptor::{BufferLen, BufferUsage, Pipeline};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry r(bidx: []u32) ?k. [k]vec4f32 =
   let cand = map(|s| let i = i32(s) in @[f32(i), 0.0, f32(i), 1.0], bidx) in
@@ -2661,7 +2676,7 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
     .expect("widening map-filter compiles");
     let output_length = lowered.pipeline.pipelines.iter().find_map(|pipeline| match pipeline {
         Pipeline::Compute(compute) => compute.bindings.iter().find_map(|binding| match binding {
-            crate::pipeline_descriptor::Binding::StorageBuffer {
+            pipeline_descriptor::Binding::StorageBuffer {
                 usage: BufferUsage::Output,
                 length,
                 ..
@@ -2714,7 +2729,7 @@ fn multi_consumer_producer_survival_is_characterized() {
             })
             .collect();
         let mut consumers: HashMap<_, usize> = HashMap::new();
-        for dep in crate::egir::semantic_graph::dependencies(&allocated) {
+        for dep in egir::semantic_graph::dependencies(&allocated) {
             if matches!(dep.kind, SemanticDependencyKind::Value) && seg_maps.contains(&dep.producer) {
                 *consumers.entry(dep.producer).or_default() += 1;
             }
@@ -2810,9 +2825,7 @@ entry e() [4]i32 =
         .data
         .materializations
         .iter()
-        .filter(|(_, requirement)| {
-            requirement.kind() == crate::egir::program::MaterializationKind::SharedArray
-        })
+        .filter(|(_, requirement)| requirement.kind() == egir::program::MaterializationKind::SharedArray)
         .collect::<Vec<_>>();
     assert_eq!(
         shared_requirements.len(),
@@ -2829,26 +2842,26 @@ entry e() [4]i32 =
     let ResourceOrigin::Compiler(_) = &shared[0].origin else {
         unreachable!("shared resource must be compiler-owned")
     };
-    let flow = crate::egir::allocation::resource_flows(&allocated)
+    let flow = egir::allocation::resource_flows(&allocated)
         .into_iter()
         .find_map(|(resource, flow)| (resource == shared_resource).then_some(flow))
         .expect("shared resource has an allocated flow");
     assert!(matches!(
         flow.producer,
-        crate::egir::allocation::CompilerFlowEndpoint::Materialization(_)
+        egir::allocation::CompilerFlowEndpoint::Materialization(_)
     ));
     let consumer = flow
         .consumers
         .iter()
         .copied()
         .find_map(|consumer| match consumer {
-            crate::egir::allocation::CompilerFlowEndpoint::Entry(id) => Some(id),
-            crate::egir::allocation::CompilerFlowEndpoint::Materialization(_) => None,
+            egir::allocation::CompilerFlowEndpoint::Entry(id) => Some(id),
+            egir::allocation::CompilerFlowEndpoint::Materialization(_) => None,
         })
         .expect("shared array remains an input of the source entry");
     assert_eq!(allocated.entry_points[consumer.index()].name, "e");
-    let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
-    let mir = crate::ssa::print::format_program(&lowered);
+    let lowered = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
+    let mir = ssa::print::format_program(&lowered);
     assert_eq!(
         mir.matches("materialize ").count(),
         0,
@@ -2861,7 +2874,7 @@ entry e() [4]i32 =
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
     let phases: Vec<_> = lowered.global_context.kernel_plan.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
-        resource.resource == shared_resource && resource.access == crate::ResourceAccess::Write
+        resource.resource == shared_resource && resource.access == ResourceAccess::Write
     }));
     assert!(phases
         .last()
@@ -2872,7 +2885,7 @@ entry e() [4]i32 =
     assert!(phases.last().unwrap().dependencies.contains(&phases[0].id));
     let second = lower_semantic_egir(
         compile_to_semantic_egir(reduce_then_map),
-        crate::LoweringProfile::PORTABLE,
+        LoweringProfile::PORTABLE,
     );
     assert_eq!(
         serde_json::to_string(&lowered.global_context.pipeline).unwrap(),
@@ -2880,15 +2893,15 @@ entry e() [4]i32 =
         "shared materialization descriptor is deterministic"
     );
     let ys: Vec<i32> = (0..8).map(|value| value + 1).collect();
-    let sum = crate::egir::semantic_exec::reduce(&ys, 0, |a, b| a + b);
+    let sum = egir::semantic_exec::reduce(&ys, 0, |a, b| a + b);
     assert_eq!(
-        crate::egir::semantic_exec::map(&ys, |value| value + sum),
+        egir::semantic_exec::map(&ys, |value| value + sum),
         [37, 38, 39, 40, 41, 42, 43, 44]
     );
 
     let single = lower_semantic_egir(
         compile_to_semantic_egir(reduce_then_map),
-        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
+        LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     );
     let single_phases: Vec<_> = single.global_context.kernel_plan.phases().collect();
     assert_eq!(
@@ -2898,12 +2911,12 @@ entry e() [4]i32 =
     );
     assert!(matches!(
         single_phases[0].domain,
-        crate::egir::parallelize::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
+        egir::parallelize::KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(reduce_then_map),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("shared materialization lowers to WGSL");
     assert!(wgsl.contains("e_materialize_shared"));
@@ -2911,7 +2924,7 @@ entry e() [4]i32 =
 
 #[test]
 fn tuple_outputs_with_independent_map_chains_lower_after_semantic_fusion() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def N: i32 = 8
 def f(x: i32) i32 = x + 1
@@ -2932,20 +2945,20 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
     for pipeline in &allocated.data.core.pipeline.pipelines {
-        if let crate::pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
+        if let pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
             assert!(
                 compute.bindings.is_empty(),
                 "bindings publish only at terminal lowering"
             );
         }
     }
-    let first = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
+    let first = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
     let phases: Vec<_> = first.global_context.kernel_plan.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
     assert!(phases.iter().all(|phase| !phase.resources.is_empty()));
 
-    let second = crate::compile_thru_ssa(source).expect("second lowering");
+    let second = compile_thru_ssa(source).expect("second lowering");
     assert_eq!(
         serde_json::to_string(&first.global_context.pipeline).unwrap(),
         serde_json::to_string(&second.global_context.pipeline).unwrap(),
@@ -2962,33 +2975,33 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 
     let lowered = lower_semantic_egir(
         allocated,
-        crate::LoweringProfile::new(crate::CodegenTarget::Portable, crate::SchedulePolicy::Serial),
+        LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     );
     assert_eq!(lowered.global_context.kernel_plan.phases().count(), 1);
     assert!(!lowered.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
 #[test]
 fn unified_root_array_program_compiles_through_spirv() {
-    let lowered = crate::compile_thru_spirv("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+    let lowered = compile_thru_spirv("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("attribute-free root entry lowers through the array planner");
     assert_naga_accepts_spirv(&lowered.spirv);
 }
 #[test]
 fn unified_root_is_classified_before_egir() {
-    let program = crate::compile_thru_tlc("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+    let program = compile_thru_tlc("entry frame(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("root reaches TLC");
     let entry_kind = program.defs.iter().find_map(|definition| {
-        let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+        let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
             return None;
         };
         Some(entry.declaration.entry_kind)
     });
-    assert_eq!(entry_kind, Some(crate::interface::EntryKind::Compute));
+    assert_eq!(entry_kind, Some(interface::EntryKind::Compute));
 }
 
 #[test]
 fn unified_root_graphics_program_reaches_tlc() {
-    let program = crate::compile_thru_tlc(
+    let program = compile_thru_tlc(
         r#"
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
@@ -3001,15 +3014,12 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     )
     .expect("unified graphics entry reaches the stage-extraction boundary");
     assert_eq!(program.defs.len(), 2);
-    assert!(program
-        .defs
-        .iter()
-        .all(|definition| matches!(definition.meta, crate::tlc::DefMeta::EntryPoint(_))));
+    assert!(program.defs.iter().all(|definition| matches!(definition.meta, tlc::DefMeta::EntryPoint(_))));
     let groups = program
         .defs
         .iter()
         .filter_map(|definition| {
-            let crate::tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+            let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
                 return None;
             };
             entry.declaration.graphics_group.as_ref()
@@ -3021,7 +3031,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 
 #[test]
 fn unified_root_graphics_program_compiles_through_spirv() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_lines(
@@ -3035,25 +3045,25 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     .expect("unified graphics entry lowers through stage extraction");
     assert_naga_accepts_spirv(&lowered.spirv);
     assert_eq!(lowered.pipeline.pipelines.len(), 1);
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("unified rasterization must publish a graphics pipeline");
     };
     assert_eq!(graphics.stages.len(), 2);
     assert!(matches!(
         graphics.stages[0].stage,
-        crate::pipeline_descriptor::ShaderStage::Vertex
+        pipeline_descriptor::ShaderStage::Vertex
     ));
     assert!(matches!(
         graphics.stages[1].stage,
-        crate::pipeline_descriptor::ShaderStage::Fragment
+        pipeline_descriptor::ShaderStage::Fragment
     ));
     assert_eq!(
         graphics.invocation.topology,
-        crate::pipeline_descriptor::PrimitiveTopology::LineList
+        pipeline_descriptor::PrimitiveTopology::LineList
     );
     assert_eq!(
         graphics.invocation.draw,
-        crate::pipeline_descriptor::DrawCall::Direct {
+        pipeline_descriptor::DrawCall::Direct {
             vertex_count: 5,
             instance_count: 2,
             first_vertex: 7,
@@ -3063,7 +3073,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 #[test]
 fn unified_root_normalizes_ordinary_value_bindings_before_planning() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let vertex_count = 3u32 in
@@ -3079,12 +3089,12 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     .expect("ordinary value bindings do not change the root operation plan");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert_eq!(
         graphics.invocation.draw,
-        crate::pipeline_descriptor::DrawCall::Direct {
+        pipeline_descriptor::DrawCall::Direct {
             vertex_count: 3,
             instance_count: 1,
             first_vertex: 0,
@@ -3094,7 +3104,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 #[test]
 fn unified_root_array_result_can_feed_vertex_callback() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry frame(points: []vec2f32,
             target: render_target<vec4f32>)
@@ -3118,16 +3128,16 @@ entry frame(points: []vec2f32,
     .expect("an ordinary array result feeds a stage callback in one root");
     assert_naga_accepts_spirv(&lowered.spirv);
     assert_eq!(lowered.pipeline.pipelines.len(), 2);
-    let crate::pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
         panic!("array prefix must publish a compute pipeline");
     };
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
         panic!("rasterization must publish a graphics pipeline");
     };
-    let named_frame_output = |binding: &crate::pipeline_descriptor::Binding| {
+    let named_frame_output = |binding: &pipeline_descriptor::Binding| {
         matches!(
             binding,
-            crate::pipeline_descriptor::Binding::StorageBuffer { name, .. }
+            pipeline_descriptor::Binding::StorageBuffer { name, .. }
                 if name == "frame_output"
         )
     };
@@ -3143,7 +3153,7 @@ entry frame(points: []vec2f32,
 
 #[test]
 fn unified_invocation_fields_compile_through_spirv() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
@@ -3167,7 +3177,7 @@ entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 #[test]
 fn unified_graphics_captures_use_compiler_assigned_interfaces() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry triangle(points: []vec2f32, scale: f32,
                target: render_target<vec4f32>) render_target<vec4f32> =
@@ -3187,12 +3197,12 @@ entry triangle(points: []vec2f32, scale: f32,
     )
     .expect("unified callback captures receive compiler-assigned interfaces");
     assert_naga_accepts_spirv(&lowered.spirv);
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("unified rasterization must publish a graphics pipeline");
     };
     assert!(graphics.bindings.iter().any(|binding| matches!(
         binding,
-        crate::pipeline_descriptor::Binding::StorageBuffer {
+        pipeline_descriptor::Binding::StorageBuffer {
             set: 0,
             binding: 0,
             name,
@@ -3201,13 +3211,13 @@ entry triangle(points: []vec2f32, scale: f32,
     )));
     assert!(graphics.bindings.iter().any(|binding| matches!(
         binding,
-        crate::pipeline_descriptor::Binding::Uniform { name, .. } if name.contains("scale")
+        pipeline_descriptor::Binding::Uniform { name, .. } if name.contains("scale")
     )));
 }
 
 #[test]
 fn unified_graphics_supports_structured_varyings_and_sampled_resources() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type varying = { uv: vec2f32, tint: vec4f32 }
 
@@ -3232,22 +3242,22 @@ entry textured(tex: texture2d, sampling: sampler,
     )
     .expect("structured varyings and sampled resources lower through unified callbacks");
     assert_naga_accepts_spirv(&lowered.spirv);
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("unified rasterization must publish a graphics pipeline");
     };
-    assert!(graphics.bindings.iter().any(|binding| matches!(
-        binding,
-        crate::pipeline_descriptor::Binding::Texture { binding: 0, .. }
-    )));
-    assert!(graphics.bindings.iter().any(|binding| matches!(
-        binding,
-        crate::pipeline_descriptor::Binding::Sampler { binding: 1, .. }
-    )));
+    assert!(graphics
+        .bindings
+        .iter()
+        .any(|binding| matches!(binding, pipeline_descriptor::Binding::Texture { binding: 0, .. })));
+    assert!(graphics
+        .bindings
+        .iter()
+        .any(|binding| matches!(binding, pipeline_descriptor::Binding::Sampler { binding: 1, .. })));
 }
 
 #[test]
 fn unified_graphics_callbacks_may_call_named_helpers() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 def make_vertex(vertex: vertex_invocation) vertex<vec4f32> =
   vertex_output(
@@ -3270,7 +3280,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 
 #[test]
 fn unified_root_supports_successive_draws_into_one_target() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 def triangle_vertex(offset: f32, vertex: vertex_invocation) vertex<vec4f32> =
   let x = if vertex.vertex_index == 0u32 then -0.5
@@ -3300,8 +3310,8 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
         .pipelines
         .iter()
         .filter_map(|pipeline| match pipeline {
-            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
-            crate::pipeline_descriptor::Pipeline::Compute(_) => None,
+            pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            pipeline_descriptor::Pipeline::Compute(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(graphics.len(), 2, "one graphics pipeline per draw");
@@ -3314,7 +3324,7 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
         .frame_graph
         .passes
         .iter()
-        .filter(|pass| pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment)
+        .filter(|pass| pass.kind == pipeline_descriptor::FramePassKind::Fragment)
         .collect::<Vec<_>>();
     assert_eq!(fragment_passes.len(), 2);
     assert!(
@@ -3347,7 +3357,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let first = shade(target, covered, |fragment| fragment.value) in
   shade(first, covered, |fragment| fragment.value)
 "#;
-    let error = crate::compile_thru_tlc(source).expect_err("a raster value is consumed by shade");
+    let error = compile_thru_tlc(source).expect_err("a raster value is consumed by shade");
     assert!(
         error.to_string().contains("use of moved value `covered`"),
         "unexpected diagnostic: {error}"
@@ -3368,7 +3378,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let second = shade(target, second_raster, |fragment| fragment.value) in
   second
 "#;
-    let error = crate::compile_thru_tlc(source).expect_err("shade consumes its render target");
+    let error = compile_thru_tlc(source).expect_err("shade consumes its render target");
     assert!(
         error.to_string().contains("use of moved value `target`"),
         "unexpected diagnostic: {error}"
@@ -3385,8 +3395,8 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   shade(target, covered,
     |fragment| target_load(target, @[0, 0], fragment.sample_index))
 "#;
-    let error = crate::compile_thru_tlc(source)
-        .expect_err("a fragment callback must not read the target being consumed");
+    let error =
+        compile_thru_tlc(source).expect_err("a fragment callback must not read the target being consumed");
     assert!(
         error
             .to_string()
@@ -3404,7 +3414,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   target
 "#;
-    let error = crate::compile_thru_tlc(source).expect_err("a raster value must not be discarded");
+    let error = compile_thru_tlc(source).expect_err("a raster value must not be discarded");
     assert!(
         error.to_string().contains("raster value `covered` must be consumed exactly once"),
         "unexpected diagnostic: {error}"
@@ -3413,7 +3423,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
 
 #[test]
 fn unified_root_orders_graphics_compute_graphics_operations() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry postprocess(values: []vec2i32,
                   scene: render_target<vec4f32>,
@@ -3453,21 +3463,21 @@ entry postprocess(values: []vec2i32,
     assert_eq!(lowered.pipeline.pipelines.len(), 3);
     assert!(matches!(
         lowered.pipeline.pipelines[0],
-        crate::pipeline_descriptor::Pipeline::Graphics(_)
+        pipeline_descriptor::Pipeline::Graphics(_)
     ));
     assert!(matches!(
         lowered.pipeline.pipelines[1],
-        crate::pipeline_descriptor::Pipeline::Compute(_)
+        pipeline_descriptor::Pipeline::Compute(_)
     ));
-    let crate::pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[2] else {
+    let pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[2] else {
         panic!("the final operation must be the resolve graphics pipeline")
     };
     let compute_names = match &lowered.pipeline.pipelines[1] {
-        crate::pipeline_descriptor::Pipeline::Compute(compute) => compute
+        pipeline_descriptor::Pipeline::Compute(compute) => compute
             .bindings
             .iter()
             .filter_map(|binding| match binding {
-                crate::pipeline_descriptor::Binding::StorageBuffer { name, .. } => Some(name),
+                pipeline_descriptor::Binding::StorageBuffer { name, .. } => Some(name),
                 _ => None,
             })
             .collect::<Vec<_>>(),
@@ -3476,7 +3486,7 @@ entry postprocess(values: []vec2i32,
     assert!(resolve.bindings.iter().any(|binding| {
         matches!(
             binding,
-            crate::pipeline_descriptor::Binding::StorageBuffer { name, .. }
+            pipeline_descriptor::Binding::StorageBuffer { name, .. }
                 if compute_names.contains(&name)
         )
     }));
@@ -3485,7 +3495,7 @@ entry postprocess(values: []vec2i32,
     let scene_fragment = passes
         .iter()
         .position(|pass| {
-            pass.pipeline_index == 0 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+            pass.pipeline_index == 0 && pass.kind == pipeline_descriptor::FramePassKind::Fragment
         })
         .expect("scene fragment pass");
     let compute =
@@ -3493,7 +3503,7 @@ entry postprocess(values: []vec2i32,
     let resolve_fragment = passes
         .iter()
         .position(|pass| {
-            pass.pipeline_index == 2 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+            pass.pipeline_index == 2 && pass.kind == pipeline_descriptor::FramePassKind::Fragment
         })
         .expect("resolve fragment pass");
     assert!(passes[compute].depends_on.contains(&scene_fragment));
@@ -3502,7 +3512,7 @@ entry postprocess(values: []vec2i32,
 
 #[test]
 fn unified_root_samples_a_prior_render_target_in_a_later_pass() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry resolve(sampling: sampler,
               scene: render_target<vec4f32>,
@@ -3537,32 +3547,32 @@ entry resolve(sampling: sampler,
     assert_naga_accepts_spirv(&lowered.spirv);
 
     assert_eq!(lowered.pipeline.pipelines.len(), 2);
-    let crate::pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[1] else {
+    let pipeline_descriptor::Pipeline::Graphics(resolve) = &lowered.pipeline.pipelines[1] else {
         panic!("resolve graphics pipeline")
     };
     assert!(resolve.bindings.iter().any(|binding| matches!(
         binding,
-        crate::pipeline_descriptor::Binding::Texture {
+        pipeline_descriptor::Binding::Texture {
             resource: Some(resource),
             ..
         } if resource == "scene"
     )));
     assert!(resolve.bindings.iter().any(|binding| matches!(
         binding,
-        crate::pipeline_descriptor::Binding::Sampler { name, .. } if name == "sampling"
+        pipeline_descriptor::Binding::Sampler { name, .. } if name == "sampling"
     )));
 
     let passes = &lowered.pipeline.frame_graph.passes;
     let scene_fragment = passes
         .iter()
         .position(|pass| {
-            pass.pipeline_index == 0 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+            pass.pipeline_index == 0 && pass.kind == pipeline_descriptor::FramePassKind::Fragment
         })
         .expect("scene fragment pass");
     let resolve_fragment = passes
         .iter()
         .position(|pass| {
-            pass.pipeline_index == 1 && pass.kind == crate::pipeline_descriptor::FramePassKind::Fragment
+            pass.pipeline_index == 1 && pass.kind == pipeline_descriptor::FramePassKind::Fragment
         })
         .expect("resolve fragment pass");
     assert!(passes[resolve_fragment].depends_on.contains(&scene_fragment));
@@ -3570,7 +3580,7 @@ entry resolve(sampling: sampler,
 
 #[test]
 fn unified_root_supports_structured_render_targets() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type gbuffer = {
   albedo: vec4f32,
@@ -3617,7 +3627,7 @@ entry deferred(coords: []vec2i32,
     .expect("structured render targets flow between graphics and compute");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(geometry) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(geometry) = &lowered.pipeline.pipelines[0] else {
         panic!("geometry pipeline")
     };
     assert_eq!(
@@ -3625,14 +3635,14 @@ entry deferred(coords: []vec2i32,
         vec!["scene_albedo", "scene_normal", "scene_depth"]
     );
 
-    let crate::pipeline_descriptor::Pipeline::Compute(depths) = &lowered.pipeline.pipelines[1] else {
+    let pipeline_descriptor::Pipeline::Compute(depths) = &lowered.pipeline.pipelines[1] else {
         panic!("depth processing pipeline")
     };
     let sampled_resources = depths
         .bindings
         .iter()
         .filter_map(|binding| match binding {
-            crate::pipeline_descriptor::Binding::Texture {
+            pipeline_descriptor::Binding::Texture {
                 resource: Some(resource),
                 ..
             } => Some(resource.as_str()),
@@ -3647,7 +3657,7 @@ entry deferred(coords: []vec2i32,
 
 #[test]
 fn fragment_output_helpers_can_destructure_the_predeclared_sum() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 def normalize_output(output: fragment_output<vec4f32>) fragment_output<vec4f32> =
   match output
@@ -3678,7 +3688,7 @@ entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
 
 #[test]
 fn direct_tuple_color_is_not_mistaken_for_fragment_output() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry tuple_color(target: render_target<(u32, vec4f32, vec4f32, f32)>)
     render_target<(u32, vec4f32, vec4f32, f32)> =
@@ -3695,7 +3705,7 @@ entry tuple_color(target: render_target<(u32, vec4f32, vec4f32, f32)>)
     .expect("a direct tuple color remains an ordinary color result");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert_eq!(graphics.fragment_outputs.len(), 4);
@@ -3726,11 +3736,11 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
       then #depth(fragment.value, 0.25)
       else #discard)
 "#;
-    let lowered = crate::compile_thru_spirv(source)
+    let lowered = compile_thru_spirv(source)
         .expect("fragment_output supports explicit depth and conditional discard");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert_eq!(
@@ -3741,10 +3751,8 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::FragDepth));
     assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::SampleMask));
 
-    let wgsl = crate::lower_ssa_to_wgsl(
-        crate::compile_thru_ssa(source).expect("fragment_output lowers to portable SSA"),
-    )
-    .expect("fragment_output lowers to WGSL");
+    let wgsl = lower_ssa_to_wgsl(compile_thru_ssa(source).expect("fragment_output lowers to portable SSA"))
+        .expect("fragment_output lowers to WGSL");
     assert!(wgsl.contains("@builtin(frag_depth)"), "{wgsl}");
     assert!(wgsl.contains("@builtin(sample_mask)"), "{wgsl}");
     let module = naga::front::wgsl::parse_str(&wgsl)
@@ -3758,7 +3766,7 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 #[test]
 fn unified_root_accepts_explicit_fragment_state() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
@@ -3779,24 +3787,24 @@ entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
     .expect("shade_with accepts the specified structural fragment state");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert_eq!(
         graphics.invocation.fragment_state.depth_test,
-        crate::pipeline_descriptor::DepthTest::LessEqual
+        pipeline_descriptor::DepthTest::LessEqual
     );
     assert!(graphics.invocation.fragment_state.depth_write);
     assert_eq!(
         graphics.invocation.fragment_state.blend,
-        crate::pipeline_descriptor::BlendMode::Replace
+        pipeline_descriptor::BlendMode::Replace
     );
     assert!(graphics.invocation.fragment_state.color_write);
 }
 
 #[test]
 fn unified_root_flattens_structured_compute_results() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry prepare_and_draw<[n]>(values: [n]vec4f32,
                             target: render_target<vec4f32>)
@@ -3819,15 +3827,15 @@ entry prepare_and_draw<[n]>(values: [n]vec4f32,
     assert_naga_accepts_spirv(&lowered.spirv);
 
     assert_eq!(lowered.pipeline.pipelines.len(), 2);
-    let crate::pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
         panic!("preparation compute pipeline")
     };
     let outputs = compute
         .bindings
         .iter()
         .filter_map(|binding| match binding {
-            crate::pipeline_descriptor::Binding::StorageBuffer {
-                usage: crate::pipeline_descriptor::BufferUsage::Output,
+            pipeline_descriptor::Binding::StorageBuffer {
+                usage: pipeline_descriptor::BufferUsage::Output,
                 name,
                 ..
             } => Some(name.as_str()),
@@ -3836,19 +3844,19 @@ entry prepare_and_draw<[n]>(values: [n]vec4f32,
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 2);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
         panic!("draw graphics pipeline")
     };
     for output in outputs {
         assert!(graphics.bindings.iter().any(|binding| {
-            matches!(binding, crate::pipeline_descriptor::Binding::StorageBuffer { name, .. } if name == output)
+            matches!(binding, pipeline_descriptor::Binding::StorageBuffer { name, .. } if name == output)
         }));
     }
 }
 
 #[test]
 fn unified_root_uses_computed_indirect_draw_command() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type draw_command = {
   vertex_count: u32,
@@ -3889,11 +3897,10 @@ entry compact_and_draw(values: []vec4f32,
     assert_naga_accepts_spirv(&lowered.spirv);
 
     assert_eq!(lowered.pipeline.pipelines.len(), 2);
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
         panic!("indirect graphics pipeline")
     };
-    let crate::pipeline_descriptor::DrawCall::Indirect { commands, offset, .. } = &graphics.invocation.draw
-    else {
+    let pipeline_descriptor::DrawCall::Indirect { commands, offset, .. } = &graphics.invocation.draw else {
         panic!("draw must be indirect")
     };
     assert_eq!(*offset, 0);
@@ -3907,7 +3914,7 @@ entry compact_and_draw(values: []vec4f32,
 
 #[test]
 fn unified_root_publishes_indexed_draws() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry indexed(indices: [3]u32,
               target: render_target<vec4f32>) render_target<vec4f32> =
@@ -3920,10 +3927,10 @@ entry indexed(indices: [3]u32,
     .expect("indexed_draw is accepted by unified roots");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
-    let crate::pipeline_descriptor::DrawCall::Indexed {
+    let pipeline_descriptor::DrawCall::Indexed {
         indices,
         index_count,
         instance_count,
@@ -3932,7 +3939,7 @@ entry indexed(indices: [3]u32,
     else {
         panic!("draw must be indexed")
     };
-    assert_eq!(*index_count, crate::pipeline_descriptor::DrawCount::Fixed(3));
+    assert_eq!(*index_count, pipeline_descriptor::DrawCount::Fixed(3));
     assert_eq!(*instance_count, 2);
     let index_resource = indices.resource.as_ref().unwrap_or(&indices.name);
     let vertex_pass = lowered
@@ -3940,7 +3947,7 @@ entry indexed(indices: [3]u32,
         .frame_graph
         .passes
         .iter()
-        .find(|pass| pass.kind == crate::pipeline_descriptor::FramePassKind::Vertex)
+        .find(|pass| pass.kind == pipeline_descriptor::FramePassKind::Vertex)
         .expect("vertex pass");
     assert!(vertex_pass
         .reads
@@ -3950,7 +3957,7 @@ entry indexed(indices: [3]u32,
 
 #[test]
 fn unified_root_publishes_indexed_and_plural_indirect_draws() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type draw_command = {
   vertex_count: u32,
@@ -3997,29 +4004,29 @@ entry draw_many(indices: [3]u32,
         .pipelines
         .iter()
         .filter_map(|pipeline| match pipeline {
-            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(graphics.len(), 2);
     assert!(matches!(
         graphics[0].invocation.draw,
-        crate::pipeline_descriptor::DrawCall::Indirect {
-            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(2),
+        pipeline_descriptor::DrawCall::Indirect {
+            draw_count: pipeline_descriptor::DrawCount::Fixed(2),
             ..
         }
     ));
     assert!(matches!(
         graphics[1].invocation.draw,
-        crate::pipeline_descriptor::DrawCall::IndexedIndirect {
-            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(1),
+        pipeline_descriptor::DrawCall::IndexedIndirect {
+            draw_count: pipeline_descriptor::DrawCount::Fixed(1),
             ..
         }
     ));
 }
 #[test]
 fn unified_root_publishes_offset_and_singular_indexed_draws() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type indexed_draw_command = {
   index_count: u32,
@@ -4053,25 +4060,25 @@ entry indexed_forms(indices: [4]u16,
         .pipelines
         .iter()
         .filter_map(|pipeline| match pipeline {
-            crate::pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+            pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(graphics.len(), 2);
     assert!(matches!(
         graphics[0].invocation.draw,
-        crate::pipeline_descriptor::DrawCall::Indexed {
-            index_format: crate::pipeline_descriptor::IndexFormat::Uint16,
-            index_count: crate::pipeline_descriptor::DrawCount::Fixed(3),
+        pipeline_descriptor::DrawCall::Indexed {
+            index_format: pipeline_descriptor::IndexFormat::Uint16,
+            index_count: pipeline_descriptor::DrawCount::Fixed(3),
             vertex_offset: -1,
             ..
         }
     ));
     assert!(matches!(
         graphics[1].invocation.draw,
-        crate::pipeline_descriptor::DrawCall::IndexedIndirect {
-            index_format: crate::pipeline_descriptor::IndexFormat::Uint16,
-            draw_count: crate::pipeline_descriptor::DrawCount::Fixed(1),
+        pipeline_descriptor::DrawCall::IndexedIndirect {
+            index_format: pipeline_descriptor::IndexFormat::Uint16,
+            draw_count: pipeline_descriptor::DrawCount::Fixed(1),
             ..
         }
     ));
@@ -4079,7 +4086,7 @@ entry indexed_forms(indices: [4]u16,
 
 #[test]
 fn unified_root_preserves_dynamic_indirect_draw_count() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type draw_command = {
   vertex_count: u32,
@@ -4099,20 +4106,20 @@ entry draw_dynamic(commands: []draw_command,
     .expect("a runtime-sized command array remains runtime-sized in the descriptor");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert!(matches!(
         graphics.invocation.draw,
-        crate::pipeline_descriptor::DrawCall::Indirect {
-            draw_count: crate::pipeline_descriptor::DrawCount::BufferLength,
+        pipeline_descriptor::DrawCall::Indirect {
+            draw_count: pipeline_descriptor::DrawCount::BufferLength,
             ..
         }
     ));
 }
 #[test]
 fn unified_root_publishes_explicit_raster_state() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry clipped(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles_with(
@@ -4135,37 +4142,34 @@ entry clipped(target: render_target<vec4f32>) render_target<vec4f32> =
     .expect("rasterize_*_with accepts the specified raster state");
     assert_naga_accepts_spirv(&lowered.spirv);
 
-    let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
     };
     assert_eq!(
         graphics.invocation.raster_state,
-        crate::pipeline_descriptor::RasterState {
-            viewport: crate::pipeline_descriptor::Viewport::Custom {
+        pipeline_descriptor::RasterState {
+            viewport: pipeline_descriptor::Viewport::Custom {
                 origin: [10.0, 20.0],
                 extent: [640.0, 480.0],
                 depth: [0.25, 0.75],
             },
-            scissor: crate::pipeline_descriptor::Scissor::Custom {
+            scissor: pipeline_descriptor::Scissor::Custom {
                 origin: [4, 8],
                 extent: [320, 240],
             },
-            front_face: crate::pipeline_descriptor::FrontFace::Clockwise,
-            cull: crate::pipeline_descriptor::CullMode::Back,
-            fill: crate::pipeline_descriptor::FillMode::Line,
+            front_face: pipeline_descriptor::FrontFace::Clockwise,
+            cull: pipeline_descriptor::CullMode::Back,
+            fill: pipeline_descriptor::FillMode::Line,
         }
     );
 }
 #[test]
 fn target_profiles_are_selected_before_ssa_lowering() {
-    let portable = crate::compile_thru_ssa(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
-        .expect("portable SSA");
-    assert_eq!(
-        portable.global_context.profile.target,
-        crate::CodegenTarget::Portable
-    );
+    let portable =
+        compile_thru_ssa(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)").expect("portable SSA");
+    assert_eq!(portable.global_context.profile.target, CodegenTarget::Portable);
 
-    let spirv = crate::compile_thru_spirv(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
+    let spirv = compile_thru_spirv(" entry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)")
         .expect("SPIR-V-targeted lowering");
     assert!(!spirv.spirv.is_empty());
 }
@@ -4179,14 +4183,13 @@ fn terminal_scan_helpers_are_complete_region_arena_members() {
         "planner-generated scan helper leaked into semantic EGIR"
     );
     let planned_callables =
-        crate::egir::parallelize::tests::planned_callable_names(compile_to_semantic_egir(source))
+        egir::parallelize::tests::planned_callable_names(compile_to_semantic_egir(source))
             .expect("parallel schedule");
     assert!(
         planned_callables.iter().any(|name| name.ends_with("_scan_op_swap")),
         "scan helper must be owned by the kernel plan"
     );
-    let physical =
-        crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE).expect("terminal schedule");
+    let physical = egir::plan(allocated, LoweringProfile::PORTABLE).expect("terminal schedule");
     let helper = physical
         .functions
         .iter()
@@ -4339,7 +4342,7 @@ entry mn(n: u32) (u32, [4]u32) =
 #[test]
 fn tuple_reduce_writes_every_output_field() {
     use crate::pipeline_descriptor::{Binding, BufferUsage, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry mn(n: u32) (u32, [4]u32) =
   let cands = map(|i: u32| (i, [i, i, i, i]), 0u32..<n) in
@@ -4453,7 +4456,7 @@ entry sum(xs: []f32) f32 =
 #[test]
 fn parallel_reduce_descriptor_wires_partials_and_original_output() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry sum(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
 "#,
@@ -4507,7 +4510,7 @@ entry sum(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, xs)
 #[test]
 fn mapped_reduce_with_phase1_capture_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry scaled_sum(xs: []i32, scale: i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
@@ -4528,7 +4531,7 @@ entry scaled_sum(xs: []i32, scale: i32) i32 =
 #[test]
 fn captured_reduce_operator_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry captured_reduce(xs: []i32, modes: []i32) i32 =
   reduce(
@@ -4558,7 +4561,7 @@ entry captured_reduce(xs: []i32, modes: []i32) i32 =
 #[test]
 fn reduce_scalar_output_is_not_dispatch_sized() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry total(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
@@ -4601,7 +4604,7 @@ entry total(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 #[test]
 fn parallel_scan_descriptor_wires_three_phases_and_scratch() {
     use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)
 "#,
@@ -4651,7 +4654,7 @@ entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)
 #[test]
 fn mapped_scan_with_phase1_capture_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry scaled_prefix(xs: []i32, scale: i32) []i32 =
   scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * scale, xs))
@@ -4672,7 +4675,7 @@ entry scaled_prefix(xs: []i32, scale: i32) []i32 =
 #[test]
 fn captured_scan_operator_stays_parallel() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry captured_scan(xs: []i32, modes: []i32) []i32 =
   scan(
@@ -4718,12 +4721,12 @@ entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
         .expect("tuple scan remains canonical");
     assert_eq!(scan.len(), 1);
     assert_eq!(scan[0].neutral.len(), 1);
-    crate::compile_thru_spirv(source).expect("tuple-element scan compiles through the parallel recipe");
+    compile_thru_spirv(source).expect("tuple-element scan compiles through the parallel recipe");
 }
 #[test]
 fn range_map_dispatch_uses_range_length() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry generated() []i32 = map(|i: i32| i + 1, 0i32..<2048)
 "#,
@@ -4762,7 +4765,7 @@ def f(n: i32) []f32 =
 entry gen(events: []vec4f32) []f32 =
   f(0)
 "#;
-    let lowered = crate::compile_thru_spirv(source).expect("iota map returned from a helper compiles");
+    let lowered = compile_thru_spirv(source).expect("iota map returned from a helper compiles");
     let stage = lowered
         .pipeline
         .pipelines
@@ -4784,7 +4787,7 @@ entry gen(events: []vec4f32) []f32 =
 #[test]
 fn scalar_prepass_and_consumer_share_one_scheduled_pipeline() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
@@ -4849,9 +4852,9 @@ def fold_events(events: []u32) u32 =
 "#;
 
 fn scalar_prelude_pipeline<'a>(
-    lowered: &'a crate::Lowered,
+    lowered: &'a Lowered,
     source_entry: &str,
-) -> &'a crate::pipeline_descriptor::ComputePipeline {
+) -> &'a pipeline_descriptor::ComputePipeline {
     use crate::pipeline_descriptor::Pipeline;
     let mut pipelines = lowered.pipeline.pipelines.iter().filter_map(|pipeline| match pipeline {
         Pipeline::Compute(compute)
@@ -4869,7 +4872,7 @@ fn scalar_prelude_pipeline<'a>(
     pipeline
 }
 
-fn is_singleton_stage(stage: &crate::pipeline_descriptor::ComputeStage) -> bool {
+fn is_singleton_stage(stage: &pipeline_descriptor::ComputeStage) -> bool {
     use crate::pipeline_descriptor::DispatchSize;
     stage.workgroup_size == (1, 1, 1)
         && matches!(stage.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1, .. })
@@ -5029,7 +5032,7 @@ fn spirv_entry_storage_binding_is_writable(
     })
 }
 
-fn assert_expensive_scalar_prefix_pipeline(lowered: &crate::Lowered, source_entry: &str) {
+fn assert_expensive_scalar_prefix_pipeline(lowered: &Lowered, source_entry: &str) {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
     let pipeline = scalar_prelude_pipeline(lowered, source_entry);
@@ -5107,13 +5110,13 @@ fn expensive_scalar_source_is_one_singleton_feeding_two_map_domains() {
            let out_y = map(|y| y ^ state, ys) in\n\
            (out_x, out_y)\n"
     );
-    let lowered = crate::compile_thru_spirv(&source).expect("expensive scalar source compiles");
+    let lowered = compile_thru_spirv(&source).expect("expensive scalar source compiles");
     assert_expensive_scalar_prefix_pipeline(&lowered, "serial_prefix_before_maps");
 }
 
 #[test]
 fn direct_loop_scalar_prefix_uses_the_general_residency_policy() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
   let state =
@@ -5132,7 +5135,7 @@ entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
 fn composite_serial_prefix_is_one_singleton_feeding_two_map_domains() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 def serial_prefix(events: []i32) (i32, [1]i32) =
   loop (sum, last) = (0, [0]) for k < 32 do
@@ -5198,7 +5201,7 @@ entry serial_prefix_composite_two_maps(events: []i32) ([]i32, []i32) =
 fn composite_serial_prefix_is_shared_by_fixed_outputs_and_parallel_maps() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 def serial_prefix(events: []i32) (i32, [1]i32) =
   loop (sum, last) = (0, [0]) for k < 32 do
@@ -5267,7 +5270,7 @@ entry serial_prefix_mixed_consumers(events: []i32)
 fn mixed_fixed_parallel_output_preserves_independent_load_and_serial_prepass() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry mixed_fixed_parallel_prefix_ice(events: []i32) ([1]i32, []i32) =
   let sum = loop total = 0 for k < 1 do total + events[k] in
@@ -5330,7 +5333,7 @@ entry mixed_fixed_parallel_prefix_ice(events: []i32) ([1]i32, []i32) =
 fn conditional_state_prefix_publishes_all_live_outs_to_mixed_consumers() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type ui_state = { tool: i32 }
 type stroke_head = { count: i32 }
@@ -5438,7 +5441,7 @@ fn conditional_scalar_prefix_uses_the_general_residency_policy() {
            let out_y = map(|y| y ^ state, ys) in\n\
            (out_x, out_y)\n"
     );
-    let lowered = crate::compile_thru_spirv(&source).expect("conditional structured prefix compiles");
+    let lowered = compile_thru_spirv(&source).expect("conditional structured prefix compiles");
     assert_expensive_scalar_prefix_pipeline(&lowered, "conditional_prefix");
 }
 
@@ -5451,16 +5454,16 @@ fn expensive_scalar_source_is_profitable_for_one_map() {
            let state = fold_events(events) in\n\
            map(|x| x + state, xs)\n"
     );
-    let lowered = crate::compile_thru_spirv(&source).expect("single-map scalar source compiles");
+    let lowered = compile_thru_spirv(&source).expect("single-map scalar source compiles");
     let stages = &scalar_prelude_pipeline(&lowered, "serial_prefix_one_map").stages;
     assert_eq!(stages.len(), 2, "one singleton and one map stage");
     assert_eq!(stages.iter().filter(|stage| is_singleton_stage(stage)).count(), 1);
 }
 
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("scalar prepass lowers to WGSL");
     let module = naga::front::wgsl::parse_str(&wgsl)
@@ -5500,7 +5503,7 @@ entry direct_loop_prefix_wgsl(xs: []u32, events: []u32) []u32 =
 
 #[test]
 fn cheap_scalar_source_stays_cloned_into_two_maps() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry cheap_prefix(xs: []u32, ys: []u32, factor: u32) ([]u32, []u32) =
   let state = factor * 3u32
@@ -5546,11 +5549,11 @@ entry add_sum(xs: []i32) []i32 =
             _ => false,
         })
         .expect("scalar handoff resource");
-    let flow = crate::egir::allocation::resource_flows(&allocated)
+    let flow = egir::allocation::resource_flows(&allocated)
         .into_iter()
         .find_map(|(candidate, flow)| (candidate == resource.id()).then_some(flow))
         .expect("scalar handoff has an explicit resource flow");
-    let crate::egir::allocation::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
+    let egir::allocation::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
         panic!("scalar producer must be a typed materialization requirement")
     };
     let producer = allocated
@@ -5562,8 +5565,8 @@ entry add_sum(xs: []i32) []i32 =
     assert_eq!(flow.consumers.len(), 1);
     assert_eq!(
         allocated.entry_points[match flow.consumers[0] {
-            crate::egir::allocation::CompilerFlowEndpoint::Entry(id) => id.index(),
-            crate::egir::allocation::CompilerFlowEndpoint::Materialization(_) => {
+            egir::allocation::CompilerFlowEndpoint::Entry(id) => id.index(),
+            egir::allocation::CompilerFlowEndpoint::Materialization(_) => {
                 panic!("scalar materialization consumer must be a semantic entry")
             }
         }]
@@ -5584,7 +5587,7 @@ entry add_sum(xs: []i32) []i32 =
 ///
 /// On violation, panics with the offending sym, its symbol-table name,
 /// and the pipeline stage name.
-fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &str) {
+fn assert_no_unbound_var_refs(program: &tlc::stage::Reachable, stage: &str) {
     use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
     use crate::tlc::{ArrayExpr, Lambda, LoopKind, SoacOp, Term, TermKind};
     use crate::SymbolId;
@@ -5771,7 +5774,7 @@ fn assert_no_unbound_var_refs(program: &crate::tlc::stage::Reachable, stage: &st
     ) {
         match ae {
             ArrayExpr::Var(vr, ty) => {
-                let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
+                let t = tlc::synthetic_atom_var_term(*vr, ty.clone());
                 walk(&t, bound, symbols, stage, def_name);
             }
             ArrayExpr::Zip(arrs) => {
@@ -5815,7 +5818,7 @@ entry frag() vec4f32 =
     let range = [1, 2, 3, 4] in
     @[f32.i32(range[0]), 0.0, 0.0, 1.0]
 "#;
-    let tlc = crate::compile_thru_tlc(source).expect("compile_thru_tlc");
+    let tlc = compile_thru_tlc(source).expect("compile_thru_tlc");
     assert_no_unbound_var_refs(&tlc, "compile_thru_tlc");
 }
 
@@ -5850,11 +5853,9 @@ fn count_uninit_in_program<Tag, GlobalContext>(ssa: &Program<Tag, GlobalContext>
         .chain(ssa.entry_points.iter().map(|e| &e.body.inner.insts));
     for insts in bodies {
         for (_id, inst) in insts {
-            if let crate::ssa::types::InstKind::Op { tag, .. } = &inst.data {
+            if let ssa::types::InstKind::Op { tag, .. } = &inst.data {
                 match tag {
-                    crate::op::OpTag::Intrinsic { id, .. }
-                        if *id == crate::builtins::catalog().known().uninit =>
-                    {
+                    op::OpTag::Intrinsic { id, .. } if *id == builtins::catalog().known().uninit => {
                         count += 1;
                     }
                     _ => {}
@@ -5973,8 +5974,8 @@ entry parallel_scan(a: []i32) []i32 = scan(|acc: i32, x: i32| acc + x, 0, a)
         .insts
         .values()
         .find_map(|inst| match &inst.data {
-            crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Call(name),
+            ssa::types::InstKind::Op {
+                tag: op::OpTag::Call(name),
                 operands,
             } => Some((name.clone(), operands.clone())),
             _ => None,
@@ -6074,7 +6075,7 @@ fn inst_signature_multiset<Tag, GlobalContext>(
                 match tag {
                     OpTag::Call(name) => format!("Call({})", name),
                     OpTag::Intrinsic { id, .. } => {
-                        let name = crate::builtins::by_id(*id).raw.surface_name;
+                        let name = builtins::by_id(*id).raw.surface_name;
                         format!("Intrinsic({})", name)
                     }
                     OpTag::BinOp(op) => format!("BinOp({})", op.symbol()),
@@ -6172,7 +6173,7 @@ entry fragment_main() vec4f32 =
     compile_to_spirv(source).expect("fragment map+reduce should lower to SPIR-V");
 }
 
-fn has_soac_kind(term: &crate::tlc::Term, kind: &str) -> bool {
+fn has_soac_kind(term: &tlc::Term, kind: &str) -> bool {
     use crate::tlc::{SoacOp, TermKind};
     match &term.kind {
         TermKind::Soac(SoacOp::Map { .. }) if kind == "Map" => true,
@@ -6297,7 +6298,7 @@ entry gen(src: []f32) ([]f32, []f32) =
 #[test]
 fn multidomain_split_with_shared_domain_map_pair_compiles() {
     use crate::pipeline_descriptor::Pipeline;
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry r(a: []u32, b: []u32, c: []u32, st: []f32)
   ([2]f32, []u32, []u32, []u32, []u32) =
@@ -6338,7 +6339,7 @@ entry r(a: []u32, b: []u32, c: []u32, st: []f32)
 fn captured_loop_bodied_sibling_maps_fuse_to_one_stage() {
     use crate::pipeline_descriptor::Pipeline;
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry geom(ids: []u32, params: []f32) ([]f32, []f32) =
   let scale = params[0] in
@@ -6391,9 +6392,9 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
   (lo, hi)
 "#;
 
-    let wgsl = crate::lower_ssa_to_wgsl(lower_semantic_egir(
+    let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
         compile_to_semantic_egir(source),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("WGSL lowering");
 
@@ -6432,7 +6433,7 @@ entry sim(fb: *[]u32, pos: []u32) []u32 =
   let _ = scatter(cleared, idxs, vals) in
   map(|p: u32| p + 1u32, pos)
 "#;
-    let lowered = crate::compile_thru_spirv(src).expect("in-place clear + scatter compiles");
+    let lowered = compile_thru_spirv(src).expect("in-place clear + scatter compiles");
     // The framebuffer clear is internal to the scatter, so it must not appear
     // as its own `_dispatch_` output stage.
     let stage_names: Vec<&str> = lowered
@@ -6473,7 +6474,7 @@ entry r(a: []u32, b: []u32, fb: *[]u32, pos: []u32)
 "#;
 
     // Two distinct output domains → two map kernels.
-    let lowered = crate::compile_thru_spirv(src).expect("multidomain split + shared scatter compiles");
+    let lowered = compile_thru_spirv(src).expect("multidomain split + shared scatter compiles");
     let compute = lowered
         .pipeline
         .pipelines
@@ -6523,7 +6524,7 @@ fn multidomain_maps_split_into_per_domain_stages() {
 entry two(a: []f32, b: []f32) ([]f32, []f32) =
     (map(|x: f32| x + 1.0, a), map(|x: f32| x + 2.0, b))
 "#;
-    let lowered = crate::compile_thru_spirv(source).expect("two compiles");
+    let lowered = compile_thru_spirv(source).expect("two compiles");
 
     let computes: Vec<_> = lowered
         .pipeline
@@ -6567,7 +6568,7 @@ entry two(a: []f32, b: []f32) ([]f32, []f32) =
 fn multidomain_input_storage_keeps_nonwritable_decoration() {
     use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry gen(data: []f32) ([]f32, []f32) =
   (map(|i| data[i] + 1.0, iota(1024)),
@@ -6632,7 +6633,7 @@ entry gen(data: []f32) ([]f32, []f32) =
 #[test]
 fn equal_domain_independent_sibling_maps_remain_separate() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
     (map(|x: f32| x + 1.0, xs), map(|y: f32| y + 2.0, ys))
@@ -6666,7 +6667,7 @@ entry eqn<[n]>(xs: [n]f32, ys: [n]f32) ([n]f32, [n]f32) =
 #[test]
 fn split_stage_reads_include_storage_behind_scalar_producer() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
     let scalar = table[0] in
@@ -6689,7 +6690,7 @@ entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
         "a and b are distinct domains → two stages"
     );
 
-    let dispatch_binding = |stage: &crate::pipeline_descriptor::ComputeStage| {
+    let dispatch_binding = |stage: &pipeline_descriptor::ComputeStage| {
         let DispatchSize::DerivedFrom {
             len: DispatchLen::InputBinding { set, binding, .. },
             ..
@@ -6752,7 +6753,7 @@ entry cap(a: []f32, b: []f32, table: []f32) ([]f32, []f32) =
 #[test]
 fn same_symbol_sibling_maps_fuse_to_one_stage() {
     use crate::pipeline_descriptor::{DispatchLen, DispatchSize, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry same(xs: []f32) ([]f32, []f32) =
     (map(|x: f32| x + 1.0, xs), map(|x: f32| x + 2.0, xs))
@@ -7151,7 +7152,7 @@ entry vertex_main(vid: i32)
   @[total, 0.0, 0.0, 1.0]
 "#;
 
-    crate::compile_thru_spirv(source).expect(
+    compile_thru_spirv(source).expect(
         "a fused graphical reduce must carry its invariant local scalar into \
          the generated pre-pass instead of emitting an unresolved global",
     );
@@ -7391,7 +7392,7 @@ entry vertex_main() vec4f32 =
     @[f32.i32(result), 0.0, 0.0, 1.0]
 "#;
 
-    let result = crate::compile_thru_spirv(source);
+    let result = compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -7409,7 +7410,7 @@ entry compute_main(data: []i32) i32 =
     from_storage + from_literal
 "#;
 
-    let result = crate::compile_thru_spirv(source);
+    let result = compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -7429,7 +7430,7 @@ entry fragment_main(iTime: f32, pos: vec4f32) vec4f32 =
     @[s + iTime, 0.0, 0.0, 1.0]
 "#;
 
-    let result = crate::compile_thru_spirv(source);
+    let result = compile_thru_spirv(source);
 
     assert!(result.is_ok(), "SPIR-V compilation failed: {:?}", result.err());
 }
@@ -7504,7 +7505,7 @@ entry fragment_main(pos: vec4f32) vec4f32 =
     let vm: vec2f32 = mul(v, mm) in
     @[mv.x, mv.y, vm.x, vm.y]
 "#;
-    let result = crate::compile_thru_spirv(source);
+    let result = compile_thru_spirv(source);
     assert!(
         result.is_ok(),
         "all three mul overloads should compile to SPIR-V: {:?}",
@@ -7547,19 +7548,19 @@ entry compute_main(data: []i32) i32 =
         // Show all instructions that involve indexing or storage views
         for inst in f.body.inner.insts.values() {
             match &inst.data {
-                crate::ssa::types::InstKind::Op {
-                    tag: crate::op::OpTag::Index,
+                ssa::types::InstKind::Op {
+                    tag: op::OpTag::Index,
                     ..
                 } => {
                     eprintln!("    inst {:?}: Index", inst.result);
                 }
-                crate::ssa::types::InstKind::Op {
-                    tag: crate::op::OpTag::StorageView(_),
+                ssa::types::InstKind::Op {
+                    tag: op::OpTag::StorageView(_),
                     ..
                 } => {
                     eprintln!("    inst {:?}: StorageView", inst.result);
                 }
-                crate::ssa::types::InstKind::ViewIndex { .. } => {
+                ssa::types::InstKind::ViewIndex { .. } => {
                     eprintln!("    inst {:?}: ViewIndex", inst.result);
                 }
                 _ => {}
@@ -7579,18 +7580,18 @@ entry compute_main(data: []i32) i32 =
 
 /// Compile source all the way through SPIR-V and return Ok/Err.
 fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    Ok(crate::compile_thru_spirv(input)?.spirv)
+    Ok(compile_thru_spirv(input)?.spirv)
 }
 
 /// Single-stage equivalent of `compile_to_spirv` — disables
 /// `parallelize_soacs`, matching the CLI's `--single-stage` mode.
 fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    Ok(crate::compile_thru_spirv_single_stage(input)?.spirv)
+    Ok(compile_thru_spirv_single_stage(input)?.spirv)
 }
 
 /// Compile module-bearing source through SSA using the shared frontend.
-fn compile_to_ssa_with_modules(input: &str) -> crate::ssa::stage::Elaborated {
-    crate::compile_thru_ssa(input).expect("compile to SSA")
+fn compile_to_ssa_with_modules(input: &str) -> ssa::stage::Elaborated {
+    compile_thru_ssa(input).expect("compile to SSA")
 }
 
 // =========================================================================
@@ -8156,13 +8157,13 @@ entry fragment_main(pos: vec4f32) vec4f32 =
     );
 
     // Dump what we got.
-    eprintln!("{}", crate::ssa::print::format_program(&ssa));
+    eprintln!("{}", ssa::print::format_program(&ssa));
 
     // Check that no Global("PI") instruction exists — it should have been inlined.
     for func in &ssa.functions {
         for (_id, inst) in &func.body.inner.insts {
-            if let crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Global(_),
+            if let ssa::types::InstKind::Op {
+                tag: op::OpTag::Global(_),
                 ..
             } = &inst.data
             {
@@ -8172,8 +8173,8 @@ entry fragment_main(pos: vec4f32) vec4f32 =
     }
     for ep in &ssa.entry_points {
         for (_id, inst) in &ep.body.inner.insts {
-            if let crate::ssa::types::InstKind::Op {
-                tag: crate::op::OpTag::Global(_),
+            if let ssa::types::InstKind::Op {
+                tag: op::OpTag::Global(_),
                 ..
             } = &inst.data
             {
@@ -8187,10 +8188,10 @@ entry fragment_main(pos: vec4f32) vec4f32 =
 // `--fill-holes`: type-hole default fill
 // ============================================================================
 
-fn compile_tlc_with_fill_holes(input: &str) -> crate::error::Result<crate::tlc::stage::Transformed> {
-    let typed = crate::compile_thru_frontend(input)?;
-    let filled = crate::ast_type_holes::fill_type_holes(typed)?;
-    crate::tlc::lower_from_ast(filled)
+fn compile_tlc_with_fill_holes(input: &str) -> error::Result<tlc::stage::Transformed> {
+    let typed = compile_thru_frontend(input)?;
+    let filled = ast_type_holes::fill_type_holes(typed)?;
+    tlc::lower_from_ast(filled)
 }
 
 #[test]
@@ -8719,7 +8720,7 @@ fn entry_loads_global_invocation_id(spirv: &[u32], entry_name: &str) -> bool {
 fn assert_fixed_output_and_streamed_map_partition(source: &str, output_count: usize) {
     use crate::pipeline_descriptor::{Binding, BufferUsage, DispatchSize, Pipeline};
 
-    let lowered = crate::compile_thru_spirv(source).expect("fixed output and streamed map compile");
+    let lowered = compile_thru_spirv(source).expect("fixed output and streamed map compile");
     let compute = lowered
         .pipeline
         .pipelines
@@ -9038,15 +9039,15 @@ entry pair(xs: []f32) ([]f32, []f32) =
 /// Compile `source` through the full *parallelized* pipeline (matching the
 /// production driver, which always parallelizes compute) and return the
 /// lowered SPIR-V + pipeline descriptor.
-fn compile_parallel(source: &str) -> crate::Lowered {
-    crate::compile_thru_spirv(source).expect("compile_thru_spirv")
+fn compile_parallel(source: &str) -> Lowered {
+    compile_thru_spirv(source).expect("compile_thru_spirv")
 }
 
 /// Full storage-buffer descriptors of a compute pipeline.
 fn compute_storage_buffers(
-    pipeline: &crate::pipeline_descriptor::PipelineDescriptor,
+    pipeline: &pipeline_descriptor::PipelineDescriptor,
     entry: &str,
-) -> Vec<crate::pipeline_descriptor::Binding> {
+) -> Vec<pipeline_descriptor::Binding> {
     use crate::pipeline_descriptor::{Binding, Pipeline};
     pipeline
         .pipelines
@@ -9088,7 +9089,7 @@ entry gen(bh: []vec4f32) []i32 =
         .pipelines
         .iter()
         .find_map(|p| match p {
-            crate::pipeline_descriptor::Pipeline::Compute(cp) => {
+            pipeline_descriptor::Pipeline::Compute(cp) => {
                 cp.stages.iter().find(|s| s.entry_point.contains("_gather_")).map(|s| s.entry_point.clone())
             }
             _ => None,
@@ -9150,7 +9151,7 @@ entry gen(bh: []vec4f32) []i32 =
         .pipelines
         .iter()
         .find_map(|pipeline| match pipeline {
-            crate::pipeline_descriptor::Pipeline::Compute(compute)
+            pipeline_descriptor::Pipeline::Compute(compute)
                 if compute.stages.iter().any(|stage| stage.entry_point == gather_entry) =>
             {
                 Some(compute)
@@ -9417,7 +9418,7 @@ fn swizzle_on_nontrivial_base_does_not_duplicate_producer() {
     // Each `def` returns a swizzle of a reduce result. With the fix
     // there's one physical reduce per def (let-bound, then projected);
     // without the fix each `.xy` would emit two independent reduces.
-    let tlc = crate::compile_thru_tlc(
+    let tlc = compile_thru_tlc(
         "\
 def sum2<[n]>(xs: [n]vec4f32) vec2f32 =
   reduce(|a: vec4f32, b: vec4f32| a + b, @[0.0f32, 0.0f32, 0.0f32, 0.0f32], xs).xy
@@ -9437,7 +9438,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 /// shape of a parallelized scalar reduction: chunk + combine). This
 /// distinguishes masked fused reduction from a serial single-stage
 /// filter→reduce.
-fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
+fn is_two_phase_compute(pipeline: &pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
     use crate::pipeline_descriptor::Pipeline;
     pipeline.pipelines.iter().any(|p| match p {
         Pipeline::Compute(mc) => mc.stages.len() >= 2 && mc.stages.iter().any(|s| s.entry_point == entry),
@@ -9450,7 +9451,7 @@ fn is_two_phase_compute(pipeline: &crate::pipeline_descriptor::PipelineDescripto
 /// fusion fired (not the serial scratch-view filter path).
 #[test]
 fn filter_into_reduce_fuses_to_parallel_screma() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 entry filt_reduce(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 4i32, xs) in
@@ -9469,7 +9470,7 @@ entry filt_reduce(xs: []i32) i32 =
 /// before EGIR optimization.
 #[test]
 fn filter_into_reduce_fuses_across_functions() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 def evens(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 2i32 == 0i32, xs)
 
@@ -9488,7 +9489,7 @@ entry filt_reduce(xs: []i32) i32 =
 /// Every compute entry point generated for a program, across all pipelines and
 /// their stages (the source entries plus any lifted `_gather_` pre-passes).
 /// Lets a test assert how many GPU dispatches one source entry expands to.
-fn compute_entry_points(pipeline: &crate::pipeline_descriptor::PipelineDescriptor) -> Vec<String> {
+fn compute_entry_points(pipeline: &pipeline_descriptor::PipelineDescriptor) -> Vec<String> {
     use crate::pipeline_descriptor::Pipeline;
     pipeline
         .pipelines
@@ -9654,7 +9655,7 @@ entry e(xs: []f32,
 /// multi-phase pipeline as the in-entry form.
 #[test]
 fn cross_function_scan_parallelizes() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 def stencil(xs: []i32) []i32 = scan(|a: i32, b: i32| if a > b then a else b, 0i32, xs)
 entry e(xs: []i32) []i32 = stencil(xs)
@@ -9687,7 +9688,7 @@ entry e(i: i32) i32 =
 /// lane-indexed map, not a multi-phase reduce pipeline.
 #[test]
 fn per_element_helper_soac_stays_serial() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 def rsum(x: i32) i32 = reduce(|a: i32, b: i32| a + b, 0i32, [x, x, x])
 entry e(xs: []i32) []i32 = map(|x: i32| rsum(x), xs)
@@ -9727,7 +9728,7 @@ fn filter_output_descriptor_has_paired_length_buffer() {
 entry filt_out(xs: []i32) ?k. [k]i32 =
   filter(|x: i32| x % 2i32 == 0i32, xs)
 ";
-    let lowered = crate::compile_thru_spirv(src).expect("filter→output compiles");
+    let lowered = compile_thru_spirv(src).expect("filter→output compiles");
     let bufs = compute_storage_buffers(&lowered.pipeline, "filt_out");
 
     let output = bufs
@@ -9853,8 +9854,8 @@ entry gen(xs: []i32) []i32 =
         "a multi-consumer producer is not a single-consumer gather"
     );
 
-    let lowered = lower_semantic_egir(allocated, crate::LoweringProfile::PORTABLE);
-    crate::lower_ssa_to_spirv(lowered)
+    let lowered = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
+    lower_ssa_to_spirv(lowered)
         .expect("multi-consumer (reduce + scan over the same counts) should lift + compile");
 }
 /// `counts` consumed by both `scan(counts)` and a direct random gather
@@ -9949,7 +9950,7 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
 
 #[test]
 fn multi_output_returns_scan_in_two_slots() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         "\
 entry gen(xs: []i32) ([]i32, []i32) =
   let offsets = scan(|a: i32, b: i32| a + b, 0, xs) in
@@ -9982,7 +9983,7 @@ entry gen(xs: []i32) []vec4f32 =
 fn intermediate_buffer_descriptor_access_repro() {
     use crate::pipeline_descriptor::{Access, Binding, Pipeline};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 entry gen(xs: []i32) ([]i32, [1]i32) =
   let counts  = map(|x: i32| x * 2, xs) in
@@ -10131,7 +10132,7 @@ entry g(xs: []i32) []i32 =
 
     let converted = lower_semantic_egir(
         compile_to_semantic_egir(src),
-        crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     );
     let wgsl_slot = converted
         .global_context
@@ -10160,7 +10161,7 @@ entry g(xs: []i32) []i32 =
             Pipeline::Graphics(_) => None,
         })
         .expect("WGSL scan pipeline has a read-only use of a read_write layout slot");
-    let wgsl = crate::lower_ssa_to_wgsl(converted).expect("scan gather lowers to WGSL");
+    let wgsl = lower_ssa_to_wgsl(converted).expect("scan gather lowers to WGSL");
     assert!(
         wgsl.contains(&format!(
             "@group({}) @binding({}) var<storage, read_write>",
@@ -10274,7 +10275,7 @@ entry go(dom: []u32, pdom: []u32, idom: []u32, pts_in: []f32, its_in: []f32)
   (w2.pts, w2.its,
    map(|s| sc.pts[0] + sc.its[0] + f32(s), dom))
 ";
-    crate::compile_thru_spirv(src).expect("record of views indexed inside a map must compile");
+    compile_thru_spirv(src).expect("record of views indexed inside a map must compile");
 }
 
 /// The equal-domain fuser rewrites sibling output maps into one `Screma`. That
@@ -10301,7 +10302,7 @@ entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
         .pipelines
         .iter()
         .find_map(|p| match p {
-            crate::pipeline_descriptor::Pipeline::Compute(cp) => Some(cp),
+            pipeline_descriptor::Pipeline::Compute(cp) => Some(cp),
             _ => None,
         })
         .expect("a compute pipeline")
@@ -10328,7 +10329,7 @@ entry go(dom: []u32, pts_in: []f32) ([]f32, []f32) =
   (map(|s| pts_in[i32(s)] * 2.0, dom),
    map(|s| sdf(sc, f32(s)), dom))
 ";
-    crate::compile_thru_spirv(src).expect("record of views must survive map fusion into one stage");
+    compile_thru_spirv(src).expect("record of views must survive map fusion into one stage");
 }
 
 /// A fragment entry's storage-buffer parameters carry a concrete
@@ -10365,7 +10366,7 @@ entry resolve_like(fc: vec4f32,
   let v = scene_sdf(sc, fc.x) in
   @[v, v, v, 1.0]
 ";
-    crate::compile_thru_spirv(src).expect("fragment storage-buffer reads must pin a buffer region");
+    compile_thru_spirv(src).expect("fragment storage-buffer reads must pin a buffer region");
 }
 
 /// A unique `*storage_image` handle threaded through both arms of an `if` is
@@ -10464,7 +10465,7 @@ fn multidim_composite_local_const_and_runtime_index() {
                 matches!(
                     &inst.data,
                     InstKind::Op {
-                        tag: crate::op::OpTag::DynamicExtract,
+                        tag: op::OpTag::DynamicExtract,
                         ..
                     }
                 )
@@ -10483,7 +10484,7 @@ fn multidim_composite_local_const_and_runtime_index() {
     );
 
     // End-to-end smoke: the SPIR-V backend accepts the program.
-    let _ = crate::compile_thru_spirv(src).expect("compile_thru_spirv should succeed");
+    let _ = compile_thru_spirv(src).expect("compile_thru_spirv should succeed");
 }
 
 // Stage 2: runtime-outer / fixed-inner storage view. Pins the descriptor
@@ -10498,7 +10499,7 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
                 entry row_sums(buf: []([4]u32)) []u32 =
             map(|row: [4]u32| row[0] + row[1] + row[2] + row[3], buf)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
+    let lowered = compile_thru_spirv(src).expect("compile_thru_spirv");
     let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
@@ -10529,9 +10530,7 @@ fn multidim_view_inner_fixed_carries_subarray_elem_bytes() {
     // is itself derived from `buf` (as it is here), but `LikeInput`
     // names the source binding explicitly.
     let output_len = cp.bindings.iter().find_map(|b| match b {
-        crate::pipeline_descriptor::Binding::StorageBuffer { name, length, .. }
-            if name == "row_sums_output" =>
-        {
+        pipeline_descriptor::Binding::StorageBuffer { name, length, .. } if name == "row_sums_output" => {
             length.clone()
         }
         _ => None,
@@ -10569,16 +10568,14 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
             then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
             else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("compile_thru_spirv");
+    let lowered = compile_thru_spirv(src).expect("compile_thru_spirv");
     let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
     // Output's size variable matches `prev`'s — the length-inference
     // rule emits `LikeInput` rather than `SameAsDispatch`.
     let output_len = cp.bindings.iter().find_map(|b| match b {
-        crate::pipeline_descriptor::Binding::StorageBuffer { name, length, .. }
-            if name == "tick_output" =>
-        {
+        pipeline_descriptor::Binding::StorageBuffer { name, length, .. } if name == "tick_output" => {
             length.clone()
         }
         _ => None,
@@ -10612,7 +10609,7 @@ fn compute_if_over_two_maps_becomes_parallel_pointwise_map() {
 
     // Inspect at the pre-defunctionalize stage: `if_over_producer` normalizes
     // here, before defunctionalization lifts the Map operator to a ref.
-    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
+    let fused = test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
         .iter()
@@ -10652,7 +10649,7 @@ fn compute_if_over_range_and_let_wrapped_slice_map_parallelizes() {
 
     // Pre-defunctionalize: see `if_over_producer`'s normalized Map before
     // defunctionalization obscures it.
-    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
+    let fused = test_pipeline::compile_thru_expose_producers(src);
     let tick = fused
         .defs
         .iter()
@@ -10680,7 +10677,7 @@ fn compute_if_over_different_runtime_sources_stays_branching() {
 
     // Pre-defunctionalize: maps over distinct domains must stay a branching
     // `If` here (`if_over_producer` only merges branches over one domain).
-    let fused = crate::test_pipeline::compile_thru_expose_producers(src);
+    let fused = test_pipeline::compile_thru_expose_producers(src);
     let pick = fused
         .defs
         .iter()
@@ -10709,7 +10706,7 @@ fn compute_nested_if_over_three_maps_compiles_runtime_sized() {
               then map(|p: vec2f32| @[1.0f32, 1.0f32], prev)
               else map(|p: vec2f32| @[p.x + 1.0f32, p.y + 1.0f32], prev)
     "#;
-    crate::compile_thru_spirv(src).expect("nested If over three maps must compile");
+    compile_thru_spirv(src).expect("nested If over three maps must compile");
 }
 
 /// `Let`-wrapped `If` whose body's branches read the let-bound value.
@@ -10726,7 +10723,7 @@ fn compute_let_wrapped_if_over_two_maps_compiles_runtime_sized() {
             then map(|p: vec2f32| @[nudge, nudge], prev)
             else map(|p: vec2f32| @[p.x + nudge, p.y + nudge], prev)
     "#;
-    crate::compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
+    compile_thru_spirv(src).expect("Let-wrapped If over two maps must compile");
 }
 
 /// Fixed-size output: both branches map
@@ -10744,7 +10741,7 @@ fn compute_if_over_two_maps_compiles_fixed_size_different_sources() {
           else
             map(|pos:vec2f32| @[pos.x + 1.0, pos.y + 1.0], prev_pos)
     "#;
-    crate::compile_thru_spirv(src).expect("fixed-size If-over-maps (different sources) must compile");
+    compile_thru_spirv(src).expect("fixed-size If-over-maps (different sources) must compile");
 }
 
 /// The user's original case 2 (fixed-size output): both branches map
@@ -10762,7 +10759,7 @@ fn compute_if_over_two_maps_compiles_fixed_size_same_source() {
           else
             map(|i:i32| @[f32.i32(i), f32.i32(i)], 0i32..<N)
     "#;
-    crate::compile_thru_spirv(src).expect("fixed-size If-over-maps (same source) must compile");
+    compile_thru_spirv(src).expect("fixed-size If-over-maps (same source) must compile");
 }
 
 /// Multi-output entry whose Tuple components each contain an `If`.
@@ -10781,7 +10778,7 @@ fn compute_multi_output_tuple_of_ifs_compiles() {
              then map(|p: vec2f32| 0.0f32, prev_pos)
              else map(|p: vec2f32| p.x * p.x + p.y * p.y, prev_pos))
     "#;
-    crate::compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
+    compile_thru_spirv(src).expect("multi-output tuple of Ifs must compile");
 }
 
 /// Assert the StorageBuffer variable decorated `(set, binding)` is the base
@@ -10856,7 +10853,7 @@ fn slice_view_inside_map_lambda_compiles_to_spirv() {
                 entry tick(xs: []f32) []f32 =
           map(|_:i32| gather3(xs[0..3]), 0i32..<3)
     "#;
-    let lowered = crate::compile_thru_spirv(src)
+    let lowered = compile_thru_spirv(src)
         .expect("view-array slice inside a map lambda must preserve buffer provenance");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
@@ -10876,7 +10873,7 @@ fn view_index_in_map_lambda_reads_own_buffer() {
                 entry tick(xs: []f32) []f32 =
           map(|i: i32| xs[i] + xs[0], 0i32..<4)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("captured-view index compiles");
+    let lowered = compile_thru_spirv(src).expect("captured-view index compiles");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
@@ -10892,7 +10889,7 @@ fn two_view_captures_read_distinct_buffers() {
         ) []f32 =
           map(|i: i32| xs[i] + ys[0], 0i32..<4)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("two captured views compile");
+    let lowered = compile_thru_spirv(src).expect("two captured views compile");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 1);
 }
@@ -10907,7 +10904,7 @@ fn view_through_nested_fn_specialization_reads_own_buffer() {
                 entry tick(xs: []f32) []f32 =
           map(|_: i32| firstx(xs), 0i32..<4)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("nested view specialization compiles");
+    let lowered = compile_thru_spirv(src).expect("nested view specialization compiles");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
@@ -10931,7 +10928,7 @@ entry nested_view(
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let leaf =
                 ssa.functions.iter().find(|function| function.name.contains("leaf")).unwrap_or_else(|| {
@@ -10944,18 +10941,18 @@ entry nested_view(
             assert!(
                 matches!(
                     leaf.body.place_elem_ty(table),
-                    polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                    polytype::Type::Constructed(ast::TypeName::Array, _)
                 ),
                 "leaf table parameter must address array storage"
             );
 
-            let reachable = crate::ssa::filter_reachable(ssa.clone());
+            let reachable = ssa::filter_reachable(ssa.clone());
             assert!(
                 reachable.functions.iter().all(|function| !function.name.contains("leaf")),
                 "the fully inlined leaf helper must be removed before backend lowering"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("nested fixed storage view lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("nested fixed storage view lowers to WGSL");
             assert!(
                 !wgsl.lines().any(|line| line.starts_with("fn w_leaf")),
                 "WGSL must not emit the fully inlined leaf helper:\n{wgsl}"
@@ -10989,7 +10986,7 @@ entry main(roots: [1][1024]u32) [1]u32 =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
             let mut view_places = Vec::new();
@@ -10998,16 +10995,16 @@ entry main(roots: [1][1024]u32) [1]u32 =
             let mut array_loads = 0;
             for inst in entry.body.inner.insts.values() {
                 match &inst.data {
-                    crate::ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
-                    crate::ssa::types::InstKind::PlaceIndex { place, result, .. } => {
+                    ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
+                    ssa::types::InstKind::PlaceIndex { place, result, .. } => {
                         place_indices.push((*result, *place));
                     }
-                    crate::ssa::types::InstKind::Load { place } => {
+                    ssa::types::InstKind::Load { place } => {
                         load_places.push(*place);
                         let result = inst.result.expect("Load has a result");
                         if matches!(
                             entry.body.get_value_type(result),
-                            polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                            polytype::Type::Constructed(ast::TypeName::Array, _)
                         ) {
                             array_loads += 1;
                         }
@@ -11026,7 +11023,7 @@ entry main(roots: [1][1024]u32) [1]u32 =
                 "the leaf PlaceIndex must extend the input ViewIndex"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("ranked storage index lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("ranked storage index lowers to WGSL");
             assert!(
                 !wgsl.lines().any(|line| line.contains("var ") && line.contains(": array<u32, 1024>")),
                 "WGSL must not materialize the complete row in a local variable:\n{wgsl}"
@@ -11070,7 +11067,7 @@ entry main(roots: [1][1024]u32) [4]u32 =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let helper = ssa
                 .functions
@@ -11081,7 +11078,7 @@ entry main(roots: [1][1024]u32) [4]u32 =
                         .inner
                         .insts
                         .values()
-                        .any(|inst| matches!(inst.data, crate::ssa::types::InstKind::PlaceIndex { .. }))
+                        .any(|inst| matches!(inst.data, ssa::types::InstKind::PlaceIndex { .. }))
                 })
                 .expect("mapped helper contains the recovered ranked place chain");
             let mut view_places = Vec::new();
@@ -11090,16 +11087,16 @@ entry main(roots: [1][1024]u32) [4]u32 =
             let mut array_loads = 0;
             for inst in helper.body.inner.insts.values() {
                 match &inst.data {
-                    crate::ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
-                    crate::ssa::types::InstKind::PlaceIndex { place, result, .. } => {
+                    ssa::types::InstKind::ViewIndex { result, .. } => view_places.push(*result),
+                    ssa::types::InstKind::PlaceIndex { place, result, .. } => {
                         place_indices.push((*result, *place));
                     }
-                    crate::ssa::types::InstKind::Load { place } => {
+                    ssa::types::InstKind::Load { place } => {
                         load_places.push(*place);
                         let result = inst.result.expect("Load has a result");
                         if matches!(
                             helper.body.get_value_type(result),
-                            polytype::Type::Constructed(crate::ast::TypeName::Array, _)
+                            polytype::Type::Constructed(ast::TypeName::Array, _)
                         ) {
                             array_loads += 1;
                         }
@@ -11120,7 +11117,7 @@ entry main(roots: [1][1024]u32) [4]u32 =
                 "mapped helper's indexed address chain must have an addressable boundary root"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mapped ranked storage index lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("mapped ranked storage index lowers to WGSL");
             assert!(
                 !wgsl.lines().any(|line| line.contains("var ") && line.contains(": array<u32, 1024>")),
                 "mapped-helper WGSL must not materialize the complete row:\n{wgsl}"
@@ -11140,7 +11137,7 @@ entry main(roots: [1][1024]u32) [4]u32 =
                 panic!("Naga validation rejected mapped-helper WGSL: {error:?}\n{wgsl}")
             });
 
-            crate::compile_thru_spirv(source)
+            compile_thru_spirv(source)
                 .expect("mapped helper's storage-rooted PlaceIndex chain lowers to valid SPIR-V");
         })
         .expect("spawn mapped-helper ranked-index regression")
@@ -11166,14 +11163,14 @@ entry main(root: [2]u32) [4]u32 =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
             assert!(
                 entry.body.inner.insts.values().all(|inst| !matches!(
                     inst.data,
-                    crate::ssa::types::InstKind::Op {
-                        tag: crate::op::OpTag::Call(_),
+                    ssa::types::InstKind::Op {
+                        tag: op::OpTag::Call(_),
                         ..
                     }
                 )),
@@ -11187,8 +11184,8 @@ entry main(root: [2]u32) [4]u32 =
                     .values()
                     .filter(|inst| matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Materialize,
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Materialize,
                             ..
                         }
                     ))
@@ -11197,7 +11194,7 @@ entry main(root: [2]u32) [4]u32 =
                 "the entry parameter place should make dynamic extraction copy-free"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("fixed-array capture lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("fixed-array capture lowers to WGSL");
             let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
             assert!(
                 !main.contains("w_Uw_Ulambda_U0("),
@@ -11230,14 +11227,14 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
             assert!(
                 entry.body.inner.insts.values().all(|inst| !matches!(
                     inst.data,
-                    crate::ssa::types::InstKind::Op {
-                        tag: crate::op::OpTag::Call(_),
+                    ssa::types::InstKind::Op {
+                        tag: op::OpTag::Call(_),
                         ..
                     }
                 )),
@@ -11251,8 +11248,8 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
                     .values()
                     .filter(|inst| matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Materialize,
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Materialize,
                             ..
                         }
                     ))
@@ -11261,7 +11258,7 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
                 "the root parameter place should make dynamic indexing copy-free"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("mixed capture lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("mixed capture lowers to WGSL");
             let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
             assert!(
                 !main.contains("w_Uw_Ulambda_U0("),
@@ -11306,9 +11303,9 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
 
                 let ssa = lower_semantic_egir(
                     compile_to_semantic_egir(&source),
-                    crate::LoweringProfile::new(
-                        crate::CodegenTarget::Wgsl,
-                        crate::SchedulePolicy::Parallel,
+                    LoweringProfile::new(
+                        CodegenTarget::Wgsl,
+                        SchedulePolicy::Parallel,
                     ),
                 );
                 let owner = ssa
@@ -11324,8 +11321,8 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                 assert!(
                     owner.body.inner.insts.values().all(|inst| !matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Call(_),
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Call(_),
                             ..
                         }
                     )),
@@ -11339,8 +11336,8 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                     .filter_map(|(id, inst)| {
                         matches!(
                             inst.data,
-                            crate::ssa::types::InstKind::Op {
-                                tag: crate::op::OpTag::Materialize,
+                            ssa::types::InstKind::Op {
+                                tag: op::OpTag::Materialize,
                                 ..
                             }
                         )
@@ -11352,7 +11349,7 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                     "width-{width} owner must preserve addressable captures without aggregate materialization"
                 );
 
-                let wgsl = crate::lower_ssa_to_wgsl(ssa)
+                let wgsl = lower_ssa_to_wgsl(ssa)
                     .unwrap_or_else(|error| panic!("width-{width} capture lowers to WGSL: {error}"));
                 assert!(
                     !wgsl.contains("fn w_Uw_Ulambda_U0("),
@@ -11391,7 +11388,7 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let helper = ssa
                 .functions
@@ -11406,8 +11403,8 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                 .filter(|inst| {
                     matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Project { .. },
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Project { .. },
                             ..
                         }
                     )
@@ -11421,8 +11418,8 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                 .filter(|inst| {
                     matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Tuple(_),
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Tuple(_),
                             ..
                         }
                     )
@@ -11446,8 +11443,8 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                     .values()
                     .filter(|inst| matches!(
                         inst.data,
-                        crate::ssa::types::InstKind::Op {
-                            tag: crate::op::OpTag::Tuple(_),
+                        ssa::types::InstKind::Op {
+                            tag: op::OpTag::Tuple(_),
                             ..
                         }
                     ))
@@ -11456,8 +11453,7 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
                 "entry stores projected unzip components directly without repacking the helper result"
             );
 
-            let wgsl =
-                crate::lower_ssa_to_wgsl(ssa).expect("simplified unzip/map aggregate lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("simplified unzip/map aggregate lowers to WGSL");
             let main = wgsl.split("fn main(").nth(1).expect("WGSL main body");
             assert!(
                 !main.lines().any(|line| line.contains(": T") && line.contains(" = T")),
@@ -11484,20 +11480,20 @@ entry main(input: [1]u32) ([1]u32, [1]u32) =
 
             let ssa = lower_semantic_egir(
                 compile_to_semantic_egir(source),
-                crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+                LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             assert!(
                 !ssa.functions.is_empty(),
                 "reproducer must reach SSA with helpers orphaned by physical inlining"
             );
 
-            let reachable = crate::ssa::filter_reachable(ssa.clone());
+            let reachable = ssa::filter_reachable(ssa.clone());
             assert!(
                 reachable.functions.is_empty(),
                 "the fully inlined entry must not retain any callable definitions"
             );
 
-            let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("reachable unzip/map SSA lowers to WGSL");
+            let wgsl = lower_ssa_to_wgsl(ssa).expect("reachable unzip/map SSA lowers to WGSL");
             assert_eq!(
                 wgsl.lines().filter(|line| line.starts_with("fn ")).count(),
                 1,
@@ -11521,7 +11517,7 @@ fn view_as_map_input_reads_own_buffer() {
                 entry tick(xs: []f32) []f32 =
           map(|x: f32| x * 2.0, xs)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("view-as-map-input compiles");
+    let lowered = compile_thru_spirv(src).expect("view-as-map-input compiles");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
@@ -11637,7 +11633,7 @@ fn entry_length_queries_own_buffer() {
                 entry tick(xs: []f32) []f32 =
           map(|i: i32| xs[i] * f32.i32(length(xs)), 0i32..<4)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("entry length(view) compiles");
+    let lowered = compile_thru_spirv(src).expect("entry length(view) compiles");
     assert_array_length_queried_on_descriptor(&lowered.spirv, 0, 0);
     assert_array_lengths_have_no_identity_bitcasts(&lowered.spirv);
     // and the indexed read still hits the same descriptor
@@ -11655,7 +11651,7 @@ fn scan_over_view_reads_own_buffer() {
                 entry tick(xs: []f32) []f32 =
           scan(|a: f32, b: f32| a + b, 0.0, xs)
     "#;
-    let lowered = crate::compile_thru_spirv(src).expect("scan over a view compiles");
+    let lowered = compile_thru_spirv(src).expect("scan over a view compiles");
     assert_storage_descriptor_is_accessed(&lowered.spirv, 0, 0);
 }
 
@@ -11674,9 +11670,8 @@ fn merge_of_distinct_buffers_is_a_type_error() {
         ) []f32 =
           map(|i: i32| (if c > 0u32 then xs else ys)[i], 0i32..<4)
     "#;
-    let err = crate::compile_thru_spirv(src)
-        .err()
-        .expect("merging xs and ys (distinct descriptors) must not compile");
+    let err =
+        compile_thru_spirv(src).err().expect("merging xs and ys (distinct descriptors) must not compile");
     let msg = format!("{err}");
     assert!(
         msg.contains("region") || msg.contains("binding") || msg.contains("descriptor"),
@@ -11698,7 +11693,7 @@ fn ctor_scalar_constructor_compiles_to_spirv() {
                    n: u32) []i32 =
           map(|x: f32| i32(x), xs)
     "#;
-    crate::compile_thru_spirv(src).expect("i32(f32) constructor must compile to SPIR-V");
+    compile_thru_spirv(src).expect("i32(f32) constructor must compile to SPIR-V");
 }
 
 #[test]
@@ -11714,8 +11709,8 @@ fn ctor_scalar_constructor_matches_legacy_dot_form() {
           map(|x: f32| i32.f32(x), xs)
     "#;
     // Constructor and dot-form compatibility syntax lower identically.
-    crate::compile_thru_spirv(new).expect("new T(value) form must compile");
-    crate::compile_thru_spirv(legacy).expect("legacy T.source(value) form must still compile");
+    compile_thru_spirv(new).expect("new T(value) form must compile");
+    compile_thru_spirv(legacy).expect("legacy T.source(value) form must still compile");
 }
 
 #[test]
@@ -11725,7 +11720,7 @@ fn ctor_vec2_constructor_compiles_to_spirv() {
                    n: u32) []vec2i32 =
           map(|v: vec2f32| vec2i32(v), xs)
     "#;
-    crate::compile_thru_spirv(src).expect("vec2i32(vec2f32) must compile to SPIR-V");
+    compile_thru_spirv(src).expect("vec2i32(vec2f32) must compile to SPIR-V");
 }
 
 #[test]
@@ -11740,8 +11735,8 @@ fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
                    n: u32) []vec4f32 =
           map(|v: vec4u32| vec4f32(v), xs)
     "#;
-    crate::compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
-    crate::compile_thru_spirv(v4).expect("vec4f32(vec4u32) must compile");
+    compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
+    compile_thru_spirv(v4).expect("vec4f32(vec4u32) must compile");
 }
 
 // ---- ArrayVariantAbstract — `filter` → size-polymorphic consumer ----
@@ -11766,7 +11761,7 @@ entry tick(xs: []f32) f32 =
   let kept = filter(|x: f32| x > 0.0, xs) in
   sum(kept)
 "#;
-    crate::compile_thru_spirv(src)
+    compile_thru_spirv(src)
         .expect("`filter` piped through a user-defined size-poly helper must compile to SPIR-V");
 }
 
@@ -11781,8 +11776,7 @@ entry tick() f32 =
   let kept = filter(|x: f32| x > 0.0, [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0]) in
   sum(kept)
 "#;
-    crate::compile_thru_spirv(src)
-        .expect("static-capacity filter piped through a size-poly helper must compile");
+    compile_thru_spirv(src).expect("static-capacity filter piped through a size-poly helper must compile");
 }
 
 /// A `filter -> map -> reduce` chain feeds a vector operation and swizzle
@@ -11803,7 +11797,7 @@ entry e(arr0: []vec4f32) []vec2f32 =
   let arr = arr0[0..512] in
   map(|p: vec4f32| f(arr), arr)
 "#;
-    crate::compile_thru_spirv(src)
+    compile_thru_spirv(src)
         .expect("filter -> map -> reduce -> vec-op -> swizzle in a non-inlined helper must compile");
 }
 
@@ -11828,7 +11822,7 @@ entry e(a: []f32,
   let m = map(|x: f32| x * 2.0, filter(|x: f32| x > 0.0, a[0..256])) in
   let _ = scatter(o, [0i32], [m[0]]) in ()
 "#;
-    crate::compile_thru_spirv(src).expect("Filter->Map should compile");
+    compile_thru_spirv(src).expect("Filter->Map should compile");
 }
 
 /// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. The iota is NOT
@@ -11845,8 +11839,8 @@ entry e(o: *[]i32) () =
   let s = reduce(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
   let _ = scatter(o, [0i32], [s]) in ()
 "#;
-    let ssa = crate::compile_thru_ssa(src).expect("Range->Reduce should compile");
-    let mir = crate::ssa::print::format_program(&ssa);
+    let ssa = compile_thru_ssa(src).expect("Range->Reduce should compile");
+    let mir = ssa::print::format_program(&ssa);
     let loops = mir.matches("loop merge").count();
     assert_eq!(
         loops, 1,
@@ -11865,7 +11859,7 @@ entry e(o: *[]i32) () =
   let s = scan(|a: i32, b: i32| a + b, 0i32, 0i32 ..< 256) in
   let _ = scatter(o, [0i32], [s[0]]) in ()
 "#;
-    crate::compile_thru_spirv(src).expect("Range->Scan should compile");
+    compile_thru_spirv(src).expect("Range->Scan should compile");
 }
 
 /// Filter -> Scan, e.g. `scan(op, ne, filter(p, a))`. Compiles: two fixes
@@ -11882,7 +11876,7 @@ entry e(a: []f32,
   let s = scan(|x: f32, y: f32| x + y, 0.0, filter(|x: f32| x > 0.0, a[0..256])) in
   let _ = scatter(o, [0i32], [s[0]]) in ()
 "#;
-    crate::compile_thru_spirv(src).expect("Filter->Scan should compile");
+    compile_thru_spirv(src).expect("Filter->Scan should compile");
 }
 
 /// Scan -> Map is represented as one canonical Screma whose post-map consumes
@@ -11973,9 +11967,9 @@ entry e(a: []f32) []f32 =
             .any(|effect| {
                 matches!(
                     &effect.kind,
-                    crate::egir::types::SideEffectKind::Soac(crate::egir::types::SoacEffect(
+                    egir::types::SideEffectKind::Soac(egir::types::SoacEffect(
                         _,
-                        crate::egir::types::Soac::Screma(op)
+                        egir::types::Soac::Screma(op)
                     )) if !op.form.scans.is_empty() && op.form.reductions.is_empty() && !op.form.post.is_identity() && op.form.post.result_types.len() == expected_outputs
                 )
             });
@@ -11983,7 +11977,7 @@ entry e(a: []f32) []f32 =
             has_post_scan,
             "{label}: scan result must route through the post-map"
         );
-        let planned = crate::egir::plan(compile_to_semantic_egir(src), crate::LoweringProfile::PORTABLE)
+        let planned = egir::plan(compile_to_semantic_egir(src), LoweringProfile::PORTABLE)
             .unwrap_or_else(|error| panic!("{label}: parallel plan: {error}"));
         let expected_phases: &[&str] = if parallel {
             &["scan_phase1", "scan_block", "scan_apply_offsets"]
@@ -12001,17 +11995,17 @@ entry e(a: []f32) []f32 =
                 .iter()
                 .filter(|resource| matches!(
                     &resource.origin,
-                    crate::egir::program::ResourceOrigin::Compiler(compiler)
-                        if compiler.kind == crate::egir::program::CompilerResourceKind::ScanPrefixes
+                    egir::program::ResourceOrigin::Compiler(compiler)
+                        if compiler.kind == egir::program::CompilerResourceKind::ScanPrefixes
                 ))
                 .count(),
             usize::from(parallel),
             "{label}: prefix handoff ownership"
         );
-        crate::compile_thru_spirv(src).unwrap_or_else(|error| panic!("{label}: SPIR-V: {error}"));
-        crate::lower_ssa_to_wgsl(lower_semantic_egir(
+        compile_thru_spirv(src).unwrap_or_else(|error| panic!("{label}: SPIR-V: {error}"));
+        lower_ssa_to_wgsl(lower_semantic_egir(
             compile_to_semantic_egir(src),
-            crate::LoweringProfile::new(crate::CodegenTarget::Wgsl, crate::SchedulePolicy::Parallel),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
         ))
         .unwrap_or_else(|error| panic!("{label}: WGSL: {error}"));
     }
@@ -12028,13 +12022,13 @@ entry paired_prefixes(xs: []i32) ([]i32, []i32) =
     let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
     assert_eq!(stats.seg_scans, 1, "independent scans share one Screma");
     assert_eq!(stats.scan_operators, 2);
-    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan independent scans");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
-    crate::compile_thru_spirv(source).expect("parallel product scan compiles to SPIR-V");
+    compile_thru_spirv(source).expect("parallel product scan compiles to SPIR-V");
 }
 #[test]
 fn scan_fuses_with_independent_consumer_collective() {
@@ -12054,7 +12048,7 @@ entry e(xs: []i32) ([]i32, [1]i32) =
     assert_eq!(stats.scan_operators, 1);
     assert_eq!(stats.reduce_operators, 1);
     assert_eq!(stats.seg_maps + stats.seg_scans + stats.seg_reds, 0);
-    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan mixed scan/reduction");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -12081,13 +12075,13 @@ entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
     assert_eq!(stats.mixed_scremas, 1);
     assert_eq!(stats.scan_operators, 2);
     assert_eq!(stats.reduce_operators, 2);
-    let planned = crate::egir::plan(compile_to_semantic_egir(source), crate::LoweringProfile::PORTABLE)
+    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan collective product");
     assert_eq!(
         planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
-    crate::compile_thru_spirv(source).expect("collective product compiles to SPIR-V");
+    compile_thru_spirv(source).expect("collective product compiles to SPIR-V");
 }
 #[test]
 fn dependent_scan_into_reduce_keeps_two_collective_barriers() {
@@ -12110,7 +12104,7 @@ entry e(xs: [8]i32) [1]i32 =
 #[test]
 fn entry_tuple_output_with_scan_indexed_literal_keeps_both_bindings() {
     use crate::pipeline_descriptor::{BufferUsage, Pipeline};
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         "\
 entry gen(xs: []i32, n: i32) ([]vec4f32, [5]i32) =
   let offsets = scan(|a:i32,b:i32| a+b, 0, xs) in
@@ -12132,7 +12126,7 @@ entry gen(xs: []i32, n: i32) ([]vec4f32, [5]i32) =
         .bindings
         .iter()
         .filter_map(|b| match b {
-            crate::pipeline_descriptor::Binding::StorageBuffer {
+            pipeline_descriptor::Binding::StorageBuffer {
                 usage: BufferUsage::Output,
                 name,
                 ..
@@ -12310,7 +12304,7 @@ entry e() []u32 = map(|i: i32| g.at((0x9e3779b9u32, 0x243f6a88u32), u32.i32(i)),
 /// `is_conversion` marker on the catalog entry.
 #[test]
 fn constructor_form_same_type_conversion_is_identity() {
-    crate::compile_thru_frontend("def f(x: i32) i32 = i32(x)")
+    compile_thru_frontend("def f(x: i32) i32 = i32(x)")
         .expect("i32(x) where x: i32 should resolve as the identity conversion");
 }
 
@@ -12321,7 +12315,7 @@ fn constructor_form_same_type_conversion_is_identity() {
 /// share a slot.
 #[test]
 fn two_compute_entries_do_not_collide_on_auto_bindings() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry a(xs: []u32) []vec4f32 = map(|x| @[f32.u32(x), 0.0, 0.0, 0.0], xs)
 entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
@@ -12343,7 +12337,7 @@ entry b(xs: []u32) []f32 = map(|x| f32.u32(x), xs)
 /// `IdSource<u32>` across all entries.
 #[test]
 fn two_compute_entries_with_differently_typed_inputs_do_not_alias() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry a(xs: []u32) []u32 = map(|x| x, xs)
 entry b(ys: []f32) []f32 = map(|y| y, ys)
@@ -12363,7 +12357,7 @@ entry b(ys: []f32) []f32 = map(|y| y, ys)
 /// reject the conflicting interface first.
 #[test]
 fn matching_explicit_storage_binding_across_entries_compiles() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry ent_a(idx: []u32, buf: []f32) []f32 =
   map(|s| buf[i32.u32(s)], idx)
@@ -12380,7 +12374,7 @@ entry ent_b(idx: []u32, buf: []f32) []f32 =
 /// sampled view a distinct texture descriptor with a backing reference.
 #[test]
 fn image_store_is_not_user_visible() {
-    let result = crate::compile_thru_spirv(
+    let result = compile_thru_spirv(
         r#"
 entry r(xs: []u32,
         img: storage_image) []u32 =
@@ -12404,7 +12398,7 @@ entry r(xs: []u32,
 #[test]
 #[ignore = "array-of-tuples entry input does not lower (element type Tuple(2) has no static size); blocks the SoA same-size-class case"]
 fn soa_array_of_tuples_components_stay_one_size_class() {
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry main(pts: [](f32, f32)) ([]f32, []f32) =
   (map(|p| p.0 + 1.0, pts), map(|p| p.1 + 2.0, pts))
@@ -12420,7 +12414,7 @@ entry main(pts: [](f32, f32)) ([]f32, []f32) =
 /// `program.functions`.
 #[test]
 fn function_call_initialized_global_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def DIST: f32 = 5.0
 def ELEV: f32 = 0.7
@@ -12500,7 +12494,7 @@ entry filt(xs: []u32) ([]u32, [1]u32) =
 /// flip the assertion to expect clean success.
 #[test]
 fn inplace_write_to_returned_readwrite_storage_errors_gracefully() {
-    let result = crate::compile_thru_spirv(
+    let result = compile_thru_spirv(
         r#"
 entry tick(buf: *[]u32) *[]u32 =
   buf with [0] = 42u32
@@ -12532,7 +12526,7 @@ entry tick(buf: *[]u32) *[]u32 =
 /// entry, and scattering records into a `*[]point` storage buffer.
 #[test]
 fn structural_record_lowers_through_spirv() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 type draw_args = {x: f32, y: f32, z: f32, w: f32}
 
@@ -12542,7 +12536,7 @@ entry frag(iTime: f32) draw_args =
     )
     .expect("fragment returning a structural record should lower");
 
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 type point = {x: f32, y: f32}
 entry e(o: *[]point) () =
@@ -12558,7 +12552,7 @@ entry e(o: *[]point) () =
 /// `world` unifies with a `{ points = view, items = view }` argument.
 #[test]
 fn record_of_arrays_param_across_boundary_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 open f32
 type world = { points: []vec2f32, items: []vec4f32 }
@@ -12581,7 +12575,7 @@ entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
 /// `composite`/`no_buffer` map-result arrays.
 #[test]
 fn record_of_arrays_construct_and_return_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 open f32
 type world = { points: []vec2f32, items: []vec4f32 }
@@ -12604,7 +12598,7 @@ entry step(dom: []u32) ([]vec2f32, []vec4f32) =
 /// in-register runtime-sized Composite array.
 #[test]
 fn map_output_fed_and_returned_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
   let occ = map(|i| i + 7u32, occ_dom)
@@ -12620,7 +12614,7 @@ entry frame(occ_dom: []u32, sett_dom: []u32) ([]u32, []u32) =
 /// materializes it.
 #[test]
 fn map_output_fed_but_only_dependent_returned_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def build(occ_dom: []u32, sett_dom: []u32) []u32 =
   let occ = map(|i| i + 7u32, occ_dom)
@@ -12641,7 +12635,7 @@ entry frame(occ_dom: []u32, sett_dom: []u32) []u32 =
 /// and internal `w.points` projection must receive the same representation.
 #[test]
 fn map_output_in_record_field_fed_and_returned_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 open f32
 
@@ -12663,7 +12657,7 @@ entry step(pdom: []u32, tdom: []u32, points_in: []vec2f32)
 
 #[test]
 fn clear_then_scatter_on_consuming_write_storage_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 entry e(fb: *[]vec4f32) () =
   let cleared = map(|_p:vec4f32| @[0.0, 0.0, 0.0, 1.0], fb) in
@@ -12682,7 +12676,7 @@ entry e(fb: *[]vec4f32) () =
 /// `source → view` in the scatter's input-region operand.
 #[test]
 fn compute_entry_returns_screma_result_and_scatters_through_it() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def N:i32 = 8
 def RES:i32 = 8
@@ -12854,7 +12848,7 @@ fn local_import_parses_per_spec() {
 /// f32.to_bits".
 #[test]
 fn f32_bit_reinterpret_members_lower_through_spirv() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def fsqrt(x: f32) f32 =
   f32.from_bits(0x1fbd1df5u32 + (f32.to_bits(x) >> 1u32))
@@ -12879,7 +12873,7 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
 /// result).
 #[test]
 fn record_uniform_shared_across_stages_compiles() {
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 type block = { radius: f32, tint: vec2f32 }
 
@@ -12913,7 +12907,7 @@ fn storage_matrix_elements_publish_std430_matrix_layout() {
     use wspirv::dr::{Loader, Operand};
     use wspirv::spirv::{Decoration, Op};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 entry copy_matrix(
     input: []mat3f32,
@@ -12975,7 +12969,7 @@ fn storage_record_elements_get_std430_offsets_and_stride() {
     use wspirv::dr::{Loader, Operand};
     use wspirv::spirv::{Decoration, Op};
 
-    let lowered = crate::compile_thru_spirv(
+    let lowered = compile_thru_spirv(
         r#"
 type point = { w: f32, uv: vec2f32 }
 entry e(o: *[]point) () =
@@ -13086,7 +13080,7 @@ entry world_to_clip_loop_invariant(
   map(|i| project_twenty_samples(points[i].xyz, frame.resolution, o), iota(1024))
 "#;
 
-    let converted = crate::compile_thru_ssa(source).expect("camera LICM repro compiles to SSA");
+    let converted = compile_thru_ssa(source).expect("camera LICM repro compiles to SSA");
     let function_id = |name: &str| {
         converted
             .functions
@@ -13155,5 +13149,5 @@ entry world_to_clip_loop_invariant(
         "the loop body should contain no residual function calls"
     );
 
-    crate::lower_ssa_to_spirv(converted).expect("optimized camera repro lowers to valid SPIR-V");
+    lower_ssa_to_spirv(converted).expect("optimized camera repro lowers to valid SPIR-V");
 }

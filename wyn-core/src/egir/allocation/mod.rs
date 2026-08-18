@@ -8,6 +8,10 @@
 mod cost;
 mod residency;
 
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::IdArena;
 use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
@@ -77,7 +81,7 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
         constants,
         AllocatedProgramData {
             core: data,
-            materializations: crate::IdArena::new(),
+            materializations: IdArena::new(),
         },
         global_context,
     );
@@ -114,13 +118,13 @@ pub(crate) fn resource_flows(program: &ResourcesAllocated) -> Vec<(ResourceId, C
         for declaration in &entry.resource_declarations {
             let resource = declaration.resource.0;
             match &declaration.role {
-                crate::interface::StorageRole::Output => {
+                interface::StorageRole::Output => {
                     producers.entry(resource).or_default().push(endpoint);
                 }
-                crate::interface::StorageRole::Input => {
+                interface::StorageRole::Input => {
                     consumers.entry(resource).or_default().push(endpoint);
                 }
-                crate::interface::StorageRole::Intermediate => {}
+                interface::StorageRole::Intermediate => {}
             }
         }
     }
@@ -189,7 +193,7 @@ fn classify_existing_compiler_resources(program: ResourcesAllocated) -> Resource
     let mut classifications = HashMap::new();
     for entry in &program.entry_points {
         for declaration in &entry.resource_declarations {
-            if declaration.role == crate::interface::StorageRole::Intermediate {
+            if declaration.role == interface::StorageRole::Intermediate {
                 classifications
                     .entry(declaration.resource.0)
                     .or_insert_with(|| CompilerResource::new(CompilerResourceKind::Staging, None, 0));
@@ -272,8 +276,7 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
                 else {
                     continue;
                 };
-                let elem_bytes =
-                    crate::ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
+                let elem_bytes = ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
                 let size = match space.dims() {
                     [super::types::SegExtent::Fixed(count)] => {
                         LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64)
@@ -291,14 +294,14 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
                 };
                 let output_len = match &size {
                     LogicalSize::FixedBytes(bytes) => {
-                        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
+                        Some(pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
                     }
                     LogicalSize::LikeResource {
                         resource,
                         elem_bytes,
                         src_elem_bytes,
                     } => program.data.core.resources[*resource].host_binding().map(|binding| {
-                        crate::pipeline_descriptor::BufferLen::LikeInput {
+                        pipeline_descriptor::BufferLen::LikeInput {
                             set: binding.set,
                             binding: binding.binding,
                             elem_bytes: *elem_bytes,
@@ -306,7 +309,7 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
                         }
                     }),
                     LogicalSize::SameAsDispatch { elem_bytes } => {
-                        Some(crate::pipeline_descriptor::BufferLen::SameAsDispatch {
+                        Some(pipeline_descriptor::BufferLen::SameAsDispatch {
                             elem_bytes: *elem_bytes,
                         })
                     }

@@ -1,8 +1,11 @@
 use super::check;
 use crate::ast::{Span, TypeName};
+use crate::compile_thru_tlc;
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
+use crate::types;
+use crate::IdSource;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -25,7 +28,7 @@ fn arr_ty() -> Type<TypeName> {
             i32_ty(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
@@ -62,7 +65,7 @@ fn map_producer(xs: u32, ids: &mut TermIdSource) -> SoacOp {
     SoacOp::Map {
         lam: trivial_lam(i32_ty(), TermKind::IntLit("0".into()), ids),
         inputs: vec![arr_var(xs)],
-        destination: crate::types::SoacOwnership::Fresh,
+        destination: types::SoacOwnership::Fresh,
     }
 }
 
@@ -72,7 +75,7 @@ fn filter_term(input: ArrayExpr, ids: &mut TermIdSource) -> Term {
         TermKind::Soac(SoacOp::Filter {
             pred: trivial_lam(bool_ty(), TermKind::BoolLit(true), ids),
             input,
-            destination: crate::types::SoacOwnership::Fresh,
+            destination: types::SoacOwnership::Fresh,
         }),
         arr_ty(),
         ids,
@@ -91,13 +94,13 @@ fn prog(body: Term, ids: TermIdSource) -> tlc::stage::SoacsAnfNormalized {
             meta: DefMeta::Function,
             arity: 1,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         SymbolTable::new(),
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     )
 }
@@ -159,7 +162,7 @@ fn let_bound_producer_then_named_consumer_is_anf() {
 /// Sanity that `check` passes on ordinary pipeline output.
 #[test]
 fn real_program_single_map_is_anf() {
-    let reachable = crate::compile_thru_tlc("\nentry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)\n")
+    let reachable = compile_thru_tlc("\nentry e(xs: []i32) []i32 = map(|x: i32| x + 1, xs)\n")
         .expect("compile_thru_tlc");
     assert!(check(&reachable).is_ok(), "{}", check(&reachable).unwrap_err());
 }
@@ -169,7 +172,7 @@ fn real_program_single_map_is_anf() {
 /// this assertion is the red checkpoint for that work.
 #[test]
 fn real_program_inline_filter_over_map_is_anf() {
-    let reachable = crate::compile_thru_tlc(
+    let reachable = compile_thru_tlc(
         "open f32\n\nentry e(xs: []u32) ?k. [k]u32 =\n  filter(|y: u32| y < 100u32, map(|x: u32| x + 1u32, xs))\n",
     )
     .expect("compile_thru_tlc");

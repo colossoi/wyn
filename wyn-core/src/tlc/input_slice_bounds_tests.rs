@@ -2,16 +2,19 @@
 //! on `input_slice_bounds` for the contract.
 
 use crate::pipeline_descriptor::BufferLen;
+use crate::test_pipeline;
 use crate::tlc::{self, DefMeta};
+use crate::LookupMap;
+use crate::SymbolId;
 
 fn program_from(src: &str) -> tlc::stage::InputSliceBoundsInferred {
-    tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src))
+    tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src))
 }
 
 fn bounds_for_entry<'a>(
     program: &'a tlc::stage::InputSliceBoundsInferred,
     name: &str,
-) -> &'a crate::LookupMap<crate::SymbolId, BufferLen> {
+) -> &'a LookupMap<SymbolId, BufferLen> {
     let def = program
         .defs
         .iter()
@@ -23,10 +26,7 @@ fn bounds_for_entry<'a>(
     &entry.data.by_symbol
 }
 
-fn collect_term_ids<C: crate::tlc::Payload, S: crate::tlc::Payload>(
-    term: &crate::tlc::Term<C, S>,
-    ids: &mut Vec<crate::tlc::TermId>,
-) {
+fn collect_term_ids<C: tlc::Payload, S: tlc::Payload>(term: &tlc::Term<C, S>, ids: &mut Vec<tlc::TermId>) {
     ids.push(term.id);
     term.for_each_child(&mut |child| collect_term_ids(child, ids));
 }
@@ -37,7 +37,7 @@ fn transition_reuses_entry_term_tree() {
 entry e(xs: []i32) i32 =
   length(xs)
 "#;
-    let reachable = crate::test_pipeline::compile_to_reachable(src);
+    let reachable = test_pipeline::compile_to_reachable(src);
     let mut before = Vec::new();
     for def in &reachable.defs {
         collect_term_ids(&def.body, &mut before);

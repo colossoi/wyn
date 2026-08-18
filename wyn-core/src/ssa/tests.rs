@@ -1,6 +1,8 @@
 #![cfg(test)]
 
 use crate::ast::TypeName;
+use crate::compile_thru_spirv;
+use crate::op;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{InstKind, Terminator, ValueId, ValueRef};
 use polytype::Type;
@@ -18,7 +20,7 @@ fn test_func_body_params() {
     let sum = builder
         .push_inst(
             InstKind::Op {
-                tag: crate::op::OpTag::BinOp(crate::op::BinaryOperator::Add),
+                tag: op::OpTag::BinOp(op::BinaryOperator::Add),
                 operands: vec![ValueRef::Ssa(x), ValueRef::Ssa(y)],
             },
             i32_ty(),
@@ -172,7 +174,7 @@ fn spirv_storage_write_chain_lowers_cleanly() {
     // the MapInto path → ViewIndex (place) + Store.
     let source = "\nentry double(arr: []f32) []f32 = map(|x: f32| x * 2.0, arr)\n";
 
-    let spirv = crate::compile_thru_spirv(source)
+    let spirv = compile_thru_spirv(source)
         .expect("SPIR-V lowering of StorageView → ViewIndex → Store chain must succeed");
 
     assert_eq!(spirv.spirv[0], 0x07230203, "SPIR-V magic number");

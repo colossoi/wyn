@@ -24,31 +24,36 @@ pub mod reachability;
 pub(crate) mod storage_function_variants;
 pub mod types;
 
+use crate::egir;
+use crate::err_spirv;
+use crate::error;
+use crate::spirv;
+use crate::CodegenTarget;
 pub use reachability::filter_reachable;
 pub use types::{context, stage, Program};
 
 /// Validate reachable SSA for SPIR-V and record that proof in its
 /// top-level type.
-pub fn prepare_spirv(program: stage::Reachable) -> crate::error::Result<stage::SpirvReady> {
-    if program.global_context.profile.target == crate::CodegenTarget::Wgsl {
-        return Err(crate::err_spirv!(
+pub fn prepare_spirv(program: stage::Reachable) -> error::Result<stage::SpirvReady> {
+    if program.global_context.profile.target == CodegenTarget::Wgsl {
+        return Err(err_spirv!(
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
     }
-    crate::egir::verify_no_abstract::verify_no_abstract_types(&program)?;
-    crate::spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
+    egir::verify_no_abstract::verify_no_abstract_types(&program)?;
+    spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
 }
 
 /// Validate reachable SSA for WGSL and record that proof in its
 /// top-level type.
-pub fn prepare_wgsl(program: stage::Reachable) -> crate::error::Result<stage::WgslReady> {
-    if program.global_context.profile.target == crate::CodegenTarget::Spirv {
-        return Err(crate::err_spirv!(
+pub fn prepare_wgsl(program: stage::Reachable) -> error::Result<stage::WgslReady> {
+    if program.global_context.profile.target == CodegenTarget::Spirv {
+        return Err(err_spirv!(
             "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
         ));
     }
-    crate::egir::verify_no_abstract::verify_no_abstract_types(&program)?;
+    egir::verify_no_abstract::verify_no_abstract_types(&program)?;
     Ok(program.retag())
 }
 

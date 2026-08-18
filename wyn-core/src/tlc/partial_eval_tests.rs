@@ -2,16 +2,19 @@
 
 use super::{partial_eval, VarRef};
 use crate::ast::{BinaryOp, Span, TypeName};
+use crate::builtins;
 use crate::op::BinaryOperator;
+use crate::tlc;
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
 use crate::tlc::ownership::OwnershipValidated;
 use crate::tlc::test_support::TestBuilder;
 use crate::tlc::{Def, DefMeta, Lambda, LoopKind, Program, Term, TermIdSource, TermKind};
+use crate::types;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
 
-fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
+fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};
     let t = *boxed;
     match t.kind {
@@ -38,7 +41,7 @@ fn make_program(
             meta: DefMeta::Function,
             arity: 0,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
@@ -85,7 +88,7 @@ fn make_float(ids: &mut TermIdSource, value: f32) -> Term<Empty, Empty> {
 }
 
 fn make_float_builtin_call(ids: &mut TermIdSource, name: &str, args: &[f32]) -> Term<Empty, Empty> {
-    let builtin = crate::builtins::catalog()
+    let builtin = builtins::catalog()
         .lookup_by_surface_name(name)
         .unwrap_or_else(|| panic!("missing test builtin `{name}`"));
     let func_ty = args.iter().fold(float_ty(), |result, _| arrow_ty(float_ty(), result));
@@ -266,8 +269,8 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
             body: lambda,
             meta: DefMeta::Function,
             arity: 1,
-            param_diets: vec![crate::types::Diet::observing()],
-            return_diet: crate::types::Diet::observing(),
+            param_diets: vec![types::Diet::observing()],
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
@@ -542,7 +545,7 @@ fn test_function_inlining() {
                 meta: DefMeta::Function,
                 arity: 2,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: PolymorphicDefinition { scheme: None },
@@ -552,7 +555,7 @@ fn test_function_inlining() {
                 meta: DefMeta::Function,
                 arity: 0,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
@@ -660,7 +663,7 @@ fn test_function_alias_inlining() {
                 meta: DefMeta::Function,
                 arity: 1,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: PolymorphicDefinition { scheme: None },
@@ -670,7 +673,7 @@ fn test_function_alias_inlining() {
                 meta: DefMeta::Function,
                 arity: 0,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
@@ -782,7 +785,7 @@ fn test_function_alias_partial_application() {
                 meta: DefMeta::Function,
                 arity: 2,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: PolymorphicDefinition { scheme: None },
@@ -792,7 +795,7 @@ fn test_function_alias_partial_application() {
                 meta: DefMeta::Function,
                 arity: 0,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
@@ -876,7 +879,7 @@ fn test_intrinsic_alias_inlining() {
             meta: DefMeta::Function,
             arity: 0,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
@@ -978,7 +981,7 @@ fn let_bound_array_substituted_through_soac_input() {
             i32_ty.clone(),
             Type::Constructed(TypeName::Size(3), vec![]),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
 
@@ -1023,7 +1026,7 @@ fn let_bound_array_substituted_through_soac_input() {
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody { lam, data: () },
             inputs: vec![input_ae(Box::new(m_var))],
-            destination: crate::types::SoacOwnership::Fresh,
+            destination: types::SoacOwnership::Fresh,
         }),
     };
 

@@ -4,7 +4,9 @@ use super::super::extract;
 use super::super::types::{EGraph as GenericEGraph, PureOp, ValueId, ValueKind};
 use super::default_rewrites;
 use crate::ast::TypeName;
+use crate::op;
 use crate::ssa::types::ConstantValue;
+use crate::types;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -19,14 +21,14 @@ fn i32_ty() -> Type<TypeName> {
 }
 
 fn vec3f32_ty() -> Type<TypeName> {
-    crate::types::vec(3, f32_ty())
+    types::vec(3, f32_ty())
 }
 
 fn pow(g: &mut EGraph, base: ValueId, exp: ConstantValue, exp_ty: Type<TypeName>) -> ValueId {
     let result_ty = g.nodes[base].ty.clone();
     let exp = g.intern_constant(exp, exp_ty);
     g.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Power),
+        PureOp::BinOp(op::BinaryOperator::Power),
         smallvec![base, exp],
         result_ty,
         None,
@@ -62,7 +64,7 @@ fn chain_len_over_same_base(graph: &EGraph, nid: ValueId, base: ValueId) -> Opti
             return None;
         };
         match op {
-            PureOp::BinOp(crate::op::BinaryOperator::Multiply) if operands.len() == 2 => {
+            PureOp::BinOp(op::BinaryOperator::Multiply) if operands.len() == 2 => {
                 if operands[1] != base {
                     return None;
                 }
@@ -78,7 +80,7 @@ fn is_pow(graph: &EGraph, nid: ValueId) -> bool {
     matches!(
         &graph.nodes[nid].kind,
         ValueKind::Pure {
-            op: PureOp::BinOp(crate::op::BinaryOperator::Power),
+            op: PureOp::BinOp(op::BinaryOperator::Power),
             ..
         }
     )
@@ -168,7 +170,7 @@ fn pow_non_const_exponent_does_not_rewrite() {
     let base = g.add_test_value_parameter(0, f32_ty());
     let exp = g.add_test_value_parameter(1, i32_ty()); // runtime
     let p = g.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Power),
+        PureOp::BinOp(op::BinaryOperator::Power),
         smallvec![base, exp],
         f32_ty(),
         None,
@@ -198,7 +200,7 @@ fn pow_of_expensive_shared_base_still_extracts_chain() {
     for i in 0..10 {
         let c = g.intern_constant(ConstantValue::from_f32(1.5 + i as f32), f32_ty());
         base = g.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![base, c],
             f32_ty(),
             None,
@@ -216,7 +218,7 @@ fn consumers_see_the_rewrite_through_the_original_id() {
     let p = pow(&mut g, base, ConstantValue::I32(2), i32_ty());
     let one = g.intern_constant(ConstantValue::from_f32(1.0), f32_ty());
     let consumer = g.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![p, one],
         f32_ty(),
         None,

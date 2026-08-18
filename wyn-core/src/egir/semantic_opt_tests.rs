@@ -1,8 +1,10 @@
 use super::*;
 use crate::ast::TypeName;
+use crate::egir;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
 use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacEffect, SoacInputType, SoacOwnership};
+use crate::FunctionId;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -22,8 +24,8 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                 inputs: Vec::<SoacInputType>::new(),
                 form: screma::ScremaForm {
                     pre: screma::Lambda::region(
-                        crate::egir::types::SegBody {
-                            region: crate::FunctionId::from_index(0),
+                        egir::types::SegBody {
+                            region: FunctionId::from_index(0),
                             captures: vec![],
                         },
                         vec![],
@@ -37,7 +39,7 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
                     ownership: SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Segmented {
-                    space: SegSpace::new(crate::egir::types::SegExtent::Fixed(1)),
+                    space: SegSpace::new(egir::types::SegExtent::Fixed(1)),
                     placement: screma::Placement::LaneLocal,
                     output_slots: vec![],
                     resources: vec![],

@@ -1,4 +1,6 @@
 use super::*;
+use crate::flow;
+use crate::op;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
@@ -36,7 +38,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     let stage_input = graph.add_test_value_parameter(1, ty.clone());
     let one = graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let uniform_sum = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![uniform, one],
         ty.clone(),
         None,
@@ -191,7 +193,7 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     };
     let current = graph.add_block_param(header, ty.clone());
     let next = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![current, one],
         ty.clone(),
         None,
@@ -208,7 +210,7 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     let result = graph.add_block_param(exit, ty);
     graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(result)));
 
-    graph.skeleton.blocks[header].control_header = Some(crate::flow::ControlHeader::Loop {
+    graph.skeleton.blocks[header].control_header = Some(flow::ControlHeader::Loop {
         merge: exit,
         continue_block: header,
     });
@@ -296,7 +298,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
     let lane_value = region_graph.add_test_value_parameter(0, ty.clone());
     let capture = region_graph.add_test_value_parameter(1, ty.clone());
     let result = region_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![lane_value, capture],
         ty.clone(),
         None,

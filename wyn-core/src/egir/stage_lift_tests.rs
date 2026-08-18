@@ -1,4 +1,5 @@
 use super::*;
+use crate::types;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::program::{
@@ -130,7 +131,7 @@ fn array_ty(element: Type<TypeName>, variant: TypeName) -> Type<TypeName> {
             element,
             Type::Constructed(variant, vec![]),
             Type::Constructed(TypeName::Size(64), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }

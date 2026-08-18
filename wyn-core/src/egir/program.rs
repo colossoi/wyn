@@ -5,6 +5,13 @@
 //! defines the concrete resource arenas, identifiers, and program data used
 //! by those states.
 
+use crate::builtins;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::types;
+use crate::LoweringProfile;
+use crate::ResourceAccess;
+use crate::SortedSet;
 use crate::{BindingRef, EntryId, FunctionId, GlobalId, IdArena, IdSource, LookupMap};
 
 use polytype::Type;
@@ -234,7 +241,7 @@ impl LogicalSize {
         space: &SegSpace<SemanticResourceRef>,
         elem_ty: &Type<TypeName>,
     ) -> Option<Self> {
-        let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty)?;
+        let elem_bytes = ssa::layout::storage_elem_stride(elem_ty)?;
         if let Some(count) = space.dims().iter().try_fold(1u64, |count, extent| match extent {
             SegExtent::Fixed(length) => count.checked_mul(u64::from(*length)),
             _ => None,
@@ -344,7 +351,7 @@ impl CompilerResource {
 
 #[derive(Clone, Debug)]
 pub struct HostResource {
-    pub binding: crate::BindingRef,
+    pub binding: BindingRef,
     /// Source-level name published for this binding, when one exists.
     pub name: Option<String>,
 }
@@ -356,7 +363,7 @@ pub enum ResourceOrigin {
 }
 
 impl ResourceOrigin {
-    pub fn host(binding: crate::BindingRef) -> Self {
+    pub fn host(binding: BindingRef) -> Self {
         Self::Host(HostResource { binding, name: None })
     }
 }
@@ -376,7 +383,7 @@ impl LogicalResource {
         self.id
     }
 
-    pub fn host_binding(&self) -> Option<crate::BindingRef> {
+    pub fn host_binding(&self) -> Option<BindingRef> {
         match &self.origin {
             ResourceOrigin::Host(host) => Some(host.binding),
             ResourceOrigin::Compiler(_) => None,
@@ -390,7 +397,7 @@ impl LogicalResource {
 #[derive(Clone, Debug, Default)]
 pub struct LogicalResourceArena {
     resources: Vec<LogicalResource>,
-    host: HashMap<crate::BindingRef, ResourceId>,
+    host: HashMap<BindingRef, ResourceId>,
     compiler: HashMap<CompilerResourceKey, ResourceId>,
 }
 
@@ -399,7 +406,7 @@ pub struct LogicalResourceArena {
 /// identities and requires every reservation to be defined before `finish`.
 #[derive(Default)]
 pub(crate) struct LogicalResourceArenaBuilder {
-    by_binding: HashMap<crate::BindingRef, ResourceId>,
+    by_binding: HashMap<BindingRef, ResourceId>,
     compiler: HashMap<CompilerResourceKey, ResourceId>,
     resources: Vec<Option<LogicalResourceDraft>>,
 }
@@ -411,7 +418,7 @@ struct LogicalResourceDraft {
 }
 
 impl LogicalResourceArenaBuilder {
-    pub(crate) fn host_id(&mut self, binding: crate::BindingRef) -> ResourceId {
+    pub(crate) fn host_id(&mut self, binding: BindingRef) -> ResourceId {
         if let Some(resource) = self.by_binding.get(&binding) {
             return *resource;
         }
@@ -423,7 +430,7 @@ impl LogicalResourceArenaBuilder {
 
     pub(crate) fn declare_host(
         &mut self,
-        binding: crate::BindingRef,
+        binding: BindingRef,
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
@@ -534,11 +541,11 @@ impl LogicalResourceArena {
         id
     }
 
-    pub(crate) fn host_resource(&self, binding: crate::BindingRef) -> Option<ResourceId> {
+    pub(crate) fn host_resource(&self, binding: BindingRef) -> Option<ResourceId> {
         self.host.get(&binding).copied()
     }
 
-    pub(crate) fn host_bindings(&self) -> impl Iterator<Item = crate::BindingRef> + '_ {
+    pub(crate) fn host_bindings(&self) -> impl Iterator<Item = BindingRef> + '_ {
         self.host.keys().copied()
     }
 
@@ -691,10 +698,7 @@ fn semantic_type_resource(ty: &Type<TypeName>) -> Option<SemanticResourceRef> {
     Some(SemanticResourceRef(*resource))
 }
 
-fn normalize_converted_graph_types(
-    graph: &mut EGraph<Raw>,
-    by_binding: &HashMap<crate::BindingRef, ResourceId>,
-) {
+fn normalize_converted_graph_types(graph: &mut EGraph<Raw>, by_binding: &HashMap<BindingRef, ResourceId>) {
     rewrite_raw_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
 }
 
@@ -745,7 +749,7 @@ fn semantic_parameter_representation(
 ) -> OperandType<SemanticResourceRef, Type<TypeName>> {
     let physical_ty = viewify_resource_arrays(ty);
     if ty.array_variant().is_some()
-        && (crate::types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
+        && (types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
     {
         OperandType::View(ViewType {
             array: physical_ty,
@@ -761,10 +765,10 @@ fn semantic_parameter_representation(
 
 fn viewify_resource_arrays(ty: &Type<TypeName>) -> Type<TypeName> {
     if ty.array_variant().is_some()
-        && (crate::types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
+        && (types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
     {
-        let region = ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
-        return crate::types::view_array_of(ty, region);
+        let region = ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
+        return types::view_array_of(ty, region);
     }
     match ty {
         Type::Constructed(name, fields)
@@ -779,7 +783,7 @@ fn viewify_resource_arrays(ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
-fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<crate::BindingRef, ResourceId>) {
+fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<BindingRef, ResourceId>) {
     visit_type_names_mut(ty, |name| {
         if let TypeName::Buffer(binding) = *name {
             *name = TypeName::Resource(
@@ -1132,7 +1136,7 @@ pub(crate) fn physicalize_graph_resources(
             graph.replace_pure_node(
                 node,
                 super::types::PureOp::Intrinsic {
-                    id: crate::builtins::catalog().known().storage_len,
+                    id: builtins::catalog().known().storage_len,
                     overload_idx: 0,
                 },
                 smallvec::smallvec![set, slot],
@@ -1162,7 +1166,7 @@ pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &Phy
 pub fn buffer_len(
     size: &LogicalSize,
     resources: &PhysicalResourceTable,
-) -> Option<crate::pipeline_descriptor::BufferLen> {
+) -> Option<pipeline_descriptor::BufferLen> {
     use crate::pipeline_descriptor::BufferLen;
     match size {
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
@@ -1207,9 +1211,9 @@ pub(crate) fn semantic_program_for_test(
             identities,
         },
         RewriteGlobal {
-            binding_ids: crate::IdSource::new(),
-            effect_ids: crate::IdSource::new(),
-            semantic_ids: crate::IdSource::new(),
+            binding_ids: IdSource::new(),
+            effect_ids: IdSource::new(),
+            semantic_ids: IdSource::new(),
         },
     )
 }
@@ -1278,14 +1282,14 @@ impl Entry {
         &self,
         projection: &super::graph_projector::GraphProjection,
         resources: &HashSet<ResourceId>,
-    ) -> crate::SortedSet<usize> {
+    ) -> SortedSet<usize> {
         let mut parameters = projection
             .source_nodes()
             .filter_map(|node| match self.graph.nodes.get(node).map(|node| &node.kind) {
                 Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
                 _ => None,
             })
-            .collect::<crate::SortedSet<_>>();
+            .collect::<SortedSet<_>>();
         for (index, input) in self.inputs.iter().enumerate() {
             if input
                 .resource
@@ -1385,7 +1389,7 @@ impl Entry {
                 Some(ValueKind::FuncParam { parameter }) => Some(parameter.index()),
                 _ => None,
             })
-            .collect::<crate::SortedSet<_>>();
+            .collect::<SortedSet<_>>();
         for (index, input) in self.inputs.iter().enumerate() {
             if input.resource.is_some_and(|resource| reachable_resources.contains(&resource.0)) {
                 kept_indices.insert(index);
@@ -1452,7 +1456,7 @@ impl<P: Family> std::ops::DerefMut for PlannedEntry<P> {
 /// second copy of the semantic graph.
 #[derive(Clone, Debug)]
 pub struct PlannedPublication {
-    pub id: crate::EntryId,
+    pub id: EntryId,
     pub name: String,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
@@ -1570,7 +1574,7 @@ impl PlannedEntry {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_projection(
         projection: super::graph_projector::GraphProjection,
-        id: crate::EntryId,
+        id: EntryId,
         name: String,
         span: Span,
         execution_model: ExecutionModel,
@@ -1646,7 +1650,7 @@ where
 }
 
 fn publish_entry(
-    id: crate::EntryId,
+    id: EntryId,
     name: &str,
     execution_model: &ExecutionModel,
     inputs: &[EntryInput],
@@ -1748,7 +1752,7 @@ impl MaterializationRequirement {
 #[derive(Clone, Debug)]
 pub struct EntryPublication {
     /// Compiler identity. The name below remains emitted host ABI metadata.
-    pub id: crate::EntryId,
+    pub id: EntryId,
     pub name: String,
     pub execution_model: ExecutionModel,
     pub inputs: Vec<EntryInput>,
@@ -1763,7 +1767,7 @@ pub type PhysicalEntry =
 /// Deterministic allocation of logical resources to backend bindings.
 #[derive(Clone, Debug, Default)]
 pub struct PhysicalResourceTable {
-    bindings: Vec<crate::BindingRef>,
+    bindings: Vec<BindingRef>,
     compiler_owned: Vec<bool>,
 }
 
@@ -1771,7 +1775,7 @@ impl PhysicalResourceTable {
     /// Assign backend bindings deterministically. Host resources retain their
     /// declared ABI identities; only compiler-owned resources draw automatic
     /// bindings from `ids`.
-    pub fn allocate(resources: &LogicalResourceArena, ids: &mut crate::IdSource<u32>) -> Self {
+    pub fn allocate(resources: &LogicalResourceArena, ids: &mut IdSource<u32>) -> Self {
         Self::allocate_avoiding(resources, ids, std::iter::empty())
     }
 
@@ -1779,8 +1783,8 @@ impl PhysicalResourceTable {
     /// non-resource interfaces such as textures and samplers.
     pub fn allocate_avoiding(
         resources: &LogicalResourceArena,
-        ids: &mut crate::IdSource<u32>,
-        reserved: impl IntoIterator<Item = crate::BindingRef>,
+        ids: &mut IdSource<u32>,
+        reserved: impl IntoIterator<Item = BindingRef>,
     ) -> Self {
         let mut used = resources.host_bindings().collect::<std::collections::HashSet<_>>();
         used.extend(reserved);
@@ -1791,8 +1795,7 @@ impl PhysicalResourceTable {
             let binding = match &resource.origin {
                 ResourceOrigin::Host(host) => host.binding,
                 ResourceOrigin::Compiler(_) => loop {
-                    let candidate =
-                        crate::BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, ids.next_id());
+                    let candidate = BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, ids.next_id());
                     if used.insert(candidate) {
                         break candidate;
                     }
@@ -1806,7 +1809,7 @@ impl PhysicalResourceTable {
         }
     }
 
-    pub fn binding(&self, resource: ResourceId) -> crate::BindingRef {
+    pub fn binding(&self, resource: ResourceId) -> BindingRef {
         self.bindings[resource.index()]
     }
 
@@ -1840,27 +1843,27 @@ impl ProgramIdentities {
             entries: IdArena::default(),
         }
     }
-    pub(crate) fn alloc_function(&mut self, name: String) -> crate::FunctionId {
+    pub(crate) fn alloc_function(&mut self, name: String) -> FunctionId {
         self.functions.alloc(name)
     }
 
-    pub(crate) fn alloc_global(&mut self, name: String) -> crate::GlobalId {
+    pub(crate) fn alloc_global(&mut self, name: String) -> GlobalId {
         self.globals.alloc(name)
     }
 
-    pub(crate) fn alloc_entry(&mut self, name: String) -> crate::EntryId {
+    pub(crate) fn alloc_entry(&mut self, name: String) -> EntryId {
         self.entries.alloc(name)
     }
 
-    pub(crate) fn function_name(&self, id: crate::FunctionId) -> &str {
+    pub(crate) fn function_name(&self, id: FunctionId) -> &str {
         self.functions.get(id).expect("unknown function identity")
     }
 
-    pub(crate) fn global_name(&self, id: crate::GlobalId) -> &str {
+    pub(crate) fn global_name(&self, id: GlobalId) -> &str {
         self.globals.get(id).expect("unknown global identity")
     }
 
-    pub(crate) fn entry_name(&self, id: crate::EntryId) -> &str {
+    pub(crate) fn entry_name(&self, id: EntryId) -> &str {
         self.entries.get(id).expect("unknown entry identity")
     }
 
@@ -1868,15 +1871,15 @@ impl ProgramIdentities {
         self.functions.values().map(String::as_str)
     }
 
-    pub(crate) fn contains_function(&self, id: crate::FunctionId) -> bool {
+    pub(crate) fn contains_function(&self, id: FunctionId) -> bool {
         self.functions.get(id).is_some()
     }
 
-    pub(crate) fn contains_global(&self, id: crate::GlobalId) -> bool {
+    pub(crate) fn contains_global(&self, id: GlobalId) -> bool {
         self.globals.get(id).is_some()
     }
 
-    pub(crate) fn contains_entry(&self, id: crate::EntryId) -> bool {
+    pub(crate) fn contains_entry(&self, id: EntryId) -> bool {
         self.entries.get(id).is_some()
     }
 }
@@ -1892,7 +1895,7 @@ impl Default for ProgramIdentities {
 pub struct CoreProgramData {
     pub pipeline: PipelineDescriptor,
     /// Structural entry identity for each descriptor pipeline stage.
-    pub stage_entries: Vec<Vec<crate::EntryId>>,
+    pub stage_entries: Vec<Vec<EntryId>>,
 
     pub resources: LogicalResourceArena,
     pub identities: ProgramIdentities,
@@ -1902,7 +1905,7 @@ pub struct CoreProgramData {
 #[derive(Debug)]
 pub struct AllocatedProgramData {
     pub core: CoreProgramData,
-    pub materializations: crate::IdArena<MaterializationId, MaterializationRequirement>,
+    pub materializations: IdArena<MaterializationId, MaterializationRequirement>,
 }
 
 impl AllocatedProgramData {
@@ -1919,8 +1922,8 @@ impl AllocatedProgramData {
 /// Allocators carried while EGIR graphs and logical resources are rebuilt.
 #[derive(Debug)]
 pub struct RewriteGlobal {
-    pub binding_ids: crate::IdSource<u32>,
-    pub effect_ids: crate::IdSource<super::types::EffectToken>,
+    pub binding_ids: IdSource<u32>,
+    pub effect_ids: IdSource<super::types::EffectToken>,
     pub semantic_ids: SemanticOpIdSource,
 }
 
@@ -1928,8 +1931,8 @@ pub struct RewriteGlobal {
 #[derive(Debug)]
 pub struct PlannedGlobal {
     pub kernel_plan: super::parallelize::KernelPlanSummary,
-    pub profile: crate::LoweringProfile,
-    pub effect_ids: crate::IdSource<super::types::EffectToken>,
+    pub profile: LoweringProfile,
+    pub effect_ids: IdSource<super::types::EffectToken>,
     pub semantic_ids: SemanticOpIdSource,
 }
 
@@ -2024,7 +2027,7 @@ fn route_writes_resource(
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                 matches!(&op.state, screma::ScheduledState::Segmented(segment)
                 if segment.resources.iter().any(|access| {
-                    access.resource == resource && access.access != crate::ResourceAccess::Read
+                    access.resource == resource && access.access != ResourceAccess::Read
                 }))
             }
             SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => match &op.state {
@@ -2040,7 +2043,7 @@ fn route_writes_resource(
 
 fn emit_entry_output_writes(
     entry: &mut PlannedEntry<Scheduled>,
-    effect_ids: &mut crate::IdSource<super::types::EffectToken>,
+    effect_ids: &mut IdSource<super::types::EffectToken>,
 ) -> Result<(), String> {
     for slot in 0..entry.outputs.len() {
         let entry_span = entry.span;
@@ -2118,7 +2121,7 @@ fn emit_entry_output_writes(
 fn physicalize_entry(
     mut entry: PlannedEntry<Scheduled>,
     resources: &PhysicalResourceTable,
-    effect_ids: &mut crate::IdSource<super::types::EffectToken>,
+    effect_ids: &mut IdSource<super::types::EffectToken>,
 ) -> Result<PhysicalEntry, String> {
     emit_entry_output_writes(&mut entry, effect_ids)?;
     let Entry {
@@ -2222,7 +2225,7 @@ pub(in crate::egir) fn physicalize_program(
     physical_resources: &PhysicalResourceTable,
     serial: bool,
     kernel_plan: super::parallelize::KernelPlanSummary,
-    profile: crate::LoweringProfile,
+    profile: LoweringProfile,
 ) -> Result<super::parallelize::Planned, String> {
     let Program {
         functions,

@@ -1,4 +1,5 @@
 use super::{retain_reachable, Definition};
+use crate::ssa;
 
 use crate::ast::{Span, TypeName};
 use crate::flow::ExecutionModel;
@@ -12,7 +13,7 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn body(references: &[Definition]) -> crate::ssa::types::FuncBody {
+fn body(references: &[Definition]) -> ssa::types::FuncBody {
     let mut builder = FuncBuilder::new(vec![], unit_ty());
     for reference in references {
         let tag = match reference {

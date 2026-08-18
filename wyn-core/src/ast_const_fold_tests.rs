@@ -1,3 +1,4 @@
+use crate::ast;
 use crate::ast::{BinaryOp, ExprKind, Expression, Header, Identifier, NodeId, Span, Type, TypeName};
 use crate::ast_const_fold::AstConstFolder;
 use crate::op::{BinaryOperator, UnaryOperator};
@@ -167,7 +168,7 @@ fn make_array_ident(name: &str) -> Expression {
 fn make_slice(array: Expression, start: Option<Expression>, end: Option<Expression>) -> Expression {
     Expression {
         h: test_header(),
-        kind: ExprKind::Slice(crate::ast::SliceExpr {
+        kind: ExprKind::Slice(ast::SliceExpr {
             array: Box::new(array),
             start: start.map(Box::new),
             end: end.map(Box::new),

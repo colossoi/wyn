@@ -7,6 +7,10 @@ use super::array_io::{
 use super::loop_builder::{expand_loop, LoopBody};
 use super::screma_lowering::emit_screma_lambda;
 use super::*;
+use crate::builtins;
+use crate::op;
+use crate::ssa;
+use crate::IdSource;
 
 /// Inputs for canonical serial histogram expansion. The form owns all bucket
 /// result routing and operation metadata; the loop supplies co-iterated input
@@ -30,13 +34,13 @@ fn flatten_hist_index(graph: &mut EGraph<Physical>, indices: &[ValueId], shape: 
     };
     rest.iter().copied().zip(shape.iter().copied().skip(1)).fold(first, |linear, (index, dimension)| {
         let scaled = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            PureOp::BinOp(op::BinaryOperator::Multiply),
             smallvec![linear, dimension],
             i32_type.clone(),
             None,
         );
         graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![scaled, index],
             i32_type.clone(),
             None,
@@ -52,25 +56,25 @@ fn hist_index_in_bounds(graph: &mut EGraph<Physical>, indices: &[ValueId], shape
         graph.intern_pure(PureOp::Bool(true), smallvec![], bool_type.clone(), None),
         |valid, (index, dimension)| {
             let nonnegative = graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::GreaterEqual),
+                PureOp::BinOp(op::BinaryOperator::GreaterEqual),
                 smallvec![index, zero],
                 bool_type.clone(),
                 None,
             );
             let below = graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::Less),
+                PureOp::BinOp(op::BinaryOperator::Less),
                 smallvec![index, dimension],
                 bool_type.clone(),
                 None,
             );
             let in_dimension = graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                PureOp::BinOp(op::BinaryOperator::LogicalAnd),
                 smallvec![nonnegative, below],
                 bool_type.clone(),
                 None,
             );
             graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                PureOp::BinOp(op::BinaryOperator::LogicalAnd),
                 smallvec![valid, in_dimension],
                 bool_type.clone(),
                 None,
@@ -89,7 +93,7 @@ fn emit_hist_atomic_update(
     value_type: Type<TypeName>,
     operation: &hist::HistOp,
     plan: hist::AtomicUpdate,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
 ) {
     use super::super::graph_ops::emit_atomic;
@@ -182,7 +186,7 @@ fn emit_hist_atomic_update(
                 None,
             );
             let retry_after_attempt = graph.intern_pure(
-                PureOp::UnaryOp(crate::op::UnaryOperator::LogicalNot),
+                PureOp::UnaryOp(op::UnaryOperator::LogicalNot),
                 smallvec![exchanged],
                 bool_type,
                 None,
@@ -213,7 +217,7 @@ pub(super) fn build_hist_atomic(
     spec: HistLoop,
     space: &SegSpace<BindingRef>,
     atomic_operations: &[hist::AtomicUpdate],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
 ) {
     let HistLoop {
@@ -226,7 +230,7 @@ pub(super) fn build_hist_atomic(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
 
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
@@ -260,7 +264,7 @@ pub(super) fn build_hist_atomic(
         &Type::Constructed(TypeName::Int(32), vec![]),
     );
     let in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![lane, length],
         bool_type,
         None,
@@ -317,7 +321,7 @@ pub(super) fn build_hist_atomic(
             let active = guards[guard_offset];
             guard_offset += 1;
             graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                PureOp::BinOp(op::BinaryOperator::LogicalAnd),
                 smallvec![active, in_bounds],
                 Type::Constructed(TypeName::Bool, vec![]),
                 None,
@@ -367,7 +371,7 @@ pub(super) fn build_hist_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: HistLoop,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
 ) {
     use super::super::graph_ops::{emit_storage_store, emit_view_load};
@@ -437,7 +441,7 @@ pub(super) fn build_hist_loop(
                     let active = guards[guard_offset];
                     guard_offset += 1;
                     graph.intern_pure(
-                        PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                        PureOp::BinOp(op::BinaryOperator::LogicalAnd),
                         smallvec![active, in_bounds],
                         Type::Constructed(TypeName::Bool, vec![]),
                         None,
@@ -521,7 +525,7 @@ fn emit_thread_lane(graph: &mut EGraph<Physical>) -> ValueId {
     emit_thread_coordinate(graph, catalog().known().thread_id)
 }
 
-fn emit_thread_coordinate(graph: &mut EGraph<Physical>, builtin: crate::builtins::BuiltinId) -> ValueId {
+fn emit_thread_coordinate(graph: &mut EGraph<Physical>, builtin: builtins::BuiltinId) -> ValueId {
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let thread = graph.intern_pure(
@@ -555,7 +559,7 @@ fn emit_dispatch_axis_extent(
     let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type.clone(), None);
     dimensions.iter().copied().fold(one, |product, dimension| {
         graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            PureOp::BinOp(op::BinaryOperator::Multiply),
             smallvec![product, dimension],
             i32_type.clone(),
             None,
@@ -581,7 +585,7 @@ fn emit_ranked_bucket_coordinates(
         let axis_dimensions = &dimensions[axis.start..axis.end];
         let axis_extent = emit_dispatch_axis_extent(graph, axis_dimensions, i32_type);
         let axis_in_range = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Less),
+            PureOp::BinOp(op::BinaryOperator::Less),
             smallvec![lane, axis_extent],
             bool_type.clone(),
             None,
@@ -589,7 +593,7 @@ fn emit_ranked_bucket_coordinates(
         in_range = Some(match in_range {
             None => axis_in_range,
             Some(previous) => graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+                PureOp::BinOp(op::BinaryOperator::LogicalAnd),
                 smallvec![previous, axis_in_range],
                 bool_type.clone(),
                 None,
@@ -615,7 +619,7 @@ fn emit_overflow_flag(
     graph: &mut EGraph<Physical>,
     block: BlockId,
     overflow: ViewId,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use crate::ssa::types::AtomicOp;
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -639,13 +643,13 @@ pub(super) fn build_bucket_init(
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use crate::ssa::types::AtomicOp;
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
     let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
@@ -654,7 +658,7 @@ pub(super) fn build_bucket_init(
     let lane = emit_thread_lane(graph);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![lane, operation.shape[0]],
         bool_type.clone(),
         None,
@@ -685,7 +689,7 @@ pub(super) fn build_bucket_init(
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let zero_i32 = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type, None);
     let first = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        PureOp::BinOp(op::BinaryOperator::Equal),
         smallvec![lane, zero_i32],
         bool_type,
         None,
@@ -733,14 +737,14 @@ pub(super) fn build_bucket_insert(
     spec: HistLoop,
     space: &SegSpace<BindingRef>,
     topology: Option<&hist::DispatchTopology>,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
 ) {
     use crate::ssa::types::AtomicOp;
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
     let hist::Update::BucketInsert {
@@ -781,7 +785,7 @@ pub(super) fn build_bucket_insert(
         let coordinates = emit_flat_domain_coordinates(graph, lane, &domain_dimensions, &i32_type);
         let length = emit_seg_space_len(graph, space, &spec.len_input, &i32_type);
         let in_range = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Less),
+            PureOp::BinOp(op::BinaryOperator::Less),
             smallvec![lane, length],
             bool_type.clone(),
             None,
@@ -791,13 +795,13 @@ pub(super) fn build_bucket_insert(
     if let Some((_, lane, _)) = grid_loop {
         let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_type.clone(), None);
         let did_not_wrap = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::GreaterEqual),
+            PureOp::BinOp(op::BinaryOperator::GreaterEqual),
             smallvec![lane, zero],
             bool_type.clone(),
             None,
         );
         in_range = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::LogicalAnd),
+            PureOp::BinOp(op::BinaryOperator::LogicalAnd),
             smallvec![did_not_wrap, in_range],
             bool_type.clone(),
             None,
@@ -823,7 +827,7 @@ pub(super) fn build_bucket_insert(
             None,
         );
         let next_lane = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![lane, stride_value],
             i32_type.clone(),
             None,
@@ -888,7 +892,7 @@ pub(super) fn build_bucket_insert(
     graph.skeleton.blocks[body].control_header = Some(ControlHeader::Selection { merge: work_done });
 
     let valid_key = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![*key, operation.shape[0]],
         bool_type.clone(),
         None,
@@ -936,7 +940,7 @@ pub(super) fn build_bucket_insert(
         None,
     );
     let has_capacity = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![slot, capacity],
         bool_type,
         None,
@@ -979,7 +983,7 @@ pub(super) fn build_bucket_finish(
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     graph.replace_node_preserving_type(
         result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
     graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
         target: after,

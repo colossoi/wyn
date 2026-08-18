@@ -3,6 +3,7 @@
 
 use super::vertex_format;
 use crate::ast::{Type, TypeName};
+use crate::types;
 use wyn_pipeline_descriptor::VertexFormat;
 
 fn scalar(tn: TypeName) -> Type {
@@ -94,7 +95,7 @@ fn vertex_format_rejects_aggregates() {
             scalar(TypeName::Float(32)),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     assert_eq!(vertex_format(&arr), None);

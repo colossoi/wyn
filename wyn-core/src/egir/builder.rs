@@ -3,6 +3,9 @@
 use crate::ast::{Span, TypeName};
 use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
+use crate::types;
+use crate::EntryId;
+use crate::IdSource;
 use crate::{FunctionId, ResourceId};
 use polytype::Type;
 use smallvec::SmallVec;
@@ -19,7 +22,7 @@ use super::types::{
 
 pub struct EntryBuilder<'a> {
     graph: EGraph,
-    id: crate::EntryId,
+    id: EntryId,
     current_block: BlockId,
     name: String,
     span: Span,
@@ -28,7 +31,7 @@ pub struct EntryBuilder<'a> {
     outputs: Vec<EntryOutput>,
     resource_declarations: Vec<SemanticResourceDecl>,
     semantic_ids: &'a mut SemanticOpIdSource,
-    effect_ids: &'a mut crate::IdSource<EffectToken>,
+    effect_ids: &'a mut IdSource<EffectToken>,
 }
 
 impl<'a> EntryBuilder<'a> {
@@ -37,7 +40,7 @@ impl<'a> EntryBuilder<'a> {
         local_size: (u32, u32, u32),
         identities: &mut super::program::ProgramIdentities,
         semantic_ids: &'a mut SemanticOpIdSource,
-        effect_ids: &'a mut crate::IdSource<EffectToken>,
+        effect_ids: &'a mut IdSource<EffectToken>,
     ) -> Self {
         let id = identities.alloc_entry(name.clone());
         let graph = EGraph::new();
@@ -107,7 +110,7 @@ impl<'a> EntryBuilder<'a> {
         &mut self.graph
     }
 
-    pub fn construction_parts_mut(&mut self) -> (&mut EGraph, &mut crate::IdSource<EffectToken>) {
+    pub fn construction_parts_mut(&mut self) -> (&mut EGraph, &mut IdSource<EffectToken>) {
         (&mut self.graph, self.effect_ids)
     }
 
@@ -190,7 +193,7 @@ impl<'a> EntryBuilder<'a> {
                 result_state: result_types
                     .iter()
                     .map(|_| screma::ResultState {
-                        ownership: crate::types::SoacOwnership::Fresh,
+                        ownership: types::SoacOwnership::Fresh,
                     })
                     .collect(),
                 state: screma::SemanticState::Serial,

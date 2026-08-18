@@ -3,11 +3,13 @@
 
 use super::lower::LowerCtx;
 use super::*;
+use crate::builtins;
+use crate::err_spirv;
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_builtin_call(
         &mut self,
-        id: crate::builtins::BuiltinId,
+        id: builtins::BuiltinId,
         builtin: &BuiltinLowering,
         dispatch_name: &str,
         value_refs: &[ValueRef],
@@ -237,7 +239,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let arr_var = self.constructor.declare_variable("_array_with_tmp", result_ty)?;
                         self.constructor.builder.store(arr_var, arr, None, [])?;
                         let elem_ty = self.constructor.get_array_element_type(result_ty).map_err(|_| {
-                            crate::err_spirv!(
+                            err_spirv!(
                                 "ArrayWith: element type not found for array type ID {}. \
                                  Unsized or view arrays may not support indexed writes.",
                                 result_ty

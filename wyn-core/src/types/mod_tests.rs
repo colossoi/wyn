@@ -1,4 +1,5 @@
 use super::*;
+use crate::diags;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -16,7 +17,7 @@ fn arrow(a: Type, b: Type) -> Type {
 fn raster_formats_as_a_spellable_source_type() {
     let raster = Type::Constructed(TypeName::Raster, vec![f32_ty()]);
     assert_eq!(format_type(&raster), "raster<f32>");
-    assert_eq!(crate::diags::format_type(&raster), "raster<f32>");
+    assert_eq!(diags::format_type(&raster), "raster<f32>");
 }
 
 fn hash_value<T: Hash>(value: &T) -> u64 {

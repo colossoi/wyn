@@ -11,7 +11,10 @@
 //! phase entry point. Having a single typed home for these declarations
 //! gives backends one source of truth for the entry interface.
 
+use crate::ast;
 use crate::ast::Span;
+use crate::pipeline_descriptor;
+use crate::types;
 use crate::types::Type;
 use crate::{pipeline_descriptor::Access as DescriptorAccess, BindingRef, ResourceAccess, SymbolId};
 
@@ -60,7 +63,7 @@ pub enum Attribute<V = ViewAttribute> {
     Texture {
         set: u32,
         binding: u32,
-        backing: Option<crate::BindingRef>,
+        backing: Option<BindingRef>,
         /// The render-target `resource` this samples, from `#[view(name,
         /// sampled)]` on a resource with no storage backing. Frame-graph
         /// identity: a fragment `#[target(name)]` write and this read share it.
@@ -82,9 +85,9 @@ pub enum Attribute<V = ViewAttribute> {
     StorageImage {
         set: u32,
         binding: u32,
-        format: crate::pipeline_descriptor::StorageImageFormat,
+        format: pipeline_descriptor::StorageImageFormat,
         access: StorageAccess,
-        size: crate::pipeline_descriptor::StorageTextureSize,
+        size: pipeline_descriptor::StorageTextureSize,
         /// The `resource` this storage view accesses, from `#[view(name,
         /// storage_read|storage_write)]`. Frame-graph identity shared with the
         /// resource's other views and any `#[target(name)]` write.
@@ -232,7 +235,7 @@ pub struct GraphicsStageGroup {
     /// The operation's stable ordinal within that root.
     pub operation: u32,
     /// The invocation selected by the source rasterization operation.
-    pub invocation: crate::pipeline_descriptor::GraphicsInvocation,
+    pub invocation: pipeline_descriptor::GraphicsInvocation,
 }
 
 pub trait AttrExt<V = ViewAttribute> {
@@ -356,7 +359,7 @@ pub enum EntryInputKind {
     Storage {
         exposure: BindingExposure,
         access: StorageAccess,
-        length: Option<crate::pipeline_descriptor::BufferLen>,
+        length: Option<pipeline_descriptor::BufferLen>,
     },
     Uniform {
         binding: BindingRef,
@@ -373,9 +376,9 @@ pub enum EntryInputKind {
     },
     StorageImage {
         binding: BindingRef,
-        format: crate::pipeline_descriptor::StorageImageFormat,
+        format: pipeline_descriptor::StorageImageFormat,
         access: StorageAccess,
-        size: crate::pipeline_descriptor::StorageTextureSize,
+        size: pipeline_descriptor::StorageTextureSize,
         resource: Option<String>,
     },
 }
@@ -426,7 +429,7 @@ impl<Ty> EntryInput<Ty> {
         }
     }
 
-    pub fn storage_length(&self) -> Option<&crate::pipeline_descriptor::BufferLen> {
+    pub fn storage_length(&self) -> Option<&pipeline_descriptor::BufferLen> {
         match &self.kind {
             EntryInputKind::Storage { length, .. } => length.as_ref(),
             _ => None,
@@ -478,9 +481,9 @@ impl<Ty> EntryInput<Ty> {
         &self,
     ) -> Option<(
         BindingRef,
-        crate::pipeline_descriptor::StorageImageFormat,
+        pipeline_descriptor::StorageImageFormat,
         StorageAccess,
-        crate::pipeline_descriptor::StorageTextureSize,
+        pipeline_descriptor::StorageTextureSize,
     )> {
         match self.kind {
             EntryInputKind::StorageImage {
@@ -516,7 +519,7 @@ pub enum EntryOutputKind {
     },
     Storage {
         exposure: BindingExposure,
-        length: Option<crate::pipeline_descriptor::BufferLen>,
+        length: Option<pipeline_descriptor::BufferLen>,
     },
 }
 
@@ -560,14 +563,14 @@ impl<Ty> EntryOutput<Ty> {
         }
     }
 
-    pub fn storage_length(&self) -> Option<&crate::pipeline_descriptor::BufferLen> {
+    pub fn storage_length(&self) -> Option<&pipeline_descriptor::BufferLen> {
         match &self.kind {
             EntryOutputKind::Storage { length, .. } => length.as_ref(),
             _ => None,
         }
     }
 
-    pub fn storage_length_mut(&mut self) -> Option<&mut Option<crate::pipeline_descriptor::BufferLen>> {
+    pub fn storage_length_mut(&mut self) -> Option<&mut Option<pipeline_descriptor::BufferLen>> {
         match &mut self.kind {
             EntryOutputKind::Storage { length, .. } => Some(length),
             _ => None,
@@ -615,8 +618,8 @@ pub struct EntryDecl {
     pub params: Vec<EntryParamDecl>,
     pub outputs: Vec<EntryOutputDecl<ResolvedAttribute>>,
     pub feedback: Vec<FeedbackPair>,
-    pub param_diets: Vec<crate::types::Diet>,
-    pub return_diet: crate::types::Diet,
+    pub param_diets: Vec<types::Diet>,
+    pub return_diet: types::Diet,
 }
 
 /// Auto-allocated storage-buffer binding(s) for a single compute-entry
@@ -781,8 +784,8 @@ pub enum ResourceUsage {
 /// `--feedback ENTRY:READ=WRITE` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeedbackPair {
-    pub read: crate::BindingRef,
-    pub write: crate::BindingRef,
+    pub read: BindingRef,
+    pub write: BindingRef,
 }
 
 /// The backing kind of a top-level `resource` declaration. Only 2D images are
@@ -801,18 +804,18 @@ pub enum ResourceKind {
 pub struct ResourceDecl {
     pub name: String,
     pub kind: ResourceKind,
-    pub format: crate::pipeline_descriptor::StorageImageFormat,
-    pub size: crate::pipeline_descriptor::StorageTextureSize,
+    pub format: pipeline_descriptor::StorageImageFormat,
+    pub size: pipeline_descriptor::StorageTextureSize,
     pub usages: Vec<ResourceUsage>,
     /// Explicit `layout = binding(set, binding)` pin for the current-frame
     /// binding, or `None` to let the compiler assign the slot.
-    pub layout: Option<crate::BindingRef>,
+    pub layout: Option<BindingRef>,
     /// Number of previous frames kept (double-buffering). `0` = no history;
     /// `1` = a `previous` view reads last frame (v1 supports 0 or 1). The
     /// previous-frame binding is always compiler-assigned; the descriptor's
     /// feedback pair, not a fixed slot number, is what the runtime consumes.
     pub history: u32,
-    pub span: crate::ast::Span,
+    pub span: ast::Span,
 }
 
 /// Role a storage buffer plays in a compute entry point's interface.
@@ -846,5 +849,5 @@ pub struct StorageBindingDecl {
     /// Sizing policy for a compiler-managed buffer whose length isn't a
     /// host-supplied input (e.g. a gather intermediate). `None` for ordinary
     /// inputs/outputs, which the runtime sizes from host data or dispatch.
-    pub length: Option<crate::pipeline_descriptor::BufferLen>,
+    pub length: Option<pipeline_descriptor::BufferLen>,
 }

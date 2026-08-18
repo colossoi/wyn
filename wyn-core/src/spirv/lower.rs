@@ -2,6 +2,9 @@
 //! the entry surface; everything else is internal.
 
 use super::*;
+use crate::builtins;
+use crate::op;
+use crate::ssa;
 
 /// Per-function SSA → SPIR-V lowering state. Fields are
 /// `pub(super)` so sibling-file `impl LowerCtx` blocks
@@ -28,11 +31,11 @@ pub(super) struct LowerCtx<'a, 'b> {
     /// Map from a `PlaceId` to the SPIR-V pointer word that addresses it.
     /// Populated by place-producing instructions (`OutputSlot`,
     /// `ViewIndex`, `Alloca`) and read by `Load` / `Store`.
-    pub(super) place_ptr_id: LookupMap<crate::ssa::types::PlaceId, spirv::Word>,
+    pub(super) place_ptr_id: LookupMap<ssa::types::PlaceId, spirv::Word>,
     /// Storage class of each place pointer. `PlaceIndex` must inherit this
     /// from its parent: view-rooted place chains address `StorageBuffer` (or
     /// `Workgroup`) memory, while local materializations use `Function`.
-    pub(super) place_storage_class: LookupMap<crate::ssa::types::PlaceId, spirv::StorageClass>,
+    pub(super) place_storage_class: LookupMap<ssa::types::PlaceId, spirv::StorageClass>,
     /// Span of the instruction currently being lowered (set by `lower_inst`).
     /// Consumed via `blame_span()` so backend errors blame the source line of
     /// the originating expression.
@@ -55,7 +58,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         is_entry_point: bool,
         func_span: Span,
         param_ids: Vec<spirv::Word>,
-        parameter_places: LookupMap<crate::ssa::types::PlaceId, (spirv::Word, spirv::StorageClass)>,
+        parameter_places: LookupMap<ssa::types::PlaceId, (spirv::Word, spirv::StorageClass)>,
         first_code_block: spirv::Word,
     ) -> Self {
         let mut place_ptr_id = LookupMap::new();
@@ -91,7 +94,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     /// SPIR-V pointer word for a `PlaceId` — set by the defining instruction
     /// (`OutputSlot`, `ViewIndex`, `Alloca`), consumed by `Load` / `Store`.
-    pub(super) fn place_ptr(&self, place: crate::ssa::types::PlaceId) -> Result<spirv::Word> {
+    pub(super) fn place_ptr(&self, place: ssa::types::PlaceId) -> Result<spirv::Word> {
         self.place_ptr_id.get(&place).copied().ok_or_else(|| {
             err_spirv_at!(
                 self.blame_span(),
@@ -247,10 +250,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         let spirv_result = match &inst.data {
             InstKind::Op { tag, operands } => match tag {
-                crate::op::OpTag::ResourceLen(_) => {
+                op::OpTag::ResourceLen(_) => {
                     panic!("logical resource length reached SPIR-V lowering")
                 }
-                crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
+                op::OpTag::Int(s) | op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
                         let val: u32 = s
                             .parse()
@@ -265,21 +268,21 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 },
 
-                crate::op::OpTag::Float(s) => {
+                op::OpTag::Float(s) => {
                     let val: f32 =
                         s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid f32: {}", s))?;
                     self.constructor.const_f32(val)
                 }
 
-                crate::op::OpTag::Bool(b) => self.constructor.const_bool(*b),
+                op::OpTag::Bool(b) => self.constructor.const_bool(*b),
 
-                crate::op::OpTag::Unit => {
+                op::OpTag::Unit => {
                     unreachable!(
                         "OpTag::Unit should never reach SPIR-V codegen; unit values are not materializable"
                     )
                 }
 
-                crate::op::OpTag::BinOp(op) => {
+                op::OpTag::BinOp(op) => {
                     let lhs = operands[0];
                     let rhs = operands[1];
                     let lhs_id = self.get_value_ref(lhs)?;
@@ -289,26 +292,26 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.lower_binop(op, lhs_id, rhs_id, &lhs_ty, &rhs_ty, result_ty)?
                 }
 
-                crate::op::OpTag::UnaryOp(op) => {
+                op::OpTag::UnaryOp(op) => {
                     let operand = operands[0];
                     let operand_id = self.get_value_ref(operand)?;
                     let operand_ty = self.get_value_type_ref(operand);
                     self.lower_unaryop(op, operand_id, &operand_ty, result_ty)?
                 }
 
-                crate::op::OpTag::Tuple(_) => {
+                op::OpTag::Tuple(_) => {
                     let elem_ids: Vec<_> =
                         operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                     self.constructor.composite_or_constant(result_ty, elem_ids)?
                 }
 
-                crate::op::OpTag::ArrayLit(_) => {
+                op::OpTag::ArrayLit(_) => {
                     let elem_ids: Vec<_> =
                         operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                     self.constructor.composite_or_constant(result_ty, elem_ids)?
                 }
 
-                crate::op::OpTag::ArrayRange { has_step } => {
+                op::OpTag::ArrayRange { has_step } => {
                     // Virtual array represented as {start, step, len} struct
                     // This matches the layout expected by lower_virtual_index
                     let start_id = self.get_value_ref(operands[0])?;
@@ -333,13 +336,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     )?
                 }
 
-                crate::op::OpTag::Vector(_) => {
+                op::OpTag::Vector(_) => {
                     let elem_ids: Vec<_> =
                         operands.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                     self.constructor.composite_or_constant(result_ty, elem_ids)?
                 }
 
-                crate::op::OpTag::Matrix { .. } => {
+                op::OpTag::Matrix { .. } => {
                     // Matrix is constructed as an array of vectors (columns)
                     // For now, flatten and construct
                     let all_elems: Vec<_> =
@@ -347,7 +350,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.composite_or_constant(result_ty, all_elems)?
                 }
 
-                crate::op::OpTag::Project { index } => {
+                op::OpTag::Project { index } => {
                     let base = operands[0];
                     let base_ty = self.get_value_type_ref(base);
                     let base_id = self.get_value_ref(base)?;
@@ -364,9 +367,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.builder.composite_extract(result_ty, None, composite_id, [*index])?
                 }
 
-                crate::op::OpTag::Index => self.lower_index(operands[0], operands[1], result_ty)?,
+                op::OpTag::Index => self.lower_index(operands[0], operands[1], result_ty)?,
 
-                crate::op::OpTag::Call(func) => {
+                op::OpTag::Call(func) => {
                     let args: Vec<ValueRef> = operands.clone();
                     let arg_ids: Vec<_> =
                         args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
@@ -384,7 +387,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::Global(id) => {
+                op::OpTag::Global(id) => {
                     let func_id =
                         self.constructor.globals.get(id).copied().ok_or_else(|| {
                             err_spirv_at!(self.blame_span(), "Unknown global id: {:?}", id)
@@ -392,11 +395,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.builder.function_call(result_ty, None, func_id, [])?
                 }
 
-                crate::op::OpTag::Intrinsic { id, overload_idx } => {
+                op::OpTag::Intrinsic { id, overload_idx } => {
                     let args: Vec<ValueRef> = operands.clone();
                     let arg_ids: Vec<_> =
                         args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
-                    let def = crate::builtins::by_id(*id);
+                    let def = builtins::by_id(*id);
                     let lowering = &def.overloads()[*overload_idx].lowering;
                     // Variants with a structural arm in `lower_builtin_call`
                     // dispatch via the BuiltinLowering value or the entry
@@ -445,13 +448,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::StorageImageLoad(binding) => {
+                op::OpTag::StorageImageLoad(binding) => {
                     let coord = self.get_value_ref(operands[0])?;
                     let image = self.constructor.load_storage_image(*binding)?;
                     self.constructor.builder.image_read(result_ty, None, image, coord, None, [])?
                 }
 
-                crate::op::OpTag::StorageImageStore(binding) => {
+                op::OpTag::StorageImageStore(binding) => {
                     let coord = self.get_value_ref(operands[0])?;
                     let texel = self.get_value_ref(operands[1])?;
                     let image = self.constructor.load_storage_image(*binding)?;
@@ -459,14 +462,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.constructor.const_i32(0)
                 }
 
-                crate::op::OpTag::StorageView(src) => {
+                op::OpTag::StorageView(src) => {
                     let offset = operands[0];
                     let len = operands[1];
                     let offset_id = self.get_value_ref(offset)?;
                     let len_id = self.get_value_ref(len)?;
 
                     match src {
-                        crate::op::PureViewSource::Storage(br) => {
+                        op::PureViewSource::Storage(br) => {
                             let (set, binding) = (&br.set, &br.binding);
                             // The descriptor rides in the result value's type
                             // (`Buffer(set, binding)`); consumers recover the
@@ -491,7 +494,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 )
                             }
                         }
-                        crate::op::PureViewSource::Inherited => {
+                        op::PureViewSource::Inherited => {
                             let parent =
                                 operands[2].as_ssa().expect("StorageView Inherited parent must be SSA");
                             let parent_id = self.get_value(parent)?;
@@ -513,7 +516,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 [new_offset, len_id],
                             )?
                         }
-                        crate::op::PureViewSource::Workgroup { id, .. } => {
+                        op::PureViewSource::Workgroup { id, .. } => {
                             // The workgroup var was created in entry setup.
                             // Record the view→id mapping so ViewIndex chains
                             // into it; the {offset, len} struct is built the
@@ -533,14 +536,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::StorageViewLen => {
+                op::OpTag::StorageViewLen => {
                     let view = operands[0];
                     let view_id = self.get_value_ref(view)?;
                     // Extract len from view struct (field 1 in {offset, len})
                     self.constructor.builder.composite_extract(result_ty, None, view_id, [1u32])?
                 }
 
-                crate::op::OpTag::Materialize => {
+                op::OpTag::Materialize => {
                     let value = operands[0];
                     let value_id = self.get_value_ref(value)?;
                     let value_ty = self.get_value_type_ref(value);
@@ -566,7 +569,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::DynamicExtract => {
+                op::OpTag::DynamicExtract => {
                     let base = operands[0];
                     let index = operands[1];
                     let base_var = self.get_value_ref(base)?;
@@ -832,7 +835,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_terminator(
         &mut self,
         _block_id: BlockId,
-        _block: &crate::ssa::framework::BasicBlock,
+        _block: &ssa::framework::BasicBlock,
         term: &Terminator,
     ) -> Result<()> {
         let current_block = self.current_block;

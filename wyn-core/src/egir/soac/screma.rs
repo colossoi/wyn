@@ -1,3 +1,4 @@
+use crate::BindingRef;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -533,7 +534,7 @@ pub enum ScheduledState<R> {
 #[derive(Clone, Debug)]
 pub enum PhysicalState {
     Serial,
-    Segmented(Segmented<crate::BindingRef>),
+    Segmented(Segmented<BindingRef>),
 }
 
 /// A Screma plus information owned by one EGIR phase.

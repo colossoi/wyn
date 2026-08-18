@@ -3,6 +3,9 @@
 
 use super::lower::LowerCtx;
 use super::*;
+use crate::op;
+use crate::ssa;
+use crate::types;
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
     /// Slice a storage view, materializing into a composite array.
@@ -169,7 +172,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 elem.clone(),
                                 PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
                                 base_ty.array_size().expect("Array has size").clone(),
-                                crate::types::no_buffer(),
+                                types::no_buffer(),
                             ],
                         );
                         self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)
@@ -208,12 +211,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             ValueRef::Const(ConstantValue::I32(i)) => Some(i as u32),
             ValueRef::Ssa(id) => {
                 let inst_id = match self.body.inner.values.get(id)?.def {
-                    crate::ssa::framework::ValueDef::Inst { inst } => inst,
+                    ssa::framework::ValueDef::Inst { inst } => inst,
                     _ => return None,
                 };
                 match &self.body.inner.insts.get(inst_id)?.data {
                     InstKind::Op {
-                        tag: crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s),
+                        tag: op::OpTag::Int(s) | op::OpTag::Uint(s),
                         ..
                     } => s.parse::<u32>().ok().or_else(|| s.parse::<i32>().ok().map(|i| i as u32)),
                     _ => None,
@@ -230,7 +233,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     /// is read here rather than tracked in a side-map.
     pub(super) fn view_buffer_var(&mut self, view_ssa: ValueId) -> Result<spirv::Word> {
         let ty = self.body.get_value_type(view_ssa).clone();
-        let br = crate::types::array_view_buffer(&ty).ok_or_else(|| {
+        let br = types::array_view_buffer(&ty).ok_or_else(|| {
             err_spirv_at!(
                 self.blame_span(),
                 "view value {:?} has no concrete buffer in its type: {:?}",

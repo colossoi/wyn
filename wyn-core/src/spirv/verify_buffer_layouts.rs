@@ -27,9 +27,12 @@
 
 use crate::ast::TypeName;
 use crate::error::{CompilerError, Result};
+use crate::interface;
 use crate::interface::{EntryInput, StorageBindingDecl};
+use crate::ssa;
 use crate::ssa::layout::type_byte_size;
 use crate::ssa::types::{EntryPoint, Program};
+use crate::types;
 use crate::BindingRef;
 use polytype::Type;
 
@@ -88,7 +91,7 @@ fn check_buffer_elem(
     // Mirror `create_storage_buffer`'s own derivation: try
     // `array_elem`, fall back to `array_ty` itself (the scalar/vec
     // outputs that get packed into a single-element runtime array).
-    let elem_ty = crate::types::array_elem(array_ty).unwrap_or(array_ty);
+    let elem_ty = types::array_elem(array_ty).unwrap_or(array_ty);
     if elem_is_layoutable(elem_ty) {
         return Ok(());
     }
@@ -131,7 +134,7 @@ fn elem_is_layoutable(elem_ty: &Type<TypeName>) -> bool {
         Type::Constructed(TN::Tuple(_), _) | Type::Constructed(TN::Record(_), _)
     );
     if is_struct {
-        crate::ssa::layout::block_layout(elem_ty, crate::interface::StorageLayout::Std430).is_some()
+        ssa::layout::block_layout(elem_ty, interface::StorageLayout::Std430).is_some()
     } else {
         type_byte_size(elem_ty).is_some()
     }

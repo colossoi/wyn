@@ -2,6 +2,10 @@
 //! `lower_ssa_body_for_entry` in `mod.rs`.
 
 use super::*;
+use crate::interface;
+use crate::op;
+use crate::ssa;
+use crate::types;
 
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
@@ -118,7 +122,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // uniform whose fields are the block's members.
     let mut uniform_loads: Vec<(
         ValueId,
-        Option<crate::ssa::types::PlaceId>,
+        Option<ssa::types::PlaceId>,
         spirv::Word,
         spirv::Word,
         Option<Vec<spirv::Word>>,
@@ -214,15 +218,14 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 _ => None,
             };
             let (block_struct, member_types) = if let Some(args) = record_fields {
-                let layout =
-                    crate::ssa::layout::block_layout(&input.ty, crate::interface::StorageLayout::Std140)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "uniform block `{}`: members must be 32-bit scalars or \
+                let layout = ssa::layout::block_layout(&input.ty, interface::StorageLayout::Std140)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "uniform block `{}`: members must be 32-bit scalars or \
                                  vectors of them (flat record), got {:?}",
-                                input.name, input.ty
-                            )
-                        });
+                            input.name, input.ty
+                        )
+                    });
                 let member_types: Vec<spirv::Word> =
                     args.iter().map(|a| constructor.polytype_to_spirv(a)).collect();
                 let member_poly_types: Vec<&PolyType<TypeName>> = args.iter().collect();
@@ -370,7 +373,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     if is_compute {
         for (_, inst) in body.inner.insts.iter() {
             let InstKind::Op {
-                tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Workgroup { id, count }),
+                tag: op::OpTag::StorageView(op::PureViewSource::Workgroup { id, count }),
                 ..
             } = &inst.data
             else {
@@ -387,7 +390,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // Workgroup-shared partial buffer: array-shaped for vector reduces
             // (`[]T` → elem is `T`), or scalar/vec/struct-shaped for single-
             // element reductions (the view itself IS the elem).
-            let elem_ty = match crate::types::array_elem(view_ty) {
+            let elem_ty = match types::array_elem(view_ty) {
                 Some(elem) => elem.clone(),
                 None => view_ty.clone(),
             };

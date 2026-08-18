@@ -3,8 +3,16 @@
 use super::kernel::cloneable_capture_inputs;
 use super::model::REDUCE_PHASE1_WIDTH;
 use super::*;
+use crate::ast;
+use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::types::{OperandRef, ResultBinding};
+use crate::interface;
+use crate::op;
+use crate::ssa;
+use crate::types;
+use crate::IdSource;
+use crate::ResourceAccess;
 
 #[derive(Clone, Copy)]
 pub(super) struct ScanScratch {
@@ -36,42 +44,42 @@ pub(super) struct ScanPhase2Spec<'a> {
 impl ScanPhase2Spec<'_> {
     pub(super) fn build(
         self,
-        identities: &mut crate::egir::program::ProgramIdentities,
-        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
-        effect_ids: &mut crate::IdSource<EffectToken>,
+        identities: &mut egir::program::ProgramIdentities,
+        semantic_ids: &mut egir::program::SemanticOpIdSource,
+        effect_ids: &mut IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
 
         let mut accesses = vec![
             SegResourceAccess::<ResourceId> {
                 resource: self.scratch.block_sums,
-                access: crate::ResourceAccess::Read,
+                access: ResourceAccess::Read,
             },
             SegResourceAccess::<ResourceId> {
                 resource: self.scratch.block_offsets,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             },
         ];
         if let Some(resource) = self.total_out {
             accesses.push(SegResourceAccess::<ResourceId> {
                 resource,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             });
         }
         if let Some(output) = &self.reduction_output {
             accesses.extend(output.stores.iter().map(|store| SegResourceAccess::<ResourceId> {
                 resource: store.output.0,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             }));
         }
 
         accesses.extend(
             self.capture_inputs.iter().map(|declaration| SegResourceAccess::<ResourceId> {
                 resource: declaration.resource.0,
-                access: crate::ResourceAccess::Read,
+                access: ResourceAccess::Read,
             }),
         );
-        accesses = crate::egir::ir::SegResourceAccess::merge(&accesses, &[]);
+        accesses = egir::ir::SegResourceAccess::merge(&accesses, &[]);
 
         let mut builder = EntryBuilder::new_compute(
             format!("{}_phase2_scan_sums", self.entry_name),
@@ -102,7 +110,7 @@ impl ScanPhase2Spec<'_> {
             builder.declare_output_storage_sized(
                 len_out,
                 self.elem_ty.clone(),
-                crate::egir::program::LogicalSize::FixedBytes(4),
+                egir::program::LogicalSize::FixedBytes(4),
             );
         }
         if let Some(output) = &self.reduction_output {
@@ -174,7 +182,7 @@ impl ScanPhase2Spec<'_> {
 
     fn emit_loop(
         &self,
-        builder: &mut crate::egir::builder::EntryBuilder,
+        builder: &mut egir::builder::EntryBuilder,
         neutral: ValueId,
         operator_captures: &[OperandRef],
     ) -> ExclusiveScanPhase2 {
@@ -182,8 +190,7 @@ impl ScanPhase2Spec<'_> {
         let want_total = self.total_out.is_some() || self.reduction_output.is_some();
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-        let arr_ty =
-            crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
+        let arr_ty = types::view_array_with_size(&elem_ty, Type::Variable(0), types::no_buffer());
         let entry_block = builder.graph_mut().skeleton.entry;
         let (graph, effect_ids) = builder.construction_parts_mut();
         let sums = graph_ops::intern_resource_view(graph, self.scratch.block_sums, arr_ty.clone(), None);
@@ -202,8 +209,7 @@ impl ScanPhase2Spec<'_> {
             target: header,
             args: graph.admit_flow_values([neutral, zero]),
         };
-        let condition =
-            graph_ops::intern_binop(graph, crate::op::BinaryOperator::Less, index, len, bool_ty, None);
+        let condition = graph_ops::intern_binop(graph, op::BinaryOperator::Less, index, len, bool_ty, None);
         graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
             cond: condition,
             then_target: body,
@@ -249,8 +255,7 @@ impl ScanPhase2Spec<'_> {
         };
         let continued_accumulator =
             graph.add_block_param(continuation, graph.nodes[accumulator].ty.clone());
-        let next_index =
-            graph_ops::intern_binop(graph, crate::op::BinaryOperator::Add, index, one, u32_ty, None);
+        let next_index = graph_ops::intern_binop(graph, op::BinaryOperator::Add, index, one, u32_ty, None);
         graph.skeleton.blocks[continuation].term = SkeletonTerminator::Branch {
             target: header,
             args: graph.admit_flow_values([continued_accumulator, next_index]),
@@ -278,7 +283,7 @@ pub(super) struct ScanPostOutput {
 pub(super) struct ScanPostPhaseSpec<'a> {
     pub pre: screma::Lambda,
     pub source_graph: &'a EGraph,
-    pub inputs: Vec<(ValueId, crate::egir::types::SoacInputType)>,
+    pub inputs: Vec<(ValueId, egir::types::SoacInputType)>,
     pub input_declarations: Vec<SemanticResourceDecl>,
     pub outputs: Vec<ScanPostOutput>,
 }
@@ -302,9 +307,9 @@ pub(super) struct ScanPhase3Spec<'a> {
 impl ScanPhase3Spec<'_> {
     pub(super) fn build(
         self,
-        identities: &mut crate::egir::program::ProgramIdentities,
-        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
-        effect_ids: &mut crate::IdSource<EffectToken>,
+        identities: &mut egir::program::ProgramIdentities,
+        semantic_ids: &mut egir::program::SemanticOpIdSource,
+        effect_ids: &mut IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
 
@@ -319,11 +324,11 @@ impl ScanPhase3Spec<'_> {
         let mut resources = vec![
             SegResourceAccess::<ResourceId> {
                 resource: self.output_resource,
-                access: crate::ResourceAccess::ReadWrite,
+                access: ResourceAccess::ReadWrite,
             },
             SegResourceAccess::<ResourceId> {
                 resource: self.block_offsets,
-                access: crate::ResourceAccess::Read,
+                access: ResourceAccess::Read,
             },
         ];
         resources = merge_scheduled_resources(&resources, &declared_input_resources(&input_declarations));
@@ -335,7 +340,7 @@ impl ScanPhase3Spec<'_> {
                     .iter()
                     .map(|output| SegResourceAccess::<ResourceId> {
                         resource: output.resource,
-                        access: crate::ResourceAccess::Write,
+                        access: ResourceAccess::Write,
                     })
                     .collect::<Vec<_>>(),
             );
@@ -374,8 +379,7 @@ impl ScanPhase3Spec<'_> {
             self.elem_ty.clone(),
             dispatch_worker_logical_size(&self.elem_ty),
         );
-        let arr_ty =
-            crate::types::view_array_with_size(&self.elem_ty, Type::Variable(0), crate::types::no_buffer());
+        let arr_ty = types::view_array_with_size(&self.elem_ty, Type::Variable(0), types::no_buffer());
         let block_offsets_view = builder.emit_storage_view(self.block_offsets, arr_ty.clone());
         let output_len = graph_ops::intern_resource_len(builder.graph_mut(), self.output_resource, None);
         let (tid, chunk_start, chunk_len) =
@@ -424,7 +428,7 @@ impl ScanPhase3Spec<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
             }
             let mut inputs = Vec::with_capacity(1 + post.inputs.len());
-            inputs.push((chunked_output, crate::egir::types::SoacInputType::array(arr_ty)));
+            inputs.push((chunked_output, egir::types::SoacInputType::array(arr_ty)));
             for (index, (source, input)) in post.inputs.into_iter().enumerate() {
                 let cloned =
                     graph_ops::clone_pure_subgraph(post.source_graph, builder.graph_mut(), source)?;
@@ -476,7 +480,7 @@ pub(super) struct ScanCandidate {
     reduction_routing: super::reduce::ReductionRouting,
     operator_capture_inputs: Vec<SemanticResourceDecl>,
     post: screma::Lambda,
-    input_views: Vec<(ValueId, crate::egir::types::SoacInputType)>,
+    input_views: Vec<(ValueId, egir::types::SoacInputType)>,
     results: Vec<ResultBinding<Type<TypeName>>>,
     outputs: Vec<ScanOutput>,
     direct_output: bool,
@@ -498,9 +502,9 @@ pub(super) struct BoundScan {
 }
 
 pub(super) fn analyze_scan_candidate(
-    entry: &crate::egir::program::PlannedEntry,
+    entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
-    resources: &crate::egir::program::LogicalResourceArena,
+    resources: &egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ScanCandidate>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
@@ -573,7 +577,7 @@ pub(super) fn analyze_scan_candidate(
         .flat_map(|operator| operator.result_types.iter().cloned())
         .collect::<Vec<_>>();
     let scratch_type = lambda_ops::result_type(&component_types);
-    if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
+    if ssa::layout::type_byte_size(&scratch_type).is_none() {
         return Ok(None);
     }
     let direct_output = reductions.is_empty()
@@ -652,7 +656,7 @@ impl BoundScan {
 impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_scan_entry(
         &mut self,
-        mut entry: crate::egir::program::PlannedEntry,
+        mut entry: egir::program::PlannedEntry,
         analysis: BoundScan,
     ) -> error::Result<[BuiltPhase; 3]> {
         let BoundScan {
@@ -878,7 +882,7 @@ impl KernelPlanBuilder<'_, '_> {
             output.resource.is_none_or(|resource| !moved_reduction_outputs.contains(&resource.0))
         });
         entry.resource_declarations.retain(|declaration| {
-            declaration.role != crate::interface::StorageRole::Output
+            declaration.role != interface::StorageRole::Output
                 || !moved_reduction_outputs.contains(&declaration.resource.0)
         });
         let mut phase1_resources = merge_scheduled_resources(
@@ -890,10 +894,10 @@ impl KernelPlanBuilder<'_, '_> {
                 return true;
             }
             match access.access {
-                crate::ResourceAccess::Read => true,
-                crate::ResourceAccess::Write => false,
-                crate::ResourceAccess::ReadWrite => {
-                    access.access = crate::ResourceAccess::Read;
+                ResourceAccess::Read => true,
+                ResourceAccess::Write => false,
+                ResourceAccess::ReadWrite => {
+                    access.access = ResourceAccess::Read;
                     true
                 }
             }
@@ -908,7 +912,7 @@ impl KernelPlanBuilder<'_, '_> {
         let chunked = chunk_soac_inputs(&mut entry.graph, &input_view_data, total_threads, "SegScan")?;
         let prefix_resource = scan_prefixes.unwrap_or(outputs[0].resource.0);
         let prefix_view_type = if scan_prefixes.is_some() {
-            crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer())
+            types::view_array_with_size(&elem_ty, Type::Variable(0), types::no_buffer())
         } else {
             outputs[0].view_type.clone()
         };
@@ -926,7 +930,7 @@ impl KernelPlanBuilder<'_, '_> {
             chunked_prefix,
         );
         let phase1_result_ty = Type::Constructed(TypeName::Tuple(1), vec![prefix_view_type]);
-        let phase1_result = crate::egir::types::ResultBinding::product(phase1_result_ty, [prefix_binding]);
+        let phase1_result = egir::types::ResultBinding::product(phase1_result_ty, [prefix_binding]);
         {
             let operands = chunked.views.iter().map(|value| entry.graph.operand_ref(*value)).collect();
             let effect = entry.graph.skeleton.effect_mut(site);
@@ -939,7 +943,7 @@ impl KernelPlanBuilder<'_, '_> {
             op.form.reductions.clear();
             op.form.post = screma::Lambda::identity(vec![elem_ty.clone()]);
             op.result_state = vec![screma::ResultState {
-                ownership: crate::types::SoacOwnership::Fresh,
+                ownership: types::SoacOwnership::Fresh,
             }];
             effect.result = Some(phase1_result);
         }
@@ -966,7 +970,7 @@ impl KernelPlanBuilder<'_, '_> {
                     post: screma::Lambda::identity(Vec::new()),
                 },
                 result_state: vec![screma::ResultState {
-                    ownership: crate::types::SoacOwnership::Fresh,
+                    ownership: types::SoacOwnership::Fresh,
                 }],
                 state: screma::SemanticState::Serial,
             }),
@@ -979,7 +983,7 @@ impl KernelPlanBuilder<'_, '_> {
         let block_sum = graph_ops::pack_result_values(&mut entry.graph, &block_sum_result)
             .expect("the block reduction result is returned by value");
         let scratch_array_type =
-            crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
+            types::view_array_with_size(&elem_ty, Type::Variable(0), types::no_buffer());
         let block_sums_view = graph_ops::intern_resource_view(
             &mut entry.graph,
             block_sums_resource,
@@ -1000,7 +1004,7 @@ impl KernelPlanBuilder<'_, '_> {
         for resource in [block_sums_resource, block_offsets_resource].into_iter().chain(scan_prefixes) {
             entry.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(resource),
-                role: crate::interface::StorageRole::Intermediate,
+                role: interface::StorageRole::Intermediate,
                 elem_ty: elem_ty.clone(),
                 size: self.resources[resource].size.clone(),
             });
@@ -1056,7 +1060,7 @@ impl KernelPlanBuilder<'_, '_> {
         let input_declarations = entry
             .resource_declarations
             .iter()
-            .filter(|declaration| declaration.role == crate::interface::StorageRole::Input)
+            .filter(|declaration| declaration.role == interface::StorageRole::Input)
             .cloned()
             .collect();
         let post_phase = post_lambda.map(|pre| ScanPostPhaseSpec {
@@ -1092,7 +1096,7 @@ impl KernelPlanBuilder<'_, '_> {
             &phase1_resources,
             &[SegResourceAccess::<ResourceId> {
                 resource: block_sums_resource,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             }],
         );
         if scan_prefixes.is_some() {
@@ -1100,7 +1104,7 @@ impl KernelPlanBuilder<'_, '_> {
                 &phase1_resources,
                 &[SegResourceAccess::<ResourceId> {
                     resource: prefix_resource,
-                    access: crate::ResourceAccess::Write,
+                    access: ResourceAccess::Write,
                 }],
             );
         }
@@ -1117,7 +1121,7 @@ fn synthesize_packed_operator_function(
     component_types: Vec<Type<TypeName>>,
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
-    span: crate::ast::Span,
+    span: ast::Span,
 ) -> Func {
     let mut parameter_types = vec![scratch_type.clone(), scratch_type.clone()];
     parameter_types.extend(capture_types);
@@ -1179,7 +1183,7 @@ fn synthesize_scan_input_function(
     capture_types: Vec<Type<TypeName>>,
     component_count: usize,
     result_type: Type<TypeName>,
-    span: crate::ast::Span,
+    span: ast::Span,
 ) -> Func {
     let mut parameter_types = pre.parameter_types.clone();
     parameter_types.extend(capture_types);
@@ -1219,7 +1223,7 @@ fn synthesize_scan_post_function(
     scan_component_count: usize,
     scratch_type: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
-    span: crate::ast::Span,
+    span: ast::Span,
 ) -> Func {
     let mut element_types = vec![scratch_type];
     element_types.extend(pre.parameter_types.iter().cloned());

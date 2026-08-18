@@ -1,5 +1,6 @@
 use crate::ast::{Type, TypeName, TypeScheme};
 use crate::type_checker::TypeVarGenerator;
+use crate::types;
 
 /// A scheme builder is a function that produces a fresh `TypeScheme` —
 /// fresh type variables drawn from the supplied generator. Schemes can't
@@ -378,7 +379,7 @@ pub fn direct_draw_from_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 fn draw_command_ty() -> Type {
-    crate::types::record(vec![
+    types::record(vec![
         ("vertex_count".to_string(), u32_ty()),
         ("instance_count".to_string(), u32_ty()),
         ("first_vertex".to_string(), u32_ty()),
@@ -392,7 +393,7 @@ pub fn indirect_draw_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 fn indexed_draw_command_ty() -> Type {
-    crate::types::record(vec![
+    types::record(vec![
         ("index_count".to_string(), u32_ty()),
         ("instance_count".to_string(), u32_ty()),
         ("first_index".to_string(), u32_ty()),
@@ -473,7 +474,7 @@ pub fn indexed_indirect_draws_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> Type
 }
 
 fn depth_test_ty() -> Type {
-    crate::types::sum(
+    types::sum(
         [
             "disabled",
             "never",
@@ -491,13 +492,13 @@ fn depth_test_ty() -> Type {
 }
 
 fn blend_mode_ty() -> Type {
-    crate::types::sum(
+    types::sum(
         ["replace", "source_over", "add"].into_iter().map(|name| (name.to_string(), vec![])).collect(),
     )
 }
 
 fn fragment_state_ty() -> Type {
-    crate::types::record(vec![
+    types::record(vec![
         ("depth_test".to_string(), depth_test_ty()),
         ("depth_write".to_string(), bool_ty()),
         ("blend".to_string(), blend_mode_ty()),
@@ -513,40 +514,40 @@ pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 fn raster_state_ty() -> Type {
-    let viewport = crate::types::record(vec![
+    let viewport = types::record(vec![
         ("origin".to_string(), vec_n(f32_ty(), 2)),
         ("extent".to_string(), vec_n(f32_ty(), 2)),
         ("depth".to_string(), vec_n(f32_ty(), 2)),
     ]);
-    let scissor = crate::types::record(vec![
+    let scissor = types::record(vec![
         ("origin".to_string(), vec_n(i32_ty(), 2)),
         ("extent".to_string(), vec_n(u32_ty(), 2)),
     ]);
-    crate::types::record(vec![
+    types::record(vec![
         (
             "viewport".to_string(),
-            crate::types::sum(vec![
+            types::sum(vec![
                 ("target".to_string(), vec![]),
                 ("custom".to_string(), vec![viewport]),
             ]),
         ),
         (
             "scissor".to_string(),
-            crate::types::sum(vec![
+            types::sum(vec![
                 ("target".to_string(), vec![]),
                 ("custom".to_string(), vec![scissor]),
             ]),
         ),
         (
             "front_face".to_string(),
-            crate::types::sum(vec![
+            types::sum(vec![
                 ("clockwise".to_string(), vec![]),
                 ("counter_clockwise".to_string(), vec![]),
             ]),
         ),
         (
             "cull".to_string(),
-            crate::types::sum(vec![
+            types::sum(vec![
                 ("none".to_string(), vec![]),
                 ("front".to_string(), vec![]),
                 ("back".to_string(), vec![]),
@@ -554,7 +555,7 @@ fn raster_state_ty() -> Type {
         ),
         (
             "fill".to_string(),
-            crate::types::sum(vec![
+            types::sum(vec![
                 ("fill".to_string(), vec![]),
                 ("line".to_string(), vec![]),
                 ("point".to_string(), vec![]),
@@ -623,7 +624,7 @@ pub fn shade_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(
         &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
-        crate::types::fragment_output(c),
+        types::fragment_output(c),
     );
     quantify(arrow_chain(&[target.clone(), raster, callback], target))
 }
@@ -637,7 +638,7 @@ pub fn shade_with_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(
         &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
-        crate::types::fragment_output(c),
+        types::fragment_output(c),
     );
     quantify(arrow_chain(
         &[fragment_state_ty(), target.clone(), raster, callback],

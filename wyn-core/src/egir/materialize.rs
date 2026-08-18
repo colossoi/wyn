@@ -20,6 +20,8 @@
 //! source never selected. Only genuinely in-register composites need the
 //! rewrite.
 
+use crate::interface;
+use crate::IdSource;
 use smallvec::smallvec;
 
 use polytype::Type;
@@ -35,7 +37,7 @@ pub type Materialized = super::program::Program<
     MaterializedTag,
     super::ir::ProgramFamily<
         super::types::Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
@@ -60,7 +62,7 @@ pub fn materialize_dynamic_extracts(program: super::partial_inline::PartiallyInl
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +
 /// DynamicExtract.
-fn run_one_body<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut crate::IdSource<EffectToken>) {
+fn run_one_body<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut IdSource<EffectToken>) {
     normalize_place_backed_stores(graph, effect_ids);
     let place_backed = graph
         .nodes
@@ -106,10 +108,7 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut crate::IdSour
     }
 }
 
-fn normalize_place_backed_stores<P: Family>(
-    graph: &mut EGraph<P>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
-) {
+fn normalize_place_backed_stores<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut IdSource<EffectToken>) {
     loop {
         let candidate = graph.skeleton.blocks.values().find_map(|contents| {
             contents.side_effects.iter().find_map(|effect| {

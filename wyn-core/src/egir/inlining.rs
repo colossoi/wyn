@@ -4,6 +4,8 @@
 //! call operands for function parameters, and replacing the call. It contains
 //! no profitability or placement policy; callers decide which calls to inline.
 
+use crate::ast;
+use crate::IdSource;
 use std::collections::VecDeque;
 
 use crate::{LookupMap, LookupSet};
@@ -24,7 +26,7 @@ mod inlining_tests;
 
 fn inlineable_return_binding<P: Family>(
     function: &Func<P, WynLanguage>,
-) -> Option<&ResultBinding<polytype::Type<crate::ast::TypeName>>> {
+) -> Option<&ResultBinding<polytype::Type<ast::TypeName>>> {
     if function.graph.skeleton.blocks.len() != 1
         || function.graph.skeleton.blocks.iter().any(|(_, block)| block.control_header.is_some())
     {
@@ -126,7 +128,7 @@ pub(crate) fn inline_effectful_call<P: Family>(
     caller: &mut EGraph<P>,
     effect: SideEffectSite,
     callee: &Func<P, WynLanguage>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<InlineCost, String> {
     let site = effect_call_site(caller, effect)
         .ok_or_else(|| format!("inline_effectful_call: {effect:?} is not an explicit call effect"))?;

@@ -32,8 +32,15 @@ use crate::ast::{Span, TypeName};
 use crate::binding_layout::{
     compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
 };
+use crate::builtins;
+use crate::egir;
+use crate::err_type_at;
+use crate::error;
+use crate::interface;
 use crate::interface::{EntryDecl, EntryParamBindingKind};
+use crate::types;
 use crate::types::{buffer_tag, TypeExt};
+use crate::IdSource;
 use crate::{BindingRef, LookupMap, SymbolId};
 use polytype::Type;
 
@@ -47,7 +54,7 @@ pub type BuffersPinned = super::Program<BuffersPinnedTag, Polymorphic, super::co
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPinned> {
+pub fn pin_entry_buffers(program: Transformed) -> error::Result<BuffersPinned> {
     let Program {
         defs,
         symbols,
@@ -59,7 +66,7 @@ pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPi
     let defs = defs
         .into_iter()
         .map(|def| pin_definition(def, &mut term_ids, &mut binding_ids))
-        .collect::<crate::error::Result<_>>()?;
+        .collect::<error::Result<_>>()?;
     Ok(Program::from_parts(
         defs,
         symbols,
@@ -74,8 +81,8 @@ pub fn pin_entry_buffers(program: Transformed) -> crate::error::Result<BuffersPi
 fn pin_definition(
     def: Def<super::run::UnpinnedPolymorphic>,
     term_ids: &mut TermIdSource,
-    binding_ids: &mut crate::IdSource<u32>,
-) -> crate::error::Result<Def<Polymorphic>> {
+    binding_ids: &mut IdSource<u32>,
+) -> error::Result<Def<Polymorphic>> {
     let Def {
         data,
         name,
@@ -96,7 +103,7 @@ fn pin_definition(
                 &params,
                 &param_diets,
                 &entry.declaration,
-                crate::egir::from_tlc::AUTO_STORAGE_SET,
+                egir::from_tlc::AUTO_STORAGE_SET,
                 binding_ids,
             );
             let mut subst = BufferSubst::new();
@@ -139,11 +146,11 @@ fn pin_definition(
 fn collect_buffer_subst(
     params: &[(SymbolId, Type<TypeName>)],
     entry: &EntryDecl,
-    layout: &[Option<crate::interface::EntryParamBinding>],
+    layout: &[Option<interface::EntryParamBinding>],
     subst: &mut BufferSubst,
     buffer_env: &mut LookupMap<SymbolId, Type<TypeName>>,
     span: Span,
-) -> crate::error::Result<()> {
+) -> error::Result<()> {
     for (i, (_sym, ty)) in params.iter().enumerate() {
         let ty = ty;
 
@@ -191,7 +198,7 @@ fn pin_resource_buffer(
     binding: BindingRef,
     subst: &mut BufferSubst,
     span: Span,
-) -> crate::error::Result<()> {
+) -> error::Result<()> {
     let buffer_slot = match view_ty {
         Type::Constructed(TypeName::StorageTexture, args) => args.first(),
         _ => view_ty.array_buffer(),
@@ -204,7 +211,7 @@ fn pin_resource_buffer(
                     Type::Constructed(TypeName::Buffer(b), _) => *b,
                     _ => unreachable!("region subst only holds Region tags"),
                 };
-                return Err(crate::err_type_at!(
+                return Err(err_type_at!(
                     span,
                     "this resource merges two distinct descriptor bindings — \
                      region(set={}, binding={}) and region(set={}, binding={}); \
@@ -227,7 +234,7 @@ fn collect_view_slice_buffer_subst(
     term: &Term<Empty, Empty>,
     subst: &mut BufferSubst,
     buffer_env: &LookupMap<SymbolId, Type<TypeName>>,
-) -> crate::error::Result<bool> {
+) -> error::Result<bool> {
     if let TermKind::Let {
         name,
         name_ty,
@@ -264,7 +271,7 @@ fn collect_view_slice_buffer_subst(
 
     if let Some(source_buffer) = view_buffer_for_term(term, subst, buffer_env) {
         let result_ty = apply_type_substitution(&term.ty, subst);
-        if result_ty.array_variant().map(crate::types::is_array_variant_view).unwrap_or(false) {
+        if result_ty.array_variant().map(types::is_array_variant_view).unwrap_or(false) {
             if let Some(Type::Variable(id)) = result_ty.array_buffer() {
                 if !subst.contains_key(id) {
                     subst.insert(*id, source_buffer);
@@ -293,7 +300,7 @@ fn view_buffer_for_term(
             let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
                 return None;
             };
-            if *id == crate::builtins::catalog().known().slice && args.len() == 3 {
+            if *id == builtins::catalog().known().slice && args.len() == 3 {
                 view_buffer_for_term(&args[0], subst, buffer_env)
             } else {
                 None

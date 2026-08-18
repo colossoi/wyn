@@ -1,13 +1,19 @@
 //! Shared chunk arithmetic, resource sizing, and callable construction.
 
 use super::*;
+use crate::ast;
+use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::types::OperandRef;
+use crate::interface;
+use crate::op;
+use crate::ssa;
+use crate::types;
 use crate::types::TypeExt;
 
 pub(super) fn apply_manifest_resource_sizes(
-    entry: &mut crate::egir::program::PlannedEntry,
-    resources: &crate::egir::program::LogicalResourceArena,
+    entry: &mut egir::program::PlannedEntry,
+    resources: &egir::program::LogicalResourceArena,
 ) {
     for declaration in &mut entry.resource_declarations {
         let resource = declaration.resource.0;
@@ -20,7 +26,7 @@ pub(super) fn apply_manifest_resource_sizes(
 /// into a synthesized phase. Non-cloneable captures and captures of writable
 /// resources keep the operation on the serial fallback.
 pub(super) fn cloneable_capture_inputs(
-    entry: &crate::egir::program::PlannedEntry,
+    entry: &egir::program::PlannedEntry,
     captures: &[OperandRef],
 ) -> Option<Vec<SemanticResourceDecl>> {
     let values = captures.iter().map(|capture| capture.value()).collect::<Option<Vec<_>>>()?;
@@ -35,7 +41,7 @@ pub(super) fn cloneable_capture_inputs(
                 .iter()
                 .find(|declaration| {
                     declaration.resource == access.resource
-                        && declaration.role == crate::interface::StorageRole::Input
+                        && declaration.role == interface::StorageRole::Input
                 })
                 .cloned()
         })
@@ -49,7 +55,7 @@ pub(super) fn cloneable_capture_inputs(
 /// it's the Range's own `len` operand. Returns
 /// `(tid, chunk_start, chunk_len)`.
 pub(super) fn emit_chunk_arithmetic(
-    graph: &mut crate::egir::types::EGraph,
+    graph: &mut egir::types::EGraph,
     total_threads: u32,
     input_len: ValueId,
 ) -> Result<(ValueId, ValueId, ValueId), String> {
@@ -96,7 +102,7 @@ pub(super) fn emit_chunk_arithmetic(
     let wg_width = intern_index_lit(graph, total_threads, &index_ty);
     let total = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Multiply,
+        op::BinaryOperator::Multiply,
         nwg_idx,
         wg_width,
         index_ty.clone(),
@@ -105,7 +111,7 @@ pub(super) fn emit_chunk_arithmetic(
     let one = intern_index_lit(graph, 1, &index_ty);
     let total_minus_one = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Subtract,
+        op::BinaryOperator::Subtract,
         total,
         one,
         index_ty.clone(),
@@ -113,7 +119,7 @@ pub(super) fn emit_chunk_arithmetic(
     );
     let len_plus = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Add,
+        op::BinaryOperator::Add,
         input_len,
         total_minus_one,
         index_ty.clone(),
@@ -121,7 +127,7 @@ pub(super) fn emit_chunk_arithmetic(
     );
     let chunk_size = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Divide,
+        op::BinaryOperator::Divide,
         len_plus,
         total,
         index_ty.clone(),
@@ -129,7 +135,7 @@ pub(super) fn emit_chunk_arithmetic(
     );
     let raw_chunk_start = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Multiply,
+        op::BinaryOperator::Multiply,
         tid_idx,
         chunk_size,
         index_ty.clone(),
@@ -150,7 +156,7 @@ pub(super) fn emit_chunk_arithmetic(
     );
     let remaining = graph_ops::intern_binop(
         graph,
-        crate::op::BinaryOperator::Subtract,
+        op::BinaryOperator::Subtract,
         input_len,
         chunk_start,
         index_ty.clone(),
@@ -163,10 +169,10 @@ pub(super) fn emit_chunk_arithmetic(
 
 /// Integer literal `n` typed as `index_ty` (`u32` → `PureOp::Uint`, else
 /// `PureOp::Int`).
-fn intern_index_lit(graph: &mut crate::egir::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> ValueId {
+fn intern_index_lit(graph: &mut egir::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> ValueId {
     let op = match index_ty {
-        Type::Constructed(TypeName::UInt(32), _) => crate::egir::types::PureOp::Uint(n.to_string()),
-        _ => crate::egir::types::PureOp::Int(n.to_string()),
+        Type::Constructed(TypeName::UInt(32), _) => egir::types::PureOp::Uint(n.to_string()),
+        _ => egir::types::PureOp::Int(n.to_string()),
     };
     graph.intern_pure(op, smallvec![], index_ty.clone(), None)
 }
@@ -174,7 +180,7 @@ fn intern_index_lit(graph: &mut crate::egir::types::EGraph, n: u32, index_ty: &T
 /// Cast a u32 value into `index_ty`: identity for u32, else the per-type
 /// bitcast intrinsic (`i32.u32`).
 fn cast_u32_to_index(
-    graph: &mut crate::egir::types::EGraph,
+    graph: &mut egir::types::EGraph,
     v: ValueId,
     index_ty: &Type<TypeName>,
 ) -> Result<ValueId, String> {
@@ -196,11 +202,10 @@ fn cast_u32_to_index(
     }
 }
 
-pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> crate::egir::program::LogicalSize {
-    crate::ssa::layout::type_byte_size(elem_ty)
-        .map_or(crate::egir::program::LogicalSize::Unspecified, |bytes| {
-            crate::egir::program::LogicalSize::SameAsDispatch { elem_bytes: bytes }
-        })
+pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> egir::program::LogicalSize {
+    ssa::layout::type_byte_size(elem_ty).map_or(egir::program::LogicalSize::Unspecified, |bytes| {
+        egir::program::LogicalSize::SameAsDispatch { elem_bytes: bytes }
+    })
 }
 
 /// Build a two-argument (`a`, `b`) helper function of type `T -> T -> T` named
@@ -209,7 +214,7 @@ fn synthesize_binary_fn(
     region: FunctionId,
     name: String,
     elem_ty: Type<TypeName>,
-    span: crate::ast::Span,
+    span: ast::Span,
     body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
 ) -> Func {
     let params = lambda_ops::named_parameters(&[elem_ty.clone(), elem_ty.clone()], "arg");
@@ -239,7 +244,7 @@ pub(super) fn synthesize_swap_wrapper(
     inner: &Func<Semantic>,
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
-    span: crate::ast::Span,
+    span: ast::Span,
 ) -> Func {
     let mut parameter_types = vec![elem_ty.clone(), elem_ty.clone()];
     parameter_types.extend(capture_types);
@@ -275,16 +280,12 @@ pub(super) fn synthesize_swap_wrapper(
     )
 }
 
-pub(super) fn synthesize_u32_add_function(
-    region: FunctionId,
-    name: String,
-    span: crate::ast::Span,
-) -> Func {
+pub(super) fn synthesize_u32_add_function(region: FunctionId, name: String, span: ast::Span) -> Func {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {
         graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![a_nid, b_nid],
             result_ty,
             None,
@@ -312,13 +313,13 @@ impl ChunkableView {
             return Some(Self::Storage(resource));
         }
         if let ValueKind::Pure {
-            op: PureOp::StorageView(crate::op::PureViewSource::Inherited),
+            op: PureOp::StorageView(op::PureViewSource::Inherited),
             operands,
         } = &graph.nodes[view].kind
         {
             let is_flat_storage_slice = operands.len() == 3
                 && graph_ops::extract_storage_view_source(graph, operands[2]).is_some()
-                && graph.nodes[view].ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+                && graph.nodes[view].ty.array_variant().is_some_and(types::is_array_variant_view)
                 && graph.nodes[operands[0]].ty == graph.nodes[operands[1]].ty
                 && matches!(
                     &graph.nodes[operands[0]].ty,
@@ -385,7 +386,7 @@ impl ChunkableView {
                 let start_delta = if let Some(step) = step {
                     graph_ops::intern_binop(
                         graph,
-                        crate::op::BinaryOperator::Multiply,
+                        op::BinaryOperator::Multiply,
                         chunk_start,
                         step,
                         start_ty.clone(),
@@ -396,7 +397,7 @@ impl ChunkableView {
                 };
                 let new_start = graph_ops::intern_binop(
                     graph,
-                    crate::op::BinaryOperator::Add,
+                    op::BinaryOperator::Add,
                     start,
                     start_delta,
                     start_ty,

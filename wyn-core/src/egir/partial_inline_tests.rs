@@ -1,4 +1,9 @@
 use super::*;
+use crate::op;
+use crate::types;
+use crate::BindingRef;
+use crate::FunctionId;
+use crate::IdSource;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{
@@ -25,31 +30,31 @@ fn fixed_u32_array_ty(size: usize) -> Type<TypeName> {
             u32_ty(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(size), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
 
 fn physical_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<crate::BindingRef, Type<TypeName>>> {
+) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
     specs
         .into_iter()
-        .map(|(name, ty)| callable_parameter::<crate::BindingRef, WynLanguage>(name.into(), ty))
+        .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
         .collect()
 }
 
 fn inline_test_body(
     graph: &mut EGraph<Physical>,
-    callees: &LookupMap<crate::FunctionId, Func<Physical>>,
+    callees: &LookupMap<FunctionId, Func<Physical>>,
 ) -> Result<InliningStats, String> {
-    inline_body(graph, callees, &mut crate::IdSource::new())
+    inline_body(graph, callees, &mut IdSource::new())
 }
 
 fn add_value_call(
     graph: &mut EGraph<Physical>,
-    callee: crate::FunctionId,
-    params: &[FuncParam<crate::BindingRef, Type<TypeName>>],
+    callee: FunctionId,
+    params: &[FuncParam<BindingRef, Type<TypeName>>],
     result_ty: Type<TypeName>,
     arguments: impl IntoIterator<Item = ValueId>,
 ) -> ValueId {
@@ -73,18 +78,18 @@ fn add_value_call(
 
 fn mixed_callee() -> Func<Physical> {
     let ty = u32_ty();
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_test_value_parameter(0, ty.clone());
     let invariant = graph.add_test_value_parameter(1, ty.clone());
     let invariant_square = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
         ty.clone(),
         None,
     );
     let result = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![varying, invariant_square],
         ty.clone(),
         None,
@@ -106,12 +111,12 @@ fn mixed_callee() -> Func<Physical> {
 
 fn mixed_callee_without_invariant_subexpression() -> Func<Physical> {
     let ty = u32_ty();
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut graph = EGraph::<Physical>::new();
     let varying = graph.add_test_value_parameter(0, ty.clone());
     let invariant = graph.add_test_value_parameter(1, ty.clone());
     let result = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![varying, invariant],
         ty.clone(),
         None,
@@ -173,7 +178,7 @@ fn loop_caller(shape: CallArgs) -> (EGraph<Physical>, ValueId, ValueId) {
     let params = physical_params([("varying", ty.clone()), ("invariant", ty.clone())]);
     let call = add_value_call(
         &mut graph,
-        crate::FunctionId::from_index(0),
+        FunctionId::from_index(0),
         &params,
         ty.clone(),
         operands,
@@ -206,7 +211,7 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
     assert!(graph.nodes.values().any(|node| matches!(
         &node.kind,
         ValueKind::Pure {
-            op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            op: PureOp::BinOp(op::BinaryOperator::Multiply),
             operands
         } if operands.as_slice() == [invariant, invariant]
     )));
@@ -241,7 +246,7 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
 fn inlines_fixed_array_parameters_outside_loops() {
     let scalar = u32_ty();
     let array = fixed_u32_array_ty(4);
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Physical>::new();
     let values = callee_graph.add_test_value_parameter(0, array.clone());
     let zero = callee_graph.intern_constant(ConstantValue::I32(0), i32_ty());
@@ -279,7 +284,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let index_ty = i32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let array = fixed_u32_array_ty(4);
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Physical>::new();
     let index = callee_graph.add_test_value_parameter(0, index_ty.clone());
     let values = callee_graph.add_test_value_parameter(1, array.clone());
@@ -297,7 +302,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let merge = callee_graph.skeleton.create_block();
     let zero = callee_graph.intern_constant(ConstantValue::I32(0), index_ty.clone());
     let condition = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        PureOp::BinOp(op::BinaryOperator::Equal),
         smallvec![index, zero],
         bool_ty,
         None,
@@ -317,7 +322,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     };
     let one = callee_graph.intern_constant(ConstantValue::U32(1), scalar.clone());
     let incremented = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![element, one],
         scalar.clone(),
         None,

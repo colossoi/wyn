@@ -7,6 +7,8 @@
 //! one aggregate capture. Existing scalar residency decides whether that
 //! capture is profitable and legal to materialize in a singleton prepass.
 
+use crate::ssa;
+use crate::types;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -330,8 +332,8 @@ fn is_liftable(
     dependence.is_stage_invariant()
         && !dependence.is_compile_time_constant()
         && dependence.loop_dependencies().is_empty()
-        && !crate::types::TypeExt::is_array(ty)
-        && crate::ssa::layout::storage_elem_stride(ty).is_some()
+        && !types::TypeExt::is_array(ty)
+        && ssa::layout::storage_elem_stride(ty).is_some()
         && cloneable_from_captures(graph, node, leading_parameters, &mut LookupSet::new())
 }
 

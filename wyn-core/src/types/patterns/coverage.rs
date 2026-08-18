@@ -20,6 +20,7 @@
 //!     matrix of arms 1..i? If not, arm i is dead.
 
 use crate::ast::{self, PatternKind, PatternLiteral, Span};
+use crate::types;
 use crate::types::{Type, TypeName};
 use crate::LookupSet;
 
@@ -72,7 +73,7 @@ pub enum Universe {
 impl Universe {
     /// Build a Universe from a (post-substitution) type.
     pub fn of(ty: &Type) -> Universe {
-        if let Some(variants) = crate::types::sum_variants(ty) {
+        if let Some(variants) = types::sum_variants(ty) {
             return Universe::Sum(variants);
         }
         match ty {
@@ -503,7 +504,7 @@ fn useful_wildcard(matrix: &[Vec<CovPat>], rest: &[CovPat], col_tys: &[Type]) ->
 }
 
 fn column_tys_for_ctor(name: &str, head_ty: &Type, rest: &[Type]) -> Vec<Type> {
-    if let Some(variants) = crate::types::sum_variants(head_ty) {
+    if let Some(variants) = types::sum_variants(head_ty) {
         if let Some((_, payload)) = variants.iter().find(|(n, _)| n == name) {
             let mut out = payload.clone();
             out.extend(rest.iter().cloned());

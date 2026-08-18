@@ -1,17 +1,23 @@
 use super::*;
+use crate::compile_thru_tlc;
+use crate::egir;
 use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+use crate::lower_egir_to_ssa;
+use crate::tlc;
+use crate::to_egraph;
+use crate::LoweringProfile;
 
-fn reified(source: &str) -> crate::egir::reify::Segmented {
-    let program = crate::compile_thru_tlc(source).expect("compile through TLC");
-    let program = crate::tlc::infer_input_slice_bounds(program);
-    let program = crate::to_egraph(program).expect("convert to raw EGIR");
-    let program = crate::egir::realize_outputs(program).expect("realize EGIR outputs");
-    crate::egir::reify_soacs(program)
+fn reified(source: &str) -> egir::reify::Segmented {
+    let program = compile_thru_tlc(source).expect("compile through TLC");
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program).expect("convert to raw EGIR");
+    let program = egir::realize_outputs(program).expect("realize EGIR outputs");
+    egir::reify_soacs(program)
 }
 
-fn force_horizontal_then_vertical(source: &str) -> crate::egir::ResourcesAllocated {
+fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
     let program = reified(source);
-    let dependencies = crate::egir::semantic_graph::dependencies(&program);
+    let dependencies = egir::semantic_graph::dependencies(&program);
     let oracle = SemanticGraph::new(&dependencies);
     let horizontal = horizontal::analyze(&program, &oracle)
         .expect("the sibling collective and array producer should fuse horizontally");
@@ -31,20 +37,20 @@ fn force_horizontal_then_vertical(source: &str) -> crate::egir::ResourcesAllocat
     assert_eq!(producer.form.reduction_result_count(), 1);
     assert_eq!(producer.form.post.result_types.len(), 1);
 
-    let dependencies = crate::egir::semantic_graph::dependencies(&program);
+    let dependencies = egir::semantic_graph::dependencies(&program);
     let oracle = SemanticGraph::new(&dependencies);
     let vertical = vertical::analyze(&program, &oracle).unwrap_or_else(|| {
             panic!(
                 "the reduction-bearing producer should fuse into its map consumer:\n{}\ndependencies: {dependencies:#?}",
-                crate::egir::semantic_graph::summary(&program)
+                egir::semantic_graph::summary(&program)
             )
         });
     let program = vertical::apply(program, vertical);
-    let optimized = crate::egir::optimize_semantics(program);
-    crate::egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
+    let optimized = egir::optimize_semantics(program);
+    egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
 }
 
-fn assert_screma_and_lower(allocated: crate::egir::ResourcesAllocated, scans: usize) {
+fn assert_screma_and_lower(allocated: egir::ResourcesAllocated, scans: usize) {
     let scremas = allocated
         .entry_points
         .iter()
@@ -62,9 +68,9 @@ fn assert_screma_and_lower(allocated: crate::egir::ResourcesAllocated, scans: us
     assert_eq!(scremas[0].form.post.result_types.len(), 1);
     assert!(scremas[0].validate().is_ok());
 
-    let planned = crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE)
-        .expect("plan the vertically normalized Screma");
-    crate::lower_egir_to_ssa(planned).expect("lower the vertically normalized Screma");
+    let planned =
+        egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan the vertically normalized Screma");
+    lower_egir_to_ssa(planned).expect("lower the vertically normalized Screma");
 }
 
 #[test]
@@ -85,7 +91,7 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
     );
     let mut fused = program;
     loop {
-        let dependencies = crate::egir::semantic_graph::dependencies(&fused);
+        let dependencies = egir::semantic_graph::dependencies(&fused);
         let oracle = SemanticGraph::new(&dependencies);
         let (next, changed) = rewrite_once(fused, &oracle);
         fused = next;
@@ -109,7 +115,7 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
         scremas.len(),
         1,
         "independent collective work crosses the scan barrier:\n{}",
-        crate::egir::semantic_graph::summary(&fused)
+        egir::semantic_graph::summary(&fused)
     );
     assert_eq!(scremas[0].form.scan_count(), 1);
     assert_eq!(scremas[0].form.reduction_count(), 1);
@@ -120,12 +126,12 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
         "conditional result projection synthesizes an explicit CFG helper"
     );
 
-    let optimized: crate::egir::Optimized = fused.retag();
-    let allocated = crate::egir::plan_logical_resources(optimized)
-        .expect("allocate the cross-barrier conditional Screma");
-    let planned = crate::egir::plan(allocated, crate::LoweringProfile::PORTABLE)
+    let optimized: egir::Optimized = fused.retag();
+    let allocated =
+        egir::plan_logical_resources(optimized).expect("allocate the cross-barrier conditional Screma");
+    let planned = egir::plan(allocated, LoweringProfile::PORTABLE)
         .expect("plan the cross-barrier conditional Screma");
-    crate::lower_egir_to_ssa(planned).expect("lower the cross-barrier conditional Screma");
+    lower_egir_to_ssa(planned).expect("lower the cross-barrier conditional Screma");
 }
 #[test]
 fn vertical_normalization_accepts_a_reduction_bearing_producer() {

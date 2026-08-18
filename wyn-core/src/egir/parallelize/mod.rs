@@ -35,7 +35,7 @@ pub type Planned = super::program::Program<
     PlannedTag,
     super::ir::ProgramFamily<
         super::types::Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
@@ -54,6 +54,11 @@ mod reduce;
 mod scan;
 mod schedule;
 
+use crate::egir;
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::IdArena;
+use crate::IdSource;
 use filter::analyze_filter_candidate;
 use kernel::{
     apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
@@ -143,7 +148,7 @@ impl BuiltPhase {
         self,
         dispatch: schedule::KernelDispatch,
         owner: SemanticOpId,
-        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
+        operations: Vec<egir::soac::hist::AtomicUpdate>,
     ) -> schedule::PhaseSpec {
         schedule::PhaseSpec::hist(self.body, dispatch, owner, operations).with_resources(self.resources)
     }
@@ -152,8 +157,8 @@ impl BuiltPhase {
         self,
         dispatch: schedule::KernelDispatch,
         owner: SemanticOpId,
-        stage: crate::egir::soac::hist::ParallelStage,
-        topology: Option<crate::egir::soac::hist::DispatchTopology>,
+        stage: egir::soac::hist::ParallelStage,
+        topology: Option<egir::soac::hist::DispatchTopology>,
     ) -> schedule::PhaseSpec {
         schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage, topology)
             .with_resources(self.resources)
@@ -277,7 +282,7 @@ struct KernelPlanBuilder<'resources, 'effects> {
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
-    effect_ids: &'effects mut crate::IdSource<EffectToken>,
+    effect_ids: &'effects mut IdSource<EffectToken>,
     generated_callables: Vec<Func<Semantic>>,
     callables: LookupMap<FunctionId, Func<Semantic>>,
     entry_ids: Vec<EntryId>,
@@ -383,14 +388,14 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
     fn new(
         resources: &'resources LogicalResourceArena,
-        descriptor: &crate::pipeline_descriptor::PipelineDescriptor,
-        stage_entries: &[Vec<crate::EntryId>],
+        descriptor: &pipeline_descriptor::PipelineDescriptor,
+        stage_entries: &[Vec<EntryId>],
         entries: &[Entry<Semantic>],
         functions: &[Func<Semantic>],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
-        effect_ids: &'effects mut crate::IdSource<EffectToken>,
+        effect_ids: &'effects mut IdSource<EffectToken>,
         identities: super::program::ProgramIdentities,
     ) -> error::Result<Self> {
         let flows = model::ResourceFlowIndex::new(flows);
@@ -419,7 +424,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
     fn build_parallel_schedule(
         mut self,
-        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
     ) -> error::Result<Self> {
         self.attach_materializations(materializations)?;
         self.schedule_entries()?;
@@ -429,7 +434,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
 
     fn build_serial_schedule(
         mut self,
-        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
     ) -> error::Result<Self> {
         self.attach_materializations(materializations)?;
         self.schedule.make_serial()?;
@@ -449,7 +454,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     /// immediately lower the recipe owned by each new physical kernel.
     fn attach_materializations(
         &mut self,
-        materializations: &crate::IdArena<MaterializationId, MaterializationRequirement>,
+        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
     ) -> error::Result<()> {
         let mut ready = std::collections::BTreeSet::new();
         for (_, flow) in self.flows.flows() {
@@ -620,7 +625,7 @@ fn merge_scheduled_resources(
     left: &[SegResourceAccess<ResourceId>],
     right: &[SegResourceAccess<ResourceId>],
 ) -> Vec<SegResourceAccess<ResourceId>> {
-    crate::egir::ir::SegResourceAccess::merge(left, right)
+    egir::ir::SegResourceAccess::merge(left, right)
 }
 
 fn segmented_resources(
@@ -654,7 +659,7 @@ fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceA
 fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceAccess<ResourceId>> {
     declarations
         .iter()
-        .filter(|declaration| declaration.role == crate::interface::StorageRole::Input)
+        .filter(|declaration| declaration.role == interface::StorageRole::Input)
         .map(|declaration| SegResourceAccess::<ResourceId> {
             resource: declaration.resource.0,
             access: ResourceAccess::Read,

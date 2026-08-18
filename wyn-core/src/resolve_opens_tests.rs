@@ -6,19 +6,24 @@
 
 use super::*;
 use crate::ast::{self, Declaration, ExprKind, Expression};
+use crate::elaborate_modules;
+use crate::module_manager;
+use crate::name_resolution;
+use crate::parser;
+use crate::resolve_imports;
+use crate::resolve_resources;
 
-fn parse(src: &str) -> crate::resolve_resources::ResourcesResolved {
-    let program = crate::parser::parse(
+fn parse(src: &str) -> resolve_resources::ResourcesResolved {
+    let program = parser::parse(
         src,
         ast::NodeCounter::new(),
-        crate::module_manager::ModuleManager::new_empty(),
+        module_manager::ModuleManager::new_empty(),
     )
     .expect("parse");
-    let program =
-        crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).expect("imports");
-    let program = crate::elaborate_modules::elaborate_modules(program).expect("modules");
-    let program = crate::name_resolution::resolve_names(program);
-    crate::resolve_resources::resolve_resources(program).expect("resources")
+    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).expect("imports");
+    let program = elaborate_modules::elaborate_modules(program).expect("modules");
+    let program = name_resolution::resolve_names(program);
+    resolve_resources::resolve_resources(program).expect("resources")
 }
 
 fn make_index(pairs: &[(&str, &str)]) -> OpenIndex {
@@ -30,7 +35,7 @@ fn make_index(pairs: &[(&str, &str)]) -> OpenIndex {
 }
 
 /// Pull the body expression of the first `def`/`let` declaration.
-fn first_decl_body(prog: &crate::resolve_resources::ResourcesResolved) -> &Expression {
+fn first_decl_body(prog: &resolve_resources::ResourcesResolved) -> &Expression {
     for d in &prog.declarations {
         if let Declaration::Decl(d) = d {
             return &d.body;
@@ -44,7 +49,7 @@ fn first_decl_body(prog: &crate::resolve_resources::ResourcesResolved) -> &Expre
 /// depending on application/argument structure.
 fn find_ident<'a>(expr: &'a Expression, target: &str) -> &'a Expression {
     fn walk<'a>(e: &'a Expression, target: &str) -> Option<&'a Expression> {
-        if let ExprKind::Identifier(crate::ast::Identifier { name, .. }) = &e.kind {
+        if let ExprKind::Identifier(ast::Identifier { name, .. }) = &e.kind {
             if name == target {
                 return Some(e);
             }
@@ -87,7 +92,7 @@ fn find_ident<'a>(expr: &'a Expression, target: &str) -> &'a Expression {
 
 fn ident_quals<'a>(expr: &'a Expression) -> &'a [String] {
     match &expr.kind {
-        ExprKind::Identifier(crate::ast::Identifier {
+        ExprKind::Identifier(ast::Identifier {
             qualifiers: quals, ..
         }) => quals,
         _ => panic!("expected identifier"),
@@ -203,7 +208,7 @@ fn already_qualified_left_alone() {
         _ => panic!("expected Application, got {:?}", body.kind),
     };
     match &func.kind {
-        ExprKind::Identifier(crate::ast::Identifier {
+        ExprKind::Identifier(ast::Identifier {
             qualifiers: quals,
             name,
         }) => {
@@ -240,7 +245,7 @@ fn manually_qualified_identifier_left_alone() {
 
     let body = first_decl_body(&prog);
     match &body.kind {
-        ExprKind::Identifier(crate::ast::Identifier {
+        ExprKind::Identifier(ast::Identifier {
             qualifiers: quals,
             name,
         }) => {

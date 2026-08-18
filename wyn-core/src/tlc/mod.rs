@@ -35,6 +35,7 @@ mod traversal;
 
 use crate::ast::{self, Span, TypeName};
 use crate::builtins::BuiltinId;
+use crate::types;
 use crate::types::SoacOwnership;
 use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
@@ -272,6 +273,7 @@ where
 /// Program-wide context selected by TLC pipeline checkpoints.
 pub mod context {
     use super::*;
+    use crate::IdSource;
 
     /// Global state immediately after AST-to-TLC conversion.
     ///
@@ -280,26 +282,26 @@ pub mod context {
     #[derive(Debug)]
     pub struct TransformedGlobal {
         pub known_defs: LookupSet<SymbolId>,
-        pub auto_storage_binding_ids: crate::IdSource<u32>,
+        pub auto_storage_binding_ids: IdSource<u32>,
     }
 
     /// Global state shared by tree-rewriting TLC checkpoints.
     #[derive(Debug, Clone)]
     pub struct RewriteGlobal {
         pub known_defs: LookupSet<SymbolId>,
-        pub auto_storage_binding_ids: crate::IdSource<u32>,
+        pub auto_storage_binding_ids: IdSource<u32>,
     }
 
     /// Global state after closure conversion has consumed `known_defs`.
     #[derive(Debug, Clone)]
     pub struct PostClosureGlobal {
-        pub auto_storage_binding_ids: crate::IdSource<u32>,
+        pub auto_storage_binding_ids: IdSource<u32>,
     }
 
     /// Global state retained at the TLC-to-EGIR boundary.
     #[derive(Debug, Clone)]
     pub struct BackendGlobal {
-        pub auto_storage_binding_ids: crate::IdSource<u32>,
+        pub auto_storage_binding_ids: IdSource<u32>,
     }
 }
 
@@ -916,7 +918,7 @@ impl<C: Payload, S: Payload> ArrayExpr<C, S> {
                 let elems: Vec<Type<TypeName>> = children
                     .iter()
                     .map(|c| {
-                        crate::types::array_elem(&c.array_type())
+                        types::array_elem(&c.array_type())
                             .cloned()
                             .unwrap_or_else(|| Type::Constructed(TypeName::Unit, vec![]))
                     })
@@ -1042,8 +1044,8 @@ pub struct Def<F: Family> {
     pub meta: DefMeta<F::EntryData>,
     /// Number of arguments this function expects.
     pub arity: usize,
-    pub param_diets: Vec<crate::types::Diet>,
-    pub return_diet: crate::types::Diet,
+    pub param_diets: Vec<types::Diet>,
+    pub return_diet: types::Diet,
 }
 
 /// A TLC program (collection of definitions).

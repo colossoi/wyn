@@ -12,7 +12,14 @@
 //! `emit_pending_soac`) also take the target `BlockId` and a mutable
 //! effect-token counter.
 
+use crate::flow;
+use crate::op;
+use crate::ssa;
+use crate::types;
+use crate::FunctionId;
+use crate::IdSource;
 use crate::LookupMap;
+use crate::ResourceId;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 use std::collections::{HashMap, HashSet};
@@ -172,9 +179,9 @@ pub(crate) fn adapt_physical_call_argument(
     graph: &mut EGraph<Physical>,
     argument: OperandRef,
     parameter: &FuncParam<BindingRef, Type<TypeName>>,
-    callee: crate::FunctionId,
+    callee: FunctionId,
     index: usize,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(OperandRef, Vec<SideEffect<Physical>>), String> {
     let argument = graph.canonical_operand(argument);
     let mut effects = Vec::new();
@@ -261,12 +268,12 @@ fn view_type_for_place(
     pointee: &Type<TypeName>,
 ) -> Type<TypeName> {
     let region = match &graph.place(place).ty().region {
-        PlaceRegion::Resource(binding) => crate::types::buffer_tag(*binding),
+        PlaceRegion::Resource(binding) => types::buffer_tag(*binding),
         PlaceRegion::Function | PlaceRegion::Workgroup | PlaceRegion::Parametric | PlaceRegion::Output => {
-            crate::types::no_buffer()
+            types::no_buffer()
         }
     };
-    crate::types::view_array_of(pointee, region)
+    types::view_array_of(pointee, region)
 }
 
 pub fn alloc_by_value_effect_result<P: Family>(
@@ -362,13 +369,13 @@ pub(crate) fn normalize_place_backed_value_consumers<P: Family>(graph: &mut EGra
         .collect::<Vec<_>>();
     for (consumer, start, end, ty, span) in slices {
         let length = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Subtract),
+            PureOp::BinOp(op::BinaryOperator::Subtract),
             smallvec![end, start],
             graph.nodes[end].ty().clone(),
             span,
         );
         let slice_place = graph.add_slice_place(place, start, length, ty.clone(), span);
-        let view_ty = crate::types::view_array_of(&ty, crate::types::no_buffer());
+        let view_ty = types::view_array_of(&ty, types::no_buffer());
         let slice_view = graph.add_place_view(slice_place, view_ty, span).value();
         graph.replace_value_references(consumer, slice_view);
         graph.install_aliases([(consumer, slice_view)]);
@@ -429,7 +436,7 @@ pub(crate) fn materialize_place_backed_projections<P: Family>(
     graph: &mut EGraph<P>,
     value: ValueId,
     block: BlockId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) {
     let mut pending = vec![graph.canonical_value(value)];
     let mut loads = Vec::new();
@@ -469,7 +476,7 @@ pub(crate) fn materialize_place_backed_projections<P: Family>(
             });
             let element = graph.add_index_place(place, index, ty.clone(), span);
             let replacement = if ty.array_variant().is_some() {
-                let view_ty = crate::types::view_array_of(&ty, crate::types::no_buffer());
+                let view_ty = types::view_array_of(&ty, types::no_buffer());
                 let view = graph.add_place_view(element, view_ty, span).value();
                 pending.push(view);
                 view
@@ -526,7 +533,7 @@ pub(crate) fn result_argument_value<P: Family>(
     match destination {
         ResultDestination::ReturnValue(value) => Ok(graph.canonical_value(*value)),
         ResultDestination::Place(PlaceDestination::Fixed(place)) => {
-            let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+            let view_ty = types::view_array_of(ty, types::no_buffer());
             Ok(graph.add_place_view(*place, view_ty, None).value())
         }
         ResultDestination::Place(PlaceDestination::Bounded { .. }) => {
@@ -542,7 +549,7 @@ pub(crate) fn load_result_value<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     binding: &ResultBinding<Type<TypeName>>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> ValueId {
     if binding.is_product() {
         let fields = binding
@@ -620,9 +627,9 @@ pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
         return Ok(result.map_destinations(|_, _| ResultDestination::ReturnValue(view)));
     }
     let parent_ty = graph.nodes[view].ty().clone();
-    let parent_elem = crate::types::array_elem(&parent_ty)
+    let parent_elem = types::array_elem(&parent_ty)
         .ok_or_else(|| "structured result destination is not an array view".to_owned())?;
-    let parent_elem_bytes = crate::ssa::layout::type_byte_size(parent_elem)
+    let parent_elem_bytes = ssa::layout::type_byte_size(parent_elem)
         .ok_or_else(|| "structured result destination has no physical element size".to_owned())?;
     let region = parent_ty
         .array_buffer()
@@ -631,7 +638,7 @@ pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
     let mut offset_bytes = 0u32;
     let mut views = Vec::with_capacity(leaves.len());
     for leaf in &leaves {
-        let bytes = crate::ssa::layout::type_byte_size(leaf.ty())
+        let bytes = ssa::layout::type_byte_size(leaf.ty())
             .ok_or_else(|| "structured result component has no fixed physical size".to_owned())?;
         if offset_bytes % parent_elem_bytes != 0 {
             return Err("structured result component is not aligned to its storage element".into());
@@ -649,7 +656,7 @@ pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
             u32::try_from(*length).map_err(|_| "structured result length exceeds u32")?,
             None,
         );
-        let view_ty = crate::types::view_array_of(leaf.ty(), region.clone());
+        let view_ty = types::view_array_of(leaf.ty(), region.clone());
         views.push(intern_inherited_view(graph, view, offset, length, view_ty, None));
         offset_bytes = offset_bytes
             .checked_add(bytes)
@@ -669,7 +676,7 @@ pub(crate) fn bind_result_from_place<P: Family>(
     result: &super::ir::FunctionResult<Type<TypeName>>,
     root: PlaceId,
     block: BlockId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> Result<ResultBinding<Type<TypeName>>, String> {
     let mut destinations = Vec::with_capacity(result.destination_count());
@@ -710,7 +717,7 @@ pub(crate) fn bind_result_from_place<P: Family>(
 
 pub(crate) fn place_reference_type(ty: &Type<TypeName>) -> Type<TypeName> {
     if WynLanguage::is_materialized_aggregate(ty) || WynLanguage::is_view(ty) {
-        return crate::types::view_array_of(ty, crate::types::no_buffer());
+        return types::view_array_of(ty, types::no_buffer());
     }
     match ty {
         Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => {
@@ -753,7 +760,7 @@ fn result_leaf_values<P: Family>(
                 ResultDestination::ReturnValue(value) => graph.canonical_value(*value),
                 ResultDestination::Place(PlaceDestination::Fixed(place))
                 | ResultDestination::Place(PlaceDestination::Bounded { storage: place, .. }) => {
-                    let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                    let view_ty = types::view_array_of(ty, types::no_buffer());
                     graph.add_place_view(*place, view_ty, None).value()
                 }
             })
@@ -1240,13 +1247,13 @@ where
 /// explicit destination views.
 pub(crate) fn resource_effect_writers<P>(
     graph: &EGraph<P>,
-) -> crate::LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>
+) -> LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>
 where
     P: ValueProducerPhase
         + super::types::WynSoacPhase
         + Family<Resource = super::program::SemanticResourceRef>,
 {
-    let mut writers = crate::LookupMap::<_, Vec<_>>::new();
+    let mut writers = LookupMap::<_, Vec<_>>::new();
     for block in graph.skeleton.blocks.values() {
         for effect in &block.side_effects {
             let SideEffectKind::Soac(super::types::SoacEffect(_, soac)) = &effect.kind else {
@@ -1366,7 +1373,7 @@ pub fn intern_intrinsic<P: Family>(
 /// `"-"`, etc.) — matches the convention `from_tlc` uses.
 pub fn intern_binop<P: Family>(
     graph: &mut EGraph<P>,
-    op: crate::op::BinaryOperator,
+    op: op::BinaryOperator,
     lhs: ValueId,
     rhs: ValueId,
     ty: Type<TypeName>,
@@ -1395,7 +1402,7 @@ pub fn intern_storage_view(
         span,
     );
     let zero_nid = intern_u32(graph, 0, span);
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
+    let view_ty = types::view_array_of(&view_ty, types::buffer_tag(br));
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![zero_nid, len_nid],
@@ -1407,7 +1414,7 @@ pub fn intern_storage_view(
 /// Target-independent storage view used after logical-resource allocation.
 pub fn intern_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
-    resource: crate::ResourceId,
+    resource: ResourceId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> ValueId {
@@ -1419,7 +1426,7 @@ pub fn intern_resource_view<P: Family<Resource = super::program::SemanticResourc
 /// Target-independent logical-resource length.
 pub fn intern_resource_len<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
-    resource: crate::ResourceId,
+    resource: ResourceId,
     span: Option<Span>,
 ) -> ValueId {
     graph.intern_pure(
@@ -1432,14 +1439,13 @@ pub fn intern_resource_len<P: Family<Resource = super::program::SemanticResource
 
 pub fn intern_chunked_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
-    resource: crate::ResourceId,
+    resource: ResourceId,
     offset: ValueId,
     len: ValueId,
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> ValueId {
-    let view_ty =
-        crate::types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
+    let view_ty = types::view_array_of(&view_ty, Type::Constructed(TypeName::Resource(resource), vec![]));
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(super::program::SemanticResourceRef(
             resource,
@@ -1454,8 +1460,8 @@ pub fn intern_chunked_resource_view<P: Family<Resource = super::program::Semanti
 /// Returns the value substitutions needed by metadata stored outside the graph.
 pub(crate) fn retarget_resource_views<P>(
     graph: &mut EGraph<P>,
-    source: crate::ResourceId,
-    destination: crate::ResourceId,
+    source: ResourceId,
+    destination: ResourceId,
 ) -> Vec<(ValueId, ValueId)>
 where
     P: Family<Resource = super::program::SemanticResourceRef>,
@@ -1550,7 +1556,7 @@ pub fn emit_workgroup_view<P: Family>(
     let zero_nid = intern_u32(graph, 0, span);
     let count_nid = intern_u32(graph, count, span);
     // Workgroup-shared memory is not descriptor-bound: no (set, binding) region.
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::no_buffer());
+    let view_ty = types::view_array_of(&view_ty, types::no_buffer());
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Workgroup { id, count }),
         smallvec![zero_nid, count_nid],
@@ -1570,7 +1576,7 @@ pub fn intern_chunked_storage_view(
     view_ty: Type<TypeName>,
     span: Option<Span>,
 ) -> ValueId {
-    let view_ty = crate::types::view_array_of(&view_ty, crate::types::buffer_tag(br));
+    let view_ty = types::view_array_of(&view_ty, types::buffer_tag(br));
     graph.intern_pure(
         PureOp::StorageView(PureViewSource::Storage(br)),
         smallvec![offset, len],
@@ -1583,7 +1589,7 @@ pub fn intern_chunked_storage_view(
 // Side effects
 // ---------------------------------------------------------------------------
 
-pub fn alloc_effect(effect_ids: &mut crate::IdSource<EffectToken>) -> EffectToken {
+pub fn alloc_effect(effect_ids: &mut IdSource<EffectToken>) -> EffectToken {
     effect_ids.next_id()
 }
 
@@ -1595,7 +1601,7 @@ pub fn emit_store<P: Family>(
     block: BlockId,
     place: PlaceId,
     value_nid: ValueId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
     let effect_in = alloc_effect(effect_ids);
@@ -1614,7 +1620,7 @@ pub fn emit_store<P: Family>(
 pub fn detached_store<P: Family>(
     place: PlaceId,
     value: ValueId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> SideEffect<P> {
     SideEffect {
@@ -1632,10 +1638,10 @@ pub fn emit_atomic<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     place: PlaceId,
-    op: crate::ssa::types::AtomicOp,
+    op: ssa::types::AtomicOp,
     values: &[ValueId],
     result_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
     assert_eq!(values.len(), op.value_arity());
@@ -1660,7 +1666,7 @@ pub fn emit_atomic<P: Family>(
 pub fn emit_workgroup_barrier<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> EffectToken {
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
@@ -1683,7 +1689,7 @@ pub fn emit_storage_store<P: Family>(
     index_nid: ValueId,
     value_nid: ValueId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> EffectToken {
     let view = graph.view_id(view_nid);
@@ -1697,10 +1703,10 @@ pub fn emit_storage_store<P: Family>(
 pub fn emit_resource_write<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
     block: BlockId,
-    resource: crate::ResourceId,
+    resource: ResourceId,
     value: ValueId,
     ty: &Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> Result<Vec<EffectToken>, String> {
     let view = intern_resource_view(graph, resource, ty.clone(), span);
@@ -1763,7 +1769,7 @@ pub fn emit_load<P: Family>(
     block: BlockId,
     place: PlaceId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
     let (result, effect) = detached_load(graph, place, elem_ty, effect_ids, span);
@@ -1785,7 +1791,7 @@ pub fn emit_result_to_place<P: Family>(
     block: BlockId,
     result: &ResultBinding<Type<TypeName>>,
     destination: PlaceId,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> Result<BlockId, String> {
     if result.is_product() {
@@ -1837,7 +1843,7 @@ pub fn emit_result_to_place<P: Family>(
                     effect_ids,
                     span,
                 );
-                let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                let view_ty = types::view_array_of(ty, types::no_buffer());
                 let replacement = graph.add_place_view(destination, view_ty, span).value();
                 graph.replace_value_references(value, replacement);
                 graph.install_aliases([(value, replacement)]);
@@ -1896,7 +1902,7 @@ pub fn rewrite_result_store_consumers<P: Family>(
     graph: &mut EGraph<P>,
     source: ValueId,
     result: &ResultBinding<Type<TypeName>>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     loop {
         let candidate = graph.skeleton.blocks.iter().find_map(|(block, contents)| {
@@ -1932,7 +1938,7 @@ fn emit_addressable_copy<P: Family>(
     source: AddressableSource,
     destination: PlaceId,
     ty: &Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> Result<BlockId, String> {
     if let Some(fields) = WynLanguage::product_fields(ty) {
@@ -1971,7 +1977,7 @@ fn emit_addressable_copy<P: Family>(
         let index = graph.add_block_param(header, i32_ty.clone());
         let extent = graph.intern_pure(PureOp::Int(length.to_string()), smallvec![], i32_ty.clone(), span);
         let condition = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Less),
+            PureOp::BinOp(op::BinaryOperator::Less),
             smallvec![index, extent],
             Type::Constructed(TypeName::Bool, vec![]),
             span,
@@ -1983,7 +1989,7 @@ fn emit_addressable_copy<P: Family>(
             else_target: after,
             else_args: vec![],
         };
-        graph.skeleton.blocks[header].control_header = Some(crate::flow::ControlHeader::Loop {
+        graph.skeleton.blocks[header].control_header = Some(flow::ControlHeader::Loop {
             merge: after,
             continue_block: body,
         });
@@ -1993,7 +1999,7 @@ fn emit_addressable_copy<P: Family>(
         let tail = emit_addressable_copy(graph, body, source, destination, &element_ty, effect_ids, span)?;
         let one = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), span);
         let next = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![index, one],
             i32_ty,
             span,
@@ -2033,7 +2039,7 @@ pub fn detached_load<P: Family>(
     graph: &mut EGraph<P>,
     place: PlaceId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> (ValueId, SideEffect<P>) {
     let effect_in = alloc_effect(effect_ids);
@@ -2054,7 +2060,7 @@ pub fn emit_alloca<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> PlaceId {
     let (place, effect) = detached_alloca(graph, elem_ty, effect_ids, span);
@@ -2067,7 +2073,7 @@ pub fn emit_alloca<P: Family>(
 pub fn detached_alloca<P: Family>(
     graph: &mut EGraph<P>,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> (PlaceId, SideEffect<P>) {
     let effect_in = alloc_effect(effect_ids);
@@ -2114,7 +2120,7 @@ pub fn emit_place_index_store<P: Family>(
     index_nid: ValueId,
     value_nid: ValueId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) {
     let elem_place = intern_place_index(graph, parent_place, index_nid, elem_ty, span);
@@ -2129,7 +2135,7 @@ pub fn emit_view_load<P: Family>(
     view_nid: ValueId,
     index_nid: ValueId,
     elem_ty: Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ValueId {
     let view = graph.view_id(view_nid);
@@ -2145,7 +2151,7 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
     soac: Soac<P>,
     operands: SmallVec<[OperandRef; 4]>,
     result: ResultBinding<Type<TypeName>>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
 ) -> ResultBinding<Type<TypeName>> {
     let effect_in = alloc_effect(effect_ids);
@@ -2513,7 +2519,7 @@ pub(crate) fn clone_body_substituting<P: Family>(
     target: &mut EGraph<P>,
     arguments: &[OperandRef],
     place_bindings: &[(PlaceId, PlaceId)],
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<ClonedBody, String> {
     let blocks = wyn_graph::reachable_from_ordered(
         [source.skeleton.entry],
@@ -2625,7 +2631,7 @@ struct BodyCloner<'a, P: Family> {
     calls: LookupMap<CallSiteId, CallSiteId>,
     blocks: LookupMap<BlockId, BlockId>,
     effects: LookupMap<EffectToken, EffectToken>,
-    effect_ids: &'a mut crate::IdSource<EffectToken>,
+    effect_ids: &'a mut IdSource<EffectToken>,
 }
 
 impl<P: Family> BodyCloner<'_, P> {

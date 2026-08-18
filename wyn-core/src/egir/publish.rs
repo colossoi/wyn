@@ -21,6 +21,10 @@
 //! rule blocks a regular `impl` block here too. A trait owned by
 //! `wyn-core` is the standard workaround.
 
+use crate::ast;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::EntryId;
 use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EntryPublication;
@@ -37,9 +41,9 @@ pub struct DescriptorError(String);
 
 /// EGIR-owned companion to the host ABI descriptor. Each outer index is a
 /// descriptor pipeline index and each inner index is a stage index.
-pub(crate) type StageEntryAssociations = Vec<Vec<crate::EntryId>>;
+pub(crate) type StageEntryAssociations = Vec<Vec<EntryId>>;
 
-fn entries_by_id<'a>(entries: &[&'a EntryPublication]) -> LookupMap<crate::EntryId, &'a EntryPublication> {
+fn entries_by_id<'a>(entries: &[&'a EntryPublication]) -> LookupMap<EntryId, &'a EntryPublication> {
     entries.iter().map(|entry| (entry.id, *entry)).collect()
 }
 
@@ -133,7 +137,7 @@ fn reconcile_storage_binding_access<'a>(
 fn publish_pipeline_stage_uses(
     pipeline: &mut Pipeline,
     entries: &[&EntryPublication],
-    stage_ids: &[crate::EntryId],
+    stage_ids: &[EntryId],
 ) {
     let entries = entries_by_id(entries);
     match pipeline {
@@ -467,7 +471,7 @@ enum DescriptorShape {
         binding_type: SamplerBindingType,
     },
     StorageTexture {
-        format: crate::pipeline_descriptor::StorageImageFormat,
+        format: pipeline_descriptor::StorageImageFormat,
     },
 }
 
@@ -563,7 +567,7 @@ fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryP
         let Some(IoDecoration::Location(slot)) = input.decoration() else {
             continue;
         };
-        let format = crate::ssa::layout::vertex_format(&input.ty)
+        let format = ssa::layout::vertex_format(&input.ty)
             .expect("vertex #[vertex_slot] param must have a valid vertex format");
         vertex_inputs.push(VertexAttribute {
             slot,
@@ -590,7 +594,7 @@ fn append_fragment_outputs(fragment_outputs: &mut Vec<FragmentOutput>, entry: &E
 /// qualify — size 0 / empty members when the type has no block layout
 /// (hosts fall back to their known-name tables).
 fn uniform_block_members(
-    ty: &polytype::Type<crate::ast::TypeName>,
+    ty: &polytype::Type<ast::TypeName>,
 ) -> (u32, Vec<wyn_pipeline_descriptor::UniformMember>) {
     use crate::ast::TypeName;
     use crate::interface::StorageLayout;
@@ -598,7 +602,7 @@ fn uniform_block_members(
     let Some(layout) = block_layout(ty, StorageLayout::Std140) else {
         return (0, Vec::new());
     };
-    let (names, field_tys): (Vec<String>, Vec<&polytype::Type<crate::ast::TypeName>>) = match ty {
+    let (names, field_tys): (Vec<String>, Vec<&polytype::Type<ast::TypeName>>) = match ty {
         polytype::Type::Constructed(TypeName::Record(fields), args) => {
             (fields.iter().cloned().collect(), args.iter().collect())
         }

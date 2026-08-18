@@ -1,3 +1,5 @@
+use crate::ssa;
+use crate::types;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -165,7 +167,7 @@ pub enum SemanticState<R> {
 /// Parallel update selected for one histogram operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtomicUpdate {
-    Direct(crate::ssa::types::AtomicOp),
+    Direct(ssa::types::AtomicOp),
     CompareExchange,
 }
 
@@ -349,9 +351,9 @@ impl<P: WynSoacPhase> Op<P> {
             {
                 let destination_type = node_type(destination.value());
                 let destination_element = destination_type.as_ref().and_then(|ty| {
-                    let element = crate::types::array_elem(ty)?;
+                    let element = types::array_elem(ty)?;
                     if matches!(operation.update, Update::BucketInsert { .. }) {
-                        crate::types::array_elem(element)
+                        types::array_elem(element)
                     } else {
                         Some(element)
                     }

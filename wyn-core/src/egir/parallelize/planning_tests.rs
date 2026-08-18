@@ -2,13 +2,15 @@
 
 use super::*;
 use crate::egir::program::{LogicalResourceArena, ResourceOrigin};
+use crate::EntryId;
+use crate::ResourceId;
 
 fn resource(
     resources: &mut LogicalResourceArena,
     owner: u32,
     kind: CompilerResourceKind,
     slot: usize,
-) -> crate::ResourceId {
+) -> ResourceId {
     resources.allocate(
         ResourceOrigin::Compiler(CompilerResource::new(
             kind,
@@ -52,7 +54,7 @@ fn resource_arena_interns_compiler_ownership_keys() {
 fn serial_recipe_index_carries_no_parallel_recipe_state() {
     let mut serial = RecipeIndex::serial(std::collections::HashMap::new());
     assert!(serial
-        .take_endpoint(CompilerFlowEndpoint::Entry(crate::EntryId::from_index(0)))
+        .take_endpoint(CompilerFlowEndpoint::Entry(EntryId::from_index(0)))
         .expect("serial endpoint lookup")
         .is_none());
 }

@@ -14,7 +14,12 @@
 //! live in a generated operator def while the producer survives only as a SOAC
 //! capture, which is exactly the interprocedural rewrite this pass avoids.
 
+use crate::ast;
+use crate::map_in_place;
+use crate::op;
+use crate::types;
 use crate::LookupSet;
+use crate::SymbolTable;
 
 use polytype::Type;
 
@@ -41,7 +46,7 @@ pub fn float_runtime_index_nested_producers(
     let ids = &mut program.term_ids;
     let blocked = LookupSet::new();
 
-    crate::map_in_place(&mut program.defs, |def| {
+    map_in_place(&mut program.defs, |def| {
         let body = def.body;
         let (floats, body) = float_term(body, &blocked, ids, &mut program.symbols, false);
         Def {
@@ -58,7 +63,7 @@ fn float_term(
     term: Term<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
     collect: bool,
 ) -> (Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>) {
     let Term { ty, span, kind, .. } = term;
@@ -238,7 +243,7 @@ fn fuse_ranked_bucket_map(
     rhs: &Term<Empty, Empty>,
     body: &Term<Empty, Empty>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
 ) -> Option<(Vec<LetBinding<Empty, Empty>>, Term<Empty, Empty>)> {
     let TermKind::Soac(SoacOp::BucketScatter {
         dest,
@@ -297,7 +302,7 @@ fn fuse_ranked_bucket_map(
 fn guard_bucket_leaf(
     pair: Term<Empty, Empty>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
 ) -> Option<Term<Empty, Empty>> {
     let Type::Constructed(TypeName::Tuple(2), fields) = &pair.ty else {
         return None;
@@ -335,8 +340,8 @@ fn guard_bucket_leaf(
         ids,
         operator_ty,
         span,
-        TermKind::BinOp(crate::ast::BinaryOp {
-            op: crate::op::BinaryOperator::GreaterEqual,
+        TermKind::BinOp(ast::BinaryOp {
+            op: op::BinaryOperator::GreaterEqual,
         }),
     );
     let active = Term::fresh(
@@ -463,7 +468,7 @@ fn float_soac(
     soac: SoacOp<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
 ) -> (Vec<LetBinding<Empty, Empty>>, SoacOp<Empty, Empty>) {
     match soac {
         SoacOp::Map {
@@ -620,7 +625,7 @@ fn float_soac_body(
     body: SoacBody<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
 ) -> (Vec<LetBinding<Empty, Empty>>, SoacBody<Empty, Empty>) {
     let mut lambda_blocked = blocked.clone();
     for (sym, _) in &body.lam.params {
@@ -645,7 +650,7 @@ fn float_array_expr(
     ae: ArrayExpr<Empty, Empty>,
     blocked: &LookupSet<SymbolId>,
     ids: &mut TermIdSource,
-    symbols: &mut crate::SymbolTable,
+    symbols: &mut SymbolTable,
 ) -> (Vec<LetBinding<Empty, Empty>>, ArrayExpr<Empty, Empty>) {
     match ae {
         // A named input has no producer to float.
@@ -717,7 +722,7 @@ fn is_liftable_array_producer(term: &Term<Empty, Empty>) -> bool {
 }
 
 fn is_runtime_sized_array(ty: &Type<TypeName>) -> bool {
-    crate::types::TypeExt::is_runtime_sized_array(ty)
+    types::TypeExt::is_runtime_sized_array(ty)
 }
 
 fn is_int_lit(term: &Term<Empty, Empty>) -> bool {

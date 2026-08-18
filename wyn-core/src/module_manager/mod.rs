@@ -1,12 +1,19 @@
 //! Module manager for lazy loading and caching module definitions
 
+use crate::ast;
 use crate::ast::{
     Decl, Declaration, Identifier, ImportsResolvedFrontend, ModuleExpression, ModuleTypeExpression,
     NestedDeclaration, NodeCounter, ParsedFrontend, Pattern, Spec, Type, TypeBind, TypeLifting, TypeName,
 };
+use crate::ast_renumber;
+use crate::err_type;
 use crate::error::Result;
 use crate::lexer;
+use crate::name_resolution;
+use crate::parser;
 use crate::parser::Parser;
+use crate::resolve_imports;
+use crate::scope;
 use crate::scope::ScopeStack;
 use crate::StableMap;
 use crate::{bail_module, err_module, err_parse};
@@ -17,7 +24,7 @@ use crate::{LookupMap, LookupSet};
 /// lets applications be checked and substituted at each use site.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAliasDefinition {
-    pub type_params: Vec<crate::ast::TypeParam>,
+    pub type_params: Vec<ast::TypeParam>,
     pub definition: Type,
 }
 
@@ -54,7 +61,7 @@ fn clone_items_fresh_ids(items: &[ElaboratedItem], node_counter: &mut NodeCounte
         .map(|item| match item {
             ElaboratedItem::Spec(spec) => ElaboratedItem::Spec(spec.clone()),
             ElaboratedItem::Decl(decl) => {
-                ElaboratedItem::Decl(crate::ast_renumber::clone_decl_fresh_ids(decl, node_counter))
+                ElaboratedItem::Decl(ast_renumber::clone_decl_fresh_ids(decl, node_counter))
             }
             ElaboratedItem::TypeAlias(name, ty) => ElaboratedItem::TypeAlias(name.clone(), ty.clone()),
         })
@@ -76,7 +83,7 @@ pub struct FunctorModule {
     /// The functor's name
     pub name: String,
     /// Parameters this functor takes
-    pub params: Vec<crate::ast::ModuleParam>,
+    pub params: Vec<ast::ModuleParam>,
     /// The module signature (if any)
     pub signature: Option<ModuleTypeExpression>,
     /// The unevaluated body
@@ -176,7 +183,7 @@ impl ModuleManager {
         self.prelude_functions = self
             .prelude_functions
             .drain(..)
-            .map(|(name, decl)| (name, crate::name_resolution::resolve_decl(decl, known_modules)))
+            .map(|(name, decl)| (name, name_resolution::resolve_decl(decl, known_modules)))
             .collect();
 
         Ok(())
@@ -252,11 +259,11 @@ impl ModuleManager {
     /// Elaborate a single module or functor declaration
     fn elaborate_module_decl(
         &mut self,
-        md: &crate::ast::ModuleDecl,
+        md: &ast::ModuleDecl,
         node_counter: &mut NodeCounter,
     ) -> Result<()> {
         match md {
-            crate::ast::ModuleDecl::Functor { name, params, body } => {
+            ast::ModuleDecl::Functor { name, params, body } => {
                 if self.elaborated_modules.contains_key(name) {
                     bail_module!("Module '{}' is already defined", name);
                 }
@@ -274,7 +281,7 @@ impl ModuleManager {
                 self.known_modules.insert(name.clone());
                 Ok(())
             }
-            crate::ast::ModuleDecl::Module {
+            ast::ModuleDecl::Module {
                 name,
                 signature,
                 body,
@@ -348,7 +355,7 @@ impl ModuleManager {
     /// This is the public entry point for elaborating modules from any source
     pub fn elaborate_modules(
         &mut self,
-        declarations: &[Declaration<crate::resolve_imports::ImportsResolvedFamily>],
+        declarations: &[Declaration<resolve_imports::ImportsResolvedFamily>],
         node_counter: &mut NodeCounter,
     ) -> Result<()> {
         // Register module types first
@@ -358,8 +365,8 @@ impl ModuleManager {
             match decl {
                 Declaration::Frontend(ImportsResolvedFrontend::Module(md)) => {
                     let name = match md {
-                        crate::ast::ModuleDecl::Module { name, .. } => name.clone(),
-                        crate::ast::ModuleDecl::Functor { name, .. } => name.clone(),
+                        ast::ModuleDecl::Module { name, .. } => name.clone(),
+                        ast::ModuleDecl::Functor { name, .. } => name.clone(),
                     };
                     self.user_module_names.insert(name);
                     self.elaborate_module_decl(md, node_counter)?;
@@ -380,7 +387,7 @@ impl ModuleManager {
     /// Elaborate all module bindings and collect top-level declarations (for prelude files)
     fn elaborate_all_modules(
         &mut self,
-        declarations: &[Declaration<crate::parser::ParsedFamily>],
+        declarations: &[Declaration<parser::ParsedFamily>],
         node_counter: &mut NodeCounter,
     ) -> Result<()> {
         for decl in declarations {
@@ -415,7 +422,7 @@ impl ModuleManager {
     /// Register all module type definitions from a parsed program
     fn register_parsed_module_types(
         &mut self,
-        declarations: &[Declaration<crate::parser::ParsedFamily>],
+        declarations: &[Declaration<parser::ParsedFamily>],
     ) -> Result<()> {
         for decl in declarations {
             if let Declaration::Frontend(ParsedFrontend::ModuleTypeBind(mtb)) = decl {
@@ -430,7 +437,7 @@ impl ModuleManager {
 
     fn register_imports_resolved_module_types(
         &mut self,
-        declarations: &[Declaration<crate::resolve_imports::ImportsResolvedFamily>],
+        declarations: &[Declaration<resolve_imports::ImportsResolvedFamily>],
     ) -> Result<()> {
         for decl in declarations {
             if let Declaration::Frontend(ImportsResolvedFrontend::ModuleTypeBind(mtb)) = decl {
@@ -655,7 +662,7 @@ impl ModuleManager {
     }
 
     /// Recursively check if an expression uses _w_intrinsic_* functions
-    fn expr_uses_intrinsic(expr: &crate::ast::Expression) -> bool {
+    fn expr_uses_intrinsic(expr: &ast::Expression) -> bool {
         use crate::ast::ExprKind;
         match &expr.kind {
             ExprKind::Identifier(identifier) => {
@@ -989,7 +996,7 @@ impl ModuleManager {
     /// method so existing `self.collect_pattern_names(...)` call sites don't
     /// need touching.
     fn collect_pattern_names(&self, pattern: &Pattern) -> Vec<String> {
-        crate::scope::pattern_bound_names(pattern)
+        scope::pattern_bound_names(pattern)
     }
 
     /// Apply type substitutions to a pattern.
@@ -1000,14 +1007,13 @@ impl ModuleManager {
     /// first via `clone_pattern_fresh_ids`; direct reuse would give distinct
     /// instances the same NodeId.
     fn substitute_in_pattern(&self, pattern: &Pattern, substitutions: &LookupMap<String, Type>) -> Pattern {
-        let rebuilt: std::result::Result<Pattern, std::convert::Infallible> =
-            crate::ast::rebuild::pattern_with(
-                pattern.clone(),
-                &mut Ok,
-                &mut |_header, binding| Ok(binding),
-                &mut Ok,
-                &mut |ty| Ok(self.substitute_in_type(&ty, substitutions)),
-            );
+        let rebuilt: std::result::Result<Pattern, std::convert::Infallible> = ast::rebuild::pattern_with(
+            pattern.clone(),
+            &mut Ok,
+            &mut |_header, binding| Ok(binding),
+            &mut Ok,
+            &mut |ty| Ok(self.substitute_in_type(&ty, substitutions)),
+        );
         match rebuilt {
             Ok(pattern) => pattern,
             Err(error) => match error {},
@@ -1018,12 +1024,12 @@ impl ModuleManager {
     /// E.g., n.add -> my_f32_num.add when n is bound to my_f32_num
     fn resolve_names_in_expr(
         &self,
-        expr: crate::ast::Expression,
+        expr: ast::Expression,
         module_name: &str,
         module_functions: &LookupSet<String>,
         local_bindings: &LookupSet<String>,
         param_bindings: &LookupMap<String, ElaboratedModule>,
-    ) -> crate::ast::Expression {
+    ) -> ast::Expression {
         // Seed a ScopeStack from the caller-provided locals so the shared
         // walker sees them as "visible locals that should shadow intra-module
         // rewrites". All further pushes/pops happen inside the walker.
@@ -1037,7 +1043,7 @@ impl ModuleManager {
             param_bindings,
             known_modules: &self.known_modules,
         };
-        crate::name_resolution::rewrite_expr(expr, &ctx, scope)
+        name_resolution::rewrite_expr(expr, &ctx, scope)
     }
 }
 
@@ -1054,7 +1060,7 @@ struct ModuleElaborationResolver<'a> {
     known_modules: &'a LookupSet<String>,
 }
 
-impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a> {
+impl<'a> name_resolution::ResolveContext for ModuleElaborationResolver<'a> {
     fn resolve_identifier(&self, quals: &mut Vec<String>, name: &mut String, scope: &ScopeStack<()>) {
         // Intra-module function reference: bare name that's in the current
         // module's function set AND not shadowed by a local binding.
@@ -1069,21 +1075,21 @@ impl<'a> crate::name_resolution::ResolveContext for ModuleElaborationResolver<'a
         obj_name: &str,
         field: &str,
         _scope: &ScopeStack<()>,
-    ) -> Option<crate::ast::ExprKind> {
+    ) -> Option<ast::ExprKind> {
         if !obj_quals.is_empty() {
             return None;
         }
         // Parameter-module reference: `n.add` where `n` is a functor param
         // bound to an elaborated module.
         if let Some(param_module) = self.param_bindings.get(obj_name) {
-            return Some(crate::ast::ExprKind::Identifier(Identifier {
+            return Some(ast::ExprKind::Identifier(Identifier {
                 qualifiers: vec![param_module.name.clone()],
                 name: field.to_string(),
             }));
         }
         // Known-module reference: `f32.sin`.
         if self.known_modules.contains(obj_name) {
-            return Some(crate::ast::ExprKind::Identifier(Identifier {
+            return Some(ast::ExprKind::Identifier(Identifier {
                 qualifiers: vec![obj_name.to_string()],
                 name: field.to_string(),
             }));
@@ -1104,13 +1110,13 @@ fn enforce_lifting_rule(tb: &TypeBind) -> Result<()> {
     let allow_function = matches!(tb.lifting, Some(TypeLifting::FullyLifted));
 
     if !allow_function && contains_function(&tb.definition) {
-        return Err(crate::err_type!(
+        return Err(err_type!(
             "plain `type {0}` must not have a function type as its RHS; use `type^ {0}` for a fully-lifted alias",
             tb.name
         ));
     }
     if !allow_existential && contains_existential(&tb.definition) {
-        return Err(crate::err_type!(
+        return Err(err_type!(
             "plain `type {0}` must not have an existential size as its RHS; use `type~ {0}` (or `type^`) to admit existentials",
             tb.name
         ));

@@ -3,11 +3,13 @@
 
 use super::lower::LowerCtx;
 use super::*;
+use crate::err_spirv;
+use crate::op;
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_binop(
         &mut self,
-        op: &crate::op::BinaryOperator,
+        op: &op::BinaryOperator,
         lhs: spirv::Word,
         rhs: spirv::Word,
         lhs_ty: &PolyType<TypeName>,
@@ -223,7 +225,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                 let elem_ty = lhs_ty
                     .elem_type()
-                    .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
+                    .ok_or_else(|| err_spirv!("Vec type missing element type: {:?}", lhs_ty))?;
                 match (op_symbol, elem_ty) {
                     ("+", Constructed(Float(_), _)) => {
                         Ok(self.constructor.builder.f_add(result_ty, None, lhs, rhs)?)
@@ -277,7 +279,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     ("==" | "!=", _) => {
                         let vec_size = lhs_ty
                             .vec_size()
-                            .ok_or_else(|| crate::err_spirv!("Vec type missing size: {:?}", lhs_ty))?
+                            .ok_or_else(|| err_spirv!("Vec type missing size: {:?}", lhs_ty))?
                             as u32;
                         let bvec_ty =
                             self.constructor.get_or_create_vec_type(self.constructor.bool_type, vec_size);
@@ -348,16 +350,16 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         vec_ty: &PolyType<TypeName>,
         vec_spirv_ty: spirv::Word,
     ) -> Result<spirv::Word> {
-        let n = vec_ty.vec_size().ok_or_else(|| {
-            crate::err_spirv!("Cannot splat: vec type has no concrete size: {:?}", vec_ty)
-        })?;
+        let n = vec_ty
+            .vec_size()
+            .ok_or_else(|| err_spirv!("Cannot splat: vec type has no concrete size: {:?}", vec_ty))?;
         let components = vec![scalar; n];
         Ok(self.constructor.builder.composite_construct(vec_spirv_ty, None, components)?)
     }
 
     pub(super) fn lower_unaryop(
         &mut self,
-        op: &crate::op::UnaryOperator,
+        op: &op::UnaryOperator,
         operand: spirv::Word,
         operand_ty: &PolyType<TypeName>,
         result_ty: spirv::Word,
@@ -381,7 +383,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             ("-", Constructed(Vec, _)) => {
                 let elem_ty = operand_ty
                     .elem_type()
-                    .ok_or_else(|| crate::err_spirv!("Vec type missing element type: {:?}", operand_ty))?;
+                    .ok_or_else(|| err_spirv!("Vec type missing element type: {:?}", operand_ty))?;
                 match elem_ty {
                     Constructed(Float(_), _) => {
                         Ok(self.constructor.builder.f_negate(result_ty, None, operand)?)

@@ -2,6 +2,8 @@
 
 use super::array_io::{emit_read_element, emit_seg_space_len};
 use super::*;
+use crate::op;
+use crate::IdSource;
 
 pub(super) fn emit_screma_lambda(
     graph: &mut EGraph<Physical>,
@@ -10,7 +12,7 @@ pub(super) fn emit_screma_lambda(
     lambda: &screma::Lambda,
     mut arguments: Vec<ValueId>,
     mapped_destinations: Option<(&[ResultBinding<Type<TypeName>>], ValueId)>,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
         debug_assert_eq!(arguments.len(), lambda.result_types.len());
@@ -49,7 +51,7 @@ pub(super) fn build_parallel_screma_map(
     read_inputs: &[(ValueId, Type<TypeName>, Type<TypeName>)],
     pre: &screma::Lambda,
     output_views: &[ResultBinding<Type<TypeName>>],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     callables: &CallableMap,
 ) {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
@@ -81,7 +83,7 @@ pub(super) fn build_parallel_screma_map(
     );
     let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
     let condition = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![lane, length],
         bool_type,
         None,

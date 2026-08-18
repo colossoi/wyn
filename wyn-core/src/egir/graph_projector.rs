@@ -4,6 +4,7 @@
 //! selected side effects, and the transitive value/effect producer closure,
 //! allocating fresh block, node, and side-effect-result identities throughout.
 
+use crate::ast;
 use std::collections::{HashMap, HashSet};
 
 use crate::flow::{BlockId, ControlHeader};
@@ -1349,7 +1350,7 @@ fn remap_terminator(
     term.clone().try_map_parts(
         &mut |condition| node(condition),
         &mut |argument: FlowValueId| argument.try_remap(&node),
-        &mut |result: super::ir::ResultBinding<polytype::Type<crate::ast::TypeName>>| {
+        &mut |result: super::ir::ResultBinding<polytype::Type<ast::TypeName>>| {
             result.try_map(
                 &mut |ty| Ok::<_, String>(ty),
                 &mut |value| node(value),

@@ -13,6 +13,7 @@ pub mod names;
 pub mod overload;
 pub mod scheme;
 
+use crate::ast;
 pub use catalog::{BuiltinCatalog, BuiltinDef, BuiltinId, BuiltinKind, BuiltinOverload, Purity};
 pub use lowering::BuiltinLowering;
 pub use scheme::SchemeBuilder;
@@ -47,7 +48,7 @@ pub fn by_id(id: BuiltinId) -> &'static BuiltinDef {
 pub fn intrinsic_arity(name: &str) -> Option<usize> {
     let def = catalog().lookup_by_any_name(name)?;
     let overload = def.raw.overloads.first()?;
-    let mut ctx = polytype::Context::<crate::ast::TypeName>::default();
+    let mut ctx = polytype::Context::<ast::TypeName>::default();
     let scheme = (overload.scheme?)(&mut ctx);
     let mut ty = &scheme;
     let monotype = loop {
@@ -60,14 +61,14 @@ pub fn intrinsic_arity(name: &str) -> Option<usize> {
     // placeholder/value scheme (e.g. compiler-internal intrinsics whose
     // scheme is just `Unit`) and arity is meaningless.
     match monotype {
-        polytype::Type::Constructed(crate::ast::TypeName::Arrow, _) => Some(count_arrows(monotype)),
+        polytype::Type::Constructed(ast::TypeName::Arrow, _) => Some(count_arrows(monotype)),
         _ => None,
     }
 }
 
-fn count_arrows(ty: &crate::ast::Type) -> usize {
+fn count_arrows(ty: &ast::Type) -> usize {
     match ty {
-        polytype::Type::Constructed(crate::ast::TypeName::Arrow, args) if args.len() == 2 => {
+        polytype::Type::Constructed(ast::TypeName::Arrow, args) if args.len() == 2 => {
             1 + count_arrows(&args[1])
         }
         _ => 0,

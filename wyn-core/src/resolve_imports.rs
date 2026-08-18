@@ -5,6 +5,8 @@
 //! file's directory. A canonical-path dedup set prevents infinite loops on
 //! cyclic imports and dedupes diamond imports.
 
+use crate::interface;
+use crate::module_manager;
 use crate::LookupSet;
 use std::path::{Path, PathBuf};
 
@@ -16,7 +18,7 @@ pub type ImportsResolvedFamily = ast::AstFamily<
     ast::SourceTree,
     ast::DefinitionSyntax,
     ast::EntrySyntax,
-    crate::interface::Attribute,
+    interface::Attribute,
     ast::ExternSyntax,
     ast::ImportsResolvedFrontend<ast::NestedDeclaration>,
 >;
@@ -25,7 +27,7 @@ pub type ImportsResolvedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum ImportsResolvedTag {}
 pub type ImportsResolved =
-    ast::Program<ImportsResolvedTag, ImportsResolvedFamily, crate::module_manager::ModuleManager>;
+    ast::Program<ImportsResolvedTag, ImportsResolvedFamily, module_manager::ModuleManager>;
 
 /// Recursively expand every `Declaration::Import(path)` in `decls` by parsing
 /// the referenced file (relative to `base_dir`), resolving its own imports

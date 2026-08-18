@@ -1,5 +1,6 @@
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::egir;
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
 use crate::egir::soac::screma;
 use crate::egir::types::{
@@ -7,6 +8,7 @@ use crate::egir::types::{
     SoacEffect, SoacOwnership, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::types;
 use crate::FunctionId;
 use polytype::Type;
 use smallvec::smallvec;
@@ -118,15 +120,12 @@ fn array(element: Type<TypeName>) -> Type<TypeName> {
             element,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
 
-fn screma_verification_program(
-    operator: screma::Lambda,
-    neutral_is_bool: bool,
-) -> crate::egir::reify::Segmented {
+fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) -> egir::reify::Segmented {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let array_type = array(i32_type.clone());
     let result_type = Type::Constructed(TypeName::Tuple(1), vec![array_type.clone()]);
@@ -149,7 +148,7 @@ fn screma_verification_program(
         kind: SideEffectKind::Soac(SoacEffect(
             op(0),
             Soac::Screma(screma::Op {
-                inputs: vec![crate::egir::types::SoacInputType::array(array_type.clone())],
+                inputs: vec![egir::types::SoacInputType::array(array_type.clone())],
                 form: screma::ScremaForm {
                     pre: screma::Lambda::identity(vec![i32_type.clone()]),
                     scans: vec![screma::Scan {

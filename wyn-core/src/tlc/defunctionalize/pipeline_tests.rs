@@ -1,15 +1,16 @@
 use crate::ast::{BinaryOp, TypeName};
 use crate::op::BinaryOperator;
+use crate::tlc;
 use crate::tlc::test_support::TestBuilder;
 use crate::tlc::{Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermKind, VarRef};
+use crate::types;
+use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.
-fn defunctionalize(
-    program: crate::tlc::stage::RuntimeIndexProducersFloated,
-) -> crate::tlc::stage::Defunctionalized {
+fn defunctionalize(program: tlc::stage::RuntimeIndexProducersFloated) -> tlc::stage::Defunctionalized {
     super::defunctionalize(program)
 }
 
@@ -27,7 +28,7 @@ fn array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
@@ -180,13 +181,13 @@ fn test_defunc_simple_lambda_no_capture() {
             meta: DefMeta::Function,
             arity: 1,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
-        crate::tlc::context::RewriteGlobal {
+        tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 
@@ -281,13 +282,13 @@ fn test_defunc_lambda_with_capture() {
             meta: DefMeta::Function,
             arity: 1,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
-        crate::tlc::context::RewriteGlobal {
+        tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 
@@ -492,7 +493,7 @@ fn test_nested_hof_passthrough() {
                 meta: DefMeta::Function,
                 arity: 2,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: (),
@@ -502,7 +503,7 @@ fn test_nested_hof_passthrough() {
                 meta: DefMeta::Function,
                 arity: 2,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: (),
@@ -512,14 +513,14 @@ fn test_nested_hof_passthrough() {
                 meta: DefMeta::Function,
                 arity: 1,
                 param_diets: vec![],
-                return_diet: crate::types::Diet::observing(),
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
         term_ids,
-        crate::tlc::context::RewriteGlobal {
+        tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 
@@ -679,8 +680,8 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
                 body: apply_lam,
                 meta: DefMeta::Function,
                 arity: 2,
-                param_diets: vec![crate::types::Diet::observing(), crate::types::Diet::Leaf(true)],
-                return_diet: crate::types::Diet::observing(),
+                param_diets: vec![types::Diet::observing(), types::Diet::Leaf(true)],
+                return_diet: types::Diet::observing(),
             },
             Def {
                 data: (),
@@ -689,15 +690,15 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
                 body: main_lam,
                 meta: DefMeta::Function,
                 arity: 1,
-                param_diets: vec![crate::types::Diet::Leaf(true)],
-                return_diet: crate::types::Diet::observing(),
+                param_diets: vec![types::Diet::Leaf(true)],
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
         term_ids,
-        crate::tlc::context::RewriteGlobal {
+        tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 

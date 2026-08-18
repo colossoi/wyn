@@ -6,6 +6,7 @@
 //! the final SSA call/global graph and removes those orphan definitions before
 //! backend validation and emission.
 
+use crate::ssa;
 use std::collections::VecDeque;
 
 use crate::op::OpTag;
@@ -28,7 +29,7 @@ enum Definition {
 /// Definition order is preserved. Only instructions in CFG-reachable blocks
 /// contribute graph edges, so a stale call in a disconnected block does not
 /// keep its target alive.
-pub fn filter_reachable(program: crate::ssa::stage::Elaborated) -> crate::ssa::stage::Reachable {
+pub fn filter_reachable(program: ssa::stage::Elaborated) -> ssa::stage::Reachable {
     retain_reachable(program).retag()
 }
 

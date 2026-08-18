@@ -1,5 +1,9 @@
 //! Atomic lowering eligibility for canonical histograms.
 
+use crate::builtins;
+use crate::egir;
+use crate::flow;
+use crate::pipeline_descriptor;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -31,19 +35,19 @@ pub(super) struct AtomicCandidate {
 }
 
 pub(super) struct BucketCandidate {
-    pub site: crate::egir::types::SideEffectSite,
+    pub site: egir::types::SideEffectSite,
     pub owner: SemanticOpId,
     pub space: SegSpace,
     pub bucket_count: u32,
-    pub destination: crate::ResourceId,
-    pub input_resources: Vec<crate::ResourceId>,
-    pub counts: crate::ResourceId,
-    pub overflow: crate::ResourceId,
+    pub destination: ResourceId,
+    pub input_resources: Vec<ResourceId>,
+    pub counts: ResourceId,
+    pub overflow: ResourceId,
 }
 
 pub(super) fn analyze_hist_candidate(
     program: &ResourcesAllocated,
-    entry: &crate::egir::program::PlannedEntry,
+    entry: &egir::program::PlannedEntry,
     located: LocatedHist<'_>,
 ) -> Option<HistCandidate> {
     let graph = &entry.graph;
@@ -57,7 +61,7 @@ pub(super) fn analyze_hist_candidate(
                 return None;
             }
             let resources_for = |node| {
-                let closure = crate::egir::graph_ops::value_producer_closure(graph, [node]);
+                let closure = egir::graph_ops::value_producer_closure(graph, [node]);
                 entry.resources_referenced_by_nodes(graph, closure.nodes)
             };
             let resource_for = |node| {
@@ -103,7 +107,7 @@ pub(super) fn analyze_hist_candidate(
 
 fn analyze_operation(
     program: &ResourcesAllocated,
-    graph: &crate::egir::types::EGraph<Semantic>,
+    graph: &egir::types::EGraph<Semantic>,
     operation: &hist::HistOp,
 ) -> Option<hist::AtomicUpdate> {
     // The race factor is a contention estimate. Until replicated histograms
@@ -131,10 +135,7 @@ fn analyze_operation(
     Some(direct.map_or(hist::AtomicUpdate::CompareExchange, hist::AtomicUpdate::Direct))
 }
 
-fn recognize_direct_atomic(
-    function: &crate::egir::program::Func<Semantic>,
-    signed: bool,
-) -> Option<AtomicOp> {
+fn recognize_direct_atomic(function: &egir::program::Func<Semantic>, signed: bool) -> Option<AtomicOp> {
     if function.graph.skeleton.blocks.len() != 1 || function.graph.has_ordered_effects() {
         return None;
     }
@@ -155,16 +156,16 @@ fn recognize_direct_atomic(
         PureOp::BinOp(BinaryOperator::BitwiseAnd) => Some(AtomicOp::And),
         PureOp::BinOp(BinaryOperator::BitwiseOr) => Some(AtomicOp::Or),
         PureOp::BinOp(BinaryOperator::BitwiseXor) => Some(AtomicOp::Xor),
-        PureOp::Intrinsic { id, .. } if *id == crate::builtins::catalog().known().min => {
+        PureOp::Intrinsic { id, .. } if *id == builtins::catalog().known().min => {
             Some(if signed { AtomicOp::SignedMin } else { AtomicOp::UnsignedMin })
         }
-        PureOp::Intrinsic { id, .. } if *id == crate::builtins::catalog().known().max => {
+        PureOp::Intrinsic { id, .. } if *id == builtins::catalog().known().max => {
             Some(if signed { AtomicOp::SignedMax } else { AtomicOp::UnsignedMax })
         }
         _ => None,
     }
 }
-fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands: &[ValueId]) -> bool {
+fn matches_parameter_pair(graph: &egir::types::EGraph<Semantic>, operands: &[ValueId]) -> bool {
     let [left, right] = operands else {
         return false;
     };
@@ -178,7 +179,7 @@ fn matches_parameter_pair(graph: &crate::egir::types::EGraph<Semantic>, operands
     )
 }
 
-fn constant_i32(graph: &crate::egir::types::EGraph<Semantic>, node: ValueId) -> Option<i32> {
+fn constant_i32(graph: &egir::types::EGraph<Semantic>, node: ValueId) -> Option<i32> {
     match &graph.nodes[node].kind {
         ValueKind::Constant(ConstantValue::I32(value)) => Some(*value),
         ValueKind::Pure {
@@ -233,7 +234,7 @@ fn plan_axis(extents: &[u32], local_size: u32) -> Option<AxisDispatch> {
 }
 
 fn fixed_array_extent(ty: &Type<TypeName>) -> Option<u32> {
-    if let Some(components) = crate::egir::types::as_soa_tuple(ty) {
+    if let Some(components) = egir::types::as_soa_tuple(ty) {
         return components.first().and_then(|component| fixed_array_extent(component));
     }
     match ty.array_size()? {
@@ -242,19 +243,16 @@ fn fixed_array_extent(ty: &Type<TypeName>) -> Option<u32> {
     }
 }
 
-fn fixed_seg_extent(
-    graph: &crate::egir::types::EGraph<Semantic>,
-    extent: &crate::egir::types::SegExtent,
-) -> Option<u32> {
+fn fixed_seg_extent(graph: &egir::types::EGraph<Semantic>, extent: &egir::types::SegExtent) -> Option<u32> {
     match extent {
-        crate::egir::types::SegExtent::Fixed(count) => Some(*count),
-        crate::egir::types::SegExtent::Value(node) => constant_i32(graph, *node)
+        egir::types::SegExtent::Fixed(count) => Some(*count),
+        egir::types::SegExtent::Value(node) => constant_i32(graph, *node)
             .and_then(|value| u32::try_from(value).ok())
             .or_else(|| fixed_array_extent(&graph.nodes[*node].ty)),
-        crate::egir::types::SegExtent::ResourceLength { view, .. } => {
+        egir::types::SegExtent::ResourceLength { view, .. } => {
             fixed_array_extent(&graph.nodes[view.value()].ty)
         }
-        crate::egir::types::SegExtent::PushConstant { .. } => None,
+        egir::types::SegExtent::PushConstant { .. } => None,
     }
 }
 
@@ -263,7 +261,7 @@ fn fixed_seg_extent(
 /// innermost dimension is kept on x, while all legal divisions of the outer
 /// prefix between y and z are considered with checked wide arithmetic.
 fn bucket_dispatch_topology(
-    graph: &crate::egir::types::EGraph<Semantic>,
+    graph: &egir::types::EGraph<Semantic>,
     space: &SegSpace,
     local_size: (u32, u32, u32),
 ) -> Result<Option<(hist::DispatchTopology, super::schedule::KernelDomain)>, String> {
@@ -348,7 +346,7 @@ fn bucket_dispatch_topology(
 impl super::KernelPlanBuilder<'_, '_> {
     pub(super) fn lower_parallel_bucket(
         &mut self,
-        body: crate::egir::program::PlannedEntry,
+        body: egir::program::PlannedEntry,
         kernel: super::schedule::KernelId,
         candidate: BucketCandidate,
         output_projection: Option<Vec<usize>>,
@@ -357,7 +355,7 @@ impl super::KernelPlanBuilder<'_, '_> {
         use crate::ResourceAccess;
 
         let local_size = match &body.execution_model {
-            crate::flow::ExecutionModel::Compute { local_size } => *local_size,
+            flow::ExecutionModel::Compute { local_size } => *local_size,
             _ => (1, 1, 1),
         };
         let fixed_dispatch = bucket_dispatch_topology(&body.graph, &candidate.space, local_size)
@@ -402,7 +400,7 @@ impl super::KernelPlanBuilder<'_, '_> {
         )
         .bucket(
             super::schedule::KernelDispatch::explicit(super::schedule::KernelDomain::Elements(
-                crate::pipeline_descriptor::DispatchLen::Fixed {
+                pipeline_descriptor::DispatchLen::Fixed {
                     count: candidate.bucket_count,
                 },
             )),

@@ -3,17 +3,21 @@
 //! the TLC level, not by an AST-level desugar pass) compile correctly
 //! through SSA, and that constant folding in slice indices works.
 
+use crate::compile_thru_spirv;
+use crate::compile_thru_ssa;
+use crate::err_spirv;
 use crate::error::CompilerError;
+use crate::ssa;
 
 /// Helper to run full pipeline through SPIR-V lowering. Discards the
 /// output; only the pipeline succeeding/failing matters.
 fn compile_through_lowering(input: &str) -> Result<(), CompilerError> {
-    crate::compile_thru_spirv(input).map(|_| ()).map_err(|e| crate::err_spirv!("{}", e))
+    compile_thru_spirv(input).map(|_| ()).map_err(|e| err_spirv!("{}", e))
 }
 
 /// Helper to run pipeline through SSA.
-fn compile_through_ssa(input: &str) -> Result<crate::ssa::stage::Elaborated, CompilerError> {
-    crate::compile_thru_ssa(input).map_err(|e| crate::err_spirv!("{}", e))
+fn compile_through_ssa(input: &str) -> Result<ssa::stage::Elaborated, CompilerError> {
+    compile_thru_ssa(input).map_err(|e| err_spirv!("{}", e))
 }
 
 // =============================================================================
@@ -427,7 +431,7 @@ fn test_array_param_stack_overflow() {
     // A regular function that indexes an array parameter — once
     // stack-overflowed somewhere in the pipeline; pins the full
     // compile path against that.
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def first(arr: [4]i32) i32 = arr[0]
 
@@ -445,7 +449,7 @@ fn test_view_array_param_stack_overflow() {
     // Unsized (view) array parameter in a regular function, called
     // from a compute entry — once stack-overflowed somewhere in the
     // pipeline; pins the full compile path against that.
-    crate::compile_thru_spirv(
+    compile_thru_spirv(
         r#"
 def first(arr: []i32) i32 = arr[0]
 

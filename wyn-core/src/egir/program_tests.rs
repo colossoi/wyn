@@ -2,13 +2,20 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::egir;
 use crate::egir::allocation::{
     entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
     ResourcesAllocated,
 };
 use crate::egir::types::{by_value_function_result, CallEffects, EGraph, WynLanguage};
 use crate::flow::ExecutionModel;
+use crate::interface;
+use crate::op;
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::BindingRef;
+use crate::EntryId;
+use crate::IdArena;
+use crate::IdSource;
 use polytype::Type;
 
 fn unit_ty() -> Type<TypeName> {
@@ -28,7 +35,7 @@ fn empty_func(id: FunctionId, name: &str) -> Func {
     )
 }
 
-fn empty_entry(id: crate::EntryId, name: &str) -> Entry {
+fn empty_entry(id: EntryId, name: &str) -> Entry {
     Entry::<Semantic>::new_with_resources(
         name.to_string(),
         id,
@@ -45,7 +52,7 @@ fn empty_entry(id: crate::EntryId, name: &str) -> Entry {
     )
 }
 
-fn into_allocated(program: crate::egir::reify::Segmented) -> ResourcesAllocated {
+fn into_allocated(program: egir::reify::Segmented) -> ResourcesAllocated {
     let Program {
         functions,
         externs,
@@ -62,14 +69,14 @@ fn into_allocated(program: crate::egir::reify::Segmented) -> ResourcesAllocated 
         constants,
         AllocatedProgramData {
             core: data,
-            materializations: crate::IdArena::new(),
+            materializations: IdArena::new(),
         },
         global_context,
     )
 }
 
 fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
-    let binding = crate::BindingRef::new(0, 7);
+    let binding = BindingRef::new(0, 7);
     let mut identities = ProgramIdentities::default();
     let main = identities.alloc_entry("main".into());
     let mut program = semantic_program_for_test(
@@ -84,7 +91,7 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     let resource_size = program.data.resources[resource].size.clone();
     program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
         resource: SemanticResourceRef(resource),
-        role: crate::interface::StorageRole::Input,
+        role: interface::StorageRole::Input,
         elem_ty: unit_ty(),
         size: resource_size,
     });
@@ -93,7 +100,7 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
 
 #[test]
 fn logical_allocation_introduces_the_allocated_sidecar() {
-    let binding = crate::BindingRef::new(2, 3);
+    let binding = BindingRef::new(2, 3);
     let mut semantic = semantic_program_for_test(
         vec![],
         vec![],
@@ -155,7 +162,7 @@ fn allocated_resource_verifier_accepts_resource_only_program() {
 fn semantic_resource_ref_has_no_binding_constructor() {
     let mut resources = LogicalResourceArena::default();
     let resource = resources.allocate(
-        ResourceOrigin::host(crate::BindingRef::new(0, 0)),
+        ResourceOrigin::host(BindingRef::new(0, 0)),
         unit_ty(),
         LogicalSize::Unspecified,
     );
@@ -167,7 +174,7 @@ fn semantic_resource_ref_has_no_binding_constructor() {
 fn logical_resource_arena_owns_dense_identity_assignment() {
     let mut resources = LogicalResourceArena::default();
     let first = resources.allocate(
-        ResourceOrigin::host(crate::BindingRef::new(0, 1)),
+        ResourceOrigin::host(BindingRef::new(0, 1)),
         unit_ty(),
         LogicalSize::Unspecified,
     );
@@ -189,16 +196,16 @@ fn logical_resource_arena_owns_dense_identity_assignment() {
 
 #[test]
 fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
-    let binding = crate::BindingRef::new(3, 5);
+    let binding = BindingRef::new(3, 5);
     let mut resources = LogicalResourceArena::default();
     let resource = resources.allocate(
         ResourceOrigin::host(binding),
         Type::Constructed(TypeName::UInt(32), vec![]),
         LogicalSize::Unspecified,
     );
-    let table = PhysicalResourceTable::allocate(&resources, &mut crate::IdSource::new());
+    let table = PhysicalResourceTable::allocate(&resources, &mut IdSource::new());
     let mut graph = EGraph::new();
-    let view = crate::egir::graph_ops::intern_resource_view(
+    let view = egir::graph_ops::intern_resource_view(
         &mut graph,
         resource,
         Type::Constructed(TypeName::UInt(32), vec![]),
@@ -210,15 +217,15 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let mapped_view = node_map[&view];
     assert!(matches!(
         &physical.nodes[mapped_view].kind,
-        crate::egir::types::ValueKind::Pure {
-            op: crate::egir::types::PureOp::StorageView(crate::op::PureViewSource::Storage(found)),
+        egir::types::ValueKind::Pure {
+            op: egir::types::PureOp::StorageView(op::PureViewSource::Storage(found)),
             ..
         } if *found == binding
     ));
     assert!(physical.nodes.values().all(|node| !matches!(
         &node.kind,
-        crate::egir::types::ValueKind::Pure {
-            op: crate::egir::types::PureOp::ResourceLen(_),
+        egir::types::ValueKind::Pure {
+            op: egir::types::PureOp::ResourceLen(_),
             ..
         }
     )));
@@ -245,15 +252,15 @@ fn compiler_binding_allocation_avoids_non_resource_descriptor_slots() {
         unit_ty(),
         LogicalSize::FixedBytes(4),
     );
-    let mut ids = crate::IdSource::new();
+    let mut ids = IdSource::new();
     let table = PhysicalResourceTable::allocate_avoiding(
         &resources,
         &mut ids,
-        [crate::BindingRef::new(0, 0), crate::BindingRef::new(0, 2)],
+        [BindingRef::new(0, 0), BindingRef::new(0, 2)],
     );
 
-    assert_eq!(table.binding(first), crate::BindingRef::new(0, 1));
-    assert_eq!(table.binding(second), crate::BindingRef::new(0, 3));
+    assert_eq!(table.binding(first), BindingRef::new(0, 1));
+    assert_eq!(table.binding(second), BindingRef::new(0, 3));
 }
 
 #[test]

@@ -16,13 +16,14 @@ pub type Rewritten = super::program::Program<
     RewrittenTag,
     super::ir::ProgramFamily<
         super::types::Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
     super::program::PlannedGlobal,
 >;
 
+use crate::interface;
 use polytype::Type;
 use smallvec::smallvec;
 

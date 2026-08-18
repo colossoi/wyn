@@ -8,8 +8,11 @@ use super::{
     Place, ProgramParts, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use crate::ast::{self, Span, TypeName};
+use crate::ast_type_holes;
 use crate::builtins::{catalog, BuiltinId};
+use crate::op;
 use crate::op::BinaryOperator;
+use crate::types;
 use crate::types::{SoacOwnership, TypeExt};
 use crate::{interface, LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
@@ -70,7 +73,7 @@ impl<'a> Transformer<'a> {
     /// their owned symbol table using `ProgramParts::with_symbols`.
     pub fn transform_program(
         &mut self,
-        program: &crate::ast_type_holes::HolesResolved,
+        program: &ast_type_holes::HolesResolved,
     ) -> ProgramParts<run::UnpinnedPolymorphic> {
         let mut defs = Vec::new();
 
@@ -510,7 +513,7 @@ impl<'a> Transformer<'a> {
                 // Vec swizzle (1–4 letters from a single swizzle set —
                 // `xyzw` or `rgba`): build per-letter projections;
                 // single letter → scalar, multi → _w_vec_lit.
-                if rec.ty.is_vec() && crate::types::is_swizzle_field(field) {
+                if rec.ty.is_vec() && types::is_swizzle_field(field) {
                     let elem_ty = rec
                         .ty
                         .elem_type()
@@ -521,7 +524,7 @@ impl<'a> Transformer<'a> {
                     // Single-letter swizzle is one projection — no
                     // duplication concern; project the rec term directly.
                     if n_components == 1 {
-                        let idx = crate::types::swizzle_component_index(field.chars().next().unwrap())
+                        let idx = types::swizzle_component_index(field.chars().next().unwrap())
                             .expect("is_swizzle_field already accepted this letter");
                         return self.mk_tuple_proj(rec, idx as usize, elem_ty, span);
                     }
@@ -561,7 +564,7 @@ impl<'a> Transformer<'a> {
                     let components: Vec<Term> = field
                         .chars()
                         .map(|c| {
-                            let idx = crate::types::swizzle_component_index(c)
+                            let idx = types::swizzle_component_index(c)
                                 .expect("is_swizzle_field already accepted this letter");
                             self.mk_tuple_proj(base.clone(), idx as usize, elem_ty.clone(), span)
                         })
@@ -617,7 +620,7 @@ impl<'a> Transformer<'a> {
                 let variants = match &raw_sum_ty {
                     Type::Constructed(TypeName::Sum(v), _) => v.clone(),
                     Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
-                        crate::types::fragment_output_variants(args[0].clone())
+                        types::fragment_output_variants(args[0].clone())
                     }
                     _ => panic!("BUG: Constructor `#{}` has non-sum type {:?}", name, raw_sum_ty),
                 };
@@ -1340,7 +1343,7 @@ impl<'a> Transformer<'a> {
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let active = self.build_binop(
             ast::BinaryOp {
-                op: crate::op::BinaryOperator::GreaterEqual,
+                op: op::BinaryOperator::GreaterEqual,
             },
             key.clone(),
             zero,
@@ -2073,7 +2076,7 @@ impl<'a> Transformer<'a> {
                 Type::Constructed(TypeName::Tuple(layout.slot_types.len()), layout.slot_types)
             }
             Type::Constructed(TypeName::FragmentOutput, args) if args.len() == 1 => {
-                let variants = crate::types::fragment_output_variants(args[0].clone());
+                let variants = types::fragment_output_variants(args[0].clone());
                 let layout = Self::sum_layout(&variants);
                 Type::Constructed(TypeName::Tuple(layout.slot_types.len()), layout.slot_types)
             }

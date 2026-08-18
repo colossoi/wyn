@@ -5,6 +5,8 @@
 //! equivalent of Futhark's `SuperScrema`, normalises the legal barrier ordering,
 //! deduplicates forwarded inputs, and synthesises whole pre/post lambdas.
 
+use crate::flow;
+use crate::ssa;
 use polytype::Type;
 
 use super::{capture_types, deduplicate_array_inputs};
@@ -769,7 +771,7 @@ fn fuse_across_middle_barrier(
 enum ProjectedValue {
     Input(usize),
     Constant {
-        value: crate::ssa::types::ConstantValue,
+        value: ssa::types::ConstantValue,
         ty: Type<TypeName>,
     },
     Pure {
@@ -832,7 +834,7 @@ fn lambda_results_depend_on_parameters(
     Some(dependencies.iter().any(|input| parameters.contains(input)))
 }
 
-fn function_return_site(function: &Func<Semantic>) -> Option<(crate::flow::BlockId, Vec<ValueId>)> {
+fn function_return_site(function: &Func<Semantic>) -> Option<(flow::BlockId, Vec<ValueId>)> {
     let mut returns = function.graph.skeleton.blocks.iter().filter_map(|(block, body)| match &body.term {
         SkeletonTerminator::Return(Some(result)) => Some((block, result.values())),
         _ => None,
@@ -1037,7 +1039,7 @@ impl ProjectionBuilder<'_> {
     fn call(
         &mut self,
         caller: &Func<Semantic>,
-        callee: &crate::FunctionId,
+        callee: &FunctionId,
         call_arguments: &[OperandRef],
         result: usize,
         caller_arguments: &[Option<ProjectedValue>],

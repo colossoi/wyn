@@ -2,6 +2,9 @@
 
 use super::array_io::emit_length;
 use super::*;
+use crate::op;
+use crate::ssa;
+use crate::IdSource;
 
 /// One expanded-loop iteration. A body can finish in a different CFG block
 /// when its effectful work is conditionally executed.
@@ -19,17 +22,11 @@ fn build_loop<F>(
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
     results: &[LoopResultBinding],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     mut emit_body: F,
 ) -> BlockId
 where
-    F: FnMut(
-        &mut EGraph<Physical>,
-        &mut crate::IdSource<EffectToken>,
-        BlockId,
-        ValueId,
-        &[ValueId],
-    ) -> LoopBody,
+    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -70,18 +67,12 @@ pub(super) fn expand_loop<F>(
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
     results: &[LoopResultBinding],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     allow_unroll: bool,
     mut emit_body: F,
 ) -> BlockId
 where
-    F: FnMut(
-        &mut EGraph<Physical>,
-        &mut crate::IdSource<EffectToken>,
-        BlockId,
-        ValueId,
-        &[ValueId],
-    ) -> LoopBody,
+    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     if allow_unroll {
         if let Some(continuation) = try_unroll(
@@ -121,17 +112,11 @@ fn try_unroll<F>(
     len_input: &(ValueId, Type<TypeName>),
     carried: &[(Type<TypeName>, ValueId)],
     results: &[LoopResultBinding],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     mut emit_body: F,
 ) -> Option<BlockId>
 where
-    F: FnMut(
-        &mut EGraph<Physical>,
-        &mut crate::IdSource<EffectToken>,
-        BlockId,
-        ValueId,
-        &[ValueId],
-    ) -> LoopBody,
+    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
@@ -251,7 +236,7 @@ fn build_loop_skeleton(
             LoopResultSource::ConstantFalse => {
                 graph.replace_node_preserving_type(
                     binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
-                    ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+                    ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
                 );
             }
         }
@@ -279,7 +264,7 @@ fn build_loop_skeleton(
     // Header terminator: condbr i<len -> body / after(result_carried).
     let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
     let cond_nid = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![idx_nid, len_nid],
         bool_ty,
         None,
@@ -315,7 +300,7 @@ fn bind_unrolled_result(graph: &mut EGraph<Physical>, binding: &LoopResultBindin
         LoopResultSource::ConstantFalse => {
             graph.replace_node_preserving_type(
                 binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
-                ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+                ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
             );
         }
     }
@@ -326,7 +311,7 @@ fn increment(graph: &mut EGraph<Physical>, idx_nid: ValueId) -> ValueId {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let one_nid = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty.clone(), None);
     graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![idx_nid, one_nid],
         i32_ty,
         None,

@@ -5,7 +5,9 @@
 //! lowering. `types::checker_tests` covers the checker integration.
 
 use super::*;
+use crate::ast;
 use crate::ast::Span;
+use crate::lexer;
 use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> Span {
@@ -229,7 +231,7 @@ fn int_requires_wildcard_for_exhaustive() {
                     id: ast::NodeId(0),
                     span: dummy_span(),
                 },
-                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString(
+                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString(
                     "0".to_string(),
                 ))),
             },
@@ -241,7 +243,7 @@ fn int_requires_wildcard_for_exhaustive() {
                     id: ast::NodeId(1),
                     span: dummy_span(),
                 },
-                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString(
+                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString(
                     "1".to_string(),
                 ))),
             },
@@ -259,7 +261,7 @@ fn int_requires_wildcard_for_exhaustive() {
                     id: ast::NodeId(0),
                     span: dummy_span(),
                 },
-                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString(
+                kind: ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString(
                     "0".to_string(),
                 ))),
             },
@@ -404,7 +406,7 @@ fn ctor(n: &str, sub: Vec<ast::Pattern>) -> ast::Pattern {
 }
 fn lit_int(s: &str) -> ast::Pattern {
     pat(ast::PatternKind::Literal(ast::PatternLiteral::Int(
-        crate::lexer::IntString(s.to_string()),
+        lexer::IntString(s.to_string()),
     )))
 }
 fn lit_bool(b: bool) -> ast::Pattern {
@@ -635,7 +637,7 @@ fn lower_strips_typed_wrapper() {
     let inner = name("x");
     let typed = pat(ast::PatternKind::Typed(
         Box::new(inner),
-        AstType::Constructed(crate::ast::TypeName::Bool, vec![]),
+        AstType::Constructed(ast::TypeName::Bool, vec![]),
     ));
     let cp = lower(&typed);
     assert!(matches!(cp, CovPat::Wild));

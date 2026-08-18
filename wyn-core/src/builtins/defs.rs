@@ -1,3 +1,4 @@
+use crate::builtins;
 use crate::builtins::catalog::{BuiltinDefRaw, BuiltinKind, BuiltinOverload, Purity};
 use crate::builtins::lowering::BuiltinLowering;
 use crate::builtins::lowering::PrimOp;
@@ -479,13 +480,13 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
     polymorphic_intrinsic!(
         "min",
         "_w_intrinsic_min",
-        crate::builtins::scheme::scalar_binary,
+        builtins::scheme::scalar_binary,
         BuiltinLowering::PrimOp(PrimOp::GlslExt(37))
     ),
     polymorphic_intrinsic!(
         "max",
         "_w_intrinsic_max",
-        crate::builtins::scheme::scalar_binary,
+        builtins::scheme::scalar_binary,
         BuiltinLowering::PrimOp(PrimOp::GlslExt(40))
     ),
     BuiltinDefRaw {
@@ -496,7 +497,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: Some(crate::builtins::scheme::scalar_ternary),
+                scheme: Some(builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(43)),
             },
             // `clamp(vec, scalar, scalar)` — splat lo and hi to vec
@@ -518,7 +519,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: Some(crate::builtins::scheme::scalar_ternary),
+                scheme: Some(builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(46)),
             },
             // `mix(vec, vec, scalar)` — splat the scalar `t` to vec
@@ -541,7 +542,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         purity: Purity::Pure,
         overloads: &[
             BuiltinOverload {
-                scheme: Some(crate::builtins::scheme::scalar_ternary),
+                scheme: Some(builtins::scheme::scalar_ternary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(49)),
             },
             // `smoothstep(scalar, scalar, vec)` — splat edge0/edge1 to
@@ -566,7 +567,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             // vec/vec both unify against this scheme. GLSL.std.450 `Step`
             // (#48) accepts matching scalar or vec operand types.
             BuiltinOverload {
-                scheme: Some(crate::builtins::scheme::scalar_binary),
+                scheme: Some(builtins::scheme::scalar_binary),
                 lowering: BuiltinLowering::PrimOp(PrimOp::GlslExt(48)),
             },
             // `step(scalar_edge, vec)` — splat the scalar edge to vec
@@ -614,7 +615,7 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Pure,
         overloads: &[BuiltinOverload {
-            scheme: Some(crate::builtins::scheme::array_index_value_to_array),
+            scheme: Some(builtins::scheme::array_index_value_to_array),
             lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
@@ -625,123 +626,99 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
         kind: BuiltinKind::InternalIntrinsic,
         purity: Purity::Effectful,
         overloads: &[BuiltinOverload {
-            scheme: Some(crate::builtins::scheme::array_index_value_to_array),
+            scheme: Some(builtins::scheme::array_index_value_to_array),
             lowering: BuiltinLowering::ByBuiltinId,
         }],
     },
     // ---- Unified pipeline invocation forms. These are type-checked as
     // ordinary calls and consumed by stage extraction before backend lowering. ----
-    hof_intrinsic!("direct_draw", crate::builtins::scheme::direct_draw_scheme),
-    hof_intrinsic!(
-        "direct_draw_from",
-        crate::builtins::scheme::direct_draw_from_scheme
-    ),
+    hof_intrinsic!("direct_draw", builtins::scheme::direct_draw_scheme),
+    hof_intrinsic!("direct_draw_from", builtins::scheme::direct_draw_from_scheme),
     hof_intrinsic_overloaded!(
         "indexed_draw",
         [
-            crate::builtins::scheme::indexed_draw_u16_scheme,
-            crate::builtins::scheme::indexed_draw_u32_scheme,
+            builtins::scheme::indexed_draw_u16_scheme,
+            builtins::scheme::indexed_draw_u32_scheme,
         ]
     ),
     hof_intrinsic_overloaded!(
         "indexed_draw_from",
         [
-            crate::builtins::scheme::indexed_draw_from_u16_scheme,
-            crate::builtins::scheme::indexed_draw_from_u32_scheme,
+            builtins::scheme::indexed_draw_from_u16_scheme,
+            builtins::scheme::indexed_draw_from_u32_scheme,
         ]
     ),
-    hof_intrinsic!("indirect_draw", crate::builtins::scheme::indirect_draw_scheme),
-    hof_intrinsic!("indirect_draws", crate::builtins::scheme::indirect_draws_scheme),
+    hof_intrinsic!("indirect_draw", builtins::scheme::indirect_draw_scheme),
+    hof_intrinsic!("indirect_draws", builtins::scheme::indirect_draws_scheme),
     hof_intrinsic_overloaded!(
         "indexed_indirect_draw",
         [
-            crate::builtins::scheme::indexed_indirect_draw_u16_scheme,
-            crate::builtins::scheme::indexed_indirect_draw_u32_scheme,
+            builtins::scheme::indexed_indirect_draw_u16_scheme,
+            builtins::scheme::indexed_indirect_draw_u32_scheme,
         ]
     ),
     hof_intrinsic_overloaded!(
         "indexed_indirect_draws",
         [
-            crate::builtins::scheme::indexed_indirect_draws_u16_scheme,
-            crate::builtins::scheme::indexed_indirect_draws_u32_scheme,
+            builtins::scheme::indexed_indirect_draws_u16_scheme,
+            builtins::scheme::indexed_indirect_draws_u32_scheme,
         ]
     ),
-    hof_intrinsic!("vertex_output", crate::builtins::scheme::vertex_output_scheme),
-    hof_intrinsic!("rasterize_triangles", crate::builtins::scheme::rasterize_scheme),
-    hof_intrinsic!(
-        "rasterize_triangle_strip",
-        crate::builtins::scheme::rasterize_scheme
-    ),
-    hof_intrinsic!("rasterize_lines", crate::builtins::scheme::rasterize_scheme),
-    hof_intrinsic!("rasterize_line_strip", crate::builtins::scheme::rasterize_scheme),
-    hof_intrinsic!("rasterize_points", crate::builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("vertex_output", builtins::scheme::vertex_output_scheme),
+    hof_intrinsic!("rasterize_triangles", builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_triangle_strip", builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_lines", builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_line_strip", builtins::scheme::rasterize_scheme),
+    hof_intrinsic!("rasterize_points", builtins::scheme::rasterize_scheme),
     hof_intrinsic!(
         "rasterize_triangles_with",
-        crate::builtins::scheme::rasterize_with_scheme
+        builtins::scheme::rasterize_with_scheme
     ),
     hof_intrinsic!(
         "rasterize_triangle_strip_with",
-        crate::builtins::scheme::rasterize_with_scheme
+        builtins::scheme::rasterize_with_scheme
     ),
-    hof_intrinsic!(
-        "rasterize_lines_with",
-        crate::builtins::scheme::rasterize_with_scheme
-    ),
+    hof_intrinsic!("rasterize_lines_with", builtins::scheme::rasterize_with_scheme),
     hof_intrinsic!(
         "rasterize_line_strip_with",
-        crate::builtins::scheme::rasterize_with_scheme
+        builtins::scheme::rasterize_with_scheme
     ),
-    hof_intrinsic!(
-        "rasterize_points_with",
-        crate::builtins::scheme::rasterize_with_scheme
-    ),
+    hof_intrinsic!("rasterize_points_with", builtins::scheme::rasterize_with_scheme),
     hof_intrinsic_overloaded!(
         "shade",
         [
-            crate::builtins::scheme::shade_scheme,
-            crate::builtins::scheme::shade_output_scheme,
+            builtins::scheme::shade_scheme,
+            builtins::scheme::shade_output_scheme,
         ]
     ),
     hof_intrinsic_overloaded!(
         "shade_with",
         [
-            crate::builtins::scheme::shade_with_scheme,
-            crate::builtins::scheme::shade_with_output_scheme,
+            builtins::scheme::shade_with_scheme,
+            builtins::scheme::shade_with_output_scheme,
         ]
     ),
-    hof_intrinsic!("target_load", crate::builtins::scheme::target_load_scheme),
-    hof_intrinsic!("target_sample", crate::builtins::scheme::target_sample_scheme),
+    hof_intrinsic!("target_load", builtins::scheme::target_load_scheme),
+    hof_intrinsic!("target_sample", builtins::scheme::target_sample_scheme),
     // ---- HOF / SOAC intrinsics: scheme only, lowered earlier in the pipeline ----
     hof_intrinsic!(
         "_w_intrinsic_replicate",
-        crate::builtins::scheme::replicate_scheme,
+        builtins::scheme::replicate_scheme,
         Purity::Pure
     ),
     hof_intrinsic!(
         "_w_intrinsic_reduce",
-        crate::builtins::scheme::reduce_scheme,
+        builtins::scheme::reduce_scheme,
         Purity::Pure
     ),
-    hof_intrinsic!(
-        "_w_intrinsic_scan",
-        crate::builtins::scheme::scan_scheme,
-        Purity::Pure
-    ),
-    hof_intrinsic!(
-        "_w_intrinsic_map",
-        crate::builtins::scheme::map_scheme,
-        Purity::Pure
-    ),
+    hof_intrinsic!("_w_intrinsic_scan", builtins::scheme::scan_scheme, Purity::Pure),
+    hof_intrinsic!("_w_intrinsic_map", builtins::scheme::map_scheme, Purity::Pure),
     hof_intrinsic!(
         "_w_intrinsic_map_into",
-        crate::builtins::scheme::map_into_scheme,
+        builtins::scheme::map_into_scheme,
         Purity::Effectful
     ),
-    hof_intrinsic!(
-        "_w_intrinsic_rotr32",
-        crate::builtins::scheme::u32_binary,
-        Purity::Pure
-    ),
+    hof_intrinsic!("_w_intrinsic_rotr32", builtins::scheme::u32_binary, Purity::Pure),
     // ---- Compiler-internal intrinsics: emitted by the codegen pipeline,
     // not user-facing. They have no published scheme (the compiler
     // synthesises type-correct calls) and lowering is special-cased per

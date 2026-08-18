@@ -5,7 +5,9 @@
 //! representation and live here so consumers do not depend on producing
 //! passes.
 
+use crate::interface;
 use crate::pipeline_descriptor::BufferLen;
+use crate::types;
 use crate::{LookupMap, SymbolId};
 
 /// No payload is stored at this position in the selected phase.
@@ -51,7 +53,7 @@ impl super::Payload for Empty {
 /// Per-definition information retained until monomorphization consumes it.
 #[derive(Debug, Clone)]
 pub struct PolymorphicDefinition {
-    pub scheme: Option<crate::types::TypeScheme>,
+    pub scheme: Option<types::TypeScheme>,
 }
 
 /// A closure value whose environment is intrinsically owned by its term.
@@ -159,13 +161,13 @@ impl super::Payload for ExplicitCapturesPayload {
 /// Buffer layout attached by `pin_entry_buffers`.
 #[derive(Debug, Clone, Default)]
 pub struct PinnedEntry {
-    pub param_bindings: Vec<Option<crate::interface::EntryParamBinding>>,
+    pub param_bindings: Vec<Option<interface::EntryParamBinding>>,
 }
 
 /// Buffer layout and minimum required storage-input lengths attached directly
 /// to an entry after input-bound inference.
 #[derive(Debug, Clone, Default)]
 pub struct EntryInputBounds {
-    pub param_bindings: Vec<Option<crate::interface::EntryParamBinding>>,
+    pub param_bindings: Vec<Option<interface::EntryParamBinding>>,
     pub by_symbol: LookupMap<SymbolId, BufferLen>,
 }

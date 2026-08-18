@@ -5,6 +5,7 @@
 //! identical. This module keeps those invariants in one place while the
 //! consumer modules provide only their shape-specific adapters.
 
+use crate::egir;
 use std::collections::HashSet;
 
 use polytype::Type;
@@ -197,7 +198,7 @@ pub(super) fn compose(
 pub(super) fn finish(
     inner: Segmented,
     candidate: Candidate,
-    consumer_id: crate::egir::program::SemanticOpId,
+    consumer_id: egir::program::SemanticOpId,
     consumer_op: Soac<Semantic>,
     input_nodes: Vec<ValueId>,
     synthesized: Vec<Func<Semantic>>,

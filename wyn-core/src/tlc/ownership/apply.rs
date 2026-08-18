@@ -6,22 +6,21 @@
 use super::analysis::{alias_target_of, analyze, AnalysisState, Origin};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
+use crate::tlc;
 use crate::tlc::stage::GeneratedLambdasFolded;
 use crate::tlc::{
     var_term_builtin_id, ArrayExpr, Def, Lambda, Payload, Program, RewriteDecision, SoacOp, Term, TermId,
     TermIdSource, TermKind, TermRewriter, VarRef, WalkDecision,
 };
+use crate::types;
 use crate::types::TypeExt;
 use crate::{LookupMap, SymbolId, SymbolTable};
 use polytype::Type;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OwnershipAppliedTag {}
-pub type OwnershipApplied = crate::tlc::Program<
-    OwnershipAppliedTag,
-    crate::tlc::family::ClosureConverted,
-    crate::tlc::context::PostClosureGlobal,
->;
+pub type OwnershipApplied =
+    tlc::Program<OwnershipAppliedTag, tlc::family::ClosureConverted, tlc::context::PostClosureGlobal>;
 
 // =============================================================================
 // TLC-level promotion of array_with → array_with_inplace
@@ -45,7 +44,7 @@ fn insert_ownership_patch(patches: &mut OwnershipPatches, target: TermId, patch:
 
 /// Analyze the exact tree that will be rebuilt and return every requested
 /// ownership mutation as a `TermId`-keyed patch map.
-fn analyze_application<Tag, F: crate::tlc::Family, GlobalContext>(
+fn analyze_application<Tag, F: tlc::Family, GlobalContext>(
     program: &Program<Tag, F, GlobalContext>,
 ) -> OwnershipPatches {
     let model = analyze(program);
@@ -84,7 +83,7 @@ pub fn apply_ownership(program: GeneratedLambdasFolded) -> OwnershipApplied {
     apply_ownership_rewrite(program).retag()
 }
 
-pub(super) fn apply_ownership_rewrite<Tag, F: crate::tlc::Family, GlobalContext>(
+pub(super) fn apply_ownership_rewrite<Tag, F: tlc::Family, GlobalContext>(
     program: Program<Tag, F, GlobalContext>,
 ) -> Program<Tag, F, GlobalContext> {
     let mut patches = analyze_application(&program);
@@ -136,7 +135,7 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for OwnershipRewriter<'_> {
                 TermKind::Soac(SoacOp::Map { destination, .. })
                 | TermKind::Soac(SoacOp::Scan { destination, .. })
                 | TermKind::Soac(SoacOp::Filter { destination, .. }) => {
-                    *destination = crate::types::SoacOwnership::UniqueInput;
+                    *destination = types::SoacOwnership::UniqueInput;
                 }
                 _ => panic!(
                     "unique-input ownership patch targeted ineligible term {:?}",
@@ -191,7 +190,7 @@ fn array_with_is_promotable<C: Payload, S: Payload>(
 /// Pure analysis. Does not mutate the program. The caller decides
 /// whether to act on the result.
 #[cfg(test)]
-pub(super) fn eligible_unique_input_soacs<Tag, F: crate::tlc::Family, GlobalContext>(
+pub(super) fn eligible_unique_input_soacs<Tag, F: tlc::Family, GlobalContext>(
     program: &Program<Tag, F, GlobalContext>,
     model: &AnalysisState,
 ) -> Vec<TermId> {

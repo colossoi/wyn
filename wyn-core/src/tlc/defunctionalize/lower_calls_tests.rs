@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::tlc;
 use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
+use crate::types;
+use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
 
@@ -11,8 +14,8 @@ fn empty_program() -> Defunctionalized {
         vec![],
         SymbolTable::new(),
         TermIdSource::new(),
-        crate::tlc::context::PostClosureGlobal {
-            auto_storage_binding_ids: crate::IdSource::new(),
+        tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: IdSource::new(),
         },
     )
 }
@@ -60,7 +63,7 @@ fn direct_call_passes() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     assert!(verify_closure_calls_lowered(&p).is_ok());
 }
@@ -80,7 +83,7 @@ fn arity_mismatch_fails() {
         meta: DefMeta::Function,
         arity: 2,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     // f calls g with only 1 arg — wrong.
     let func = term(&mut p, TermKind::Var(VarRef::Symbol(g)));
@@ -100,7 +103,7 @@ fn arity_mismatch_fails() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     let err = verify_closure_calls_lowered(&p).unwrap_err();
     assert!(
@@ -145,7 +148,7 @@ fn nested_app_in_func_position_fails() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     let err = verify_closure_calls_lowered(&p).unwrap_err();
     assert!(matches!(err, ClosureCallsLowerError::IndirectCall { .. }));

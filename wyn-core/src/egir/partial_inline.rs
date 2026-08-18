@@ -17,14 +17,20 @@ pub type PartiallyInlined = super::program::Program<
     PartiallyInlinedTag,
     super::ir::ProgramFamily<
         Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
     super::program::PlannedGlobal,
 >;
 
+use crate::ast;
+use crate::flow;
+use crate::interface;
+use crate::types;
 use crate::types::TypeExt;
+use crate::FunctionId;
+use crate::IdSource;
 use crate::LookupMap;
 
 use super::inlining;
@@ -62,8 +68,8 @@ struct InliningStats {
 #[derive(Clone, Debug)]
 struct Candidate {
     call: ValueId,
-    block: crate::flow::BlockId,
-    callee: crate::FunctionId,
+    block: flow::BlockId,
+    callee: FunctionId,
     callee_nodes: usize,
     callee_blocks: usize,
 }
@@ -71,7 +77,7 @@ struct Candidate {
 #[derive(Clone, Copy, Debug)]
 struct EffectfulCandidate {
     effect: SideEffectSite,
-    callee: crate::FunctionId,
+    callee: FunctionId,
 }
 
 /// Inline profitable mixed-variance calls in every physical body. The ordinary
@@ -82,7 +88,7 @@ pub fn partially_inline_calls(
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
     // clone, so snapshots do not need to be refreshed after each body.
-    let callees: LookupMap<crate::FunctionId, Func<Physical>> =
+    let callees: LookupMap<FunctionId, Func<Physical>> =
         program.functions.iter().map(|function| (function.region, function.clone())).collect();
     program
         .try_map_graphs_with_state(|site, mut graph, _, context| {
@@ -95,8 +101,8 @@ pub fn partially_inline_calls(
 
 fn inline_body(
     graph: &mut EGraph<Physical>,
-    callees: &LookupMap<crate::FunctionId, Func<Physical>>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    callees: &LookupMap<FunctionId, Func<Physical>>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<InliningStats, String> {
     let mut stats = InliningStats::default();
     let mut effectful_inlines = 0usize;
@@ -131,7 +137,7 @@ fn inline_body(
 
 fn find_effectful_candidate(
     graph: &EGraph<Physical>,
-    callees: &LookupMap<crate::FunctionId, Func<Physical>>,
+    callees: &LookupMap<FunctionId, Func<Physical>>,
 ) -> Option<EffectfulCandidate> {
     for (block, body) in &graph.skeleton.blocks {
         for (index, effect) in body.side_effects.iter().enumerate() {
@@ -161,7 +167,7 @@ fn find_effectful_candidate(
 
 fn find_candidate(
     graph: &EGraph<Physical>,
-    callees: &LookupMap<crate::FunctionId, Func<Physical>>,
+    callees: &LookupMap<FunctionId, Func<Physical>>,
     remaining_nodes: usize,
     remaining_blocks: usize,
 ) -> Option<Candidate> {
@@ -286,11 +292,11 @@ fn find_candidate(
     None
 }
 
-fn is_fixed_composite_array(ty: &polytype::Type<crate::ast::TypeName>) -> bool {
-    (ty.array_variant().is_some_and(crate::types::is_array_variant_composite)
+fn is_fixed_composite_array(ty: &polytype::Type<ast::TypeName>) -> bool {
+    (ty.array_variant().is_some_and(types::is_array_variant_composite)
         && matches!(
             ty.array_size(),
-            Some(polytype::Type::Constructed(crate::ast::TypeName::Size(_), _))
+            Some(polytype::Type::Constructed(ast::TypeName::Size(_), _))
         ))
         || super::types::WynLanguage::product_fields(ty)
             .is_some_and(|fields| fields.iter().any(is_fixed_composite_array))

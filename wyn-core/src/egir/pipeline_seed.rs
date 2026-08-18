@@ -5,11 +5,14 @@
 
 use crate::interface::EntryKind;
 use crate::pipeline_descriptor::*;
+use crate::symbol_name_or_bug;
+use crate::tlc;
 use crate::tlc::DefMeta as GenericDefMeta;
+use crate::LookupMap;
 use crate::SymbolId;
 
-type Program = crate::tlc::stage::InputSliceBoundsInferred;
-type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
+type Program = tlc::stage::InputSliceBoundsInferred;
+type DefMeta = GenericDefMeta<tlc::data::EntryInputBounds>;
 
 pub(super) struct PipelineSeed {
     pub pipeline: PipelineDescriptor,
@@ -19,14 +22,14 @@ pub(super) struct PipelineSeed {
 pub(super) fn build(program: &Program) -> PipelineSeed {
     let mut pipelines: Vec<Pipeline> = Vec::new();
     let mut stage_symbols: Vec<Vec<SymbolId>> = Vec::new();
-    let mut unified_graphics = crate::LookupMap::<(SymbolId, u32), usize>::new();
+    let mut unified_graphics = LookupMap::<(SymbolId, u32), usize>::new();
 
     for def in &program.defs {
         let DefMeta::EntryPoint(entry) = &def.meta else {
             continue;
         };
         let decl = &entry.declaration;
-        let name = crate::symbol_name_or_bug(&program.symbols, def.name).to_string();
+        let name = symbol_name_or_bug(&program.symbols, def.name).to_string();
         let feedback = decl
             .feedback
             .iter()
@@ -72,7 +75,7 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                 .as_ref()
                 .expect("extracted graphics stage is missing its operation identity");
             let key = (group.root, group.operation);
-            let owner = crate::symbol_name_or_bug(&program.symbols, group.root).to_string();
+            let owner = symbol_name_or_bug(&program.symbols, group.root).to_string();
             let stage = match decl.entry_kind {
                 EntryKind::Vertex => ShaderStage::Vertex,
                 EntryKind::Fragment => ShaderStage::Fragment,

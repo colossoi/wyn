@@ -2,6 +2,8 @@
 //! generator that fills dead variant slots at Constructor expressions.
 
 use super::*;
+use crate::ast_type_holes;
+use crate::compile_thru_frontend;
 
 fn unit_test_term(ids: &mut TermIdSource, kind: TermKind) -> Term {
     Term {
@@ -40,8 +42,8 @@ fn mapping_children_assigns_caller_provided_parent_id() {
 /// `to_tlc`, skipping every post-TLC pass so the Constructor lowering
 /// is observable verbatim.
 fn compile_to_tlc_raw(source: &str) -> stage::Transformed {
-    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
-    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let type_checked = compile_thru_frontend(source).expect("type_check");
+    let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     lower_from_ast(program).expect("lower_from_ast")
 }
 

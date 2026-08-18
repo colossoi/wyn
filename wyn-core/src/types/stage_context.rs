@@ -5,7 +5,9 @@
 //! for exactly their callback argument.
 
 use crate::ast::{self, Declaration, ExprKind, IdentifierResolution, LoopForm, PatternKind, TypeScheme};
+use crate::builtins;
 use crate::builtins::BuiltinId;
+use crate::err_type_at;
 use crate::error::Result;
 use crate::{LookupMap, LookupSet, SymbolId};
 
@@ -40,7 +42,7 @@ struct InvocationBuiltins {
 
 impl InvocationBuiltins {
     fn get() -> Self {
-        let catalog = crate::builtins::catalog();
+        let catalog = builtins::catalog();
         let id = |name: &str| {
             catalog
                 .lookup_by_surface_name(name)
@@ -307,7 +309,7 @@ impl<'a> Validator<'a> {
         }
         if builtin == self.builtins.vertex_output {
             if context != InvocationContext::Vertex {
-                return Some(Err(crate::err_type_at!(
+                return Some(Err(err_type_at!(
                     application_span,
                     "vertex_output may only be evaluated in a vertex callback, not {}",
                     context.description()
@@ -331,7 +333,7 @@ impl<'a> Validator<'a> {
                 ExprKind::Identifier(identifier) => identifier.source.name.as_str(),
                 _ => "stage invocation",
             };
-            return Err(crate::err_type_at!(
+            return Err(err_type_at!(
                 application_span,
                 "stage invocation '{}' cannot be evaluated in a {}",
                 name,

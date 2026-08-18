@@ -1,4 +1,10 @@
 use super::*;
+use crate::ast;
+use crate::flow;
+use crate::interface;
+use crate::op;
+use crate::EntryId;
+use crate::SortedSet;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
@@ -136,7 +142,7 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
             args: graph.admit_flow_values([args[6], args[7], args[8]]),
         };
 
-    let slots = [2, 0, 2].into_iter().collect::<crate::SortedSet<_>>();
+    let slots = [2, 0, 2].into_iter().collect::<SortedSet<_>>();
     let removed = graph.remove_block_param_slots(target, &slots);
 
     assert_eq!(removed, [first, third]);
@@ -176,8 +182,7 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     let entry = graph.skeleton.entry;
     graph.skeleton.blocks[entry].side_effects = vec![effect(first), effect(second), effect(third)];
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(Some(graph.value_result(third)));
-    graph.skeleton.blocks[entry].control_header =
-        Some(crate::flow::ControlHeader::Selection { merge: entry });
+    graph.skeleton.blocks[entry].control_header = Some(flow::ControlHeader::Selection { merge: entry });
 
     let continuation = graph.skeleton.split_block_before_effect(entry, 1);
 
@@ -209,7 +214,7 @@ fn splitting_block_moves_effect_suffix_and_original_terminator() {
     assert!(graph.skeleton.blocks[entry].control_header.is_none());
     assert!(matches!(
         graph.skeleton.blocks[continuation].control_header.as_ref(),
-        Some(crate::flow::ControlHeader::Selection { merge }) if *merge == entry
+        Some(flow::ControlHeader::Selection { merge }) if *merge == entry
     ));
 }
 
@@ -218,9 +223,9 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     let graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
     let entry = super::super::ir::Entry::<TestPhase, u16, (), TestLanguage>::new_with_resources(
         "custom".to_string(),
-        crate::EntryId::from_index(0),
-        crate::ast::Span::new(0, 0, 0, 0),
-        crate::flow::ExecutionModel::Compute {
+        EntryId::from_index(0),
+        ast::Span::new(0, 0, 0, 0),
+        flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
         vec![],
@@ -251,11 +256,11 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
     let third = graph.add_test_value_parameter(2, "third".to_string());
     let inputs = ["first", "removed", "third"]
         .into_iter()
-        .map(|name| crate::interface::EntryInput {
+        .map(|name| interface::EntryInput {
             name: name.to_string(),
             ty: name.to_string(),
             size_hint: None,
-            kind: crate::interface::EntryInputKind::Value { decoration: None },
+            kind: interface::EntryInputKind::Value { decoration: None },
         })
         .collect();
     let params = ["first", "removed", "third"]
@@ -264,9 +269,9 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
         .collect();
     let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
-        crate::EntryId::from_index(0),
-        crate::ast::Span::dummy(),
-        crate::flow::ExecutionModel::Compute {
+        EntryId::from_index(0),
+        ast::Span::dummy(),
+        flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
         inputs,
@@ -337,7 +342,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     let a = graph.intern_pure(PureOp::Int("1".into()), smallvec::smallvec![], int.clone(), None);
     let b = graph.intern_pure(PureOp::Int("2".into()), smallvec::smallvec![], int.clone(), None);
     let old_call = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec::smallvec![a, b],
         int.clone(),
         None,
@@ -346,7 +351,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
     graph.replace_value_references(b, a);
 
     let reinterned_old_call = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec::smallvec![a, b],
         int,
         None,
@@ -359,7 +364,7 @@ fn replace_all_references_does_not_leave_stale_hash_cons_key() {
 #[test]
 fn removing_func_param_clears_its_metadata() {
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
-    let span = crate::ast::Span::new(1, 2, 3, 4);
+    let span = ast::Span::new(1, 2, 3, 4);
     let param = graph.add_test_value_parameter(0, "number".to_string());
     graph.nodes[param].span = Some(span);
 

@@ -13,7 +13,7 @@ pub type SoacsExpanded = super::program::Program<
     SoacsExpandedTag,
     super::ir::ProgramFamily<
         super::types::Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
@@ -22,6 +22,9 @@ pub type SoacsExpanded = super::program::Program<
 
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader};
+use crate::interface;
+use crate::types;
+use crate::IdSource;
 
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
@@ -83,7 +86,7 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
 pub fn run_one_body(
     mut graph: EGraph<Physical>,
     callables: &CallableMap,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<EGraph<Physical>, String> {
     // Re-scan after every expansion because splitting a block moves the
     // remaining suffix. Selecting the first operation preserves producer to
@@ -230,7 +233,7 @@ fn load_result_arguments(
     graph: &mut EGraph<Physical>,
     block: BlockId,
     results: &[ResultBinding<Type<TypeName>>],
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> Vec<ValueId> {
     results
         .iter()
@@ -263,11 +266,10 @@ fn emit_mapped_result_stores(
     lane: ValueId,
     produced: &ResultBinding<Type<TypeName>>,
     destination: &ResultBinding<Type<TypeName>>,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> BlockId {
     if let Some((array_ty, destination)) = destination.single_destination() {
-        let element_ty =
-            crate::types::array_elem(array_ty).expect("mapped result destination is not an array");
+        let element_ty = types::array_elem(array_ty).expect("mapped result destination is not an array");
         assert_eq!(element_ty, produced.ty());
         let place = match destination {
             ResultDestination::ReturnValue(view) => {
@@ -296,7 +298,7 @@ fn expand_one(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
     callables: &CallableMap,
 ) -> Result<(), String> {
     let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
@@ -351,7 +353,7 @@ fn expand_one(
                             let sink = result.map_destinations(|ty, _| {
                                 let (place, effect) = detached_alloca(graph, ty.clone(), next_effect, None);
                                 prelude.push(effect);
-                                let view_ty = crate::types::view_array_of(ty, crate::types::no_buffer());
+                                let view_ty = types::view_array_of(ty, types::no_buffer());
                                 let view = graph.add_place_view(place, view_ty, None);
                                 views.push(view.value());
                                 place_backed_results.push(view.value());

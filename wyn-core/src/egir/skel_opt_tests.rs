@@ -4,6 +4,7 @@ use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{EGraph as GenericEGraph, PureOp, SkeletonTerminator, ValueId};
 use crate::flow::BlockId;
+use crate::op;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -447,7 +448,7 @@ fn phi_elim_preserves_loop_header_param() {
 
     // body_val = acc + 1 (a ValueId distinct from init)
     let body_val = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![acc, one],
         i32_ty(),
         None,

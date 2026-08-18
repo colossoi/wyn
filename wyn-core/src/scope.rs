@@ -1,3 +1,4 @@
+use crate::ast;
 use crate::LookupMap;
 
 /// What kind of identifier a scope entry represents.
@@ -211,9 +212,9 @@ impl<T: Clone> ScopeStack<ScopeEntry<T>> {
 /// constructors, typed/attributed wrappers) and reports every leaf
 /// `PatternKind::Name`, plus shorthand record fields (`{ name }` binds
 /// `name`). Wildcards, unit, and literal patterns contribute no names.
-pub fn for_each_pattern_name<T, A>(pattern: &crate::ast::Pattern<T, A>, f: &mut impl FnMut(&str))
+pub fn for_each_pattern_name<T, A>(pattern: &ast::Pattern<T, A>, f: &mut impl FnMut(&str))
 where
-    T: crate::ast::TreeFamily,
+    T: ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
     use crate::ast::{BindingName, PatternKind, RecordPatternTarget};
@@ -240,9 +241,9 @@ where
 }
 
 /// Collect all names bound by `pattern` into a fresh `Vec`.
-pub fn pattern_bound_names<T, A>(pattern: &crate::ast::Pattern<T, A>) -> Vec<String>
+pub fn pattern_bound_names<T, A>(pattern: &ast::Pattern<T, A>) -> Vec<String>
 where
-    T: crate::ast::TreeFamily,
+    T: ast::TreeFamily,
     A: Clone + std::fmt::Debug + PartialEq,
 {
     let mut names = Vec::new();

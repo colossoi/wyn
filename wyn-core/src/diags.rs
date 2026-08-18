@@ -3,7 +3,10 @@
 //! Provides less verbose formatters for AST and TLC nodes that output
 //! something close to Wyn syntax.
 
+use crate::ast;
 use crate::ast::*;
+use crate::builtins;
+use crate::interface;
 use crate::parser::{Parsed, ParsedFamily};
 use crate::tlc::VarRef;
 use crate::types::TypeExt;
@@ -351,10 +354,10 @@ impl AstFormatter {
 
     fn write_entry(&mut self, entry: &EntryDecl<EntrySyntax, SourceTree>) {
         let entry_kind = match entry.data.entry_kind {
-            crate::interface::EntryKind::Vertex => "vertex",
-            crate::interface::EntryKind::Root => "entry",
-            crate::interface::EntryKind::Fragment => "fragment",
-            crate::interface::EntryKind::Compute => "compute",
+            interface::EntryKind::Vertex => "vertex",
+            interface::EntryKind::Root => "entry",
+            interface::EntryKind::Fragment => "fragment",
+            interface::EntryKind::Compute => "compute",
         };
         let mut header = format!("{} {}", entry_kind, entry.name);
 
@@ -737,10 +740,10 @@ impl AstFormatter {
                 let items: Vec<String> = fields
                     .iter()
                     .map(|f| match &f.target {
-                        crate::ast::RecordPatternTarget::Pattern(pattern) => {
+                        ast::RecordPatternTarget::Pattern(pattern) => {
                             format!("{} = {}", f.field, self.format_pattern(pattern))
                         }
-                        crate::ast::RecordPatternTarget::Shorthand(_) => f.field.clone(),
+                        ast::RecordPatternTarget::Shorthand(_) => f.field.clone(),
                     })
                     .collect();
                 format!("{{{}}}", items.join(", "))
@@ -808,7 +811,7 @@ impl<C: tlc::Payload, S: tlc::Payload> tlc::Term<C, S> {
         match &self.kind {
             tlc::TermKind::Var(VarRef::Symbol(name)) => write!(f, "{}", name),
             tlc::TermKind::Var(VarRef::Builtin { id, .. }) => {
-                write!(f, "{}", crate::builtins::by_id(*id).raw.surface_name)
+                write!(f, "{}", builtins::by_id(*id).raw.surface_name)
             }
 
             tlc::TermKind::Lambda(ref lam) => {

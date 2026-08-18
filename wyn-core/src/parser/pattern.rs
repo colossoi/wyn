@@ -1,8 +1,10 @@
+use crate::ast;
 use crate::ast::*;
 use crate::error::Result;
 use crate::interface::AttrExt;
 use crate::lexer::Token;
 use crate::parser::Parser;
+use crate::types;
 use crate::{bail_parse, bail_parse_at, err_parse};
 use log::trace;
 
@@ -58,7 +60,7 @@ impl Parser<'_> {
     /// As `parse_pattern`, also returning the diet lifted off the type
     /// annotation's `*` markers (observing when unannotated). Parameter
     /// parsers keep the diet; other pattern positions discard it.
-    pub fn parse_pattern_with_diet(&mut self) -> Result<(Pattern, crate::types::Diet)> {
+    pub fn parse_pattern_with_diet(&mut self) -> Result<(Pattern, types::Diet)> {
         trace!("parse_pattern: next token = {:?}", self.peek());
         let start_span = self.current_span();
 
@@ -95,7 +97,7 @@ impl Parser<'_> {
             ));
         }
 
-        Ok((pattern, crate::types::Diet::observing()))
+        Ok((pattern, types::Diet::observing()))
     }
 
     fn parse_pattern_without_attributes(&mut self) -> Result<Pattern> {
@@ -192,10 +194,10 @@ impl Parser<'_> {
             let target = if parser.check(&Token::Assign) {
                 // field = pat
                 parser.advance();
-                crate::ast::RecordPatternTarget::Pattern(parser.parse_pattern()?)
+                ast::RecordPatternTarget::Pattern(parser.parse_pattern()?)
             } else {
                 // Shorthand: just field name
-                crate::ast::RecordPatternTarget::Shorthand(field_name.clone())
+                ast::RecordPatternTarget::Shorthand(field_name.clone())
             };
             Ok(RecordPatternField {
                 field: field_name,

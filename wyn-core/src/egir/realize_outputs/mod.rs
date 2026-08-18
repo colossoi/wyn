@@ -5,8 +5,15 @@
 //! updating route provenance. Concrete places and writes are installed only
 //! when the planned program is physicalized.
 
+use crate::ast;
 use crate::flow::BlockId;
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::types;
 use crate::types::TypeExt;
+use crate::LookupMap;
+use crate::LookupSet;
 use polytype::Type;
 
 use super::from_tlc::ConvertError;
@@ -40,8 +47,8 @@ fn record_entry_outputs(
     let graph = &entry.graph;
     let effect_index = graph.side_effect_index();
     let resource_writers = super::graph_ops::resource_effect_writers(graph);
-    let mut superseded_output_resources = crate::LookupSet::new();
-    let mut retargeted_resources = crate::LookupMap::new();
+    let mut superseded_output_resources = LookupSet::new();
+    let mut retargeted_resources = LookupMap::new();
     for (slot, output) in entry.outputs.iter_mut().enumerate() {
         if output.routes.is_empty() {
             return Err(ConvertError::Unsupported(format!(
@@ -52,7 +59,7 @@ fn record_entry_outputs(
             let mut writers =
                 source_value_writers(graph, &effect_index, &resource_writers, route.source.value);
             writers.push(OutputWriter::Value(route.source.value));
-            let mut seen = crate::LookupSet::new();
+            let mut seen = LookupSet::new();
             writers.retain(|writer| seen.insert(*writer));
             route.writers = writers;
         }
@@ -69,8 +76,8 @@ fn record_entry_outputs(
             continue;
         };
         let length = output.storage_length().cloned();
-        output.kind = crate::interface::EntryOutputKind::Storage {
-            exposure: crate::interface::BindingExposure::Host(binding),
+        output.kind = interface::EntryOutputKind::Storage {
+            exposure: interface::BindingExposure::Host(binding),
             length,
         };
         if let Some(previous) = output.resource.replace(source_resource) {
@@ -115,10 +122,10 @@ fn record_entry_outputs(
         route.replace_values(&value_replacements);
     }
     let live_output_resources =
-        entry.outputs.iter().filter_map(|output| output.resource).collect::<crate::LookupSet<_>>();
+        entry.outputs.iter().filter_map(|output| output.resource).collect::<LookupSet<_>>();
     entry.resource_declarations.retain(|declaration| {
         !retargeted_resources.contains_key(&declaration.resource)
-            && (declaration.role != crate::interface::StorageRole::Output
+            && (declaration.role != interface::StorageRole::Output
                 || !superseded_output_resources.contains(&declaration.resource)
                 || live_output_resources.contains(&declaration.resource))
     });
@@ -166,7 +173,7 @@ fn bind_runtime_filter_output(
         length: filter::RuntimeLength::Stored(scratch),
     };
 
-    let u32_ty = Type::Constructed(crate::ast::TypeName::UInt(32), Vec::new());
+    let u32_ty = Type::Constructed(ast::TypeName::UInt(32), Vec::new());
     if let Some(declaration) =
         entry.resource_declarations.iter_mut().find(|declaration| declaration.resource == scratch)
     {
@@ -177,15 +184,15 @@ fn bind_runtime_filter_output(
     resources[scratch.0].size = super::program::LogicalSize::FixedBytes(4);
 
     let length = input_array.array_buffer().and_then(|region| {
-        let Type::Constructed(crate::ast::TypeName::Resource(resource), _) = region else {
+        let Type::Constructed(ast::TypeName::Resource(resource), _) = region else {
             return None;
         };
         let binding = resources[*resource].host_binding()?;
-        Some(crate::pipeline_descriptor::BufferLen::LikeInput {
+        Some(pipeline_descriptor::BufferLen::LikeInput {
             set: binding.set,
             binding: binding.binding,
-            elem_bytes: crate::ssa::layout::storage_elem_stride(&output_element)?,
-            src_elem_bytes: crate::ssa::layout::storage_elem_stride(&input_element)?,
+            elem_bytes: ssa::layout::storage_elem_stride(&output_element)?,
+            src_elem_bytes: ssa::layout::storage_elem_stride(&input_element)?,
         })
     });
     *entry.outputs[slot].storage_length_mut().expect("runtime Filter output is storage") = length;
@@ -210,7 +217,7 @@ fn synthesize_routes(entry: &mut RawEntry) -> Result<(), ConvertError> {
     Ok(())
 }
 
-fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<crate::types::Type>)> {
+fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<types::Type>)> {
     let mut returns = graph.skeleton.blocks.iter().filter_map(|(block, body)| {
         let SkeletonTerminator::Return(Some(result)) = &body.term else {
             return None;
@@ -228,7 +235,7 @@ fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<cr
 fn source_value_writers(
     graph: &EGraph<Raw>,
     effect_index: &super::types::SideEffectIndex,
-    resource_writers: &crate::LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>,
+    resource_writers: &LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>,
     source: ValueId,
 ) -> Vec<OutputWriter> {
     let mut writers = Vec::new();
@@ -262,7 +269,7 @@ fn source_value_writers(
 
 fn output_sources(
     graph: &mut EGraph<Raw>,
-    result: &ResultBinding<crate::types::Type>,
+    result: &ResultBinding<types::Type>,
     output_count: usize,
 ) -> Result<Vec<ValueId>, String> {
     if output_count == 1 {

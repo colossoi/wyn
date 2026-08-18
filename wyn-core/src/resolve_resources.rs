@@ -11,10 +11,14 @@
 //! looks exactly as if the bindings had been written inline.
 
 use crate::ast::{self, Declaration, Pattern};
+use crate::err_type_at;
 use crate::error::Result;
+use crate::interface;
 use crate::interface::{
     Attribute, FeedbackPair, ResolvedAttribute, ResourceDecl, ResourceUsage, StorageAccess,
 };
+use crate::module_manager;
+use crate::name_resolution;
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
 
@@ -32,7 +36,7 @@ pub type ResourcesResolvedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum ResourcesResolvedTag {}
 pub type ResourcesResolved =
-    ast::Program<ResourcesResolvedTag, ResourcesResolvedFamily, crate::module_manager::ModuleManager>;
+    ast::Program<ResourcesResolvedTag, ResourcesResolvedFamily, module_manager::ModuleManager>;
 
 /// Default descriptor set for auto-assigned resource bindings. Set 0 is
 /// compiler-reserved; user resources live on set 1+.
@@ -55,7 +59,7 @@ struct ResolvedResource {
     previous_sampled: Option<BindingRef>,
 }
 
-pub fn resolve_resources(mut program: crate::name_resolution::NamesResolved) -> Result<ResourcesResolved> {
+pub fn resolve_resources(mut program: name_resolution::NamesResolved) -> Result<ResourcesResolved> {
     let decls: Vec<ResourceDecl> = program
         .declarations
         .iter()
@@ -83,7 +87,7 @@ pub fn resolve_resources(mut program: crate::name_resolution::NamesResolved) -> 
 /// set, avoiding slots already taken by explicit param attributes or pins.
 fn derive_bindings(
     decls: &[ResourceDecl],
-    program: &crate::name_resolution::NamesResolved,
+    program: &name_resolution::NamesResolved,
 ) -> Result<LookupMap<String, ResolvedResource>> {
     let mut used: LookupSet<(u32, u32)> = collect_explicit_slots(program);
     for r in decls {
@@ -173,19 +177,19 @@ fn rewrite_view_param(
     let handle = param.pattern_type().and_then(type_name_of);
     let attributes = param
         .attributes_mut()
-        .ok_or_else(|| crate::err_type_at!(span, "view attribute on a param without an attribute list"))?;
+        .ok_or_else(|| err_type_at!(span, "view attribute on a param without an attribute list"))?;
     for attribute in attributes {
         let Attribute::View(view) = attribute else {
             continue;
         };
-        let crate::interface::ViewAttribute {
+        let interface::ViewAttribute {
             resource,
             usage,
             previous,
         } = view.clone();
         let resolved = table
             .get(&resource)
-            .ok_or_else(|| crate::err_type_at!(span, "unknown resource '{}' in view", resource))?;
+            .ok_or_else(|| err_type_at!(span, "unknown resource '{}' in view", resource))?;
         if !resolved.decl.usages.contains(&usage) {
             bail_type_at!(span, "resource '{}' does not declare usage {:?}", resource, usage);
         }
@@ -223,7 +227,7 @@ fn rewrite_view_param(
                 }
                 let binding = if previous {
                     let previous_binding = resolved.previous_sampled.ok_or_else(|| {
-                        crate::err_type_at!(
+                        err_type_at!(
                             span,
                             "view of '{}' uses `previous`, but the resource has no `history`",
                             resource
@@ -252,7 +256,7 @@ fn rewrite_view_param(
 }
 
 fn materialize(
-    program: crate::name_resolution::NamesResolved,
+    program: name_resolution::NamesResolved,
     mut entry_feedback: std::collections::VecDeque<Vec<FeedbackPair>>,
 ) -> Result<ResourcesResolved> {
     program.try_rebuild(|declarations, global_context, _| {
@@ -325,7 +329,7 @@ fn materialize_frontend(
 
 /// Every `(set, binding)` already claimed by an explicit binding attribute on
 /// any entry param — so auto-assigned resources don't collide with them.
-fn collect_explicit_slots(program: &crate::name_resolution::NamesResolved) -> LookupSet<(u32, u32)> {
+fn collect_explicit_slots(program: &name_resolution::NamesResolved) -> LookupSet<(u32, u32)> {
     let mut used = LookupSet::new();
     for decl in &program.declarations {
         let Declaration::Entry(entry) = decl else {

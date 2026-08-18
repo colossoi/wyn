@@ -3,12 +3,15 @@
 //! This deliberately executes semantic values rather than scheduled kernels;
 //! optional adapter tests compare backend readback against the same oracle.
 
+use crate::ast;
 use crate::egir::program::Func;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
     PureOp, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId, ValueKind,
 };
+use crate::op;
+use crate::ssa;
 use crate::{FunctionId, LookupMap};
 
 #[cfg(test)]
@@ -107,10 +110,10 @@ impl<'a> RegionExecutor<'a> {
                 let index = parameter.index();
                 arguments.get(index).cloned().ok_or_else(|| format!("missing region argument {index}"))?
             }
-            ValueKind::Constant(crate::ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
-            ValueKind::Constant(crate::ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
-            ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(value)) => Value::Bool(*value),
-            ValueKind::Constant(crate::ssa::types::ConstantValue::F32(_)) => {
+            ValueKind::Constant(ssa::types::ConstantValue::I32(value)) => Value::Int(*value as i64),
+            ValueKind::Constant(ssa::types::ConstantValue::U32(value)) => Value::Int(*value as i64),
+            ValueKind::Constant(ssa::types::ConstantValue::Bool(value)) => Value::Bool(*value),
+            ValueKind::Constant(ssa::types::ConstantValue::F32(_)) => {
                 return Err("floating-point region execution is not needed by semantic tests".into())
             }
             ValueKind::Union { left, .. } => self.eval_node(region, *left, arguments, memo)?,
@@ -177,23 +180,19 @@ impl<'a> RegionExecutor<'a> {
             PureOp::BinOp(operator) => {
                 let values = ints()?;
                 match (operator, values.as_slice()) {
-                    (crate::op::BinaryOperator::Add, [left, right]) => {
-                        Ok(Value::Int(left.wrapping_add(*right)))
-                    }
-                    (crate::op::BinaryOperator::Subtract, [left, right]) => {
+                    (op::BinaryOperator::Add, [left, right]) => Ok(Value::Int(left.wrapping_add(*right))),
+                    (op::BinaryOperator::Subtract, [left, right]) => {
                         Ok(Value::Int(left.wrapping_sub(*right)))
                     }
-                    (crate::op::BinaryOperator::Multiply, [left, right]) => {
+                    (op::BinaryOperator::Multiply, [left, right]) => {
                         Ok(Value::Int(left.wrapping_mul(*right)))
                     }
-                    (crate::op::BinaryOperator::Remainder, [left, right]) => {
+                    (op::BinaryOperator::Remainder, [left, right]) => {
                         Ok(Value::Int(left.wrapping_rem(*right)))
                     }
-                    (crate::op::BinaryOperator::Less, [left, right]) => Ok(Value::Bool(left < right)),
-                    (crate::op::BinaryOperator::GreaterEqual, [left, right]) => {
-                        Ok(Value::Bool(left >= right))
-                    }
-                    (crate::op::BinaryOperator::Equal, [left, right]) => Ok(Value::Bool(left == right)),
+                    (op::BinaryOperator::Less, [left, right]) => Ok(Value::Bool(left < right)),
+                    (op::BinaryOperator::GreaterEqual, [left, right]) => Ok(Value::Bool(left >= right)),
+                    (op::BinaryOperator::Equal, [left, right]) => Ok(Value::Bool(left == right)),
                     _ => Err(format!("unsupported integer operator `{operator}`")),
                 }
             }
@@ -204,7 +203,7 @@ impl<'a> RegionExecutor<'a> {
     fn eval_result(
         &self,
         region: &Func<Semantic>,
-        result: &ResultBinding<polytype::Type<crate::ast::TypeName>>,
+        result: &ResultBinding<polytype::Type<ast::TypeName>>,
         arguments: &[Value],
         memo: &mut LookupMap<ValueId, Value>,
     ) -> Result<Value, String> {

@@ -4,7 +4,9 @@
 //! consumes that graph and records the execution decisions made by the
 //! scheduler in phase-specific SOAC states.
 
+use crate::egir;
 use crate::flow::BlockId;
+use crate::LookupMap;
 
 use super::super::program::{PlannedEntry, SemanticResourceRef};
 use super::super::soac::{filter, hist, screma};
@@ -39,17 +41,17 @@ pub(super) struct ParallelHistPlan {
 
 #[derive(Clone)]
 enum ParallelHistKind {
-    Atomic(Vec<crate::egir::soac::hist::AtomicUpdate>),
+    Atomic(Vec<egir::soac::hist::AtomicUpdate>),
     Bucket {
-        stage: crate::egir::soac::hist::ParallelStage,
-        topology: Option<crate::egir::soac::hist::DispatchTopology>,
+        stage: egir::soac::hist::ParallelStage,
+        topology: Option<egir::soac::hist::DispatchTopology>,
     },
 }
 
 impl ParallelHistPlan {
     pub(super) fn new(
         owner: super::super::program::SemanticOpId,
-        operations: Vec<crate::egir::soac::hist::AtomicUpdate>,
+        operations: Vec<egir::soac::hist::AtomicUpdate>,
     ) -> Self {
         Self {
             owner,
@@ -59,8 +61,8 @@ impl ParallelHistPlan {
 
     pub(super) fn bucket(
         owner: super::super::program::SemanticOpId,
-        stage: crate::egir::soac::hist::ParallelStage,
-        topology: Option<crate::egir::soac::hist::DispatchTopology>,
+        stage: egir::soac::hist::ParallelStage,
+        topology: Option<egir::soac::hist::DispatchTopology>,
     ) -> Self {
         Self {
             owner,
@@ -84,7 +86,7 @@ pub(super) fn entry(
 pub(in crate::egir) fn graph(
     graph: EGraph<Semantic>,
     serial: bool,
-) -> Result<(EGraph<Scheduled>, crate::LookupMap<BlockId, BlockId>), String> {
+) -> Result<(EGraph<Scheduled>, LookupMap<BlockId, BlockId>), String> {
     graph.try_map_phase(|_, _, id, soac| {
         schedule_soac_with_mode(id, soac, None, None, serial).map(|soac| (id, soac))
     })

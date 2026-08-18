@@ -1,8 +1,12 @@
 //! Tests for HOF specialization verification.
 
 use super::*;
+use crate::ast;
 use crate::ast::TypeName;
+use crate::tlc;
 use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
+use crate::types;
+use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
 
@@ -11,8 +15,8 @@ fn empty_program() -> Defunctionalized {
         vec![],
         SymbolTable::new(),
         TermIdSource::new(),
-        crate::tlc::context::PostClosureGlobal {
-            auto_storage_binding_ids: crate::IdSource::new(),
+        tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: IdSource::new(),
         },
     )
 }
@@ -29,7 +33,7 @@ fn dummy_body(program: &mut Defunctionalized) -> Term<ExplicitClosurePayload, Ex
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
-        span: crate::ast::Span::dummy(),
+        span: ast::Span::dummy(),
         kind: TermKind::IntLit("0".into()),
     }
 }
@@ -52,7 +56,7 @@ fn def_with_no_arrow_params_passes() {
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     assert!(verify_hof_specialized(&p).is_ok());
 }
@@ -71,7 +75,7 @@ fn def_with_function_typed_param_fails() {
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     let err = verify_hof_specialized(&p).unwrap_err();
     assert!(matches!(
@@ -94,7 +98,7 @@ fn function_typed_return_is_ignored() {
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     assert!(verify_hof_specialized(&p).is_ok());
 }

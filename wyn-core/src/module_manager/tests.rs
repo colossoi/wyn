@@ -1,5 +1,14 @@
 use super::{ElaboratedItem, ModuleManager};
 use crate::ast::{ModuleTypeExpression, NodeCounter, Spec, TypeName};
+use crate::ast_const_fold;
+use crate::builtins;
+use crate::elaborate_modules;
+use crate::name_resolution;
+use crate::parser;
+use crate::resolve_imports;
+use crate::resolve_opens;
+use crate::resolve_placeholders;
+use crate::resolve_resources;
 use crate::types::checker::TypeChecker;
 use polytype::Type;
 use std::collections::HashMap;
@@ -8,9 +17,9 @@ use polytype::TypeScheme;
 
 /// Create a ModuleManager with the given source elaborated (no prelude)
 fn module_manager_with(src: &str) -> ModuleManager {
-    let program = crate::parser::parse(src, NodeCounter::new(), ModuleManager::new_empty()).unwrap();
-    let program = crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
-    crate::elaborate_modules::elaborate_modules(program).unwrap().global_context
+    let program = parser::parse(src, NodeCounter::new(), ModuleManager::new_empty()).unwrap();
+    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    elaborate_modules::elaborate_modules(program).unwrap().global_context
 }
 
 /// Check if a type is f32 -> f32
@@ -50,20 +59,20 @@ fn test_query_f32_sin_from_math_prelude() {
 
     // Resolve placeholders in modules to build spec_schemes
     // (No program to resolve, just pass an empty one)
-    let program = crate::parser::parse("", node_counter, manager).unwrap();
-    let program = crate::resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
-    let program = crate::elaborate_modules::elaborate_modules(program).unwrap();
-    let program = crate::name_resolution::resolve_names(program);
-    let program = crate::resolve_resources::resolve_resources(program).unwrap();
-    let program = crate::ast_const_fold::fold_constants(program);
-    let program = crate::resolve_placeholders::resolve_type_placeholders(program);
-    let program = crate::resolve_opens::resolve_opens(program).unwrap();
-    let nr = crate::name_resolution::build_name_resolution(
+    let program = parser::parse("", node_counter, manager).unwrap();
+    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    let program = elaborate_modules::elaborate_modules(program).unwrap();
+    let program = name_resolution::resolve_names(program);
+    let program = resolve_resources::resolve_resources(program).unwrap();
+    let program = ast_const_fold::fold_constants(program);
+    let program = resolve_placeholders::resolve_type_placeholders(program);
+    let program = resolve_opens::resolve_opens(program).unwrap();
+    let nr = name_resolution::build_name_resolution(
         &program,
         &program.global_context.module_manager,
-        crate::builtins::catalog(),
+        builtins::catalog(),
     );
-    let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
+    let resolve_placeholders::PlaceholdersResolvedGlobal {
         module_manager: manager,
         context,
         spec_schemes,

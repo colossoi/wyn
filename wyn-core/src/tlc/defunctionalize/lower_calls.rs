@@ -5,6 +5,7 @@
 //! `closure(code, captures)(args)` becomes `code(args, captures)`.
 
 use super::{ClosureConverted, Defunctionalized};
+use crate::builtins;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::{Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter, VarRef};
 use crate::{LookupMap, SymbolId, SymbolTable};
@@ -53,7 +54,7 @@ fn verify_term(
             let expected = arities
                 .get(target)
                 .copied()
-                .or_else(|| symbols.get(*target).and_then(|name| crate::builtins::intrinsic_arity(name)));
+                .or_else(|| symbols.get(*target).and_then(|name| builtins::intrinsic_arity(name)));
             if let Some(expected) = expected {
                 if expected != args.len() {
                     return Err(ClosureCallsLowerError::ArityMismatch {

@@ -4,6 +4,9 @@
 //! its pre-lambda with the consumer's pre-lambda while preserving the consumer's
 //! single collective barrier.
 
+use crate::builtins;
+use crate::op;
+use crate::types;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
@@ -70,13 +73,13 @@ impl InputTransform {
                 return None;
             };
             let (base, start, extent) = match op {
-                PureOp::StorageView(crate::op::PureViewSource::Inherited) => {
+                PureOp::StorageView(op::PureViewSource::Inherited) => {
                     let [start, len, base] = operands.as_slice() else {
                         return None;
                     };
                     (*base, *start, SliceExtent::Length(*len))
                 }
-                PureOp::Intrinsic { id, .. } if *id == crate::builtins::catalog().known().slice => {
+                PureOp::Intrinsic { id, .. } if *id == builtins::catalog().known().slice => {
                     let [base, start, end] = operands.as_slice() else {
                         return None;
                     };
@@ -113,12 +116,12 @@ impl InputTransform {
         let mut array = input.array.clone();
         for slice in &self.slices {
             array = array_with_outer_size(&array, &slice.size)?;
-            if array.array_variant().is_some_and(crate::types::is_array_variant_view) {
+            if array.array_variant().is_some_and(types::is_array_variant_view) {
                 let len = match &slice.extent {
                     SliceExtent::Length(len) => *len,
                     SliceExtent::End { end, .. } => graph_ops::intern_binop(
                         graph,
-                        crate::op::BinaryOperator::Subtract,
+                        op::BinaryOperator::Subtract,
                         *end,
                         slice.start,
                         graph.nodes[*end].ty().clone(),
@@ -132,7 +135,7 @@ impl InputTransform {
                     SliceExtent::Length(len) => {
                         let end = graph_ops::intern_binop(
                             graph,
-                            crate::op::BinaryOperator::Add,
+                            op::BinaryOperator::Add,
                             slice.start,
                             *len,
                             graph.nodes[*len].ty().clone(),
@@ -141,7 +144,7 @@ impl InputTransform {
                         (
                             end,
                             PureOp::Intrinsic {
-                                id: crate::builtins::catalog().known().slice,
+                                id: builtins::catalog().known().slice,
                                 overload_idx: 0,
                             },
                         )

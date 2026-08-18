@@ -1,7 +1,10 @@
 //! Pretty-printer for SSA programs.
 
 use crate::ast::TypeName;
+use crate::builtins;
 use crate::flow::ExecutionModel;
+use crate::op;
+use crate::ssa;
 use crate::ssa::types::Program;
 use polytype::Type;
 use std::fmt::Write;
@@ -74,7 +77,7 @@ fn fmt_val(v: ValueId) -> String {
     format!("%{:?}", v)
 }
 
-fn fmt_place(p: crate::ssa::types::PlaceId) -> String {
+fn fmt_place(p: ssa::types::PlaceId) -> String {
     format!("@{:?}", p)
 }
 
@@ -188,7 +191,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
     use crate::op::{OpTag, PureViewSource};
     match kind {
         InstKind::Op { tag, operands } => match tag {
-            crate::op::OpTag::ResourceLen(resource) => {
+            op::OpTag::ResourceLen(resource) => {
                 let _ = write!(out, "resource_len({},{})", resource.set, resource.binding);
             }
             OpTag::Int(s) => {
@@ -267,7 +270,7 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
             }
 
             OpTag::Intrinsic { id, overload_idx } => {
-                let name = crate::builtins::by_id(*id).dispatch_name();
+                let name = builtins::by_id(*id).dispatch_name();
                 let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands));
             }
             OpTag::StorageImageLoad(binding) => {

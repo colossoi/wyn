@@ -1,12 +1,16 @@
 //! AST checkpoint after source `???` expressions have been handled.
 
 use crate::ast;
+use crate::err_type_hole;
+use crate::error;
+use crate::interface;
+use crate::types;
 
 pub type HolesResolvedFamily = ast::AstFamily<
     ast::HolesResolvedTree,
     ast::TypedDefinition,
     ast::TypedEntry,
-    crate::interface::ResolvedAttribute,
+    interface::ResolvedAttribute,
     ast::TypedExtern,
     std::convert::Infallible,
 >;
@@ -22,7 +26,7 @@ pub type HolesResolved = ast::Program<
     ast::TypedGlobal<ast::TypedDefinition, ast::HolesResolvedTree>,
 >;
 
-pub fn reject_type_holes(program: crate::types::run::TypeChecked) -> crate::error::Result<HolesResolved> {
+pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<HolesResolved> {
     use std::fmt::Write;
 
     let holes: Vec<_> = program
@@ -30,9 +34,7 @@ pub fn reject_type_holes(program: crate::types::run::TypeChecked) -> crate::erro
         .warnings
         .iter()
         .map(|warning| match warning {
-            crate::types::checker::TypeWarning::TypeHoleFilled { inferred_type, span } => {
-                (inferred_type, span)
-            }
+            types::checker::TypeWarning::TypeHoleFilled { inferred_type, span } => (inferred_type, span),
         })
         .collect();
     if !holes.is_empty() {
@@ -43,19 +45,19 @@ pub fn reject_type_holes(program: crate::types::run::TypeChecked) -> crate::erro
                 "  at {}:{} — inferred `{}`",
                 span.start_line,
                 span.start_col,
-                crate::types::format_type(ty),
+                types::format_type(ty),
             );
         }
-        return Err(crate::err_type_hole!("{}", message.trim_end()));
+        return Err(err_type_hole!("{}", message.trim_end()));
     }
     rebuild(program, &mut |_header, _hole, _node_ids| {
-        Err(crate::err_type_hole!(
+        Err(err_type_hole!(
             "type checker omitted a warning for a stored type hole"
         ))
     })
 }
 
-pub fn fill_type_holes(program: crate::types::run::TypeChecked) -> crate::error::Result<HolesResolved> {
+pub fn fill_type_holes(program: types::run::TypeChecked) -> error::Result<HolesResolved> {
     let mut errors = Vec::new();
     let rebuilt = rebuild(program, &mut |header, _hole, node_ids| {
         Ok(default_kind(header, node_ids, &mut errors))
@@ -63,18 +65,18 @@ pub fn fill_type_holes(program: crate::types::run::TypeChecked) -> crate::error:
     if errors.is_empty() {
         Ok(rebuilt)
     } else {
-        Err(crate::err_type_hole!("{}", errors.join("\n")))
+        Err(err_type_hole!("{}", errors.join("\n")))
     }
 }
 
 fn rebuild(
-    program: crate::types::run::TypeChecked,
+    program: types::run::TypeChecked,
     hole: &mut impl FnMut(
         &ast::TypedHeader,
         ast::TypeHole,
         &mut ast::NodeCounter,
-    ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
-) -> crate::error::Result<HolesResolved> {
+    ) -> error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
+) -> error::Result<HolesResolved> {
     program.try_rebuild(|declarations, global_context, node_ids| {
         let declarations = declarations
             .into_iter()
@@ -88,14 +90,14 @@ fn rebuild(
                 ast::Declaration::Extern(external) => Ok(ast::Declaration::Extern(external)),
                 ast::Declaration::Frontend(never) => match never {},
             })
-            .collect::<crate::error::Result<_>>()?;
+            .collect::<error::Result<_>>()?;
         let support_definitions = global_context
             .support_definitions
             .into_iter()
             .map(|support| {
                 support.try_map_definition(|definition| rebuild_definition(definition, node_ids, hole))
             })
-            .collect::<crate::error::Result<_>>()?;
+            .collect::<error::Result<_>>()?;
         Ok((
             declarations,
             ast::TypedGlobal {
@@ -115,8 +117,8 @@ fn rebuild_definition(
         &ast::TypedHeader,
         ast::TypeHole,
         &mut ast::NodeCounter,
-    ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
-) -> crate::error::Result<ast::Decl<ast::TypedDefinition, ast::HolesResolvedTree>> {
+    ) -> error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
+) -> error::Result<ast::Decl<ast::TypedDefinition, ast::HolesResolvedTree>> {
     definition.try_rebuild(
         |data, _, _| Ok(data),
         |params, body| {
@@ -129,16 +131,14 @@ fn rebuild_definition(
 }
 
 fn rebuild_entry(
-    entry: ast::EntryDecl<ast::TypedEntry, ast::TypedTree, crate::interface::ResolvedAttribute>,
+    entry: ast::EntryDecl<ast::TypedEntry, ast::TypedTree, interface::ResolvedAttribute>,
     node_ids: &mut ast::NodeCounter,
     hole: &mut impl FnMut(
         &ast::TypedHeader,
         ast::TypeHole,
         &mut ast::NodeCounter,
-    ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
-) -> crate::error::Result<
-    ast::EntryDecl<ast::TypedEntry, ast::HolesResolvedTree, crate::interface::ResolvedAttribute>,
-> {
+    ) -> error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
+) -> error::Result<ast::EntryDecl<ast::TypedEntry, ast::HolesResolvedTree, interface::ResolvedAttribute>> {
     entry.try_rebuild(
         |data, _, _| Ok(data),
         |params, body| {
@@ -162,8 +162,8 @@ fn rebuild_expression(
         &ast::TypedHeader,
         ast::TypeHole,
         &mut ast::NodeCounter,
-    ) -> crate::error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
-) -> crate::error::Result<ast::Expression<ast::HolesResolvedTree>> {
+    ) -> error::Result<ast::ExprKind<ast::HolesResolvedTree>>,
+) -> error::Result<ast::Expression<ast::HolesResolvedTree>> {
     ast::rebuild::expression(
         expression,
         &mut Ok,

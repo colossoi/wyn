@@ -11,6 +11,7 @@
 
 use crate::ast::{self, PatternKind, Span, TypeName};
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
+use crate::types;
 use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::SymbolId;
@@ -199,7 +200,7 @@ impl<'a> Transformer<'a> {
                 // sum; the tag is statically known and no test is
                 // emitted. Project each payload slot and bind it.
                 let sum_ty = scrutinee.ty.clone();
-                let variants = if let Some(variants) = crate::types::sum_variants(&sum_ty) {
+                let variants = if let Some(variants) = types::sum_variants(&sum_ty) {
                     variants
                 } else {
                     match &sum_ty {
@@ -207,7 +208,7 @@ impl<'a> Transformer<'a> {
                             // Scrutinee already lowered from a sum to a flat
                             // tuple. Recover the original variant list from
                             // the pattern's type-table entry.
-                            crate::types::sum_variants(&Self::raw_type(&pattern.h)).unwrap_or_else(|| {
+                            types::sum_variants(&Self::raw_type(&pattern.h)).unwrap_or_else(|| {
                                 panic!(
                                     "BUG: Constructor pattern lacks sum type in type table for NodeId {:?}",
                                     pattern.h.id

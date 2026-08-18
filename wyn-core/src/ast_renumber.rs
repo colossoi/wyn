@@ -11,6 +11,7 @@
 //! Prefer these helpers over `expr.clone()` whenever the cloned subtree
 //! will appear alongside the original in the same compilation unit.
 
+use crate::ast;
 use crate::ast::{
     Decl, ExprKind, Expression, Header, IfExpr, LambdaExpr, LetInExpr, LoopExpr, LoopForm, MatchCase,
     MatchExpr, Node, NodeCounter, Pattern, RangeExpr, SliceExpr,
@@ -173,7 +174,7 @@ fn clone_loop_form(form: &LoopForm, nc: &mut NodeCounter) -> LoopForm {
 
 /// Deep-clone `pat` with every `Header.id` reallocated from `nc`.
 pub fn clone_pattern_fresh_ids(pat: &Pattern, nc: &mut NodeCounter) -> Pattern {
-    let rebuilt: std::result::Result<Pattern, std::convert::Infallible> = crate::ast::rebuild::pattern_with(
+    let rebuilt: std::result::Result<Pattern, std::convert::Infallible> = ast::rebuild::pattern_with(
         pat.clone(),
         &mut |header| Ok(fresh_header(&header, nc)),
         &mut |_header, binding| Ok(binding),

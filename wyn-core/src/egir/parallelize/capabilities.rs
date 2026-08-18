@@ -6,6 +6,7 @@
 
 use crate::egir::soac::screma;
 use crate::egir::types::{ResourceAccess, Semantic};
+use crate::types;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Strategy {
@@ -25,7 +26,7 @@ pub(super) fn classify(op: &screma::Op<Semantic>) -> Strategy {
     let scans_ready =
         op.form.scans.iter().all(|scan| !scan.neutral.is_empty() && scan.operator.seg_body().is_some());
     let reductions_are_fresh =
-        (0..reduction_results).all(|field| op.ownership(field) == Some(crate::types::SoacOwnership::Fresh));
+        (0..reduction_results).all(|field| op.ownership(field) == Some(types::SoacOwnership::Fresh));
     let routed_post_results = match op.semantic_state() {
         screma::SemanticState::Segmented {
             output_slots,

@@ -8,7 +8,10 @@ use crate::egir::types::{
 };
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
+use crate::op;
 use crate::BindingRef;
+use crate::EntryId;
+use crate::ResourceId;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -67,7 +70,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     ];
     let entry = Entry::<Semantic>::new_with_resources(
         "compute".into(),
-        crate::EntryId::from_index(0),
+        EntryId::from_index(0),
         Span::dummy(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
@@ -118,7 +121,7 @@ fn structured_storage_prefix_requires_materialization() {
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
-    let view = graph_ops::intern_resource_view(&mut graph, crate::ResourceId::for_test(1), i32_ty(), None);
+    let view = graph_ops::intern_resource_view(&mut graph, ResourceId::for_test(1), i32_ty(), None);
     let place = graph.add_view_index_place(graph.view_id(view), zero, i32_ty(), None);
     let loaded = graph.alloc_side_effect_result(i32_ty());
     let loaded_binding = graph.value_result(loaded);
@@ -169,7 +172,7 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         args: zero_args,
     };
     let cond = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![index, bound],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -182,7 +185,7 @@ fn canonical_fixed_range_loop_recovers_trip_count() {
         else_args: vec![],
     };
     let next = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![index, one],
         i32_ty(),
         None,

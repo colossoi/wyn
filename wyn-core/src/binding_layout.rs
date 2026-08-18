@@ -8,6 +8,11 @@
 //! `Vec<Option<...>>` aligned to the body params, so consumers can
 //! iterate them in lockstep instead of joining by symbol.
 
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::types;
+use crate::IdSource;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -40,7 +45,7 @@ pub fn runtime_sized_array_elem(ty: &Type<TypeName>) -> Option<(&Type<TypeName>,
         return None;
     }
     let elem = ty.elem_type()?;
-    let elem_bytes = crate::ssa::layout::storage_elem_stride(elem)?;
+    let elem_bytes = ssa::layout::storage_elem_stride(elem)?;
     Some((elem, elem_bytes))
 }
 
@@ -54,9 +59,9 @@ fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<Typ
     }
     const PORTABLE_PUSH_CONSTANT_BYTES: u32 = 128;
     let elem = ty.elem_type()?;
-    let total_bytes = crate::ssa::layout::type_byte_size(ty)?;
+    let total_bytes = ssa::layout::type_byte_size(ty)?;
     (consuming || total_bytes > PORTABLE_PUSH_CONSTANT_BYTES)
-        .then(|| crate::ssa::layout::storage_elem_stride(elem).map(|stride| (elem, stride)))?
+        .then(|| ssa::layout::storage_elem_stride(elem).map(|stride| (elem, stride)))?
 }
 
 /// Walk an entry's params and produce the auto-storage binding layout.
@@ -79,15 +84,15 @@ fn storage_array_elem(ty: &Type<TypeName>, consuming: bool) -> Option<(&Type<Typ
 /// Binding numbers come from `binding_ids` in declaration order.
 pub fn compute_entry_binding_layout(
     body_params: &[(SymbolId, Type<TypeName>)],
-    param_diets: &[crate::types::Diet],
+    param_diets: &[types::Diet],
     entry: &EntryDecl,
     set: u32,
-    binding_ids: &mut crate::IdSource<u32>,
+    binding_ids: &mut IdSource<u32>,
 ) -> Vec<Option<EntryParamBinding>> {
     let mut out: Vec<Option<EntryParamBinding>> = Vec::with_capacity(body_params.len());
 
     for (i, (sym, ty)) in body_params.iter().enumerate() {
-        let consuming = param_diets.get(i).is_some_and(crate::types::Diet::is_consuming);
+        let consuming = param_diets.get(i).is_some_and(types::Diet::is_consuming);
         let decoration = entry.params.get(i).and_then(extract_io_decoration);
         let has_builtin = matches!(decoration, Some(IoDecoration::BuiltIn(_)));
 
@@ -179,7 +184,7 @@ pub fn extract_storage_binding(param: &EntryParamDecl) -> Option<BindingRef> {
 
 /// Extract the declared `access` of a `#[storage(...)]` param (so the backend
 /// knows whether the buffer is written in place, e.g. a `scatter` destination).
-pub fn extract_storage_access(param: &EntryParamDecl) -> Option<crate::interface::StorageAccess> {
+pub fn extract_storage_access(param: &EntryParamDecl) -> Option<interface::StorageAccess> {
     param.attributes.iter().find_map(|attribute| match attribute {
         Attribute::Storage { access, .. } => Some(*access),
         _ => None,
@@ -239,9 +244,9 @@ pub fn extract_storage_image_binding(
     param: &EntryParamDecl,
 ) -> Option<(
     BindingRef,
-    crate::pipeline_descriptor::StorageImageFormat,
-    crate::interface::StorageAccess,
-    crate::pipeline_descriptor::StorageTextureSize,
+    pipeline_descriptor::StorageImageFormat,
+    interface::StorageAccess,
+    pipeline_descriptor::StorageTextureSize,
 )> {
     param.attributes.iter().find_map(|attribute| match attribute {
         Attribute::StorageImage {

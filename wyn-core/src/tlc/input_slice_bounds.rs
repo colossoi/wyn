@@ -32,6 +32,7 @@
 //! directly to its owning entry node; EGIR consumes that in-tree data when
 //! it builds the descriptor entry for each input binding.
 
+use crate::ssa;
 use crate::{LookupMap, LookupSet};
 
 use polytype::Type;
@@ -157,7 +158,7 @@ pub fn infer<C: Payload, S: Payload>(
     let mut elem_bytes: LookupMap<SymbolId, u64> = LookupMap::new();
     for (sym, ty) in inputs {
         let Some(et) = ty.elem_type() else { continue };
-        let Some(b) = crate::ssa::layout::type_byte_size(et) else {
+        let Some(b) = ssa::layout::type_byte_size(et) else {
             continue;
         };
         elem_bytes.insert(*sym, b as u64);

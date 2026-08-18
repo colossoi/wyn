@@ -17,22 +17,23 @@
 //! Such constants — like the float/bool constants this pass also ignores —
 //! flow through as ordinary typed references.
 
+use crate::ast;
 use crate::ast::UnaryOp;
 use crate::ast::{
     Decl, Declaration, EntryDecl, ExprKind, Expression, IfExpr, LetInExpr, LoopExpr, LoopForm, MatchExpr,
     Pattern, PatternKind, Program, RangeExpr, Type, TypeName,
 };
+use crate::interface;
+use crate::module_manager;
 use crate::op::{BinaryOperator, UnaryOperator};
+use crate::resolve_resources;
 use crate::LookupMap;
 
 /// AST after integer constants needed by static-size inference are exposed.
 #[derive(Debug, Clone, Copy)]
 pub enum ConstantsFoldedTag {}
-pub type ConstantsFolded = Program<
-    ConstantsFoldedTag,
-    crate::resolve_resources::ResourcesResolvedFamily,
-    crate::module_manager::ModuleManager,
->;
+pub type ConstantsFolded =
+    Program<ConstantsFoldedTag, resolve_resources::ResourcesResolvedFamily, module_manager::ModuleManager>;
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
@@ -66,7 +67,7 @@ impl AstConstFolder {
     /// Two passes:
     /// 1. Collect top-level constant definitions (parameterless defs with integer values)
     /// 2. Fold and inline in expressions and type dimensions
-    pub fn fold_program(&mut self, program: &mut crate::resolve_resources::ResourcesResolved) {
+    pub fn fold_program(&mut self, program: &mut resolve_resources::ResourcesResolved) {
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
@@ -90,10 +91,7 @@ impl AstConstFolder {
         }
     }
 
-    fn fold_declaration(
-        &mut self,
-        decl: &mut Declaration<crate::resolve_resources::ResourcesResolvedFamily>,
-    ) {
+    fn fold_declaration(&mut self, decl: &mut Declaration<resolve_resources::ResourcesResolvedFamily>) {
         match decl {
             Declaration::Decl(d) => self.fold_decl(d),
             Declaration::Entry(e) => self.fold_entry_decl(e),
@@ -101,21 +99,21 @@ impl AstConstFolder {
                 self.fold_type(&mut e.data.ty, &e.data.size_params);
             }
             Declaration::Frontend(frontend) => match frontend {
-                crate::ast::ResourcesResolvedFrontend::Sig(sig) => {
+                ast::ResourcesResolvedFrontend::Sig(sig) => {
                     self.fold_type(&mut sig.ty, &sig.size_params);
                 }
-                crate::ast::ResourcesResolvedFrontend::TypeBind(bind) => {
+                ast::ResourcesResolvedFrontend::TypeBind(bind) => {
                     let bound_sizes = bind
                         .type_params
                         .iter()
                         .filter_map(|param| match param {
-                            crate::ast::TypeParam::Size(name) => Some(name.clone()),
+                            ast::TypeParam::Size(name) => Some(name.clone()),
                             _ => None,
                         })
                         .collect::<Vec<_>>();
                     self.fold_type(&mut bind.definition, &bound_sizes);
                 }
-                crate::ast::ResourcesResolvedFrontend::Open(_) => {}
+                ast::ResourcesResolvedFrontend::Open(_) => {}
             },
         }
     }
@@ -132,11 +130,7 @@ impl AstConstFolder {
 
     fn fold_entry_decl(
         &mut self,
-        e: &mut EntryDecl<
-            crate::ast::ResolvedEntry,
-            crate::ast::SourceTree,
-            crate::interface::ResolvedAttribute,
-        >,
+        e: &mut EntryDecl<ast::ResolvedEntry, ast::SourceTree, interface::ResolvedAttribute>,
     ) {
         for param in &mut e.params {
             self.fold_pattern(param, &e.size_params);
@@ -191,7 +185,7 @@ impl AstConstFolder {
         }
     }
 
-    fn fold_pattern<A>(&self, pattern: &mut Pattern<crate::ast::SourceTree, A>, bound_sizes: &[String]) {
+    fn fold_pattern<A>(&self, pattern: &mut Pattern<ast::SourceTree, A>, bound_sizes: &[String]) {
         match &mut pattern.kind {
             PatternKind::Tuple(patterns)
             | PatternKind::Vec(patterns)
@@ -202,7 +196,7 @@ impl AstConstFolder {
             }
             PatternKind::Record(fields) => {
                 for field in fields {
-                    if let crate::ast::RecordPatternTarget::Pattern(pattern) = &mut field.target {
+                    if let ast::RecordPatternTarget::Pattern(pattern) = &mut field.target {
                         self.fold_pattern(pattern, bound_sizes);
                     }
                 }
@@ -374,7 +368,7 @@ impl AstConstFolder {
 
         // Check if this introduces a constant
         // For simplicity, only handle simple name patterns
-        let const_binding = if let crate::ast::PatternKind::Name(name) = &let_in.pattern.kind {
+        let const_binding = if let ast::PatternKind::Name(name) = &let_in.pattern.kind {
             if Self::is_i32_constant(let_in.ty.as_ref(), &let_in.value) {
                 self.try_eval_const(&let_in.value).map(|val| (name.clone(), val))
             } else {
@@ -614,7 +608,7 @@ impl AstConstFolder {
 }
 
 /// Expose literal integer bounds needed by static-size inference.
-pub fn fold_constants(mut program: crate::resolve_resources::ResourcesResolved) -> ConstantsFolded {
+pub fn fold_constants(mut program: resolve_resources::ResourcesResolved) -> ConstantsFolded {
     let mut folder = AstConstFolder::new();
     folder.fold_program(&mut program);
     program.retag()

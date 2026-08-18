@@ -6,11 +6,13 @@
 
 use super::{ClosureConverted, Defunctionalized};
 use crate::ast::{Span, TypeName};
+use crate::symbol_name_or_bug;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosure, ExplicitClosurePayload};
 use crate::tlc::{
     self, apply_type_substitution, ArrayExpr, Def, DefMeta, LoopKind, Program, RewriteDecision, SoacBody,
     SoacOp, Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution, VarRef,
 };
+use crate::types;
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -499,7 +501,7 @@ impl HofSpecializer<'_> {
                 TermKind::Var(VarRef::Symbol(symbol)) => *symbol,
                 _ => panic!("BUG: closure capture is not a variable"),
             };
-            let outer_name = crate::symbol_name_or_bug(self.symbols, outer_symbol);
+            let outer_name = symbol_name_or_bug(self.symbols, outer_symbol);
             let fresh_symbol = self.symbols.alloc(format!("{specialized_name}__cap_{outer_name}"));
             new_params.push((fresh_symbol, capture.ty.clone()));
             closure_captures.push(Term::fresh(
@@ -539,8 +541,8 @@ impl HofSpecializer<'_> {
             body,
             meta: DefMeta::Function,
             arity,
-            param_diets: vec![crate::types::Diet::observing(); arity],
-            return_diet: crate::types::Diet::observing(),
+            param_diets: vec![types::Diet::observing(); arity],
+            return_diet: types::Diet::observing(),
         });
         self.top_level.insert(specialized_symbol);
 
@@ -721,7 +723,7 @@ impl HofSpecializer<'_> {
 
         self.cascade_specialize_term(&mut body);
         let body = tlc::rebuild_nested_lam(&new_params, body, lifted_def.body.span, self.term_ids);
-        let name = crate::symbol_name_or_bug(self.symbols, lifted_symbol).to_string();
+        let name = symbol_name_or_bug(self.symbols, lifted_symbol).to_string();
         let symbol = self.symbols.alloc(format!("{name}${}", self.specialization_counter));
         self.specialization_counter += 1;
         self.top_level.insert(symbol);
@@ -733,8 +735,8 @@ impl HofSpecializer<'_> {
             body,
             meta: lifted_def.meta,
             arity,
-            param_diets: vec![crate::types::Diet::observing(); arity],
-            return_diet: crate::types::Diet::observing(),
+            param_diets: vec![types::Diet::observing(); arity],
+            return_diet: types::Diet::observing(),
         };
         self.defs_by_sym.insert(symbol, def.clone());
         self.specialized_defs.push(def);

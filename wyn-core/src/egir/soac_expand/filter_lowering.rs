@@ -1,6 +1,11 @@
 //! Filter expansion implementations.
 
 use super::array_io::{emit_length, emit_read_element};
+use crate::op;
+use crate::ssa;
+use crate::types;
+use crate::BindingRef;
+use crate::IdSource;
 
 use super::*;
 
@@ -37,7 +42,7 @@ fn filter_kept_value(
     block: BlockId,
     index: ValueId,
     spec: &FilterLoop,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> ValueId {
     let elements = spec
         .read_inputs
@@ -76,7 +81,7 @@ pub(super) fn build_filter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     if let filter::Output::Runtime { scratch, .. } = &spec.output {
         build_runtime_filter_loop(graph, bid, idx_in_block, &spec, *scratch, next_effect);
@@ -92,7 +97,7 @@ pub(super) fn build_filter_loop(
             spec.output_elem_ty.clone(),
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             capacity.clone(),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
 
@@ -148,7 +153,7 @@ fn build_serial_filter_cfg(
     zero: ValueId,
     one: ValueId,
     sink: FilterSink,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> ValueId {
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
     let after_count = graph.add_block_param(after, index_ty.clone());
@@ -172,7 +177,7 @@ fn build_serial_filter_cfg(
         &index_ty,
     );
     let in_range = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![index, length],
         bool_ty.clone(),
         None,
@@ -243,7 +248,7 @@ fn build_serial_filter_cfg(
         }
     }
     let bumped_count = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![count, one],
         index_ty.clone(),
         None,
@@ -264,7 +269,7 @@ fn build_serial_filter_cfg(
     };
     let continued_count = graph.add_block_param(continue_block, index_ty.clone());
     let next_index = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![index, one],
         index_ty,
         None,
@@ -293,8 +298,8 @@ pub(super) fn build_filter_flags(
     bid: BlockId,
     idx: usize,
     spec: FilterLoop,
-    flags: crate::BindingRef,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    flags: BindingRef,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use super::super::graph_ops::{emit_storage_store, intern_storage_view, intern_u32};
     graph.skeleton.blocks[bid].side_effects.drain(idx..);
@@ -313,7 +318,7 @@ pub(super) fn build_filter_flags(
         &u32_ty,
     );
     let bounded = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![gid, len],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -374,7 +379,7 @@ pub(super) fn build_filter_flags(
     };
     graph.replace_node_preserving_type(
         spec.result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
 }
 
@@ -385,7 +390,7 @@ pub(super) fn build_filter_scan(
     spec: FilterLoop,
     work: filter::WorkBuffers<BindingRef>,
     scan_workgroup_width: u32,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use super::super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
     graph.skeleton.blocks[bid].side_effects.drain(idx..);
@@ -418,31 +423,31 @@ pub(super) fn build_filter_scan(
         None,
     );
     let total_threads = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![nwg, wg_width],
         u32_ty.clone(),
         None,
     );
     let total_minus_one = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
+        PureOp::BinOp(op::BinaryOperator::Subtract),
         smallvec![total_threads, one],
         u32_ty.clone(),
         None,
     );
     let len_plus = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![input_len, total_minus_one],
         u32_ty.clone(),
         None,
     );
     let chunk_size = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Divide),
+        PureOp::BinOp(op::BinaryOperator::Divide),
         smallvec![len_plus, total_threads],
         u32_ty.clone(),
         None,
     );
     let raw_chunk_start = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![gid, chunk_size],
         u32_ty.clone(),
         None,
@@ -460,7 +465,7 @@ pub(super) fn build_filter_scan(
         None,
     );
     let remaining = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
+        PureOp::BinOp(op::BinaryOperator::Subtract),
         smallvec![input_len, chunk_start],
         u32_ty.clone(),
         None,
@@ -481,7 +486,7 @@ pub(super) fn build_filter_scan(
     let i = graph.add_block_param(header, u32_ty.clone());
     let acc = graph.add_block_param(header, u32_ty.clone());
     let cond = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![i, chunk_len],
         Type::Constructed(TypeName::Bool, vec![]),
         None,
@@ -500,7 +505,7 @@ pub(super) fn build_filter_scan(
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let global_i = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![chunk_start, i],
         u32_ty.clone(),
         None,
@@ -508,7 +513,7 @@ pub(super) fn build_filter_scan(
     let flag_place = graph.add_view_index_place(graph.view_id(flags), global_i, u32_ty.clone(), None);
     let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
     let next = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![acc, flag],
         u32_ty.clone(),
         None,
@@ -524,7 +529,7 @@ pub(super) fn build_filter_scan(
         None,
     );
     let next_i = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![i, one],
         u32_ty.clone(),
         None,
@@ -548,7 +553,7 @@ pub(super) fn build_filter_scan(
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
     graph.replace_node_preserving_type(
         spec.result_node,
-        ValueKind::Constant(crate::ssa::types::ConstantValue::Bool(false)),
+        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
 }
 
@@ -558,7 +563,7 @@ pub(super) fn build_filter_scatter(
     idx: usize,
     spec: FilterLoop,
     work: filter::WorkBuffers<BindingRef>,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use super::super::graph_ops::{emit_load, emit_storage_store, intern_storage_view, intern_u32};
     let after = graph.skeleton.split_block_before_effect(bid, idx);
@@ -576,7 +581,7 @@ pub(super) fn build_filter_scatter(
         &u32_ty,
     );
     let bounded = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![gid, len],
         bool_ty.clone(),
         None,
@@ -595,7 +600,7 @@ pub(super) fn build_filter_scatter(
     let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
     let one = intern_u32(graph, 1, None);
     let keep = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Equal),
+        PureOp::BinOp(op::BinaryOperator::Equal),
         smallvec![flag, one],
         bool_ty,
         None,
@@ -611,7 +616,7 @@ pub(super) fn build_filter_scatter(
     let offset_place = graph.add_view_index_place(graph.view_id(offsets), gid, u32_ty.clone(), None);
     let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
     let output_index = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Subtract),
+        PureOp::BinOp(op::BinaryOperator::Subtract),
         smallvec![inclusive, one],
         u32_ty.clone(),
         None,
@@ -655,7 +660,7 @@ pub(super) fn build_filter_scatter(
     let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
     graph.replace_pure_node(
         spec.result_node,
-        PureOp::StorageView(crate::op::PureViewSource::Storage(out_binding)),
+        PureOp::StorageView(op::PureViewSource::Storage(out_binding)),
         smallvec![zero, count],
     );
 }
@@ -673,8 +678,8 @@ fn build_runtime_filter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: &FilterLoop,
-    scratch_out: crate::BindingRef,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    scratch_out: BindingRef,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     use super::super::graph_ops::{intern_storage_view, intern_u32};
 
@@ -714,7 +719,7 @@ fn build_runtime_filter_loop(
     }
     graph.replace_pure_node(
         spec.result_node,
-        PureOp::StorageView(crate::op::PureViewSource::Storage(scratch_out)),
+        PureOp::StorageView(op::PureViewSource::Storage(scratch_out)),
         smallvec![zero, after_count],
     );
 }

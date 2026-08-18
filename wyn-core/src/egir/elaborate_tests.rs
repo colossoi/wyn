@@ -1,4 +1,5 @@
 use super::*;
+use crate::op;
 use crate::ssa::types::{ConstantValue, Terminator};
 
 #[test]
@@ -8,7 +9,7 @@ fn scalar_literals_stay_inline_in_ssa_operands() {
     let one = graph.intern_pure(PureOp::Uint("1".into()), SmallVec::new(), ty.clone(), None);
     let two = graph.intern_pure(PureOp::Uint("2".into()), SmallVec::new(), ty.clone(), None);
     let sum = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec::smallvec![one, two],
         ty.clone(),
         None,
@@ -26,7 +27,7 @@ fn scalar_literals_stay_inline_in_ssa_operands() {
     assert!(matches!(
         &inst.data,
         InstKind::Op {
-            tag: OpTag::BinOp(crate::op::BinaryOperator::Add),
+            tag: OpTag::BinOp(op::BinaryOperator::Add),
             operands,
         } if operands == &vec![
             ValueRef::Const(ConstantValue::U32(1)),

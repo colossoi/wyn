@@ -21,7 +21,9 @@
 //!      owners are unique. EGIR separately decides physical reuse from the
 //!      post-fusion semantic graph and its liveness.
 
+use crate::builtins;
 use crate::builtins::catalog;
+use crate::tlc;
 use crate::tlc::var_term_builtin_id;
 use crate::tlc::VarRef;
 use crate::{LookupMap, LookupSet};
@@ -912,7 +914,7 @@ impl<'p, C: Payload, S: Payload> Builder<'p, C, S> {
     fn element_origin_from_input(&mut self, ae: &ArrayExpr<C, S>) -> Origin {
         match ae {
             ArrayExpr::Var(vr, ty) => {
-                let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
+                let t = tlc::synthetic_atom_var_term(*vr, ty.clone());
                 let aliases = self.alias_targets(&t);
                 if !aliases.is_empty() {
                     if aliases
@@ -1375,7 +1377,7 @@ pub(super) fn alias_target_of<C: Payload, S: Payload>(
 /// after peeling `n_args` arrows. Ownership reads the callee signature's `*`
 /// return contract to decide whether a call produces a fresh value; the
 /// inferred call type supplies only its value shape.
-fn builtin_id(name: &str) -> Option<crate::builtins::BuiltinId> {
+fn builtin_id(name: &str) -> Option<builtins::BuiltinId> {
     catalog().lookup_by_surface_name(name).map(|builtin| builtin.id)
 }
 

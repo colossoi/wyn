@@ -1,5 +1,10 @@
 //! Phase-agnostic, low-level data structures for EGIR.
 
+use crate::flow;
+use crate::op;
+use crate::EntryId;
+use crate::GlobalId;
+use crate::ResourceAccess;
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 
@@ -1736,13 +1741,12 @@ impl SegBody {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SegResourceAccess<R> {
     pub resource: R,
-    pub access: crate::ResourceAccess,
+    pub access: ResourceAccess,
 }
 
 impl<R: Copy + Ord> SegResourceAccess<R> {
     pub fn merge(a: &[Self], b: &[Self]) -> Vec<Self> {
-        let mut merged: std::collections::BTreeMap<R, crate::ResourceAccess> =
-            std::collections::BTreeMap::new();
+        let mut merged: std::collections::BTreeMap<R, ResourceAccess> = std::collections::BTreeMap::new();
         for resource in a.iter().chain(b) {
             merged
                 .entry(resource.resource)
@@ -1865,9 +1869,9 @@ impl<Ty> SoacInputType<Ty> {
 /// EGIR conditions are values, CFG arguments are admitted flow values, and a
 /// return carries the complete function-result binding.
 pub type SkeletonTerminator<Lang> =
-    crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<<Lang as Language>::Ty>>;
+    flow::Terminator<ValueId, FlowValueId, ResultBinding<<Lang as Language>::Ty>>;
 
-impl<Ty> crate::flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
+impl<Ty> flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
     pub fn referenced_nodes(&self) -> SmallVec<[ValueId; 8]> {
         match self {
             Self::Return(result) => result.iter().flat_map(ResultBinding::values).collect(),
@@ -1941,7 +1945,7 @@ impl<P: Family, Lang: Language> SkeletonBlock<P, Lang> {
         SkeletonBlock {
             params: Vec::new(),
             side_effects: Vec::new(),
-            term: crate::flow::Terminator::Unreachable,
+            term: flow::Terminator::Unreachable,
             control_header: None,
         }
     }
@@ -2028,7 +2032,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
         let control_header = source.control_header.take();
         let old_term = std::mem::replace(
             &mut source.term,
-            crate::flow::Terminator::Branch {
+            flow::Terminator::Branch {
                 target: continuation,
                 args: Vec::new(),
             },
@@ -2057,8 +2061,8 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
                 Ok(())
             };
             match &block.term {
-                crate::flow::Terminator::Branch { target, args } => check(*target, args)?,
-                crate::flow::Terminator::CondBranch {
+                flow::Terminator::Branch { target, args } => check(*target, args)?,
+                flow::Terminator::CondBranch {
                     then_target,
                     then_args,
                     else_target,
@@ -2068,7 +2072,7 @@ impl<P: Family, Lang: Language> Skeleton<P, Lang> {
                     check(*then_target, then_args)?;
                     check(*else_target, else_args)?;
                 }
-                crate::flow::Terminator::Return(_) | crate::flow::Terminator::Unreachable => {}
+                flow::Terminator::Return(_) | flow::Terminator::Unreachable => {}
             }
         }
         Ok(())
@@ -2766,7 +2770,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if let PlaceOp::Slice { base, start, .. } = self.place(base).op().clone() {
             let index_ty = self.value(index).ty().clone();
             let index = self.intern_pure(
-                OpTag::BinOp(crate::op::BinaryOperator::Add),
+                OpTag::BinOp(op::BinaryOperator::Add),
                 smallvec::smallvec![start, index],
                 index_ty,
                 span,
@@ -3019,7 +3023,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                             result.replace_value_with_place(old, place);
                         }
                     }
-                    if let crate::flow::Terminator::Return(Some(result)) = &mut block.term {
+                    if let flow::Terminator::Return(Some(result)) = &mut block.term {
                         result.replace_value_with_place(old, place);
                     }
                 }
@@ -3171,7 +3175,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                     }
                 }
             }
-            if let crate::flow::Terminator::Return(Some(result)) = &mut block.term {
+            if let flow::Terminator::Return(Some(result)) = &mut block.term {
                 result.replace_place(old, new);
             }
         }
@@ -3329,12 +3333,12 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
         for (_, predecessor) in self.skeleton.blocks.iter_mut() {
             match &mut predecessor.term {
-                crate::flow::Terminator::Branch { target, args } if *target == block => {
+                flow::Terminator::Branch { target, args } if *target == block => {
                     for &slot in slots.iter().rev() {
                         args.remove(slot);
                     }
                 }
-                crate::flow::Terminator::CondBranch {
+                flow::Terminator::CondBranch {
                     then_target,
                     then_args,
                     else_target,
@@ -3477,7 +3481,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             .iter()
             .filter_map(|(header, block)| {
                 let control = block.control_header.as_ref()?;
-                let valid = matches!(block.term, crate::flow::Terminator::CondBranch { .. })
+                let valid = matches!(block.term, flow::Terminator::CondBranch { .. })
                     && match control {
                         ControlHeader::Loop {
                             merge,
@@ -3669,7 +3673,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
 /// elaboration. Constant bodies have no parameters and must be proven pure.
 #[derive(Clone, Debug)]
 pub struct ConstantDef<P: Family, Lang: Language> {
-    pub id: crate::GlobalId,
+    pub id: GlobalId,
     /// Diagnostic and emitted-symbol metadata; never used to resolve a global.
     pub name: String,
     pub span: Span,
@@ -3807,7 +3811,7 @@ impl<R, Route, Lang: Language> std::ops::DerefMut for EntryOutput<R, Route, Lang
 
 #[derive(Clone, Debug)]
 pub struct Entry<P: Family, ResourceDecl, Route, Lang: Language> {
-    pub id: crate::EntryId,
+    pub id: EntryId,
     /// Host-facing entry symbol and diagnostic metadata.
     pub name: String,
     pub span: Span,
@@ -3867,7 +3871,7 @@ impl<P: Family, ResourceDecl: Clone, Route: Clone, Lang: Language> Entry<P, Reso
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resources(
         name: String,
-        id: crate::EntryId,
+        id: EntryId,
         span: Span,
         execution_model: ExecutionModel,
         inputs: Vec<InterfaceEntryInput<Lang::Ty>>,

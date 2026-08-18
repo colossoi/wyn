@@ -3,6 +3,7 @@
 use super::projection::side_effect_output_slots;
 use super::*;
 use crate::ast::Span;
+use crate::egir;
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::ir::RealizedOutputRoute;
 use crate::egir::program::SlotSource;
@@ -12,7 +13,11 @@ use crate::egir::types::{
     PlaceAccess, PlaceRegion, PlaceType, Semantic, WynLanguage,
 };
 use crate::flow::ExecutionModel;
+use crate::interface;
+use crate::op;
+use crate::types;
 use crate::FunctionId;
+use crate::IdSource;
 
 pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
@@ -78,7 +83,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
         effects: Some((EffectToken::from(8), writer)),
         span: None,
     });
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let mut entry = Entry::<Semantic>::new_with_resources(
         "route_test".into(),
         identities.alloc_entry("route_test".into()),
@@ -88,10 +93,10 @@ fn output_ownership_comes_from_explicit_route_writer() {
         },
         vec![],
         (0..4)
-            .map(|_| crate::interface::EntryOutput {
+            .map(|_| interface::EntryOutput {
                 ty: Type::Constructed(TypeName::Unit, vec![]),
-                kind: crate::interface::EntryOutputKind::Value {
-                    destination: crate::interface::EntryOutputDestination::Plain,
+                kind: interface::EntryOutputKind::Value {
+                    destination: interface::EntryOutputDestination::Plain,
                 },
             })
             .collect(),
@@ -107,7 +112,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let resource = SemanticResourceRef(ResourceId::for_test(0));
     entry.outputs[3].resource = Some(resource);
 
-    let entry = crate::egir::program::PlannedEntry::project(&entry).expect("project route fixture");
+    let entry = egir::program::PlannedEntry::project(&entry).expect("project route fixture");
     assert_eq!(entry.outputs[3].resource, Some(resource));
     let effect = entry
         .graph
@@ -146,7 +151,7 @@ fn reduction_keeps_canonical_operator_lambda_together() {
             post: screma::Lambda::identity(vec![]),
         },
         result_state: vec![screma::ResultState {
-            ownership: crate::types::SoacOwnership::Fresh,
+            ownership: types::SoacOwnership::Fresh,
         }],
         state: screma::SemanticState::Serial,
     };
@@ -173,7 +178,7 @@ fn scan_form_carries_operator_and_neutral() {
             post: screma::Lambda::identity(vec![unit]),
         },
         result_state: vec![screma::ResultState {
-            ownership: crate::types::SoacOwnership::Fresh,
+            ownership: types::SoacOwnership::Fresh,
         }],
         state: screma::SemanticState::Serial,
     };
@@ -197,10 +202,10 @@ fn screma_form_carries_scan_and_reduction_operators() {
         },
         result_state: vec![
             screma::ResultState {
-                ownership: crate::types::SoacOwnership::Fresh,
+                ownership: types::SoacOwnership::Fresh,
             },
             screma::ResultState {
-                ownership: crate::types::SoacOwnership::Fresh,
+                ownership: types::SoacOwnership::Fresh,
             },
         ],
         state: screma::SemanticState::Serial,
@@ -232,15 +237,15 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let neutral = phase1.intern_pure(PureOp::Int("0".into()), smallvec![], elem_ty.clone(), None);
     let sums = ResourceId::for_test(40);
     let offsets = ResourceId::for_test(41);
-    let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
-    let mut effect_ids = crate::IdSource::new();
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut semantic_ids = egir::program::SemanticOpIdSource::default();
+    let mut effect_ids = IdSource::new();
+    let mut identities = egir::program::ProgramIdentities::default();
     let operator_id = identities.alloc_function("combine".into());
     let mut operator_graph = EGraph::new();
     let left = operator_graph.add_test_value_parameter(0, elem_ty.clone());
     let right = operator_graph.add_test_value_parameter(1, elem_ty.clone());
     let combined = operator_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![left, right],
         elem_ty.clone(),
         None,
@@ -291,7 +296,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
             };
             let value = effect.operands.first()?.value()?;
             let resource = match &phase2.body.graph.place(*place).ty().region {
-                crate::egir::types::PlaceRegion::Resource(resource) => Some(*resource),
+                egir::types::PlaceRegion::Resource(resource) => Some(*resource),
                 _ => None,
             };
             (resource == Some(SemanticResourceRef(offsets))).then_some(value)

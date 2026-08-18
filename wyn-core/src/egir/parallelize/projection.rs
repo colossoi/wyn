@@ -1,23 +1,22 @@
 //! Physical-entry projection, interface compaction, and output-domain split.
 
 use super::*;
+use crate::egir;
 use crate::egir::{graph_projector, program};
+use crate::interface;
+use crate::types;
+use crate::EntryId;
 
 pub(super) struct ProjectionSpec {
     name: String,
     execution_model: ExecutionModel,
     outputs: Vec<
-        crate::egir::ir::EntryOutput<
-            SemanticResourceRef,
-            crate::egir::ir::RealizedOutputRoute,
-            crate::egir::types::WynLanguage,
-        >,
+        egir::ir::EntryOutput<SemanticResourceRef, egir::ir::RealizedOutputRoute, egir::types::WynLanguage>,
     >,
-    internal_results: Vec<
-        crate::egir::ir::InternalResultRoute<SemanticResourceRef, crate::egir::ir::RealizedOutputRoute>,
-    >,
+    internal_results:
+        Vec<egir::ir::InternalResultRoute<SemanticResourceRef, egir::ir::RealizedOutputRoute>>,
     resource_declarations: Vec<SemanticResourceDecl>,
-    result: crate::egir::ir::FunctionResult<Type<TypeName>>,
+    result: egir::ir::FunctionResult<Type<TypeName>>,
 }
 
 impl ProjectionSpec {
@@ -32,9 +31,10 @@ impl ProjectionSpec {
             outputs: Vec::new(),
             internal_results: Vec::new(),
             resource_declarations,
-            result: crate::egir::ir::by_value_function_result::<crate::egir::types::WynLanguage>(
-                Type::Constructed(TypeName::Unit, vec![]),
-            ),
+            result: egir::ir::by_value_function_result::<egir::types::WynLanguage>(Type::Constructed(
+                TypeName::Unit,
+                vec![],
+            )),
         }
     }
 
@@ -55,7 +55,7 @@ impl ProjectionSpec {
 
 pub(super) fn project_kernel_body(
     source: &program::PlannedEntry,
-    id: crate::EntryId,
+    id: EntryId,
     spec: ProjectionSpec,
 ) -> Result<program::PlannedEntry, String> {
     let ProjectionSpec {
@@ -98,7 +98,7 @@ pub(super) fn project_kernel_body(
 
 fn project_kernel_body_effects(
     source: &program::PlannedEntry,
-    id: crate::EntryId,
+    id: EntryId,
     selected: HashSet<SideEffectSite>,
     spec: ProjectionSpec,
 ) -> Result<(program::PlannedEntry, LookupMap<SideEffectSite, SideEffectSite>), String> {
@@ -150,17 +150,17 @@ fn project_kernel_body_effects(
     )?;
     entry.retain_parameter_indices(&retained_parameters);
     entry.resource_declarations.retain(|declaration| match declaration.role {
-        crate::interface::StorageRole::Input | crate::interface::StorageRole::Output => {
+        interface::StorageRole::Input | interface::StorageRole::Output => {
             retained_resources.contains(&declaration.resource.0)
         }
-        crate::interface::StorageRole::Intermediate => true,
+        interface::StorageRole::Intermediate => true,
     });
     Ok((entry, effect_sites))
 }
 
 pub(super) fn project_single_effect_body(
     source: &program::PlannedEntry,
-    id: crate::EntryId,
+    id: EntryId,
     site: SideEffectSite,
     spec: ProjectionSpec,
 ) -> Result<program::PlannedEntry, String> {
@@ -226,10 +226,9 @@ fn output_execution_domain(effect: &SideEffect) -> OutputExecutionDomain {
 fn requires_unrouted_owner(effect: &SideEffect) -> bool {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_) | Soac::Filter(_))) => true,
-        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => op
-            .result_state
-            .iter()
-            .any(|result| result.ownership == crate::types::SoacOwnership::UniqueInput),
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+            op.result_state.iter().any(|result| result.ownership == types::SoacOwnership::UniqueInput)
+        }
         SideEffectKind::Effect(EffectOp::Store { .. }) => true,
         _ => false,
     }

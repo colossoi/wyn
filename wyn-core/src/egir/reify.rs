@@ -17,6 +17,7 @@ pub type Segmented = super::program::Program<
     super::program::RewriteGlobal,
 >;
 
+use crate::ssa;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 
@@ -340,7 +341,7 @@ fn space(
             if let Some(Type::Constructed(TypeName::Size(size), _)) = input.array.array_size() {
                 SegExtent::Fixed(u32::try_from(*size).expect("ranked SOAC dimension is too large"))
             } else if let Some(resource) = graph_ops::extract_storage_view_source(graph, node) {
-                let elem_bytes = crate::ssa::layout::storage_elem_stride(
+                let elem_bytes = ssa::layout::storage_elem_stride(
                     input.array.elem_type().expect("resource-backed SOAC input must be an array"),
                 )
                 .expect("resource-backed SOAC input must have a storable element type");

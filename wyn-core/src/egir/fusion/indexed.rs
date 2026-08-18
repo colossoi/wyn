@@ -5,6 +5,7 @@
 //! demands, the full-domain map and its storage disappear.  Multiple demands
 //! are handled uniformly; profitability policy is separate from legality.
 
+use crate::egir;
 use std::collections::HashSet;
 
 use crate::egir::graph_ops;
@@ -219,7 +220,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
                 operands.extend_from_slice(pre.captures());
                 let results =
                     lambda_ops::emit_call(graph, candidate.block, &pre, callee.as_ref(), operands);
-                let scalar = crate::egir::graph_ops::pack_result_values(graph, &results[demand.output])
+                let scalar = egir::graph_ops::pack_result_values(graph, &results[demand.output])
                     .expect("indexed fusion demands a by-value lambda result");
                 graph.replace_value_references(demand.index, scalar);
                 replacements.push((demand.index, scalar));

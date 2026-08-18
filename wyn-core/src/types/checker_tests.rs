@@ -1,5 +1,8 @@
 use super::TypeWarning;
+use crate::ast;
+use crate::compile_thru_frontend;
 use crate::error::CompilerError;
+use crate::types;
 use crate::types::{Type, TypeExt, TypeName, TypeScheme};
 
 /// Helper to parse and type check source code, expecting success
@@ -14,7 +17,7 @@ fn typecheck_program(input: &str) {
 
 /// Helper to parse and type check source code, returning Result
 fn try_typecheck_program(input: &str) -> Result<(), CompilerError> {
-    crate::compile_thru_frontend(input).map(|_| ())
+    compile_thru_frontend(input).map(|_| ())
 }
 
 #[test]
@@ -475,7 +478,7 @@ def test_mul(mat1: mat4f32, mat2: mat4f32) mat4f32 =
 
 /// Helper function to check a program with a type hole and return the inferred type
 fn check_type_hole(source: &str) -> Type {
-    let checked = crate::compile_thru_frontend(source).unwrap();
+    let checked = compile_thru_frontend(source).unwrap();
     let warnings = &checked.global_context.warnings;
     assert_eq!(warnings.len(), 1, "Expected exactly one type hole warning");
 
@@ -2763,7 +2766,7 @@ fn aspiration_chained_multidim_slice() {
 
 #[test]
 fn storage_slice_with_literal_bounds_stays_view() {
-    let checked = crate::compile_thru_frontend(
+    let checked = compile_thru_frontend(
         r#"
 entry e(data: []i32) i32 = length(data[0..4096])
 "#,
@@ -2774,15 +2777,15 @@ entry e(data: []i32) i32 = length(data[0..4096])
         .declarations
         .iter()
         .find_map(|decl| match decl {
-            crate::ast::Declaration::Entry(entry) if entry.name == "e" => Some(entry),
+            ast::Declaration::Entry(entry) if entry.name == "e" => Some(entry),
             _ => None,
         })
         .expect("entry e should exist");
 
     let slice_expr = match &entry.body.kind {
-        crate::ast::ExprKind::Application(_, args) => args
+        ast::ExprKind::Application(_, args) => args
             .iter()
-            .find(|arg| matches!(arg.kind, crate::ast::ExprKind::Slice(_)))
+            .find(|arg| matches!(arg.kind, ast::ExprKind::Slice(_)))
             .expect("length argument should be the slice expression"),
         other => panic!("expected length application, got {other:?}"),
     };
@@ -2793,7 +2796,7 @@ entry e(data: []i32) i32 = length(data[0..4096])
     };
 
     assert!(
-        crate::types::is_array_variant_view(ty.array_variant().expect("slice type has variant")),
+        types::is_array_variant_view(ty.array_variant().expect("slice type has variant")),
         "literal-bounded storage slice should stay View, got {ty:?}"
     );
     assert!(

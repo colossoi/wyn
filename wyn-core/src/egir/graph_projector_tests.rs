@@ -3,6 +3,7 @@ use crate::ast::TypeName;
 use crate::egir::types::{
     EffectOp, EffectToken, OperandRef, PlaceAccess, PlaceId, PlaceRegion, PlaceType, PureOp, SideEffectKind,
 };
+use crate::op;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
@@ -200,7 +201,7 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         args: initial_args,
     };
     let cond = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Less),
+        PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![index, bound],
         bool_ty(),
         None,
@@ -214,13 +215,13 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         else_args: exit_args,
     };
     let next_acc = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![acc, one],
         u32_ty(),
         None,
     );
     let next_index = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![index, one],
         u32_ty(),
         None,
@@ -392,7 +393,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
     graph.skeleton.blocks[entry].side_effects.push(effect);
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
     let external = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![live_out, root],
         u32_ty(),
         None,
@@ -418,13 +419,13 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     let parameter = graph.add_test_value_parameter(0, u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
     let first = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![parameter, one],
         u32_ty(),
         None,
     );
     let second = graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![parameter, first],
         u32_ty(),
         None,

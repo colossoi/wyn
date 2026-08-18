@@ -1,3 +1,6 @@
+use crate::ast;
+use crate::builtins;
+use crate::type_checker;
 use crate::{LookupMap, StableMap};
 
 use crate::builtins::lowering::BuiltinLowering;
@@ -160,8 +163,8 @@ pub struct BuiltinCatalog {
     by_internal_name: LookupMap<&'static str, BuiltinId>,
     /// Type-directed dispatch tables built once beside the catalog's textual
     /// declarations. Downstream phases select identities by resolved types.
-    numeric_specializations: LookupMap<(BuiltinId, crate::ast::TypeName), BuiltinId>,
-    conversions: LookupMap<(crate::ast::TypeName, crate::ast::TypeName), BuiltinId>,
+    numeric_specializations: LookupMap<(BuiltinId, ast::TypeName), BuiltinId>,
+    conversions: LookupMap<(ast::TypeName, ast::TypeName), BuiltinId>,
     known: KnownBuiltinIds,
 }
 
@@ -224,17 +227,17 @@ impl BuiltinCatalog {
             image_load: resolve(N::INTRINSIC_IMAGE_LOAD),
         };
         let scalar_types = [
-            (crate::ast::TypeName::Int(8), "i8"),
-            (crate::ast::TypeName::Int(16), "i16"),
-            (crate::ast::TypeName::Int(32), "i32"),
-            (crate::ast::TypeName::Int(64), "i64"),
-            (crate::ast::TypeName::UInt(8), "u8"),
-            (crate::ast::TypeName::UInt(16), "u16"),
-            (crate::ast::TypeName::UInt(32), "u32"),
-            (crate::ast::TypeName::UInt(64), "u64"),
-            (crate::ast::TypeName::Float(16), "f16"),
-            (crate::ast::TypeName::Float(32), "f32"),
-            (crate::ast::TypeName::Float(64), "f64"),
+            (ast::TypeName::Int(8), "i8"),
+            (ast::TypeName::Int(16), "i16"),
+            (ast::TypeName::Int(32), "i32"),
+            (ast::TypeName::Int(64), "i64"),
+            (ast::TypeName::UInt(8), "u8"),
+            (ast::TypeName::UInt(16), "u16"),
+            (ast::TypeName::UInt(32), "u32"),
+            (ast::TypeName::UInt(64), "u64"),
+            (ast::TypeName::Float(16), "f16"),
+            (ast::TypeName::Float(32), "f32"),
+            (ast::TypeName::Float(64), "f64"),
         ];
         let mut numeric_specializations = LookupMap::new();
         for (generic, member) in [
@@ -282,21 +285,13 @@ impl BuiltinCatalog {
 
     /// Resolve a polymorphic numeric builtin using the already-resolved scalar
     /// argument type. No source spelling participates in downstream dispatch.
-    pub fn specialize_numeric(
-        &self,
-        generic: BuiltinId,
-        scalar: &crate::ast::TypeName,
-    ) -> Option<BuiltinId> {
+    pub fn specialize_numeric(&self, generic: BuiltinId, scalar: &ast::TypeName) -> Option<BuiltinId> {
         self.numeric_specializations.get(&(generic, scalar.clone())).copied()
     }
 
     /// Resolve one scalar conversion by structural source and destination
     /// types. The returned `BuiltinId` is the only identity carried onward.
-    pub fn conversion(
-        &self,
-        target: &crate::ast::TypeName,
-        source: &crate::ast::TypeName,
-    ) -> Option<BuiltinId> {
+    pub fn conversion(&self, target: &ast::TypeName, source: &ast::TypeName) -> Option<BuiltinId> {
         self.conversions.get(&(target.clone(), source.clone())).copied()
     }
 
@@ -350,7 +345,7 @@ impl BuiltinCatalog {
     /// construction that all overloads of an entry share lowering, or
     /// (b) threading the overload index from the type checker through
     /// the IR so backends look up `overloads[idx]` directly.
-    pub fn lookup_lowering(&self, name: &str) -> Option<&crate::builtins::lowering::BuiltinLowering> {
+    pub fn lookup_lowering(&self, name: &str) -> Option<&builtins::lowering::BuiltinLowering> {
         let def = self.lookup_by_any_name(name)?;
         Some(&def.overloads()[0].lowering)
     }
@@ -363,8 +358,8 @@ impl BuiltinCatalog {
         &self,
         id: BuiltinId,
         overload_idx: usize,
-        ctx: &mut dyn crate::type_checker::TypeVarGenerator,
-    ) -> Option<crate::ast::TypeScheme> {
+        ctx: &mut dyn type_checker::TypeVarGenerator,
+    ) -> Option<ast::TypeScheme> {
         let def = self.get(id);
         let ovld = &def.raw.overloads[overload_idx];
         ovld.scheme.map(|f| f(ctx))

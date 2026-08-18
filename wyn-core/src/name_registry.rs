@@ -3,6 +3,8 @@
 //! Collects all top-level names from every source (builtins, modules, prelude,
 //! user code) into a single `BTreeMap` for deterministic SymbolId assignment.
 
+use crate::ast_type_holes;
+use crate::builtins;
 use crate::LookupSet;
 use std::collections::BTreeMap;
 
@@ -43,13 +45,13 @@ const MATH_BUILTINS: &[&str] = &[
 ];
 
 impl NameRegistry {
-    pub fn build(ast: &crate::ast_type_holes::HolesResolved) -> Self {
+    pub fn build(ast: &ast_type_holes::HolesResolved) -> Self {
         let mut names = BTreeMap::new();
 
         // 1+2. All catalog entries: per-source-name, classify into
         // ImplOp (entries with `impl_source_names`) and
         // PolymorphicIntrinsic (entries with `intrinsic_source_names`).
-        let catalog = crate::builtins::catalog();
+        let catalog = builtins::catalog();
         for def in catalog.defs() {
             for &name in def.impl_source_names() {
                 names.insert(name.to_string(), NameKind::ImplOp);

@@ -1,6 +1,9 @@
 //! Top-level AST → TLC transition.
 
 use super::{TermIdSource, Transformer};
+use crate::ast_type_holes;
+use crate::error;
+use crate::IdSource;
 
 /// Polymorphic TLC definitions retain their type schemes in-tree.
 pub type UnpinnedPolymorphic =
@@ -12,7 +15,7 @@ pub enum TransformedTag {}
 pub type Transformed =
     super::Program<TransformedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
-pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> crate::error::Result<Transformed> {
+pub fn lower_from_ast(mut ast: ast_type_holes::HolesResolved) -> error::Result<Transformed> {
     let mut symbols = std::mem::take(&mut ast.global_context.symbols);
     let mut term_ids = TermIdSource::new();
     let mut support_defs = Vec::new();
@@ -33,7 +36,7 @@ pub fn lower_from_ast(mut ast: crate::ast_type_holes::HolesResolved) -> crate::e
         term_ids,
         super::context::TransformedGlobal {
             known_defs,
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
     super::ownership::check_unextracted(&program)?;

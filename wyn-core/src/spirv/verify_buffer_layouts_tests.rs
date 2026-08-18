@@ -1,12 +1,16 @@
+use crate::ast;
 use crate::ast::TypeName;
 use crate::error::CompilerError;
+use crate::interface;
 use crate::interface::{
     BindingExposure, EntryInput, EntryInputKind, EntryOutput, EntryOutputKind, StorageBindingDecl,
     StorageRole,
 };
 use crate::spirv::verify_buffer_layouts;
+use crate::ssa;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{EntryPoint, ExecutionModel, Program};
+use crate::EntryId;
 use crate::{types, BindingRef, LookupMap};
 use polytype::Type;
 
@@ -44,14 +48,14 @@ fn runtime_array_of_runtime_array() -> Type<TypeName> {
     )
 }
 
-fn empty_program() -> crate::ssa::stage::Bare {
+fn empty_program() -> ssa::stage::Bare {
     Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 
 fn entry(name: &str) -> EntryPoint {
     let builder = FuncBuilder::new(vec![], Type::Constructed(TypeName::Unit, vec![]));
     EntryPoint {
-        id: crate::EntryId::from_index(0),
+        id: EntryId::from_index(0),
         name: name.into(),
         body: builder.finish_unchecked(),
         execution_model: ExecutionModel::Compute {
@@ -62,7 +66,7 @@ fn entry(name: &str) -> EntryPoint {
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),
-        span: crate::ast::Span::dummy(),
+        span: ast::Span::dummy(),
     }
 }
 
@@ -73,7 +77,7 @@ fn storage_input(name: &str, set: u32, binding: u32, ty: Type<TypeName>) -> Entr
         size_hint: None,
         kind: EntryInputKind::Storage {
             exposure: BindingExposure::Host(BindingRef::new(set, binding)),
-            access: crate::interface::StorageAccess::ReadWrite,
+            access: interface::StorageAccess::ReadWrite,
             length: None,
         },
     }

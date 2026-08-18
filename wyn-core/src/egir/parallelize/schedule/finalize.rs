@@ -1,5 +1,7 @@
 //! Validation, descriptor publication, binding allocation, and physical construction.
 
+use crate::egir;
+use crate::pipeline_descriptor;
 use std::collections::{HashMap, HashSet};
 
 use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan, PhaseGroup};
@@ -20,7 +22,7 @@ impl KernelPlan {
         self,
         mut program: ResourcesAllocated,
         profile: LoweringProfile,
-    ) -> Result<crate::egir::parallelize::Planned, ConvertError> {
+    ) -> Result<egir::parallelize::Planned, ConvertError> {
         #[cfg(debug_assertions)]
         {
             let verification = self.validate();
@@ -92,7 +94,7 @@ impl KernelPlan {
             summary,
             profile,
         )?;
-        crate::egir::verify_physical::check(&physical, &physical_resources)?;
+        egir::verify_physical::check(&physical, &physical_resources)?;
         Ok(physical)
     }
 
@@ -276,8 +278,7 @@ impl KernelPlan {
             else {
                 continue;
             };
-            let Some(crate::egir::parallelize::CompilerFlowEndpoint::Entry(source_entry)) =
-                phase.flow_source
+            let Some(egir::parallelize::CompilerFlowEndpoint::Entry(source_entry)) = phase.flow_source
             else {
                 continue;
             };
@@ -309,6 +310,6 @@ impl KernelPlan {
     }
 }
 
-fn binding_ref(binding: &crate::pipeline_descriptor::Binding) -> Option<BindingRef> {
+fn binding_ref(binding: &pipeline_descriptor::Binding) -> Option<BindingRef> {
     binding.slot().map(|(set, binding)| BindingRef::new(set, binding))
 }

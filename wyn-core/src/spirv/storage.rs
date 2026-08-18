@@ -4,6 +4,10 @@
 //! map view-indexing uses to recover a buffer var.
 
 use super::*;
+use crate::interface;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::types;
 
 impl Constructor {
     /// Get or assign a sequential buffer_id for a (set, binding) pair.
@@ -119,7 +123,7 @@ impl Constructor {
         // binding level even though the user-visible type is `T`). Use
         // `array_elem` rather than `elem_type` here so a vec-typed buffer
         // stays a vec instead of being unpacked into its component.
-        let elem_ty = match crate::types::array_elem(array_ty) {
+        let elem_ty = match types::array_elem(array_ty) {
             Some(elem) => elem.clone(),
             None => array_ty.clone(),
         };
@@ -132,11 +136,11 @@ impl Constructor {
         // elements take their aligned size from `block_layout`, which also
         // supplies the member offsets below (a tight `type_byte_size` sum
         // under-strides structs whose members pad).
-        let layout = crate::ssa::layout::block_layout(&elem_ty, crate::interface::StorageLayout::Std430);
+        let layout = ssa::layout::block_layout(&elem_ty, interface::StorageLayout::Std430);
         let stride = match &layout {
             Some(l) => l.size,
             None => {
-                let elem_size = crate::ssa::layout::storage_elem_stride(&elem_ty)
+                let elem_size = ssa::layout::storage_elem_stride(&elem_ty)
                     .expect("storage buffer element type must have known size");
                 let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
                 elem_size.div_ceil(elem_align) * elem_align
@@ -176,7 +180,7 @@ impl Constructor {
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
 
         // Create block struct (cached)
-        let matrix_stride = crate::ssa::layout::std430_matrix_stride(&elem_ty);
+        let matrix_stride = ssa::layout::std430_matrix_stride(&elem_ty);
         let block_struct = self.get_or_create_buffer_block_type(runtime_array, matrix_stride);
 
         let ptr_type = self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);
@@ -212,8 +216,8 @@ impl Constructor {
     pub(super) fn create_storage_image(
         &mut self,
         br: BindingRef,
-        format: crate::pipeline_descriptor::StorageImageFormat,
-        access: crate::interface::StorageAccess,
+        format: pipeline_descriptor::StorageImageFormat,
+        access: interface::StorageAccess,
     ) -> spirv::Word {
         if let Some(&(var_id, _)) = self.storage_images.get(&br) {
             return var_id;

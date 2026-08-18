@@ -24,6 +24,7 @@
 //!     variants.
 
 use crate::ast::{self, PatternKind, Span};
+use crate::types;
 use crate::types::{Type, TypeName};
 
 #[derive(Debug, Clone)]
@@ -97,7 +98,7 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
         PatternKind::Record(fields) => {
             if let Type::Constructed(TypeName::Record(record_names), args) = ty {
                 for f in fields {
-                    if let crate::ast::RecordPatternTarget::Pattern(sub) = &f.target {
+                    if let ast::RecordPatternTarget::Pattern(sub) = &f.target {
                         let idx = record_names.iter().position(|n| n == &f.field).ok_or_else(|| {
                             RefutabilityError {
                                 culprit: pat.h.span,
@@ -117,7 +118,7 @@ pub fn is_irrefutable(pat: &ast::Pattern, ty: &Type) -> Result<(), RefutabilityE
             }
         }
         PatternKind::Constructor(name, sub) => {
-            if let Some(variants) = crate::types::sum_variants(ty) {
+            if let Some(variants) = types::sum_variants(ty) {
                 if variants.len() == 1 {
                     let (only_name, payload_tys) = &variants[0];
                     if only_name != name {

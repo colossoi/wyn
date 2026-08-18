@@ -1,5 +1,6 @@
 //! Shared target-planning policy, decisions, errors, and immutable indexes.
 
+use crate::ResourceId;
 use std::collections::BTreeMap;
 
 use thiserror::Error;
@@ -75,12 +76,12 @@ pub(super) enum CandidateSelection<T> {
 
 /// Canonical compiler-flow edges shared by attachment and coalescing.
 pub(super) struct ResourceFlowIndex {
-    flows: Vec<(crate::ResourceId, CompilerResourceFlow)>,
+    flows: Vec<(ResourceId, CompilerResourceFlow)>,
     incoming: BTreeMap<CompilerFlowEndpoint, Vec<CompilerFlowEndpoint>>,
 }
 
 impl ResourceFlowIndex {
-    pub(super) fn new(mut flows: Vec<(crate::ResourceId, CompilerResourceFlow)>) -> Self {
+    pub(super) fn new(mut flows: Vec<(ResourceId, CompilerResourceFlow)>) -> Self {
         flows.sort_by_key(|(resource, _)| *resource);
         let mut incoming = BTreeMap::<_, Vec<_>>::new();
         for (_, flow) in &flows {
@@ -95,7 +96,7 @@ impl ResourceFlowIndex {
         Self { flows, incoming }
     }
 
-    pub(super) fn flows(&self) -> &[(crate::ResourceId, CompilerResourceFlow)] {
+    pub(super) fn flows(&self) -> &[(ResourceId, CompilerResourceFlow)] {
         &self.flows
     }
 

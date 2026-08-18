@@ -15,6 +15,9 @@ use super::{
 };
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};
+use crate::op;
+use crate::tlc;
+use crate::types;
 use crate::types::TypeExt;
 use crate::LookupSet;
 use crate::SymbolId;
@@ -148,7 +151,7 @@ fn try_compose_prefix_map(
         TermKind::Soac(SoacOp::Map {
             lam,
             inputs,
-            destination: crate::types::SoacOwnership::Fresh,
+            destination: types::SoacOwnership::Fresh,
         }) => (lam, inputs),
         _ => return false,
     };
@@ -310,7 +313,7 @@ fn build_fused_map_if(
                 data: (),
             },
             inputs,
-            destination: crate::types::SoacOwnership::Fresh,
+            destination: types::SoacOwnership::Fresh,
         }),
     );
 
@@ -398,7 +401,7 @@ enum LenKey {
     Int(String),
     Symbol(SymbolId),
     Builtin(BuiltinId),
-    BinOp(crate::op::BinaryOperator),
+    BinOp(op::BinaryOperator),
     App(Box<LenKey>, Vec<LenKey>),
     ArrayLen(Box<LenKey>),
     Coerce(Box<LenKey>),
@@ -413,7 +416,7 @@ fn array_expr_len_key(
 ) -> Option<LenKey> {
     match ae {
         ArrayExpr::Var(vr, ty) => {
-            let t = crate::tlc::synthetic_atom_var_term(*vr, ty.clone());
+            let t = tlc::synthetic_atom_var_term(*vr, ty.clone());
             term_array_len_key(&t, env, resolving)
         }
         ArrayExpr::Range { len, .. } => len_key(len, env, resolving),
@@ -489,13 +492,13 @@ fn len_key(
             let args = args?;
             if let LenKey::BinOp(op) = &f {
                 if args.len() == 2 {
-                    if *op == crate::op::BinaryOperator::Subtract && is_zero_len_key(&args[1]) {
+                    if *op == op::BinaryOperator::Subtract && is_zero_len_key(&args[1]) {
                         return Some(args[0].clone());
                     }
-                    if *op == crate::op::BinaryOperator::Add && is_zero_len_key(&args[1]) {
+                    if *op == op::BinaryOperator::Add && is_zero_len_key(&args[1]) {
                         return Some(args[0].clone());
                     }
-                    if *op == crate::op::BinaryOperator::Add && is_zero_len_key(&args[0]) {
+                    if *op == op::BinaryOperator::Add && is_zero_len_key(&args[0]) {
                         return Some(args[1].clone());
                     }
                 }
@@ -531,7 +534,7 @@ fn len_key_sub(
         return Some(lhs);
     }
     Some(LenKey::App(
-        Box::new(LenKey::BinOp(crate::op::BinaryOperator::Subtract)),
+        Box::new(LenKey::BinOp(op::BinaryOperator::Subtract)),
         vec![lhs, rhs],
     ))
 }
@@ -561,10 +564,7 @@ fn extract_iota_bound(term: &Term<Empty, Empty>) -> Option<Term<Empty, Empty>> {
         return None;
     };
     let arg_is_name = matches!(&arg.kind, TermKind::Var(VarRef::Symbol(sym)) if sym == name);
-    (op.op == crate::op::BinaryOperator::Subtract
-        && is_zero_term(start)
-        && is_zero_term(zero)
-        && arg_is_name)
+    (op.op == op::BinaryOperator::Subtract && is_zero_term(start) && is_zero_term(zero) && arg_is_name)
         .then(|| (**rhs).clone())
 }
 

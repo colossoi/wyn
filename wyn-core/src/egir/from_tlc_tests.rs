@@ -3,12 +3,25 @@
 // ============================================================================
 
 use super::{convert_program, ConversionArenas, Converter};
+use crate::ast;
 use crate::ast::TypeName;
+use crate::builtins;
+use crate::compile_thru_ssa;
+use crate::egir;
 use crate::egir::types::{callable_parameter, FuncParam, WynLanguage};
+use crate::interface;
+use crate::lower_egir_to_ssa;
+use crate::op;
+use crate::ssa;
 use crate::ssa::types::{ConstantValue, FuncBody, InstKind, ValueRef};
+use crate::test_pipeline;
+use crate::tlc;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
+use crate::types;
+use crate::IdSource;
+use crate::LoweringProfile;
 use crate::SymbolTable;
 use crate::{BindingRef, SymbolId};
 use polytype::Type;
@@ -18,17 +31,16 @@ use std::collections::{HashMap, HashSet};
 /// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
-fn compile_via_egir(src: &str) -> crate::ssa::stage::Elaborated {
-    let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
-    let program = convert_program(&tlc, crate::IdSource::<u32>::new(), crate::IdSource::new())
+fn compile_via_egir(src: &str) -> ssa::stage::Elaborated {
+    let tlc = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src));
+    let program = convert_program(&tlc, IdSource::<u32>::new(), IdSource::new())
         .expect("egir::from_tlc conversion failed");
-    let program = crate::egir::realize_outputs(program).expect("egir::realize_outputs failed");
-    let program = crate::egir::reify_soacs(program);
-    let program = crate::egir::optimize_semantics(program);
-    let program = crate::egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
-    let program = crate::egir::plan(program, crate::LoweringProfile::PORTABLE)
-        .expect("semantic EGIR planning failed");
-    crate::lower_egir_to_ssa(program).expect("semantic EGIR lowering failed")
+    let program = egir::realize_outputs(program).expect("egir::realize_outputs failed");
+    let program = egir::reify_soacs(program);
+    let program = egir::optimize_semantics(program);
+    let program = egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
+    let program = egir::plan(program, LoweringProfile::PORTABLE).expect("semantic EGIR planning failed");
+    lower_egir_to_ssa(program).expect("semantic EGIR lowering failed")
 }
 
 use crate::ast::Span;
@@ -58,7 +70,7 @@ fn elaborate_converter(
 ) -> FuncBody {
     let graph = converter.into_graph();
     let (graph, _, _) = graph
-        .try_map_resources_and_phase::<crate::egir::types::Physical, String>(
+        .try_map_resources_and_phase::<egir::types::Physical, String>(
             |resource| {
                 Err(format!(
                     "unit-test graph unexpectedly references resource {resource:?}"
@@ -67,7 +79,7 @@ fn elaborate_converter(
             |_, _, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
         )
         .expect("unit-test graph should be directly physicalizable");
-    crate::egir::elaborate::elaborate_one_body(graph, params, return_ty)
+    egir::elaborate::elaborate_one_body(graph, params, return_ty)
 }
 
 /// Build a minimal TLC def and convert it via EGraph.
@@ -87,8 +99,8 @@ fn convert_simple_def(
         .map(|(i, (_, ty))| callable_parameter::<BindingRef, WynLanguage>(format!("p{i}"), ty.clone()))
         .collect::<Vec<_>>();
 
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
+    let mut binding_ids = IdSource::<u32>::new();
+    let mut effect_ids = IdSource::new();
     let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
@@ -120,7 +132,7 @@ fn test_int_literal_roundtrip() {
     );
     assert!(matches!(
         entry.term,
-        crate::ssa::framework::Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(42))))
+        ssa::framework::Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(42))))
     ));
 }
 
@@ -137,8 +149,8 @@ fn test_add_roundtrip() {
     let add_op = mk_term(
         &mut term_ids,
         i32_ty(), // simplified — real type would be arrow
-        TermKind::BinOp(crate::ast::BinaryOp {
-            op: crate::op::BinaryOperator::Add,
+        TermKind::BinOp(ast::BinaryOp {
+            op: op::BinaryOperator::Add,
         }),
     );
     let app = mk_term(
@@ -154,8 +166,8 @@ fn test_add_roundtrip() {
     let pure_constants = HashSet::new();
     let callable_boundaries = HashMap::new();
 
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
+    let mut binding_ids = IdSource::<u32>::new();
+    let mut effect_ids = IdSource::new();
     let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
@@ -186,7 +198,7 @@ fn test_add_roundtrip() {
         matches!(
             &func.get_inst(iid).data,
             InstKind::Op {
-                tag: crate::op::OpTag::BinOp(crate::op::BinaryOperator::Add),
+                tag: op::OpTag::BinOp(op::BinaryOperator::Add),
                 ..
             }
         )
@@ -242,8 +254,8 @@ fn test_gvn_via_let() {
     let pure_constants = HashSet::new();
     let callable_boundaries = HashMap::new();
 
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
+    let mut binding_ids = IdSource::<u32>::new();
+    let mut effect_ids = IdSource::new();
     let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
@@ -267,7 +279,7 @@ fn test_gvn_via_let() {
         .iter()
         .find_map(|&iid| match &func.get_inst(iid).data {
             InstKind::Op {
-                tag: crate::op::OpTag::Tuple(2),
+                tag: op::OpTag::Tuple(2),
                 operands,
             } => Some(operands),
             _ => None,
@@ -284,7 +296,7 @@ fn test_gvn_via_let() {
         matches!(
             &func.get_inst(iid).data,
             InstKind::Op {
-                tag: crate::op::OpTag::Int(_),
+                tag: op::OpTag::Int(_),
                 ..
             }
         )
@@ -300,7 +312,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
     use crate::egir::types::{EGraph, PureOp};
     use smallvec::smallvec;
 
-    let mut g = EGraph::<crate::egir::types::Semantic>::new();
+    let mut g = EGraph::<egir::types::Semantic>::new();
     let i32_ty = i32_ty();
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
 
@@ -311,7 +323,7 @@ fn test_hash_cons_distinguishes_by_result_type() {
         None,
     );
 
-    let storage_len_id = crate::builtins::catalog().known().storage_len;
+    let storage_len_id = builtins::catalog().known().storage_len;
     let a = g.intern_pure(
         PureOp::Intrinsic {
             id: storage_len_id,
@@ -365,8 +377,8 @@ fn test_if_else_roundtrip() {
     let pure_constants = HashSet::new();
     let callable_boundaries = HashMap::new();
 
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
+    let mut binding_ids = IdSource::<u32>::new();
+    let mut effect_ids = IdSource::new();
     let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
@@ -395,7 +407,7 @@ fn test_if_else_roundtrip() {
     // Entry should end with CondBranch
     let entry = func.get_block(func.entry_block());
     assert!(
-        matches!(&entry.term, crate::ssa::framework::Terminator::CondBranch { .. }),
+        matches!(&entry.term, ssa::framework::Terminator::CondBranch { .. }),
         "Entry should end with CondBranch, got {:?}",
         entry.term
     );
@@ -496,9 +508,9 @@ def wrapper(x: i32) i32 =
 
 entry e(xs: []i32) []i32 = map(wrapper, xs)
 "#;
-    let tlc = crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(source));
-    let binding_ids = crate::IdSource::<u32>::new();
-    let effect_ids = crate::IdSource::new();
+    let tlc = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(source));
+    let binding_ids = IdSource::<u32>::new();
+    let effect_ids = IdSource::new();
     let raw = convert_program(&tlc, binding_ids, effect_ids).expect("TLC-to-EGIR construction succeeds");
     let choose = raw.functions.iter().find(|function| function.name == "choose").unwrap().region;
     let wrapper = raw.functions.iter().find(|function| function.name == "wrapper").unwrap();
@@ -534,8 +546,8 @@ fn construction_purity_propagates_effectful_builtin_calls() {
         body,
         meta: DefMeta::Function,
         arity: 1,
-        param_diets: vec![crate::types::Diet::observing()],
-        return_diet: crate::types::Diet::observing(),
+        param_diets: vec![types::Diet::observing()],
+        return_diet: types::Diet::observing(),
     };
     let reader_ref = mk_term(
         &mut term_ids,
@@ -554,7 +566,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
         &mut term_ids,
         ty.clone(),
         TermKind::Var(VarRef::Builtin {
-            id: crate::builtins::catalog().known().storage_index,
+            id: builtins::catalog().known().storage_index,
             overload_idx: 0,
         }),
     );
@@ -568,7 +580,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
     );
     let pure_body = mk_term(&mut term_ids, ty.clone(), TermKind::IntLit("1".into()));
     let array_consumer_body = mk_term(&mut term_ids, ty.clone(), TermKind::IntLit("1".into()));
-    let program = crate::tlc::Program::from_parts(
+    let program = tlc::Program::from_parts(
         vec![
             definition(pure_leaf, pure_body),
             definition(reads_storage, storage_read),
@@ -583,14 +595,14 @@ fn construction_purity_propagates_effectful_builtin_calls() {
                 body: array_consumer_body,
                 meta: DefMeta::Function,
                 arity: 1,
-                param_diets: vec![crate::types::Diet::observing()],
-                return_diet: crate::types::Diet::observing(),
+                param_diets: vec![types::Diet::observing()],
+                return_diet: types::Diet::observing(),
             },
         ],
         symbols,
         term_ids,
-        crate::tlc::context::BackendGlobal {
-            auto_storage_binding_ids: crate::IdSource::new(),
+        tlc::context::BackendGlobal {
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 
@@ -631,8 +643,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   shade(target, covered,
     |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])
 "#;
-    let mut tlc_program =
-        crate::tlc::infer_input_slice_bounds(crate::test_pipeline::compile_to_reachable(src));
+    let mut tlc_program = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src));
 
     // Wrap only the vertex entry's signature return. `inner_body.ty` stays
     // unchanged, giving the test two deliberately divergent type sources.
@@ -643,7 +654,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
             matches!(
                 &definition.meta,
                 DefMeta::EntryPoint(entry)
-                    if entry.declaration.entry_kind == crate::interface::EntryKind::Vertex
+                    if entry.declaration.entry_kind == interface::EntryKind::Vertex
             )
         })
         .map(|definition| definition.name)
@@ -658,14 +669,14 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
         matches!(
             &def.meta,
             DefMeta::EntryPoint(e)
-                if e.declaration.entry_kind != crate::interface::EntryKind::Compute
+                if e.declaration.entry_kind != interface::EntryKind::Compute
         ),
         "precondition: vertex_main is a graphics entry"
     );
     wrap_arrow_return_in_marker(&mut def.ty);
 
-    let binding_ids = crate::IdSource::<u32>::new();
-    let effect_ids = crate::IdSource::new();
+    let binding_ids = IdSource::<u32>::new();
+    let effect_ids = IdSource::new();
     let egir = super::convert_program(&tlc_program, binding_ids, effect_ids)
         .expect("from_tlc::convert_program on graphics entry must succeed");
     let entry =
@@ -708,6 +719,5 @@ fn wrap_arrow_return_in_marker(mut ty: &mut Type<TypeName>) {
 #[test]
 fn parallel_scan_synthesized_swap_region_is_name_recoverable() {
     let src = " entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
-    crate::compile_thru_ssa(src)
-        .expect("parallel scan lowers, recovering its synthesized swap-wrapper region");
+    compile_thru_ssa(src).expect("parallel scan lowers, recovering its synthesized swap-wrapper region");
 }

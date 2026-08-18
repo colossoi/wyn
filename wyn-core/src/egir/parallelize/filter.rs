@@ -2,12 +2,14 @@
 
 use super::model::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 use super::*;
+use crate::egir;
 use crate::egir::soac::filter as filter_soac;
+use crate::interface;
 
 impl KernelPlanBuilder<'_, '_> {
     pub(super) fn lower_parallel_filter(
         &mut self,
-        body: crate::egir::program::PlannedEntry,
+        body: egir::program::PlannedEntry,
         kernel: schedule::KernelId,
         recipe: BoundFilter,
         output_projection: Option<Vec<usize>>,
@@ -31,7 +33,7 @@ struct FilterKernelFamily {
 
 struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
     lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
-    entry: crate::egir::program::PlannedEntry,
+    entry: egir::program::PlannedEntry,
     candidate: FilterCandidate,
     work: filter_soac::WorkBuffers,
     elem_ty: Type<TypeName>,
@@ -40,7 +42,7 @@ struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
 impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
     fn new(
         lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
-        entry: crate::egir::program::PlannedEntry,
+        entry: egir::program::PlannedEntry,
         recipe: BoundFilter,
     ) -> Self {
         Self {
@@ -206,7 +208,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
     fn declaration(
         &self,
         resource: SemanticResourceRef,
-        role: crate::interface::StorageRole,
+        role: interface::StorageRole,
     ) -> SemanticResourceDecl {
         let logical = &self.lowering.resources[resource.0];
         SemanticResourceDecl {

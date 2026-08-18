@@ -1,11 +1,21 @@
 use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
+use crate::ast;
 use crate::ast::*;
+use crate::builtins;
 use crate::builtins::{by_id, BuiltinId};
 use crate::error::{CompilerError, Result};
+use crate::interface;
 use crate::interface::{AttrExt, Attribute};
+use crate::module_manager;
 use crate::module_manager::ModuleManager;
+use crate::name_resolution;
 use crate::name_resolution::NameResolution;
+use crate::op;
+use crate::resolve_opens;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
+use crate::ssa;
+use crate::types;
+use crate::IdSource;
 use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
 use log::debug;
 use polytype::Context;
@@ -182,9 +192,9 @@ pub struct TypeChecker<'a> {
     /// Names of top-level functions that consume an argument — a consuming
     /// function may not be passed as a value, so a call passing one is
     /// rejected.
-    consuming_defs: crate::LookupSet<String>,
+    consuming_defs: LookupSet<String>,
     /// ID source for generating unique skolem constants when opening existential types.
-    skolem_ids: crate::IdSource<SkolemId>,
+    skolem_ids: IdSource<SkolemId>,
     /// Current module context for resolving unqualified type aliases in expressions.
     /// Set during check_decl_as_in_module for module function checking.
     pub(super) current_module: Option<String>,
@@ -689,7 +699,7 @@ impl<'a> TypeChecker<'a> {
 
     fn apply_type_alias(
         name: &str,
-        alias: &crate::module_manager::TypeAliasDefinition,
+        alias: &module_manager::TypeAliasDefinition,
         args: &[Type],
     ) -> Result<Type> {
         if alias.type_params.len() != args.len() {
@@ -944,7 +954,7 @@ impl<'a> TypeChecker<'a> {
     ) -> Option<ResolvedValue> {
         // The NameResolution side table covers every catalog identifier,
         // including identifiers found while walking the prelude.
-        if let Some(crate::name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
+        if let Some(name_resolution::ResolvedValueRef::Builtin { id: builtin_id, .. }) =
             self.name_resolution.get(node_id)
         {
             let bid = *builtin_id;
@@ -956,7 +966,7 @@ impl<'a> TypeChecker<'a> {
         // SOAC-tagged identifiers go straight
         // to the catalog's builtin scheme so a user-defined shadow at
         // file scope cannot reach the prelude.
-        if let Some(crate::name_resolution::ResolvedValueRef::Soac(_)) = self.name_resolution.get(node_id) {
+        if let Some(name_resolution::ResolvedValueRef::Soac(_)) = self.name_resolution.get(node_id) {
             if let Some(scheme) = self.globals.builtins.get(full_name) {
                 return Some(self.resolve_scheme_lookup(full_name, SchemeLookup::Single(scheme.clone())));
             }
@@ -1034,7 +1044,7 @@ impl<'a> TypeChecker<'a> {
     /// `f32.i32`, …) get their schemes from prelude module signatures
     /// via `lookup_module_scheme_by_id`.
     fn scheme_lookup_for_builtin(&mut self, id: BuiltinId) -> SchemeLookup {
-        let catalog = crate::builtins::catalog();
+        let catalog = builtins::catalog();
         let def = catalog.get(id);
         let schemes: Vec<TypeScheme> = (0..def.overloads().len())
             .map(|i| {
@@ -1145,8 +1155,8 @@ impl<'a> TypeChecker<'a> {
             warnings: Vec::new(),
             type_holes: Vec::new(),
             arity_map: LookupMap::new(),
-            consuming_defs: crate::LookupSet::new(),
-            skolem_ids: crate::IdSource::new(),
+            consuming_defs: LookupSet::new(),
+            skolem_ids: IdSource::new(),
             current_module: None,
             name_resolution,
             constructor_call_catalog_ids: LookupMap::new(),
@@ -1519,9 +1529,9 @@ impl<'a> TypeChecker<'a> {
     /// Type a lambda expression, optionally with an expected type for bidirectional checking.
     fn type_lambda(
         &mut self,
-        lambda: &crate::ast::LambdaExpr,
+        lambda: &ast::LambdaExpr,
         expected: Option<&Type>,
-        expr: &crate::ast::Expression,
+        expr: &ast::Expression,
     ) -> Result<Type> {
         // Extract expected parameter and result types for bidirectional checking.
         let expected_signature: Option<(Vec<Type>, Type)> = expected.and_then(|exp| {
@@ -1816,7 +1826,7 @@ impl<'a> TypeChecker<'a> {
 
     pub fn check_program(
         &mut self,
-        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+        declarations: &[Declaration<resolve_opens::OpensResolvedFamily>],
     ) -> Result<LookupMap<NodeId, TypeScheme>> {
         // Forward-declare ascribed file-scope `def`s into
         // `globals.user_file_defs` so module function bodies can close
@@ -1861,7 +1871,7 @@ impl<'a> TypeChecker<'a> {
     /// one entry and a pointer-to-array in another is not a conflict.
     fn check_resource_binding_consistency(
         &self,
-        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+        declarations: &[Declaration<resolve_opens::OpensResolvedFamily>],
     ) -> Result<()> {
         fn param_attrs<V>(p: &Pattern<SourceTree, Attribute<V>>) -> &[Attribute<V>] {
             match &p.kind {
@@ -1904,9 +1914,7 @@ impl<'a> TypeChecker<'a> {
                 // the backends assume the layout exists.
                 if kind == "uniform" {
                     if let Some(t) = &ty {
-                        if crate::ssa::layout::block_layout(t, crate::interface::StorageLayout::Std140)
-                            .is_none()
-                        {
+                        if ssa::layout::block_layout(t, interface::StorageLayout::Std140).is_none() {
                             bail_type_at!(
                                 param.h.span,
                                 "uniform (set={}, binding={}) has type `{}`, which cannot be a 
@@ -1989,9 +1997,9 @@ impl<'a> TypeChecker<'a> {
 
     fn check_entry_with_params(
         &mut self,
-        params: &[Pattern<SourceTree, crate::interface::ResolvedAttribute>],
+        params: &[Pattern<SourceTree, interface::ResolvedAttribute>],
         body: &Expression,
-        entry_kind: crate::interface::EntryKind,
+        entry_kind: interface::EntryKind,
     ) -> Result<(Vec<Type>, Type)> {
         self.check_function_with_params_inner(params, body, None, true, Some(entry_kind), None)
     }
@@ -2015,7 +2023,7 @@ impl<'a> TypeChecker<'a> {
         // The entry's stage attribute (`Vertex` / `Fragment` / `Compute`)
         // when `is_entry`; `None` for ordinary functions. Drives
         // stage-specific parameter validation.
-        entry_stage: Option<crate::interface::EntryKind>,
+        entry_stage: Option<interface::EntryKind>,
         expected_body: Option<&Type>,
     ) -> Result<(Vec<Type>, Type)> {
         // Create type variables or use explicit types for parameters
@@ -2056,7 +2064,7 @@ impl<'a> TypeChecker<'a> {
         // every non-builtin vertex param must have an explicit slot —
         // the pipeline descriptor needs a stable slot per attribute.
         // Fragment inputs are `#[varying(n)]` interpolants, validated below.
-        if matches!(entry_stage, Some(crate::interface::EntryKind::Vertex)) {
+        if matches!(entry_stage, Some(interface::EntryKind::Vertex)) {
             // `parse_entry_params` builds `Typed(Attributed([attrs], Name), ty)`
             // — `Typed` outermost — so peel through `Typed` to reach the attrs.
             fn param_attrs<V>(p: &Pattern<SourceTree, Attribute<V>>) -> &[Attribute<V>] {
@@ -2103,7 +2111,7 @@ impl<'a> TypeChecker<'a> {
                 let is_builtin = attrs.iter().any(|a| matches!(a, Attribute::BuiltIn(_)));
                 match slot {
                     Some(slot) => {
-                        if crate::ssa::layout::vertex_format(param_type).is_none() {
+                        if ssa::layout::vertex_format(param_type).is_none() {
                             bail_type_at!(
                                 param.h.span,
                                 "vertex shader #[vertex_slot({})] input must be an explicitly-typed \
@@ -2181,7 +2189,7 @@ impl<'a> TypeChecker<'a> {
     /// without full ascription are deferred to the main loop.
     fn forward_declare_ascribed_file_scope(
         &mut self,
-        declarations: &[Declaration<crate::resolve_opens::OpensResolvedFamily>],
+        declarations: &[Declaration<resolve_opens::OpensResolvedFamily>],
     ) -> Result<()> {
         for decl in declarations {
             if let Declaration::Decl(d) = decl {
@@ -2226,8 +2234,7 @@ impl<'a> TypeChecker<'a> {
             };
             param_types.push(self.resolve_type_aliases_scoped(&ty, None)?);
         }
-        let func_ty =
-            param_types.into_iter().rev().fold(resolved_return, |acc, p| crate::types::function(p, acc));
+        let func_ty = param_types.into_iter().rev().fold(resolved_return, |acc, p| types::function(p, acc));
         Ok(Some(self.generalize(&func_ty)))
     }
 
@@ -2237,7 +2244,7 @@ impl<'a> TypeChecker<'a> {
     /// and passed to the constructor.
     pub fn check_module_functions(&mut self) -> Result<()> {
         // Collect all module declarations that need flattening (includes constants like f32.pi)
-        let module_functions: Vec<(String, crate::ast::Decl)> = self
+        let module_functions: Vec<(String, ast::Decl)> = self
             .module_manager
             .get_all_module_declarations()
             .into_iter()
@@ -2261,7 +2268,7 @@ impl<'a> TypeChecker<'a> {
     /// Called during prelude creation to populate the type table for prelude function bodies.
     pub fn check_prelude_functions(&mut self) -> Result<()> {
         // Collect all prelude function declarations to avoid borrowing issues
-        let prelude_functions: Vec<crate::ast::Decl> =
+        let prelude_functions: Vec<ast::Decl> =
             self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
 
         let saved_context = self.current_context.clone();
@@ -2349,10 +2356,7 @@ impl<'a> TypeChecker<'a> {
         self.globals.module_schemes.get(qualified_name)
     }
 
-    fn check_declaration(
-        &mut self,
-        decl: &Declaration<crate::resolve_opens::OpensResolvedFamily>,
-    ) -> Result<()> {
+    fn check_declaration(&mut self, decl: &Declaration<resolve_opens::OpensResolvedFamily>) -> Result<()> {
         match decl {
             Declaration::Decl(decl_node) => {
                 debug!(
@@ -2429,11 +2433,11 @@ impl<'a> TypeChecker<'a> {
                 debug!("Checking Extern declaration: {}", extern_decl.name);
                 self.check_extern_decl(extern_decl)
             }
-            Declaration::Frontend(crate::ast::OpensResolvedFrontend::Sig(signature)) => {
+            Declaration::Frontend(ast::OpensResolvedFrontend::Sig(signature)) => {
                 debug!("Checking Sig declaration: {}", signature.name);
                 self.check_sig_decl(signature)
             }
-            Declaration::Frontend(crate::ast::OpensResolvedFrontend::TypeBind(binding)) => {
+            Declaration::Frontend(ast::OpensResolvedFrontend::TypeBind(binding)) => {
                 debug!("Processing TypeBind: {}", binding.name);
                 self.resolve_type_aliases_scoped(&binding.definition, None).map(|_| ())
             }
@@ -3085,7 +3089,7 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     let span = expr.h.span;
-                    let resolved = crate::builtins::overload::resolve_overload(
+                    let resolved = builtins::overload::resolve_overload(
                         &candidate_tys,
                         &arg_types,
                         &mut self.context,
@@ -3181,7 +3185,7 @@ impl<'a> TypeChecker<'a> {
                 let operand_type = self.infer_expression(operand)?;
                 let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
                 match op.op {
-                    crate::op::UnaryOperator::Negate => {
+                    op::UnaryOperator::Negate => {
                         // Numeric negation - operand must be numeric
                         let resolved = operand_type.apply(&self.context);
                         if let Some(false) = Self::is_numeric_type(&resolved) {
@@ -3193,7 +3197,7 @@ impl<'a> TypeChecker<'a> {
                         }
                         Ok(resolved)
                     }
-                    crate::op::UnaryOperator::LogicalNot => {
+                    op::UnaryOperator::LogicalNot => {
                         // Logical not - operand must be bool, returns bool
                         self.context.unify(&operand_type, &bool_ty).map_err(|_| {
                             err_type_at!(
@@ -3368,7 +3372,7 @@ impl<'a> TypeChecker<'a> {
 
                 // Check start is an integer type (i32, u32, etc.)
                 let resolved_start = start_type.apply(&self.context);
-                if !crate::types::is_integer_type(&resolved_start) {
+                if !types::is_integer_type(&resolved_start) {
                     // If still a type variable, default to i32
                     if matches!(resolved_start, Type::Variable(_)) {
                         self.context.unify(&start_type, &i32()).map_err(|_| {
@@ -3616,7 +3620,7 @@ impl<'a> TypeChecker<'a> {
     ) -> Option<CalleeCandidates> {
         // Scalar dispatch.
         if self.module_manager.is_known_module(name) {
-            let catalog = crate::builtins::catalog();
+            let catalog = builtins::catalog();
             let entries = catalog.lookup_by_surface_prefix(name);
             let mut candidates: Vec<Candidate> = Vec::with_capacity(entries.len());
             let mut catalog_ids: Vec<BuiltinId> = Vec::with_capacity(entries.len());
@@ -3627,7 +3631,7 @@ impl<'a> TypeChecker<'a> {
                 // `Operator`/other; including them would let overload
                 // resolution pick a 2-arg `T.+` and report the result
                 // as a partial application.
-                if !matches!(def.raw.kind, crate::builtins::catalog::BuiltinKind::ModuleBuiltin) {
+                if !matches!(def.raw.kind, builtins::catalog::BuiltinKind::ModuleBuiltin) {
                     continue;
                 }
                 // Per-type conversion entries (`per_type_conv` in
@@ -3654,7 +3658,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         // Vec dispatch.
-        let vec_constructors = crate::types::vector_type_constructors();
+        let vec_constructors = types::vector_type_constructors();
         if let Some(target_ty) = vec_constructors.get(name) {
             // Parse arity and component-type-name from the target ty.
             let (arity, target_elem) = match target_ty {
@@ -3688,7 +3692,7 @@ impl<'a> TypeChecker<'a> {
             // Record the dispatch so `to_tlc` can desugar.
             self.name_resolution.values.insert(
                 callee_node_id,
-                crate::name_resolution::ResolvedValueRef::VecConstructor {
+                name_resolution::ResolvedValueRef::VecConstructor {
                     arity,
                     target_elem,
                     component_conversion: None,
@@ -3711,7 +3715,7 @@ impl<'a> TypeChecker<'a> {
     /// fixed the argument's component type. The catalog maps structural type
     /// pairs to a `BuiltinId`; no conversion name is reconstructed downstream.
     fn record_vec_constructor_dispatch(&mut self, callee_node_id: NodeId, args: &[Expression]) {
-        let Some(crate::name_resolution::ResolvedValueRef::VecConstructor { target_elem, .. }) =
+        let Some(name_resolution::ResolvedValueRef::VecConstructor { target_elem, .. }) =
             self.name_resolution.values.get(&callee_node_id)
         else {
             return;
@@ -3732,11 +3736,10 @@ impl<'a> TypeChecker<'a> {
             },
             other => panic!("BUG: vector constructor argument is not a vector: {other:?}"),
         };
-        let conversion =
-            crate::builtins::catalog().conversion(&target_elem, &source_elem).unwrap_or_else(|| {
-                panic!("BUG: no builtin conversion from {source_elem:?} to {target_elem:?}")
-            });
-        let Some(crate::name_resolution::ResolvedValueRef::VecConstructor {
+        let conversion = builtins::catalog().conversion(&target_elem, &source_elem).unwrap_or_else(|| {
+            panic!("BUG: no builtin conversion from {source_elem:?} to {target_elem:?}")
+        });
+        let Some(name_resolution::ResolvedValueRef::VecConstructor {
             component_conversion, ..
         }) = self.name_resolution.values.get_mut(&callee_node_id)
         else {
@@ -3753,7 +3756,7 @@ impl<'a> TypeChecker<'a> {
             if let Some(&chosen_id) = catalog_ids.get(winner_index) {
                 self.name_resolution.values.insert(
                     callee_node_id,
-                    crate::name_resolution::ResolvedValueRef::Builtin {
+                    name_resolution::ResolvedValueRef::Builtin {
                         id: chosen_id,
                         // `per_type_conv` builtins have exactly one
                         // overload each — the catalog overload index
@@ -3870,7 +3873,7 @@ impl<'a> TypeChecker<'a> {
     /// the type of `target.swizzle <op> rhs` without rebuilding an AST.
     fn infer_binop_result(
         &mut self,
-        op: &crate::op::BinaryOperator,
+        op: &op::BinaryOperator,
         left_type: Type,
         right_type: Type,
         span: Span,
@@ -3936,7 +3939,7 @@ impl<'a> TypeChecker<'a> {
     /// dispatch, and the numeric-elem check.
     fn infer_arith_op_result(
         &mut self,
-        op: &crate::op::BinaryOperator,
+        op: &op::BinaryOperator,
         left_type: Type,
         right_type: Type,
         span: Span,
@@ -3946,7 +3949,7 @@ impl<'a> TypeChecker<'a> {
 
         // `*` covers matrix products that don't reduce to plain
         // component-wise arithmetic. Try those first.
-        if matches!(op, crate::op::BinaryOperator::Multiply) {
+        if matches!(op, op::BinaryOperator::Multiply) {
             if let Some(ty) = self.try_mat_mul(&l, &r, span)? {
                 return Ok(ty);
             }
@@ -3976,7 +3979,7 @@ impl<'a> TypeChecker<'a> {
                 // any width. Result is the base's float type. See
                 // SPECIFICATION.md `x binop y`. The (Int base, Float exp) shape
                 // stays a same-typed error, matching the spec's wording.
-                if matches!(op, crate::op::BinaryOperator::Power)
+                if matches!(op, op::BinaryOperator::Power)
                     && matches!(l, Type::Constructed(TypeName::Float(_), _))
                     && matches!(
                         r,
@@ -4333,7 +4336,7 @@ impl<'a> TypeChecker<'a> {
                 }
             };
 
-            if let Some(field_type) = crate::types::vec_field_type(&type_name_str, field) {
+            if let Some(field_type) = types::vec_field_type(&type_name_str, field) {
                 return Ok(field_type);
             }
             if let Some(field_type) = self.record_field_map.get(&(type_name_str.clone(), field.to_string()))

@@ -9,7 +9,20 @@
 //! - [`TypeEmitter`]: Wyn polytype → WGSL type string, with cached tuple structs.
 //! - [`lower`]: entry point.
 
+use crate::builtins;
 use crate::builtins::{by_id, catalog, BuiltinId};
+use crate::egir;
+use crate::err_wgsl;
+use crate::err_wgsl_at;
+use crate::interface;
+use crate::op;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::structured;
+use crate::types;
+use crate::EntryId;
+use crate::FunctionId;
+use crate::ResourceAccess;
 use crate::{LookupMap, LookupSet};
 use std::fmt::Write as _;
 
@@ -31,12 +44,12 @@ use crate::BindingRef;
 /// Lower an SSA program to a WGSL module. The module contains all entry
 /// points (distinguished by `@vertex` / `@fragment` / `@compute`
 /// attributes), module-scope types, bindings, and helper functions.
-pub fn lower(program: &crate::ssa::stage::WgslReady) -> Result<String> {
+pub fn lower(program: &ssa::stage::WgslReady) -> Result<String> {
     lower_with_options(program, WgslOptions::default())
 }
 
 /// Lower an SSA program using an explicit WGSL backend policy.
-pub fn lower_with_options(program: &crate::ssa::stage::WgslReady, options: WgslOptions) -> Result<String> {
+pub fn lower_with_options(program: &ssa::stage::WgslReady, options: WgslOptions) -> Result<String> {
     Ok(lower_with_abi(program, options)?.source)
 }
 
@@ -66,7 +79,7 @@ pub(crate) struct ParameterMember {
 }
 
 pub(crate) fn lower_with_abi(
-    program: &crate::ssa::stage::WgslReady,
+    program: &ssa::stage::WgslReady,
     options: WgslOptions,
 ) -> Result<LoweredModule> {
     let mut ctx = LowerCtx::new(program, options);
@@ -487,16 +500,16 @@ impl TypeEmitter {
                 // Opaque GPU resources (v1: 2D float texture + sampler).
                 TypeName::Texture2D => Ok("texture_2d<f32>".to_string()),
                 TypeName::Sampler => Ok("sampler".to_string()),
-                TypeName::Raster => Err(crate::err_wgsl!(
+                TypeName::Raster => Err(err_wgsl!(
                     "raster<V> reached runtime WGSL type lowering; raster stage tokens must be \
                      eliminated before backend lowering"
                 )),
-                TypeName::StorageTexture => Err(crate::err_wgsl!(
+                TypeName::StorageTexture => Err(err_wgsl!(
                     "StorageTexture reached runtime WGSL type lowering; terminal EGIR resource \
                      erasure must remove image handles from SSA"
                 )),
                 TypeName::Float(bits) | TypeName::Int(bits) | TypeName::UInt(bits) if *bits != 32 => Err(
-                    crate::err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
+                    err_wgsl!("WGSL does not support {}-bit scalars (found {:?})", bits, ty),
                 ),
                 TypeName::Unit => Ok("/* unit */".to_string()),
                 // Records are tuples with named fields by this point:
@@ -518,37 +531,34 @@ impl TypeEmitter {
                 }
                 TypeName::Vec => {
                     let elem = self.type_to_wgsl(
-                        ty.elem_type()
-                            .ok_or_else(|| crate::err_wgsl!("Vec type missing elem arg: {:?}", ty))?,
+                        ty.elem_type().ok_or_else(|| err_wgsl!("Vec type missing elem arg: {:?}", ty))?,
                     )?;
                     let n = ty
                         .vec_size()
-                        .ok_or_else(|| crate::err_wgsl!("Vec type has non-concrete size: {:?}", ty))?;
+                        .ok_or_else(|| err_wgsl!("Vec type has non-concrete size: {:?}", ty))?;
                     if !(2..=4).contains(&n) {
-                        return Err(crate::err_wgsl!("WGSL vector size must be 2/3/4, got {}", n));
+                        return Err(err_wgsl!("WGSL vector size must be 2/3/4, got {}", n));
                     }
                     Ok(format!("vec{}<{}>", n, elem))
                 }
                 TypeName::Mat => {
                     let elem = self.type_to_wgsl(
-                        ty.elem_type()
-                            .ok_or_else(|| crate::err_wgsl!("Mat type missing elem arg: {:?}", ty))?,
+                        ty.elem_type().ok_or_else(|| err_wgsl!("Mat type missing elem arg: {:?}", ty))?,
                     )?;
                     let cols = ty
                         .mat_cols()
-                        .ok_or_else(|| crate::err_wgsl!("Mat type has non-concrete cols: {:?}", ty))?;
+                        .ok_or_else(|| err_wgsl!("Mat type has non-concrete cols: {:?}", ty))?;
                     let rows = ty
                         .mat_rows()
-                        .ok_or_else(|| crate::err_wgsl!("Mat type has non-concrete rows: {:?}", ty))?;
+                        .ok_or_else(|| err_wgsl!("Mat type has non-concrete rows: {:?}", ty))?;
                     if elem != "f32" {
-                        return Err(crate::err_wgsl!("WGSL matrices are f32-only (got {})", elem));
+                        return Err(err_wgsl!("WGSL matrices are f32-only (got {})", elem));
                     }
                     Ok(format!("mat{}x{}<{}>", cols, rows, elem))
                 }
                 TypeName::Array => {
                     let elem = self.type_to_wgsl(
-                        ty.elem_type()
-                            .ok_or_else(|| crate::err_wgsl!("Array type missing elem arg: {:?}", ty))?,
+                        ty.elem_type().ok_or_else(|| err_wgsl!("Array type missing elem arg: {:?}", ty))?,
                     )?;
                     // Virtual arrays (ranges) are `{start, step, len}` triples
                     // in the same elem type; lower to a generated struct.
@@ -576,7 +586,7 @@ impl TypeEmitter {
                         let n = match ty.array_size() {
                             Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
                             _ => {
-                                return Err(crate::err_wgsl!(
+                                return Err(err_wgsl!(
                                     "Bounded array must have Size(N) capacity, got {:?}",
                                     ty
                                 ));
@@ -594,9 +604,9 @@ impl TypeEmitter {
                         _ => Ok(format!("array<{}>", elem)),
                     }
                 }
-                _ => Err(crate::err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
+                _ => Err(err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
             },
-            _ => Err(crate::err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
+            _ => Err(err_wgsl!("unsupported type in WGSL lowering: {:?}", ty)),
         }
     }
 }
@@ -628,7 +638,7 @@ fn storage_buffer_name(binding: BindingRef, writable: bool, mixed: bool) -> Stri
     }
 }
 
-fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
+fn wgsl_place(id: ssa::types::PlaceId) -> String {
     use crate::ssa::framework::Key;
     let ffi = id.data().as_ffi();
     let idx = ffi & 0xFFFFFFFF;
@@ -640,10 +650,10 @@ fn wgsl_place(id: crate::ssa::types::PlaceId) -> String {
 /// `(offset, len)` function value while its elements live in the static
 /// `@group @binding` storage buffer recorded by the type's region.
 fn is_view_array_ty(ty: &polytype::Type<TypeName>) -> bool {
-    ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+    ty.array_variant().is_some_and(types::is_array_variant_view)
 }
 
-fn atomic_storage_bindings(program: &crate::ssa::stage::WgslReady) -> LookupSet<BindingRef> {
+fn atomic_storage_bindings(program: &ssa::stage::WgslReady) -> LookupSet<BindingRef> {
     fn collect(body: &FuncBody, bindings: &mut LookupSet<BindingRef>) {
         for (_, atomic) in body.inner.insts.iter() {
             let InstKind::Atomic { place, .. } = &atomic.data else {
@@ -653,8 +663,7 @@ fn atomic_storage_bindings(program: &crate::ssa::stage::WgslReady) -> LookupSet<
                 InstKind::ViewIndex { view, result, .. } if result == place => view.as_ssa(),
                 _ => None,
             });
-            if let Some(binding) =
-                view.and_then(|view| crate::types::array_view_buffer(body.get_value_type(view)))
+            if let Some(binding) = view.and_then(|view| types::array_view_buffer(body.get_value_type(view)))
             {
                 bindings.insert(binding);
             }
@@ -671,10 +680,10 @@ fn atomic_storage_bindings(program: &crate::ssa::stage::WgslReady) -> LookupSet<
     bindings
 }
 struct LowerCtx<'a> {
-    program: &'a crate::ssa::stage::WgslReady,
+    program: &'a ssa::stage::WgslReady,
     function_variants: StorageFunctionVariants,
-    current_function_names: LookupMap<crate::FunctionId, String>,
-    current_storage_accesses: LookupMap<BindingRef, crate::ResourceAccess>,
+    current_function_names: LookupMap<FunctionId, String>,
+    current_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
     atomic_bindings: LookupSet<BindingRef>,
     type_emitter: TypeEmitter,
@@ -694,7 +703,7 @@ struct LowerCtx<'a> {
     /// one field per push-constant input; fields are keyed by the input
     /// index in `entry.inputs` so `lower_entry_point` can route the
     /// corresponding SSA `ValueId` to `<block_var>.<field_name>`.
-    pc_blocks: LookupMap<crate::EntryId, PcBlock>,
+    pc_blocks: LookupMap<EntryId, PcBlock>,
     /// If the current compute entry's source declared its own
     /// `#[builtin(global_invocation_id)]` param, this holds that param's
     /// mangled WGSL name. `_w_intrinsic_thread_id()` lowering reads from
@@ -737,7 +746,7 @@ struct PcField {
 }
 
 impl<'a> LowerCtx<'a> {
-    fn new(program: &'a crate::ssa::stage::WgslReady, options: WgslOptions) -> Self {
+    fn new(program: &'a ssa::stage::WgslReady, options: WgslOptions) -> Self {
         let function_variants = StorageFunctionVariants::new(program);
         let mut current_storage_accesses = LookupMap::new();
         let mut storage_access_variants = LookupMap::new();
@@ -745,7 +754,7 @@ impl<'a> LowerCtx<'a> {
             for (binding, access) in entry.shader_storage_accesses() {
                 current_storage_accesses
                     .entry(binding)
-                    .and_modify(|current: &mut crate::ResourceAccess| *current = current.merge(access))
+                    .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
                     .or_insert(access);
                 let variants = storage_access_variants.entry(binding).or_insert((false, false));
                 if access.writes() {
@@ -801,7 +810,7 @@ impl<'a> LowerCtx<'a> {
         let mangled = wgsl_mangle(name);
         if let Some(existing) = self.mangled_names.get(&mangled) {
             if existing != name {
-                return Err(crate::err_wgsl!(
+                return Err(err_wgsl!(
                     "Identifier mangling collision: '{}' and '{}' both produced '{}'",
                     existing,
                     name,
@@ -833,7 +842,7 @@ impl<'a> LowerCtx<'a> {
                 .functions
                 .iter()
                 .find(|function| function.id == emission.function)
-                .ok_or_else(|| crate::err_wgsl!("unknown function {}", emission.function))?;
+                .ok_or_else(|| err_wgsl!("unknown function {}", emission.function))?;
             self.lower_function(function, &emission.name, &mut code)?;
         }
 
@@ -979,7 +988,7 @@ impl<'a> LowerCtx<'a> {
                         .ty
                         .elem_type()
                         .ok_or_else(|| {
-                            crate::err_wgsl!("storage-bound input '{}' has no element type", input.name)
+                            err_wgsl!("storage-bound input '{}' has no element type", input.name)
                         })?
                         .clone();
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
@@ -997,7 +1006,7 @@ impl<'a> LowerCtx<'a> {
                     // struct-valued compute output (e.g. reduce → f32) packs
                     // into a single-element `[]T` binding where `out.ty` IS
                     // the elem. `array_elem` returns None for the latter.
-                    let elem_ty = match crate::types::array_elem(&out.ty) {
+                    let elem_ty = match types::array_elem(&out.ty) {
                         Some(elem) => elem.clone(),
                         None => out.ty.clone(),
                     };
@@ -1037,7 +1046,7 @@ impl<'a> LowerCtx<'a> {
         for entry in &self.program.entry_points {
             for (_, inst) in entry.body.inner.insts.iter() {
                 if let InstKind::Op {
-                    tag: crate::op::OpTag::StorageView(crate::op::PureViewSource::Workgroup { id, count }),
+                    tag: op::OpTag::StorageView(op::PureViewSource::Workgroup { id, count }),
                     ..
                 } = &inst.data
                 {
@@ -1045,7 +1054,7 @@ impl<'a> LowerCtx<'a> {
                     let view_ty = entry.body.get_value_type(result);
                     // Array-shaped workgroup view → elem; scalar / vec /
                     // struct-shaped (single-element reduce) → view IS the elem.
-                    let elem_ty = match crate::types::array_elem(view_ty) {
+                    let elem_ty = match types::array_elem(view_ty) {
                         Some(elem) => elem.clone(),
                         None => view_ty.clone(),
                     };
@@ -1078,7 +1087,7 @@ impl<'a> LowerCtx<'a> {
                     let key = self.mangle_tracked(&input.name)?;
                     if let Some(prev) = uniforms.get(&key) {
                         if *prev != (set, binding, ty_str.clone()) {
-                            return Err(crate::err_wgsl!(
+                            return Err(err_wgsl!(
                                 "uniform '{}' declared with conflicting (set, binding, type) across entries",
                                 input.name
                             ));
@@ -1114,7 +1123,7 @@ impl<'a> LowerCtx<'a> {
                     let key = self.mangle_tracked(&input.name)?;
                     if let Some(prev) = handles.get(&key) {
                         if *prev != (set, binding, ty_str.clone()) {
-                            return Err(crate::err_wgsl!(
+                            return Err(err_wgsl!(
                                 "texture/sampler '{}' declared with conflicting (set, binding, type) \
                                  across entries",
                                 input.name
@@ -1154,7 +1163,7 @@ impl<'a> LowerCtx<'a> {
                 );
                 if let Some(previous_ty) = storage_images.get(&br) {
                     if previous_ty != &ty_str {
-                        return Err(crate::err_wgsl!(
+                        return Err(err_wgsl!(
                             "storage_image binding ({}, {}) has conflicting format/access across entries",
                             br.set,
                             br.binding
@@ -1263,7 +1272,7 @@ impl<'a> LowerCtx<'a> {
         // storage-class struct; WGSL has no push constants, so we emit
         // a read-only storage block instead. Collected here so
         // `lower_program`'s module-scope pass can emit the struct + binding.
-        let pc_inputs: Vec<(usize, &crate::interface::EntryInput)> =
+        let pc_inputs: Vec<(usize, &interface::EntryInput)> =
             entry.inputs.iter().enumerate().filter(|(_, inp)| inp.push_constant().is_some()).collect();
         let pc_block: Option<PcBlock> = if !pc_inputs.is_empty() {
             // Synthetic (set, binding) chosen to avoid colliding with
@@ -1274,8 +1283,8 @@ impl<'a> LowerCtx<'a> {
             let struct_name = format!("_PcBlock{}", binding);
             let var_name = format!("_pc{}", binding);
             let field_types = pc_inputs.iter().map(|(_, input)| &input.ty).collect::<Vec<_>>();
-            let layout = crate::ssa::layout::std430_struct_layout(&field_types).ok_or_else(|| {
-                crate::err_wgsl!(
+            let layout = ssa::layout::std430_struct_layout(&field_types).ok_or_else(|| {
+                err_wgsl!(
                     "entry '{}': push-constant inputs cannot be represented by a WGSL storage parameter block",
                     entry.name
                 )
@@ -1347,7 +1356,7 @@ impl<'a> LowerCtx<'a> {
             let (attr, param_ty_str, internal_name) = match input.decoration() {
                 Some(IoDecoration::BuiltIn(b)) => {
                     let wgsl_b = map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
-                        crate::err_wgsl!(
+                        err_wgsl!(
                             "entry input {}: WGSL has no @builtin mapping for {:?}",
                             param_name,
                             b
@@ -1387,7 +1396,7 @@ impl<'a> LowerCtx<'a> {
         // Indices (into `entry.outputs`) of the non-storage outputs, so
         // we can route `OutputPtr { index: N }` to the right struct field
         // for multi-output entries.
-        let non_storage_outputs: Vec<(usize, &crate::interface::EntryOutput)> =
+        let non_storage_outputs: Vec<(usize, &interface::EntryOutput)> =
             entry.outputs.iter().enumerate().filter(|(_, o)| o.storage_binding().is_none()).collect();
         // For multi-output: the generated struct name and the per-output
         // field mapping (orig_index → field_name), which pre-declares
@@ -1398,7 +1407,7 @@ impl<'a> LowerCtx<'a> {
             ExecutionModel::Compute { .. } => (String::new(), true),
             _ => {
                 if non_storage_outputs.is_empty() {
-                    return Err(crate::err_wgsl!(
+                    return Err(err_wgsl!(
                         "entry '{}' has no non-storage outputs but is not a compute shader",
                         entry.name
                     ));
@@ -1409,7 +1418,7 @@ impl<'a> LowerCtx<'a> {
                     let attr = match out.decoration() {
                         Some(IoDecoration::BuiltIn(b)) => {
                             let wgsl_b = map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
-                                crate::err_wgsl!("entry output: WGSL has no @builtin mapping for {:?}", b)
+                                err_wgsl!("entry output: WGSL has no @builtin mapping for {:?}", b)
                             })?;
                             format!("@builtin({}) ", wgsl_b)
                         }
@@ -1433,17 +1442,14 @@ impl<'a> LowerCtx<'a> {
                             Some(IoDecoration::BuiltIn(b)) => {
                                 let wgsl_b =
                                     map_builtin_to_wgsl(&b, stage_is_fragment).ok_or_else(|| {
-                                        crate::err_wgsl!(
-                                            "entry output: WGSL has no @builtin mapping for {:?}",
-                                            b
-                                        )
+                                        err_wgsl!("entry output: WGSL has no @builtin mapping for {:?}", b)
                                     })?;
                                 format!("@builtin({}) ", wgsl_b)
                             }
                             Some(IoDecoration::Location(n)) => format!("@location({}) ", n),
                             None if out.target().is_some() => format!("@location({}) ", orig_index),
                             None => {
-                                return Err(crate::err_wgsl!(
+                                return Err(err_wgsl!(
                                     "entry '{}' output #{} has no decoration; multi-output \
                                      WGSL entries require `@builtin(...)`, `@location(N)`, or \
                                      `#[target(name)]` on every field",
@@ -1506,7 +1512,7 @@ impl<'a> LowerCtx<'a> {
         // them to a subset of legal WGSL identifiers — we re-check here.
         let name = entry.name.clone();
         validate_wgsl_identifier(&name).map_err(|e| {
-            crate::err_wgsl!(
+            err_wgsl!(
                 "entry-point name '{}' is not a legal WGSL identifier: {}",
                 name,
                 e
@@ -1514,7 +1520,7 @@ impl<'a> LowerCtx<'a> {
         })?;
         if let Some(prev) = self.mangled_names.insert(name.clone(), name.clone()) {
             if prev != name {
-                return Err(crate::err_wgsl!(
+                return Err(err_wgsl!(
                     "entry-point name '{}' collides with mangled symbol from '{}'",
                     name,
                     prev
@@ -1608,7 +1614,7 @@ impl<'a> LowerCtx<'a> {
                 } else if output_locals.len() == 1 {
                     writeln!(output, "{}return _out0;", self.indent_str()).unwrap();
                 } else {
-                    return Err(crate::err_wgsl!(
+                    return Err(err_wgsl!(
                         "multi-output entries with OutputPtr not yet implemented (entry '{}')",
                         entry.name
                     ));
@@ -1699,10 +1705,7 @@ fn is_scalar_literal(inst: &WynInstNode) -> bool {
     matches!(
         inst.data,
         InstKind::Op {
-            tag: crate::op::OpTag::Int(_)
-                | crate::op::OpTag::Uint(_)
-                | crate::op::OpTag::Float(_)
-                | crate::op::OpTag::Bool(_),
+            tag: op::OpTag::Int(_) | op::OpTag::Uint(_) | op::OpTag::Float(_) | op::OpTag::Bool(_),
             ..
         }
     )
@@ -1734,7 +1737,7 @@ struct BodyLowerCtx<'a, 'b> {
     /// WGSL place expression per `PlaceId` — output variable name,
     /// `_alloca_N` for function-local `Alloca`s, or `buf[offset+idx]`
     /// for `ViewIndex`. Consumed by `Load` / `Store` in `emit_nodes`.
-    place_targets: LookupMap<crate::ssa::types::PlaceId, String>,
+    place_targets: LookupMap<ssa::types::PlaceId, String>,
     /// Set to `true` if at least one `OutputSlot` was lowered; the entry
     /// wrapper then returns the declared `_out0` (or builds a return
     /// struct for multi-output) instead of emitting a `return <expr>;`
@@ -1760,7 +1763,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             .iter()
             .filter_map(|(_, inst)| match &inst.data {
                 InstKind::Op {
-                    tag: crate::op::OpTag::Intrinsic { id, .. },
+                    tag: op::OpTag::Intrinsic { id, .. },
                     operands,
                 } if *id == array_with_in_place => operands.first()?.as_ssa(),
                 _ => None,
@@ -1784,11 +1787,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
     }
 
-    fn is_atomic_place(&self, place: crate::ssa::types::PlaceId) -> bool {
+    fn is_atomic_place(&self, place: ssa::types::PlaceId) -> bool {
         self.body.inner.insts.iter().any(|(_, inst)| match &inst.data {
             InstKind::ViewIndex { view, result, .. } if *result == place => view
                 .as_ssa()
-                .and_then(|view| crate::types::array_view_buffer(self.body.get_value_type(view)))
+                .and_then(|view| types::array_view_buffer(self.body.get_value_type(view)))
                 .is_some_and(|binding| self.ctx.atomic_bindings.contains(&binding)),
             _ => false,
         })
@@ -1811,8 +1814,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// `set` and `binding` must be compile-time constants.
     fn resolve_const_u32(&self, v: ValueRef) -> Option<u32> {
         match v {
-            ValueRef::Const(crate::ssa::types::ConstantValue::I32(n)) => Some(n as u32),
-            ValueRef::Const(crate::ssa::types::ConstantValue::U32(n)) => Some(n),
+            ValueRef::Const(ssa::types::ConstantValue::I32(n)) => Some(n as u32),
+            ValueRef::Const(ssa::types::ConstantValue::U32(n)) => Some(n),
             ValueRef::Ssa(id) => {
                 // Walk the body's insts looking for one whose result is
                 // `id` and whose data is a literal Int. Rare path —
@@ -1821,7 +1824,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 for (_, inst) in self.body.inner.insts.iter() {
                     if inst.result == Some(id) {
                         if let InstKind::Op {
-                            tag: crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s),
+                            tag: op::OpTag::Int(s) | op::OpTag::Uint(s),
                             ..
                         } = &inst.data
                         {
@@ -1849,7 +1852,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             return false;
         };
         let inst_id = match val.def {
-            crate::ssa::framework::ValueDef::Inst { inst } => inst,
+            ssa::framework::ValueDef::Inst { inst } => inst,
             _ => return false,
         };
         let Some(inst) = self.body.inner.insts.get(inst_id) else {
@@ -1857,7 +1860,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         };
         match &inst.data {
             InstKind::Op { tag, operands } => match tag {
-                crate::op::OpTag::ResourceLen(_) => {
+                op::OpTag::ResourceLen(_) => {
                     panic!("logical resource length reached WGSL lowering")
                 }
                 OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Unit => true,
@@ -1888,11 +1891,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             .inner
             .values
             .get(id)
-            .ok_or_else(|| crate::err_wgsl_at!(self.blame_span(), "const hoist: value not found"))?;
+            .ok_or_else(|| err_wgsl_at!(self.blame_span(), "const hoist: value not found"))?;
         let inst_id = match val.def {
-            crate::ssa::framework::ValueDef::Inst { inst } => inst,
+            ssa::framework::ValueDef::Inst { inst } => inst,
             _ => {
-                return Err(crate::err_wgsl_at!(
+                return Err(err_wgsl_at!(
                     self.blame_span(),
                     "const hoist: value has no instruction"
                 ))
@@ -1900,13 +1903,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         };
         let (tag, operands) = match self.body.inner.insts.get(inst_id).map(|i| &i.data) {
             Some(InstKind::Op { tag, operands }) => (tag.clone(), operands.clone()),
-            _ => return Err(crate::err_wgsl_at!(self.blame_span(), "const hoist: not an Op")),
+            _ => return Err(err_wgsl_at!(self.blame_span(), "const hoist: not an Op")),
         };
         match &tag {
             OpTag::Int(s) | OpTag::Uint(s) => {
                 if self.ctx.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&result_ty) {
                     int64_emulation::lower_literal(s)
-                        .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"))
+                        .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"))
                 } else if matches!(result_ty, PolyType::Constructed(TypeName::UInt(32), _)) {
                     Ok(format!("{}u", s))
                 } else {
@@ -1930,10 +1933,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
                 Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
             }
-            _ => Err(crate::err_wgsl_at!(
-                self.blame_span(),
-                "const hoist: unsupported op"
-            )),
+            _ => Err(err_wgsl_at!(self.blame_span(), "const hoist: unsupported op")),
         }
     }
 
@@ -1944,7 +1944,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         result_ty: &PolyType<TypeName>,
         elements: &[String],
     ) -> Result<String> {
-        let Some(components) = crate::egir::types::as_soa_tuple(result_ty) else {
+        let Some(components) = egir::types::as_soa_tuple(result_ty) else {
             let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
             return Ok(format!("{}({})", wgsl_ty, elements.join(", ")));
         };
@@ -1969,10 +1969,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     /// `NoBuffer`; its `_wg_<id>` name isn't in any type, so it is recovered
     /// from the `ViewHandle` set when the view was created.
     fn view_buffer_name(&self, view_ssa: ValueId) -> Result<String> {
-        match crate::types::array_view_buffer(self.body.get_value_type(view_ssa)) {
+        match types::array_view_buffer(self.body.get_value_type(view_ssa)) {
             Some(br) => self.storage_name(br.set, br.binding),
             None => self.workgroup_view_name.get(&view_ssa).cloned().ok_or_else(|| {
-                crate::err_wgsl_at!(
+                err_wgsl_at!(
                     self.blame_span(),
                     "view {:?} has neither a concrete buffer nor a workgroup name",
                     view_ssa
@@ -1998,7 +1998,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 return Ok(storage_buffer_name(br, writable, mixed));
             }
         }
-        Err(crate::err_wgsl_at!(
+        Err(err_wgsl_at!(
             self.blame_span(),
             "no storage binding at (set={}, binding={})",
             set,
@@ -2012,7 +2012,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 input.storage_image_binding().is_some_and(|(candidate, ..)| candidate == binding)
             });
         if !declared {
-            return Err(crate::err_wgsl_at!(
+            return Err(err_wgsl_at!(
                 self.blame_span(),
                 "no storage-image binding at (set={}, binding={})",
                 binding.set,
@@ -2072,7 +2072,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
             && (int64_emulation::is_u64(operand_ty) || int64_emulation::is_u64(result_ty))
         {
-            return Err(crate::err_wgsl_at!(
+            return Err(err_wgsl_at!(
                 self.blame_span(),
                 "implicit coercion between {operand_ty:?} and {result_ty:?} cannot use WGSL u64 emulation; use an explicit conversion"
             ));
@@ -2092,12 +2092,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 
     fn binding(&self, id: ValueId) -> Result<&ValueBinding> {
-        self.value_map.get(&id).ok_or_else(|| {
-            crate::err_wgsl_at!(self.blame_span(), "value {:?} not bound in WGSL value_map", id)
-        })
+        self.value_map
+            .get(&id)
+            .ok_or_else(|| err_wgsl_at!(self.blame_span(), "value {:?} not bound in WGSL value_map", id))
     }
 
-    fn format_constant(&self, c: &crate::ssa::types::ConstantValue) -> Result<String> {
+    fn format_constant(&self, c: &ssa::types::ConstantValue) -> Result<String> {
         use crate::ssa::types::ConstantValue;
         Ok(match c {
             ConstantValue::I32(v) => format!("{}i", v),
@@ -2105,7 +2105,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             ConstantValue::F32(bits) => {
                 let v = f32::from_bits(*bits);
                 if v.is_nan() || v.is_infinite() {
-                    return Err(crate::err_wgsl_at!(
+                    return Err(err_wgsl_at!(
                         self.blame_span(),
                         "WGSL does not support NaN/Infinity constants: {}",
                         v
@@ -2138,11 +2138,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             self.addressable.insert(mangled);
         }
         for (place, info) in &self.body.places {
-            let crate::ssa::types::PlaceOrigin::Parameter { index } = info.origin else {
+            let ssa::types::PlaceOrigin::Parameter { index } = info.origin else {
                 continue;
             };
             let (parameter, _, _) = self.body.param(index).ok_or_else(|| {
-                crate::err_wgsl_at!(
+                err_wgsl_at!(
                     self.func_span,
                     "place parameter {:?} names missing physical parameter {}",
                     place,
@@ -2152,7 +2152,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             let target =
                 self.value_map.get(&parameter).map(|binding| binding.expr().to_owned()).ok_or_else(
                     || {
-                        crate::err_wgsl_at!(
+                        err_wgsl_at!(
                             self.func_span,
                             "place parameter {:?} has no addressable WGSL binding",
                             place
@@ -2163,11 +2163,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         }
 
         // Structured walk via the shared structurize pass.
-        let nodes = crate::structured::structurize(self.body);
+        let nodes = structured::structurize(self.body);
         self.emit_nodes(&nodes, output)
     }
 
-    fn emit_nodes(&mut self, nodes: &[crate::structured::Node], output: &mut String) -> Result<String> {
+    fn emit_nodes(&mut self, nodes: &[structured::Node], output: &mut String) -> Result<String> {
         use crate::structured::Node;
         let mut result_var = String::new();
 
@@ -2214,7 +2214,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // through a whole-array Load.
                         InstKind::PlaceIndex { place, index, result } => {
                             let parent = self.place_targets.get(place).cloned().ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "PlaceIndex: parent place {:?} has no target expression",
                                     place
@@ -2229,7 +2229,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // ViewIndex: `buf[base_offset + idx]`.
                         InstKind::ViewIndex { view, index, result } => {
                             let view_id = view.as_ssa().ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "ViewIndex: view operand must be an SSA value"
                                 )
@@ -2249,10 +2249,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // unless an in-place array update consumes it.
                         InstKind::Load { place } => {
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Load must have a result")
+                                err_wgsl_at!(self.blame_span(), "Load must have a result")
                             })?;
                             let target = self.place_targets.get(place).cloned().ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "Load: place {:?} has no target expression",
                                     place
@@ -2274,7 +2274,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // alloca var, or `buf[idx]`).
                         InstKind::Store { place, value } => {
                             let target = self.place_targets.get(place).cloned().ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "Store: place {:?} has no target expression",
                                     place
@@ -2299,10 +2299,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         InstKind::Atomic { place, op, values } => {
                             use crate::ssa::types::AtomicOp;
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Atomic must have a result")
+                                err_wgsl_at!(self.blame_span(), "Atomic must have a result")
                             })?;
                             let target = self.place_targets.get(place).cloned().ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "Atomic: place {:?} has no target expression",
                                     place
@@ -2345,7 +2345,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                     format!("{ty}({cas}.old_value, {cas}.exchanged)")
                                 }
                                 _ => {
-                                    return Err(crate::err_wgsl_at!(
+                                    return Err(err_wgsl_at!(
                                         self.blame_span(),
                                         "atomic {:?} received {} values",
                                         op,
@@ -2377,14 +2377,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // `var<function> x: T;` — no initializer, no
                         // function call.
                         InstKind::Op {
-                            tag: crate::op::OpTag::Intrinsic { id, .. },
+                            tag: op::OpTag::Intrinsic { id, .. },
                             ..
                         } if *id == catalog().known().uninit => {
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(
-                                    self.blame_span(),
-                                    "_w_intrinsic_uninit must have a result"
-                                )
+                                err_wgsl_at!(self.blame_span(), "_w_intrinsic_uninit must have a result")
                             })?;
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
@@ -2408,7 +2405,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // functional update. Declare a fresh `var` copy
                         // of the source, then patch the one element.
                         InstKind::Op {
-                            tag: crate::op::OpTag::Intrinsic { id, .. },
+                            tag: op::OpTag::Intrinsic { id, .. },
                             operands,
                         } if *id == catalog().known().array_with_in_place
                             || *id == catalog().known().array_with =>
@@ -2417,7 +2414,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let is_inplace = *id == known.array_with_in_place;
                             let func_name = by_id(*id).dispatch_name();
                             if operands.len() != 3 {
-                                return Err(crate::err_wgsl_at!(
+                                return Err(err_wgsl_at!(
                                     self.blame_span(),
                                     "{} expects 3 args, got {}",
                                     func_name,
@@ -2428,7 +2425,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let idx = self.get_value(operands[1])?;
                             let val = self.get_value(operands[2])?;
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
+                                err_wgsl_at!(self.blame_span(), "{} must have a result", func_name)
                             })?;
                             if is_inplace {
                                 let view_target = match operands[0].as_ssa() {
@@ -2525,11 +2522,11 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // `var<private>`. Only a non-addressable expression
                         // needs a fresh function-local `var`.
                         InstKind::Op {
-                            tag: crate::op::OpTag::Materialize,
+                            tag: op::OpTag::Materialize,
                             operands,
                         } => {
                             let result_id = inst.result.ok_or_else(|| {
-                                crate::err_wgsl_at!(self.blame_span(), "Materialize must have a result")
+                                err_wgsl_at!(self.blame_span(), "Materialize must have a result")
                             })?;
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
@@ -2603,7 +2600,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         if matches!(
                             inst.data,
                             InstKind::Op {
-                                tag: crate::op::OpTag::StorageView(_),
+                                tag: op::OpTag::StorageView(_),
                                 ..
                             }
                         ) {
@@ -2630,7 +2627,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             && matches!(
                                 inst.data,
                                 InstKind::Op {
-                                    tag: crate::op::OpTag::Index | crate::op::OpTag::Project { .. },
+                                    tag: op::OpTag::Index | op::OpTag::Project { .. },
                                     ..
                                 }
                             )
@@ -2745,7 +2742,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             if matches!(
                                 inst.data,
                                 InstKind::Op {
-                                    tag: crate::op::OpTag::StorageView(_),
+                                    tag: op::OpTag::StorageView(_),
                                     ..
                                 }
                             ) {
@@ -2793,25 +2790,25 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
         match &inst.data {
             InstKind::Op { tag, operands } => match tag {
-                crate::op::OpTag::ResourceLen(_) => {
+                op::OpTag::ResourceLen(_) => {
                     panic!("logical resource length reached WGSL lowering")
                 }
                 // Integer literals carry their type in the suffix:
                 //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
                 //   int conversion, so respecting the SSA value's type is
                 //   load-bearing for subsequent uses.
-                crate::op::OpTag::Int(s) | crate::op::OpTag::Uint(s) => match result_ty.as_ref() {
+                op::OpTag::Int(s) | op::OpTag::Uint(s) => match result_ty.as_ref() {
                     Some(ty)
                         if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
                             && int64_emulation::is_u64(ty) =>
                     {
                         int64_emulation::lower_literal(s)
-                            .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"))
+                            .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"))
                     }
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => Ok(format!("{}u", s)),
                     Some(PolyType::Constructed(TypeName::Int(32), _)) | _ => Ok(format!("{}i", s)),
                 },
-                crate::op::OpTag::Float(s) => {
+                op::OpTag::Float(s) => {
                     let suffix = "f";
                     if s.contains('.') || s.contains('e') || s.contains('E') {
                         Ok(format!("{}{}", s, suffix))
@@ -2819,13 +2816,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         Ok(format!("{}.0{}", s, suffix))
                     }
                 }
-                crate::op::OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-                crate::op::OpTag::Unit => Err(crate::err_wgsl_at!(
+                op::OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
+                op::OpTag::Unit => Err(err_wgsl_at!(
                     self.blame_span(),
                     "unit values aren't materializable in WGSL"
                 )),
 
-                crate::op::OpTag::BinOp(op) => {
+                op::OpTag::BinOp(op) => {
                     let lhs = operands[0];
                     let rhs = operands[1];
                     let lhs_ty = self.logical_value_type(lhs);
@@ -2834,7 +2831,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         && (int64_emulation::is_u64(&lhs_ty) || int64_emulation::is_u64(&rhs_ty))
                     {
                         if !int64_emulation::is_u64(&lhs_ty) || !int64_emulation::is_u64(&rhs_ty) {
-                            return Err(crate::err_wgsl_at!(
+                            return Err(err_wgsl_at!(
                                 self.blame_span(),
                                 "mixed-width u64 operation requires explicit conversions (left {lhs_ty:?}, right {rhs_ty:?})"
                             ));
@@ -2852,7 +2849,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .ctx
                             .u64_emulation
                             .lower_binary(*op, &left, &right)
-                            .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"));
+                            .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"));
                     }
                     // WGSL has no implicit numeric coercion (`i32 + u32` is an
                     // error), so when an operand's type doesn't match the
@@ -2863,10 +2860,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let l = self.coerce_operand_to_result_ty(lhs, result_ty.as_ref())?;
                     let r = self.coerce_operand_to_result_ty(rhs, result_ty.as_ref())?;
                     match op {
-                        crate::op::BinaryOperator::Power => Ok(format!("pow({}, {})", l, r)),
-                        crate::op::BinaryOperator::FloorDivide
-                        | crate::op::BinaryOperator::FloorRemainder
-                        | crate::op::BinaryOperator::ShiftRightLogical => Err(crate::err_wgsl_at!(
+                        op::BinaryOperator::Power => Ok(format!("pow({}, {})", l, r)),
+                        op::BinaryOperator::FloorDivide
+                        | op::BinaryOperator::FloorRemainder
+                        | op::BinaryOperator::ShiftRightLogical => Err(err_wgsl_at!(
                             self.blame_span(),
                             "binary operator '{}' has no direct WGSL lowering",
                             op.symbol()
@@ -2875,23 +2872,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::UnaryOp(op) => {
+                op::OpTag::UnaryOp(op) => {
                     let inner = self.get_value(operands[0])?;
                     let operand_ty = self.logical_value_type(operands[0]);
                     if self.ctx.int64_mode == WgslInt64Mode::EmulateU64
                         && int64_emulation::is_u64(&operand_ty)
                     {
                         return match op {
-                            crate::op::UnaryOperator::Negate => self
+                            op::UnaryOperator::Negate => self
                                 .ctx
                                 .u64_emulation
-                                .lower_binary(
-                                    crate::op::BinaryOperator::Subtract,
-                                    "vec2<u32>(0u, 0u)",
-                                    &inner,
-                                )
-                                .map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}")),
-                            crate::op::UnaryOperator::LogicalNot => Err(crate::err_wgsl_at!(
+                                .lower_binary(op::BinaryOperator::Subtract, "vec2<u32>(0u, 0u)", &inner)
+                                .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}")),
+                            op::UnaryOperator::LogicalNot => Err(err_wgsl_at!(
                                 self.blame_span(),
                                 "logical negation is not defined for emulated u64 values"
                             )),
@@ -2900,46 +2893,46 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("({}{})", op, inner))
                 }
 
-                crate::op::OpTag::Tuple(_) => {
+                op::OpTag::Tuple(_) => {
                     if operands.is_empty() {
-                        return Err(crate::err_wgsl_at!(
+                        return Err(err_wgsl_at!(
                             self.blame_span(),
                             "empty tuple not supported in WGSL"
                         ));
                     }
                     let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
-                    let ty = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "Tuple must have a result type")
-                    })?;
+                    let ty = result_ty
+                        .as_ref()
+                        .ok_or_else(|| err_wgsl_at!(self.blame_span(), "Tuple must have a result type"))?;
                     let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
                     Ok(format!("{}({})", struct_name, parts?.join(", ")))
                 }
 
-                crate::op::OpTag::Vector(_) => {
+                op::OpTag::Vector(_) => {
                     let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
-                    let ty = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "Vector must have a result type")
-                    })?;
+                    let ty = result_ty
+                        .as_ref()
+                        .ok_or_else(|| err_wgsl_at!(self.blame_span(), "Vector must have a result type"))?;
                     let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(ty)?;
                     Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
                 }
 
-                crate::op::OpTag::ArrayLit(_) => {
+                op::OpTag::ArrayLit(_) => {
                     let parts: Result<Vec<_>> = operands.iter().map(|e| self.get_value(*e)).collect();
                     let ty = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
+                        err_wgsl_at!(self.blame_span(), "ArrayLit must have a result type")
                     })?;
                     self.array_literal_expr(ty, &parts?)
                 }
 
-                crate::op::OpTag::Project { index } => {
+                op::OpTag::Project { index } => {
                     let base = operands[0];
                     let base_val = self.get_value(base)?;
                     // Determine base type: SSA → look up via body; Const's type
                     // isn't accessible that way so we error (projects on consts
                     // would be folded earlier).
                     let base_id = base.as_ssa().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "Project base must be an SSA value")
+                        err_wgsl_at!(self.blame_span(), "Project base must be an SSA value")
                     })?;
                     let base_ty = self.body.get_value_type(base_id);
                     if matches!(base_ty, PolyType::Constructed(TypeName::Vec, _)) {
@@ -2949,7 +2942,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             2 => "z",
                             3 => "w",
                             _ => {
-                                return Err(crate::err_wgsl_at!(
+                                return Err(err_wgsl_at!(
                                     self.blame_span(),
                                     "invalid vector swizzle index: {}",
                                     index
@@ -2958,7 +2951,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         };
                         Ok(format!("{}.{}", base_val, swizzle))
                     } else if matches!(
-                        crate::types::get_array_variant(base_ty),
+                        types::get_array_variant(base_ty),
                         Some(TypeName::ArrayVariantComposite)
                     ) {
                         // A Composite array is a WGSL `array<T, N>`: project by
@@ -2970,7 +2963,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     }
                 }
 
-                crate::op::OpTag::Index => {
+                op::OpTag::Index => {
                     let base = operands[0];
                     let index = operands[1];
                     let base_val = self.get_value(base)?;
@@ -3005,7 +2998,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}[{}]", base_val, index_val))
                 }
 
-                crate::op::OpTag::Global(global_id) => {
+                op::OpTag::Global(global_id) => {
                     let constant = self
                         .ctx
                         .program
@@ -3013,12 +3006,12 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         .iter()
                         .find(|constant| constant.id == *global_id)
                         .ok_or_else(|| {
-                            crate::err_wgsl_at!(self.blame_span(), "unknown global constant {}", global_id)
+                            err_wgsl_at!(self.blame_span(), "unknown global constant {}", global_id)
                         })?;
                     self.ctx.mangle_tracked(&constant.name)
                 }
 
-                crate::op::OpTag::Call(function_id) => {
+                op::OpTag::Call(function_id) => {
                     let args: &[ValueRef] = operands;
                     let raw_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
                     let raw_strs = raw_strs?;
@@ -3029,7 +3022,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         .iter()
                         .find(|function| function.id == *function_id)
                         .ok_or_else(|| {
-                            crate::err_wgsl_at!(self.blame_span(), "unknown function {}", function_id)
+                            err_wgsl_at!(self.blame_span(), "unknown function {}", function_id)
                         })?;
                     let emitted = self
                         .ctx
@@ -3040,7 +3033,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let mangled = self.ctx.mangle_tracked(&emitted)?;
                     Ok(format!("{}({})", mangled, raw_strs.join(", ")))
                 }
-                crate::op::OpTag::Intrinsic { id, overload_idx } => {
+                op::OpTag::Intrinsic { id, overload_idx } => {
                     let args: &[ValueRef] = operands;
                     let known = catalog().known();
                     let arg_strs: Result<Vec<_>> = args.iter().map(|a| self.get_value(*a)).collect();
@@ -3056,7 +3049,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // `lower_intrinsic` below only ever sees overload 0, so it
                     // can't reach this case on its own.
                     if let BuiltinLowering::ExtInstSplat { ext, splat_args } =
-                        &crate::builtins::by_id(*id).overloads()[*overload_idx].lowering
+                        &builtins::by_id(*id).overloads()[*overload_idx].lowering
                     {
                         if let (Some(name), Some(rty)) = (glsl_std450_wgsl_name(*ext), result_ty.as_ref()) {
                             let rty_str = self.ctx.type_emitter.type_to_wgsl(rty)?;
@@ -3136,7 +3129,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                             }
                             _ => {
-                                return Err(crate::err_wgsl_at!(
+                                return Err(err_wgsl_at!(
                                     self.blame_span(),
                                     "_w_intrinsic_storage_len expects const set/binding args"
                                 ));
@@ -3158,16 +3151,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     // start/end are allowed for view→view.
                     if *id == known.slice && args.len() == 3 {
                         let arr_id = args[0].as_ssa().ok_or_else(|| {
-                            crate::err_wgsl_at!(
+                            err_wgsl_at!(
                                 self.blame_span(),
                                 "_w_intrinsic_slice: array arg must be an SSA value"
                             )
                         })?;
                         let result_ty_ref = result_ty.as_ref().ok_or_else(|| {
-                            crate::err_wgsl_at!(
-                                self.blame_span(),
-                                "_w_intrinsic_slice must have a result type"
-                            )
+                            err_wgsl_at!(self.blame_span(), "_w_intrinsic_slice must have a result type")
                         })?;
                         let result_is_composite = matches!(
                             result_ty_ref.array_variant(),
@@ -3178,7 +3168,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             .body
                             .get_value_type(arr_id)
                             .array_variant()
-                            .map(crate::types::is_array_variant_view)
+                            .map(types::is_array_variant_view)
                             .unwrap_or(false);
                         if src_is_view {
                             // Buffer name from the source view's type region; its
@@ -3189,13 +3179,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 // View → Composite: materialize as
                                 // `array<T,N>(buf[off+s], buf[off+s+1], ...)`.
                                 let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
-                                    crate::err_wgsl_at!(
+                                    err_wgsl_at!(
                                         self.blame_span(),
                                         "_w_intrinsic_slice(view → composite): start must be a constant"
                                     )
                                 })?;
                                 let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
-                                    crate::err_wgsl_at!(
+                                    err_wgsl_at!(
                                         self.blame_span(),
                                         "_w_intrinsic_slice(view → composite): end must be a constant"
                                     )
@@ -3219,13 +3209,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // Composite → Composite: `array<T,N>(arr[s], arr[s+1], ...)`.
                         if result_is_composite {
                             let start = self.resolve_const_u32(args[1]).ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "_w_intrinsic_slice: start must be a constant for composite slice"
                                 )
                             })?;
                             let end = self.resolve_const_u32(args[2]).ok_or_else(|| {
-                                crate::err_wgsl_at!(
+                                err_wgsl_at!(
                                     self.blame_span(),
                                     "_w_intrinsic_slice: end must be a constant for composite slice"
                                 )
@@ -3235,7 +3225,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                                 (start..end).map(|i| format!("{}[{}i]", arg_strs[0], i)).collect();
                             return Ok(format!("{}({})", ty_str, elems.join(", ")));
                         }
-                        return Err(crate::err_wgsl_at!(
+                        return Err(err_wgsl_at!(
                             self.blame_span(),
                             "_w_intrinsic_slice: unsupported slice shape (src not view, dst not composite)"
                         ));
@@ -3287,7 +3277,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             let expr = format!("arrayLength(&{})", arg_strs[0]);
                             return Ok(if wants_i32 { format!("i32({})", expr) } else { expr });
                         }
-                        return Err(crate::err_wgsl_at!(
+                        return Err(err_wgsl_at!(
                             self.blame_span(),
                             "_w_intrinsic_length requires an SSA array argument"
                         ));
@@ -3295,20 +3285,20 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     self.lower_intrinsic(*id, *overload_idx, &arg_strs, args, result_ty.as_ref())
                 }
 
-                crate::op::OpTag::StorageImageLoad(binding) => {
+                op::OpTag::StorageImageLoad(binding) => {
                     let image = self.storage_image_name(*binding)?;
                     let coord = self.get_value(operands[0])?;
                     Ok(format!("textureLoad({}, {})", image, coord))
                 }
 
-                crate::op::OpTag::StorageImageStore(binding) => {
+                op::OpTag::StorageImageStore(binding) => {
                     let image = self.storage_image_name(*binding)?;
                     let coord = self.get_value(operands[0])?;
                     let texel = self.get_value(operands[1])?;
                     Ok(format!("textureStore({}, {}, {})", image, coord, texel))
                 }
 
-                crate::op::OpTag::ArrayRange { has_step } => {
+                op::OpTag::ArrayRange { has_step } => {
                     let start = operands[0];
                     let len = operands[1];
                     // Virtual array lowered as a `VirtRangeN` struct whose
@@ -3319,10 +3309,10 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let start_s = self.get_value(start)?;
                     let len_s = self.get_value(len)?;
                     let ty = result_ty.as_ref().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "ArrayRange must have a result type")
+                        err_wgsl_at!(self.blame_span(), "ArrayRange must have a result type")
                     })?;
                     let elem_ty = ty.elem_type().ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "ArrayRange result missing elem type")
+                        err_wgsl_at!(self.blame_span(), "ArrayRange result missing elem type")
                     })?;
                     let elem_str = self.ctx.type_emitter.type_to_wgsl(elem_ty)?;
                     let struct_name = self.ctx.type_emitter.type_to_wgsl(ty)?;
@@ -3342,19 +3332,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("{}({}, {}, {})", struct_name, start_s, step_s, len_s))
                 }
 
-                crate::op::OpTag::Matrix { .. } => Err(crate::err_wgsl_at!(
+                op::OpTag::Matrix { .. } => Err(err_wgsl_at!(
                     self.blame_span(),
                     "Matrix literals are not yet implemented in WGSL lowering"
                 )),
 
                 // Materialize is handled in emit_nodes so it becomes a
                 // `var<function>` (subscriptable) instead of a `let`.
-                crate::op::OpTag::Materialize => Err(crate::err_wgsl_at!(
+                op::OpTag::Materialize => Err(err_wgsl_at!(
                     self.blame_span(),
                     "internal: Materialize should be handled in emit_nodes"
                 )),
 
-                crate::op::OpTag::DynamicExtract => {
+                op::OpTag::DynamicExtract => {
                     let base = operands[0];
                     let index = operands[1];
                     let base_val = self.get_value(base)?;
@@ -3380,13 +3370,13 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 // type's region at the consumer (`view_buffer_name`) — so it's
                 // NOT part of the value. Workgroup views are the one exception:
                 // their `_wg_<id>` name isn't in any type, so record it.
-                crate::op::OpTag::StorageView(src) => {
+                op::OpTag::StorageView(src) => {
                     let offset = operands[0];
                     let len = operands[1];
-                    let result_id = inst.result.ok_or_else(|| {
-                        crate::err_wgsl_at!(self.blame_span(), "StorageView must have a result")
-                    })?;
-                    if let crate::op::PureViewSource::Workgroup { id, .. } = src {
+                    let result_id = inst
+                        .result
+                        .ok_or_else(|| err_wgsl_at!(self.blame_span(), "StorageView must have a result"))?;
+                    if let op::PureViewSource::Workgroup { id, .. } = src {
                         self.workgroup_view_name.insert(result_id, format!("_wg_{}", id));
                     }
                     let offset_expr = self.get_value(offset)?;
@@ -3394,7 +3384,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     Ok(format!("vec2<u32>(u32({}), u32({}))", offset_expr, len_expr))
                 }
 
-                crate::op::OpTag::StorageViewLen => {
+                op::OpTag::StorageViewLen => {
                     // Length is the `.y` of the view's `vec2<u32>` value.
                     let view = operands[0];
                     let view_val = self.get_value(view)?;
@@ -3413,7 +3403,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | InstKind::Load { .. }
             | InstKind::Store { .. }
             | InstKind::Atomic { .. }
-            | InstKind::ControlBarrier => Err(crate::err_wgsl_at!(
+            | InstKind::ControlBarrier => Err(err_wgsl_at!(
                 self.blame_span(),
                 "internal: {:?} should be handled in emit_nodes",
                 inst.data
@@ -3431,7 +3421,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     ) -> Result<String> {
         let builtin = by_id(id);
         let overload = builtin.overloads().get(overload_idx).ok_or_else(|| {
-            crate::err_wgsl_at!(
+            err_wgsl_at!(
                 self.blame_span(),
                 "builtin '{}' has no overload {}",
                 builtin.dispatch_name(),
@@ -3444,7 +3434,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             | BuiltinLowering::ByBuiltinId
             | BuiltinLowering::ExtInstSplat { .. }
             | BuiltinLowering::NotLowered => {
-                return Err(crate::err_wgsl_at!(
+                return Err(err_wgsl_at!(
                     self.blame_span(),
                     "builtin '{}' (id {:?}, overload {}) is not yet implemented in WGSL lowering",
                     builtin.dispatch_name(),
@@ -3461,7 +3451,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             if let Some(target_ty) = ret_ty {
                 let source_ty = self.logical_value_type(arg_refs[0]);
                 if let Some(lowered) = int64_emulation::lower_conversion(&source_ty, target_ty, &args[0]) {
-                    return lowered.map_err(|message| crate::err_wgsl_at!(self.blame_span(), "{message}"));
+                    return lowered.map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"));
                 }
             }
         }
@@ -3470,7 +3460,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             None => None,
         };
         lower_primop_wgsl(prim_op, args, result_ty_str.as_deref()).ok_or_else(|| {
-            crate::err_wgsl_at!(
+            err_wgsl_at!(
                 self.blame_span(),
                 "builtin '{}' (id {:?}, overload {}) is not yet implemented in WGSL lowering",
                 builtin.dispatch_name(),
@@ -3494,7 +3484,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 /// Returns `None` for `PrimOp`s without a defined WGSL emission (e.g.
 /// `IsNan`, `OuterProduct`); the caller surfaces an error or falls
 /// back to a user-function call.
-fn wgsl_storage_image_format(format: crate::pipeline_descriptor::StorageImageFormat) -> &'static str {
+fn wgsl_storage_image_format(format: pipeline_descriptor::StorageImageFormat) -> &'static str {
     use crate::pipeline_descriptor::StorageImageFormat;
     match format {
         StorageImageFormat::Rgba8Unorm => "rgba8unorm",
@@ -3504,7 +3494,7 @@ fn wgsl_storage_image_format(format: crate::pipeline_descriptor::StorageImageFor
     }
 }
 
-fn wgsl_storage_access(access: crate::interface::StorageAccess) -> &'static str {
+fn wgsl_storage_access(access: interface::StorageAccess) -> &'static str {
     use crate::interface::StorageAccess;
     match access {
         StorageAccess::ReadOnly => "read",

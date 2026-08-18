@@ -4,6 +4,7 @@
 //! wrapper lambdas perform the canonical scan/reduction/map partitioning and
 //! result reordering.
 
+use crate::egir;
 use polytype::Type;
 use smallvec::SmallVec;
 
@@ -156,9 +157,9 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
 
 #[derive(Clone)]
 pub(super) struct ScremaParts {
-    pub(super) id: crate::egir::program::SemanticOpId,
+    pub(super) id: egir::program::SemanticOpId,
     pub(super) op: screma::Op<Semantic>,
-    pub(super) space: crate::egir::types::SegSpace,
+    pub(super) space: egir::types::SegSpace,
     pub(super) placement: screma::Placement,
     pub(super) output_slots: Vec<OutputSlotId>,
     pub(super) resources: Vec<SegResourceAccess>,
@@ -206,7 +207,7 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
 
 #[derive(Clone)]
 struct FusionPlan {
-    id: crate::egir::program::SemanticOpId,
+    id: egir::program::SemanticOpId,
     op: screma::Op<Semantic>,
     operands: SmallVec<[ValueId; 4]>,
     result_types: Vec<Type<TypeName>>,

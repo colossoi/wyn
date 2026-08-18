@@ -1,7 +1,11 @@
 //! Array length and element-access helpers for SOAC expansion.
 
 use super::*;
+use crate::egir;
 use crate::egir::types::soac_element_type;
+use crate::op;
+use crate::types;
+use crate::IdSource;
 
 pub(super) fn emit_seg_space_len(
     graph: &mut EGraph<Physical>,
@@ -15,7 +19,7 @@ pub(super) fn emit_seg_space_len(
     };
     dimensions.into_iter().skip(1).fold(first, |product, dimension| {
         graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            PureOp::BinOp(op::BinaryOperator::Multiply),
             smallvec![product, dimension],
             i32_ty.clone(),
             None,
@@ -75,7 +79,7 @@ pub(super) fn emit_flat_domain_coordinates(
                     Some(match product {
                         None => extent,
                         Some(product) => graph.intern_pure(
-                            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+                            PureOp::BinOp(op::BinaryOperator::Multiply),
                             smallvec![product, extent],
                             i32_ty.clone(),
                             None,
@@ -84,7 +88,7 @@ pub(super) fn emit_flat_domain_coordinates(
                 });
             let divided = suffix.map_or(lane, |stride| {
                 graph.intern_pure(
-                    PureOp::BinOp(crate::op::BinaryOperator::Divide),
+                    PureOp::BinOp(op::BinaryOperator::Divide),
                     smallvec![lane, stride],
                     i32_ty.clone(),
                     None,
@@ -92,7 +96,7 @@ pub(super) fn emit_flat_domain_coordinates(
             });
             let extent = domain_dimensions[dimension];
             graph.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::Remainder),
+                PureOp::BinOp(op::BinaryOperator::Remainder),
                 smallvec![divided, extent],
                 i32_ty.clone(),
                 None,
@@ -141,7 +145,7 @@ pub(super) fn emit_read_element(
     idx_nid: ValueId,
     arr_ty: &Type<TypeName>,
     elem_ty: &Type<TypeName>,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> ValueId {
     let actual_arr_ty =
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
@@ -172,8 +176,8 @@ pub(super) fn emit_read_element(
     if is_view_node(graph, arr_nid, arr_ty) {
         let place = graph.add_view_index_place(graph.view_id(arr_nid), idx_nid, elem_ty.clone(), None);
         if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(elem_ty) {
-            let region = arr_ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
-            let view_ty = crate::types::view_array_of(elem_ty, region);
+            let region = arr_ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
+            let view_ty = types::view_array_of(elem_ty, region);
             return graph.add_place_view(place, view_ty, None).value();
         }
         let load_result = graph.alloc_side_effect_result(elem_ty.clone());
@@ -203,13 +207,13 @@ pub(super) fn emit_read_element(
             None,
         );
         let mul_nid = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            PureOp::BinOp(op::BinaryOperator::Multiply),
             smallvec![idx_nid, step_nid],
             elem_ty.clone(),
             None,
         );
         graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![start_nid, mul_nid],
             elem_ty.clone(),
             None,
@@ -231,7 +235,7 @@ pub(super) fn emit_read_ranked_element(
     leaf_ty: &Type<TypeName>,
     rank: u8,
     layout: &ArrayLayout,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> ValueId {
     if rank == 1 {
         return emit_read_ranked_coordinates(
@@ -266,13 +270,13 @@ pub(super) fn emit_read_ranked_element(
             None,
         );
         coordinates.push(graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Divide),
+            PureOp::BinOp(op::BinaryOperator::Divide),
             smallvec![remaining, stride_node],
             i32_type.clone(),
             None,
         ));
         remaining = graph.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Remainder),
+            PureOp::BinOp(op::BinaryOperator::Remainder),
             smallvec![remaining, stride_node],
             i32_type.clone(),
             None,
@@ -301,7 +305,7 @@ pub(super) fn emit_read_ranked_coordinates(
     arr_ty: &Type<TypeName>,
     leaf_ty: &Type<TypeName>,
     layout: &ArrayLayout,
-    next_effect: &mut crate::IdSource<EffectToken>,
+    next_effect: &mut IdSource<EffectToken>,
 ) -> ValueId {
     assert!(!coordinates.is_empty(), "ranked SOAC read requires a coordinate");
     if coordinates.len() == 1 && !matches!(layout, ArrayLayout::StorageAos) {
@@ -351,8 +355,8 @@ pub(super) fn emit_read_ranked_coordinates(
             current_ty = next_ty;
         }
         if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(leaf_ty) {
-            let region = arr_ty.array_buffer().cloned().unwrap_or_else(crate::types::no_buffer);
-            let view_ty = crate::types::view_array_of(leaf_ty, region);
+            let region = arr_ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
+            let view_ty = types::view_array_of(leaf_ty, region);
             return graph.add_place_view(place, view_ty, None).value();
         }
         return emit_load(graph, body, place, leaf_ty.clone(), next_effect, None);
@@ -381,7 +385,7 @@ fn is_view_node(graph: &EGraph<Physical>, arr_nid: ValueId, arr_ty: &Type<TypeNa
     is_view_source(arr_ty)
         || matches!(
             graph.nodes[arr_nid].kind,
-            crate::egir::ir::ValueKind::Pure {
+            egir::ir::ValueKind::Pure {
                 op: PureOp::StorageView(_),
                 ..
             }

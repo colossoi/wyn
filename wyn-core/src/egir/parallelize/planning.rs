@@ -1,5 +1,10 @@
 //! Immutable recipe analysis and deterministic recipe-owned scratch allocation.
 
+use crate::egir;
+use crate::ssa;
+use crate::EntryId;
+use crate::LookupMap;
+use crate::ResourceId;
 use std::collections::HashMap;
 
 use polytype::Type;
@@ -22,21 +27,21 @@ use super::capabilities::{self, Strategy};
 pub(super) struct LocatedHist<'a> {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
-    pub op: &'a hist::Op<crate::egir::types::Semantic>,
+    pub op: &'a hist::Op<egir::types::Semantic>,
 }
 #[derive(Clone, Copy)]
 pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
     pub effect: &'a SideEffect,
     pub owner: SemanticOpId,
-    pub op: &'a screma::Op<crate::egir::types::Semantic>,
+    pub op: &'a screma::Op<egir::types::Semantic>,
 }
 
 #[derive(Clone)]
 pub(super) struct SerialScremaRecipe {
     site: SideEffectSite,
     owner: SemanticOpId,
-    op: screma::Op<crate::egir::types::Semantic>,
+    op: screma::Op<egir::types::Semantic>,
 }
 
 impl LocatedScrema<'_> {
@@ -48,7 +53,7 @@ impl LocatedScrema<'_> {
         }
     }
 
-    pub(super) fn segmented(&self) -> Result<screma::Segmented<crate::egir::program::SemanticResourceRef>> {
+    pub(super) fn segmented(&self) -> Result<screma::Segmented<egir::program::SemanticResourceRef>> {
         let screma::SemanticState::Segmented {
             space,
             output_slots,
@@ -79,7 +84,7 @@ struct RecipeTargets {
 impl RecipeTargets {
     /// Target-relevant sites are classified once on the endpoint projection.
     /// Later output projection only remaps these handles.
-    fn collect(entry: &crate::egir::program::PlannedEntry) -> Self {
+    fn collect(entry: &egir::program::PlannedEntry) -> Self {
         let mut targets = Self::default();
         for (block, contents) in &entry.graph.skeleton.blocks {
             for (index, effect) in contents.side_effects.iter().enumerate() {
@@ -115,7 +120,7 @@ impl RecipeTargets {
         targets
     }
 
-    fn remap(&self, sites: &crate::LookupMap<SideEffectSite, SideEffectSite>) -> Self {
+    fn remap(&self, sites: &LookupMap<SideEffectSite, SideEffectSite>) -> Self {
         let remap =
             |source: &[SideEffectSite]| source.iter().filter_map(|site| sites.get(site).copied()).collect();
         Self {
@@ -134,10 +139,7 @@ impl RecipeTargets {
     }
 }
 
-fn located_hist(
-    entry: &crate::egir::program::PlannedEntry,
-    site: SideEffectSite,
-) -> Result<LocatedHist<'_>> {
+fn located_hist(entry: &egir::program::PlannedEntry, site: SideEffectSite) -> Result<LocatedHist<'_>> {
     let effect = entry.graph.skeleton.effect(site);
     let SideEffectKind::Soac(SoacEffect(owner, Soac::Hist(op))) = &effect.kind else {
         return Err(ParallelizeError::Invalid(format!(
@@ -150,10 +152,7 @@ fn located_hist(
         op,
     })
 }
-fn located_screma(
-    entry: &crate::egir::program::PlannedEntry,
-    site: SideEffectSite,
-) -> Result<LocatedScrema<'_>> {
+fn located_screma(entry: &egir::program::PlannedEntry, site: SideEffectSite) -> Result<LocatedScrema<'_>> {
     let effect = entry.graph.skeleton.effect(site);
     let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
         return Err(ParallelizeError::Invalid(format!(
@@ -182,7 +181,7 @@ pub(super) enum Recipe<Filter, Reduce, Scan> {
     Hist(super::hist::HistCandidate),
     Reduce(Reduce),
     Scan(Scan),
-    Map(screma::Segmented<crate::egir::program::SemanticResourceRef>),
+    Map(screma::Segmented<egir::program::SemanticResourceRef>),
     Serial(SerialScremaRecipe),
     Unchanged,
 }
@@ -195,7 +194,7 @@ pub(super) type PlannedRecipe =
 
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
-    body: crate::egir::program::PlannedEntry,
+    body: egir::program::PlannedEntry,
     /// Maps this kernel's projected output slots back to the source entry.
     /// Unsplit kernels retain the source interface and need no mapping.
     output_projection: Option<Vec<usize>>,
@@ -203,11 +202,7 @@ pub(super) struct PlannedKernel<R = PlannedRecipe> {
 }
 
 impl<R> PlannedKernel<R> {
-    fn new(
-        body: crate::egir::program::PlannedEntry,
-        output_projection: Option<Vec<usize>>,
-        recipe: R,
-    ) -> Self {
+    fn new(body: egir::program::PlannedEntry, output_projection: Option<Vec<usize>>, recipe: R) -> Self {
         Self {
             body,
             output_projection,
@@ -217,15 +212,15 @@ impl<R> PlannedKernel<R> {
 
     /// The selected recipe and every graph-local handle it contains stay
     /// coupled to this body until lowering consumes the pair.
-    pub(super) fn into_parts(self) -> (crate::egir::program::PlannedEntry, Option<Vec<usize>>, R) {
+    pub(super) fn into_parts(self) -> (egir::program::PlannedEntry, Option<Vec<usize>>, R) {
         (self.body, self.output_projection, self.recipe)
     }
 
-    pub(super) fn seed_body(&self) -> crate::egir::program::PlannedEntry {
+    pub(super) fn seed_body(&self) -> egir::program::PlannedEntry {
         self.body.clone()
     }
 
-    pub(super) fn assign_entry_id(&mut self, id: crate::EntryId) {
+    pub(super) fn assign_entry_id(&mut self, id: EntryId) {
         self.body.id = id;
     }
 }
@@ -336,16 +331,11 @@ struct ScratchRequest {
 }
 
 pub(super) struct ScratchBindings {
-    ids: HashMap<CompilerResourceKey, crate::ResourceId>,
+    ids: HashMap<CompilerResourceKey, ResourceId>,
 }
 
 impl ScratchBindings {
-    pub(super) fn id(
-        &self,
-        owner: SemanticOpId,
-        kind: CompilerResourceKind,
-        slot: usize,
-    ) -> crate::ResourceId {
+    pub(super) fn id(&self, owner: SemanticOpId, kind: CompilerResourceKind, slot: usize) -> ResourceId {
         self.ids[&CompilerResourceKey { owner, kind, slot }]
     }
 }
@@ -439,11 +429,11 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
 
 fn analyze_endpoint(
     program: &ResourcesAllocated,
-    entry: &crate::egir::program::Entry<Semantic>,
+    entry: &egir::program::Entry<Semantic>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
-    let projected = crate::egir::program::PlannedEntry::project(entry)?;
+    let projected = egir::program::PlannedEntry::project(entry)?;
     let targets = RecipeTargets::collect(&projected);
     let required_elements = fixed_required_elements(&projected, &targets);
     let split = match endpoint {
@@ -485,10 +475,7 @@ fn analyze_endpoint(
     Ok((EndpointPlan::new(primary, siblings), requests, required_elements))
 }
 
-fn fixed_required_elements(
-    entry: &crate::egir::program::PlannedEntry,
-    targets: &RecipeTargets,
-) -> Option<u32> {
+fn fixed_required_elements(entry: &egir::program::PlannedEntry, targets: &RecipeTargets) -> Option<u32> {
     let space = if targets.filters.len() == 1 {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) =
             &entry.graph.skeleton.effect(targets.filters[0]).kind
@@ -524,7 +511,7 @@ fn fixed_required_elements(
 }
 
 fn analyze_reduce_recipe(
-    body: &crate::egir::program::PlannedEntry,
+    body: &egir::program::PlannedEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
@@ -551,7 +538,7 @@ fn analyze_reduce_recipe(
 }
 
 fn analyze_scan_recipe(
-    body: &crate::egir::program::PlannedEntry,
+    body: &egir::program::PlannedEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
@@ -590,7 +577,7 @@ fn analyze_scan_recipe(
 
 fn analyze_projected_kernel(
     program: &ResourcesAllocated,
-    body: crate::egir::program::PlannedEntry,
+    body: egir::program::PlannedEntry,
     output_projection: Option<Vec<usize>>,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
@@ -706,7 +693,7 @@ fn scratch_request(
     kind: CompilerResourceKind,
     elem_ty: Type<TypeName>,
 ) -> Result<ScratchRequest> {
-    let elem_bytes = crate::ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
+    let elem_bytes = ssa::layout::type_byte_size(&elem_ty).ok_or_else(|| {
         ParallelizeError::Invalid(format!(
             "parallel scratch for {owner:?} has no static element size"
         ))

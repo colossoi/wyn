@@ -14,6 +14,7 @@ use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, LoopKind, Program, SoacBody, SoacOp, Term, TermIdSource,
     TermKind, VarRef,
 };
+use crate::types;
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 
@@ -360,7 +361,7 @@ struct ClosureConverter {
 }
 
 impl ClosureConverter {
-    fn convert_def(&mut self, def: Def<crate::tlc::family::Monomorphic>) -> Def<ClosureConverted> {
+    fn convert_def(&mut self, def: Def<tlc::family::Monomorphic>) -> Def<ClosureConverted> {
         Def {
             data: def.data,
             name: def.name,
@@ -654,8 +655,8 @@ impl ClosureConverter {
             body,
             meta: DefMeta::LiftedLambda,
             arity,
-            param_diets: vec![crate::types::Diet::observing(); arity],
-            return_diet: crate::types::Diet::observing(),
+            param_diets: vec![types::Diet::observing(); arity],
+            return_diet: types::Diet::observing(),
         });
 
         if captures.is_empty() {
@@ -835,9 +836,7 @@ impl ClosureConverter {
     }
 }
 
-pub(super) fn convert_closures(
-    program: crate::tlc::stage::RuntimeIndexProducersFloated,
-) -> Defunctionalized {
+pub(super) fn convert_closures(program: tlc::stage::RuntimeIndexProducersFloated) -> Defunctionalized {
     let Program {
         defs,
         symbols,
@@ -845,7 +844,7 @@ pub(super) fn convert_closures(
         global_context,
         state: _,
     } = program;
-    let crate::tlc::context::RewriteGlobal {
+    let tlc::context::RewriteGlobal {
         known_defs,
         auto_storage_binding_ids,
     } = global_context;
@@ -872,7 +871,7 @@ pub(super) fn convert_closures(
         defs,
         converter.symbols,
         converter.term_ids,
-        crate::tlc::context::PostClosureGlobal {
+        tlc::context::PostClosureGlobal {
             auto_storage_binding_ids,
         },
     );

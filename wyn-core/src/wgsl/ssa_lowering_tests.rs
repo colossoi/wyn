@@ -2,6 +2,18 @@
 
 use super::{uniquify_parameter_name, validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
+use crate::compile_thru_ssa;
+use crate::err_spirv;
+use crate::error;
+use crate::lower_ssa_to_wgsl;
+use crate::lower_ssa_to_wgsl_with_options;
+use crate::ssa;
+use crate::types;
+use crate::wgsl;
+use crate::CodegenTarget;
+use crate::LookupSet;
+use crate::LoweringProfile;
+use crate::SchedulePolicy;
 use polytype::Type as PolyType;
 
 // ---------- wgsl_mangle: per-char cases ----------
@@ -165,7 +177,7 @@ fn type_u64_requires_explicit_emulation_policy() {
     let mut default_emitter = TypeEmitter::new();
     assert!(default_emitter.type_to_wgsl(&ty).is_err());
 
-    let mut emulating = TypeEmitter::with_options(crate::wgsl::WgslOptions::U64_EMULATION);
+    let mut emulating = TypeEmitter::with_options(wgsl::WgslOptions::U64_EMULATION);
     assert_eq!(emulating.type_to_wgsl(&ty).unwrap(), "vec2<u32>");
 }
 
@@ -205,7 +217,7 @@ fn type_array_sized() {
             scalar_ty(TypeName::Float(32)),
             PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
             PolyType::Constructed(TypeName::Size(8), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     );
     assert_eq!(e.type_to_wgsl(&ty).unwrap(), "array<f32, 8>");
@@ -262,16 +274,13 @@ fn type_tuple_distinct_shapes_distinct_structs() {
 fn lower_empty_program_succeeds() {
     // Empty program: no functions, no entries — lower emits just the
     // header comment and returns a string.
-    let program = crate::ssa::types::Program::<crate::ssa::stage::WgslReadyTag, _>::from_parts(
+    let program = ssa::types::Program::<ssa::stage::WgslReadyTag, _>::from_parts(
         Vec::new(),
         Vec::new(),
         Vec::new(),
-        crate::ssa::context::BackendGlobal {
+        ssa::context::BackendGlobal {
             pipeline: Default::default(),
-            profile: crate::LoweringProfile::new(
-                crate::CodegenTarget::Wgsl,
-                crate::SchedulePolicy::Parallel,
-            ),
+            profile: LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             kernel_plan: Default::default(),
         },
     );
@@ -298,14 +307,14 @@ fn validate_wgsl(source: &str) {
 }
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
-fn compile_to_wgsl(source: &str) -> crate::error::Result<String> {
-    let program = crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?;
-    crate::lower_ssa_to_wgsl(program)
+fn compile_to_wgsl(source: &str) -> error::Result<String> {
+    let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
+    lower_ssa_to_wgsl(program)
 }
 
-fn compile_to_wgsl_with_u64_emulation(source: &str) -> crate::error::Result<String> {
-    let program = crate::compile_thru_ssa(source).map_err(|e| crate::err_spirv!("{}", e))?;
-    crate::lower_ssa_to_wgsl_with_options(program, crate::wgsl::WgslOptions::U64_EMULATION)
+fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
+    let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
+    lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::U64_EMULATION)
 }
 
 #[test]
@@ -994,7 +1003,7 @@ entry frame(c: block,
 }
 #[test]
 fn duplicate_emitted_parameter_names_are_uniquified() {
-    let mut used = crate::LookupSet::new();
+    let mut used = LookupSet::new();
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i");
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p1");
     assert_eq!(uniquify_parameter_name("w_i".into(), &mut used), "w_i__p2");

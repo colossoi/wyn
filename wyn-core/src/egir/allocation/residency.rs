@@ -7,6 +7,10 @@
 //! consumers to explicit storage views or loads. Target lowering only chooses
 //! and schedules the physical kernel recipe.
 
+use crate::egir;
+use crate::ssa;
+use crate::types;
+use crate::IdSource;
 use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
@@ -267,7 +271,7 @@ fn filter_runtime_array_plan(
         return Ok(None);
     }
     let elem_ty = op.body.output_element_type().clone();
-    crate::ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
+    ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
         format!("runtime-array producer {producer:?} has no legal storage element layout")
     })?;
     let result_ty = result.ty().clone();
@@ -312,16 +316,15 @@ fn operation_result_residency(
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
-    let cloneable =
-        op.result_state.iter().all(|result| result.ownership == crate::types::SoacOwnership::Fresh)
-            && resources.iter().all(|resource| {
-                resource.access == ResourceAccess::Read
-                    || entry
-                        .outputs
-                        .iter()
-                        .filter_map(|output| output.resource)
-                        .any(|output| output == resource.resource)
-            });
+    let cloneable = op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
+        && resources.iter().all(|resource| {
+            resource.access == ResourceAccess::Read
+                || entry
+                    .outputs
+                    .iter()
+                    .filter_map(|output| output.resource)
+                    .any(|output| output == resource.resource)
+        });
     let dependencies = dependency_effects(&entry.graph, site)?;
     let upstream =
         dependencies.iter().copied().filter(|index| *index != site.index).collect::<HashSet<_>>();
@@ -412,7 +415,7 @@ fn plan_parallel_prelude(
         let dependencies = SemanticGraph::with_operation_captures(dependency_edges, &entry.graph);
         for prelude in parallel_preludes(entry, &dependencies) {
             let ty = &entry.graph.nodes[prelude.root].ty;
-            if crate::ssa::layout::storage_elem_stride(ty).is_none() {
+            if ssa::layout::storage_elem_stride(ty).is_none() {
                 continue;
             }
             if ty.is_array() {
@@ -597,7 +600,7 @@ fn direct_stage_value_is_liftable(
         && !dependence.is_compile_time_constant()
         && dependence.loop_dependencies().is_empty()
         && !ty.is_array()
-        && crate::ssa::layout::storage_elem_stride(ty).is_some()
+        && ssa::layout::storage_elem_stride(ty).is_some()
 }
 
 /// Values produced by effects that move into a prepass may also feed retained
@@ -616,7 +619,7 @@ fn stage_prelude_outputs(
     let mut outputs = Vec::with_capacity(sources.len());
     for source in sources {
         let elem_ty = entry.graph.nodes[source].ty.clone();
-        let stride = crate::ssa::layout::storage_elem_stride(&elem_ty)?;
+        let stride = ssa::layout::storage_elem_stride(&elem_ty)?;
         outputs.push(StagePreludeOutput {
             source,
             projected: recipe.projection.node(source)?,
@@ -829,7 +832,7 @@ fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashS
                         && op
                             .result_state
                             .iter()
-                            .all(|result| result.ownership == crate::types::SoacOwnership::Fresh)
+                            .all(|result| result.ownership == types::SoacOwnership::Fresh)
                         && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
         )
     })
@@ -1088,7 +1091,7 @@ fn rewrite_runtime_array_source(
     result: ValueId,
     source_site: SideEffectSite,
     handoff: &RuntimeArrayHandoff,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     entry.set_resource_declaration(handoff.data, StorageRole::Input, &handoff.elem_ty, &handoff.size);
@@ -1146,7 +1149,7 @@ fn configure_operation_materialization(
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
     source_output_resources: &HashSet<ResourceId>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let mut output_views = Vec::new();
     for (&resource, output) in output_resources.iter().zip(output_specs) {
@@ -1242,7 +1245,7 @@ fn configure_materialized_result(
     result: &ResultBinding<Type<TypeName>>,
     output_views: &[ValueId],
     output_specs: &[OutputSpec],
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<Vec<(ValueId, ValueId)>, String> {
     let mut replacements = Vec::new();
     for (&output_view, output) in output_views.iter().zip(output_specs) {
@@ -1275,7 +1278,7 @@ fn rewrite_materialized_operation_source(
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let (block_id, effect_index) = (producer_site.block, producer_site.index);
     let mut array_replacements = Vec::new();
@@ -1454,7 +1457,7 @@ fn materialize_stage_prelude(
 }
 
 fn projected_materialization_entry(
-    identities: &mut crate::egir::program::ProgramIdentities,
+    identities: &mut egir::program::ProgramIdentities,
     materialization: MaterializationId,
     source: &Entry<Semantic>,
     name_suffix: &str,
@@ -1489,7 +1492,7 @@ fn emit_scalar_handoff_store(
     output_view: ValueId,
     value: ValueId,
     elem_ty: &Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) {
     let zero = graph_ops::intern_u32(graph, 0, None);
     graph_ops::emit_storage_store(
@@ -1508,7 +1511,7 @@ fn detached_scalar_handoff_load(
     graph: &mut EGraph,
     view: ValueId,
     elem_ty: &Type<TypeName>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    effect_ids: &mut IdSource<EffectToken>,
 ) -> (ValueId, SideEffect) {
     let zero = graph_ops::intern_u32(graph, 0, None);
     let view = graph.view_id(view);
@@ -1589,7 +1592,7 @@ fn output_specs(
             };
             let size = match storage {
                 OutputStorage::Scalar => {
-                    LogicalSize::FixedBytes(u64::from(crate::ssa::layout::storage_elem_stride(&elem_ty)?))
+                    LogicalSize::FixedBytes(u64::from(ssa::layout::storage_elem_stride(&elem_ty)?))
                 }
                 OutputStorage::Array => LogicalSize::for_space(space, &elem_ty)?,
             };
@@ -1675,7 +1678,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                             new_resources.push(replacement.resource);
                             if input == 0 {
                                 let elem_ty = input_type.element();
-                                let elem_bytes = crate::ssa::layout::storage_elem_stride(&elem_ty)
+                                let elem_bytes = ssa::layout::storage_elem_stride(&elem_ty)
                                     .ok_or_else(|| {
                                         format!(
                                             "cannot retarget Screma input with non-storable element type {elem_ty:?}"
@@ -1720,12 +1723,11 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
                         };
                         input.array = replacement.view_ty.clone();
                         let elem_ty = input.element();
-                        let elem_bytes = crate::ssa::layout::storage_elem_stride(&elem_ty)
-                            .ok_or_else(|| {
-                                format!(
-                                    "cannot retarget filter input with non-storable element type {elem_ty:?}"
-                                )
-                            })?;
+                        let elem_bytes = ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
+                            format!(
+                                "cannot retarget filter input with non-storable element type {elem_ty:?}"
+                            )
+                        })?;
                         domain_input = Some((replacement.view, replacement.resource, elem_bytes));
                     }
                     replace_space_references(&mut state.space, replacements);

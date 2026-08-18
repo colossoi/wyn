@@ -1,3 +1,10 @@
+use crate::interface;
+use crate::lexer;
+use crate::name_resolution;
+use crate::op;
+use crate::parser;
+use crate::types;
+use crate::SymbolTable;
 pub use spirv;
 pub(crate) mod rebuild;
 
@@ -286,7 +293,7 @@ impl BindingName for ResolvedBinding {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedIdentifier {
     pub source: Identifier,
-    pub resolution: crate::name_resolution::ResolvedValueRef,
+    pub resolution: name_resolution::ResolvedValueRef,
 }
 
 /// A type-checked identifier's semantic meaning.
@@ -496,7 +503,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Declaration<F: Family = crate::parser::ParsedFamily> {
+pub enum Declaration<F: Family = parser::ParsedFamily> {
     Decl(Decl<F::DefinitionData, F::Tree>),
     Entry(EntryDecl<F::EntryData, F::Tree, F::EntryParameterAttribute>),
     Extern(ExternDecl<F::ExternData>),
@@ -678,7 +685,7 @@ impl<A> EntrySyntax<A> {
 /// Entry data after named resources and `#[view]` attributes are resolved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedEntry {
-    pub syntax: EntrySyntax<crate::interface::ResolvedAttribute>,
+    pub syntax: EntrySyntax<interface::ResolvedAttribute>,
     pub feedback: Vec<FeedbackPair>,
 }
 
@@ -775,8 +782,8 @@ impl<D, T: TreeFamily> SupportDefinition<D, T> {
 pub struct TypedGlobal<D, T: TreeFamily> {
     pub support_definitions: Vec<SupportDefinition<D, T>>,
     /// Sole source-binding identity arena, carried into TLC without reallocation.
-    pub symbols: crate::SymbolTable,
-    pub warnings: Vec<crate::types::checker::TypeWarning>,
+    pub symbols: SymbolTable,
+    pub warnings: Vec<types::checker::TypeWarning>,
     pub builtin_names: Vec<String>,
 }
 
@@ -886,7 +893,7 @@ pub enum NestedDeclaration {
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression),
     Import(String),
-    Resource(crate::interface::ResourceDecl),
+    Resource(interface::ResourceDecl),
 }
 
 /// Top-level forms accepted directly from the parser.
@@ -898,7 +905,7 @@ pub enum ParsedFrontend<D> {
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression<D>),
     Import(String),
-    Resource(crate::interface::ResourceDecl),
+    Resource(interface::ResourceDecl),
 }
 
 /// Frontend forms after file imports have been expanded.
@@ -909,7 +916,7 @@ pub enum ImportsResolvedFrontend<D> {
     Module(ModuleDecl<D>),
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression<D>),
-    Resource(crate::interface::ResourceDecl),
+    Resource(interface::ResourceDecl),
 }
 
 /// Frontend-only declarations that remain after modules have been elaborated.
@@ -918,7 +925,7 @@ pub enum ModulesElaboratedFrontend<D> {
     Sig(SigDecl),
     TypeBind(TypeBind),
     Open(ModuleExpression<D>),
-    Resource(crate::interface::ResourceDecl),
+    Resource(interface::ResourceDecl),
 }
 
 /// Type-checking declarations after named resources have been consumed.
@@ -942,7 +949,7 @@ pub type Expression<T = SourceTree> = Node<ExprKind<T>, <T as TreeFamily>::Heade
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind<T: TreeFamily = SourceTree> {
-    IntLiteral(crate::lexer::IntString),
+    IntLiteral(lexer::IntString),
     FloatLiteral(f32),
     BoolLiteral(bool),
     Unit,
@@ -970,7 +977,7 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
         components: Vec<u8>,
         /// `None` for plain `=`. `Some(op)` for compound `op=`,
         /// where `op` is one of `"*"`, `"+"`, `"-"`, `"/"`.
-        op: Option<crate::op::BinaryOperator>,
+        op: Option<op::BinaryOperator>,
         value: Box<Expression<T>>,
     },
     /// Record field update: `r with x = e` or `r with a.x = e`.
@@ -1019,12 +1026,12 @@ pub struct LetInExpr<T: TreeFamily = SourceTree> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryOp {
-    pub op: crate::op::BinaryOperator,
+    pub op: op::BinaryOperator,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnaryOp {
-    pub op: crate::op::UnaryOperator,
+    pub op: op::UnaryOperator,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1112,7 +1119,7 @@ impl<T: TreeFamily, A> Node<PatternKind<T, A>, T::Header> {
         self,
         map: &mut impl FnMut(A) -> Result<B, E>,
     ) -> Result<Pattern<T, B>, E> {
-        crate::ast::rebuild::pattern_with(
+        self::rebuild::pattern_with(
             self,
             &mut |header| Ok(header),
             &mut |_header, binding| Ok(binding),
@@ -1226,7 +1233,7 @@ impl<T: TreeFamily, A> Node<PatternKind<T, A>, T::Header> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternLiteral {
-    Int(crate::lexer::IntString),
+    Int(lexer::IntString),
     Float(f32),
     Bool(bool),
 }

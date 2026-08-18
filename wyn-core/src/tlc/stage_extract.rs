@@ -11,34 +11,43 @@ use super::{
     clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, ProgramParts,
     RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef, WalkDecision,
 };
+use crate::ast;
 use crate::ast::Span;
+use crate::builtins;
+use crate::egir;
+use crate::err_type_at;
+use crate::error;
 use crate::interface::{self, Attribute, EntryKind};
+use crate::op;
+use crate::pipeline_descriptor;
+use crate::types;
 use crate::types::{Diet, Type, TypeName, TypeScheme};
+use crate::BindingRef;
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 
 struct InvocationBuiltins {
-    direct_draw: crate::builtins::BuiltinId,
-    direct_draw_from: crate::builtins::BuiltinId,
-    indexed_draw: crate::builtins::BuiltinId,
-    indexed_draw_from: crate::builtins::BuiltinId,
-    indirect_draw: crate::builtins::BuiltinId,
-    indirect_draws: crate::builtins::BuiltinId,
-    indexed_indirect_draw: crate::builtins::BuiltinId,
-    indexed_indirect_draws: crate::builtins::BuiltinId,
-    vertex_output: crate::builtins::BuiltinId,
-    rasterizers: Vec<crate::builtins::BuiltinId>,
-    rasterizers_with: Vec<crate::builtins::BuiltinId>,
-    shade: crate::builtins::BuiltinId,
-    shade_with: crate::builtins::BuiltinId,
-    target_load: crate::builtins::BuiltinId,
-    target_sample: crate::builtins::BuiltinId,
-    texture_load: crate::builtins::BuiltinId,
-    texture_sample: crate::builtins::BuiltinId,
+    direct_draw: builtins::BuiltinId,
+    direct_draw_from: builtins::BuiltinId,
+    indexed_draw: builtins::BuiltinId,
+    indexed_draw_from: builtins::BuiltinId,
+    indirect_draw: builtins::BuiltinId,
+    indirect_draws: builtins::BuiltinId,
+    indexed_indirect_draw: builtins::BuiltinId,
+    indexed_indirect_draws: builtins::BuiltinId,
+    vertex_output: builtins::BuiltinId,
+    rasterizers: Vec<builtins::BuiltinId>,
+    rasterizers_with: Vec<builtins::BuiltinId>,
+    shade: builtins::BuiltinId,
+    shade_with: builtins::BuiltinId,
+    target_load: builtins::BuiltinId,
+    target_sample: builtins::BuiltinId,
+    texture_load: builtins::BuiltinId,
+    texture_sample: builtins::BuiltinId,
 }
 
 impl InvocationBuiltins {
     fn get() -> Self {
-        let catalog = crate::builtins::catalog();
+        let catalog = builtins::catalog();
         let id = |name: &str| {
             catalog
                 .lookup_by_surface_name(name)
@@ -230,7 +239,7 @@ pub(super) fn extract(
     parts: &mut ProgramParts<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
-) -> crate::error::Result<()> {
+) -> error::Result<()> {
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
     let helpers = source_defs.iter().filter_map(stage_helper).collect::<LookupMap<_, _>>();
@@ -260,7 +269,7 @@ pub(super) fn extract(
         };
         if contains_invocation {
             let name = root_entry_name(&definition).unwrap_or_else(|| "<entry>".to_string());
-            return Err(crate::err_type_at!(
+            return Err(err_type_at!(
                 root_entry_span(&definition),
                 "entry `{}` contains a graphics invocation that cannot be planned as an ordered rasterization and shading operation",
                 name
@@ -665,7 +674,7 @@ fn graphics_operation<'a>(
 fn rasterizer_app<'a>(
     term: &'a Term,
     builtins: &InvocationBuiltins,
-) -> Option<(crate::builtins::BuiltinId, &'a [Term], bool)> {
+) -> Option<(builtins::BuiltinId, &'a [Term], bool)> {
     if let Some((id, args)) = builtin_app(term, &builtins.rasterizers) {
         return Some((id, args, false));
     }
@@ -675,7 +684,7 @@ fn rasterizer_app<'a>(
 fn shade_app<'a>(
     term: &'a Term,
     builtins: &InvocationBuiltins,
-) -> Option<(crate::builtins::BuiltinId, &'a [Term])> {
+) -> Option<(builtins::BuiltinId, &'a [Term])> {
     builtin_app(term, &[builtins.shade, builtins.shade_with])
 }
 
@@ -757,8 +766,8 @@ fn is_render_target_type(ty: &Type) -> bool {
 
 fn builtin_app<'a>(
     term: &'a Term,
-    candidates: &[crate::builtins::BuiltinId],
-) -> Option<(crate::builtins::BuiltinId, &'a [Term])> {
+    candidates: &[builtins::BuiltinId],
+) -> Option<(builtins::BuiltinId, &'a [Term])> {
     let TermKind::App { func, args } = &term.kind else {
         return None;
     };
@@ -811,15 +820,15 @@ fn callback_lambda(
 }
 
 fn graphics_invocation(
-    rasterizer: crate::builtins::BuiltinId,
+    rasterizer: builtins::BuiltinId,
     draw: &Term,
-    raster_state: crate::pipeline_descriptor::RasterState,
-    fragment_state: crate::pipeline_descriptor::FragmentState,
+    raster_state: pipeline_descriptor::RasterState,
+    fragment_state: pipeline_descriptor::FragmentState,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
     builtins: &InvocationBuiltins,
-) -> Option<crate::pipeline_descriptor::GraphicsInvocation> {
+) -> Option<pipeline_descriptor::GraphicsInvocation> {
     use crate::pipeline_descriptor::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
 
     let topology_index = builtins
@@ -954,7 +963,7 @@ fn indirect_command_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-) -> Option<(crate::pipeline_descriptor::DrawBufferRef, u64)> {
+) -> Option<(pipeline_descriptor::DrawBufferRef, u64)> {
     let TermKind::Index { array, index } = &command.kind else {
         return None;
     };
@@ -970,14 +979,14 @@ fn draw_buffer_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
-) -> Option<crate::pipeline_descriptor::DrawBufferRef> {
+) -> Option<pipeline_descriptor::DrawBufferRef> {
     let (symbol, path) = projected_symbol_path(array)?;
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
         {
-            return Some(crate::pipeline_descriptor::DrawBufferRef {
-                set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            return Some(pipeline_descriptor::DrawBufferRef {
+                set: egir::from_tlc::AUTO_STORAGE_SET,
                 binding: index as u32,
                 name: root_entry.declaration.params.get(index)?.name.clone(),
                 resource: None,
@@ -986,8 +995,8 @@ fn draw_buffer_source(
     }
     let value = computed.iter().find(|value| value.symbol == symbol)?;
     let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
-    Some(crate::pipeline_descriptor::DrawBufferRef {
-        set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+    Some(pipeline_descriptor::DrawBufferRef {
+        set: egir::from_tlc::AUTO_STORAGE_SET,
         binding: leaf.binding,
         name: leaf.output_name.clone(),
         resource: Some(leaf.output_name.clone()),
@@ -1003,17 +1012,17 @@ fn array_type_parts(mut ty: &Type) -> Option<(&Type, &Type)> {
     Some((args.first()?, args.get(2)?))
 }
 
-fn array_draw_count(array: &Term) -> Option<crate::pipeline_descriptor::DrawCount> {
+fn array_draw_count(array: &Term) -> Option<pipeline_descriptor::DrawCount> {
     match array_type_parts(&array.ty).map(|(_, size)| size) {
-        Some(Type::Constructed(TypeName::Size(count), _)) => Some(
-            crate::pipeline_descriptor::DrawCount::Fixed(u32::try_from(*count).ok()?),
-        ),
-        Some(_) => Some(crate::pipeline_descriptor::DrawCount::BufferLength),
+        Some(Type::Constructed(TypeName::Size(count), _)) => {
+            Some(pipeline_descriptor::DrawCount::Fixed(u32::try_from(*count).ok()?))
+        }
+        Some(_) => Some(pipeline_descriptor::DrawCount::BufferLength),
         None => None,
     }
 }
 
-fn index_format(array: &Term) -> Option<crate::pipeline_descriptor::IndexFormat> {
+fn index_format(array: &Term) -> Option<pipeline_descriptor::IndexFormat> {
     use crate::pipeline_descriptor::IndexFormat;
     match array_type_parts(&array.ty)?.0 {
         Type::Constructed(TypeName::UInt(16), _) => Some(IndexFormat::Uint16),
@@ -1027,7 +1036,7 @@ fn is_u16_array(ty: &Type) -> bool {
         Some(Type::Constructed(TypeName::UInt(16), _))
     )
 }
-fn parse_raster_state(term: &Term) -> Option<crate::pipeline_descriptor::RasterState> {
+fn parse_raster_state(term: &Term) -> Option<pipeline_descriptor::RasterState> {
     use crate::pipeline_descriptor::{CullMode, FillMode, FrontFace, RasterState, Scissor, Viewport};
 
     let viewport_term = record_component(term, "viewport")?;
@@ -1081,7 +1090,7 @@ fn parse_raster_state(term: &Term) -> Option<crate::pipeline_descriptor::RasterS
     })
 }
 
-fn parse_fragment_state(term: &Term) -> Option<crate::pipeline_descriptor::FragmentState> {
+fn parse_fragment_state(term: &Term) -> Option<pipeline_descriptor::FragmentState> {
     use crate::pipeline_descriptor::{BlendMode, DepthTest, FragmentState};
 
     let depth_test = match sum_tag(record_component(term, "depth_test")?)? {
@@ -1360,7 +1369,7 @@ fn append_target_captures(
                 span: Span::new(0, 0, 0, 0),
                 ty: texture_ty,
                 attributes: vec![Attribute::Texture {
-                    set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+                    set: egir::from_tlc::AUTO_STORAGE_SET,
                     binding,
                     backing: None,
                     resource: Some(name),
@@ -1424,8 +1433,8 @@ fn external_parameter_type(ty: &Type, binding: u32) -> Type {
     if args.len() >= 4 {
         args[1] = Type::Constructed(TypeName::ArrayVariantView, vec![]);
         let slot = args.len() - 1;
-        args[slot] = crate::types::buffer_tag(crate::BindingRef {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+        args[slot] = types::buffer_tag(BindingRef {
+            set: egir::from_tlc::AUTO_STORAGE_SET,
             binding,
         });
     }
@@ -1435,23 +1444,23 @@ fn external_parameter_type(ty: &Type, binding: u32) -> Type {
 fn external_binding_attribute(ty: &Type, binding: u32) -> Option<interface::ResolvedAttribute> {
     match ty {
         Type::Constructed(TypeName::Array, _) => Some(Attribute::Storage {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            set: egir::from_tlc::AUTO_STORAGE_SET,
             binding,
             layout: interface::StorageLayout::Std430,
             access: interface::StorageAccess::ReadOnly,
         }),
         Type::Constructed(TypeName::Texture2D, _) => Some(Attribute::Texture {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            set: egir::from_tlc::AUTO_STORAGE_SET,
             binding,
             backing: None,
             resource: None,
         }),
         Type::Constructed(TypeName::Sampler, _) => Some(Attribute::Sampler {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            set: egir::from_tlc::AUTO_STORAGE_SET,
             binding,
         }),
         _ => Some(Attribute::Uniform {
-            set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+            set: egir::from_tlc::AUTO_STORAGE_SET,
             binding,
         }),
     }
@@ -1517,7 +1526,7 @@ fn build_compute_stage(
         .map(|leaf| interface::EntryOutputDecl {
             ty: leaf.ty.clone(),
             attribute: Some(Attribute::Storage {
-                set: crate::egir::from_tlc::AUTO_STORAGE_SET,
+                set: egir::from_tlc::AUTO_STORAGE_SET,
                 binding: leaf.binding,
                 layout: interface::StorageLayout::Std430,
                 access: interface::StorageAccess::WriteOnly,
@@ -1542,10 +1551,10 @@ struct ExternalValueRewriter<'a> {
     term_ids: &'a mut TermIdSource,
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
-    target_load: crate::builtins::BuiltinId,
-    target_sample: crate::builtins::BuiltinId,
-    texture_load: crate::builtins::BuiltinId,
-    texture_sample: crate::builtins::BuiltinId,
+    target_load: builtins::BuiltinId,
+    target_sample: builtins::BuiltinId,
+    texture_load: builtins::BuiltinId,
+    texture_sample: builtins::BuiltinId,
 }
 
 impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
@@ -1600,7 +1609,7 @@ fn build_target_load_value(
     read: &TargetRead,
     coord: &Term,
     span: Span,
-    texture_load: crate::builtins::BuiltinId,
+    texture_load: builtins::BuiltinId,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let mut leaves = read
@@ -1619,7 +1628,7 @@ fn build_target_sample_value(
     sampler: &Term,
     uv: &Term,
     span: Span,
-    texture_sample: crate::builtins::BuiltinId,
+    texture_sample: builtins::BuiltinId,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let mut leaves = read
@@ -1639,7 +1648,7 @@ fn filtered_target_leaf(
     sampler: &Term,
     uv: &Term,
     span: Span,
-    texture_sample: crate::builtins::BuiltinId,
+    texture_sample: builtins::BuiltinId,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let texture_ty = target_read_type();
@@ -1678,7 +1687,7 @@ fn sampled_target_leaf(
     leaf_ty: &Type,
     coord: &Term,
     span: Span,
-    texture_load: crate::builtins::BuiltinId,
+    texture_load: builtins::BuiltinId,
     term_ids: &mut TermIdSource,
 ) -> Option<Term> {
     let texture_ty = target_read_type();
@@ -2027,8 +2036,8 @@ fn fragment_tag_is(
         term_ids,
         curried_function_type([u32_ty(), u32_ty()].iter(), &bool_ty()),
         span,
-        TermKind::BinOp(crate::ast::BinaryOp {
-            op: crate::op::BinaryOperator::Equal,
+        TermKind::BinOp(ast::BinaryOp {
+            op: op::BinaryOperator::Equal,
         }),
     );
     Term::fresh(
@@ -2417,7 +2426,7 @@ struct StageBodyRewriter<'a> {
     vertex_result_ty: Option<Type>,
     invocation_symbol: SymbolId,
     projections: Vec<Option<ProjectionReplacement>>,
-    vertex_output: Option<crate::builtins::BuiltinId>,
+    vertex_output: Option<builtins::BuiltinId>,
 }
 
 impl TermRewriter<data::Empty, data::Empty> for StageBodyRewriter<'_> {

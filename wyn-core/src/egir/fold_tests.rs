@@ -1,5 +1,8 @@
 //! Tests for algebraic folding at the TLC-to-EGIR construction boundary.
 
+use crate::op;
+use crate::types;
+use crate::IdSource;
 use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
@@ -17,8 +20,8 @@ fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
     let symbols = SymbolTable::new();
     let pure_constants = HashSet::new();
     let callable_boundaries = HashMap::new();
-    let mut binding_ids = crate::IdSource::<u32>::new();
-    let mut effect_ids = crate::IdSource::new();
+    let mut binding_ids = IdSource::<u32>::new();
+    let mut effect_ids = IdSource::new();
     let mut arenas = ConversionArenas::new();
     let mut converter = Converter::new(
         &top_level,
@@ -45,7 +48,7 @@ fn u32_ty() -> Type<TypeName> {
 }
 
 fn vec3f32_ty() -> Type<TypeName> {
-    crate::types::vec(3, f32_ty())
+    types::vec(3, f32_ty())
 }
 
 fn intrinsic(name: &str) -> PureOp {
@@ -62,19 +65,19 @@ fn runtime_value_plus_signed_float_zero_folds_in_both_orders() {
         let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let positive_zero = converter.intern_pure(PureOp::Float("0.0".into()), smallvec![], f32_ty());
         let negative_zero = converter.intern_pure(
-            PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
+            PureOp::UnaryOp(op::UnaryOperator::Negate),
             smallvec![positive_zero],
             f32_ty(),
         );
 
         for zero in [positive_zero, negative_zero] {
             let value_plus_zero = converter.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::Add),
+                PureOp::BinOp(op::BinaryOperator::Add),
                 smallvec![value, zero],
                 f32_ty(),
             );
             let zero_plus_value = converter.intern_pure(
-                PureOp::BinOp(crate::op::BinaryOperator::Add),
+                PureOp::BinOp(op::BinaryOperator::Add),
                 smallvec![zero, value],
                 f32_ty(),
             );
@@ -92,12 +95,12 @@ fn runtime_i32_plus_zero_folds_in_both_orders() {
         let zero = converter.graph.intern_constant(ConstantValue::I32(0), i32_ty());
 
         let value_plus_zero = converter.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![value, zero],
             i32_ty(),
         );
         let zero_plus_value = converter.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Add),
+            PureOp::BinOp(op::BinaryOperator::Add),
             smallvec![zero, value],
             i32_ty(),
         );
@@ -114,7 +117,7 @@ fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
         let divisor = converter.graph.intern_constant(ConstantValue::from_f32(4.0), f32_ty());
 
         let result = converter.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Divide),
+            PureOp::BinOp(op::BinaryOperator::Divide),
             smallvec![value, divisor],
             f32_ty(),
         );
@@ -122,7 +125,7 @@ fn runtime_f32_div_constant_folds_to_reciprocal_multiply() {
         let ValueKind::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected reciprocal multiply")
         };
-        assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Multiply)));
+        assert!(matches!(op, PureOp::BinOp(op::BinaryOperator::Multiply)));
         assert_eq!(operands[0], value);
         assert!(matches!(
             converter.graph.nodes[operands[1]].kind,
@@ -138,7 +141,7 @@ fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
         let divisor = converter.graph.intern_constant(ConstantValue::from_f32(8.0), f32_ty());
 
         let result = converter.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Divide),
+            PureOp::BinOp(op::BinaryOperator::Divide),
             smallvec![value, divisor],
             vec3f32_ty(),
         );
@@ -146,7 +149,7 @@ fn runtime_f32_vector_div_scalar_constant_folds_to_reciprocal_multiply() {
         let ValueKind::Pure { op, operands } = &converter.graph.nodes[result].kind else {
             panic!("expected vector/scalar reciprocal multiply")
         };
-        assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Multiply)));
+        assert!(matches!(op, PureOp::BinOp(op::BinaryOperator::Multiply)));
         assert_eq!(operands[0], value);
         assert!(matches!(
             converter.graph.nodes[operands[1]].kind,
@@ -163,7 +166,7 @@ fn f32_div_zero_does_not_rewrite_to_multiply() {
         let zero = converter.graph.intern_constant(ConstantValue::from_f32(0.0), f32_ty());
 
         let result = converter.intern_pure(
-            PureOp::BinOp(crate::op::BinaryOperator::Divide),
+            PureOp::BinOp(op::BinaryOperator::Divide),
             smallvec![value, zero],
             f32_ty(),
         );
@@ -171,7 +174,7 @@ fn f32_div_zero_does_not_rewrite_to_multiply() {
         assert!(matches!(
             &converter.graph.nodes[result].kind,
             ValueKind::Pure {
-                op: PureOp::BinOp(crate::op::BinaryOperator::Divide),
+                op: PureOp::BinOp(op::BinaryOperator::Divide),
                 ..
             }
         ));
@@ -224,7 +227,7 @@ fn unary_neg_of_float_literal_folds_to_constant() {
     with_converter(|converter| {
         let half = converter.intern_pure(PureOp::Float("0.5".into()), smallvec![], f32_ty());
         let neg = converter.intern_pure(
-            PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
+            PureOp::UnaryOp(op::UnaryOperator::Negate),
             smallvec![half],
             f32_ty(),
         );
@@ -240,7 +243,7 @@ fn unary_neg_of_int_literal_folds_to_constant() {
     with_converter(|converter| {
         let five = converter.intern_pure(PureOp::Int("5".into()), smallvec![], i32_ty());
         let neg = converter.intern_pure(
-            PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
+            PureOp::UnaryOp(op::UnaryOperator::Negate),
             smallvec![five],
             i32_ty(),
         );
@@ -256,14 +259,14 @@ fn unary_neg_of_runtime_value_does_not_fold() {
     with_converter(|converter| {
         let value = converter.graph.add_test_value_parameter(0, f32_ty());
         let neg = converter.intern_pure(
-            PureOp::UnaryOp(crate::op::UnaryOperator::Negate),
+            PureOp::UnaryOp(op::UnaryOperator::Negate),
             smallvec![value],
             f32_ty(),
         );
         let ValueKind::Pure { op, operands } = &converter.graph.nodes[neg].kind else {
             panic!("expected a pure node")
         };
-        assert!(matches!(op, PureOp::UnaryOp(crate::op::UnaryOperator::Negate)));
+        assert!(matches!(op, PureOp::UnaryOp(op::UnaryOperator::Negate)));
         assert_eq!(operands.as_slice(), &[value]);
     });
 }

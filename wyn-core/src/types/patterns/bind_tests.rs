@@ -2,8 +2,9 @@
 //! `fresh_type_for_pattern`. We drive them through small wyn source
 //! programs and assert that type-check accepts / rejects as expected.
 
+use crate::compile_thru_frontend;
 fn type_check_source(source: &str) -> std::result::Result<(), String> {
-    crate::compile_thru_frontend(source).map(|_| ()).map_err(|e| format!("type_check: {}", e))
+    compile_thru_frontend(source).map(|_| ()).map_err(|e| format!("type_check: {}", e))
 }
 
 // ----- bind_pattern accepts every supported pattern variant -----

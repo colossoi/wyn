@@ -1,15 +1,23 @@
 //! Top-level type-checking entry point.
 
 use crate::ast::{self, Declaration};
+use crate::builtins;
+use crate::err_type_at;
 use crate::error::Result;
+use crate::interface;
+use crate::module_manager;
+use crate::name_resolution;
 use crate::name_resolution::ResolvedValueRef;
+use crate::resolve_opens;
+use crate::resolve_placeholders;
 use crate::types::checker::{TypeChecker, TypeWarning};
+use crate::LookupMap;
 
 pub type TypeCheckedFamily = ast::AstFamily<
     ast::TypedTree,
     ast::TypedDefinition,
     ast::TypedEntry,
-    crate::interface::ResolvedAttribute,
+    interface::ResolvedAttribute,
     ast::TypedExtern,
     std::convert::Infallible,
 >;
@@ -21,14 +29,14 @@ pub enum TypeCheckedTag {}
 pub type TypeChecked =
     ast::Program<TypeCheckedTag, TypeCheckedFamily, ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>>;
 
-pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeChecked> {
-    let name_resolution = crate::name_resolution::build_name_resolution(
+pub fn type_check(program: resolve_opens::OpensResolved) -> Result<TypeChecked> {
+    let name_resolution = name_resolution::build_name_resolution(
         &program,
         &program.global_context.module_manager,
-        crate::builtins::catalog(),
+        builtins::catalog(),
     );
     let checked = program.try_rebuild(|declarations, global_context, _| {
-        let crate::resolve_placeholders::PlaceholdersResolvedGlobal {
+        let resolve_placeholders::PlaceholdersResolvedGlobal {
             module_manager,
             context,
             spec_schemes,
@@ -58,13 +66,13 @@ pub fn type_check(program: crate::resolve_opens::OpensResolved) -> Result<TypeCh
 }
 
 fn materialize(
-    declarations: Vec<Declaration<crate::resolve_opens::OpensResolvedFamily>>,
-    module_manager: crate::module_manager::ModuleManager,
-    mut type_table: crate::LookupMap<ast::NodeId, ast::TypeScheme>,
-    schemes: crate::LookupMap<String, ast::TypeScheme>,
+    declarations: Vec<Declaration<resolve_opens::OpensResolvedFamily>>,
+    module_manager: module_manager::ModuleManager,
+    mut type_table: LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: LookupMap<String, ast::TypeScheme>,
     warnings: Vec<TypeWarning>,
     builtin_names: Vec<String>,
-    mut name_resolution: crate::name_resolution::NameResolution,
+    mut name_resolution: name_resolution::NameResolution,
 ) -> Result<(
     Vec<Declaration<TypeCheckedFamily>>,
     ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>,
@@ -137,13 +145,13 @@ fn materialize(
 fn materialize_definition(
     definition: ast::Decl,
     qualified_name: &str,
-    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
-    schemes: &crate::LookupMap<String, ast::TypeScheme>,
-    name_resolution: &mut crate::name_resolution::NameResolution,
+    type_table: &mut LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: &LookupMap<String, ast::TypeScheme>,
+    name_resolution: &mut name_resolution::NameResolution,
 ) -> Result<ast::Decl<ast::TypedDefinition, ast::TypedTree>> {
     let scheme_name = if qualified_name.is_empty() { definition.name.as_str() } else { qualified_name };
     let scheme = schemes.get(scheme_name).cloned().ok_or_else(|| {
-        crate::err_type_at!(
+        err_type_at!(
             definition.name_span,
             "type checker did not produce a scheme for '{}'",
             scheme_name
@@ -153,7 +161,7 @@ fn materialize_definition(
         .declarations
         .remove(&(scheme_name.to_owned(), definition.name_span))
         .ok_or_else(|| {
-            crate::err_type_at!(
+            err_type_at!(
                 definition.name_span,
                 "name resolution did not assign an identity to '{}'",
                 scheme_name
@@ -179,13 +187,13 @@ fn materialize_definition(
 }
 
 fn materialize_entry(
-    entry: ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, crate::interface::ResolvedAttribute>,
-    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
-    schemes: &crate::LookupMap<String, ast::TypeScheme>,
-    name_resolution: &mut crate::name_resolution::NameResolution,
-) -> Result<ast::EntryDecl<ast::TypedEntry, ast::TypedTree, crate::interface::ResolvedAttribute>> {
+    entry: ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, interface::ResolvedAttribute>,
+    type_table: &mut LookupMap<ast::NodeId, ast::TypeScheme>,
+    schemes: &LookupMap<String, ast::TypeScheme>,
+    name_resolution: &mut name_resolution::NameResolution,
+) -> Result<ast::EntryDecl<ast::TypedEntry, ast::TypedTree, interface::ResolvedAttribute>> {
     let scheme = schemes.get(&entry.name).cloned().ok_or_else(|| {
-        crate::err_type_at!(
+        err_type_at!(
             entry.name_span,
             "type checker did not produce a scheme for entry '{}'",
             entry.name
@@ -193,7 +201,7 @@ fn materialize_entry(
     })?;
     let symbol =
         name_resolution.declarations.remove(&(entry.name.clone(), entry.name_span)).ok_or_else(|| {
-            crate::err_type_at!(
+            err_type_at!(
                 entry.name_span,
                 "name resolution did not assign an identity to entry '{}'",
                 entry.name
@@ -220,11 +228,11 @@ fn materialize_entry(
 
 fn materialize_external(
     external: ast::ExternDecl,
-    schemes: &crate::LookupMap<String, ast::TypeScheme>,
-    name_resolution: &mut crate::name_resolution::NameResolution,
+    schemes: &LookupMap<String, ast::TypeScheme>,
+    name_resolution: &mut name_resolution::NameResolution,
 ) -> Result<ast::ExternDecl<ast::TypedExtern>> {
     let scheme = schemes.get(&external.name).cloned().ok_or_else(|| {
-        crate::err_type_at!(
+        err_type_at!(
             external.data.span,
             "type checker did not produce a scheme for '{}'",
             external.name
@@ -234,7 +242,7 @@ fn materialize_external(
         .declarations
         .remove(&(external.name.clone(), external.data.span))
         .ok_or_else(|| {
-            crate::err_type_at!(
+            err_type_at!(
                 external.data.span,
                 "name resolution did not assign an identity to extern '{}'",
                 external.name
@@ -250,17 +258,17 @@ fn materialize_external(
 
 fn materialize_pattern<A>(
     pattern: ast::Pattern<ast::SourceTree, A>,
-    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
-    name_resolution: &mut crate::name_resolution::NameResolution,
+    type_table: &mut LookupMap<ast::NodeId, ast::TypeScheme>,
+    name_resolution: &mut name_resolution::NameResolution,
 ) -> Result<ast::Pattern<ast::TypedTree, A>> {
     ast::rebuild::pattern(
         pattern,
         &mut |header| typed_header(header, type_table),
         &mut |header, source| {
-            let symbol =
-                name_resolution.bindings.remove(&(header.id, source.clone())).ok_or_else(|| {
-                    crate::err_type_at!(header.span, "name resolution missed binding '{}'", source)
-                })?;
+            let symbol = name_resolution
+                .bindings
+                .remove(&(header.id, source.clone()))
+                .ok_or_else(|| err_type_at!(header.span, "name resolution missed binding '{}'", source))?;
             Ok(ast::ResolvedBinding { symbol, source })
         },
     )
@@ -268,8 +276,8 @@ fn materialize_pattern<A>(
 
 fn materialize_expression(
     expression: ast::Expression,
-    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
-    name_resolution: &mut crate::name_resolution::NameResolution,
+    type_table: &mut LookupMap<ast::NodeId, ast::TypeScheme>,
+    name_resolution: &mut name_resolution::NameResolution,
 ) -> Result<ast::Expression<ast::TypedTree>> {
     let values = &mut name_resolution.values;
     let bindings = &mut name_resolution.bindings;
@@ -278,7 +286,7 @@ fn materialize_expression(
         &mut |header| typed_header(header, type_table),
         &mut |header, identifier| {
             let resolution = match values.remove(&header.id).ok_or_else(|| {
-                crate::err_type_at!(
+                err_type_at!(
                     header.span,
                     "name resolution missed identifier '{}'",
                     identifier.name
@@ -288,7 +296,7 @@ fn materialize_expression(
                 ResolvedValueRef::Builtin { id, overload_idx } => ast::IdentifierResolution::Builtin {
                     id,
                     overload_idx: overload_idx.ok_or_else(|| {
-                        crate::err_type_at!(
+                        err_type_at!(
                             header.span,
                             "builtin '{}' has no selected overload",
                             identifier.name
@@ -302,21 +310,19 @@ fn materialize_expression(
                 } => ast::IdentifierResolution::VecConstructor {
                     arity,
                     component_conversion: component_conversion.ok_or_else(|| {
-                        crate::err_type_at!(header.span, "vector constructor conversion was not resolved")
+                        err_type_at!(header.span, "vector constructor conversion was not resolved")
                     })?,
                 },
                 ResolvedValueRef::Soac(kind) => ast::IdentifierResolution::Soac(match kind {
-                    crate::name_resolution::SoacKind::Replicate => ast::SoacKind::Replicate,
-                    crate::name_resolution::SoacKind::Map => ast::SoacKind::Map,
-                    crate::name_resolution::SoacKind::Reduce => ast::SoacKind::Reduce,
-                    crate::name_resolution::SoacKind::Scan => ast::SoacKind::Scan,
-                    crate::name_resolution::SoacKind::Filter => ast::SoacKind::Filter,
-                    crate::name_resolution::SoacKind::Zip => ast::SoacKind::Zip,
-                    crate::name_resolution::SoacKind::ReduceByIndex => ast::SoacKind::ReduceByIndex,
-                    crate::name_resolution::SoacKind::Scatter => ast::SoacKind::Scatter,
-                    crate::name_resolution::SoacKind::BucketScatter(rank) => {
-                        ast::SoacKind::BucketScatter(rank)
-                    }
+                    name_resolution::SoacKind::Replicate => ast::SoacKind::Replicate,
+                    name_resolution::SoacKind::Map => ast::SoacKind::Map,
+                    name_resolution::SoacKind::Reduce => ast::SoacKind::Reduce,
+                    name_resolution::SoacKind::Scan => ast::SoacKind::Scan,
+                    name_resolution::SoacKind::Filter => ast::SoacKind::Filter,
+                    name_resolution::SoacKind::Zip => ast::SoacKind::Zip,
+                    name_resolution::SoacKind::ReduceByIndex => ast::SoacKind::ReduceByIndex,
+                    name_resolution::SoacKind::Scatter => ast::SoacKind::Scatter,
+                    name_resolution::SoacKind::BucketScatter(rank) => ast::SoacKind::BucketScatter(rank),
                 }),
             };
             Ok(ast::TypedIdentifier {
@@ -325,9 +331,9 @@ fn materialize_expression(
             })
         },
         &mut |header, source| {
-            let symbol = bindings.remove(&(header.id, source.clone())).ok_or_else(|| {
-                crate::err_type_at!(header.span, "name resolution missed binding '{}'", source)
-            })?;
+            let symbol = bindings
+                .remove(&(header.id, source.clone()))
+                .ok_or_else(|| err_type_at!(header.span, "name resolution missed binding '{}'", source))?;
             Ok(ast::ResolvedBinding { symbol, source })
         },
         &mut |_header, hole| Ok(ast::ExprKind::TypeHole(hole)),
@@ -336,10 +342,10 @@ fn materialize_expression(
 
 fn typed_header(
     header: ast::Header,
-    type_table: &mut crate::LookupMap<ast::NodeId, ast::TypeScheme>,
+    type_table: &mut LookupMap<ast::NodeId, ast::TypeScheme>,
 ) -> Result<ast::TypedHeader> {
     let ty = type_table.remove(&header.id).ok_or_else(|| {
-        crate::err_type_at!(
+        err_type_at!(
             header.span,
             "type checker did not record a type for AST node {:?}",
             header.id

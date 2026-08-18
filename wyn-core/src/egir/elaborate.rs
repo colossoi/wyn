@@ -10,15 +10,19 @@
 //! - **No partial redundancy**: scoping ensures we never reuse a value across
 //!   unrelated CFG paths.
 
+use crate::ast;
 use crate::ast::TypeName;
+use crate::builtins;
 use crate::flow::BlockId as SkelBlockId;
 use crate::op::OpTag;
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::ssa;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{
     BlockId, Constant, ControlHeader, EntryPoint, FuncBody, Function, InstKind, PlaceId, Program,
     ValueId as SsaValueId, ValueRef,
 };
+use crate::types;
 use crate::types::{ExternDecl, TypeExt};
 use crate::{BindingRef, EntryId, LookupMap, LookupSet, ResourceAccess};
 use polytype::Type;
@@ -36,7 +40,7 @@ use super::types::*;
 /// Lower the whole EGIR program to SSA. Each per-body EGraph is
 /// elaborated to a `FuncBody`, externs pass through, and the result is
 /// assembled into a backend-bound SSA program.
-pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa::stage::Elaborated {
+pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage::Elaborated {
     let super::ir::Program {
         functions,
         externs,
@@ -102,7 +106,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> crate::ssa:
         effect_ids: _,
         semantic_ids: _,
     } = global_context;
-    program.with_context::<crate::ssa::stage::ElaboratedTag, _>(crate::ssa::context::BackendGlobal {
+    program.with_context::<ssa::stage::ElaboratedTag, _>(ssa::context::BackendGlobal {
         pipeline,
         profile,
         kernel_plan,
@@ -710,7 +714,7 @@ impl<'a> Elaborator<'a> {
             };
             let base = self.resolve(base);
             steps.push((current, coordinate));
-            if self.graph.nodes[base].ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+            if self.graph.nodes[base].ty.array_variant().is_some_and(types::is_array_variant_view) {
                 steps.reverse();
                 return Some((base, steps));
             }
@@ -972,8 +976,8 @@ impl<'a> Elaborator<'a> {
                     .collect::<Vec<_>>();
                 panic!(
                     "place-backed view {resolved:?} must be consumed through addressing; value users {value_users:?}; effect users {effect_users:?}; effect places {effect_places:?}; call users {call_users:?}; terminator users {terminator_users:?}; length intrinsic {:?}; storage-length intrinsic {:?}",
-                    crate::builtins::catalog().known().length,
-                    crate::builtins::catalog().known().storage_len,
+                    builtins::catalog().known().length,
+                    builtins::catalog().known().storage_len,
                 )
             }
         }
@@ -1054,7 +1058,7 @@ impl<'a> Elaborator<'a> {
         target_skel: SkelBlockId,
         kind: InstKind,
         ty: Type<TypeName>,
-        span: Option<crate::ast::Span>,
+        span: Option<ast::Span>,
     ) -> SsaValueId {
         let out_bid = self.block_map[&target_skel];
         self.builder.func_mut().append_inst_with_span(out_bid, kind, ty, span)
@@ -1068,14 +1072,14 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a skeleton terminator.
     fn elaborate_terminator(&mut self, term: &SkeletonTerminator) {
         let t = match term {
-            SkeletonTerminator::Return(None) => crate::ssa::framework::Terminator::Return(None),
+            SkeletonTerminator::Return(None) => ssa::framework::Terminator::Return(None),
             SkeletonTerminator::Return(Some(result)) => {
-                crate::ssa::framework::Terminator::Return(self.demand_result_ref(result))
+                ssa::framework::Terminator::Return(self.demand_result_ref(result))
             }
             SkeletonTerminator::Branch { target, args } => {
                 let out_args: Vec<ValueRef> =
                     args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
-                crate::ssa::framework::Terminator::Branch {
+                ssa::framework::Terminator::Branch {
                     target: self.block_map[target],
                     args: out_args,
                 }
@@ -1090,7 +1094,7 @@ impl<'a> Elaborator<'a> {
                 let cond = self.demand_ref(*cond);
                 let ta: Vec<ValueRef> = then_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
                 let ea: Vec<ValueRef> = else_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
-                crate::ssa::framework::Terminator::CondBranch {
+                ssa::framework::Terminator::CondBranch {
                     cond,
                     then_target: self.block_map[then_target],
                     then_args: ta,
@@ -1098,7 +1102,7 @@ impl<'a> Elaborator<'a> {
                     else_args: ea,
                 }
             }
-            SkeletonTerminator::Unreachable => crate::ssa::framework::Terminator::Unreachable,
+            SkeletonTerminator::Unreachable => ssa::framework::Terminator::Unreachable,
         };
         let _ = self.builder.terminate(t);
     }

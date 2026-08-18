@@ -3,11 +3,13 @@
 use super::specialize_intrinsics;
 use super::VarRef;
 use crate::ast::TypeName;
+use crate::builtins;
 use crate::builtins::by_id;
 use crate::tlc::context::RewriteGlobal;
 use crate::tlc::data::PolymorphicDefinition;
 use crate::tlc::test_support::TestBuilder;
 use crate::tlc::{Def, DefMeta, Program, Term, TermKind};
+use crate::types;
 use crate::{IdSource, LookupSet};
 use polytype::Type;
 
@@ -29,7 +31,7 @@ fn test_specialize_sign_f32() {
         kind: TermKind::Var(VarRef::Symbol(x_sym)),
     };
 
-    let sign_id = crate::builtins::catalog().known().sign;
+    let sign_id = builtins::catalog().known().sign;
     let sign_var = Term {
         id: b.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![f32_ty.clone(), f32_ty.clone()]),
@@ -61,7 +63,7 @@ fn test_specialize_sign_f32() {
             meta: DefMeta::Function,
             arity: 0,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,
@@ -117,7 +119,7 @@ fn test_specialize_min_i32() {
     let partial_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), i32_ty.clone()]);
     let func_ty = Type::Constructed(TypeName::Arrow, vec![i32_ty.clone(), partial_ty.clone()]);
 
-    let min_id = crate::builtins::catalog().known().min;
+    let min_id = builtins::catalog().known().min;
     let min_var = Term {
         id: b.next_id(),
         ty: func_ty,
@@ -149,7 +151,7 @@ fn test_specialize_min_i32() {
             meta: DefMeta::Function,
             arity: 0,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         term_ids,

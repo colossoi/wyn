@@ -4,6 +4,8 @@
 //! keeps the concrete family types and their `Family` implementations so the
 //! low-level IR does not need to know which phases the compiler defines.
 
+use crate::types;
+use crate::BindingRef;
 use polytype::Type;
 use slotmap::SlotMap;
 
@@ -36,12 +38,12 @@ impl Language for WynLanguage {
 
     fn is_materialized_aggregate(ty: &Self::Ty) -> bool {
         ty.array_variant().is_some()
-            && !crate::types::is_virtual_array(ty)
-            && !ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+            && !types::is_virtual_array(ty)
+            && !ty.array_variant().is_some_and(types::is_array_variant_view)
     }
 
     fn is_view(ty: &Self::Ty) -> bool {
-        ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+        ty.array_variant().is_some_and(types::is_array_variant_view)
     }
 
     fn product_fields(ty: &Self::Ty) -> Option<&[Self::Ty]> {
@@ -276,7 +278,7 @@ pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
             components.iter().map(soac_element_type).collect(),
         );
     }
-    crate::types::array_elem(array)
+    types::array_elem(array)
         .cloned()
         .unwrap_or_else(|| panic!("expected an array or SoA tuple, got {array:?}"))
 }
@@ -296,7 +298,7 @@ pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName>
     }
     let mut leaf = array.clone();
     for _ in 0..rank {
-        leaf = crate::types::array_elem(&leaf)
+        leaf = types::array_elem(&leaf)
             .cloned()
             .unwrap_or_else(|| panic!("SOAC input rank {rank} exceeds array type {array:?}"));
     }
@@ -409,7 +411,7 @@ impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
 }
 
 impl Family for Physical {
-    type Resource = crate::BindingRef;
+    type Resource = BindingRef;
     type Soac = SoacEffect<Self>;
 
     fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
@@ -453,8 +455,8 @@ impl WynSoacPhase for Physical {
     type SoacId = super::program::SemanticOpId;
     type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::PhysicalState;
-    type FilterState = filter::ScheduledState<crate::BindingRef>;
-    type HistState = hist::ScheduledState<crate::BindingRef>;
+    type FilterState = filter::ScheduledState<BindingRef>;
+    type HistState = hist::ScheduledState<BindingRef>;
 }
 
 fn remap_control_header(header: ControlHeader, blocks: &LookupMap<BlockId, BlockId>) -> ControlHeader {

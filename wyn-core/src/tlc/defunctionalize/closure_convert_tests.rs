@@ -2,14 +2,19 @@
 
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::tlc;
 use crate::tlc::{
     data::{Empty, ExplicitCapturesPayload, ExplicitClosurePayload},
     Def, DefMeta, Lambda, Payload, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
 };
+use crate::types;
+use crate::IdSource;
+use crate::LookupSet;
+use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
 
-fn input_ae(boxed: Box<Term<Empty, Empty>>) -> crate::tlc::ArrayExpr<Empty, Empty> {
+fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};
     let t = *boxed;
     match t.kind {
@@ -27,14 +32,14 @@ fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])
 }
 
-fn empty_program() -> crate::tlc::stage::RuntimeIndexProducersFloated {
+fn empty_program() -> tlc::stage::RuntimeIndexProducersFloated {
     Program::from_parts(
         vec![],
         SymbolTable::new(),
         TermIdSource::new(),
-        crate::tlc::context::RewriteGlobal {
+        tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     )
 }
@@ -44,14 +49,14 @@ fn empty_converted_program() -> Defunctionalized {
         vec![],
         SymbolTable::new(),
         TermIdSource::new(),
-        crate::tlc::context::PostClosureGlobal {
-            auto_storage_binding_ids: crate::IdSource::new(),
+        tlc::context::PostClosureGlobal {
+            auto_storage_binding_ids: IdSource::new(),
         },
     )
 }
 
 fn term(
-    program: &mut crate::tlc::stage::RuntimeIndexProducersFloated,
+    program: &mut tlc::stage::RuntimeIndexProducersFloated,
     kind: TermKind<Empty, Empty>,
     ty: Type<TypeName>,
 ) -> Term<Empty, Empty> {
@@ -108,7 +113,7 @@ fn def_with_simple_body_passes_verifier() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     assert!(verify_closure_converted(&program).is_ok());
 }
@@ -147,7 +152,7 @@ fn unlifted_lambda_in_body_fails_verifier() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     let err = verify_closure_converted(&program).unwrap_err();
     assert!(matches!(err, ClosureConvertError::UnliftedLambda { .. }));
@@ -156,7 +161,7 @@ fn unlifted_lambda_in_body_fails_verifier() {
 #[test]
 fn append_capture_params_extends_param_list() {
     let mut symbols = SymbolTable::new();
-    let mut ids = crate::tlc::TermIdSource::new();
+    let mut ids = tlc::TermIdSource::new();
 
     let x = symbols.alloc("x".into());
     let cap_a = symbols.alloc("a".into());
@@ -175,7 +180,7 @@ fn append_capture_params_extends_param_list() {
         }),
     };
 
-    let captures: Vec<(crate::SymbolId, Type<TypeName>)> = vec![(cap_a, unit_ty()), (cap_b, unit_ty())];
+    let captures: Vec<(SymbolId, Type<TypeName>)> = vec![(cap_a, unit_ty()), (cap_b, unit_ty())];
 
     let out = append_capture_params(lam, &captures, span(), &mut ids);
 
@@ -212,7 +217,7 @@ fn param_spine_lambdas_are_skipped() {
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
     assert!(verify_closure_converted(&program).is_ok());
 }
@@ -236,7 +241,7 @@ fn unlifted_scatter_envelope_fails_verifier() {
                     body: Box::new(scatter_body),
                     ret_ty: unit_ty(),
                 },
-                data: crate::tlc::data::ExplicitCaptures { captures: vec![] },
+                data: tlc::data::ExplicitCaptures { captures: vec![] },
             },
             inputs: vec![],
         }),
@@ -250,7 +255,7 @@ fn unlifted_scatter_envelope_fails_verifier() {
         meta: DefMeta::Function,
         arity: 0,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
 
     let err = verify_closure_converted(&program).unwrap_err();
@@ -260,7 +265,7 @@ fn unlifted_scatter_envelope_fails_verifier() {
 #[test]
 fn scatter_envelope_params_count_as_bound_symbols() {
     let mut symbols = SymbolTable::new();
-    let mut ids = crate::tlc::TermIdSource::new();
+    let mut ids = tlc::TermIdSource::new();
     let dest = symbols.alloc("dest".to_string());
     let param = symbols.alloc("p".to_string());
     let scatter = Term {
@@ -284,7 +289,7 @@ fn scatter_envelope_params_count_as_bound_symbols() {
                     )),
                     ret_ty: unit_ty(),
                 },
-                data: crate::tlc::data::ExplicitCaptures { captures: vec![] },
+                data: tlc::data::ExplicitCaptures { captures: vec![] },
             },
             inputs: vec![],
         }),
@@ -292,9 +297,9 @@ fn scatter_envelope_params_count_as_bound_symbols() {
 
     let free = compute_free_vars(
         &scatter,
-        &crate::LookupSet::new(),
-        &crate::LookupSet::new(),
-        &crate::LookupSet::new(),
+        &LookupSet::new(),
+        &LookupSet::new(),
+        &LookupSet::new(),
         &symbols,
     );
     assert!(
@@ -323,8 +328,8 @@ fn binop_ty(elem: &Type<TypeName>) -> Type<TypeName> {
 /// alongside `g` and `main`'s symbols. `op_args` chooses how the operator
 /// envelope forwards its parameters to `g` (in order → eta-reducible).
 fn reduce_with_operator(
-    op_args: impl Fn(crate::SymbolId, crate::SymbolId) -> [crate::SymbolId; 2],
-) -> (Defunctionalized, crate::SymbolId, crate::SymbolId) {
+    op_args: impl Fn(SymbolId, SymbolId) -> [SymbolId; 2],
+) -> (Defunctionalized, SymbolId, SymbolId) {
     let mut program = empty_program();
     let elem = unit_ty();
     let op_ty = binop_ty(&elem);
@@ -350,7 +355,7 @@ fn reduce_with_operator(
         meta: DefMeta::Function,
         arity: 2,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
 
     let p0 = program.symbols.alloc("p0".to_string());
@@ -367,7 +372,7 @@ fn reduce_with_operator(
         },
         elem.clone(),
     );
-    let op = crate::tlc::SoacBody {
+    let op = tlc::SoacBody {
         lam: Lambda {
             params: vec![(p0, elem.clone()), (p1, elem.clone())],
             body: Box::new(op_body),
@@ -407,7 +412,7 @@ fn reduce_with_operator(
         meta: DefMeta::Function,
         arity: 1,
         param_diets: vec![],
-        return_diet: crate::types::Diet::observing(),
+        return_diet: types::Diet::observing(),
     });
 
     let result = convert_closures(program);
@@ -417,7 +422,7 @@ fn reduce_with_operator(
 /// Peel `main`'s parameter spine and return its tail `reduce` operator body.
 fn reduce_operator_body(
     program: &Defunctionalized,
-    main: crate::SymbolId,
+    main: SymbolId,
 ) -> Term<ExplicitClosurePayload, ExplicitCapturesPayload> {
     let def = program.defs.iter().find(|d| d.name == main).expect("main def");
     let mut body = &def.body;

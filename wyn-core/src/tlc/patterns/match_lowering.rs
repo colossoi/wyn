@@ -9,7 +9,9 @@
 //! guarantees it's reachable when every prior arm fails).
 
 use crate::ast::{self, PatternKind, PatternLiteral, Span, TypeName};
+use crate::op;
 use crate::tlc::{PendingBinding, Term, TermKind, Transformer, VarRef};
+use crate::types;
 use polytype::Type;
 
 impl<'a> Transformer<'a> {
@@ -98,7 +100,7 @@ impl<'a> Transformer<'a> {
                 let lit_term = self.literal_term(lit, &scrut.ty, span);
                 let cond = self.build_binop(
                     ast::BinaryOp {
-                        op: crate::op::BinaryOperator::Equal,
+                        op: op::BinaryOperator::Equal,
                     },
                     scrut.clone(),
                     lit_term,
@@ -143,7 +145,7 @@ impl<'a> Transformer<'a> {
                 (cond, bindings)
             }
             PatternKind::Constructor(name, sub_patterns) => {
-                let variants = if let Some(variants) = crate::types::sum_variants(&scrut.ty) {
+                let variants = if let Some(variants) = types::sum_variants(&scrut.ty) {
                     variants
                 } else {
                     match &scrut.ty {
@@ -170,7 +172,7 @@ impl<'a> Transformer<'a> {
                 let tag_lit = self.mk_term(u32_ty, span, TermKind::IntLit(tag_value.to_string()));
                 let mut cond = self.build_binop(
                     ast::BinaryOp {
-                        op: crate::op::BinaryOperator::Equal,
+                        op: op::BinaryOperator::Equal,
                     },
                     tag_proj,
                     tag_lit,
@@ -228,7 +230,7 @@ impl<'a> Transformer<'a> {
         }
         self.build_binop(
             ast::BinaryOp {
-                op: crate::op::BinaryOperator::LogicalAnd,
+                op: op::BinaryOperator::LogicalAnd,
             },
             lhs,
             rhs,
@@ -256,7 +258,7 @@ impl<'a> Transformer<'a> {
         header: &ast::TypedHeader,
     ) -> Option<Vec<(String, Vec<Type<TypeName>>)>> {
         let raw = Self::raw_type(header);
-        crate::types::sum_variants(&raw)
+        types::sum_variants(&raw)
     }
 }
 

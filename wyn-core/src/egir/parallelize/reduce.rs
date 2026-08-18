@@ -3,8 +3,15 @@
 use super::kernel::cloneable_capture_inputs;
 use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
 use super::*;
+use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::types::{OperandRef, ResultBinding};
+use crate::interface;
+use crate::op;
+use crate::ssa;
+use crate::types;
+use crate::IdSource;
+use crate::ResourceAccess;
 /// Complete graph-local reduction recipe, consumed before entry mutation.
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,
@@ -38,7 +45,7 @@ pub(super) struct RoutedReductionStore {
     pub(super) value: ValueId,
     pub(super) ty: Type<TypeName>,
     accumulators: Vec<usize>,
-    pub(super) output: (ResourceId, Type<TypeName>, crate::egir::program::LogicalSize),
+    pub(super) output: (ResourceId, Type<TypeName>, egir::program::LogicalSize),
 }
 
 pub(super) struct BoundReduce {
@@ -64,8 +71,8 @@ impl ReduceCandidate {
 }
 
 fn analyze_reduction_operators(
-    entry: &crate::egir::program::PlannedEntry,
-    op: &screma::Op<crate::egir::types::Semantic>,
+    entry: &egir::program::PlannedEntry,
+    op: &screma::Op<egir::types::Semantic>,
 ) -> Option<Vec<ReductionAccumulator>> {
     op.form
         .reductions
@@ -79,7 +86,7 @@ fn analyze_reduction_operators(
             let capture_inputs = cloneable_capture_inputs(entry, &combine_captures)?;
             let component_types = reduction.operator.result_types.clone();
             let scratch_type = lambda_ops::result_type(&component_types);
-            if crate::ssa::layout::type_byte_size(&scratch_type).is_none() {
+            if ssa::layout::type_byte_size(&scratch_type).is_none() {
                 return None;
             }
             Some(ReductionAccumulator {
@@ -96,10 +103,10 @@ fn analyze_reduction_operators(
 }
 
 pub(super) fn analyze_reduction_routing(
-    entry: &crate::egir::program::PlannedEntry,
-    op: &screma::Op<crate::egir::types::Semantic>,
+    entry: &egir::program::PlannedEntry,
+    op: &screma::Op<egir::types::Semantic>,
     results: &[ResultBinding<Type<TypeName>>],
-    resources: &crate::egir::program::LogicalResourceArena,
+    resources: &egir::program::LogicalResourceArena,
 ) -> Option<ReductionRouting> {
     let field_accumulators = op
         .form
@@ -112,7 +119,7 @@ pub(super) fn analyze_reduction_routing(
     for (resource, route) in entry.resource_routes() {
         let resource = resource.0;
         let declaration = entry.resource_declarations.iter().find(|declaration| {
-            declaration.role == crate::interface::StorageRole::Output && declaration.resource.0 == resource
+            declaration.role == interface::StorageRole::Output && declaration.resource.0 == resource
         })?;
         let destination = (
             resource,
@@ -156,10 +163,10 @@ pub(super) fn analyze_reduction_routing(
 }
 
 fn analyze_reduction_accumulators(
-    entry: &crate::egir::program::PlannedEntry,
-    op: &screma::Op<crate::egir::types::Semantic>,
+    entry: &egir::program::PlannedEntry,
+    op: &screma::Op<egir::types::Semantic>,
     results: &[ResultBinding<Type<TypeName>>],
-    resources: &crate::egir::program::LogicalResourceArena,
+    resources: &egir::program::LogicalResourceArena,
 ) -> Option<Vec<ReductionAccumulator>> {
     let mut accumulators = analyze_reduction_operators(entry, op)?;
     let routing = analyze_reduction_routing(entry, op, results, resources)?;
@@ -174,9 +181,9 @@ fn analyze_reduction_accumulators(
     Some(accumulators)
 }
 pub(super) fn analyze_reduce_candidate(
-    entry: &crate::egir::program::PlannedEntry,
+    entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
-    resources: &crate::egir::program::LogicalResourceArena,
+    resources: &egir::program::LogicalResourceArena,
 ) -> error::Result<Option<ReduceCandidate>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
@@ -256,7 +263,7 @@ impl BoundReduce {
 impl KernelPlanBuilder<'_, '_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
-        mut entry: crate::egir::program::PlannedEntry,
+        mut entry: egir::program::PlannedEntry,
         bound: BoundReduce,
     ) -> error::Result<(BuiltPhase, Vec<BuiltPhase>)> {
         let BoundReduce {
@@ -344,8 +351,7 @@ impl KernelPlanBuilder<'_, '_> {
         }
         for (accumulator, (_, accumulator_value)) in accumulators.iter().zip(&accumulator_values) {
             let elem_ty = accumulator.scratch_type.clone();
-            let arr_ty =
-                crate::types::view_array_with_size(&elem_ty, Type::Variable(0), crate::types::no_buffer());
+            let arr_ty = types::view_array_with_size(&elem_ty, Type::Variable(0), types::no_buffer());
             let partials_view =
                 graph_ops::intern_resource_view(&mut entry.graph, accumulator.partial, arr_ty, None);
             graph_ops::emit_storage_store(
@@ -360,7 +366,7 @@ impl KernelPlanBuilder<'_, '_> {
             );
             entry.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(accumulator.partial),
-                role: crate::interface::StorageRole::Intermediate,
+                role: interface::StorageRole::Intermediate,
                 elem_ty: accumulator.scratch_type.clone(),
                 size: self.resources[accumulator.partial].size.clone(),
             });
@@ -375,8 +381,7 @@ impl KernelPlanBuilder<'_, '_> {
             .collect();
         entry.outputs.retain(|output| output.resource.is_none_or(|resource| !moved.contains(&resource.0)));
         entry.resource_declarations.retain(|declaration| {
-            declaration.role != crate::interface::StorageRole::Output
-                || !moved.contains(&declaration.resource.0)
+            declaration.role != interface::StorageRole::Output || !moved.contains(&declaration.resource.0)
         });
 
         // 6. Synthesize one phase 2 entry per accumulator. Dropping the phase-1
@@ -416,10 +421,10 @@ impl KernelPlanBuilder<'_, '_> {
                 return true;
             }
             match access.access {
-                crate::ResourceAccess::Read => true,
-                crate::ResourceAccess::Write => false,
-                crate::ResourceAccess::ReadWrite => {
-                    access.access = crate::ResourceAccess::Read;
+                ResourceAccess::Read => true,
+                ResourceAccess::Write => false,
+                ResourceAccess::ReadWrite => {
+                    access.access = ResourceAccess::Read;
                     true
                 }
             }
@@ -427,7 +432,7 @@ impl KernelPlanBuilder<'_, '_> {
         phase1_resources.extend(
             accumulators.iter().map(|accumulator| SegResourceAccess::<ResourceId> {
                 resource: accumulator.partial,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             }),
         );
         phase1_resources.sort_by_key(|resource| resource.resource);
@@ -445,7 +450,7 @@ struct ReduceCombineSpec<'a> {
     operator: &'a Func<Semantic>,
     component_types: &'a [Type<TypeName>],
     elem_ty: Type<TypeName>,
-    source_graph: &'a crate::egir::types::EGraph,
+    source_graph: &'a egir::types::EGraph,
     operator_captures: &'a [OperandRef],
     capture_inputs: &'a [SemanticResourceDecl],
     neutrals: &'a [ValueId],
@@ -492,7 +497,7 @@ impl ReduceCombineSpec<'_> {
 
     fn emit_tree(
         &self,
-        b: &mut crate::egir::builder::EntryBuilder,
+        b: &mut egir::builder::EntryBuilder,
         init_nid: ValueId,
         operator_captures: &[OperandRef],
     ) -> Result<(), String> {
@@ -505,11 +510,11 @@ impl ReduceCombineSpec<'_> {
         let w = width;
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-        let view_arr_ty = crate::types::view_array_with_size(
+        let view_arr_ty = types::view_array_with_size(
             &elem_ty,
             Type::Variable(0),
             // Resource stamped by `intern_resource_view`.
-            crate::types::no_buffer(),
+            types::no_buffer(),
         );
 
         // ---- entry block: lid, partials view + length, shared view, result view ----
@@ -539,7 +544,7 @@ impl ReduceCombineSpec<'_> {
         let w_minus_1 = graph_ops::intern_u32(graph, w - 1, None);
         let len_plus = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Add,
+            op::BinaryOperator::Add,
             len,
             w_minus_1,
             u32_ty.clone(),
@@ -547,7 +552,7 @@ impl ReduceCombineSpec<'_> {
         );
         let chunk = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Divide,
+            op::BinaryOperator::Divide,
             len_plus,
             w_nid,
             u32_ty.clone(),
@@ -555,20 +560,14 @@ impl ReduceCombineSpec<'_> {
         );
         let start = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Multiply,
+            op::BinaryOperator::Multiply,
             lid,
             chunk,
             u32_ty.clone(),
             None,
         );
-        let start_plus = graph_ops::intern_binop(
-            graph,
-            crate::op::BinaryOperator::Add,
-            start,
-            chunk,
-            u32_ty.clone(),
-            None,
-        );
+        let start_plus =
+            graph_ops::intern_binop(graph, op::BinaryOperator::Add, start, chunk, u32_ty.clone(), None);
         let u32_min = catalog()
             .specialize_numeric(catalog().known().min, &TypeName::UInt(32))
             .ok_or_else(|| "u32 min specialization is missing from the catalog".to_string())?;
@@ -600,14 +599,8 @@ impl ReduceCombineSpec<'_> {
         };
 
         // grid_header: i < end ? grid_body : grid_after(acc)
-        let grid_cond = graph_ops::intern_binop(
-            graph,
-            crate::op::BinaryOperator::Less,
-            i_in,
-            end,
-            bool_ty.clone(),
-            None,
-        );
+        let grid_cond =
+            graph_ops::intern_binop(graph, op::BinaryOperator::Less, i_in, end, bool_ty.clone(), None);
         graph.skeleton.blocks[grid_header].term = SkeletonTerminator::CondBranch {
             cond: grid_cond,
             then_target: grid_body,
@@ -634,7 +627,7 @@ impl ReduceCombineSpec<'_> {
         let one_u32 = graph_ops::intern_u32(graph, 1, None);
         let i_next = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Add,
+            op::BinaryOperator::Add,
             i_in,
             one_u32,
             u32_ty.clone(),
@@ -668,7 +661,7 @@ impl ReduceCombineSpec<'_> {
         let stride_in = graph.add_block_param(tree_header, u32_ty.clone());
         let stride_cond = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Less,
+            op::BinaryOperator::Less,
             stride_in,
             w_nid,
             bool_ty.clone(),
@@ -690,7 +683,7 @@ impl ReduceCombineSpec<'_> {
         let two = graph_ops::intern_u32(graph, 2, None);
         let pair_width = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Multiply,
+            op::BinaryOperator::Multiply,
             stride_in,
             two,
             u32_ty.clone(),
@@ -698,7 +691,7 @@ impl ReduceCombineSpec<'_> {
         );
         let lane_in_pair = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Remainder,
+            op::BinaryOperator::Remainder,
             lid,
             pair_width,
             u32_ty.clone(),
@@ -706,7 +699,7 @@ impl ReduceCombineSpec<'_> {
         );
         let active = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Equal,
+            op::BinaryOperator::Equal,
             lane_in_pair,
             zero_u32,
             bool_ty.clone(),
@@ -727,7 +720,7 @@ impl ReduceCombineSpec<'_> {
         let a = graph_ops::emit_view_load(graph, tree_then, shared_view, lid, elem_ty.clone(), eff, None);
         let lid_plus = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Add,
+            op::BinaryOperator::Add,
             lid,
             stride_in,
             u32_ty.clone(),
@@ -768,7 +761,7 @@ impl ReduceCombineSpec<'_> {
         graph_ops::emit_workgroup_barrier(graph, tree_cont, eff);
         let stride_next = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Multiply,
+            op::BinaryOperator::Multiply,
             stride_in,
             two,
             u32_ty.clone(),
@@ -782,7 +775,7 @@ impl ReduceCombineSpec<'_> {
         // tree_after: lid == 0 ? write_blk : end_blk   (selection)
         let is_zero = graph_ops::intern_binop(
             graph,
-            crate::op::BinaryOperator::Equal,
+            op::BinaryOperator::Equal,
             lid,
             zero_u32,
             bool_ty.clone(),
@@ -817,9 +810,7 @@ impl ReduceCombineSpec<'_> {
             .zip(&combined_components)
             .zip(self.component_types)
             .flat_map(|((old, combined), ty)| {
-                let abi = crate::egir::types::by_value_function_result::<crate::egir::types::WynLanguage>(
-                    ty.clone(),
-                );
+                let abi = egir::types::by_value_function_result::<egir::types::WynLanguage>(ty.clone());
                 let new = graph_ops::bind_by_value_result(graph, &abi, *combined);
                 old.values().into_iter().zip(new.values())
             })
@@ -866,19 +857,19 @@ impl ReduceCombineSpec<'_> {
 impl ReduceCombineSpec<'_> {
     fn build(
         self,
-        identities: &mut crate::egir::program::ProgramIdentities,
-        semantic_ids: &mut crate::egir::program::SemanticOpIdSource,
-        effect_ids: &mut crate::IdSource<EffectToken>,
+        identities: &mut egir::program::ProgramIdentities,
+        semantic_ids: &mut egir::program::SemanticOpIdSource,
+        effect_ids: &mut IdSource<EffectToken>,
     ) -> Result<BuiltPhase, String> {
         use crate::egir::builder::EntryBuilder;
         let mut resources = vec![SegResourceAccess::<ResourceId> {
             resource: self.partials,
-            access: crate::ResourceAccess::Read,
+            access: ResourceAccess::Read,
         }];
         resources.extend(
             self.capture_inputs.iter().map(|declaration| SegResourceAccess::<ResourceId> {
                 resource: declaration.resource.0,
-                access: crate::ResourceAccess::Read,
+                access: ResourceAccess::Read,
             }),
         );
         let output_declarations = self.output_stores.iter().map(|store| store.output.clone()).fold(
@@ -893,10 +884,10 @@ impl ReduceCombineSpec<'_> {
         resources.extend(
             output_declarations.iter().map(|(resource, _, _)| SegResourceAccess::<ResourceId> {
                 resource: *resource,
-                access: crate::ResourceAccess::Write,
+                access: ResourceAccess::Write,
             }),
         );
-        resources = crate::egir::ir::SegResourceAccess::merge(&resources, &[]);
+        resources = egir::ir::SegResourceAccess::merge(&resources, &[]);
         let mut b = EntryBuilder::new_compute(
             self.name.clone(),
             (self.width, 1, 1),

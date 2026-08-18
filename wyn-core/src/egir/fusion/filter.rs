@@ -6,6 +6,9 @@
 //! associative reduction operators remain unchanged.  `length` is represented
 //! by one additional sum reduction over `1`/`0` values.
 
+use crate::ast;
+use crate::egir;
+use crate::types;
 use std::collections::HashSet;
 
 use polytype::Type;
@@ -292,7 +295,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
 fn build_count_reduction(
     identities: &mut ProgramIdentities,
     scope: &str,
-    span: crate::ast::Span,
+    span: ast::Span,
     count_ty: Type<TypeName>,
 ) -> (screma::Reduce, Func<Semantic>) {
     let mut graph = EGraph::new();
@@ -336,7 +339,7 @@ fn build_masked_pre(
     inner: &Segmented,
     identities: &mut ProgramIdentities,
     scope: &str,
-    span: crate::ast::Span,
+    span: ast::Span,
     filter: &FilterParts,
     consumer: Option<&screma::ScremaForm>,
     count_ty: Option<&Type<TypeName>>,
@@ -351,12 +354,12 @@ fn build_masked_pre(
                 .reductions
                 .iter()
                 .flat_map(|reduction| reduction.neutral.iter().copied())
-                .map(crate::egir::types::OperandRef::Value),
+                .map(egir::types::OperandRef::Value),
         );
     }
     let capture_types = capture_types(outer_types, captures.iter());
     let input_types =
-        filter.body.inputs.iter().map(crate::egir::types::SoacInputType::element).collect::<Vec<_>>();
+        filter.body.inputs.iter().map(egir::types::SoacInputType::element).collect::<Vec<_>>();
     let mut result_types = consumer.map(|consumer| consumer.pre.result_types.clone()).unwrap_or_default();
     if let Some(count_ty) = count_ty {
         result_types.push(count_ty.clone());
@@ -521,7 +524,7 @@ fn rewrite_with_consumer(
             if let Some((count, _, _)) = &count_project {
                 op.form.reductions.push(count.clone());
                 op.result_state.push(screma::ResultState {
-                    ownership: crate::types::SoacOwnership::Fresh,
+                    ownership: types::SoacOwnership::Fresh,
                 });
             }
             let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state_mut() else {
@@ -555,7 +558,7 @@ fn rewrite_with_consumer(
             }
             let consumer_snapshot =
                 graph.skeleton.blocks[candidate.block].side_effects[consumer_index].clone();
-            let reads = crate::egir::semantic_graph::read_resources(graph, &consumer_snapshot);
+            let reads = egir::semantic_graph::read_resources(graph, &consumer_snapshot);
             if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
                 &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
             {
@@ -616,7 +619,7 @@ fn rewrite_count_only(
                             post: screma::Lambda::identity(vec![]),
                         },
                         result_state: vec![screma::ResultState {
-                            ownership: crate::types::SoacOwnership::Fresh,
+                            ownership: types::SoacOwnership::Fresh,
                         }],
                         state: screma::SemanticState::Segmented {
                             space: filter.space.clone(),
@@ -631,7 +634,7 @@ fn rewrite_count_only(
             }
             let effect_snapshot =
                 graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].clone();
-            let reads = crate::egir::semantic_graph::read_resources(graph, &effect_snapshot);
+            let reads = egir::semantic_graph::read_resources(graph, &effect_snapshot);
             if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
                 &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
             {
@@ -655,7 +658,7 @@ fn rewrite_count_only(
 }
 
 fn finish_entry_metadata(
-    entry: &mut crate::egir::program::Entry<Semantic>,
+    entry: &mut egir::program::Entry<Semantic>,
     old_values: &[ValueId],
     patch: EntryMetadataPatch,
 ) {

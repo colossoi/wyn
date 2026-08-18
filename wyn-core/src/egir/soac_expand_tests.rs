@@ -5,6 +5,9 @@
 
 use crate::ast::Span;
 use crate::ast::TypeName;
+use crate::builtins;
+use crate::compile_thru_tlc;
+use crate::egir;
 use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::ir::PlaceOp;
 use crate::egir::program::{Func, ProgramIdentities, SemanticOpId};
@@ -14,22 +17,30 @@ use crate::egir::types::{
     OperandRef, Physical, PureOp, SideEffectKind, SkeletonTerminator, Soac, SoacEffect, SoacInputType,
     ValueId, ValueKind, ViewId, WynLanguage,
 };
+use crate::flow;
+use crate::op;
+use crate::tlc;
+use crate::to_egraph;
+use crate::types;
 use crate::BindingRef;
+use crate::FunctionId;
+use crate::IdSource;
+use crate::LoweringProfile;
 use polytype::Type;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
 /// returning the EGraph for the (single) entry point so tests can
 /// introspect node structure.
 fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
-    let program = crate::compile_thru_tlc(input).expect("compile_thru_tlc");
-    let program = crate::tlc::infer_input_slice_bounds(program);
-    let program = crate::to_egraph(program).expect("to_egraph");
-    let program = crate::egir::realize_outputs(program).expect("realize_outputs");
-    let program = crate::egir::reify_soacs(program);
-    let program = crate::egir::optimize_semantics(program);
-    let program = crate::egir::plan_logical_resources(program).expect("allocate semantic EGIR");
-    let program = crate::egir::plan(program, crate::LoweringProfile::PORTABLE).expect("terminal schedule");
-    let program = crate::egir::expand_soacs(program).expect("physical SOAC expansion");
+    let program = compile_thru_tlc(input).expect("compile_thru_tlc");
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program).expect("to_egraph");
+    let program = egir::realize_outputs(program).expect("realize_outputs");
+    let program = egir::reify_soacs(program);
+    let program = egir::optimize_semantics(program);
+    let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
+    let program = egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule");
+    let program = egir::expand_soacs(program).expect("physical SOAC expansion");
     let inner = &program;
     inner
         .entry_points
@@ -41,8 +52,8 @@ fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.
-fn array_with_nodes<P: Family>(graph: &crate::egir::types::EGraph<P>) -> Vec<crate::egir::types::ValueId> {
-    let inplace_id = crate::builtins::catalog().known().array_with_in_place;
+fn array_with_nodes<P: Family>(graph: &egir::types::EGraph<P>) -> Vec<egir::types::ValueId> {
+    let inplace_id = builtins::catalog().known().array_with_in_place;
     graph
         .nodes
         .iter()
@@ -63,13 +74,13 @@ fn plain_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
 
 fn physical_callable(
-    region: crate::FunctionId,
+    region: FunctionId,
     name: &str,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
@@ -132,7 +143,7 @@ fn scatter_handleability_checks_every_input() {
             ],
             form: hist::HistForm {
                 bucket: screma::Lambda::region(
-                    crate::egir::types::SegBody {
+                    egir::types::SegBody {
                         region: bucket_region,
                         captures: vec![],
                     },
@@ -186,12 +197,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     }
     let destination_values = (0..3)
         .map(|binding| {
-            graph_ops::intern_storage_view(
-                &mut graph,
-                crate::BindingRef::new(2, binding),
-                i32_ty.clone(),
-                None,
-            )
+            graph_ops::intern_storage_view(&mut graph, BindingRef::new(2, binding), i32_ty.clone(), None)
         })
         .collect::<Vec<_>>();
     let destinations = destination_values.into_iter().map(|view| graph.view_id(view)).collect::<Vec<_>>();
@@ -209,7 +215,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                     destinations: destinations[..2].to_vec(),
                     update: hist::Update::Reduce {
                         operator: screma::Lambda::region(
-                            crate::egir::types::SegBody {
+                            egir::types::SegBody {
                                 region: reducer_region,
                                 captures: vec![],
                             },
@@ -232,7 +238,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
         },
         state: hist::ScheduledState::Serial,
     };
-    let mut effect_ids = crate::IdSource::new();
+    let mut effect_ids = IdSource::new();
     let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
@@ -289,7 +295,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                 ValueKind::Pure {
                     op: PureOp::BinOp(op),
                     ..
-                } if *op == crate::op::BinaryOperator::Multiply
+                } if *op == op::BinaryOperator::Multiply
             )
         }),
         "rank-2 indices must be flattened row-major"
@@ -323,7 +329,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         None,
     );
     let destination =
-        graph_ops::intern_storage_view(&mut graph, crate::BindingRef::new(2, 0), i32_ty.clone(), None);
+        graph_ops::intern_storage_view(&mut graph, BindingRef::new(2, 0), i32_ty.clone(), None);
     let histogram = hist::Op::<Physical> {
         inputs: vec![
             SoacInputType::array(array_ty.clone()),
@@ -343,7 +349,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
         },
         state: hist::ScheduledState::Serial,
     };
-    let mut effect_ids = crate::IdSource::new();
+    let mut effect_ids = IdSource::new();
     let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
@@ -366,17 +372,15 @@ fn serial_hist_ignores_out_of_bounds_indices() {
                 ValueKind::Pure {
                     op: PureOp::BinOp(op),
                     ..
-                } if *op == crate::op::BinaryOperator::GreaterEqual
+                } if *op == op::BinaryOperator::GreaterEqual
             )
         }),
         "serial Hist must reject negative bucket indices"
     );
     assert!(
         graph.skeleton.blocks.iter().any(|(_, block)| {
-            matches!(
-                block.control_header,
-                Some(crate::flow::ControlHeader::Selection { .. })
-            ) && matches!(block.term, SkeletonTerminator::CondBranch { .. })
+            matches!(block.control_header, Some(flow::ControlHeader::Selection { .. }))
+                && matches!(block.term, SkeletonTerminator::CondBranch { .. })
         }),
         "serial Hist must branch around the load/store for invalid indices"
     );
@@ -409,12 +413,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     }
     let destination_values = (0..2)
         .map(|binding| {
-            graph_ops::intern_storage_view(
-                &mut graph,
-                crate::BindingRef::new(2, binding),
-                i32_ty.clone(),
-                None,
-            )
+            graph_ops::intern_storage_view(&mut graph, BindingRef::new(2, binding), i32_ty.clone(), None)
         })
         .collect::<Vec<_>>();
     let destinations = destination_values.into_iter().map(|view| graph.view_id(view)).collect::<Vec<_>>();
@@ -433,7 +432,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     destinations: vec![destinations[0]],
                     update: hist::Update::Reduce {
                         operator: screma::Lambda::region(
-                            crate::egir::types::SegBody {
+                            egir::types::SegBody {
                                 region: first_reducer,
                                 captures: vec![],
                             },
@@ -450,7 +449,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     destinations: vec![destinations[1]],
                     update: hist::Update::Reduce {
                         operator: screma::Lambda::region(
-                            crate::egir::types::SegBody {
+                            egir::types::SegBody {
                                 region: second_reducer,
                                 captures: vec![],
                             },
@@ -470,7 +469,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             ],
         },
     };
-    let mut effect_ids = crate::IdSource::new();
+    let mut effect_ids = IdSource::new();
     let result = graph_ops::alloc_by_value_effect_result(&mut graph, bool_ty);
     graph_ops::emit_pending_soac(
         &mut graph,
@@ -521,7 +520,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             ValueKind::Pure {
                 op: PureOp::BinOp(op),
                 ..
-            } if *op == crate::op::BinaryOperator::GreaterEqual
+            } if *op == op::BinaryOperator::GreaterEqual
         )
     }));
     assert!(graph.nodes.iter().any(|(_, node)| {
@@ -530,7 +529,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
             ValueKind::Pure {
                 op: PureOp::BinOp(op),
                 ..
-            } if *op == crate::op::BinaryOperator::Multiply
+            } if *op == op::BinaryOperator::Multiply
         )
     }));
 }

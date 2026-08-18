@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ast;
+use crate::lexer;
 use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> ast::Span {
@@ -41,7 +42,7 @@ fn wildcard_is_irrefutable() {
 #[test]
 fn literal_is_refutable() {
     let p = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString("0".to_string()))),
+        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
         0,
     );
     assert!(is_irrefutable(&p, &i32_ty()).is_err());
@@ -142,13 +143,13 @@ fn nested_single_variant_ctor_with_wild_payload_is_irrefutable() {
 #[test]
 fn typed_wrapping_refutable_literal_is_refutable() {
     let lit = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString("0".to_string()))),
+        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
         1,
     );
     let typed = pat(
         ast::PatternKind::Typed(
             Box::new(lit),
-            crate::ast::Type::Constructed(crate::ast::TypeName::Int(32), vec![]),
+            ast::Type::Constructed(ast::TypeName::Int(32), vec![]),
         ),
         0,
     );
@@ -166,7 +167,7 @@ fn attributed_wrapping_irrefutable_name_is_irrefutable() {
 fn tuple_with_refutable_first_element_is_refutable() {
     let ty = tuple(vec![i32_ty(), bool_ty()]);
     let lit = pat(
-        ast::PatternKind::Literal(ast::PatternLiteral::Int(crate::lexer::IntString("0".to_string()))),
+        ast::PatternKind::Literal(ast::PatternLiteral::Int(lexer::IntString("0".to_string()))),
         1,
     );
     let p = pat(

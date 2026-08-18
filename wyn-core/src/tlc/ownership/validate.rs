@@ -6,7 +6,9 @@
 use super::analysis::{alias_target_of, analyze, owner_display_name, AnalysisState, Origin, OwnerId};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
+use crate::error;
 use crate::error::CompilerError;
+use crate::tlc;
 use crate::tlc::data::Empty;
 use crate::tlc::stage::BuffersPinned;
 use crate::tlc::{
@@ -18,13 +20,10 @@ use polytype::Type;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OwnershipValidatedTag {}
-pub type OwnershipValidated = crate::tlc::Program<
-    OwnershipValidatedTag,
-    crate::tlc::family::Polymorphic,
-    crate::tlc::context::RewriteGlobal,
->;
+pub type OwnershipValidated =
+    tlc::Program<OwnershipValidatedTag, tlc::family::Polymorphic, tlc::context::RewriteGlobal>;
 
-pub fn validate_ownership(program: BuffersPinned) -> crate::error::Result<OwnershipValidated> {
+pub fn validate_ownership(program: BuffersPinned) -> error::Result<OwnershipValidated> {
     check(&program)?;
     Ok(program.retag())
 }
@@ -32,7 +31,7 @@ pub fn validate_ownership(program: BuffersPinned) -> crate::error::Result<Owners
 /// Validate the linear pipeline handles before stage extraction consumes their
 /// orchestration calls. Ordinary buffer ownership is checked again after entry
 /// buffers have been pinned.
-pub(crate) fn check_unextracted(program: &crate::tlc::run::Transformed) -> crate::error::Result<()> {
+pub(crate) fn check_unextracted(program: &tlc::run::Transformed) -> error::Result<()> {
     let model = analyze(program);
     if let Some(err) = check_shade_target_capture(program, &model) {
         return Err(err);
@@ -50,7 +49,7 @@ pub(crate) fn check_unextracted(program: &crate::tlc::run::Transformed) -> crate
 /// any owner is consumed at a program point where a successor still
 /// reads it. Used by the `wyn check` subcommand and indirectly by
 /// `promote_inplace`.
-pub fn check(program: &BuffersPinned) -> crate::error::Result<()> {
+pub fn check(program: &BuffersPinned) -> error::Result<()> {
     let model = analyze(program);
     if let Some(err) = check_use_after_move(program, &model) {
         return Err(err);
@@ -153,7 +152,7 @@ fn check_shade_target_capture_in_term<Tag, F: Family, GlobalContext>(
     error
 }
 
-fn term_tree_reads_owner<C: crate::tlc::Payload, S: crate::tlc::Payload>(
+fn term_tree_reads_owner<C: tlc::Payload, S: tlc::Payload>(
     term: &Term<C, S>,
     owner: OwnerId,
     model: &AnalysisState,

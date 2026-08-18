@@ -2,11 +2,13 @@
 //! AST→TLC lowering of irrefutable patterns through small source
 //! programs and inspects the resulting Term structure.
 
+use crate::ast_type_holes;
+use crate::compile_thru_frontend;
 use crate::tlc::{self, Term, TermKind};
 
 fn compile_to_tlc_raw(source: &str) -> tlc::stage::Transformed {
-    let type_checked = crate::compile_thru_frontend(source).expect("type_check");
-    let program = crate::ast_type_holes::reject_type_holes(type_checked).expect("type holes");
+    let type_checked = compile_thru_frontend(source).expect("type_check");
+    let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     tlc::lower_from_ast(program).expect("lower_from_ast")
 }
 

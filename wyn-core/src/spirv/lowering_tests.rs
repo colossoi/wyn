@@ -1,9 +1,11 @@
+use crate::compile_thru_spirv;
+use crate::err_spirv;
 use crate::error::Result;
 
 /// Compile a source string to SPIR-V words. Thin wrapper around the
 /// canonical `compile_thru_spirv` so test failures lift through `.unwrap()`.
 fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
-    crate::compile_thru_spirv(source).map(|l| l.spirv).map_err(|e| crate::err_spirv!("{}", e))
+    compile_thru_spirv(source).map(|l| l.spirv).map_err(|e| err_spirv!("{}", e))
 }
 
 #[test]

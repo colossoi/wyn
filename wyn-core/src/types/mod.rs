@@ -11,7 +11,10 @@ pub mod run;
 mod stage_context;
 
 use crate::ast::Span;
+use crate::BindingRef;
+use crate::FunctionId;
 use crate::LookupMap;
+use crate::ResourceId;
 use std::hash::{Hash, Hasher};
 
 /// Map a swizzle letter to its component index. Supports both the
@@ -76,7 +79,7 @@ pub type TypeScheme = polytype::TypeScheme<TypeName>;
 /// A bodyless external callable declaration shared by compiler IRs.
 #[derive(Clone, Debug)]
 pub struct ExternDecl<Ty = Type> {
-    pub id: crate::FunctionId,
+    pub id: FunctionId,
     /// Wyn-visible diagnostic/emitted name; calls use `id`.
     pub name: String,
     pub span: Span,
@@ -305,10 +308,10 @@ pub enum TypeName {
     /// Introduced at EGIR lowering (where the binding is known), so the backend
     /// reads a view's descriptor off its type instead of a per-value side-map.
     /// Never appears in source/TLC types — views are nullary (`View[]`) there.
-    Buffer(crate::BindingRef),
+    Buffer(BindingRef),
     /// Target-independent storage identity used by allocated semantic EGIR.
     /// Physicalization rewrites this to `Buffer` before SSA elaboration.
-    Resource(crate::ResourceId),
+    Resource(ResourceId),
     /// The buffer slot's value for a non-view array (composite/virtual/bounded):
     /// "this array is not buffer-backed, so it has no descriptor binding." A
     /// concrete tag (not a variable) so non-view arrays carry no free type var.
@@ -946,7 +949,7 @@ pub fn matrix_type_constructors() -> LookupMap<String, Type> {
 }
 
 /// A concrete buffer-buffer tag `Buffer(set, binding)` for a View's buffer slot.
-pub fn buffer_tag(binding: crate::BindingRef) -> Type {
+pub fn buffer_tag(binding: BindingRef) -> Type {
     Type::Constructed(TypeName::Buffer(binding), vec![])
 }
 
@@ -1007,7 +1010,7 @@ pub fn view_array_with_size(elem: &Type, size: Type, region: Type) -> Type {
 
 /// Read the concrete buffer off an array type's buffer slot, if it has
 /// a concrete `Region` (not `NoBuffer` and not a variable).
-pub fn array_view_buffer(ty: &Type) -> Option<crate::BindingRef> {
+pub fn array_view_buffer(ty: &Type) -> Option<BindingRef> {
     match ty.array_buffer()? {
         Type::Constructed(TypeName::Buffer(b), _) => Some(*b),
         _ => None,
@@ -1017,7 +1020,7 @@ pub fn array_view_buffer(ty: &Type) -> Option<crate::BindingRef> {
 /// Concrete descriptor carried by a monomorphized storage-image type.
 /// Storage images have no runtime payload; this region is their complete
 /// identity during EGIR and backend lowering.
-pub fn storage_image_buffer(ty: &Type) -> Option<crate::BindingRef> {
+pub fn storage_image_buffer(ty: &Type) -> Option<BindingRef> {
     match ty {
         Type::Constructed(TypeName::StorageTexture, args) => match args.first() {
             Some(Type::Constructed(TypeName::Buffer(binding), _)) => Some(*binding),

@@ -30,7 +30,7 @@ pub type SkeletonOptimized = super::program::Program<
     SkeletonOptimizedTag,
     super::ir::ProgramFamily<
         super::types::Physical,
-        crate::interface::StorageBindingDecl,
+        interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
         super::program::CoreProgramData,
     >,
@@ -38,6 +38,7 @@ pub type SkeletonOptimized = super::program::Program<
 >;
 
 use crate::flow::BlockId;
+use crate::interface;
 use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;

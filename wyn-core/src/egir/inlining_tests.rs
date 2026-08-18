@@ -1,4 +1,6 @@
 use super::*;
+use crate::op;
+use crate::FunctionId;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
@@ -27,7 +29,7 @@ fn semantic_params(
 
 fn add_call(
     graph: &mut EGraph<Semantic>,
-    callee: crate::FunctionId,
+    callee: FunctionId,
     params: &[FuncParam<SemanticResourceRef, Type<TypeName>>],
     result_ty: Type<TypeName>,
     arguments: impl IntoIterator<Item = ValueId>,
@@ -50,18 +52,18 @@ fn add_call(
 #[test]
 fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ty = u32_ty();
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let x = callee_graph.add_test_value_parameter(0, ty.clone());
     let invariant = callee_graph.add_test_value_parameter(1, ty.clone());
     let square = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![invariant, invariant],
         ty.clone(),
         None,
     );
     let result = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![x, square],
         ty.clone(),
         None,
@@ -92,13 +94,13 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let ValueKind::Pure { op, operands } = &caller.nodes[inlined].kind else {
         panic!("inlined root is not pure")
     };
-    assert!(matches!(op, PureOp::BinOp(crate::op::BinaryOperator::Add)));
+    assert!(matches!(op, PureOp::BinOp(op::BinaryOperator::Add)));
     assert!(operands.contains(&actual_x));
     let cloned_square = operands.iter().copied().find(|operand| *operand != actual_x).unwrap();
     assert!(matches!(
         &caller.nodes[cloned_square].kind,
         ValueKind::Pure {
-            op: PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+            op: PureOp::BinOp(op::BinaryOperator::Multiply),
             operands
         } if operands.as_slice() == [actual_invariant, actual_invariant]
     ));
@@ -109,7 +111,7 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
 fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     let ty = u32_ty();
     let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let left = callee_graph.add_test_value_parameter(0, ty.clone());
     let right = callee_graph.add_test_value_parameter(1, ty.clone());
@@ -148,7 +150,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
 fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
     let ty = u32_ty();
     let pair_ty = Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]);
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let left = callee_graph.add_test_value_parameter(0, ty.clone());
     let right = callee_graph.add_test_value_parameter(1, ty.clone());
@@ -189,7 +191,7 @@ fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
 fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let region = crate::FunctionId::from_index(0);
+    let region = FunctionId::from_index(0);
     let mut callee_graph = EGraph::<Semantic>::new();
     let value = callee_graph.add_test_value_parameter(0, ty.clone());
     let choose_left = callee_graph.add_test_value_parameter(1, bool_ty.clone());
@@ -208,13 +210,13 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let one = callee_graph.intern_constant(ConstantValue::U32(1), ty.clone());
     let two = callee_graph.intern_constant(ConstantValue::U32(2), ty.clone());
     let left_value = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![value, one],
         ty.clone(),
         None,
     );
     let right_value = callee_graph.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Add),
+        PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![value, two],
         ty.clone(),
         None,
@@ -251,7 +253,7 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
         add_call(&mut caller, region, &params, ty.clone(), [actual, condition]).single_value().unwrap();
     let three = caller.intern_constant(ConstantValue::U32(3), ty.clone());
     let final_value = caller.intern_pure(
-        PureOp::BinOp(crate::op::BinaryOperator::Multiply),
+        PureOp::BinOp(op::BinaryOperator::Multiply),
         smallvec![call, three],
         ty,
         None,

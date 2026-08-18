@@ -4,6 +4,8 @@
 //! lane-local evaluation with a singleton launch plus a scalar handoff; they
 //! are not the e-graph extraction weights.
 
+use crate::builtins;
+use crate::FunctionId;
 use std::collections::{HashMap, HashSet};
 
 use super::super::graph_ops;
@@ -148,8 +150,8 @@ fn effect_cost(
     program: &ResourcesAllocated,
     graph: &EGraph,
     effect: &SideEffect,
-    summaries: &mut HashMap<crate::FunctionId, u64>,
-    visiting: &mut HashSet<crate::FunctionId>,
+    summaries: &mut HashMap<FunctionId, u64>,
+    visiting: &mut HashSet<FunctionId>,
 ) -> Option<u64> {
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(_)))
@@ -217,7 +219,7 @@ fn operation_cost(
                 known.image_load,
             ]
             .contains(id)
-                || crate::builtins::by_id(*id).raw.purity != Purity::Pure
+                || builtins::by_id(*id).raw.purity != Purity::Pure
             {
                 None
             } else {
@@ -229,9 +231,9 @@ fn operation_cost(
 
 fn function_cost(
     program: &ResourcesAllocated,
-    callee: &crate::FunctionId,
-    summaries: &mut HashMap<crate::FunctionId, u64>,
-    visiting: &mut HashSet<crate::FunctionId>,
+    callee: &FunctionId,
+    summaries: &mut HashMap<FunctionId, u64>,
+    visiting: &mut HashSet<FunctionId>,
 ) -> Option<u64> {
     if let Some(cost) = summaries.get(callee) {
         return Some(*cost);
@@ -259,8 +261,8 @@ fn graph_block_costs(
     program: &ResourcesAllocated,
     graph: &EGraph,
     extra_roots: &HashMap<BlockId, Vec<ValueId>>,
-    summaries: &mut HashMap<crate::FunctionId, u64>,
-    visiting: &mut HashSet<crate::FunctionId>,
+    summaries: &mut HashMap<FunctionId, u64>,
+    visiting: &mut HashSet<FunctionId>,
 ) -> Option<HashMap<BlockId, u64>> {
     graph
         .skeleton

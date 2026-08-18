@@ -1,12 +1,16 @@
 use super::float_runtime_index_nested_producers;
 use crate::ast::{Span, TypeName};
+use crate::test_pipeline;
 use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
     VarRef,
 };
+use crate::types;
+use crate::IdSource;
+use crate::SymbolTable;
 use polytype::Type;
 
-fn input_ae(boxed: Box<crate::tlc::Term>) -> crate::tlc::ArrayExpr {
+fn input_ae(boxed: Box<tlc::Term>) -> tlc::ArrayExpr {
     use crate::tlc::{ArrayExpr, TermKind};
     let t = *boxed;
     match t.kind {
@@ -125,7 +129,7 @@ fn runtime_array_ty(elem: Type<TypeName>) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Variable(0),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
@@ -137,7 +141,7 @@ fn static_array_ty(elem: Type<TypeName>, n: usize) -> Type<TypeName> {
             elem,
             Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
             Type::Constructed(TypeName::Size(n), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }
@@ -168,7 +172,7 @@ fn range_expr(n: usize, ty: Type<TypeName>, ids: &mut TermIdSource) -> Term {
 /// pass under test — so the inlined runtime-indexed producer is still present
 /// for `run` to float.
 fn prepared(source: &str) -> tlc::stage::SoacsAnfNormalized {
-    crate::test_pipeline::compile_thru_static_index(source)
+    test_pipeline::compile_thru_static_index(source)
 }
 
 fn entry_body(program: &tlc::stage::RuntimeIndexProducersFloated) -> &Term {
@@ -242,7 +246,7 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 
 #[test]
 fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() {
-    let mut symbols = crate::SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let mut ids = TermIdSource::new();
 
     let main = symbols.alloc("main".to_string());
@@ -268,7 +272,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
                 static_array_ty(i32_ty(), 8),
                 &mut ids,
             )))],
-            destination: crate::types::SoacOwnership::Fresh,
+            destination: types::SoacOwnership::Fresh,
         }),
         runtime_array_ty(i32_ty()),
         &mut ids,
@@ -331,13 +335,13 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
             meta: DefMeta::Function,
             arity: 0,
             param_diets: vec![],
-            return_diet: crate::types::Diet::observing(),
+            return_diet: types::Diet::observing(),
         }],
         symbols,
         ids,
         tlc::context::RewriteGlobal {
             known_defs: Default::default(),
-            auto_storage_binding_ids: crate::IdSource::new(),
+            auto_storage_binding_ids: IdSource::new(),
         },
     );
 

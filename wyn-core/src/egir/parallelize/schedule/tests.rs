@@ -1,11 +1,13 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use crate::egir;
 use crate::egir::builder::EntryBuilder;
+use crate::IdSource;
 
-fn body(name: &str, identities: &mut crate::egir::program::ProgramIdentities) -> PlannedEntry {
-    let mut semantic_ids = crate::egir::program::SemanticOpIdSource::default();
-    let mut effect_ids = crate::IdSource::new();
+fn body(name: &str, identities: &mut egir::program::ProgramIdentities) -> PlannedEntry {
+    let mut semantic_ids = egir::program::SemanticOpIdSource::default();
+    let mut effect_ids = IdSource::new();
     EntryBuilder::new_compute(
         name.to_string(),
         (1, 1, 1),
@@ -16,11 +18,7 @@ fn body(name: &str, identities: &mut crate::egir::program::ProgramIdentities) ->
     .build()
 }
 
-fn spec(
-    name: &str,
-    label: &'static str,
-    identities: &mut crate::egir::program::ProgramIdentities,
-) -> PhaseSpec {
+fn spec(name: &str, label: &'static str, identities: &mut egir::program::ProgramIdentities) -> PhaseSpec {
     PhaseSpec::compute(
         body(name, identities),
         KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
@@ -32,7 +30,7 @@ fn phase(
     name: &str,
     label: &'static str,
     order: usize,
-    identities: &mut crate::egir::program::ProgramIdentities,
+    identities: &mut egir::program::ProgramIdentities,
 ) -> KernelPhase {
     phase_from_body(
         None,
@@ -61,7 +59,7 @@ fn plan(mut phases: Vec<KernelPhase>) -> KernelPlan {
 
 #[test]
 fn body_preparation_retains_creator_supplied_facts() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let prepared = spec("kernel", "diagnostic_label", &mut identities).prepare().unwrap();
     assert_eq!(prepared.label, "diagnostic_label");
     assert_eq!(prepared.entry.name, "kernel");
@@ -84,7 +82,7 @@ fn body_preparation_retains_creator_supplied_facts() {
 
 #[test]
 fn body_preparation_rejects_compute_graphics_mismatches() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     assert!(PhaseSpec::graphics(
         body("compute", &mut identities),
         KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
@@ -105,7 +103,7 @@ fn body_preparation_rejects_compute_graphics_mismatches() {
 
 #[test]
 fn validator_rejects_duplicate_names_and_dependency_cycles() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let error = plan(vec![
         phase("same", "serial_compute", 0, &mut identities),
         phase("same", "serial_compute", 1, &mut identities),
@@ -123,7 +121,7 @@ fn validator_rejects_duplicate_names_and_dependency_cycles() {
 
 #[test]
 fn validator_rejects_duplicate_and_gapped_placements() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let mut duplicate = plan(vec![
         phase("first", "serial_compute", 0, &mut identities),
         phase("second", "serial_compute", 1, &mut identities),
@@ -141,7 +139,7 @@ fn validator_rejects_duplicate_and_gapped_placements() {
 
 #[test]
 fn checked_dependency_insertion_preserves_the_dag() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let first = KernelId::for_test(0);
     let second = KernelId::for_test(1);
     let mut plan = plan(vec![
@@ -162,7 +160,7 @@ fn checked_dependency_insertion_preserves_the_dag() {
 
 #[test]
 fn dense_handles_survive_entry_changes_and_chain_insertions() {
-    let mut identities = crate::egir::program::ProgramIdentities::default();
+    let mut identities = egir::program::ProgramIdentities::default();
     let root = KernelId::for_test(0);
     let mut plan = plan(vec![phase("seeded", "serial_compute", 0, &mut identities)]);
 

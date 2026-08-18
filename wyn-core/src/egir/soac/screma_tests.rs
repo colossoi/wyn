@@ -1,5 +1,6 @@
 use super::*;
 use crate::egir::types::{Raw, Semantic};
+use crate::types;
 use crate::FunctionId;
 
 fn scalar(name: TypeName) -> Type<TypeName> {
@@ -13,7 +14,7 @@ fn array(element: Type<TypeName>) -> Type<TypeName> {
             element,
             Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
             Type::Constructed(TypeName::Size(4), vec![]),
-            crate::types::no_buffer(),
+            types::no_buffer(),
         ],
     )
 }

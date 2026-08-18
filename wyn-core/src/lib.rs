@@ -766,7 +766,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
                     member.push_constant_offset == *offset && member.name == *name && member.size == *size
                 })
             }) {
-                return Err(crate::err_wgsl!(
+                return Err(err_wgsl!(
                     "pipeline push constant '{}' at offset {} has no WGSL storage parameter",
                     name,
                     offset
@@ -846,7 +846,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
                         .flatten()
                         .map(|member| (*block, member))
                 }) else {
-                    return Err(crate::err_wgsl!(
+                    return Err(err_wgsl!(
                         "entry '{}': dynamic dispatch push constant at offset {} has no WGSL storage parameter",
                         stage.entry_point,
                         offset
@@ -869,7 +869,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
             graphics.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }))
         }
     }) {
-        return Err(crate::err_wgsl!(
+        return Err(err_wgsl!(
             "WGSL pipeline descriptor still contains a push constant with no WebGPU binding"
         ));
     }

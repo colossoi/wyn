@@ -26,8 +26,15 @@
 //! "undefined `cos`" diagnostics later.
 
 use crate::ast::{self, Declaration, ExprKind, Expression, ModuleExpression, Pattern, Program, TypeName};
+use crate::builtins;
 use crate::builtins::catalog::BuiltinCatalog;
+use crate::err_module;
+use crate::err_module_at;
 use crate::error::Result;
+use crate::interface;
+use crate::module_manager;
+use crate::resolve_placeholders;
+use crate::resolve_resources;
 use crate::{LookupMap, LookupSet};
 use polytype::TypeScheme;
 
@@ -39,7 +46,7 @@ pub type OpensResolvedFamily = ast::AstFamily<
     ast::SourceTree,
     ast::DefinitionSyntax,
     ast::ResolvedEntry,
-    crate::interface::ResolvedAttribute,
+    interface::ResolvedAttribute,
     ast::ExternSyntax,
     ast::OpensResolvedFrontend,
 >;
@@ -49,15 +56,13 @@ pub type OpensResolvedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum OpensResolvedTag {}
 pub type OpensResolved =
-    Program<OpensResolvedTag, OpensResolvedFamily, crate::resolve_placeholders::PlaceholdersResolvedGlobal>;
+    Program<OpensResolvedTag, OpensResolvedFamily, resolve_placeholders::PlaceholdersResolvedGlobal>;
 
-pub fn resolve_opens(
-    mut program: crate::resolve_placeholders::TypePlaceholdersResolved,
-) -> Result<OpensResolved> {
-    let mut index = build_index(&program.global_context.spec_schemes, crate::builtins::catalog());
+pub fn resolve_opens(mut program: resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
+    let mut index = build_index(&program.global_context.spec_schemes, builtins::catalog());
     for (module_name, elaborated) in program.global_context.module_manager.get_elaborated_modules() {
         for item in &elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(declaration) = item {
+            if let module_manager::ElaboratedItem::Decl(declaration) = item {
                 index.add_member(module_name, &declaration.name);
             }
         }
@@ -74,7 +79,7 @@ pub fn resolve_opens(
             .get_mut(&module_name)
             .expect("module exists");
         for item in &mut elaborated.items {
-            if let crate::module_manager::ElaboratedItem::Decl(declaration) = item {
+            if let module_manager::ElaboratedItem::Decl(declaration) = item {
                 run_in_module_with_index(&mut declaration.body, &module_name, &index)?;
             }
         }
@@ -177,7 +182,7 @@ impl<'a> OpenResolver<'a> {
     /// program in source order.
     pub fn resolve_program(
         &mut self,
-        declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
+        declarations: &mut [Declaration<resolve_resources::ResourcesResolvedFamily>],
     ) -> Result<()> {
         // Top-level `def` / `entry` / `extern` names are all visible
         // in each other's bodies (mutual recursion). Pre-load the
@@ -197,7 +202,7 @@ impl<'a> OpenResolver<'a> {
 
     fn resolve_declaration(
         &mut self,
-        decl: &mut Declaration<crate::resolve_resources::ResourcesResolvedFamily>,
+        decl: &mut Declaration<resolve_resources::ResourcesResolvedFamily>,
     ) -> Result<()> {
         match decl {
             Declaration::Frontend(ast::ResourcesResolvedFrontend::Open(mod_exp)) => {
@@ -232,7 +237,7 @@ impl<'a> OpenResolver<'a> {
         match mod_exp {
             ModuleExpression::Name(name) => {
                 if !self.index.has_module(name) {
-                    return Err(crate::err_module!(
+                    return Err(err_module!(
                         "open: unknown module '{}'. No module by that name is in scope.",
                         name
                     ));
@@ -243,7 +248,7 @@ impl<'a> OpenResolver<'a> {
             // Other module-expression forms parse but we don't
             // support them as `open` targets yet — fail loudly so
             // typos and unsupported shapes don't silently no-op.
-            _ => Err(crate::err_module!(
+            _ => Err(err_module!(
                 "open: only `open <ModuleName>` is supported in this resolver pass; other module expressions (lambda, application, struct, import, ascription) are not yet handled."
             )),
         }
@@ -304,7 +309,7 @@ impl<'a> OpenResolver<'a> {
                         .map(|m| format!("`{}.{}`", m, identifier.name))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Err(crate::err_module_at!(
+                    return Err(err_module_at!(
                         expr.h.span,
                         "ambiguous reference '{}'; opened modules provide: {}. Qualify the reference explicitly.",
                         identifier.name,
@@ -481,7 +486,7 @@ pub fn build_index(
 }
 
 fn resolve_program_with_index(
-    declarations: &mut [Declaration<crate::resolve_resources::ResourcesResolvedFamily>],
+    declarations: &mut [Declaration<resolve_resources::ResourcesResolvedFamily>],
     index: &OpenIndex,
 ) -> Result<()> {
     let mut r = OpenResolver::new(index);
@@ -497,7 +502,7 @@ fn resolve_program_with_index(
 /// resolve many such bodies should hoist `build_index` and call
 /// `run_in_module_with_index` instead.
 pub fn run_in_module(
-    expr: &mut crate::ast::Expression,
+    expr: &mut ast::Expression,
     module_name: &str,
     spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
     catalog: &BuiltinCatalog,
@@ -508,7 +513,7 @@ pub fn run_in_module(
 
 /// Like `run_in_module` but reuses a pre-built index.
 pub fn run_in_module_with_index(
-    expr: &mut crate::ast::Expression,
+    expr: &mut ast::Expression,
     module_name: &str,
     index: &OpenIndex,
 ) -> Result<()> {
@@ -519,7 +524,7 @@ pub fn run_in_module_with_index(
     r.resolve_expression(expr)
 }
 
-fn materialize(program: crate::resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
+fn materialize(program: resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
     program.try_rebuild(|declarations, global_context, _| {
         let declarations = declarations
             .into_iter()
@@ -540,7 +545,7 @@ fn materialize(program: crate::resolve_placeholders::TypePlaceholdersResolved) -
     })
 }
 
-fn top_level_name(decl: &Declaration<crate::resolve_resources::ResourcesResolvedFamily>) -> Option<String> {
+fn top_level_name(decl: &Declaration<resolve_resources::ResourcesResolvedFamily>) -> Option<String> {
     match decl {
         Declaration::Decl(d) => Some(d.name.clone()),
         Declaration::Entry(e) => Some(e.name.clone()),

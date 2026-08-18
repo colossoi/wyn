@@ -10,6 +10,7 @@ use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::filter;
 use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+use crate::types;
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
     map_anchor::analyze(inner, oracle, |effect| {
@@ -57,8 +58,8 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     consumer_op.body.map = lambda;
     consumer_op.state.space = producer_space;
     if let filter::Output::Local { ownership, .. } = &mut consumer_op.state.storage {
-        if *ownership == crate::types::SoacOwnership::UniqueInput {
-            *ownership = crate::types::SoacOwnership::Fresh;
+        if *ownership == types::SoacOwnership::UniqueInput {
+            *ownership = types::SoacOwnership::Fresh;
         }
     }
     debug_assert!(consumer_op.body.validate().is_ok());

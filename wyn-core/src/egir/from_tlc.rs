@@ -19,9 +19,20 @@ pub type Converted = super::program::Program<
     super::program::RewriteGlobal,
 >;
 
+use crate::builtins;
 use crate::builtins::{catalog, Purity};
+use crate::egir;
+use crate::op;
 use crate::op::BinaryOperator;
+use crate::pipeline_descriptor;
+use crate::ssa;
+use crate::tlc;
 use crate::tlc::VarRef;
+use crate::types;
+use crate::EntryId;
+use crate::FunctionId;
+use crate::GlobalId;
+use crate::IdSource;
 use crate::{LookupMap, LookupSet};
 
 use super::types::EffectToken;
@@ -58,19 +69,19 @@ use super::soac::{filter, hist, screma};
 use super::types::*;
 use crate::pipeline_descriptor::BufferLen;
 
-type TlcFamily = crate::tlc::input_slice_bounds::InputBounded;
-type ClosureData = crate::tlc::data::ExplicitClosurePayload;
-type SoacBodyData = crate::tlc::data::ExplicitCapturesPayload;
-type TlcProgram = crate::tlc::stage::InputSliceBoundsInferred;
+type TlcFamily = tlc::input_slice_bounds::InputBounded;
+type ClosureData = tlc::data::ExplicitClosurePayload;
+type SoacBodyData = tlc::data::ExplicitCapturesPayload;
+type TlcProgram = tlc::stage::InputSliceBoundsInferred;
 type TlcDef = GenericDef<TlcFamily>;
-type DefMeta = GenericDefMeta<crate::tlc::data::EntryInputBounds>;
+type DefMeta = GenericDefMeta<tlc::data::EntryInputBounds>;
 type Term = GenericTerm<ClosureData, SoacBodyData>;
 type TermKind = GenericTermKind<ClosureData, SoacBodyData>;
 type Lambda = GenericLambda<ClosureData, SoacBodyData>;
 type LoopKind = GenericLoopKind<ClosureData, SoacBodyData>;
 
 fn contains_storage_view_type(ty: &Type<TypeName>) -> bool {
-    crate::types::is_array_variant_view(ty)
+    types::is_array_variant_view(ty)
         || super::types::as_soa_tuple(ty)
             .is_some_and(|components| components.iter().any(contains_storage_view_type))
 }
@@ -82,7 +93,7 @@ fn strided_fields_layout(array: &Type<TypeName>, rank: usize) -> Option<ArrayLay
     for component in components {
         let leaf = super::types::soac_leaf_type(component, u8::try_from(rank).ok()?);
         field_offsets.push(offset);
-        offset = offset.checked_add(crate::ssa::layout::type_byte_size(&leaf)?)?;
+        offset = offset.checked_add(ssa::layout::type_byte_size(&leaf)?)?;
     }
     Some(ArrayLayout::StridedFields {
         element_stride_bytes: offset,
@@ -178,7 +189,7 @@ fn infer_pure_definitions(program: &TlcProgram) -> LookupSet<SymbolId> {
         .filter(|def| !matches!(def.body.kind, TermKind::Extern(_)))
         .filter(|def| {
             let (params, result) = extract_function_signature(&def.ty);
-            params.iter().all(crate::types::is_copy) && crate::types::is_copy(&result)
+            params.iter().all(types::is_copy) && types::is_copy(&result)
         })
         .map(|def| {
             let mut summary = DefinitionEffects::default();
@@ -222,7 +233,7 @@ fn summarize_definition_effects(
                     // `storage_index` is surface-pure but EGIR models the
                     // backing-buffer read as an ordered Load.
                     if *id == catalog().known().storage_index
-                        || crate::builtins::by_id(*id).raw.purity == Purity::Effectful
+                        || builtins::by_id(*id).raw.purity == Purity::Effectful
                     {
                         summary.direct_effect = true;
                     }
@@ -245,7 +256,7 @@ fn summarize_definition_effects(
         TermKind::Index { array, index } => {
             summarize_definition_effects(array, top_level, summary);
             summarize_definition_effects(index, top_level, summary);
-            if array.ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+            if array.ty.array_variant().is_some_and(types::is_array_variant_view) {
                 summary.direct_effect = true;
             }
         }
@@ -279,9 +290,9 @@ struct GlobalContext<'a> {
 
 struct ConversionArenas {
     identities: ProgramIdentities,
-    function_ids: LookupMap<SymbolId, crate::FunctionId>,
-    global_ids: LookupMap<SymbolId, crate::GlobalId>,
-    entry_ids: LookupMap<SymbolId, crate::EntryId>,
+    function_ids: LookupMap<SymbolId, FunctionId>,
+    global_ids: LookupMap<SymbolId, GlobalId>,
+    entry_ids: LookupMap<SymbolId, EntryId>,
     resources: LogicalResourceArenaBuilder,
 }
 
@@ -301,8 +312,8 @@ impl<'a> GlobalContext<'a> {
     fn new_converter<'b>(
         &self,
         pure_constants: &LookupSet<SymbolId>,
-        binding_ids: &'b mut crate::IdSource<u32>,
-        effect_ids: &'b mut crate::IdSource<EffectToken>,
+        binding_ids: &'b mut IdSource<u32>,
+        effect_ids: &'b mut IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
     ) -> Converter<'a, 'b> {
         Converter::new(
@@ -327,8 +338,8 @@ impl<'a> GlobalContext<'a> {
 /// elaborate`).
 pub fn convert_program(
     program: &TlcProgram,
-    mut binding_ids: crate::IdSource<u32>,
-    mut effect_ids: crate::IdSource<EffectToken>,
+    mut binding_ids: IdSource<u32>,
+    mut effect_ids: IdSource<EffectToken>,
 ) -> Result<Converted, ConvertError> {
     let super::pipeline_seed::PipelineSeed {
         pipeline,
@@ -377,7 +388,7 @@ pub fn convert_program(
         }
     }
 
-    let stage_entries: Vec<Vec<crate::EntryId>> = stage_symbols
+    let stage_entries: Vec<Vec<EntryId>> = stage_symbols
         .into_iter()
         .map(|stages| {
             stages
@@ -532,9 +543,9 @@ pub fn convert_program(
 }
 
 fn pipeline_workgroup_size(
-    pipeline: &crate::pipeline_descriptor::PipelineDescriptor,
-    stage_entries: &[Vec<crate::EntryId>],
-    entry: crate::EntryId,
+    pipeline: &pipeline_descriptor::PipelineDescriptor,
+    stage_entries: &[Vec<EntryId>],
+    entry: EntryId,
 ) -> (u32, u32, u32) {
     use crate::pipeline_descriptor::Pipeline;
     pipeline
@@ -567,8 +578,8 @@ fn convert_function<'a>(
     def: &TlcDef,
     ctx: &GlobalContext<'a>,
     pure_constants: &LookupSet<SymbolId>,
-    binding_ids: &'a mut crate::IdSource<u32>,
-    effect_ids: &'a mut crate::IdSource<EffectToken>,
+    binding_ids: &'a mut IdSource<u32>,
+    effect_ids: &'a mut IdSource<EffectToken>,
     arenas: &'a mut ConversionArenas,
 ) -> Result<ConvertedFunc, ConvertError> {
     let symbols = ctx.symbols;
@@ -592,7 +603,7 @@ fn convert_function<'a>(
     }
 
     // Regular functions: extract lambda params and build an EGraph.
-    let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
+    let (inner_body, params) = tlc::extract_lambda_params_ref(&def.body);
     let ret_type = inner_body.ty.clone();
     let param_info: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> = params
         .iter()
@@ -770,8 +781,8 @@ fn convert_entry_point(
     pure_constants: &LookupSet<SymbolId>,
     workgroup: (u32, u32, u32),
     input_bounds: &LookupMap<SymbolId, BufferLen>,
-    binding_ids: &mut crate::IdSource<u32>,
-    effect_ids: &mut crate::IdSource<EffectToken>,
+    binding_ids: &mut IdSource<u32>,
+    effect_ids: &mut IdSource<EffectToken>,
     arenas: &mut ConversionArenas,
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
@@ -779,7 +790,7 @@ fn convert_entry_point(
     let entry_id = arenas.entry_ids[&def.name];
     let symbols = ctx.symbols;
     let def_name = symbol_name(symbols, def.name)?;
-    let (inner_body, params) = crate::tlc::extract_lambda_params_ref(&def.body);
+    let (inner_body, params) = tlc::extract_lambda_params_ref(&def.body);
     let is_compute = entry.entry_kind == interface::EntryKind::Compute;
 
     // The converted body carries the specialized return representation; use it
@@ -867,7 +878,7 @@ fn convert_entry_point(
             for (field_idx, (field_ty, slot)) in field_tys.iter().zip(fields.iter()).enumerate() {
                 inputs.push(EntryInput {
                     name: format!("{}_{}", name, field_idx),
-                    ty: crate::types::canonical_storage_buffer_ty(field_ty),
+                    ty: types::canonical_storage_buffer_ty(field_ty),
                     size_hint: None,
                     kind: EntryInputKind::Storage {
                         exposure: BindingExposure::Host(slot.binding),
@@ -897,7 +908,7 @@ fn convert_entry_point(
             && storage_image_binding.is_none()
             && !matches!(&decoration, Some(IoDecoration::BuiltIn(_)))
         {
-            let size = crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
+            let size = ssa::layout::type_byte_size(ty).ok_or_else(|| {
                 ConvertError::Internal(format!(
                     "push-constant param `{}` has no static byte layout",
                     name
@@ -948,7 +959,7 @@ fn convert_entry_point(
         };
         inputs.push(EntryInput {
             name: name.to_string(),
-            ty: crate::types::canonical_storage_buffer_ty(ty),
+            ty: types::canonical_storage_buffer_ty(ty),
             size_hint,
             kind,
         });
@@ -973,7 +984,7 @@ fn convert_entry_point(
             continue;
         };
         if length.is_none() {
-            *length = crate::ssa::layout::type_byte_size(&input.ty).map(|bytes| BufferLen::Fixed {
+            *length = ssa::layout::type_byte_size(&input.ty).map(|bytes| BufferLen::Fixed {
                 bytes: u64::from(bytes),
             });
         }
@@ -1133,7 +1144,7 @@ struct Converter<'a, 'b> {
         ),
     >,
     /// Program-wide identity source for effect-chain endpoints.
-    effect_ids: &'b mut crate::IdSource<EffectToken>,
+    effect_ids: &'b mut IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
     /// pure-node intern and side-effect push so backend errors can blame
     /// the originating source. Pushed/popped in `convert_term`; `None`
@@ -1145,10 +1156,10 @@ struct Converter<'a, 'b> {
     ///
     /// A slot with one source has `vec![one]`; a slot written from both
     /// arms of an `If` has two. Unit-returning entries leave it empty.
-    output_sources: Vec<Vec<crate::egir::program::SlotSource>>,
+    output_sources: Vec<Vec<egir::program::SlotSource>>,
     /// Module-wide id factory for host-visible auto-storage binding numbers.
     /// Compiler resources never draw from this namespace.
-    binding_ids: &'b mut crate::IdSource<u32>,
+    binding_ids: &'b mut IdSource<u32>,
     /// Compiler-introduced logical resource declarations accumulated during
     /// body conversion (runtime `filter` scratch buffers).
     extra_resource_declarations: Vec<SemanticResourceDecl>,
@@ -1169,8 +1180,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 CallEffects,
             ),
         >,
-        binding_ids: &'b mut crate::IdSource<u32>,
-        effect_ids: &'b mut crate::IdSource<EffectToken>,
+        binding_ids: &'b mut IdSource<u32>,
+        effect_ids: &'b mut IdSource<EffectToken>,
         arenas: &'b mut ConversionArenas,
     ) -> Self {
         let graph = EGraph::new();
@@ -1193,7 +1204,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
     }
 
-    fn function_id(&self, symbol: SymbolId) -> crate::FunctionId {
+    fn function_id(&self, symbol: SymbolId) -> FunctionId {
         self.arenas.function_ids[&symbol]
     }
 
@@ -1309,7 +1320,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 let next_place =
                     self.graph.add_index_place(parent_place, index, result_ty.clone(), Some(span));
                 place = Some(next_place);
-            } else if current_ty.array_variant().is_some_and(crate::types::is_array_variant_view) {
+            } else if current_ty.array_variant().is_some_and(types::is_array_variant_view) {
                 let view = self.graph.view_id(value);
                 let next_place =
                     self.graph.add_view_index_place(view, index, result_ty.clone(), Some(span));
@@ -1528,7 +1539,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 while self.output_sources.len() <= slot_index {
                     self.output_sources.push(Vec::new());
                 }
-                self.output_sources[slot_index].push(crate::egir::program::SlotSource {
+                self.output_sources[slot_index].push(egir::program::SlotSource {
                     block: self.current_block,
                     value: value_nid,
                 });
@@ -1575,7 +1586,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     while self.output_sources.len() <= slot {
                         self.output_sources.push(Vec::new());
                     }
-                    self.output_sources[slot].push(crate::egir::program::SlotSource {
+                    self.output_sources[slot].push(egir::program::SlotSource {
                         block: self.current_block,
                         value,
                     });
@@ -1671,7 +1682,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 } else if *id == known.image_with && args.len() == 3 {
                     self.lower_image_with(args, ty)
                 } else if *id == known.image_load && args.len() == 2 {
-                    let binding = crate::types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
+                    let binding = types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
                         ConvertError::GraphError(
                             "image_load operand has no concrete storage-image binding after monomorphization"
                                 .into(),
@@ -1682,7 +1693,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
                 } else if *id == known.slice
                     && args.len() == 3
-                    && ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+                    && ty.array_variant().is_some_and(types::is_array_variant_view)
                 {
                     let parent = self.convert_term(&args[0])?;
                     let start = self.convert_term(&args[1])?;
@@ -1811,7 +1822,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// linear image handle. The image handle itself has no runtime payload; the
     /// concrete descriptor binding is carried by `args[0].ty`.
     fn lower_image_with(&mut self, args: &[Term], ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
-        let binding = crate::types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
+        let binding = types::storage_image_buffer(&args[0].ty).ok_or_else(|| {
             ConvertError::GraphError(
                 "storage-image update operand has no concrete storage-image binding after monomorphization"
                     .into(),
@@ -1824,7 +1835,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Op {
-                tag: crate::op::OpTag::StorageImageStore(resource),
+                tag: op::OpTag::StorageImageStore(resource),
             }),
             operands: arg_nids.into_iter().map(OperandRef::Value).collect(),
             result: None,
@@ -2581,7 +2592,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // representation. Other shape-preserving maps inherit an input shape
         // when the logical result carries an unresolved size.
         let project_ty = if ownership == SoacOwnership::UniqueInput
-            && input_arr_types[0].array_variant().is_some_and(crate::types::is_array_variant_view)
+            && input_arr_types[0].array_variant().is_some_and(types::is_array_variant_view)
         {
             input_arr_types[0].clone()
         } else {
@@ -2621,7 +2632,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// explicit associative read-combine-write operator.
     fn convert_soac_reduce_by_index(
         &mut self,
-        dest: &crate::tlc::Place,
+        dest: &tlc::Place,
         op: &SoacBody,
         ne: &Term,
         indices: &ArrayExpr,
@@ -2643,10 +2654,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         let value_node = self.convert_array_expr_value(values)?;
         let index_array = self.value_array_type(index_node, indices);
         let value_array = self.value_array_type(value_node, values);
-        let index_type = crate::types::array_elem(&index_array)
+        let index_type = types::array_elem(&index_array)
             .cloned()
             .ok_or_else(|| ConvertError::GraphError("reduce_by_index indices are not an array".into()))?;
-        let value_type = crate::types::array_elem(&value_array)
+        let value_type = types::array_elem(&value_array)
             .cloned()
             .ok_or_else(|| ConvertError::GraphError("reduce_by_index values are not an array".into()))?;
         let operator_parameters = op.lam.params.iter().map(|(_, ty)| ty.clone()).collect();
@@ -2703,7 +2714,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// result after emitting the indexed stores.
     fn convert_soac_scatter(
         &mut self,
-        dest: &crate::tlc::Place,
+        dest: &tlc::Place,
         lam: &SoacBody,
         inputs: &[ArrayExpr],
         result_ty: Type<TypeName>,
@@ -2784,7 +2795,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// the item rank remains explicit on the SOAC input.
     fn convert_soac_bucket_scatter(
         &mut self,
-        dest: &crate::tlc::Place,
+        dest: &tlc::Place,
         lam: &SoacBody,
         inputs: &[ArrayExpr],
         input_dimensions: &[Vec<u8>],
@@ -2941,7 +2952,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                             let mut field_offsets = Vec::with_capacity(fields.len());
                             for field in &fields {
                                 field_offsets.push(offset);
-                                let Some(size) = crate::ssa::layout::type_byte_size(field) else {
+                                let Some(size) = ssa::layout::type_byte_size(field) else {
                                     return ArrayLayout::StructureOfArrays;
                                 };
                                 let Some(next) = offset.checked_add(size) else {
@@ -2958,7 +2969,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     ArrayLayout::StructureOfArrays
                 } else if storage_type.is_some() {
                     ArrayLayout::StorageAos
-                } else if crate::types::is_virtual_array(array) {
+                } else if types::is_virtual_array(array) {
                     ArrayLayout::Generated
                 } else {
                     ArrayLayout::Composite
@@ -2987,22 +2998,22 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.extra_resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef(counts),
-            role: crate::interface::StorageRole::Output,
+            role: interface::StorageRole::Output,
             elem_ty: u32_type.clone(),
             size: counts_size,
         });
         self.extra_resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef(overflow),
-            role: crate::interface::StorageRole::Intermediate,
+            role: interface::StorageRole::Intermediate,
             elem_ty: u32_type.clone(),
             size: overflow_size,
         });
-        let counts_type = crate::types::view_array_with_size(
+        let counts_type = types::view_array_with_size(
             &u32_type,
             Type::Constructed(TypeName::Size(bucket_count as usize), vec![]),
             Type::Constructed(TypeName::Resource(counts), vec![]),
         );
-        let overflow_type = crate::types::view_array_with_size(
+        let overflow_type = types::view_array_with_size(
             &u32_type,
             Type::Constructed(TypeName::Size(1), vec![]),
             Type::Constructed(TypeName::Resource(overflow), vec![]),
@@ -3165,7 +3176,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // accumulator type. A consuming scan routes that result to the input
         // destination.
         let project_ty = if ownership == SoacOwnership::UniqueInput
-            && arr_ty.array_variant().is_some_and(crate::types::is_array_variant_view)
+            && arr_ty.array_variant().is_some_and(types::is_array_variant_view)
         {
             arr_ty.clone()
         } else {
@@ -3245,7 +3256,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     output_elem_ty.clone(),
                     Type::Constructed(TypeName::ArrayVariantBounded, vec![]),
                     size.clone(),
-                    crate::types::no_buffer(),
+                    types::no_buffer(),
                 ],
             );
             return Ok(self.emit_soac(
@@ -3280,17 +3291,16 @@ impl<'a, 'b> Converter<'a, 'b> {
         // `filter` reaching here in a standalone function still has no entry
         // interface that can own the requirement, so `convert_function`
         // rejects that broken inlining state below.
-        let input_binding = crate::types::array_view_buffer(&arr_ty);
-        let input_elem_bytes = crate::ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
+        let input_binding = types::array_view_buffer(&arr_ty);
+        let input_elem_bytes = ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
             ConvertError::GraphError("filter: element type has no static byte size".into())
         })?;
         // The scratch buffer holds the kept output values (`f(x)` when a map is
         // fused), so it is sized in `output_elem_ty`; the surviving-count bound
         // still comes from the input buffer's element count.
-        let output_elem_bytes =
-            crate::ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
-                ConvertError::GraphError("filter: output element type has no static byte size".into())
-            })?;
+        let output_elem_bytes = ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
+            ConvertError::GraphError("filter: output element type has no static byte size".into())
+        })?;
         // A runtime map producer may still be a Composite here. Reserve the
         // filter resource identity now, but let semantic EGIR resolve its size
         // after producer fusion exposes the actual input resource/domain.
@@ -3308,11 +3318,11 @@ impl<'a, 'b> Converter<'a, 'b> {
         );
         self.extra_resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef(scratch_out),
-            role: crate::interface::StorageRole::Output,
+            role: interface::StorageRole::Output,
             elem_ty: output_elem_ty.clone(),
             size: scratch_size,
         });
-        let view_result_ty = crate::types::view_array_of(
+        let view_result_ty = types::view_array_of(
             &output_elem_ty,
             Type::Constructed(TypeName::Resource(scratch_out), vec![]),
         );
@@ -3348,7 +3358,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     fn convert_array_expr(&mut self, ae: &ArrayExpr, ty: Type<TypeName>) -> Result<ValueId, ConvertError> {
         match ae {
             ArrayExpr::Var(vr, var_ty) => {
-                let t = crate::tlc::synthetic_atom_var_term(*vr, var_ty.clone());
+                let t = tlc::synthetic_atom_var_term(*vr, var_ty.clone());
                 self.convert_term(&t)
             }
             // A `Zip` is the SoA form of a tuple-element array input: it lowers
@@ -3582,12 +3592,12 @@ fn shape_preserving_result_ty(
     result_ty: &Type<TypeName>,
 ) -> Option<Type<TypeName>> {
     if !matches!(
-        crate::types::array_size(result_ty),
+        types::array_size(result_ty),
         Some(Type::Constructed(TypeName::Skolem(_), _))
     ) {
         return None;
     }
-    Some(crate::types::make_array1(
+    Some(types::make_array1(
         output_elem_ty.clone(),
         input_arr_ty.array_variant()?.clone(),
         input_arr_ty.array_size()?.clone(),
@@ -3601,7 +3611,7 @@ fn build_entry_outputs(
     slot_value_tys: &[Option<Type<TypeName>>],
     inputs: &[EntryInput],
     is_compute: bool,
-    binding_ids: &mut crate::IdSource<u32>,
+    binding_ids: &mut IdSource<u32>,
 ) -> Result<Vec<EntryOutput>, ConvertError> {
     use EntryOutput;
     let logical_ret_type = strip_existentials(ret_type);
@@ -3621,67 +3631,67 @@ fn build_entry_outputs(
     // The size info is already in the (post-monomorphize) type — we
     // just read it. No structural rewrites needed for `if/else`
     // branches whose result types have already been unified.
-    let length_for =
-        |binding: Option<BindingRef>, ty: &Type<TypeName>| -> Result<Option<BufferLen>, ConvertError> {
-            if binding.is_none() {
-                return Ok(None);
-            }
-            let Some(elem_ty) = ty.elem_type() else {
-                let bytes = crate::ssa::layout::type_byte_size(ty).ok_or_else(|| {
-                    ConvertError::Internal(format!("output has no static byte layout: {ty:?}"))
-                })?;
-                return Ok(Some(BufferLen::Fixed {
-                    bytes: u64::from(bytes),
-                }));
-            };
-            let elem_bytes = crate::ssa::layout::storage_elem_stride(elem_ty).ok_or_else(|| {
-                ConvertError::Internal(format!("output element has no static byte layout: {elem_ty:?}"))
+    let length_for = |binding: Option<BindingRef>,
+                      ty: &Type<TypeName>|
+     -> Result<Option<BufferLen>, ConvertError> {
+        if binding.is_none() {
+            return Ok(None);
+        }
+        let Some(elem_ty) = ty.elem_type() else {
+            let bytes = ssa::layout::type_byte_size(ty).ok_or_else(|| {
+                ConvertError::Internal(format!("output has no static byte layout: {ty:?}"))
             })?;
-            if let Some(out_size) = crate::types::array_size(ty) {
-                // Rule 1: compile-time size literal.
-                if let Type::Constructed(TypeName::Size(n), _) = out_size {
-                    return Ok(Some(BufferLen::Fixed {
-                        bytes: (*n as u64) * elem_bytes as u64,
+            return Ok(Some(BufferLen::Fixed {
+                bytes: u64::from(bytes),
+            }));
+        };
+        let elem_bytes = ssa::layout::storage_elem_stride(elem_ty).ok_or_else(|| {
+            ConvertError::Internal(format!("output element has no static byte layout: {elem_ty:?}"))
+        })?;
+        if let Some(out_size) = types::array_size(ty) {
+            // Rule 1: compile-time size literal.
+            if let Type::Constructed(TypeName::Size(n), _) = out_size {
+                return Ok(Some(BufferLen::Fixed {
+                    bytes: (*n as u64) * elem_bytes as u64,
+                }));
+            }
+            // Rule 2: size variable shared with an entry input.
+            for input in inputs {
+                let EntryInputKind::Storage {
+                    exposure: BindingExposure::Host(in_binding),
+                    ..
+                } = &input.kind
+                else {
+                    continue;
+                };
+                let Some(in_size) = types::array_size(&input.ty) else {
+                    continue;
+                };
+                if in_size == out_size {
+                    let Some(in_elem_ty) = input.ty.elem_type() else {
+                        continue;
+                    };
+                    let src_elem_bytes = ssa::layout::storage_elem_stride(in_elem_ty).ok_or_else(|| {
+                        ConvertError::Internal(format!(
+                            "input element has no static byte layout: {in_elem_ty:?}"
+                        ))
+                    })?;
+                    return Ok(Some(BufferLen::LikeInput {
+                        set: in_binding.set,
+                        binding: in_binding.binding,
+                        elem_bytes,
+                        src_elem_bytes,
                     }));
                 }
-                // Rule 2: size variable shared with an entry input.
-                for input in inputs {
-                    let EntryInputKind::Storage {
-                        exposure: BindingExposure::Host(in_binding),
-                        ..
-                    } = &input.kind
-                    else {
-                        continue;
-                    };
-                    let Some(in_size) = crate::types::array_size(&input.ty) else {
-                        continue;
-                    };
-                    if in_size == out_size {
-                        let Some(in_elem_ty) = input.ty.elem_type() else {
-                            continue;
-                        };
-                        let src_elem_bytes = crate::ssa::layout::storage_elem_stride(in_elem_ty)
-                            .ok_or_else(|| {
-                                ConvertError::Internal(format!(
-                                    "input element has no static byte layout: {in_elem_ty:?}"
-                                ))
-                            })?;
-                        return Ok(Some(BufferLen::LikeInput {
-                            set: in_binding.set,
-                            binding: in_binding.binding,
-                            elem_bytes,
-                            src_elem_bytes,
-                        }));
-                    }
-                }
             }
-            // Rule 3: dynamic arrays without a fixed or matching-input size
-            // are sized from the finalized semantic dispatch domain.
-            if ty.is_array() {
-                return Ok(Some(BufferLen::SameAsDispatch { elem_bytes }));
-            }
-            Ok(None)
-        };
+        }
+        // Rule 3: dynamic arrays without a fixed or matching-input size
+        // are sized from the finalized semantic dispatch domain.
+        if ty.is_array() {
+            return Ok(Some(BufferLen::SameAsDispatch { elem_bytes }));
+        }
+        Ok(None)
+    };
     let mut storage_binding_for = |ty: &Type<TypeName>,
                                    is_compute: bool,
                                    attribute: Option<&interface::ResolvedAttribute>|
@@ -3716,7 +3726,7 @@ fn build_entry_outputs(
     if entry.outputs.iter().all(|o| o.attribute.is_none()) && output_arity == 1 {
         if !matches!(ret_type, Type::Constructed(TypeName::Unit, _)) {
             let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
-            let ty = crate::types::canonical_storage_buffer_ty(source_ty);
+            let ty = types::canonical_storage_buffer_ty(source_ty);
             let attribute = entry.outputs.first().and_then(|output| output.attribute.as_ref());
             let storage_binding = storage_binding_for(&ty, is_compute, attribute);
             let length = length_for(storage_binding, &ty)?;
@@ -3735,7 +3745,7 @@ fn build_entry_outputs(
             .enumerate()
             .map(|(slot, ty)| {
                 let ty = slot_value_tys.get(slot).and_then(Option::as_ref).unwrap_or(ty);
-                let ty = crate::types::canonical_storage_buffer_ty(ty);
+                let ty = types::canonical_storage_buffer_ty(ty);
                 let attribute = entry.outputs.get(slot).and_then(|output| output.attribute.as_ref());
                 let storage_binding = storage_binding_for(&ty, is_compute, attribute);
                 let length = length_for(storage_binding, &ty)?;
@@ -3752,7 +3762,7 @@ fn build_entry_outputs(
             .collect()
     } else {
         let source_ty = slot_value_tys.first().and_then(Option::as_ref).unwrap_or(ret_type);
-        let ty = crate::types::canonical_storage_buffer_ty(source_ty);
+        let ty = types::canonical_storage_buffer_ty(source_ty);
         let first_attr = entry.outputs.first().and_then(|o| o.attribute.as_ref());
         let storage_binding = storage_binding_for(&ty, is_compute, first_attr);
         let length = length_for(storage_binding, &ty)?;

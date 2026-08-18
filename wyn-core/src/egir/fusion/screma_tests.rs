@@ -1,12 +1,16 @@
 use super::*;
+use crate::compile_thru_tlc;
+use crate::egir;
 use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
+use crate::tlc;
+use crate::to_egraph;
 
 fn reified(source: &str) -> Segmented {
-    let program = crate::compile_thru_tlc(source).expect("compile through TLC");
-    let program = crate::tlc::infer_input_slice_bounds(program);
-    let program = crate::to_egraph(program).expect("convert to raw EGIR");
-    let program = crate::egir::realize_outputs(program).expect("realize EGIR outputs");
-    crate::egir::reify_soacs(program)
+    let program = compile_thru_tlc(source).expect("compile through TLC");
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program).expect("convert to raw EGIR");
+    let program = egir::realize_outputs(program).expect("realize EGIR outputs");
+    egir::reify_soacs(program)
 }
 
 #[test]

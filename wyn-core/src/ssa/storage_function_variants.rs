@@ -6,6 +6,9 @@
 //! only helpers reached under conflicting signatures receive variants. The
 //! plan contains indices and emitted names only and never owns or rewrites IR.
 
+use crate::types;
+use crate::EntryId;
+use crate::FunctionId;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::op::OpTag;
@@ -20,18 +23,18 @@ pub(crate) struct FunctionEmissionId(pub(crate) usize);
 pub(crate) struct FunctionEmission {
     /// Structural identity for this concrete storage-specialized emission.
     pub(crate) id: FunctionEmissionId,
-    pub(crate) function: crate::FunctionId,
+    pub(crate) function: FunctionId,
     pub(crate) name: String,
-    pub(crate) entry_context: Option<crate::EntryId>,
+    pub(crate) entry_context: Option<EntryId>,
 }
 
 pub(crate) struct StorageFunctionVariants {
     emissions: Vec<FunctionEmission>,
     /// Deterministic fallback emission for every local function. Entry-specific
     /// selections override it before lowering an entry or its helper variants.
-    fallback_emissions: LookupMap<crate::FunctionId, FunctionEmissionId>,
-    entry_emissions: LookupMap<crate::EntryId, LookupMap<crate::FunctionId, FunctionEmissionId>>,
-    entry_names: LookupMap<crate::EntryId, LookupMap<crate::FunctionId, String>>,
+    fallback_emissions: LookupMap<FunctionId, FunctionEmissionId>,
+    entry_emissions: LookupMap<EntryId, LookupMap<FunctionId, FunctionEmissionId>>,
+    entry_names: LookupMap<EntryId, LookupMap<FunctionId, String>>,
     module_accesses: LookupMap<BindingRef, ResourceAccess>,
 }
 
@@ -106,7 +109,7 @@ impl StorageFunctionVariants {
             .map(|entry| (entry.id, LookupMap::new()))
             .collect::<LookupMap<_, _>>();
         for (function_index, function) in program.functions.iter().enumerate() {
-            let mut contexts = BTreeMap::<Vec<(u32, u32, bool)>, Vec<crate::EntryId>>::new();
+            let mut contexts = BTreeMap::<Vec<(u32, u32, bool)>, Vec<EntryId>>::new();
             for (entry_id, functions) in &reachable {
                 if functions.contains(&function_index) {
                     let mut signature = dependencies[function_index]
@@ -181,31 +184,28 @@ impl StorageFunctionVariants {
         &self.emissions
     }
 
-    pub(crate) fn names_for_entry(&self, entry: crate::EntryId) -> &LookupMap<crate::FunctionId, String> {
+    pub(crate) fn names_for_entry(&self, entry: EntryId) -> &LookupMap<FunctionId, String> {
         &self.entry_names[&entry]
     }
 
     pub(crate) fn emissions_for_context(
         &self,
-        entry: Option<crate::EntryId>,
-    ) -> &LookupMap<crate::FunctionId, FunctionEmissionId> {
+        entry: Option<EntryId>,
+    ) -> &LookupMap<FunctionId, FunctionEmissionId> {
         match entry {
             Some(entry) => &self.entry_emissions[&entry],
             None => &self.fallback_emissions,
         }
     }
 
-    pub(crate) fn emissions_for_entry(
-        &self,
-        entry: crate::EntryId,
-    ) -> &LookupMap<crate::FunctionId, FunctionEmissionId> {
+    pub(crate) fn emissions_for_entry(&self, entry: EntryId) -> &LookupMap<FunctionId, FunctionEmissionId> {
         self.emissions_for_context(Some(entry))
     }
 
     pub(crate) fn accesses_for<'a, Tag, GlobalContext>(
         &'a self,
         program: &'a Program<Tag, GlobalContext>,
-        entry: Option<crate::EntryId>,
+        entry: Option<EntryId>,
     ) -> LookupMap<BindingRef, ResourceAccess> {
         entry
             .map(|entry_id| {
@@ -220,7 +220,7 @@ impl StorageFunctionVariants {
     }
 }
 
-fn body_calls(body: &FuncBody, indices: &LookupMap<crate::FunctionId, usize>) -> Vec<usize> {
+fn body_calls(body: &FuncBody, indices: &LookupMap<FunctionId, usize>) -> Vec<usize> {
     body.inner
         .insts
         .iter()
@@ -235,17 +235,13 @@ fn body_calls(body: &FuncBody, indices: &LookupMap<crate::FunctionId, usize>) ->
 }
 
 fn direct_storage_bindings(body: &FuncBody) -> HashSet<BindingRef> {
-    body.inner
-        .values
-        .iter()
-        .filter_map(|(_, value)| crate::types::array_view_buffer(&value.ty))
-        .collect()
+    body.inner.values.iter().filter_map(|(_, value)| types::array_view_buffer(&value.ty)).collect()
 }
 
 fn reachable_functions(
     body: &FuncBody,
     calls: &[Vec<usize>],
-    indices: &LookupMap<crate::FunctionId, usize>,
+    indices: &LookupMap<FunctionId, usize>,
 ) -> HashSet<usize> {
     let mut reachable = HashSet::new();
     let mut pending = VecDeque::from(body_calls(body, indices));
