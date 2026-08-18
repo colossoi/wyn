@@ -88,7 +88,10 @@ struct SemanticSoacStats {
 fn semantic_soac_stats(allocated: &egir::ResourcesAllocated) -> SemanticSoacStats {
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
-    fn visit(graph: &EGraph, stats: &mut SemanticSoacStats) {
+    fn visit(
+        graph: &EGraph<egir::types::Semantic<egir::program::SemanticResourceRef>>,
+        stats: &mut SemanticSoacStats,
+    ) {
         for effect in graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects) {
             let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
                 continue;

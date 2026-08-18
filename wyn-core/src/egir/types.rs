@@ -232,15 +232,13 @@ impl<P: WynSoacPhase> super::ir::SideEffectKind<P> {
 
 // Concrete aliases default to semantic EGIR while the definitions in `ir`
 // remain independent of compiler-specific families.
-pub type PureOp<R = super::program::SemanticResourceRef> = super::ir::PureOp<R>;
-pub type PureViewSource<R = super::program::SemanticResourceRef> = super::ir::PureViewSource<R>;
-pub type PureValueKey<R = super::program::SemanticResourceRef, Lang = WynLanguage> =
-    super::ir::PureValueKey<R, Lang>;
-pub type ValueKind<R = super::program::SemanticResourceRef, Lang = WynLanguage> =
-    super::ir::ValueKind<R, Lang>;
-pub type SegExtent<R = super::program::SemanticResourceRef> = super::ir::SegExtent<R>;
-pub type SegSpace<R = super::program::SemanticResourceRef> = super::ir::SegSpace<R>;
-pub type SegResourceAccess<R = super::program::SemanticResourceRef> = super::ir::SegResourceAccess<R>;
+pub type PureOp<R = crate::BindingRef> = super::ir::PureOp<R>;
+pub type PureViewSource<R = crate::BindingRef> = super::ir::PureViewSource<R>;
+pub type PureValueKey<R = crate::BindingRef, Lang = WynLanguage> = super::ir::PureValueKey<R, Lang>;
+pub type ValueKind<R = crate::BindingRef, Lang = WynLanguage> = super::ir::ValueKind<R, Lang>;
+pub type SegExtent<R = crate::BindingRef> = super::ir::SegExtent<R>;
+pub type SegSpace<R = crate::BindingRef> = super::ir::SegSpace<R>;
+pub type SegResourceAccess<R = crate::BindingRef> = super::ir::SegResourceAccess<R>;
 pub type SideEffect<P = Semantic, Lang = WynLanguage> = super::ir::SideEffect<P, Lang>;
 pub type SideEffectKind<P = Semantic> = super::ir::SideEffectKind<P>;
 pub type SkeletonBlock<P = Semantic, Lang = WynLanguage> = super::ir::SkeletonBlock<P, Lang>;
@@ -269,6 +267,7 @@ pub(crate) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
 
 /// Derive the logical element represented by an array or SoA tuple type.
 pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
+    let array = strip_existentials(array);
     if as_soa_tuple(array).is_some() {
         let Type::Constructed(TypeName::Tuple(arity), components) = array else {
             unreachable!()
@@ -287,6 +286,7 @@ pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
 /// preserving structure-of-arrays tuples at every level.
 pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName> {
     assert!(rank > 0, "SOAC input rank must be positive");
+    let array = strip_existentials(array);
     if as_soa_tuple(array).is_some() {
         let Type::Constructed(TypeName::Tuple(arity), components) = array else {
             unreachable!()
@@ -305,6 +305,16 @@ pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName>
     leaf
 }
 
+pub(crate) fn strip_existentials(mut ty: &Type<TypeName>) -> &Type<TypeName> {
+    while let Type::Constructed(TypeName::Existential(_), args) = ty {
+        let Some(inner) = args.first() else {
+            break;
+        };
+        ty = inner;
+    }
+    ty
+}
+
 impl super::ir::SoacInputType<Type<TypeName>> {
     pub(crate) fn element(&self) -> Type<TypeName> {
         soac_leaf_type(&self.array, self.rank())
@@ -312,10 +322,10 @@ impl super::ir::SoacInputType<Type<TypeName>> {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Raw<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);
+pub struct Raw<R = crate::BindingRef>(std::marker::PhantomData<fn() -> R>);
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Semantic<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);
+pub struct Semantic<R = crate::BindingRef>(std::marker::PhantomData<fn() -> R>);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Scheduled<R = super::program::SemanticResourceRef>(std::marker::PhantomData<fn() -> R>);
@@ -828,15 +838,6 @@ impl<P: WynSoacPhase> Soac<P> {
     }
 }
 
-impl<R: GraphResource> Soac<Raw<R>> {
-    pub(crate) fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
-        self.for_each_body_type_mut(&mut visit);
-        if let Self::Filter(op) = self {
-            op.state.for_each_type_mut(&mut visit);
-        }
-    }
-}
-
 impl Soac<Physical> {
     pub(crate) fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
         self.for_each_body_type_mut(&mut visit);
@@ -847,6 +848,15 @@ impl Soac<Physical> {
 }
 
 impl<R: GraphResource> Soac<Semantic<R>> {
+    pub(crate) fn for_each_type_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
+        self.for_each_body_type_mut(&mut visit);
+        if let Self::Filter(op) = self {
+            if let filter::Output::Local { capacity, .. } = &mut op.state.output {
+                visit(capacity);
+            }
+        }
+    }
+
     pub fn capture_nodes(&self) -> impl Iterator<Item = ValueId> {
         let nodes = match self {
             Self::Screma(op) => op.capture_nodes(),

@@ -18,7 +18,7 @@ use crate::{FunctionId, LookupSet, SortedSet};
 use super::graph_ops::{self, ConstantCopy, PureCopy};
 use super::inlining;
 use super::ir::{Body, BodySite as ProgramBodySite};
-use super::program::{fresh_region_name, CoreProgramData, Func};
+use super::program::{fresh_region_name, Func, SemanticProgramData};
 use super::reify::Segmented;
 use super::stage_variance::{entry_parameter_dependences, StageDependence, StageDependenceAnalysis};
 use super::types::{
@@ -121,7 +121,7 @@ fn run_with_stats(mut program: Segmented) -> Result<(Segmented, StageLiftStats)>
         })?;
         program = program
             .extend_functions([specialized.expect("stage-lift rewrite did not produce its region")])
-            .map_data(|data| CoreProgramData { identities, ..data });
+            .map_data(|data| SemanticProgramData { identities, ..data });
 
         stats.bodies_specialized += 1;
         stats.calls_inlined += calls_inlined;

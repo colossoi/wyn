@@ -20,7 +20,7 @@ use super::super::graph_projector::{
     GraphProjection, GraphProjector, ProjectedValueRecipe, ValueRecipeSource,
 };
 use super::super::program::{
-    CompilerResource, CompilerResourceKind, Entry, LogicalSize, MaterializationId,
+    AllocatedEntry, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId,
     MaterializationRequirement, OutputWriter, Program, RealizedOutputRoute, ResourceId, SemanticOpId,
     SemanticResourceDecl, SemanticResourceRef, SlotSource,
 };
@@ -29,8 +29,8 @@ use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
     EGraph, EffectToken, PureOp, ResourceAccess, ResultBinding, SegExtent, SegResourceAccess, SegSpace,
-    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId,
-    ValueKind, ViewId, WynLanguage,
+    Semantic as SemanticFamily, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
+    SoacEffect, ValueId, ValueKind, ViewId, WynLanguage,
 };
 use super::ResourcesAllocated;
 use crate::ast::TypeName;
@@ -38,6 +38,10 @@ use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::StorageRole;
 use crate::pipeline_descriptor::{DispatchSize, Pipeline, StorageTextureSize};
 use crate::types::TypeExt;
+
+type AllocatedSemantic = SemanticFamily<SemanticResourceRef>;
+type AllocatedGraph = EGraph<AllocatedSemantic>;
+type AllocatedSideEffect = SideEffect<AllocatedSemantic>;
 
 enum MaterializationPlan {
     FixedOperation {
@@ -51,7 +55,8 @@ enum MaterializationPlan {
         operation: ProjectedOperation,
         /// Variable-cardinality array represented by capacity storage plus a
         /// separately stored logical length.
-        scratch: ResourceId,
+        backing: Option<ResourceId>,
+        length: Option<ResourceId>,
         elem_ty: Type<TypeName>,
         result_ty: Type<TypeName>,
         size: LogicalSize,
@@ -59,7 +64,7 @@ enum MaterializationPlan {
     StagePrelude {
         entry: usize,
         insertion_site: Option<SideEffectSite>,
-        recipe: ProjectedValueRecipe,
+        recipe: ProjectedValueRecipe<SemanticResourceRef>,
         outputs: Vec<StagePreludeOutput>,
     },
 }
@@ -83,7 +88,7 @@ struct ProjectedOperation {
     producer: SemanticOpId,
     source_site: SideEffectSite,
     projected_site: SideEffectSite,
-    projection: GraphProjection,
+    projection: GraphProjection<SemanticResourceRef>,
     space: SegSpace<SemanticResourceRef>,
 }
 
@@ -164,11 +169,14 @@ fn apply_materialization(
         MaterializationPlan::RuntimeArray {
             entry,
             operation,
-            scratch,
+            backing,
+            length,
             elem_ty,
             result_ty,
             size,
-        } => materialize_runtime_array_result(program, entry, operation, scratch, elem_ty, result_ty, size),
+        } => materialize_runtime_array_result(
+            program, entry, operation, backing, length, elem_ty, result_ty, size,
+        ),
         MaterializationPlan::StagePrelude {
             entry,
             insertion_site,
@@ -249,8 +257,8 @@ fn plan_operation_result(
 
 fn filter_runtime_array_plan(
     entry_index: usize,
-    entry: &Entry<Semantic>,
-    op: &filter::Op<Semantic>,
+    entry: &AllocatedEntry,
+    op: &filter::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
@@ -258,11 +266,7 @@ fn filter_runtime_array_plan(
 ) -> Result<Option<MaterializationPlan>, String> {
     let filter::SemanticState {
         space,
-        storage:
-            filter::Output::Runtime {
-                scratch,
-                length: filter::RuntimeLength::ViewOnly,
-            },
+        output: filter::Output::Runtime(runtime),
     } = &op.state
     else {
         return Ok(None);
@@ -297,7 +301,19 @@ fn filter_runtime_array_plan(
             projection,
             space: space.clone(),
         },
-        scratch: scratch.0,
+        backing: match runtime.backing {
+            filter::RuntimeBacking::Deferred => None,
+            filter::RuntimeBacking::Bound(resource) => Some(resource.0),
+        },
+        length: match runtime.length {
+            filter::RuntimeLength::Implicit => None,
+            filter::RuntimeLength::Stored(resource) => Some(resource.0),
+            filter::RuntimeLength::Required => {
+                return Err(format!(
+                    "runtime-array producer {producer:?} retained an unresolved required length after allocation"
+                ));
+            }
+        },
         size,
         elem_ty,
         result_ty,
@@ -305,8 +321,8 @@ fn filter_runtime_array_plan(
 }
 
 fn operation_result_residency(
-    entry: &Entry<Semantic>,
-    op: &screma::Op<Semantic>,
+    entry: &AllocatedEntry,
+    op: &screma::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
@@ -347,7 +363,7 @@ fn operation_result_residency(
 }
 
 fn array_result_residency(
-    _entry: &Entry<Semantic>,
+    _entry: &AllocatedEntry,
     result: &ResultBinding<Type<TypeName>>,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
@@ -363,8 +379,8 @@ fn array_result_residency(
 
 fn operation_result_plan(
     entry_index: usize,
-    entry: &Entry<Semantic>,
-    op: &screma::Op<Semantic>,
+    entry: &AllocatedEntry,
+    op: &screma::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
@@ -514,7 +530,7 @@ fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<Materializa
     None
 }
 
-fn direct_stage_invocations(program: &ResourcesAllocated, entry: &Entry<Semantic>) -> u64 {
+fn direct_stage_invocations(program: &ResourcesAllocated, entry: &AllocatedEntry) -> u64 {
     let ExecutionModel::Compute { local_size } = &entry.execution_model else {
         return DIRECT_STAGE_INVOCATION_FALLBACK;
     };
@@ -582,7 +598,7 @@ fn direct_stage_invocations(program: &ResourcesAllocated, entry: &Entry<Semantic
 }
 
 fn direct_stage_value_is_liftable(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     analysis: &StageDependenceAnalysis,
     node: ValueId,
 ) -> bool {
@@ -608,9 +624,9 @@ fn direct_stage_value_is_liftable(
 /// Publish those live-outs beside the primary handoff before removing their
 /// source effects.
 fn stage_prelude_outputs(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     roots: impl IntoIterator<Item = ValueId>,
-    recipe: &ProjectedValueRecipe,
+    recipe: &ProjectedValueRecipe<SemanticResourceRef>,
 ) -> Option<Vec<StagePreludeOutput>> {
     let mut sources = roots.into_iter().collect::<Vec<_>>();
     sources.extend(recipe.live_outs());
@@ -630,7 +646,7 @@ fn stage_prelude_outputs(
     Some(outputs)
 }
 
-fn parallel_preludes(entry: &Entry<Semantic>, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
+fn parallel_preludes(entry: &AllocatedEntry, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
     let mut preludes = Vec::<ParallelPrelude>::new();
     let mut by_root = HashMap::<ValueId, usize>::new();
     for capture in dependencies.captured_values() {
@@ -666,7 +682,7 @@ fn parallel_preludes(entry: &Entry<Semantic>, dependencies: &SemanticGraph) -> V
 /// detach the complete prefix once, while consumers keep using their existing
 /// field projections after the boundary value is replaced by a handoff load.
 fn parallel_prelude_boundary_root(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     consumer: SideEffectSite,
     capture: ValueId,
 ) -> ValueId {
@@ -688,7 +704,7 @@ fn operation_sites(
     operations.iter().map(|operation| dependencies.operation_site(operation)).collect()
 }
 
-fn supports_parallel_prefix_consumer(entry: &Entry<Semantic>, site: SideEffectSite) -> bool {
+fn supports_parallel_prefix_consumer(entry: &AllocatedEntry, site: SideEffectSite) -> bool {
     matches!(
         &entry.graph.skeleton.effect(site).kind,
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
@@ -700,7 +716,7 @@ fn supports_parallel_prefix_consumer(entry: &Entry<Semantic>, site: SideEffectSi
 }
 
 fn source_is_observed_only_by_consumers_or_outputs(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     uses: &graph_ops::ValueUseIndex,
     root: ValueId,
     consumers: &HashSet<SideEffectSite>,
@@ -729,7 +745,7 @@ fn source_is_observed_only_by_consumers_or_outputs(
 }
 
 fn launched_consumer_invocations(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     dependencies: &SemanticGraph,
     consumers: &[SemanticOpId],
 ) -> u64 {
@@ -759,12 +775,12 @@ fn launched_consumer_invocations(
     })
 }
 
-fn has_parallel_consumer(entry: &Entry<Semantic>, consumers: Option<&HashSet<SemanticOpId>>) -> bool {
+fn has_parallel_consumer(entry: &AllocatedEntry, consumers: Option<&HashSet<SemanticOpId>>) -> bool {
     has_matching_consumer(entry, consumers, |soac| soac.scheduling_space().is_some())
 }
 
 fn has_segmented_screma_consumer(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     consumers: Option<&HashSet<SemanticOpId>>,
 ) -> bool {
     has_matching_consumer(entry, consumers, |soac| {
@@ -777,9 +793,9 @@ fn has_segmented_screma_consumer(
 }
 
 fn has_matching_consumer(
-    entry: &Entry<Semantic>,
+    entry: &AllocatedEntry,
     consumers: Option<&HashSet<SemanticOpId>>,
-    mut supports: impl FnMut(&Soac<Semantic>) -> bool,
+    mut supports: impl FnMut(&Soac<AllocatedSemantic>) -> bool,
 ) -> bool {
     let Some(consumers) = consumers else {
         return false;
@@ -798,7 +814,7 @@ fn scalar_result_is_used(
     observers.effect_sites().any(|site| site != producer) || observers.terminator_blocks().next().is_some()
 }
 
-fn invocation_invariant(entry: &Entry<Semantic>, block_id: BlockId, effects: &HashSet<usize>) -> bool {
+fn invocation_invariant(entry: &AllocatedEntry, block_id: BlockId, effects: &HashSet<usize>) -> bool {
     let Ok(dependence) = StageDependenceAnalysis::for_entry(entry) else {
         return false;
     };
@@ -821,7 +837,7 @@ fn invocation_invariant(entry: &Entry<Semantic>, block_id: BlockId, effects: &Ha
     })
 }
 
-fn dependencies_are_cloneable(graph: &EGraph, block_id: BlockId, effects: &HashSet<usize>) -> bool {
+fn dependencies_are_cloneable(graph: &AllocatedGraph, block_id: BlockId, effects: &HashSet<usize>) -> bool {
     let block = &graph.skeleton.blocks[block_id];
     effects.iter().all(|&index| {
         matches!(
@@ -975,7 +991,8 @@ fn materialize_runtime_array_result(
     program: ResourcesAllocated,
     entry_index: usize,
     operation: ProjectedOperation,
-    scratch: ResourceId,
+    backing: Option<ResourceId>,
+    stored_length: Option<ResourceId>,
     elem_ty: Type<TypeName>,
     result_ty: Type<TypeName>,
     size: LogicalSize,
@@ -1019,11 +1036,20 @@ fn materialize_runtime_array_result(
         producer_storage,
         projection,
     );
-    let length = data.alloc_compiler_resource(
-        CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(producer_id), 1),
-        Type::Constructed(TypeName::UInt(32), vec![]),
-        LogicalSize::FixedBytes(4),
-    );
+    let scratch = backing.unwrap_or_else(|| {
+        data.alloc_compiler_resource(
+            CompilerResource::new(CompilerResourceKind::FilterScratch, Some(producer_id), 0),
+            elem_ty.clone(),
+            size.clone(),
+        )
+    });
+    let length = stored_length.unwrap_or_else(|| {
+        data.alloc_compiler_resource(
+            CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(producer_id), 1),
+            Type::Constructed(TypeName::UInt(32), vec![]),
+            LogicalSize::FixedBytes(4),
+        )
+    });
     let handoff = RuntimeArrayHandoff {
         data: scratch,
         length,
@@ -1047,17 +1073,18 @@ fn materialize_runtime_array_result(
     let SideEffectKind::Soac(SoacEffect(
         _,
         Soac::Filter(filter::Op {
-            state: filter::SemanticState { storage, .. },
+            state: filter::SemanticState { output, .. },
             ..
         }),
     )) = &mut effect.kind
     else {
         return Err("runtime-array materialization projection did not retain a filter".to_string());
     };
-    *storage = filter::Output::Runtime {
-        scratch: SemanticResourceRef(handoff.data),
-        length: filter::RuntimeLength::Stored(SemanticResourceRef(handoff.length)),
+    let filter::Output::Runtime(runtime) = output else {
+        return Err("runtime-array materialization projected a local filter".to_string());
     };
+    runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(handoff.data));
+    runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(handoff.length));
     producer_entry.compact_interface();
 
     rewrite_runtime_array_source(
@@ -1087,7 +1114,7 @@ fn materialize_runtime_array_result(
 }
 
 fn rewrite_runtime_array_source(
-    entry: &mut Entry<Semantic>,
+    entry: &mut AllocatedEntry,
     result: ValueId,
     source_site: SideEffectSite,
     handoff: &RuntimeArrayHandoff,
@@ -1143,7 +1170,7 @@ fn rewrite_runtime_array_source(
 }
 
 fn configure_operation_materialization(
-    producer: &mut Entry<Semantic>,
+    producer: &mut AllocatedEntry,
     producer_site: SideEffectSite,
     producer_result: &ResultBinding<Type<TypeName>>,
     output_resources: &[ResourceId],
@@ -1195,7 +1222,7 @@ fn configure_operation_materialization(
 }
 
 fn configure_materialized_soac(
-    graph: &mut EGraph,
+    graph: &mut AllocatedGraph,
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
     output_specs: &[OutputSpec],
@@ -1240,7 +1267,7 @@ fn configure_materialized_soac(
 }
 
 fn configure_materialized_result(
-    graph: &mut EGraph,
+    graph: &mut AllocatedGraph,
     block: BlockId,
     result: &ResultBinding<Type<TypeName>>,
     output_views: &[ValueId],
@@ -1273,7 +1300,7 @@ fn configure_materialized_result(
 }
 
 fn rewrite_materialized_operation_source(
-    entry: &mut Entry<Semantic>,
+    entry: &mut AllocatedEntry,
     result: &ResultBinding<Type<TypeName>>,
     producer_site: SideEffectSite,
     output_resources: &[ResourceId],
@@ -1341,7 +1368,7 @@ fn materialize_stage_prelude(
     program: ResourcesAllocated,
     entry_index: usize,
     insertion_site: Option<SideEffectSite>,
-    recipe: ProjectedValueRecipe,
+    recipe: ProjectedValueRecipe<SemanticResourceRef>,
     outputs: Vec<StagePreludeOutput>,
 ) -> ResourcesAllocated {
     if outputs.is_empty() {
@@ -1459,15 +1486,15 @@ fn materialize_stage_prelude(
 fn projected_materialization_entry(
     identities: &mut egir::program::ProgramIdentities,
     materialization: MaterializationId,
-    source: &Entry<Semantic>,
+    source: &AllocatedEntry,
     name_suffix: &str,
     execution_model: ExecutionModel,
     resource_declarations: Vec<SemanticResourceDecl>,
-    projection: GraphProjection,
-) -> Entry {
+    projection: GraphProjection<SemanticResourceRef>,
+) -> AllocatedEntry {
     let name = materialization.entry_name(&source.name, name_suffix);
     let id = identities.alloc_entry(name.clone());
-    Entry {
+    AllocatedEntry {
         id,
         name,
         span: source.span,
@@ -1487,7 +1514,7 @@ fn projected_materialization_entry(
 }
 
 fn emit_scalar_handoff_store(
-    graph: &mut EGraph,
+    graph: &mut AllocatedGraph,
     block: BlockId,
     output_view: ValueId,
     value: ValueId,
@@ -1508,11 +1535,11 @@ fn emit_scalar_handoff_store(
 }
 
 fn detached_scalar_handoff_load(
-    graph: &mut EGraph,
+    graph: &mut AllocatedGraph,
     view: ValueId,
     elem_ty: &Type<TypeName>,
     effect_ids: &mut IdSource<EffectToken>,
-) -> (ValueId, SideEffect) {
+) -> (ValueId, AllocatedSideEffect) {
     let zero = graph_ops::intern_u32(graph, 0, None);
     let view = graph.view_id(view);
     let place = graph.add_view_index_place(view, zero, elem_ty.clone(), None);
@@ -1520,10 +1547,10 @@ fn detached_scalar_handoff_load(
 }
 
 fn replace_prelude_effects_with_load(
-    entry: &mut Entry<Semantic>,
+    entry: &mut AllocatedEntry,
     producer_effects: &HashSet<SideEffectSite>,
     insertion_site: SideEffectSite,
-    load_effects: Vec<SideEffect>,
+    load_effects: Vec<AllocatedSideEffect>,
 ) {
     let mut removed = producer_effects.iter().map(|site| site.index).collect::<Vec<_>>();
     removed.sort_unstable();
@@ -1541,9 +1568,9 @@ fn replace_prelude_effects_with_load(
 }
 
 fn replace_entry_prelude_with_load(
-    entry: &mut Entry<Semantic>,
+    entry: &mut AllocatedEntry,
     producer_effects: &HashSet<SideEffectSite>,
-    load_effects: Vec<SideEffect>,
+    load_effects: Vec<AllocatedSideEffect>,
 ) {
     entry.graph.skeleton.remove_effect_sites(producer_effects.iter().copied());
     let block = &mut entry.graph.skeleton.blocks[entry.graph.skeleton.entry];
@@ -1553,11 +1580,11 @@ fn replace_entry_prelude_with_load(
 }
 
 fn replace_structured_prefix_with_load(
-    entry: &mut Entry<Semantic>,
+    entry: &mut AllocatedEntry,
     producer_effects: &HashSet<SideEffectSite>,
     continuation: BlockId,
     loaded: ValueId,
-    load_effects: Vec<SideEffect>,
+    load_effects: Vec<AllocatedSideEffect>,
 ) {
     entry.graph.skeleton.remove_effect_sites(producer_effects.iter().copied());
     let source_entry = entry.graph.skeleton.entry;
@@ -1574,8 +1601,8 @@ fn replace_structured_prefix_with_load(
 fn output_specs(
     result: &ResultBinding<Type<TypeName>>,
     materialization: FixedMaterializationKind,
-    space: &SegSpace,
-    op: &screma::Op<Semantic>,
+    space: &SegSpace<SemanticResourceRef>,
+    op: &screma::Op<AllocatedSemantic>,
 ) -> Option<Vec<OutputSpec>> {
     if op.result_count() != result.field_count() {
         return None;
@@ -1606,7 +1633,7 @@ fn output_specs(
         .collect()
 }
 
-fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[ValueId]) {
+fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[ValueId]) {
     let mut sites = Vec::<SideEffectSite>::new();
     for (block_id, block) in &graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
@@ -1653,7 +1680,7 @@ fn refresh_resource_reads_for_values(graph: &mut EGraph, values: &[ValueId]) {
 /// effect.  Materialization is an entry prepass, so an internal producer chain
 /// must move with the multi-consumer map instead of leaving dangling Project
 /// nodes in the cloned graph.
-fn dependency_effects(graph: &EGraph, root: SideEffectSite) -> Option<HashSet<usize>> {
+fn dependency_effects(graph: &AllocatedGraph, root: SideEffectSite) -> Option<HashSet<usize>> {
     let effect = graph.skeleton.get_effect(root)?;
     let closure = graph_ops::value_producer_closure(graph, graph_ops::effect_value_inputs(graph, effect));
     if closure.effects.iter().any(|site| site.block != root.block) {
@@ -1662,7 +1689,10 @@ fn dependency_effects(graph: &EGraph, root: SideEffectSite) -> Option<HashSet<us
     Some(closure.effects.into_iter().map(|site| site.index).chain([root.index]).collect())
 }
 
-fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]) -> Result<(), String> {
+fn retarget_input_metadata(
+    graph: &mut AllocatedGraph,
+    replacements: &[InputReplacement],
+) -> Result<(), String> {
     for (_, block) in graph.skeleton.blocks.iter_mut() {
         for effect in &mut block.side_effects {
             match &mut effect.kind {
@@ -1746,7 +1776,7 @@ fn retarget_input_metadata(graph: &mut EGraph, replacements: &[InputReplacement]
     Ok(())
 }
 
-fn replace_space_references(space: &mut SegSpace, replacements: &[InputReplacement]) {
+fn replace_space_references(space: &mut SegSpace<SemanticResourceRef>, replacements: &[InputReplacement]) {
     for replacement in replacements {
         space.replace_reference(
             replacement.project,

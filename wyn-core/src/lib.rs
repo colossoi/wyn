@@ -301,13 +301,13 @@ pub type SymbolTable = IdArena<SymbolId, String>;
 // =============================================================================
 
 /// A `(descriptor set, binding)` pair naming a host-runtime storage /
-/// uniform / texture / sampler resource. Semantic EGIR graphs use
-/// `ResourceId`; this pair remains the host ABI constraint and becomes the
-/// resource identity again only in physical EGIR and SSA. Deliberately no
+/// uniform / texture / sampler resource. Pre-allocation semantic EGIR keeps
+/// this interface identity directly; logical-resource allocation replaces it
+/// with `ResourceId`. Deliberately no
 /// `Default` impl —
 /// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
 /// default value would silently mask construction bugs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BindingRef {
     pub set: u32,
     pub binding: u32,

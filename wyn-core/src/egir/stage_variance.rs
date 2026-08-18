@@ -21,7 +21,7 @@ use super::ir::{CallEffects, CallSiteId, EffectOp, Family, FlowValueId, OperandR
 use super::loop_analysis::LoopAnalysis;
 use super::program::Entry;
 use super::reify::Segmented;
-use super::types::{EGraph, PureOp, PureViewSource, SegBody, Semantic, ValueId, ValueKind};
+use super::types::{EGraph, PureOp, PureViewSource, SegBody, ValueId, ValueKind};
 
 #[cfg(test)]
 #[path = "stage_variance_tests.rs"]
@@ -309,15 +309,17 @@ impl StageDependenceAnalysis {
     }
 
     /// Analyze an entry using its declared interface as parameter seeds.
-    pub(crate) fn for_entry(entry: &Entry<Semantic>) -> Result<Self, String> {
+    pub(crate) fn for_entry<P: Family, ResourceDecl, Route>(
+        entry: &Entry<P, ResourceDecl, Route>,
+    ) -> Result<Self, String> {
         Self::for_entry_graph(entry, &entry.graph)
     }
 
     /// Analyze a graph projected from `entry`. Function-parameter indices are
     /// preserved by graph projection, so the source entry remains the
     /// authority for their stage dependence.
-    pub(crate) fn for_entry_graph<P: Family>(
-        entry: &Entry<Semantic>,
+    pub(crate) fn for_entry_graph<EntryP: Family, P: Family, ResourceDecl, Route>(
+        entry: &Entry<EntryP, ResourceDecl, Route>,
         graph: &EGraph<P>,
     ) -> Result<Self, String> {
         Self::for_graph(graph, &entry_parameter_dependences(entry))
@@ -397,12 +399,17 @@ fn seg_body_parameter_dependences(
     Ok(parameter_dependences)
 }
 
-pub(crate) fn entry_parameter_input_kind(entry: &Entry<Semantic>, index: usize) -> Option<&EntryInputKind> {
+pub(crate) fn entry_parameter_input_kind<P: Family, ResourceDecl, Route>(
+    entry: &Entry<P, ResourceDecl, Route>,
+    index: usize,
+) -> Option<&EntryInputKind> {
     let slot = *entry.parameter_inputs.get(index)?.first()?;
     entry.inputs.get(slot.0).map(|input| &input.kind)
 }
 
-pub(crate) fn entry_parameter_dependences(entry: &Entry<Semantic>) -> Vec<StageDependence> {
+pub(crate) fn entry_parameter_dependences<P: Family, ResourceDecl, Route>(
+    entry: &Entry<P, ResourceDecl, Route>,
+) -> Vec<StageDependence> {
     (0..entry.params.len())
         .map(|index| {
             entry_parameter_input_kind(entry, index).map_or_else(unknown_dependence, entry_input_dependence)

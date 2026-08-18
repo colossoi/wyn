@@ -83,8 +83,11 @@ pub(super) fn build_filter_loop(
     spec: FilterLoop,
     next_effect: &mut IdSource<EffectToken>,
 ) {
-    if let filter::Output::Runtime { scratch, .. } = &spec.output {
-        build_runtime_filter_loop(graph, bid, idx_in_block, &spec, *scratch, next_effect);
+    if let filter::Output::Runtime(runtime) = &spec.output {
+        let filter::RuntimeBacking::Bound(data) = runtime.backing else {
+            panic!("scheduled runtime filter has no backing storage");
+        };
+        build_runtime_filter_loop(graph, bid, idx_in_block, &spec, data, next_effect);
         return;
     }
     let filter::Output::Local { capacity, ownership } = &spec.output else {
@@ -623,10 +626,11 @@ pub(super) fn build_filter_scatter(
     );
     let kept = filter_kept_value(graph, write, gid, &spec, next_effect);
     let (out_binding, len_binding) = match &spec.output {
-        filter::Output::Runtime {
-            scratch,
+        filter::Output::Runtime(filter::RuntimeOutput {
+            backing: filter::RuntimeBacking::Bound(data),
             length: filter::RuntimeLength::Stored(length),
-        } => (scratch, length),
+            ..
+        }) => (data, length),
         _ => panic!("parallel filter scatter requires runtime entry output"),
     };
     let out_binding = *out_binding;
@@ -700,10 +704,10 @@ fn build_runtime_filter_loop(
         next_effect,
     );
 
-    if let filter::Output::Runtime {
+    if let filter::Output::Runtime(filter::RuntimeOutput {
         length: filter::RuntimeLength::Stored(length),
         ..
-    } = &spec.output
+    }) = &spec.output
     {
         let length_view = intern_storage_view(graph, *length, u32_ty.clone(), None);
         emit_storage_store(

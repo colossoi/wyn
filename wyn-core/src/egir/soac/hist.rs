@@ -9,6 +9,19 @@ use super::super::types::{
 };
 use super::screma;
 
+/// Stable field identity in a histogram effect's logical result binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HistResultId(pub usize);
+
+/// Logical results of capacity-bounded bucket insertion. Neither field implies
+/// storage; allocation and target planning choose their representation only
+/// if the result survives semantic optimization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BucketInsertResults {
+    pub counts: HistResultId,
+    pub overflow: HistResultId,
+}
+
 /// How one histogram operation combines bucket values with its destinations.
 ///
 /// `Reduce` is the canonical Futhark form. `OrderedOverwrite` is Wyn's
@@ -23,13 +36,11 @@ pub enum Update {
         operator: screma::Lambda,
         neutral: Vec<ValueId>,
     },
-    /// Capacity-bounded insertion. `counts` and `overflow` are storage-view
-    /// nodes over compiler resources, which keeps resource identity in the
-    /// graph even when every item input is produced by fused computation.
+    /// Capacity-bounded insertion with logical counts and overflow results.
+    /// Their eventual storage is deliberately absent from semantic EGIR.
     BucketInsert {
         value_types: Vec<Type<TypeName>>,
-        counts: ViewId,
-        overflow: ViewId,
+        results: BucketInsertResults,
         capacity: ValueId,
     },
 }
@@ -84,11 +95,7 @@ impl HistOp {
     }
 
     pub(crate) fn written_views(&self) -> Vec<ViewId> {
-        let mut views = self.destinations.clone();
-        if let Update::BucketInsert { counts, overflow, .. } = self.update {
-            views.extend([counts, overflow]);
-        }
-        views
+        self.destinations.clone()
     }
 }
 
@@ -140,16 +147,7 @@ impl HistForm {
                         *value = map(*value);
                     }
                 }
-                Update::BucketInsert {
-                    counts,
-                    overflow,
-                    capacity,
-                    ..
-                } => {
-                    counts.remap_value(&mut *map);
-                    overflow.remap_value(&mut *map);
-                    *capacity = map(*capacity);
-                }
+                Update::BucketInsert { capacity, .. } => *capacity = map(*capacity),
             }
         }
     }
@@ -176,6 +174,15 @@ pub enum ParallelStage {
     Init,
     Insert,
     Finish,
+}
+
+/// Concrete storage selected for the logical results of a surviving
+/// capacity-bounded bucket insertion. This exists only in scheduled and
+/// physical histogram state; semantic `BucketInsertResults` remain logical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BucketStorage<R> {
+    pub counts: R,
+    pub overflow: R,
 }
 
 /// A contiguous range of logical dimensions assigned to one physical
@@ -217,6 +224,7 @@ pub enum ScheduledState<R> {
         space: SegSpace<R>,
         stage: ParallelStage,
         topology: Option<DispatchTopology>,
+        storage: BucketStorage<R>,
     },
 }
 
@@ -274,14 +282,8 @@ impl<P: WynSoacPhase> Op<P> {
             if let Update::Reduce { neutral, .. } = &operation.update {
                 nodes.extend(neutral.iter().copied());
             }
-            if let Update::BucketInsert {
-                counts,
-                overflow,
-                capacity,
-                ..
-            } = operation.update
-            {
-                nodes.extend([counts.value(), overflow.value(), capacity]);
+            if let Update::BucketInsert { capacity, .. } = operation.update {
+                nodes.push(capacity);
             }
         }
         nodes

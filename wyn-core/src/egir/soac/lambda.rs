@@ -10,32 +10,31 @@ use polytype::Type;
 use smallvec::smallvec;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{fresh_region_name, Func, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, ParameterId,
-    PureOp, ResultBinding, SegBody, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, GraphResource,
+    OperandRef, ParameterId, PureOp, ResultBinding, SegBody, Semantic, SkeletonTerminator, ValueId,
+    ValueKind, WynLanguage,
 };
 use crate::flow::BlockId;
 use crate::FunctionId;
 
 use super::screma;
 
-pub(crate) fn named_parameters(
+pub(crate) fn named_parameters<R: GraphResource>(
     types: &[Type<TypeName>],
     prefix: &str,
-) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+) -> Vec<FuncParam<R, Type<TypeName>>> {
     types
         .iter()
         .enumerate()
-        .map(|(index, ty)| {
-            callable_parameter::<SemanticResourceRef, WynLanguage>(format!("{prefix}_{index}"), ty.clone())
-        })
+        .map(|(index, ty)| callable_parameter::<R, WynLanguage>(format!("{prefix}_{index}"), ty.clone()))
         .collect()
 }
 
-pub(crate) fn function_parameters(
-    graph: &mut EGraph,
-    params: &[FuncParam<SemanticResourceRef, Type<TypeName>>],
+pub(crate) fn function_parameters<R: GraphResource>(
+    graph: &mut EGraph<Semantic<R>>,
+    params: &[FuncParam<R, Type<TypeName>>],
 ) -> Vec<OperandRef> {
     params
         .iter()
@@ -50,7 +49,11 @@ pub(crate) fn result_type(types: &[Type<TypeName>]) -> Type<TypeName> {
     }
 }
 
-pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Type<TypeName>]) -> ValueId {
+pub(crate) fn pack_results<P: egir::ir::Family>(
+    graph: &mut EGraph<P>,
+    results: &[ValueId],
+    types: &[Type<TypeName>],
+) -> ValueId {
     debug_assert_eq!(results.len(), types.len());
     match results {
         [result] => *result,
@@ -74,8 +77,8 @@ pub(crate) fn pack_results(graph: &mut EGraph, results: &[ValueId], types: &[Typ
     }
 }
 
-pub(crate) fn unpack_results(
-    graph: &mut EGraph,
+pub(crate) fn unpack_results<P: egir::ir::Family>(
+    graph: &mut EGraph<P>,
     result: ValueId,
     types: &[Type<TypeName>],
 ) -> Vec<ValueId> {
@@ -127,11 +130,11 @@ pub(crate) fn result_argument_values<P: egir::ir::Family>(
 ///
 /// Identity lambdas do not have a callable region and simply return their
 /// arguments. Region-lambda callers must append captures to `arguments`.
-pub(crate) fn emit_call(
-    graph: &mut EGraph,
+pub(crate) fn emit_call<R: GraphResource>(
+    graph: &mut EGraph<Semantic<R>>,
     block: BlockId,
     lambda: &screma::Lambda,
-    callee: Option<&Func<Semantic>>,
+    callee: Option<&Func<Semantic<R>>>,
     arguments: Vec<OperandRef>,
 ) -> Vec<ResultBinding<Type<TypeName>>> {
     if lambda.is_identity() {
@@ -168,39 +171,39 @@ pub(crate) fn emit_call(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn finish_function(
-    mut graph: EGraph,
+pub(crate) fn finish_function<R: GraphResource>(
+    mut graph: EGraph<Semantic<R>>,
     return_block: BlockId,
     region: FunctionId,
     name: String,
     span: Span,
-    params: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+    params: Vec<FuncParam<R, Type<TypeName>>>,
     result_types: &[Type<TypeName>],
     results: &[ValueId],
-) -> Func {
+) -> Func<Semantic<R>> {
     let result = pack_results(&mut graph, results, result_types);
     let result_abi = by_value_function_result::<WynLanguage>(result_type(result_types));
     let result = egir::graph_ops::bind_by_value_result(&mut graph, &result_abi, result);
     graph.skeleton.blocks[return_block].term = SkeletonTerminator::Return(Some(result));
     let effects = if graph.has_ordered_effects() { CallEffects::General } else { CallEffects::Pure };
-    Func::<Semantic>::new(region, name, span, None, params, result_abi, effects, graph)
+    Func::<Semantic<R>>::new(region, name, span, None, params, result_abi, effects, graph)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn finish_region_lambda(
+pub(crate) fn finish_region_lambda<R: GraphResource>(
     identities: &mut ProgramIdentities,
     scope: &str,
     label: &str,
     span: Span,
-    graph: EGraph,
+    graph: EGraph<Semantic<R>>,
     return_block: BlockId,
-    params: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+    params: Vec<FuncParam<R, Type<TypeName>>>,
     captures: Vec<OperandRef>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,
     results: Vec<ValueId>,
     fold_identity: bool,
-) -> (screma::Lambda, Option<Func<Semantic>>) {
+) -> (screma::Lambda, Option<Func<Semantic<R>>>) {
     let is_identity = fold_identity
         && captures.is_empty()
         && params.len() == parameter_types.len()

@@ -72,7 +72,7 @@ impl ReduceCandidate {
 
 fn analyze_reduction_operators(
     entry: &egir::program::PlannedEntry,
-    op: &screma::Op<egir::types::Semantic>,
+    op: &screma::Op<Semantic>,
 ) -> Option<Vec<ReductionAccumulator>> {
     op.form
         .reductions
@@ -104,7 +104,7 @@ fn analyze_reduction_operators(
 
 pub(super) fn analyze_reduction_routing(
     entry: &egir::program::PlannedEntry,
-    op: &screma::Op<egir::types::Semantic>,
+    op: &screma::Op<Semantic>,
     results: &[ResultBinding<Type<TypeName>>],
     resources: &egir::program::LogicalResourceArena,
 ) -> Option<ReductionRouting> {
@@ -164,7 +164,7 @@ pub(super) fn analyze_reduction_routing(
 
 fn analyze_reduction_accumulators(
     entry: &egir::program::PlannedEntry,
-    op: &screma::Op<egir::types::Semantic>,
+    op: &screma::Op<Semantic>,
     results: &[ResultBinding<Type<TypeName>>],
     resources: &egir::program::LogicalResourceArena,
 ) -> Option<Vec<ReductionAccumulator>> {
@@ -450,7 +450,7 @@ struct ReduceCombineSpec<'a> {
     operator: &'a Func<Semantic>,
     component_types: &'a [Type<TypeName>],
     elem_ty: Type<TypeName>,
-    source_graph: &'a egir::types::EGraph,
+    source_graph: &'a EGraph,
     operator_captures: &'a [OperandRef],
     capture_inputs: &'a [SemanticResourceDecl],
     neutrals: &'a [ValueId],

@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::types::TypeExt;
 
 use super::graph_ops;
-use super::ir::ProgramShape;
+use super::ir::{GraphResource, ProgramShape};
 use super::program::{Program, SemanticOpId};
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -38,11 +38,12 @@ pub struct SemanticDependency {
 /// Record runtime-composite array values whose use requires a storage-backed
 /// representation. This runs at the same semantic snapshot boundary as the
 /// dependency builder, when producer identity and use shape are both direct.
-pub(crate) fn array_residency_demands<Tag, Shape, GlobalContext>(
+pub(crate) fn array_residency_demands<Tag, Shape, GlobalContext, R>(
     inner: &Program<Tag, Shape, GlobalContext>,
 ) -> HashSet<SemanticOpId>
 where
-    Shape: ProgramShape<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic<R>>,
+    R: GraphResource + Copy + Ord,
 {
     let mut demands = HashSet::new();
     for entry in &inner.entry_points {
@@ -101,11 +102,12 @@ where
 
 /// Build semantic value/effect/resource dependencies for every semantic SOAC in
 /// the program.
-pub(crate) fn dependencies<Tag, Shape, GlobalContext>(
+pub(crate) fn dependencies<Tag, Shape, GlobalContext, R>(
     inner: &Program<Tag, Shape, GlobalContext>,
 ) -> Vec<SemanticDependency>
 where
-    Shape: ProgramShape<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic<R>>,
+    R: GraphResource + Copy + Ord,
 {
     let mut dependencies = Vec::new();
     for entry in &inner.entry_points {
@@ -119,12 +121,18 @@ where
 
 /// Every edge runs between two ops of `graph`, so duplicates can only arise
 /// within one scope and `seen` need not outlive this call.
-fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<SemanticDependency>) {
-    struct Record<'a> {
+fn collect_graph_dependencies<R>(
+    _scope: &str,
+    graph: &EGraph<Semantic<R>>,
+    output: &mut Vec<SemanticDependency>,
+) where
+    R: GraphResource + Copy + Ord,
+{
+    struct Record<'a, R: GraphResource> {
         id: SemanticOpId,
         results: Vec<ValueId>,
-        effect: &'a SideEffect,
-        resources: Vec<SegResourceAccess>,
+        effect: &'a SideEffect<Semantic<R>>,
+        resources: Vec<SegResourceAccess<R>>,
     }
     let mut seen: HashSet<SemanticDependency> = HashSet::new();
 
@@ -142,12 +150,15 @@ fn collect_graph_dependencies(_scope: &str, graph: &EGraph, output: &mut Vec<Sem
                     },
                     Soac::Filter(op) => {
                         let mut resources = read_resources(graph, effect);
-                        let bindings: Vec<_> = match &op.state.storage {
+                        let bindings: Vec<_> = match &op.state.output {
                             filter::Output::Local { .. } => Vec::new(),
-                            filter::Output::Runtime { scratch, length } => {
-                                let mut bindings = vec![*scratch];
-                                if let filter::RuntimeLength::Stored(length) = length {
-                                    bindings.push(*length);
+                            filter::Output::Runtime(runtime) => {
+                                let mut bindings = Vec::new();
+                                if let filter::RuntimeBacking::Bound(backing) = runtime.backing {
+                                    bindings.push(backing);
+                                }
+                                if let filter::RuntimeLength::Stored(length) = runtime.length {
+                                    bindings.push(length);
                                 }
                                 bindings
                             }
@@ -253,19 +264,29 @@ fn push_dependency(
     }
 }
 
-pub(crate) fn read_resources(graph: &EGraph, se: &SideEffect) -> Vec<SegResourceAccess> {
+pub(crate) fn read_resources<R>(
+    graph: &EGraph<Semantic<R>>,
+    se: &SideEffect<Semantic<R>>,
+) -> Vec<SegResourceAccess<R>>
+where
+    R: GraphResource + Copy + Ord,
+{
     graph_ops::read_storage_resources(graph, graph_ops::effect_value_inputs(graph, se))
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.
-pub(crate) fn verify<Tag, Shape, GlobalContext>(
+pub(crate) fn verify<Tag, Shape, GlobalContext, R>(
     inner: &Program<Tag, Shape, GlobalContext>,
 ) -> Result<(), String>
 where
-    Shape: ProgramShape<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic<R>>,
+    R: GraphResource + Copy + Ord,
 {
     let contains_region = |region| inner.functions.iter().any(|function| function.region == region);
-    let verify_effect = |scope: &str, graph: &EGraph, effect: &SideEffect| -> Result<(), String> {
+    let verify_effect = |scope: &str,
+                         graph: &EGraph<Semantic<R>>,
+                         effect: &SideEffect<Semantic<R>>|
+     -> Result<(), String> {
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
             return Ok(());
         };
@@ -357,14 +378,15 @@ where
     Ok(())
 }
 
-pub(crate) fn summary<Tag, Shape, GlobalContext>(inner: &Program<Tag, Shape, GlobalContext>) -> String
+pub(crate) fn summary<Tag, Shape, GlobalContext, R>(inner: &Program<Tag, Shape, GlobalContext>) -> String
 where
-    Shape: ProgramShape<Family = Semantic>,
+    Shape: ProgramShape<Family = Semantic<R>>,
+    R: GraphResource + Copy + Ord,
 {
     use std::fmt::Write;
 
     let mut output = String::new();
-    let mut print_graph = |scope: &str, graph: &EGraph| {
+    let mut print_graph = |scope: &str, graph: &EGraph<Semantic<R>>| {
         for (_, block) in &graph.skeleton.blocks {
             for effect in &block.side_effects {
                 match &effect.kind {
@@ -462,7 +484,13 @@ impl SemanticGraph {
     /// Extend the semantic operation DAG with graph-local values captured by
     /// its SOACs. Capture sources are not assigned synthetic `SemanticOpId`s;
     /// their successors use the DAG's existing dense operation identities.
-    pub(crate) fn with_operation_captures(deps: &[SemanticDependency], egir: &EGraph) -> Self {
+    pub(crate) fn with_operation_captures<R>(
+        deps: &[SemanticDependency],
+        egir: &EGraph<Semantic<R>>,
+    ) -> Self
+    where
+        R: GraphResource,
+    {
         let mut graph = Self::new(deps);
         for (block, skeleton_block) in &egir.skeleton.blocks {
             for (effect_index, effect) in skeleton_block.side_effects.iter().enumerate() {

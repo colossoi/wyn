@@ -17,7 +17,7 @@ use super::support;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::CoreProgramData;
+use crate::egir::program::SemanticProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -320,7 +320,7 @@ fn find_in_graph(
                     .iter()
                     .filter_map(|route| consumer_op.inputs[route.consumer_input].array.array_buffer())
                     .filter_map(|buffer| match buffer {
-                        Type::Constructed(TypeName::Resource(resource), _) => Some(*resource),
+                        Type::Constructed(TypeName::Buffer(binding), _) => Some(*binding),
                         _ => None,
                     })
                     .collect::<std::collections::HashSet<_>>();
@@ -329,7 +329,7 @@ fn find_in_graph(
                         producer_resource.resource == consumer_resource.resource
                             && (producer_resource.access != ResourceAccess::Read
                                 || consumer_resource.access != ResourceAccess::Read)
-                            && !routed_resources.contains(&producer_resource.resource.0)
+                            && !routed_resources.contains(&producer_resource.resource)
                     })
                 });
                 let direct_effect_chain = matches!(
@@ -602,7 +602,7 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
             support::replace_route_values(entry, &replacements);
         })
     });
-    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
+    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
         identities: identities,
         ..data
     })

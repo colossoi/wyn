@@ -12,9 +12,9 @@ pub type Optimized = super::program::Program<
     OptimizedTag,
     super::ir::ProgramFamily<
         super::types::Semantic,
-        super::program::SemanticResourceDecl,
+        super::program::NoStorageDeclaration,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::SemanticProgramData,
     >,
     super::program::RewriteGlobal,
 >;
@@ -24,7 +24,10 @@ use super::program::SemanticOpId;
 use super::reify::Segmented;
 use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
-use super::types::{EGraph, ResourceAccess, SegResourceAccess, SideEffectKind, Soac, SoacEffect, ValueId};
+use super::types::{
+    EGraph, GraphResource, ResourceAccess, SegResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect,
+    ValueId,
+};
 use crate::flow::BlockId;
 use crate::LookupMap;
 use std::collections::BTreeMap;
@@ -196,8 +199,8 @@ fn apply_dead_seg_ops(inner: Segmented, mut patch: DeadSegOpsPatch) -> Segmented
     rebuilt
 }
 
-fn dead_seg_ops_in_graph(
-    graph: &EGraph,
+fn dead_seg_ops_in_graph<R: GraphResource>(
+    graph: &EGraph<Semantic<R>>,
     external_roots: impl IntoIterator<Item = ValueId>,
 ) -> DeadGraphPatch {
     // Live values are those reachable from an observable root.  Looking at
@@ -258,8 +261,8 @@ fn dead_seg_ops_in_graph(
     patch
 }
 
-pub(super) fn eliminate_dead_seg_ops_in_graph(
-    graph: &mut EGraph,
+pub(super) fn eliminate_dead_seg_ops_in_graph<R: GraphResource>(
+    graph: &mut EGraph<Semantic<R>>,
     external_roots: impl IntoIterator<Item = ValueId>,
 ) -> bool {
     let mut patch = dead_seg_ops_in_graph(graph, external_roots);

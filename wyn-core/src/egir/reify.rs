@@ -10,9 +10,9 @@ pub type Segmented = super::program::Program<
     SegmentedTag,
     super::ir::ProgramFamily<
         super::types::Semantic,
-        super::program::SemanticResourceDecl,
+        super::program::NoStorageDeclaration,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::SemanticProgramData,
     >,
     super::program::RewriteGlobal,
 >;
@@ -26,13 +26,12 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::flow::BlockId;
 use crate::types::TypeExt;
-use crate::LookupMap;
+use crate::{BindingRef, LookupMap};
 
 use super::from_tlc::Converted;
 use super::graph_ops;
 use super::program::{
     ConstantDef, Entry, Func, OutputSlotId, OutputWriter, Program, RawEntry, SemanticOpIdSource,
-    SemanticResourceRef,
 };
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -41,10 +40,10 @@ use super::types::{
 };
 
 struct Facts {
-    space: SegSpace<SemanticResourceRef>,
+    space: SegSpace<BindingRef>,
     placement: screma::Placement,
     output_slots: Vec<OutputSlotId>,
-    resources: Vec<SegResourceAccess<SemanticResourceRef>>,
+    resources: Vec<SegResourceAccess<BindingRef>>,
     entry: bool,
 }
 
@@ -174,12 +173,12 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             })
         }
         Soac::Filter(op) => {
-            let storage = op.state.storage;
+            let output = op.state.output;
             Soac::Filter(filter::Op {
                 body: op.body,
                 state: filter::SemanticState {
                     space: facts.space,
-                    storage,
+                    output,
                 },
             })
         }
@@ -303,7 +302,7 @@ fn space(
     entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     inputs: &[SoacInputType],
-) -> SegSpace<SemanticResourceRef> {
+) -> SegSpace<BindingRef> {
     let domain_rank = inputs
         .iter()
         .flat_map(|input| input.dimensions.iter().copied())
@@ -374,11 +373,7 @@ fn space(
     SegSpace::from_dims(dims).expect("ranked SOAC space is non-empty")
 }
 
-fn extent_from_node(
-    graph: &EGraph<Raw>,
-    entry: Option<&RawEntry>,
-    node: ValueId,
-) -> SegExtent<SemanticResourceRef> {
+fn extent_from_node(graph: &EGraph<Raw>, entry: Option<&RawEntry>, node: ValueId) -> SegExtent<BindingRef> {
     match &graph.nodes[node].kind {
         ValueKind::Pure {
             op: PureOp::Int(value) | PureOp::Uint(value),
@@ -423,7 +418,7 @@ fn semantic_resources(
     entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     output_slots: &[OutputSlotId],
-) -> Vec<SegResourceAccess<SemanticResourceRef>> {
+) -> Vec<SegResourceAccess<BindingRef>> {
     let mut accesses = read_resources(graph, effect)
         .into_iter()
         .map(|resource| (resource.resource, resource.access))
@@ -446,10 +441,7 @@ fn semantic_resources(
     resources
 }
 
-fn read_resources(
-    graph: &EGraph<Raw>,
-    effect: &SideEffect<Raw>,
-) -> Vec<SegResourceAccess<SemanticResourceRef>> {
+fn read_resources(graph: &EGraph<Raw>, effect: &SideEffect<Raw>) -> Vec<SegResourceAccess<BindingRef>> {
     graph_ops::read_storage_resources(graph, referenced_nodes(effect))
 }
 

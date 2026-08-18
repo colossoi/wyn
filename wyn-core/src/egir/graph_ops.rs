@@ -1223,9 +1223,10 @@ pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
 pub(crate) fn read_storage_resources<P>(
     graph: &EGraph<P>,
     roots: impl IntoIterator<Item = ValueId>,
-) -> Vec<SegResourceAccess<super::program::SemanticResourceRef>>
+) -> Vec<SegResourceAccess<P::Resource>>
 where
-    P: ValueProducerPhase + Family<Resource = super::program::SemanticResourceRef>,
+    P: ValueProducerPhase,
+    P::Resource: Copy + Eq + std::hash::Hash + Ord,
 {
     let resources = value_producer_closure(graph, roots)
         .nodes
@@ -1245,13 +1246,10 @@ where
 
 /// Index effectful SOAC writers by the logical resources named by their
 /// explicit destination views.
-pub(crate) fn resource_effect_writers<P>(
-    graph: &EGraph<P>,
-) -> LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>
+pub(crate) fn resource_effect_writers<P>(graph: &EGraph<P>) -> LookupMap<P::Resource, Vec<EffectToken>>
 where
-    P: ValueProducerPhase
-        + super::types::WynSoacPhase
-        + Family<Resource = super::program::SemanticResourceRef>,
+    P: ValueProducerPhase + super::types::WynSoacPhase,
+    P::Resource: Copy + Eq + std::hash::Hash + Ord,
 {
     let mut writers = LookupMap::<_, Vec<_>>::new();
     for block in graph.skeleton.blocks.values() {
@@ -1411,6 +1409,29 @@ pub fn intern_storage_view(
     )
 }
 
+/// Interface-backed storage view used before logical-resource allocation.
+pub fn intern_interface_view<P: Family<Resource = BindingRef>>(
+    graph: &mut EGraph<P>,
+    binding: BindingRef,
+    view_ty: Type<TypeName>,
+    span: Option<Span>,
+) -> ValueId {
+    let len = graph.intern_pure(
+        PureOp::ResourceLen(binding),
+        smallvec![],
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        span,
+    );
+    let zero = intern_u32(graph, 0, span);
+    let view_ty = types::view_array_of(&view_ty, types::buffer_tag(binding));
+    graph.intern_pure(
+        PureOp::StorageView(PureViewSource::Storage(binding)),
+        smallvec![zero, len],
+        view_ty,
+        span,
+    )
+}
+
 /// Target-independent storage view used after logical-resource allocation.
 pub fn intern_resource_view<P: Family<Resource = super::program::SemanticResourceRef>>(
     graph: &mut EGraph<P>,
@@ -1454,66 +1475,6 @@ pub fn intern_chunked_resource_view<P: Family<Resource = super::program::Semanti
         view_ty,
         span,
     )
-}
-
-/// Retarget every view of one logical resource while preserving its slice.
-/// Returns the value substitutions needed by metadata stored outside the graph.
-pub(crate) fn retarget_resource_views<P>(
-    graph: &mut EGraph<P>,
-    source: ResourceId,
-    destination: ResourceId,
-) -> Vec<(ValueId, ValueId)>
-where
-    P: Family<Resource = super::program::SemanticResourceRef>,
-{
-    if source == destination {
-        return Vec::new();
-    }
-    let source = super::program::SemanticResourceRef(source);
-    let lengths = graph
-        .nodes
-        .iter()
-        .filter_map(|(value, definition)| {
-            matches!(
-                definition.kind(),
-                ValueKind::Pure {
-                    op: PureOp::ResourceLen(resource),
-                    operands,
-                } if *resource == source && operands.is_empty()
-            )
-            .then_some((value, definition.span()))
-        })
-        .collect::<Vec<_>>();
-    let mut replacements = Vec::new();
-    for (length, span) in lengths {
-        let replacement = intern_resource_len(graph, destination, span);
-        graph.replace_value_references(length, replacement);
-        replacements.push((length, replacement));
-    }
-    let views = graph
-        .nodes
-        .iter()
-        .filter_map(|(value, definition)| match definition.kind() {
-            ValueKind::Pure {
-                op: PureOp::StorageView(PureViewSource::Storage(resource)),
-                operands,
-            } if *resource == source && operands.len() == 2 => Some((
-                value,
-                operands[0],
-                operands[1],
-                definition.ty().clone(),
-                definition.span(),
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    replacements.reserve(views.len());
-    for (view, offset, length, ty, span) in views {
-        let replacement = intern_chunked_resource_view(graph, destination, offset, length, ty, span);
-        graph.replace_value_references(view, replacement);
-        replacements.push((view, replacement));
-    }
-    replacements
 }
 
 /// Construct an addressable sub-view whose offset is relative to an existing
@@ -2171,16 +2132,13 @@ pub fn emit_pending_soac<P: WynSoacPhase>(
 // ---------------------------------------------------------------------------
 
 /// Return the semantic identity carried by a storage-view node.
-pub fn extract_storage_view_source<P: Family<Resource = super::program::SemanticResourceRef>>(
-    graph: &EGraph<P>,
-    view_nid: ValueId,
-) -> Option<super::program::SemanticResourceRef> {
+pub fn extract_storage_view_source<P: Family>(graph: &EGraph<P>, view_nid: ValueId) -> Option<P::Resource> {
     let view_nid = graph.canonical_value(view_nid);
     match &graph.nodes[view_nid].kind {
         ValueKind::Pure {
             op: PureOp::StorageView(PureViewSource::Storage(resource)),
             ..
-        } => Some(*resource),
+        } => Some(resource.clone()),
         _ => None,
     }
 }

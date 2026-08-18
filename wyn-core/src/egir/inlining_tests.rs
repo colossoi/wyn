@@ -4,13 +4,14 @@ use crate::FunctionId;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
-use crate::egir::program::{Func, SemanticResourceRef};
+use crate::egir::program::Func;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, FuncParam, OperandRef, PureOp,
     ResultBinding, Semantic, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 use crate::flow::ControlHeader;
 use crate::ssa::types::ConstantValue;
+use crate::BindingRef;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -20,17 +21,17 @@ fn u32_ty() -> Type<TypeName> {
 
 fn semantic_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
     specs
         .into_iter()
-        .map(|(name, ty)| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty))
+        .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
         .collect()
 }
 
 fn add_call(
     graph: &mut EGraph<Semantic>,
     callee: FunctionId,
-    params: &[FuncParam<SemanticResourceRef, Type<TypeName>>],
+    params: &[FuncParam<BindingRef, Type<TypeName>>],
     result_ty: Type<TypeName>,
     arguments: impl IntoIterator<Item = ValueId>,
 ) -> ResultBinding<Type<TypeName>> {

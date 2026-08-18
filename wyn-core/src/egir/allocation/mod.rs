@@ -8,20 +8,29 @@
 mod cost;
 mod residency;
 
+use crate::ast::TypeName;
 use crate::interface;
+use crate::interface::{EntryInputKind, EntryOutputKind};
 use crate::pipeline_descriptor;
+use crate::pipeline_descriptor::BufferLen;
 use crate::ssa;
+use crate::types::TypeExt;
+use crate::BindingRef;
 use crate::IdArena;
+use polytype::Type;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
+use super::ir::{PlaceId, RemapBlockIds};
 use super::program::{
-    AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry, LogicalSize, MaterializationId,
-    Program, ResourceId, ResourceOrigin, RewriteGlobal, SemanticResourceRef,
+    AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry,
+    LogicalResourceArena, LogicalSize, MaterializationId, Program, ResourceId, ResourceOrigin,
+    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::semantic_opt::Optimized;
-use super::soac::filter;
-use super::types::{Semantic, SideEffectKind, Soac, SoacEffect};
+use super::soac::{filter, hist, screma};
+use super::types::{Semantic, SideEffectKind, Soac, SoacEffect, ValueId};
 use crate::EntryId;
 
 /// EGIR after logical resources and materialization entries have been planned.
@@ -30,7 +39,7 @@ pub enum ResourcesAllocatedTag {}
 pub type ResourcesAllocated = super::program::Program<
     ResourcesAllocatedTag,
     super::ir::ProgramFamily<
-        Semantic,
+        Semantic<SemanticResourceRef>,
         super::program::SemanticResourceDecl,
         super::ir::RealizedOutputRoute,
         AllocatedProgramData,
@@ -65,27 +74,7 @@ impl ResourcesAllocated {
 
 /// Establish target-independent residency and logical resources.
 pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
-    let Program {
-        functions,
-        externs,
-        entry_points,
-        constants,
-        data,
-        global_context,
-        state: _,
-    } = program;
-    let program = Program::from_parts(
-        functions,
-        externs,
-        entry_points,
-        constants,
-        AllocatedProgramData {
-            core: data,
-            materializations: IdArena::new(),
-        },
-        global_context,
-    );
-
+    let program = allocate_semantic_resources(program)?;
     let program = classify_existing_compiler_resources(program);
     let program = residency::resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
@@ -96,9 +85,510 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
     Ok(program)
 }
 
+/// Replace pre-allocation descriptor bindings with target-independent logical
+/// resource identities. This is intentionally the first pass allowed to own
+/// or create resources.
+fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
+    let Program {
+        functions,
+        externs,
+        entry_points,
+        constants,
+        data,
+        global_context,
+        state: _,
+    } = program;
+    let resources = RefCell::new(LogicalResourceArena::default());
+
+    // Reserve every authored interface resource first so cross-entry
+    // `LikeInput` sizes can only refer to declared bindings.
+    for entry in &entry_points {
+        reserve_entry_resources(entry, &resources);
+    }
+    for entry in &entry_points {
+        refine_entry_resources(entry, &resources)?;
+    }
+
+    let functions = functions
+        .into_iter()
+        .map(|function| allocate_function(function, &resources))
+        .collect::<Result<Vec<_>, _>>()?;
+    let constants = constants
+        .into_iter()
+        .map(|constant| allocate_constant(constant, &resources))
+        .collect::<Result<Vec<_>, _>>()?;
+    let entry_points = entry_points
+        .into_iter()
+        .map(|entry| allocate_entry(entry, &resources))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Program::from_parts(
+        functions,
+        externs,
+        entry_points,
+        constants,
+        AllocatedProgramData {
+            core: ResourceProgramData {
+                pipeline: data.pipeline,
+                stage_entries: data.stage_entries,
+                resources: resources.into_inner(),
+                identities: data.identities,
+            },
+            materializations: IdArena::new(),
+        },
+        global_context,
+    ))
+}
+
+fn resource_for_binding(
+    resources: &RefCell<LogicalResourceArena>,
+    binding: BindingRef,
+) -> Result<SemanticResourceRef, ConvertError> {
+    resources.borrow().host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
+        ConvertError::GraphError(format!(
+            "resource binding set={} binding={} is not declared by an entry interface",
+            binding.set, binding.binding
+        ))
+    })
+}
+
+fn logical_size(
+    resources: &RefCell<LogicalResourceArena>,
+    length: Option<&BufferLen>,
+) -> Result<LogicalSize, ConvertError> {
+    Ok(match length {
+        Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
+        Some(BufferLen::LikeInput {
+            set,
+            binding,
+            elem_bytes,
+            src_elem_bytes,
+        }) => LogicalSize::LikeResource {
+            resource: resource_for_binding(resources, BindingRef::new(*set, *binding))?.0,
+            elem_bytes: *elem_bytes,
+            src_elem_bytes: *src_elem_bytes,
+        },
+        Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
+            elem_bytes: *elem_bytes,
+        },
+        None => LogicalSize::Unspecified,
+    })
+}
+
+struct InterfaceResource {
+    binding: BindingRef,
+    role: Option<interface::StorageRole>,
+    elem_ty: Type<TypeName>,
+    length: Option<BufferLen>,
+}
+
+fn interface_resources(entry: &Entry<Semantic>) -> Vec<InterfaceResource> {
+    let inputs = entry.inputs.iter().filter_map(|input| {
+        let binding = input.resource?;
+        let (role, length) = match &input.kind {
+            EntryInputKind::Storage { length, .. } => (Some(interface::StorageRole::Input), length.clone()),
+            _ => (None, None),
+        };
+        Some(InterfaceResource {
+            binding,
+            role,
+            elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+            length,
+        })
+    });
+    let outputs = entry.outputs.iter().filter_map(|output| {
+        let binding = output.resource?;
+        let length = match &output.kind {
+            EntryOutputKind::Storage { length, .. } => length.clone(),
+            _ => None,
+        };
+        Some(InterfaceResource {
+            binding,
+            role: Some(interface::StorageRole::Output),
+            elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+            length,
+        })
+    });
+    inputs.chain(outputs).collect()
+}
+
+fn reserve_entry_resources(entry: &Entry<Semantic>, resources: &RefCell<LogicalResourceArena>) {
+    for resource in interface_resources(entry) {
+        resources.borrow_mut().declare_host(resource.binding, resource.elem_ty, LogicalSize::Unspecified);
+    }
+}
+
+fn refine_entry_resources(
+    entry: &Entry<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<(), ConvertError> {
+    for resource in interface_resources(entry) {
+        let size = logical_size(resources, resource.length.as_ref())?;
+        resources.borrow_mut().declare_host(resource.binding, resource.elem_ty, size);
+    }
+    Ok(())
+}
+
+fn entry_resource_declarations(
+    entry: &Entry<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<Vec<SemanticResourceDecl>, ConvertError> {
+    let mut seen = HashSet::new();
+    let mut declarations = Vec::new();
+    for item in interface_resources(entry) {
+        let Some(role) = item.role else { continue };
+        let resource = resource_for_binding(resources, item.binding)?;
+        if seen.insert(resource) {
+            declarations.push(SemanticResourceDecl {
+                resource,
+                role,
+                elem_ty: item.elem_ty,
+                size: logical_size(resources, item.length.as_ref())?,
+            });
+        }
+    }
+    Ok(declarations)
+}
+
+fn allocate_type_resources(
+    ty: &mut Type<TypeName>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<(), ConvertError> {
+    let mut error = None;
+    super::program::visit_type_names_mut(ty, |name| {
+        if let TypeName::Buffer(binding) = *name {
+            match resource_for_binding(resources, binding) {
+                Ok(resource) => *name = TypeName::Resource(resource.0),
+                Err(binding_error) => error = Some(binding_error),
+            }
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
+fn allocate_filter_length(
+    owner: super::program::SemanticOpId,
+    output: filter::Output<SemanticResourceRef>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> filter::Output<SemanticResourceRef> {
+    let filter::Output::Runtime(mut runtime) = output else {
+        return output;
+    };
+    if runtime.length == filter::RuntimeLength::Required {
+        let id = resources.borrow_mut().allocate(
+            ResourceOrigin::Compiler(CompilerResource::new(
+                CompilerResourceKind::FilterLenCell,
+                Some(owner),
+                0,
+            )),
+            Type::Constructed(TypeName::UInt(32), Vec::new()),
+            LogicalSize::FixedBytes(4),
+        );
+        runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(id));
+    }
+    filter::Output::Runtime(runtime)
+}
+
+fn allocate_soac(
+    owner: super::program::SemanticOpId,
+    soac: Soac<Semantic>,
+    nodes: &crate::LookupMap<ValueId, ValueId>,
+    places: &crate::LookupMap<PlaceId, PlaceId>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<Soac<Semantic<SemanticResourceRef>>, ConvertError> {
+    let mut remap =
+        super::soac::remap::Remap::new(nodes, places, |binding| resource_for_binding(resources, binding));
+    Ok(match soac {
+        Soac::Screma(screma::Op {
+            inputs,
+            form,
+            result_state,
+            state,
+        }) => Soac::Screma(screma::Op {
+            inputs,
+            form: remap.screma_form(form),
+            result_state,
+            state: match state {
+                screma::SemanticState::Serial => screma::SemanticState::Serial,
+                screma::SemanticState::Segmented {
+                    space,
+                    placement,
+                    output_slots,
+                    resources: accesses,
+                } => {
+                    let segment = remap.segment(screma::Segmented {
+                        space,
+                        output_slots,
+                        resources: accesses,
+                    })?;
+                    screma::SemanticState::Segmented {
+                        space: segment.space,
+                        placement,
+                        output_slots: segment.output_slots,
+                        resources: segment.resources,
+                    }
+                }
+            },
+        }),
+        Soac::Filter(filter::Op { body, state }) => Soac::Filter(filter::Op {
+            body: remap.filter_body(body),
+            state: filter::SemanticState {
+                space: remap.space(state.space)?,
+                output: allocate_filter_length(owner, remap.filter_output(state.output)?, resources),
+            },
+        }),
+        Soac::Hist(hist::Op { inputs, form, state }) => Soac::Hist(hist::Op {
+            inputs,
+            form: remap.hist_form(form),
+            state: match state {
+                hist::SemanticState::Serial => hist::SemanticState::Serial,
+                hist::SemanticState::Segmented(space) => {
+                    hist::SemanticState::Segmented(remap.space(space)?)
+                }
+            },
+        }),
+    })
+}
+
+fn allocate_graph(
+    graph: super::types::EGraph<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<
+    (
+        super::types::EGraph<Semantic<SemanticResourceRef>>,
+        crate::LookupMap<ValueId, ValueId>,
+        crate::LookupMap<crate::flow::BlockId, crate::flow::BlockId>,
+    ),
+    ConvertError,
+> {
+    let (mut graph, nodes, blocks) = graph.try_map_resources_and_phase(
+        |binding| resource_for_binding(resources, binding),
+        |owner, soac, nodes, places| {
+            Ok::<_, ConvertError>((owner, allocate_soac(owner, soac, nodes, places, resources)?))
+        },
+    )?;
+    let mut type_error = None;
+    super::program::rewrite_graph_types(&mut graph, |ty| {
+        if let Err(error) = allocate_type_resources(ty, resources) {
+            type_error = Some(error);
+        }
+    });
+    if let Some(error) = type_error {
+        return Err(error);
+    }
+    realize_filter_result_types(&mut graph);
+    Ok((graph, nodes, blocks))
+}
+
+fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>) {
+    let results = graph
+        .skeleton
+        .blocks
+        .values()
+        .flat_map(|block| &block.side_effects)
+        .filter_map(|effect| {
+            let SideEffectKind::Soac(SoacEffect(
+                _,
+                Soac::Filter(filter::Op {
+                    body,
+                    state:
+                        filter::SemanticState {
+                            output:
+                                filter::Output::Runtime(filter::RuntimeOutput {
+                                    backing: filter::RuntimeBacking::Bound(backing),
+                                    ..
+                                }),
+                            ..
+                        },
+                }),
+            )) = &effect.kind
+            else {
+                return None;
+            };
+            Some((
+                effect.result.as_ref()?.single_value()?,
+                crate::types::view_array_of(
+                    &body.output_element_type(),
+                    Type::Constructed(TypeName::Resource(backing.0), Vec::new()),
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    for (result, ty) in results {
+        graph.retype_node(result, ty);
+    }
+}
+
+fn allocate_function(
+    function: super::program::Func<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<super::program::AllocatedFunc, ConvertError> {
+    let super::program::Func {
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        mut result,
+        effects,
+        graph,
+    } = function;
+    let (graph, _, _) = allocate_graph(graph, resources)?;
+    let params = params
+        .into_iter()
+        .map(|param| {
+            param.try_map(
+                &mut |binding| resource_for_binding(resources, binding),
+                &mut |mut ty| {
+                    allocate_type_resources(&mut ty, resources)?;
+                    Ok(ty)
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let mut result_error = None;
+    result.for_each_type_mut(|ty| {
+        if let Err(error) = allocate_type_resources(ty, resources) {
+            result_error = Some(error);
+        }
+    });
+    if let Some(error) = result_error {
+        return Err(error);
+    }
+    Ok(super::program::Func {
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        result,
+        effects,
+        graph,
+    })
+}
+
+fn allocate_constant(
+    constant: super::program::ConstantDef<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<super::program::AllocatedConstantDef, ConvertError> {
+    let super::program::ConstantDef {
+        id,
+        name,
+        span,
+        mut return_ty,
+        graph,
+    } = constant;
+    let (graph, _, _) = allocate_graph(graph, resources)?;
+    allocate_type_resources(&mut return_ty, resources)?;
+    Ok(super::program::ConstantDef {
+        id,
+        name,
+        span,
+        return_ty,
+        graph,
+    })
+}
+
+fn allocate_entry(
+    entry: Entry<Semantic>,
+    resources: &RefCell<LogicalResourceArena>,
+) -> Result<AllocatedEntry, ConvertError> {
+    let declarations = entry_resource_declarations(&entry, resources)?;
+    let Entry {
+        id,
+        name,
+        span,
+        execution_model,
+        inputs,
+        parameter_inputs,
+        outputs,
+        internal_results,
+        resource_declarations: _,
+        params,
+        mut result,
+        graph,
+    } = entry;
+    let (graph, _, blocks) = allocate_graph(graph, resources)?;
+    let inputs = inputs
+        .into_iter()
+        .map(|mut input| {
+            allocate_type_resources(&mut input.ty, resources)?;
+            Ok(super::ir::EntryInput {
+                inner: input.inner,
+                resource: input
+                    .resource
+                    .map(|binding| resource_for_binding(resources, binding))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let outputs = outputs
+        .into_iter()
+        .map(|mut output| {
+            allocate_type_resources(&mut output.ty, resources)?;
+            for route in &mut output.routes {
+                route.remap_block_ids(&blocks);
+            }
+            Ok(super::ir::EntryOutput {
+                inner: output.inner,
+                resource: output
+                    .resource
+                    .map(|binding| resource_for_binding(resources, binding))
+                    .transpose()?,
+                routes: output.routes,
+            })
+        })
+        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let internal_results = internal_results
+        .into_iter()
+        .map(|mut result| {
+            result.route.remap_block_ids(&blocks);
+            Ok(super::ir::InternalResultRoute {
+                resource: resource_for_binding(resources, result.resource)?,
+                route: result.route,
+            })
+        })
+        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let params = params
+        .into_iter()
+        .map(|param| {
+            param.try_map(
+                &mut |binding| resource_for_binding(resources, binding),
+                &mut |mut ty| {
+                    allocate_type_resources(&mut ty, resources)?;
+                    Ok(ty)
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, ConvertError>>()?;
+    let mut result_error = None;
+    result.for_each_type_mut(|ty| {
+        if let Err(error) = allocate_type_resources(ty, resources) {
+            result_error = Some(error);
+        }
+    });
+    if let Some(error) = result_error {
+        return Err(error);
+    }
+    Ok(Entry {
+        id,
+        name,
+        span,
+        execution_model,
+        inputs,
+        parameter_inputs,
+        outputs,
+        internal_results,
+        resource_declarations: declarations,
+        params,
+        result,
+        graph,
+    })
+}
+
 pub(crate) fn entries_with_endpoints(
     program: &ResourcesAllocated,
-) -> impl Iterator<Item = (CompilerFlowEndpoint, &Entry<Semantic>)> {
+) -> impl Iterator<Item = (CompilerFlowEndpoint, &AllocatedEntry)> {
     program.entry_points.iter().map(|entry| (CompilerFlowEndpoint::Entry(entry.id), entry)).chain(
         program.data.materializations.ids().map(|id| {
             (
@@ -200,61 +690,12 @@ fn classify_existing_compiler_resources(program: ResourcesAllocated) -> Resource
             }
         }
     }
-    let source_outputs = program
-        .entry_points
-        .iter()
-        .flat_map(|entry| {
-            entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0))
-        })
-        .collect::<HashSet<_>>();
-    classifications.extend(
-        filter_resource_kinds(&program)
-            .into_iter()
-            .filter(|(resource, _)| !source_outputs.contains(resource)),
-    );
-
     program.map_data(|mut data| {
         for (resource, compiler) in classifications {
             data.core.resources.reclassify_as_compiler(resource, compiler);
         }
         data
     })
-}
-
-fn filter_resource_kinds(program: &ResourcesAllocated) -> HashMap<ResourceId, CompilerResource> {
-    let mut kinds = HashMap::new();
-    for (_, entry) in entries_with_endpoints(program) {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(SoacEffect(
-                    owner,
-                    Soac::Filter(filter::Op {
-                        state:
-                            filter::SemanticState {
-                                storage: filter::Output::Runtime { scratch, length },
-                                ..
-                            },
-                        ..
-                    }),
-                )) = &effect.kind
-                else {
-                    continue;
-                };
-                let owner = Some(*owner);
-                kinds.insert(
-                    scratch.0,
-                    CompilerResource::new(CompilerResourceKind::FilterScratch, owner, 0),
-                );
-                if let filter::RuntimeLength::Stored(length) = length {
-                    kinds.insert(
-                        length.0,
-                        CompilerResource::new(CompilerResourceKind::FilterLenCell, owner, 1),
-                    );
-                }
-            }
-        }
-    }
-    kinds
 }
 
 fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
@@ -269,7 +710,11 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
                         state:
                             filter::SemanticState {
                                 space,
-                                storage: filter::Output::Runtime { scratch, .. },
+                                output:
+                                    filter::Output::Runtime(filter::RuntimeOutput {
+                                        backing: filter::RuntimeBacking::Bound(scratch),
+                                        ..
+                                    }),
                             },
                     }),
                 )) = &effect.kind
@@ -363,7 +808,7 @@ fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
             matches!(&resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id())
         })
         .collect::<HashSet<_>>();
-    let strip = |entry: &mut Entry<Semantic>| {
+    let strip = |entry: &mut AllocatedEntry| {
         for input in &mut entry.inputs {
             if input.resource.is_some_and(|resource| compiler_resources.contains(&resource.0)) {
                 input.make_storage_internal();

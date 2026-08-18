@@ -643,6 +643,7 @@ pub(super) fn build_bucket_init(
     block: BlockId,
     effect_index: usize,
     spec: HistLoop,
+    storage: &hist::BucketStorage<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
 ) {
     use crate::ssa::types::AtomicOp;
@@ -652,7 +653,7 @@ pub(super) fn build_bucket_init(
         ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
-    let hist::Update::BucketInsert { counts, overflow, .. } = operation.update else {
+    let hist::Update::BucketInsert { .. } = operation.update else {
         unreachable!("bucket init requires bucket insertion")
     };
     let lane = emit_thread_lane(graph);
@@ -674,6 +675,12 @@ pub(super) fn build_bucket_init(
     graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
 
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let counts =
+        super::super::graph_ops::intern_storage_view(graph, storage.counts, u32_type.clone(), None);
+    let counts = graph.view_id(counts);
+    let overflow =
+        super::super::graph_ops::intern_storage_view(graph, storage.overflow, u32_type.clone(), None);
+    let overflow = graph.view_id(overflow);
     let zero_u32 = super::super::graph_ops::intern_u32(graph, 0, None);
     let count_place = graph.add_view_index_place(counts, lane, u32_type.clone(), None);
     super::super::graph_ops::emit_atomic(
@@ -737,6 +744,7 @@ pub(super) fn build_bucket_insert(
     spec: HistLoop,
     space: &SegSpace<BindingRef>,
     topology: Option<&hist::DispatchTopology>,
+    storage: &hist::BucketStorage<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
 ) {
@@ -747,16 +755,16 @@ pub(super) fn build_bucket_insert(
         ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
     let operation = spec.form.operations.first().expect("bucket insertion has one operation");
-    let hist::Update::BucketInsert {
-        counts,
-        overflow,
-        capacity,
-        ..
-    } = operation.update
-    else {
+    let hist::Update::BucketInsert { capacity, .. } = operation.update else {
         unreachable!("bucket insert stage requires bucket insertion")
     };
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
+    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
+    let counts =
+        super::super::graph_ops::intern_storage_view(graph, storage.counts, u32_type.clone(), None);
+    let counts = graph.view_id(counts);
+    let overflow = super::super::graph_ops::intern_storage_view(graph, storage.overflow, u32_type, None);
+    let overflow = graph.view_id(overflow);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let domain_dimensions = emit_seg_space_dimensions(graph, space, &spec.len_input, &i32_type);
     let physical_lanes = [
@@ -979,12 +987,45 @@ pub(super) fn build_bucket_finish(
     block: BlockId,
     effect_index: usize,
     result_node: ValueId,
+    storage: &hist::BucketStorage<BindingRef>,
+    next_effect: &mut IdSource<EffectToken>,
 ) {
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
-    graph.replace_node_preserving_type(
-        result_node,
-        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
+    let Type::Constructed(TypeName::Tuple(2), fields) = graph.nodes[result_node].ty.clone() else {
+        unreachable!("bucket insertion result is counts and overflow")
+    };
+    let ValueKind::Pure {
+        op: PureOp::Tuple(2),
+        operands,
+    } = graph.nodes[result_node].kind.clone()
+    else {
+        unreachable!("bucket insertion result root is a packed product")
+    };
+    let [counts_result, overflow_result] = operands.as_slice() else {
+        unreachable!("bucket insertion result has two fields")
+    };
+    let counts =
+        super::super::graph_ops::intern_storage_view(graph, storage.counts, fields[0].clone(), None);
+    let overflow_view =
+        super::super::graph_ops::intern_storage_view(graph, storage.overflow, fields[1].clone(), None);
+    let zero = super::super::graph_ops::intern_u32(graph, 0, None);
+    let overflow = super::super::graph_ops::emit_view_load(
+        graph,
+        block,
+        overflow_view,
+        zero,
+        fields[1].clone(),
+        next_effect,
+        None,
     );
+    let ty = Type::Constructed(
+        TypeName::Tuple(2),
+        vec![graph.nodes[counts].ty.clone(), fields[1].clone()],
+    );
+    super::super::graph_ops::retype_projection_tree(graph, result_node, &ty);
+    super::super::graph_ops::retype_projection_tree(graph, *counts_result, &graph.nodes[counts].ty.clone());
+    super::bind_result_alias(graph, *counts_result, counts);
+    super::bind_result_alias(graph, *overflow_result, overflow);
     graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],

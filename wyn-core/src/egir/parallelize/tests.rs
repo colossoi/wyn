@@ -10,7 +10,7 @@ use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EffectOp, EffectToken, OperandRef,
-    PlaceAccess, PlaceRegion, PlaceType, Semantic, WynLanguage,
+    PlaceAccess, PlaceRegion, PlaceType, WynLanguage,
 };
 use crate::flow::ExecutionModel;
 use crate::interface;
@@ -84,7 +84,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
         span: None,
     });
     let mut identities = egir::program::ProgramIdentities::default();
-    let mut entry = Entry::<Semantic>::new_with_resources(
+    let mut entry = egir::program::AllocatedEntry::new_with_resources(
         "route_test".into(),
         identities.alloc_entry("route_test".into()),
         Span::dummy(),

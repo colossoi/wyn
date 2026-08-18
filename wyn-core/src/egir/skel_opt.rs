@@ -32,7 +32,7 @@ pub type SkeletonOptimized = super::program::Program<
         super::types::Physical,
         interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::ResourceProgramData,
     >,
     super::program::PlannedGlobal,
 >;

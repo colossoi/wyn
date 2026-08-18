@@ -3,15 +3,17 @@
 use crate::builtins;
 use crate::egir;
 use crate::flow;
+use crate::interface;
 use crate::pipeline_descriptor;
 use polytype::Type;
 
 use crate::ast::TypeName;
 use crate::egir::allocation::ResourcesAllocated;
-use crate::egir::program::SemanticOpId;
+use crate::egir::program::{SemanticOpId, SemanticResourceRef};
 use crate::egir::soac::hist;
 use crate::egir::types::{
-    PureOp, SegResourceAccess, SegSpace, Semantic, SkeletonTerminator, ValueId, ValueKind,
+    PureOp, SegResourceAccess, SegSpace as FamilySegSpace, Semantic as SemanticFamily, SkeletonTerminator,
+    ValueId, ValueKind,
 };
 use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
@@ -21,11 +23,19 @@ use std::collections::HashSet;
 
 use super::planning::LocatedHist;
 
+type Semantic = SemanticFamily<SemanticResourceRef>;
+type SegSpace = FamilySegSpace<SemanticResourceRef>;
+
 /// A histogram proven to be expressible as one native atomic update per
 /// operation and input element.
 pub(super) enum HistCandidate {
     Atomic(AtomicCandidate),
     Bucket(BucketCandidate),
+}
+
+pub(super) enum BoundHistCandidate {
+    Atomic(AtomicCandidate),
+    Bucket(BoundBucketCandidate),
 }
 
 pub(super) struct AtomicCandidate {
@@ -41,8 +51,51 @@ pub(super) struct BucketCandidate {
     pub bucket_count: u32,
     pub destination: ResourceId,
     pub input_resources: Vec<ResourceId>,
+    pub counts: Option<ResourceId>,
+    pub overflow: Option<ResourceId>,
+}
+
+pub(super) struct BoundBucketCandidate {
+    pub candidate: BucketCandidate,
     pub counts: ResourceId,
     pub overflow: ResourceId,
+}
+
+impl std::ops::Deref for BoundBucketCandidate {
+    type Target = BucketCandidate;
+
+    fn deref(&self) -> &Self::Target {
+        &self.candidate
+    }
+}
+
+impl BoundHistCandidate {
+    pub(super) fn bind(candidate: HistCandidate, resources: &super::planning::ScratchBindings) -> Self {
+        match candidate {
+            HistCandidate::Atomic(candidate) => Self::Atomic(candidate),
+            HistCandidate::Bucket(candidate) => {
+                let counts = candidate.counts.unwrap_or_else(|| {
+                    resources.id(
+                        candidate.owner,
+                        egir::program::CompilerResourceKind::BucketCounts,
+                        0,
+                    )
+                });
+                let overflow = candidate.overflow.unwrap_or_else(|| {
+                    resources.id(
+                        candidate.owner,
+                        egir::program::CompilerResourceKind::BucketOverflow,
+                        0,
+                    )
+                });
+                Self::Bucket(BoundBucketCandidate {
+                    candidate,
+                    counts,
+                    overflow,
+                })
+            }
+        }
+    }
 }
 
 pub(super) fn analyze_hist_candidate(
@@ -55,7 +108,7 @@ pub(super) fn analyze_hist_candidate(
         return None;
     };
     if let [operation] = located.op.form.operations.as_slice() {
-        if let hist::Update::BucketInsert { counts, overflow, .. } = operation.update {
+        if let hist::Update::BucketInsert { results, .. } = operation.update {
             let bucket_count = u32::try_from(constant_i32(graph, operation.shape[0])?).ok()?;
             if bucket_count == 0 || operation.shape.len() != 1 || operation.destinations.len() != 1 {
                 return None;
@@ -86,8 +139,8 @@ pub(super) fn analyze_hist_candidate(
                 bucket_count,
                 destination: resource_for(operation.destinations[0].value())?,
                 input_resources,
-                counts: resource_for(counts.value())?,
-                overflow: resource_for(overflow.value())?,
+                counts: public_result_resource(entry, located.site, results.counts),
+                overflow: public_result_resource(entry, located.site, results.overflow),
             }));
         }
     }
@@ -103,6 +156,35 @@ pub(super) fn analyze_hist_candidate(
         space: space.clone(),
         operations,
     }))
+}
+
+fn public_result_resource(
+    entry: &egir::program::PlannedEntry,
+    site: egir::types::SideEffectSite,
+    result: hist::HistResultId,
+) -> Option<ResourceId> {
+    let effects = entry.graph.side_effect_index();
+    let resources = entry
+        .outputs
+        .iter()
+        .filter_map(|output| {
+            let resource = output.resource?.0;
+            output
+                .routes
+                .iter()
+                .any(|route| {
+                    effects.effect_result_field(&entry.graph, route.source.value).is_some_and(
+                        |(_, representative, field)| {
+                            field == result.0 && effects.site(representative) == Some(site)
+                        },
+                    )
+                })
+                .then_some(resource)
+        })
+        .collect::<HashSet<_>>();
+    let mut resources = resources.into_iter();
+    let resource = resources.next()?;
+    resources.next().is_none().then_some(resource)
 }
 
 fn analyze_operation(
@@ -243,7 +325,10 @@ fn fixed_array_extent(ty: &Type<TypeName>) -> Option<u32> {
     }
 }
 
-fn fixed_seg_extent(graph: &egir::types::EGraph<Semantic>, extent: &egir::types::SegExtent) -> Option<u32> {
+fn fixed_seg_extent(
+    graph: &egir::types::EGraph<Semantic>,
+    extent: &egir::types::SegExtent<SemanticResourceRef>,
+) -> Option<u32> {
     match extent {
         egir::types::SegExtent::Fixed(count) => Some(*count),
         egir::types::SegExtent::Value(node) => constant_i32(graph, *node)
@@ -348,7 +433,7 @@ impl super::KernelPlanBuilder<'_, '_> {
         &mut self,
         body: egir::program::PlannedEntry,
         kernel: super::schedule::KernelId,
-        candidate: BucketCandidate,
+        candidate: BoundBucketCandidate,
         output_projection: Option<Vec<usize>>,
     ) -> super::error::Result<()> {
         use super::{project_kernel_body, project_single_effect_body, BuiltPhase, ProjectionSpec};
@@ -375,7 +460,28 @@ impl super::KernelPlanBuilder<'_, '_> {
                     .into(),
             ));
         };
-        let declarations = body.resource_declarations.clone();
+        let storage = hist::BucketStorage {
+            counts: egir::program::SemanticResourceRef(candidate.counts),
+            overflow: egir::program::SemanticResourceRef(candidate.overflow),
+        };
+        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+        let mut declarations = body.resource_declarations.clone();
+        if !declarations.iter().any(|declaration| declaration.resource == storage.counts) {
+            declarations.push(egir::program::SemanticResourceDecl {
+                resource: storage.counts,
+                role: interface::StorageRole::Intermediate,
+                elem_ty: u32_ty.clone(),
+                size: egir::program::LogicalSize::FixedBytes(u64::from(candidate.bucket_count) * 4),
+            });
+        }
+        if !declarations.iter().any(|declaration| declaration.resource == storage.overflow) {
+            declarations.push(egir::program::SemanticResourceDecl {
+                resource: storage.overflow,
+                role: interface::StorageRole::Intermediate,
+                elem_ty: u32_ty,
+                size: egir::program::LogicalSize::FixedBytes(4),
+            });
+        }
 
         let init_name = format!("{}_bucket_init", body.name);
         let init_id = self.identities.alloc_entry(init_name.clone());
@@ -407,6 +513,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             candidate.owner,
             hist::ParallelStage::Init,
             None,
+            storage,
         );
 
         let insert_name = format!("{}_bucket_insert", body.name);
@@ -446,6 +553,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             candidate.owner,
             hist::ParallelStage::Insert,
             insert_topology,
+            storage,
         );
 
         let finish_body = project_kernel_body(
@@ -484,6 +592,7 @@ impl super::KernelPlanBuilder<'_, '_> {
             candidate.owner,
             hist::ParallelStage::Finish,
             None,
+            storage,
         )
         .with_output_projection(output_projection);
 

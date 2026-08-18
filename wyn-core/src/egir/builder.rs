@@ -12,16 +12,19 @@ use smallvec::SmallVec;
 
 use super::graph_ops;
 use super::program::{
-    Entry, LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
+    AllocatedEntry, LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl,
+    SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectToken, OperandRef, PlaceId, ResultBinding, SkeletonTerminator, Soac, SoacInputType,
-    ValueId, WynLanguage,
+    EGraph, EffectToken, OperandRef, PlaceId, ResultBinding, Semantic, SkeletonTerminator, Soac,
+    SoacInputType, ValueId, WynLanguage,
 };
 
+type AllocatedGraph = EGraph<Semantic<SemanticResourceRef>>;
+
 pub struct EntryBuilder<'a> {
-    graph: EGraph,
+    graph: AllocatedGraph,
     id: EntryId,
     current_block: BlockId,
     name: String,
@@ -106,11 +109,11 @@ impl<'a> EntryBuilder<'a> {
         self.declare(resource, interface::StorageRole::Output, elem_ty, size);
     }
 
-    pub fn graph_mut(&mut self) -> &mut EGraph {
+    pub fn graph_mut(&mut self) -> &mut AllocatedGraph {
         &mut self.graph
     }
 
-    pub fn construction_parts_mut(&mut self) -> (&mut EGraph, &mut IdSource<EffectToken>) {
+    pub fn construction_parts_mut(&mut self) -> (&mut AllocatedGraph, &mut IdSource<EffectToken>) {
         (&mut self.graph, self.effect_ids)
     }
 
@@ -220,7 +223,7 @@ impl<'a> EntryBuilder<'a> {
 
     pub fn build(mut self) -> PlannedEntry {
         self.graph.skeleton.blocks[self.current_block].term = SkeletonTerminator::Return(None);
-        PlannedEntry::new(Entry {
+        PlannedEntry::new(AllocatedEntry {
             id: self.id,
             name: self.name,
             span: self.span,

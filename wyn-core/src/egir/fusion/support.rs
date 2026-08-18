@@ -7,13 +7,13 @@ use polytype::Type;
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{Body, SideEffectSite};
-use crate::egir::program::{Entry, OutputWriter, RealizedOutputRoute, SemanticResourceDecl};
+use crate::egir::program::{Entry, NoStorageDeclaration, OutputWriter, RealizedOutputRoute};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{EGraph, OperandRef, ResultBinding, Semantic, ValueId, WynLanguage};
 use crate::flow::BlockId;
 
-type FusionBody = Body<Semantic, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
+type FusionBody = Body<Semantic, NoStorageDeclaration, RealizedOutputRoute, WynLanguage>;
 
 pub(super) fn invoke_lambda(
     graph: &mut EGraph,

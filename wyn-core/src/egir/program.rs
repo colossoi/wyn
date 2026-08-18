@@ -8,7 +8,6 @@
 use crate::builtins;
 use crate::pipeline_descriptor;
 use crate::ssa;
-use crate::types;
 use crate::LoweringProfile;
 use crate::ResourceAccess;
 use crate::SortedSet;
@@ -26,22 +25,26 @@ use std::ops::{Deref, Index, IndexMut};
 
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, Family, OperandType, ParameterId, Physical, PlaceAccess, PlaceRegion, Raw, Scheduled, SegBody,
-    SegExtent, SegSpace, Semantic, SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, ViewType,
-    WynLanguage,
+    EGraph, Family, Physical, Raw, Scheduled, SegExtent, SegSpace, Semantic, SideEffectKind, Soac,
+    SoacEffect, ValueId, ValueKind, WynLanguage,
 };
 
 pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource};
 pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<P, Lang>;
+pub type AllocatedConstantDef<Lang = WynLanguage> =
+    super::ir::ConstantDef<Semantic<SemanticResourceRef>, Lang>;
 pub use crate::types::ExternDecl;
 pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
+pub type AllocatedFunc<Lang = WynLanguage> = super::ir::Func<Semantic<SemanticResourceRef>, Lang>;
 pub type Entry<
     P = Semantic,
-    ResourceDecl = SemanticResourceDecl,
+    ResourceDecl = NoStorageDeclaration,
     Route = RealizedOutputRoute,
     Lang = WynLanguage,
 > = super::ir::Entry<P, ResourceDecl, Route, Lang>;
-pub type RawEntry<Route = RealizedOutputRoute> = Entry<Raw, SemanticResourceDecl, Route>;
+pub type RawEntry<Route = RealizedOutputRoute> = Entry<Raw, NoStorageDeclaration, Route>;
+pub type AllocatedEntry<Route = RealizedOutputRoute> =
+    Entry<Semantic<SemanticResourceRef>, SemanticResourceDecl, Route>;
 pub type Program<Tag, Shape, GlobalContext, Lang = WynLanguage> =
     super::ir::Program<Tag, Shape, GlobalContext, Lang>;
 
@@ -81,7 +84,12 @@ where
 impl<Tag>
     super::ir::Program<
         Tag,
-        super::ir::ProgramFamily<Semantic, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
+        super::ir::ProgramFamily<
+            Semantic<SemanticResourceRef>,
+            SemanticResourceDecl,
+            RealizedOutputRoute,
+            ResourceProgramData,
+        >,
         RewriteGlobal,
         WynLanguage,
     >
@@ -94,12 +102,17 @@ impl<Tag>
 impl<Tag> Index<EntryId>
     for super::ir::Program<
         Tag,
-        super::ir::ProgramFamily<Semantic, SemanticResourceDecl, RealizedOutputRoute, CoreProgramData>,
+        super::ir::ProgramFamily<
+            Semantic<SemanticResourceRef>,
+            SemanticResourceDecl,
+            RealizedOutputRoute,
+            ResourceProgramData,
+        >,
         RewriteGlobal,
         WynLanguage,
     >
 {
-    type Output = Entry<Semantic>;
+    type Output = AllocatedEntry;
 
     fn index(&self, id: EntryId) -> &Self::Output {
         &self.entry_points[id.index()]
@@ -109,24 +122,6 @@ impl<Tag> Index<EntryId>
 #[cfg(test)]
 #[path = "program_tests.rs"]
 mod program_tests;
-
-impl<P: Family, Route> Entry<P, SemanticResourceDecl, Route> {
-    pub(super) fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut Type<TypeName>)) {
-        for input in &mut self.inputs {
-            visit(&mut input.ty);
-        }
-        for output in &mut self.outputs {
-            visit(&mut output.ty);
-        }
-        for param in &mut self.params {
-            visit(param.representation_mut().ty_mut());
-        }
-        self.result.for_each_type_mut(&mut visit);
-        for declaration in &mut self.resource_declarations {
-            visit(&mut declaration.elem_ty);
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SemanticOpId {
@@ -177,8 +172,14 @@ impl From<u32> for SemanticOpId {
 
 pub(crate) type SemanticOpIdSource = IdSource<SemanticOpId>;
 
+/// Uninhabited entry-declaration payload before logical-resource allocation.
+/// Authored storage remains in the entry interface; compiler-created storage
+/// cannot be represented in `Converted`, `Segmented`, or `Optimized` EGIR.
+#[derive(Clone, Debug)]
+pub enum NoStorageDeclaration {}
+
 /// Target-independent identity of a semantic storage resource. Identities are
-/// issued only by the logical-resource arena and its conversion-time builder;
+/// issued only by the logical-resource arena during resource allocation;
 /// callers can observe an id's dense index but cannot manufacture one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResourceId(u32);
@@ -401,111 +402,28 @@ pub struct LogicalResourceArena {
     compiler: HashMap<CompilerResourceKey, ResourceId>,
 }
 
-/// Conversion-time resource arena. Host resources may be referenced before
-/// their declarations are encountered, so this builder reserves their stable
-/// identities and requires every reservation to be defined before `finish`.
-#[derive(Default)]
-pub(crate) struct LogicalResourceArenaBuilder {
-    by_binding: HashMap<BindingRef, ResourceId>,
-    compiler: HashMap<CompilerResourceKey, ResourceId>,
-    resources: Vec<Option<LogicalResourceDraft>>,
-}
-
-struct LogicalResourceDraft {
-    origin: ResourceOrigin,
-    elem_ty: Type<TypeName>,
-    size: LogicalSize,
-}
-
-impl LogicalResourceArenaBuilder {
-    pub(crate) fn host_id(&mut self, binding: BindingRef) -> ResourceId {
-        if let Some(resource) = self.by_binding.get(&binding) {
-            return *resource;
-        }
-        let resource = ResourceId(self.resources.len() as u32);
-        self.by_binding.insert(binding, resource);
-        self.resources.push(None);
-        resource
-    }
-
+impl LogicalResourceArena {
+    /// Declare or refine a host-owned resource at the allocation boundary.
+    /// References may be reserved before descriptor metadata is visited, so a
+    /// later declaration is allowed to replace an unspecified size.
     pub(crate) fn declare_host(
         &mut self,
         binding: BindingRef,
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
-        let resource = self.host_id(binding);
-        let slot = &mut self.resources[resource.index()];
-        match slot {
-            Some(existing) => {
-                if matches!(existing.size, LogicalSize::Unspecified)
-                    && !matches!(size, LogicalSize::Unspecified)
-                {
-                    existing.size = size;
-                }
+        if let Some(id) = self.host.get(&binding).copied() {
+            let resource = &mut self.resources[id.index()];
+            if matches!(resource.size, LogicalSize::Unspecified)
+                && !matches!(size, LogicalSize::Unspecified)
+            {
+                resource.size = size;
             }
-            None => {
-                *slot = Some(LogicalResourceDraft {
-                    origin: ResourceOrigin::Host(HostResource { binding, name: None }),
-                    elem_ty,
-                    size,
-                });
-            }
+            return id;
         }
-        resource
+        self.allocate(ResourceOrigin::host(binding), elem_ty, size)
     }
 
-    pub(crate) fn allocate_compiler(
-        &mut self,
-        compiler: CompilerResource,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> ResourceId {
-        if let Some(resource) = compiler.key().and_then(|key| self.compiler.get(&key).copied()) {
-            return resource;
-        }
-        let resource = ResourceId(self.resources.len() as u32);
-        if let Some(key) = compiler.key() {
-            self.compiler.insert(key, resource);
-        }
-        self.resources.push(Some(LogicalResourceDraft {
-            origin: ResourceOrigin::Compiler(compiler),
-            elem_ty,
-            size,
-        }));
-        resource
-    }
-
-    pub(crate) fn finish(self) -> Result<LogicalResourceArena, ResourceId> {
-        let Self {
-            by_binding,
-            compiler,
-            resources,
-        } = self;
-        let resources = resources
-            .into_iter()
-            .enumerate()
-            .map(|(index, resource)| {
-                let id = ResourceId(index as u32);
-                resource
-                    .map(|resource| LogicalResource {
-                        id,
-                        origin: resource.origin,
-                        elem_ty: resource.elem_ty,
-                        size: resource.size,
-                    })
-                    .ok_or(id)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(LogicalResourceArena {
-            resources,
-            host: by_binding,
-            compiler,
-        })
-    }
-}
-
-impl LogicalResourceArena {
     pub(crate) fn allocate(
         &mut self,
         origin: ResourceOrigin,
@@ -651,146 +569,11 @@ pub(crate) fn host_resource_names(resources: &[LogicalResource]) -> LookupMap<(u
         .collect()
 }
 
-/// Finish the TLC conversion boundary by installing its authoritative
-/// resource arena and replacing descriptor-shaped identities inside the
-/// just-built graphs and types. No later semantic pass is allowed to perform
-/// this rewrite or to introduce a binding-backed semantic resource.
-pub(crate) fn finalize_converted_resources(inner: &mut super::from_tlc::Converted) {
-    {
-        let by_binding = &inner.data.resources.host;
-        for entry in &mut inner.entry_points {
-            normalize_converted_graph_types(&mut entry.graph, by_binding);
-        }
-        for function in &mut inner.functions {
-            normalize_converted_graph_types(&mut function.graph, by_binding);
-        }
-        for constant in &mut inner.constants {
-            normalize_converted_graph_types(&mut constant.graph, by_binding);
-        }
-    }
-
-    normalize_structural_resources(inner);
-
-    let by_binding = &inner.data.resources.host;
-    for entry in &mut inner.entry_points {
-        for input in &mut entry.inputs {
-            input.resource = input
-                .storage_binding()
-                .or_else(|| input.storage_image_binding().map(|(binding, ..)| binding))
-                .and_then(|binding| by_binding.get(&binding).copied())
-                .map(SemanticResourceRef)
-                .or_else(|| semantic_type_resource(&input.ty));
-        }
-        for output in &mut entry.outputs {
-            output.resource = output
-                .storage_binding()
-                .and_then(|binding| by_binding.get(&binding).copied())
-                .map(SemanticResourceRef)
-                .or_else(|| semantic_type_resource(&output.ty));
-        }
-    }
-}
-
 fn semantic_type_resource(ty: &Type<TypeName>) -> Option<SemanticResourceRef> {
     let Type::Constructed(TypeName::Resource(resource), _) = ty.array_buffer()? else {
         return None;
     };
     Some(SemanticResourceRef(*resource))
-}
-
-fn normalize_converted_graph_types(graph: &mut EGraph<Raw>, by_binding: &HashMap<BindingRef, ResourceId>) {
-    rewrite_raw_graph_types(graph, |ty| normalize_type_resources(ty, by_binding));
-}
-
-fn normalize_structural_resources(inner: &mut super::from_tlc::Converted) {
-    let by_binding = &inner.data.resources.host;
-    for resource in &mut inner.data.resources.resources {
-        normalize_type_resources(&mut resource.elem_ty, by_binding);
-    }
-    for entry in &mut inner.entry_points {
-        entry.visit_types_mut(|ty| normalize_type_resources(ty, by_binding));
-    }
-    for function in &mut inner.functions {
-        for param in &mut function.params {
-            normalize_type_resources(param.representation_mut().ty_mut(), by_binding);
-        }
-        function.result.for_each_type_mut(|ty| normalize_type_resources(ty, by_binding));
-        normalize_semantic_function_parameters(function);
-    }
-}
-
-fn normalize_semantic_function_parameters(function: &mut Func<Raw>) {
-    for index in 0..function.params.len() {
-        let representation = semantic_parameter_representation(function.params[index].ty());
-        if representation == *function.params[index].representation() {
-            continue;
-        }
-        let parameter = ParameterId::new(index);
-        let source = function
-            .graph
-            .nodes
-            .iter()
-            .find_map(|(value, definition)| {
-                matches!(
-                    definition.kind(),
-                    ValueKind::FuncParam { parameter: candidate } if *candidate == parameter
-                )
-                .then_some(value)
-            })
-            .expect("function parameter has a graph binding");
-        super::graph_ops::retype_projection_tree(&mut function.graph, source, representation.ty());
-        *function.params[index].representation_mut() = representation;
-    }
-    function.graph.canonicalize_boundary_operands();
-}
-
-fn semantic_parameter_representation(
-    ty: &Type<TypeName>,
-) -> OperandType<SemanticResourceRef, Type<TypeName>> {
-    let physical_ty = viewify_resource_arrays(ty);
-    if ty.array_variant().is_some()
-        && (types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
-    {
-        OperandType::View(ViewType {
-            array: physical_ty,
-            region: semantic_type_resource(ty)
-                .map(PlaceRegion::Resource)
-                .unwrap_or(PlaceRegion::Parametric),
-            access: PlaceAccess::ReadOnly,
-        })
-    } else {
-        OperandType::Value(physical_ty)
-    }
-}
-
-fn viewify_resource_arrays(ty: &Type<TypeName>) -> Type<TypeName> {
-    if ty.array_variant().is_some()
-        && (types::is_array_variant_view(ty) || semantic_type_resource(ty).is_some())
-    {
-        let region = ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
-        return types::view_array_of(ty, region);
-    }
-    match ty {
-        Type::Constructed(name, fields)
-            if matches!(
-                name,
-                TypeName::Tuple(_) | TypeName::Record(_) | TypeName::Unit | TypeName::SideEffect
-            ) =>
-        {
-            Type::Constructed(name.clone(), fields.iter().map(viewify_resource_arrays).collect())
-        }
-        _ => ty.clone(),
-    }
-}
-
-fn normalize_type_resources(ty: &mut Type<TypeName>, by_binding: &HashMap<BindingRef, ResourceId>) {
-    visit_type_names_mut(ty, |name| {
-        if let TypeName::Buffer(binding) = *name {
-            *name = TypeName::Resource(
-                *by_binding.get(&binding).expect("buffer type resource must be in manifest"),
-            );
-        }
-    });
 }
 
 pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMut(&mut TypeName)) {
@@ -811,7 +594,10 @@ pub(crate) fn visit_type_names_mut(ty: &mut Type<TypeName>, mut visit: impl FnMu
     recurse(ty, &mut visit);
 }
 
-fn rewrite_raw_graph_types(graph: &mut EGraph<Raw>, mut rewrite: impl FnMut(&mut Type<TypeName>)) {
+fn rewrite_physical_graph_types(
+    graph: &mut EGraph<Physical>,
+    mut rewrite: impl FnMut(&mut Type<TypeName>),
+) {
     for block in graph.skeleton.blocks.values_mut() {
         for effect in &mut block.side_effects {
             if let super::types::SideEffectKind::Soac(SoacEffect(_, soac)) = &mut effect.kind {
@@ -822,8 +608,8 @@ fn rewrite_raw_graph_types(graph: &mut EGraph<Raw>, mut rewrite: impl FnMut(&mut
     rewrite_node_types(graph, rewrite);
 }
 
-fn rewrite_physical_graph_types(
-    graph: &mut EGraph<Physical>,
+pub(crate) fn rewrite_graph_types<R: super::types::GraphResource>(
+    graph: &mut EGraph<Semantic<R>>,
     mut rewrite: impl FnMut(&mut Type<TypeName>),
 ) {
     for block in graph.skeleton.blocks.values_mut() {
@@ -850,143 +636,9 @@ fn physicalize_soac(
     places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
     bindings: &PhysicalResourceTable,
 ) -> Result<Soac<Physical>, String> {
-    fn binding(reference: SemanticResourceRef, bindings: &PhysicalResourceTable) -> BindingRef {
-        bindings.binding(reference.0)
-    }
-
-    fn seg_body(
-        mut body: SegBody,
-        nodes: &LookupMap<ValueId, ValueId>,
-        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
-    ) -> SegBody {
-        for capture in &mut body.captures {
-            *capture = capture
-                .try_map(
-                    |value| Ok::<_, std::convert::Infallible>(nodes[&value]),
-                    |view| view.try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value])),
-                    |place| Ok::<_, std::convert::Infallible>(places[&place]),
-                )
-                .unwrap();
-        }
-        body
-    }
-
-    fn space(
-        space: SegSpace,
-        nodes: &LookupMap<ValueId, ValueId>,
-        bindings: &PhysicalResourceTable,
-    ) -> Result<SegSpace<BindingRef>, String> {
-        let dims = space
-            .into_dims()
-            .into_iter()
-            .map(|extent| {
-                Ok(match extent {
-                    SegExtent::Fixed(value) => SegExtent::Fixed(value),
-                    SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
-                        node: nodes[&node],
-                        offset,
-                    },
-                    SegExtent::ResourceLength {
-                        view,
-                        resource,
-                        elem_bytes,
-                    } => SegExtent::ResourceLength {
-                        view: view
-                            .try_remap(|value| Ok::<_, std::convert::Infallible>(nodes[&value]))
-                            .unwrap(),
-                        resource: binding(resource, bindings),
-                        elem_bytes,
-                    },
-                    SegExtent::Value(node) => SegExtent::Value(nodes[&node]),
-                })
-            })
-            .collect::<Result<_, String>>()?;
-        SegSpace::from_dims(dims).ok_or_else(|| "physicalized segmented space was empty".to_string())
-    }
-
-    fn lambda(
-        mut lambda: screma::Lambda,
-        nodes: &LookupMap<ValueId, ValueId>,
-        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
-    ) -> screma::Lambda {
-        if let Some(body) = lambda.seg_body_mut() {
-            *body = seg_body(body.clone(), nodes, places);
-        }
-        lambda
-    }
-
-    fn screma_form(
-        mut form: screma::ScremaForm,
-        nodes: &LookupMap<ValueId, ValueId>,
-        places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
-    ) -> screma::ScremaForm {
-        form.pre = lambda(form.pre, nodes, places);
-        for scan in &mut form.scans {
-            scan.operator = lambda(scan.operator.clone(), nodes, places);
-            for neutral in &mut scan.neutral {
-                *neutral = nodes[neutral];
-            }
-        }
-        for reduction in &mut form.reductions {
-            reduction.operator = lambda(reduction.operator.clone(), nodes, places);
-            for neutral in &mut reduction.neutral {
-                *neutral = nodes[neutral];
-            }
-        }
-        form.post = lambda(form.post, nodes, places);
-        form
-    }
-    fn physical_segment(
-        segment: screma::Segmented<SemanticResourceRef>,
-        nodes: &LookupMap<ValueId, ValueId>,
-        bindings: &PhysicalResourceTable,
-    ) -> Result<screma::Segmented<BindingRef>, String> {
-        Ok(screma::Segmented {
-            space: space(segment.space, nodes, bindings)?,
-            output_slots: segment.output_slots,
-            resources: segment
-                .resources
-                .into_iter()
-                .map(|resource| {
-                    Ok(super::types::SegResourceAccess {
-                        resource: binding(resource.resource, bindings),
-                        access: resource.access,
-                    })
-                })
-                .collect::<Result<_, String>>()?,
-        })
-    }
-
-    fn filter_output(
-        output: filter::Output,
-        bindings: &PhysicalResourceTable,
-    ) -> Result<filter::Output<BindingRef>, String> {
-        Ok(match output {
-            filter::Output::Local { capacity, ownership } => filter::Output::Local { capacity, ownership },
-            filter::Output::Runtime { scratch, length } => filter::Output::Runtime {
-                scratch: binding(scratch, bindings),
-                length: match length {
-                    filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
-                    filter::RuntimeLength::Stored(resource) => {
-                        filter::RuntimeLength::Stored(binding(resource, bindings))
-                    }
-                },
-            },
-        })
-    }
-
-    fn work_buffers(
-        buffers: filter::WorkBuffers,
-        bindings: &PhysicalResourceTable,
-    ) -> Result<filter::WorkBuffers<BindingRef>, String> {
-        Ok(filter::WorkBuffers {
-            flags: binding(buffers.flags, bindings),
-            offsets: binding(buffers.offsets, bindings),
-            block_sums: binding(buffers.block_sums, bindings),
-            block_offsets: binding(buffers.block_offsets, bindings),
-        })
-    }
-
+    let mut remap = super::soac::remap::Remap::new(nodes, places, |reference: SemanticResourceRef| {
+        Ok::<_, String>(bindings.binding(reference.0))
+    });
     Ok(match soac {
         Soac::Screma(screma::Op {
             inputs,
@@ -998,7 +650,7 @@ fn physicalize_soac(
             let state = match state {
                 screma::ScheduledState::Serial => screma::PhysicalState::Serial,
                 screma::ScheduledState::Segmented(segment) if map_shaped => {
-                    screma::PhysicalState::Segmented(physical_segment(segment, nodes, bindings)?)
+                    screma::PhysicalState::Segmented(remap.segment(segment)?)
                 }
                 screma::ScheduledState::Segmented(_) => {
                     return Err("scheduled parallel fold reached physicalization; split it into physical kernels first".into());
@@ -1006,78 +658,40 @@ fn physicalize_soac(
             };
             Soac::Screma(screma::Op {
                 inputs,
-                form: screma_form(form, nodes, places),
+                form: remap.screma_form(form),
                 result_state,
                 state,
             })
         }
-        Soac::Filter(filter::Op { mut body, state }) => {
-            body.map = lambda(body.map, nodes, places);
-            body.predicate = lambda(body.predicate, nodes, places);
+        Soac::Filter(filter::Op { body, state }) => {
             let state = match state {
                 filter::ScheduledState::Loop {
                     space: iteration_space,
                     storage,
                 } => filter::ScheduledState::Loop {
-                    space: space(iteration_space, nodes, bindings)?,
-                    storage: filter_output(storage, bindings)?,
+                    space: remap.space(iteration_space)?,
+                    storage: remap.filter_output(storage)?,
                 },
                 filter::ScheduledState::Pipeline {
                     space: iteration_space,
                     storage,
                     plan,
                 } => filter::ScheduledState::Pipeline {
-                    space: space(iteration_space, nodes, bindings)?,
-                    storage: filter::RuntimeStorage {
-                        scratch: binding(storage.scratch, bindings),
-                        length: match storage.length {
-                            filter::RuntimeLength::ViewOnly => filter::RuntimeLength::ViewOnly,
-                            filter::RuntimeLength::Stored(resource) => {
-                                filter::RuntimeLength::Stored(binding(resource, bindings))
-                            }
-                        },
-                    },
+                    space: remap.space(iteration_space)?,
+                    storage: remap.runtime_storage(storage)?,
                     plan: filter::ParallelPlan {
                         stage: plan.stage,
-                        buffers: work_buffers(plan.buffers, bindings)?,
+                        buffers: remap.work_buffers(plan.buffers)?,
                         scan_workgroup_width: plan.scan_workgroup_width,
                     },
                 },
             };
-            Soac::Filter(filter::Op { body, state })
+            Soac::Filter(filter::Op {
+                body: remap.filter_body(body),
+                state,
+            })
         }
-        Soac::Hist(hist::Op {
-            inputs,
-            mut form,
-            state,
-        }) => {
-            form.bucket = lambda(form.bucket, nodes, places);
-            for operation in &mut form.operations {
-                for dimension in &mut operation.shape {
-                    *dimension = nodes[dimension];
-                }
-                operation.race_factor = nodes[&operation.race_factor];
-                for destination in &mut operation.destinations {
-                    destination.remap_value(|value| nodes[&value]);
-                }
-                if let hist::Update::Reduce { operator, neutral } = &mut operation.update {
-                    *operator = lambda(operator.clone(), nodes, places);
-                    for value in neutral {
-                        *value = nodes[value];
-                    }
-                }
-                if let hist::Update::BucketInsert {
-                    counts,
-                    overflow,
-                    capacity,
-                    ..
-                } = &mut operation.update
-                {
-                    counts.remap_value(|value| nodes[&value]);
-                    overflow.remap_value(|value| nodes[&value]);
-                    *capacity = nodes[capacity];
-                }
-            }
+        Soac::Hist(hist::Op { inputs, form, state }) => {
             let state = match state {
                 hist::ScheduledState::Serial => hist::ScheduledState::Serial,
 
@@ -1085,20 +699,26 @@ fn physicalize_soac(
                     space: iteration_space,
                     operations,
                 } => hist::ScheduledState::Atomic {
-                    space: space(iteration_space, nodes, bindings)?,
+                    space: remap.space(iteration_space)?,
                     operations,
                 },
                 hist::ScheduledState::Bucket {
                     space: iteration_space,
                     stage,
                     topology,
+                    storage,
                 } => hist::ScheduledState::Bucket {
-                    space: space(iteration_space, nodes, bindings)?,
+                    space: remap.space(iteration_space)?,
                     stage,
                     topology,
+                    storage: remap.bucket_storage(storage)?,
                 },
             };
-            Soac::Hist(hist::Op { inputs, form, state })
+            Soac::Hist(hist::Op {
+                inputs,
+                form: remap.hist_form(form),
+                state,
+            })
         }
     })
 }
@@ -1204,10 +824,9 @@ pub(crate) fn semantic_program_for_test(
         externs,
         entry_points,
         constants,
-        CoreProgramData {
+        SemanticProgramData {
             pipeline,
             stage_entries: Vec::new(),
-            resources: LogicalResourceArena::default(),
             identities,
         },
         RewriteGlobal {
@@ -1218,13 +837,13 @@ pub(crate) fn semantic_program_for_test(
     )
 }
 
-impl Entry {
+impl AllocatedEntry {
     /// Resource identities referenced by a set of values in `graph`, including
     /// resource-backed entry parameters whose identity is carried by the
     /// interface rather than by a storage-view node.
     pub(crate) fn resources_referenced_by_nodes(
         &self,
-        graph: &EGraph,
+        graph: &EGraph<Semantic<SemanticResourceRef>>,
         nodes: impl IntoIterator<Item = ValueId>,
     ) -> HashSet<ResourceId> {
         let mut resources = HashSet::new();
@@ -1251,7 +870,7 @@ impl Entry {
     /// do not need to rediscover that boundary from the projected graph.
     pub(crate) fn resources_referenced_by_projection(
         &self,
-        projection: &super::graph_projector::GraphProjection,
+        projection: &super::graph_projector::GraphProjection<SemanticResourceRef>,
     ) -> HashSet<ResourceId> {
         let mut resources = self.resources_referenced_by_nodes(&self.graph, projection.source_nodes());
         for site in projection.source_effects() {
@@ -1280,7 +899,7 @@ impl Entry {
 
     pub(crate) fn parameter_indices_referenced_by_projection(
         &self,
-        projection: &super::graph_projector::GraphProjection,
+        projection: &super::graph_projector::GraphProjection<SemanticResourceRef>,
         resources: &HashSet<ResourceId>,
     ) -> SortedSet<usize> {
         let mut parameters = projection
@@ -1426,20 +1045,26 @@ impl Entry {
 
 /// A complete, fresh entry projection owned by a kernel recipe.
 #[derive(Clone, Debug)]
-pub struct PlannedEntry<P: Family = Semantic>(Entry<P>);
+pub struct PlannedEntry<P: Family = Semantic<SemanticResourceRef>>(
+    super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
+);
 
 impl<P: Family> PlannedEntry<P> {
-    pub(crate) fn new(entry: Entry<P>) -> Self {
+    pub(crate) fn new(
+        entry: super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>,
+    ) -> Self {
         Self(entry)
     }
 
-    pub(crate) fn into_inner(self) -> Entry<P> {
+    pub(crate) fn into_inner(
+        self,
+    ) -> super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage> {
         self.0
     }
 }
 
 impl<P: Family> Deref for PlannedEntry<P> {
-    type Target = Entry<P>;
+    type Target = super::ir::Entry<P, SemanticResourceDecl, RealizedOutputRoute, WynLanguage>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -1465,7 +1090,7 @@ pub struct PlannedPublication {
 }
 
 impl PlannedPublication {
-    pub fn from_semantic(entry: &Entry<Semantic>) -> Self {
+    pub fn from_semantic(entry: &AllocatedEntry) -> Self {
         Self {
             id: entry.id,
             name: entry.name.clone(),
@@ -1489,7 +1114,7 @@ impl PlannedPublication {
     }
 }
 
-impl Entry {
+impl AllocatedEntry {
     pub(crate) fn resource_for_result(
         &self,
         result: &super::ir::ResultBinding<Type<TypeName>>,
@@ -1551,7 +1176,7 @@ impl Entry {
 }
 
 impl PlannedEntry {
-    pub fn project(entry: &Entry<Semantic>) -> Result<Self, String> {
+    pub fn project(entry: &AllocatedEntry) -> Result<Self, String> {
         let projection = super::graph_projector::GraphProjector::new(&entry.graph)
             .all_with_values(entry.routes().map(|route| route.source.value).collect())
             .map_err(|error| format!("could not project semantic entry '{}': {error}", entry.name))?;
@@ -1573,7 +1198,7 @@ impl PlannedEntry {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_projection(
-        projection: super::graph_projector::GraphProjection,
+        projection: super::graph_projector::GraphProjection<SemanticResourceRef>,
         id: EntryId,
         name: String,
         span: Span,
@@ -1696,18 +1321,18 @@ pub enum MaterializationKind {
 pub enum MaterializationRequirement {
     SharedArray {
         space: SegSpace<SemanticResourceRef>,
-        entry: Entry<Semantic>,
+        entry: AllocatedEntry,
     },
     Gather {
         space: SegSpace<SemanticResourceRef>,
-        entry: Entry<Semantic>,
+        entry: AllocatedEntry,
     },
     RuntimeArray {
         space: SegSpace<SemanticResourceRef>,
-        entry: Entry<Semantic>,
+        entry: AllocatedEntry,
     },
     Scalar {
-        entry: Entry<Semantic>,
+        entry: AllocatedEntry,
     },
 }
 
@@ -1730,7 +1355,7 @@ impl MaterializationRequirement {
         }
     }
 
-    pub fn entry(&self) -> &Entry {
+    pub fn entry(&self) -> &AllocatedEntry {
         match self {
             Self::SharedArray { entry, .. }
             | Self::Gather { entry, .. }
@@ -1739,7 +1364,7 @@ impl MaterializationRequirement {
         }
     }
 
-    pub fn entry_mut(&mut self) -> &mut Entry {
+    pub fn entry_mut(&mut self) -> &mut AllocatedEntry {
         match self {
             Self::SharedArray { entry, .. }
             | Self::Gather { entry, .. }
@@ -1890,13 +1515,25 @@ impl Default for ProgramIdentities {
         Self::new()
     }
 }
-/// Program-owned EGIR data shared by logical and physical checkpoints.
+/// Program-owned semantic data before logical-resource allocation.
+///
+/// Descriptor bindings and authored storage remain in the entry interface.
+/// This shape deliberately has no logical-resource arena.
 #[derive(Debug)]
-pub struct CoreProgramData {
+pub struct SemanticProgramData {
     pub pipeline: PipelineDescriptor,
     /// Structural entry identity for each descriptor pipeline stage.
     pub stage_entries: Vec<Vec<EntryId>>,
+    pub identities: ProgramIdentities,
+}
 
+/// Program-owned data after logical-resource allocation. This is the first
+/// program shape allowed to own a logical-resource arena.
+#[derive(Debug)]
+pub struct ResourceProgramData {
+    pub pipeline: PipelineDescriptor,
+    /// Structural entry identity for each descriptor pipeline stage.
+    pub stage_entries: Vec<Vec<EntryId>>,
     pub resources: LogicalResourceArena,
     pub identities: ProgramIdentities,
 }
@@ -1904,7 +1541,7 @@ pub struct CoreProgramData {
 /// Program-owned data after materialization requirements have been planned.
 #[derive(Debug)]
 pub struct AllocatedProgramData {
-    pub core: CoreProgramData,
+    pub core: ResourceProgramData,
     pub materializations: IdArena<MaterializationId, MaterializationRequirement>,
 }
 
@@ -1937,7 +1574,7 @@ pub struct PlannedGlobal {
 }
 
 fn physicalize_function(
-    function: Func<Semantic>,
+    function: AllocatedFunc,
     resources: &PhysicalResourceTable,
     serial: bool,
 ) -> Result<Func<Physical>, String> {
@@ -1986,7 +1623,7 @@ fn physicalize_function(
 }
 
 fn physicalize_constant(
-    constant: ConstantDef<Semantic>,
+    constant: AllocatedConstantDef,
     resources: &PhysicalResourceTable,
 ) -> Result<ConstantDef<Physical>, String> {
     let ConstantDef {
@@ -2032,9 +1669,10 @@ fn route_writes_resource(
             }
             SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => {
-                    matches!(storage, filter::Output::Runtime { scratch, .. } if *scratch == resource)
+                    matches!(storage, filter::Output::Runtime(runtime)
+                        if runtime.backing == filter::RuntimeBacking::Bound(resource))
                 }
-                filter::ScheduledState::Pipeline { storage, .. } => storage.scratch == resource,
+                filter::ScheduledState::Pipeline { storage, .. } => storage.data == resource,
             },
             _ => false,
         }
@@ -2253,7 +1891,7 @@ pub(in crate::egir) fn physicalize_program(
         externs,
         entry_points,
         constants,
-        CoreProgramData {
+        ResourceProgramData {
             pipeline: data.core.pipeline,
             stage_entries: data.core.stage_entries,
             resources: data.core.resources,

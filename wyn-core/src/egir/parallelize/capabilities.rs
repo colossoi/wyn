@@ -4,6 +4,7 @@
 //! Eligibility is expressed directly in terms of the canonical pre/operators/post
 //! form; graph-local cloning and storage checks remain in each recipe analyzer.
 
+use crate::egir::program::SemanticResourceRef;
 use crate::egir::soac::screma;
 use crate::egir::types::{ResourceAccess, Semantic};
 use crate::types;
@@ -16,7 +17,7 @@ pub(super) enum Strategy {
     Serial,
 }
 
-pub(super) fn classify(op: &screma::Op<Semantic>) -> Strategy {
+pub(super) fn classify(op: &screma::Op<Semantic<SemanticResourceRef>>) -> Strategy {
     let reduction_results = op.form.reduction_result_count();
     let reductions_ready = op
         .form

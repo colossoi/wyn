@@ -15,7 +15,7 @@ use super::{graph_and_span, horizontal, screma as fusion_screma, support};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::{CoreProgramData, Func, ProgramIdentities};
+use crate::egir::program::{Func, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -221,5 +221,5 @@ pub(super) fn finish(
         };
         support::rewrite_body_graph(body, rewrite)
     });
-    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData { identities, ..data })
+    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData { identities, ..data })
 }

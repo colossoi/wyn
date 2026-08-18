@@ -15,7 +15,7 @@ use super::support;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite};
-use crate::egir::program::{CoreProgramData, Func, OutputSlotId, ProgramIdentities};
+use crate::egir::program::{Func, OutputSlotId, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
@@ -149,7 +149,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
             support::replace_route_values(entry, &replacements);
         })
     });
-    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
+    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
         identities: identities,
         ..data
     })

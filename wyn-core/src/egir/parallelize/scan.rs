@@ -1122,7 +1122,7 @@ fn synthesize_packed_operator_function(
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
     span: ast::Span,
-) -> Func {
+) -> Func<Semantic> {
     let mut parameter_types = vec![scratch_type.clone(), scratch_type.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -1184,7 +1184,7 @@ fn synthesize_scan_input_function(
     component_count: usize,
     result_type: Type<TypeName>,
     span: ast::Span,
-) -> Func {
+) -> Func<Semantic> {
     let mut parameter_types = pre.parameter_types.clone();
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -1224,7 +1224,7 @@ fn synthesize_scan_post_function(
     scratch_type: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: ast::Span,
-) -> Func {
+) -> Func<Semantic> {
     let mut element_types = vec![scratch_type];
     element_types.extend(pre.parameter_types.iter().cloned());
     let element_count = element_types.len();

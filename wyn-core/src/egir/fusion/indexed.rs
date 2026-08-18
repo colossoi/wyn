@@ -10,7 +10,6 @@ use std::collections::HashSet;
 
 use crate::egir::graph_ops;
 use crate::egir::ir::{BodySite, RealizedOutputRoute};
-use crate::egir::program::SemanticResourceRef;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
@@ -18,6 +17,7 @@ use crate::egir::types::{
     ValueKind,
 };
 use crate::flow::BlockId;
+use crate::BindingRef;
 use smallvec::smallvec;
 
 use super::support;
@@ -51,7 +51,7 @@ pub(super) fn analyze(inner: &Segmented) -> Option<Candidate> {
 fn find_in_graph(
     graph: &EGraph,
     site: BodySite,
-    output_resources: &[Option<SemanticResourceRef>],
+    output_resources: &[Option<BindingRef>],
     output_routes: &[RealizedOutputRoute],
 ) -> Option<Candidate> {
     let live = graph_ops::reachable_execution_values_with_roots(

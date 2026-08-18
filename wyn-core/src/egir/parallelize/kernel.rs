@@ -55,7 +55,7 @@ pub(super) fn cloneable_capture_inputs(
 /// it's the Range's own `len` operand. Returns
 /// `(tid, chunk_start, chunk_len)`.
 pub(super) fn emit_chunk_arithmetic(
-    graph: &mut egir::types::EGraph,
+    graph: &mut EGraph,
     total_threads: u32,
     input_len: ValueId,
 ) -> Result<(ValueId, ValueId, ValueId), String> {
@@ -169,7 +169,7 @@ pub(super) fn emit_chunk_arithmetic(
 
 /// Integer literal `n` typed as `index_ty` (`u32` → `PureOp::Uint`, else
 /// `PureOp::Int`).
-fn intern_index_lit(graph: &mut egir::types::EGraph, n: u32, index_ty: &Type<TypeName>) -> ValueId {
+fn intern_index_lit(graph: &mut EGraph, n: u32, index_ty: &Type<TypeName>) -> ValueId {
     let op = match index_ty {
         Type::Constructed(TypeName::UInt(32), _) => egir::types::PureOp::Uint(n.to_string()),
         _ => egir::types::PureOp::Int(n.to_string()),
@@ -179,11 +179,7 @@ fn intern_index_lit(graph: &mut egir::types::EGraph, n: u32, index_ty: &Type<Typ
 
 /// Cast a u32 value into `index_ty`: identity for u32, else the per-type
 /// bitcast intrinsic (`i32.u32`).
-fn cast_u32_to_index(
-    graph: &mut egir::types::EGraph,
-    v: ValueId,
-    index_ty: &Type<TypeName>,
-) -> Result<ValueId, String> {
+fn cast_u32_to_index(graph: &mut EGraph, v: ValueId, index_ty: &Type<TypeName>) -> Result<ValueId, String> {
     match index_ty {
         Type::Constructed(TypeName::UInt(32), _) => Ok(v),
         Type::Constructed(TypeName::Int(32), _) => {
@@ -216,7 +212,7 @@ fn synthesize_binary_fn(
     elem_ty: Type<TypeName>,
     span: ast::Span,
     body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
-) -> Func {
+) -> Func<Semantic> {
     let params = lambda_ops::named_parameters(&[elem_ty.clone(), elem_ty.clone()], "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
@@ -245,7 +241,7 @@ pub(super) fn synthesize_swap_wrapper(
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: ast::Span,
-) -> Func {
+) -> Func<Semantic> {
     let mut parameter_types = vec![elem_ty.clone(), elem_ty.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -280,7 +276,11 @@ pub(super) fn synthesize_swap_wrapper(
     )
 }
 
-pub(super) fn synthesize_u32_add_function(region: FunctionId, name: String, span: ast::Span) -> Func {
+pub(super) fn synthesize_u32_add_function(
+    region: FunctionId,
+    name: String,
+    span: ast::Span,
+) -> Func<Semantic> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {

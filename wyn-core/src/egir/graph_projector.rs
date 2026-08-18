@@ -8,17 +8,18 @@ use crate::ast;
 use std::collections::{HashMap, HashSet};
 
 use crate::flow::{BlockId, ControlHeader};
+use crate::BindingRef;
 
 use super::graph_ops::ValueUseIndex;
 use super::ir::RealizedOutputRoute;
 use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 use super::program::OutputWriter;
 use super::types::{
-    EGraph, EffectToken, Semantic, SideEffect, SideEffectIndex, SideEffectSite, SkeletonTerminator,
-    ValueId, ValueKind,
+    EGraph, EffectToken, GraphResource, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
+    SkeletonTerminator, ValueId, ValueKind,
 };
-pub struct GraphProjection {
-    pub graph: EGraph<Semantic>,
+pub struct GraphProjection<R: GraphResource = BindingRef> {
+    pub graph: EGraph<Semantic<R>>,
     nodes: HashMap<ValueId, ValueId>,
     places: HashMap<PlaceId, PlaceId>,
     blocks: HashMap<BlockId, BlockId>,
@@ -31,8 +32,8 @@ pub struct GraphProjection {
 
 /// A projected producer recipe together with the projected identities of the
 /// values requested by the caller.
-pub struct ProjectedValueRecipe {
-    pub projection: GraphProjection,
+pub struct ProjectedValueRecipe<R: GraphResource = BindingRef> {
+    pub projection: GraphProjection<R>,
     pub values: Vec<ValueId>,
     pub result_block: BlockId,
     pub source: ValueRecipeSource,
@@ -51,7 +52,7 @@ pub enum ValueRecipeSource {
     },
 }
 
-impl ProjectedValueRecipe {
+impl<R: GraphResource> ProjectedValueRecipe<R> {
     /// Additional projected values observed by graph structure retained after
     /// this recipe is detached. The requested values themselves are not
     /// included.
@@ -60,7 +61,7 @@ impl ProjectedValueRecipe {
     }
 }
 
-impl GraphProjection {
+impl<R: GraphResource> GraphProjection<R> {
     pub fn node(&self, source: ValueId) -> Option<ValueId> {
         self.nodes.get(&source).copied()
     }
@@ -157,8 +158,8 @@ pub(crate) fn remap_output_routes(
         .collect()
 }
 
-pub struct GraphProjector<'a> {
-    source: &'a EGraph<Semantic>,
+pub struct GraphProjector<'a, R: GraphResource = BindingRef> {
+    source: &'a EGraph<Semantic<R>>,
     uses: ValueUseIndex,
     effects: SideEffectIndex,
 }
@@ -190,16 +191,16 @@ struct ProjectionSelection {
     values: HashSet<ValueId>,
 }
 
-struct ProjectionShell {
-    graph: EGraph<Semantic>,
+struct ProjectionShell<R: GraphResource> {
+    graph: EGraph<Semantic<R>>,
     blocks: HashMap<BlockId, BlockId>,
     nodes: HashMap<ValueId, ValueId>,
     places: HashMap<PlaceId, PlaceId>,
     calls: HashMap<CallSiteId, CallSiteId>,
 }
 
-impl<'a> GraphProjector<'a> {
-    pub fn new(source: &'a EGraph<Semantic>) -> Self {
+impl<'a, R: GraphResource> GraphProjector<'a, R> {
+    pub fn new(source: &'a EGraph<Semantic<R>>) -> Self {
         Self {
             source,
             uses: ValueUseIndex::build(source),
@@ -211,11 +212,11 @@ impl<'a> GraphProjector<'a> {
         &self.uses
     }
 
-    pub fn all(&self) -> Result<GraphProjection, String> {
+    pub fn all(&self) -> Result<GraphProjection<R>, String> {
         self.all_with_values(Vec::new())
     }
 
-    pub fn all_with_values(&self, extra_values: Vec<ValueId>) -> Result<GraphProjection, String> {
+    pub fn all_with_values(&self, extra_values: Vec<ValueId>) -> Result<GraphProjection<R>, String> {
         let selected = self
             .source
             .skeleton
@@ -232,7 +233,7 @@ impl<'a> GraphProjector<'a> {
     /// flow is retained, but unrelated block-parameter lanes and function
     /// parameters are omitted. This is the control-flow counterpart to cloning
     /// a straight-line value DAG.
-    pub(super) fn value_flow(&self, values: Vec<ValueId>) -> Result<GraphProjection, String> {
+    pub(super) fn value_flow(&self, values: Vec<ValueId>) -> Result<GraphProjection<R>, String> {
         if values.is_empty() {
             return Err("value-flow projection requires at least one result".into());
         }
@@ -242,7 +243,7 @@ impl<'a> GraphProjector<'a> {
         self.project(HashSet::new(), values, ProjectionMode::ValueFlow)
     }
 
-    pub fn selected(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection, String> {
+    pub fn selected(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection<R>, String> {
         self.selected_with_values(roots, Vec::new())
     }
 
@@ -253,7 +254,7 @@ impl<'a> GraphProjector<'a> {
     pub fn selected_operation_recipe(
         &self,
         roots: HashSet<SideEffectSite>,
-    ) -> Result<GraphProjection, String> {
+    ) -> Result<GraphProjection<R>, String> {
         let mut blocks = roots.iter().map(|site| site.block);
         let Some(block) = blocks.next() else {
             return Err("operation recipe effects must belong to one block".into());
@@ -278,7 +279,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         value: ValueId,
         consumer: SideEffectSite,
-    ) -> Result<ProjectedValueRecipe, String> {
+    ) -> Result<ProjectedValueRecipe<R>, String> {
         self.captured_value_recipe_with_retained_values(value, consumer, Vec::new())
     }
 
@@ -290,7 +291,7 @@ impl<'a> GraphProjector<'a> {
         value: ValueId,
         consumer: SideEffectSite,
         retained_values: impl IntoIterator<Item = ValueId>,
-    ) -> Result<ProjectedValueRecipe, String> {
+    ) -> Result<ProjectedValueRecipe<R>, String> {
         let (mode, source) = if consumer.block == self.source.skeleton.entry {
             (
                 ProjectionMode::EntryRecipe {
@@ -341,7 +342,7 @@ impl<'a> GraphProjector<'a> {
     /// boundary: direct vertex/fragment expressions can feed terminators and
     /// output effects throughout the entry. Producer closure still selects
     /// only effects required by `value`.
-    pub fn entry_value_recipe(&self, value: ValueId) -> Result<ProjectedValueRecipe, String> {
+    pub fn entry_value_recipe(&self, value: ValueId) -> Result<ProjectedValueRecipe<R>, String> {
         self.entry_value_recipe_with_retained_values(value, Vec::new())
     }
 
@@ -351,7 +352,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         value: ValueId,
         retained_values: impl IntoIterator<Item = ValueId>,
-    ) -> Result<ProjectedValueRecipe, String> {
+    ) -> Result<ProjectedValueRecipe<R>, String> {
         self.entry_values_recipe_with_retained_values([value], retained_values)
     }
 
@@ -360,7 +361,7 @@ impl<'a> GraphProjector<'a> {
     pub fn entry_values_recipe(
         &self,
         values: impl IntoIterator<Item = ValueId>,
-    ) -> Result<ProjectedValueRecipe, String> {
+    ) -> Result<ProjectedValueRecipe<R>, String> {
         self.entry_values_recipe_with_retained_values(values, Vec::new())
     }
 
@@ -370,7 +371,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         values: impl IntoIterator<Item = ValueId>,
         retained_values: impl IntoIterator<Item = ValueId>,
-    ) -> Result<ProjectedValueRecipe, String> {
+    ) -> Result<ProjectedValueRecipe<R>, String> {
         let mut requested = values.into_iter().collect::<Vec<_>>();
         let mut seen = HashSet::new();
         requested.retain(|value| seen.insert(*value));
@@ -407,7 +408,7 @@ impl<'a> GraphProjector<'a> {
     fn recipe_live_outs(
         &self,
         roots: &[ValueId],
-        projection: &GraphProjection,
+        projection: &GraphProjection<R>,
         source: ValueRecipeSource,
         retained_values: impl IntoIterator<Item = ValueId>,
     ) -> Vec<ValueId> {
@@ -461,7 +462,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         roots: HashSet<SideEffectSite>,
         extra_values: Vec<ValueId>,
-    ) -> Result<GraphProjection, String> {
+    ) -> Result<GraphProjection<R>, String> {
         self.project(roots, extra_values, ProjectionMode::Complete)
     }
 
@@ -474,7 +475,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         roots: HashSet<SideEffectSite>,
         extra_values: Vec<ValueId>,
-    ) -> Result<GraphProjection, String> {
+    ) -> Result<GraphProjection<R>, String> {
         if let Some(block) = self.component_local_block(&roots, &extra_values)? {
             return self.project(roots, extra_values, ProjectionMode::DetachedRecipe { block });
         }
@@ -509,7 +510,7 @@ impl<'a> GraphProjector<'a> {
         selected: HashSet<SideEffectSite>,
         extra_values: Vec<ValueId>,
         mode: ProjectionMode,
-    ) -> Result<GraphProjection, String> {
+    ) -> Result<GraphProjection<R>, String> {
         let selection = self.select_projection(selected, extra_values, mode)?;
         let mut shell = self.projection_shell(mode, &selection)?;
         for value in &selection.values {
@@ -545,7 +546,7 @@ impl<'a> GraphProjector<'a> {
         })
     }
 
-    fn prepare_value(&self, source: ValueId, shell: &mut ProjectionShell) -> Result<ValueId, String> {
+    fn prepare_value(&self, source: ValueId, shell: &mut ProjectionShell<R>) -> Result<ValueId, String> {
         if let Some(&target) = shell.nodes.get(&source) {
             return Ok(target);
         }
@@ -611,7 +612,7 @@ impl<'a> GraphProjector<'a> {
         )
     }
 
-    fn prepare_place(&self, source: PlaceId, shell: &mut ProjectionShell) -> Result<PlaceId, String> {
+    fn prepare_place(&self, source: PlaceId, shell: &mut ProjectionShell<R>) -> Result<PlaceId, String> {
         if let Some(&target) = shell.places.get(&source) {
             return Ok(target);
         }
@@ -665,7 +666,11 @@ impl<'a> GraphProjector<'a> {
         Ok(target)
     }
 
-    fn prepare_call(&self, source: CallSiteId, shell: &mut ProjectionShell) -> Result<CallSiteId, String> {
+    fn prepare_call(
+        &self,
+        source: CallSiteId,
+        shell: &mut ProjectionShell<R>,
+    ) -> Result<CallSiteId, String> {
         if let Some(&target) = shell.calls.get(&source) {
             return Ok(target);
         }
@@ -811,7 +816,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         mode: ProjectionMode,
         selection: &ProjectionSelection,
-    ) -> Result<ProjectionShell, String> {
+    ) -> Result<ProjectionShell<R>, String> {
         let mut graph = EGraph::new();
         let source_entry = match mode {
             ProjectionMode::DetachedRecipe { block } => block,
@@ -832,10 +837,10 @@ impl<'a> GraphProjector<'a> {
                 {
                     continue;
                 }
-                let abi = super::ir::callable_parameter::<
-                    super::program::SemanticResourceRef,
-                    super::types::WynLanguage,
-                >(String::new(), node.ty.clone());
+                let abi = super::ir::callable_parameter::<R, super::types::WynLanguage>(
+                    String::new(),
+                    node.ty.clone(),
+                );
                 let target = graph
                     .add_parameter(*parameter, abi.representation())
                     .value()
@@ -892,7 +897,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         projected_blocks: &HashSet<BlockId>,
         retained_values: Option<&HashSet<ValueId>>,
-        graph: &mut EGraph<Semantic>,
+        graph: &mut EGraph<Semantic<R>>,
         blocks: &HashMap<BlockId, BlockId>,
         nodes: &mut HashMap<ValueId, ValueId>,
     ) {
@@ -919,7 +924,7 @@ impl<'a> GraphProjector<'a> {
     fn clone_effects(
         &self,
         selection: &ProjectionSelection,
-        shell: &mut ProjectionShell,
+        shell: &mut ProjectionShell<R>,
     ) -> Result<(HashSet<EffectToken>, HashMap<SideEffectSite, SideEffectSite>), String> {
         let mut effects = HashSet::new();
         let mut effect_sites = HashMap::new();
@@ -1023,7 +1028,7 @@ impl<'a> GraphProjector<'a> {
         &self,
         mode: ProjectionMode,
         projected_blocks: &HashSet<BlockId>,
-        shell: &mut ProjectionShell,
+        shell: &mut ProjectionShell<R>,
     ) -> Result<(), String> {
         for source_block in projected_blocks {
             let target_block = shell.blocks[source_block];
@@ -1062,7 +1067,7 @@ impl<'a> GraphProjector<'a> {
     fn project_value_flow_terminator(
         &self,
         source_block: BlockId,
-        shell: &ProjectionShell,
+        shell: &ProjectionShell<R>,
     ) -> Result<SkeletonTerminator, String> {
         let map_node = |source: ValueId| {
             shell
@@ -1205,7 +1210,7 @@ impl<'a> GraphProjector<'a> {
             .collect()
     }
 
-    fn project_control_headers(&self, shell: &mut ProjectionShell) -> Result<(), String> {
+    fn project_control_headers(&self, shell: &mut ProjectionShell<R>) -> Result<(), String> {
         for (header, block) in &self.source.skeleton.blocks {
             let Some(control) = &block.control_header else {
                 continue;
@@ -1223,7 +1228,7 @@ impl<'a> GraphProjector<'a> {
         Ok(())
     }
 
-    fn project_aliases(&self, shell: &mut ProjectionShell) {
+    fn project_aliases(&self, shell: &mut ProjectionShell<R>) {
         for (&source, &target) in &shell.nodes {
             let Some(alias) = self.source.nodes[source].alias else {
                 continue;
@@ -1237,7 +1242,7 @@ impl<'a> GraphProjector<'a> {
         }
     }
 
-    fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect<Semantic>, String> {
+    fn effect_at(&self, site: SideEffectSite) -> Result<&SideEffect<Semantic<R>>, String> {
         self.source
             .skeleton
             .blocks

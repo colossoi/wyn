@@ -19,7 +19,7 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
 use crate::egir::ir::{splice_effect_tokens, BodySite, RealizedOutputRoute};
-use crate::egir::program::{CoreProgramData, Func, OutputWriter, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{Func, OutputWriter, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::{filter, lambda as lambda_ops, screma};
@@ -45,7 +45,6 @@ struct FilterParts {
     space: SegSpace,
     body: filter::Body,
     input_nodes: Vec<ValueId>,
-    scratch: Option<SemanticResourceRef>,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
@@ -217,10 +216,6 @@ fn filter_parts(effect: &SideEffect) -> FilterParts {
             .iter()
             .map(|operand| operand.value().expect("Filter inputs are values or views"))
             .collect(),
-        scratch: match &op.state.storage {
-            filter::Output::Local { .. } => None,
-            filter::Output::Runtime { scratch, .. } => Some(*scratch),
-        },
     }
 }
 
@@ -286,7 +281,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         )
     };
     let synthesized = std::iter::once(pre_function).chain(count_function).collect::<Vec<_>>();
-    rebuilt.extend_functions(synthesized).map_data(|data| CoreProgramData {
+    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
         identities: identities,
         ..data
     })
@@ -475,7 +470,6 @@ struct EntryMetadataPatch {
     replacement: Option<ValueId>,
     old_writer: Option<ValueId>,
     replacement_writer: Option<ValueId>,
-    scratch: Option<SemanticResourceRef>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,11 +525,7 @@ fn rewrite_with_consumer(
                 unreachable!();
             };
             *space = filter.space.clone();
-            *resources = resources
-                .iter()
-                .copied()
-                .filter(|resource| Some(resource.resource) != filter.scratch)
-                .collect();
+            let _ = resources;
             debug_assert!(
                 op.validate().is_ok(),
                 "invalid filtered Screma: {:?}",
@@ -575,7 +565,6 @@ fn rewrite_with_consumer(
                 replacement: count_project.as_ref().map(|(_, _, value)| *value),
                 old_writer: filter_effect.value_result(),
                 replacement_writer: old_result.values().first().copied(),
-                scratch: filter.scratch,
             }
         };
         support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
@@ -647,7 +636,6 @@ fn rewrite_count_only(
                 replacement: Some(count_value),
                 old_writer: filter_effect.value_result(),
                 replacement_writer: Some(count_value),
-                scratch: filter.scratch,
             }
         };
         support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
@@ -682,9 +670,6 @@ fn finish_entry_metadata(
                 }
             }
         }
-    }
-    if let Some(scratch) = patch.scratch {
-        entry.resource_declarations.retain(|declaration| declaration.resource != scratch);
     }
 }
 

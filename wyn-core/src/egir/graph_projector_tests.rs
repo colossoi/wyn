@@ -71,7 +71,7 @@ fn value_effect(
 
 #[test]
 fn selected_projection_remaps_cfg_aliases_and_value_producers() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let body = graph.skeleton.create_block();
     let exit = graph.skeleton.create_block();
@@ -145,7 +145,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
 
 #[test]
 fn complete_projection_remaps_loop_headers_and_parameters() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let header = graph.skeleton.create_block();
     let exit = graph.skeleton.create_block();
@@ -184,7 +184,7 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
 
 #[test]
 fn captured_value_recipe_projects_a_structured_loop_prefix() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -268,7 +268,7 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
 
 #[test]
 fn captured_value_recipe_projects_a_structured_selection_prefix() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
@@ -319,7 +319,7 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
 
 #[test]
 fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let then_block = graph.skeleton.create_block();
@@ -372,7 +372,7 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
 
 #[test]
 fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let place = test_place(&mut graph);
     let live_out = graph.alloc_side_effect_result(u32_ty());
@@ -414,7 +414,7 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
 
 #[test]
 fn entry_recipe_projects_multiple_requested_values_as_one_component() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let parameter = graph.add_test_value_parameter(0, u32_ty());
     let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
@@ -449,7 +449,7 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
 
 #[test]
 fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let place = test_place(&mut graph);
@@ -502,7 +502,7 @@ fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
 
 #[test]
 fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
@@ -540,7 +540,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
 
 #[test]
 fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
@@ -573,7 +573,7 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
 
 #[test]
 fn selected_component_detaches_an_independent_continuation_value() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
@@ -613,7 +613,7 @@ fn selected_component_detaches_an_independent_continuation_value() {
 
 #[test]
 fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
@@ -654,7 +654,7 @@ fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
 
 #[test]
 fn projection_does_not_resurrect_eliminated_block_parameters() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let continuation = graph.skeleton.create_block();
     let eliminated = graph.add_block_param(continuation, u32_ty());
@@ -678,7 +678,7 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
 
 #[test]
 fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();

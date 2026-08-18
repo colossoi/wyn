@@ -1,6 +1,7 @@
 use polytype::Type;
 
 use crate::ast::TypeName;
+use crate::BindingRef;
 
 use super::super::program::SemanticResourceRef;
 use super::super::types::{
@@ -17,21 +18,56 @@ pub struct WorkBuffers<R = SemanticResourceRef> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Output<R = SemanticResourceRef> {
+pub enum Output<R = BindingRef> {
     Local {
         capacity: Type<TypeName>,
         ownership: SoacOwnership,
     },
-    Runtime {
-        scratch: R,
-        length: RuntimeLength<R>,
+    Runtime(RuntimeOutput<R>),
+}
+
+/// Upper bound on a data-dependent result before residency is selected.
+/// Input positions refer to the filter body's inputs and survive producer
+/// fusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FilterInputId(pub usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeCapacity {
+    LikeInput {
+        input: FilterInputId,
     },
 }
 
+/// Whether a variable-cardinality result has storage yet.
+///
+/// Before allocation R is an interface BindingRef, so Bound can only mean a
+/// public interface destination. After allocation R is a SemanticResourceRef
+/// and may name an internal materialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RuntimeLength<R = SemanticResourceRef> {
-    ViewOnly,
-    /// Logical length stored in a scalar resource. Public filter outputs and
+pub enum RuntimeBacking<R> {
+    Deferred,
+    Bound(R),
+}
+
+/// Complete representation requirement for a runtime-sized filter result.
+/// Capacity, element backing, and cardinality storage remain independent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeOutput<R> {
+    pub capacity: RuntimeCapacity,
+    pub backing: RuntimeBacking<R>,
+    pub length: RuntimeLength<R>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeLength<R = BindingRef> {
+    /// Cardinality is a semantic value carried by the result representation;
+    /// it has no independently addressable storage.
+    Implicit,
+    /// A scheduling or ABI boundary requires addressable cardinality storage,
+    /// but logical-resource allocation has not assigned it yet.
+    Required,
+    /// Logical length stored in scalar backing. Public filter outputs and
     /// compiler-internal runtime-array handoffs use the same representation;
     /// publication decides whether the resource belongs to the host ABI.
     Stored(R),
@@ -120,27 +156,19 @@ fn lambda_capture_values(lambda: &screma::Lambda) -> impl Iterator<Item = ValueI
 }
 #[derive(Clone, Debug)]
 pub struct RawState<R> {
-    pub storage: Output<R>,
-}
-
-impl<R> RawState<R> {
-    pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        if let Output::Local { capacity, .. } = &mut self.storage {
-            visit(capacity);
-        }
-    }
+    pub output: Output<R>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SemanticState<R> {
     pub space: SegSpace<R>,
-    pub storage: Output<R>,
+    pub output: Output<R>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RuntimeStorage<R> {
-    pub scratch: R,
-    pub length: RuntimeLength<R>,
+    pub data: R,
+    pub length: R,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

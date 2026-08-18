@@ -10,7 +10,7 @@ use smallvec::smallvec;
 
 #[test]
 fn unreachable_project_does_not_keep_dead_segop_alive() {
-    let mut graph = EGraph::new();
+    let mut graph = EGraph::<Semantic>::new();
     let int = Type::Constructed(TypeName::Int(32), vec![]);
     let tuple = Type::Constructed(TypeName::Tuple(1), vec![int.clone()]);
     let result = graph.alloc_side_effect_result(tuple);

@@ -9,15 +9,15 @@
 //! false-negative only declines a legal fusion; a false-positive would fuse
 //! genuinely different spaces, so the comparison errs toward inequality.
 
-use crate::egir::types::{SegExtent, SegSpace};
+use crate::egir::types::{GraphResource, SegExtent, SegSpace};
 
 /// True iff two iteration spaces are provably the same for fusion purposes.
-pub(super) fn seg_space_fusable(a: &SegSpace, b: &SegSpace) -> bool {
+pub(super) fn seg_space_fusable<R: GraphResource>(a: &SegSpace<R>, b: &SegSpace<R>) -> bool {
     a.dims().len() == b.dims().len() && a.dims().iter().zip(b.dims()).all(|(x, y)| seg_extent_fusable(x, y))
 }
 
 /// True iff two extents denote the same dispatch dimension.
-pub(super) fn seg_extent_fusable(a: &SegExtent, b: &SegExtent) -> bool {
+pub(super) fn seg_extent_fusable<R: GraphResource>(a: &SegExtent<R>, b: &SegExtent<R>) -> bool {
     match (a, b) {
         (SegExtent::Fixed(x), SegExtent::Fixed(y)) => x == y,
         // The node is a re-interned `FuncParam`; the offset is the host

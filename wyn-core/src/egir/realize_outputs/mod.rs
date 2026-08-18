@@ -18,7 +18,7 @@ use polytype::Type;
 
 use super::from_tlc::ConvertError;
 use super::ir::{RealizedOutputRoute, ResultBinding};
-use super::program::{OutputWriter, RawEntry, ResourceOrigin, SlotSource};
+use super::program::{OutputWriter, RawEntry, SlotSource};
 use super::types::{EGraph, EffectToken, Raw, SideEffectKind, SkeletonTerminator, SoacEffect, ValueId};
 use super::{soac::filter, types::Soac};
 
@@ -28,15 +28,12 @@ pub fn realize_outputs(
     mut program: super::from_tlc::Converted,
 ) -> Result<super::from_tlc::Converted, ConvertError> {
     for entry in &mut program.entry_points {
-        record_entry_outputs(entry, &mut program.data.resources)?;
+        record_entry_outputs(entry)?;
     }
     Ok(program)
 }
 
-fn record_entry_outputs(
-    entry: &mut RawEntry,
-    resources: &mut super::program::LogicalResourceArena,
-) -> Result<(), ConvertError> {
+fn record_entry_outputs(entry: &mut RawEntry) -> Result<(), ConvertError> {
     if entry.outputs.is_empty() {
         return Ok(());
     }
@@ -47,8 +44,6 @@ fn record_entry_outputs(
     let graph = &entry.graph;
     let effect_index = graph.side_effect_index();
     let resource_writers = super::graph_ops::resource_effect_writers(graph);
-    let mut superseded_output_resources = LookupSet::new();
-    let mut retargeted_resources = LookupMap::new();
     for (slot, output) in entry.outputs.iter_mut().enumerate() {
         if output.routes.is_empty() {
             return Err(ConvertError::Unsupported(format!(
@@ -72,75 +67,21 @@ fn record_entry_outputs(
         else {
             continue;
         };
-        let Some(binding) = resources[source_resource.0].host_binding() else {
-            continue;
-        };
         let length = output.storage_length().cloned();
         output.kind = interface::EntryOutputKind::Storage {
-            exposure: interface::BindingExposure::Host(binding),
+            exposure: interface::BindingExposure::Host(source_resource),
             length,
         };
-        if let Some(previous) = output.resource.replace(source_resource) {
-            if previous != source_resource {
-                superseded_output_resources.insert(previous);
-            }
-        }
-
-        continue;
+        output.resource = Some(source_resource);
     }
-    for output in &entry.outputs {
-        let (Some(destination), [route]) = (output.resource, output.routes.as_slice()) else {
-            continue;
-        };
-        let sources = super::graph_ops::read_storage_resources(graph, [route.source.value]);
-        let [source] = sources.as_slice() else {
-            continue;
-        };
-        let source = source.resource;
-        if source == destination || !matches!(resources[source.0].origin, ResourceOrigin::Compiler(_)) {
-            continue;
-        }
-        match retargeted_resources.insert(source, destination) {
-            Some(previous) if previous != destination => {
-                return Err(ConvertError::Internal(format!(
-                    "compiler resource {:?} is routed to multiple output destinations",
-                    source.0
-                )));
-            }
-            _ => {}
-        }
-    }
-    let mut value_replacements = Vec::new();
-    for (source, destination) in &retargeted_resources {
-        value_replacements.extend(super::graph_ops::retarget_resource_views(
-            &mut entry.graph,
-            source.0,
-            destination.0,
-        ));
-    }
-    for route in entry.outputs.iter_mut().flat_map(|output| &mut output.routes) {
-        route.replace_values(&value_replacements);
-    }
-    let live_output_resources =
-        entry.outputs.iter().filter_map(|output| output.resource).collect::<LookupSet<_>>();
-    entry.resource_declarations.retain(|declaration| {
-        !retargeted_resources.contains_key(&declaration.resource)
-            && (declaration.role != interface::StorageRole::Output
-                || !superseded_output_resources.contains(&declaration.resource)
-                || live_output_resources.contains(&declaration.resource))
-    });
     for slot in 0..entry.outputs.len() {
-        bind_runtime_filter_output(entry, resources, slot)?;
+        bind_runtime_filter_output(entry, slot)?;
     }
     Ok(())
 }
 
-fn bind_runtime_filter_output(
-    entry: &mut RawEntry,
-    resources: &mut super::program::LogicalResourceArena,
-    slot: usize,
-) -> Result<(), ConvertError> {
-    let Some(output_resource) = entry.outputs[slot].resource else {
+fn bind_runtime_filter_output(entry: &mut RawEntry, slot: usize) -> Result<(), ConvertError> {
+    let Some(output_binding) = entry.outputs[slot].resource else {
         return Ok(());
     };
     let [route] = entry.outputs[slot].routes.as_slice() else {
@@ -154,9 +95,12 @@ fn bind_runtime_filter_output(
     let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = effect.kind() else {
         return Ok(());
     };
-    let filter::Output::Runtime { scratch, .. } = op.state.storage else {
+    let filter::Output::Runtime(runtime) = &op.state.output else {
         return Ok(());
     };
+    if !matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
+        return Ok(());
+    }
     let input =
         op.body.inputs.first().ok_or_else(|| ConvertError::Internal("Filter has no array input".into()))?;
     let input_array = input.array.clone();
@@ -168,26 +112,16 @@ fn bind_runtime_filter_output(
     let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &mut effect.kind else {
         unreachable!("located Filter producer changed")
     };
-    op.state.storage = filter::Output::Runtime {
-        scratch: output_resource,
-        length: filter::RuntimeLength::Stored(scratch),
+    let filter::Output::Runtime(runtime) = &mut op.state.output else {
+        unreachable!()
     };
-
-    let u32_ty = Type::Constructed(ast::TypeName::UInt(32), Vec::new());
-    if let Some(declaration) =
-        entry.resource_declarations.iter_mut().find(|declaration| declaration.resource == scratch)
-    {
-        declaration.elem_ty = u32_ty.clone();
-        declaration.size = super::program::LogicalSize::FixedBytes(4);
-    }
-    resources[scratch.0].elem_ty = u32_ty;
-    resources[scratch.0].size = super::program::LogicalSize::FixedBytes(4);
+    runtime.backing = filter::RuntimeBacking::Bound(output_binding);
+    runtime.length = filter::RuntimeLength::Required;
 
     let length = input_array.array_buffer().and_then(|region| {
-        let Type::Constructed(ast::TypeName::Resource(resource), _) = region else {
+        let Type::Constructed(ast::TypeName::Buffer(binding), _) = region else {
             return None;
         };
-        let binding = resources[*resource].host_binding()?;
         Some(pipeline_descriptor::BufferLen::LikeInput {
             set: binding.set,
             binding: binding.binding,
@@ -235,7 +169,7 @@ fn unique_value_return(graph: &EGraph<Raw>) -> Option<(BlockId, ResultBinding<ty
 fn source_value_writers(
     graph: &EGraph<Raw>,
     effect_index: &super::types::SideEffectIndex,
-    resource_writers: &LookupMap<super::program::SemanticResourceRef, Vec<EffectToken>>,
+    resource_writers: &LookupMap<crate::BindingRef, Vec<EffectToken>>,
     source: ValueId,
 ) -> Vec<OutputWriter> {
     let mut writers = Vec::new();

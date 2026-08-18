@@ -15,7 +15,7 @@ pub type SoacsExpanded = super::program::Program<
         super::types::Physical,
         interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::ResourceProgramData,
     >,
     super::program::PlannedGlobal,
 >;
@@ -559,10 +559,13 @@ fn expand_one(
             let (output, plan) = match &op.state {
                 filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
                 filter::ScheduledState::Pipeline { storage, plan, .. } => {
-                    let output = filter::Output::Runtime {
-                        scratch: storage.scratch,
-                        length: storage.length,
-                    };
+                    let output = filter::Output::Runtime(filter::RuntimeOutput {
+                        capacity: filter::RuntimeCapacity::LikeInput {
+                            input: filter::FilterInputId(0),
+                        },
+                        backing: filter::RuntimeBacking::Bound(storage.data),
+                        length: filter::RuntimeLength::Stored(storage.length),
+                    });
                     let config = filter::ParallelConfig {
                         buffers: plan.buffers,
                         scan_workgroup_width: plan.scan_workgroup_width,
@@ -630,7 +633,10 @@ fn expand_one(
                 input_nids[0].value().expect("Hist input is a value or view"),
                 op.inputs[0].array.clone(),
             );
-            let result_nid = se.value_result().expect("Hist has one by-value result root");
+            let result_nid = super::graph_ops::pack_result_values(
+                graph,
+                se.result.as_ref().expect("Hist has a by-value result"),
+            )?;
 
             let hist = HistLoop {
                 form: op.form.clone(),
@@ -646,8 +652,11 @@ fn expand_one(
                     space,
                     stage,
                     topology,
+                    storage,
                 } => match stage {
-                    hist::ParallelStage::Init => build_bucket_init(graph, bid, idx, hist, next_effect),
+                    hist::ParallelStage::Init => {
+                        build_bucket_init(graph, bid, idx, hist, storage, next_effect)
+                    }
                     hist::ParallelStage::Insert => build_bucket_insert(
                         graph,
                         bid,
@@ -655,10 +664,13 @@ fn expand_one(
                         hist,
                         space,
                         topology.as_ref(),
+                        storage,
                         next_effect,
                         callables,
                     ),
-                    hist::ParallelStage::Finish => build_bucket_finish(graph, bid, idx, hist.result_node),
+                    hist::ParallelStage::Finish => {
+                        build_bucket_finish(graph, bid, idx, hist.result_node, storage, next_effect)
+                    }
                 },
                 hist::ScheduledState::Serial => {
                     build_hist_loop(graph, bid, idx, hist, next_effect, callables)

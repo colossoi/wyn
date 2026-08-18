@@ -19,7 +19,7 @@ pub type PartiallyInlined = super::program::Program<
         Physical,
         interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::ResourceProgramData,
     >,
     super::program::PlannedGlobal,
 >;

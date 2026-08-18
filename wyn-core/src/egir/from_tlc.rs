@@ -12,9 +12,9 @@ pub type Converted = super::program::Program<
     ConvertedTag,
     super::ir::ProgramFamily<
         super::types::Raw,
-        super::program::SemanticResourceDecl,
+        super::program::NoStorageDeclaration,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::SemanticProgramData,
     >,
     super::program::RewriteGlobal,
 >;
@@ -61,9 +61,8 @@ use smallvec::{smallvec, SmallVec};
 use thiserror::Error;
 
 use super::program::{
-    CompilerResource, CompilerResourceKind, ConstantDef, CoreProgramData, Func,
-    LogicalResourceArenaBuilder, LogicalSize, Program, ProgramIdentities, RawEntry, RewriteGlobal,
-    SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
+    ConstantDef, Func, Program, ProgramIdentities, RawEntry, RewriteGlobal, SemanticOpIdSource,
+    SemanticProgramData,
 };
 use super::soac::{filter, hist, screma};
 use super::types::*;
@@ -281,7 +280,7 @@ struct GlobalContext<'a> {
     callable_boundaries: &'a LookupMap<
         SymbolId,
         (
-            Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+            Vec<FuncParam<BindingRef, Type<TypeName>>>,
             FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -293,7 +292,6 @@ struct ConversionArenas {
     function_ids: LookupMap<SymbolId, FunctionId>,
     global_ids: LookupMap<SymbolId, GlobalId>,
     entry_ids: LookupMap<SymbolId, EntryId>,
-    resources: LogicalResourceArenaBuilder,
 }
 
 impl ConversionArenas {
@@ -303,7 +301,6 @@ impl ConversionArenas {
             function_ids: LookupMap::new(),
             global_ids: LookupMap::new(),
             entry_ids: LookupMap::new(),
-            resources: LogicalResourceArenaBuilder::default(),
         }
     }
 }
@@ -357,9 +354,7 @@ pub fn convert_program(
             let parameters = parameter_types
                 .into_iter()
                 .enumerate()
-                .map(|(index, ty)| {
-                    callable_parameter::<SemanticResourceRef, WynLanguage>(format!("arg{index}"), ty)
-                })
+                .map(|(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("arg{index}"), ty))
                 .collect();
             let result = by_value_function_result::<WynLanguage>(result_type);
             let effects = if pure_definitions.contains(&definition.name) {
@@ -387,7 +382,6 @@ pub fn convert_program(
             }
         }
     }
-
     let stage_entries: Vec<Vec<EntryId>> = stage_symbols
         .into_iter()
         .map(|stages| {
@@ -495,6 +489,9 @@ pub fn convert_program(
             }
         }
     }
+    for function in &mut functions {
+        normalize_interface_function_parameters(function);
+    }
 
     debug_assert!(functions.iter().all(|function| {
         arenas.identities.contains_function(function.region)
@@ -511,25 +508,15 @@ pub fn convert_program(
         arenas.identities.contains_global(constant.id)
             && arenas.identities.global_name(constant.id) == constant.name
     }));
-    let ConversionArenas {
-        identities,
-        resources,
-        ..
-    } = arenas;
-    let resources = resources.finish().map_err(|resource| {
-        ConvertError::Internal(format!(
-            "semantic resource {resource:?} was referenced but never declared"
-        ))
-    })?;
-    let mut converted = Program::from_parts(
+    let ConversionArenas { identities, .. } = arenas;
+    Ok(Program::from_parts(
         functions,
         externs,
         entry_points,
         constants,
-        CoreProgramData {
+        SemanticProgramData {
             pipeline,
             stage_entries,
-            resources,
             identities,
         },
         RewriteGlobal {
@@ -537,9 +524,7 @@ pub fn convert_program(
             effect_ids,
             semantic_ids: SemanticOpIdSource::default(),
         },
-    );
-    super::program::finalize_converted_resources(&mut converted);
-    Ok(converted)
+    ))
 }
 
 fn pipeline_workgroup_size(
@@ -605,10 +590,10 @@ fn convert_function<'a>(
     // Regular functions: extract lambda params and build an EGraph.
     let (inner_body, params) = tlc::extract_lambda_params_ref(&def.body);
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> = params
+    let param_info: Vec<FuncParam<BindingRef, Type<TypeName>>> = params
         .iter()
         .map(|(sym, ty)| {
-            Ok(callable_parameter::<SemanticResourceRef, WynLanguage>(
+            Ok(callable_parameter::<BindingRef, WynLanguage>(
                 symbol_name(symbols, *sym)?.to_string(),
                 ty.clone(),
             ))
@@ -629,22 +614,6 @@ fn convert_function<'a>(
     let result_binding = super::graph_ops::bind_by_value_result(&mut converter.graph, &result_abi, result);
     converter.set_return(Some(result_binding));
 
-    // A runtime `filter` compacts into a compiler scratch resource, which only
-    // a `Entry<Semantic>` can own as a physicalization requirement. A standalone
-    // function has no entry interface to publish that requirement. In practice
-    // a function whose
-    // result is a runtime filter is inlined into its caller before this pass
-    // (see `filter_runtime_in_subroutine_compiles`), so this never fires. If it
-    // does, that inlining invariant broke: either restore it, or represent the
-    // scratch resource explicitly in the function's semantic ABI.
-    if !converter.extra_resource_declarations.is_empty() {
-        return Err(ConvertError::GraphError(format!(
-            "runtime `filter` in function `{def_name}` reserved a scratch storage buffer, but a \
-             standalone function has no descriptor-set interface to host it — the call must be \
-             inlined into a compute entry (it was not)"
-        )));
-    }
-
     let region = function_id;
     let graph = converter.into_graph();
     Ok(ConvertedFunc::Regular(Func::<Raw>::new(
@@ -657,27 +626,6 @@ fn convert_function<'a>(
         if ctx.pure_definitions.contains(&def.name) { CallEffects::Pure } else { CallEffects::General },
         graph,
     )))
-}
-
-/// Translate descriptor sizing metadata into stable logical-resource sizes.
-fn logical_size(resources: &mut LogicalResourceArenaBuilder, length: Option<&BufferLen>) -> LogicalSize {
-    match length {
-        Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
-        Some(BufferLen::LikeInput {
-            set,
-            binding,
-            elem_bytes,
-            src_elem_bytes,
-        }) => LogicalSize::LikeResource {
-            resource: resources.host_id(BindingRef::new(*set, *binding)),
-            elem_bytes: *elem_bytes,
-            src_elem_bytes: *src_elem_bytes,
-        },
-        Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
-            elem_bytes: *elem_bytes,
-        },
-        None => LogicalSize::Unspecified,
-    }
 }
 
 fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, ConvertError> {
@@ -693,62 +641,6 @@ fn literal_binding(args: &[Term], intrinsic: &str) -> Result<BindingRef, Convert
         parse(&args[0], "set")?,
         parse(&args[1], "binding")?,
     ))
-}
-
-fn entry_resource_declarations(
-    inputs: &[EntryInput],
-    outputs: &[EntryOutput],
-    resources: &mut LogicalResourceArenaBuilder,
-) -> Vec<SemanticResourceDecl> {
-    let mut declarations = Vec::new();
-    let mut declare = |resources: &mut LogicalResourceArenaBuilder,
-                       binding: BindingRef,
-                       role: interface::StorageRole,
-                       elem_ty: Type<TypeName>,
-                       size: LogicalSize| {
-        let resource = resources.declare_host(binding, elem_ty.clone(), size.clone());
-        if !declarations
-            .iter()
-            .any(|item: &SemanticResourceDecl| item.resource == SemanticResourceRef(resource))
-        {
-            declarations.push(SemanticResourceDecl {
-                resource: SemanticResourceRef(resource),
-                role,
-                elem_ty,
-                size,
-            });
-        }
-    };
-    for input in inputs {
-        match &input.kind {
-            EntryInputKind::Storage {
-                exposure: BindingExposure::Host(binding),
-                length,
-                ..
-            } => {
-                let size = logical_size(resources, length.as_ref());
-                let elem_ty = input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone());
-                declare(resources, *binding, interface::StorageRole::Input, elem_ty, size);
-            }
-            EntryInputKind::StorageImage { binding, .. } => {
-                resources.declare_host(*binding, input.ty.clone(), LogicalSize::Unspecified);
-            }
-            _ => {}
-        }
-    }
-    for output in outputs {
-        let EntryOutputKind::Storage {
-            exposure: BindingExposure::Host(binding),
-            length,
-        } = &output.kind
-        else {
-            continue;
-        };
-        let size = logical_size(resources, length.as_ref());
-        let elem_ty = output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone());
-        declare(resources, *binding, interface::StorageRole::Output, elem_ty, size);
-    }
-    declarations
 }
 
 fn storage_access_from_diet(diet: Option<&Diet>) -> StorageAccess {
@@ -796,10 +688,10 @@ fn convert_entry_point(
     // The converted body carries the specialized return representation; use it
     // rather than the parse-time entry declaration.
     let ret_type = inner_body.ty.clone();
-    let param_info: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> = params
+    let param_info: Vec<FuncParam<BindingRef, Type<TypeName>>> = params
         .iter()
         .map(|(sym, ty)| {
-            Ok(callable_parameter::<SemanticResourceRef, WynLanguage>(
+            Ok(callable_parameter::<BindingRef, WynLanguage>(
                 symbol_name(symbols, *sym)?.to_string(),
                 ty.clone(),
             ))
@@ -1055,15 +947,11 @@ fn convert_entry_point(
     };
     converter.set_return(Some(result_binding));
 
-    let mut resource_declarations =
-        entry_resource_declarations(&inputs, &outputs, &mut converter.arenas.resources);
     let Converter {
         graph,
         output_sources: slot_sources,
-        extra_resource_declarations,
         ..
     } = converter;
-    resource_declarations.extend(extra_resource_declarations);
     let output_count = outputs.len();
     let mut entry = RawEntry::new_with_resources(
         def_name.to_string(),
@@ -1072,11 +960,20 @@ fn convert_entry_point(
         execution_model,
         inputs,
         outputs,
-        resource_declarations,
+        Vec::new(),
         param_info,
         result_abi,
         graph,
     );
+    for input in &mut entry.inputs {
+        input.resource = input
+            .storage_binding()
+            .or_else(|| input.storage_image_binding().map(|(binding, ..)| binding))
+            .or_else(|| interface_type_binding(&input.ty));
+    }
+    for output in &mut entry.outputs {
+        output.resource = output.storage_binding().or_else(|| interface_type_binding(&output.ty));
+    }
     entry.parameter_inputs = vec![Vec::new(); entry.params.len()];
     for (slot, parameter_index) in input_parameter_indices.into_iter().enumerate() {
         entry.parameter_inputs[parameter_index].push(super::program::InputSlotId(slot));
@@ -1097,14 +994,73 @@ fn is_storage_image_ty(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::StorageTexture, _))
 }
 
-fn strip_existentials(mut ty: &Type<TypeName>) -> &Type<TypeName> {
-    while let Type::Constructed(TypeName::Existential(_), args) = ty {
-        let Some(inner) = args.first() else {
-            break;
-        };
-        ty = inner;
+fn interface_type_binding(ty: &Type<TypeName>) -> Option<BindingRef> {
+    let Type::Constructed(TypeName::Buffer(binding), _) = ty.array_buffer()? else {
+        return None;
+    };
+    Some(*binding)
+}
+
+fn interface_parameter_representation(ty: &Type<TypeName>) -> OperandType<BindingRef, Type<TypeName>> {
+    let binding = interface_type_binding(&ty);
+    let is_view = ty.array_variant().is_some() && (types::is_array_variant_view(&ty) || binding.is_some());
+    let ty = viewify_interface_arrays(ty);
+    if is_view {
+        OperandType::View(ViewType {
+            array: ty,
+            region: binding.map(PlaceRegion::Resource).unwrap_or(PlaceRegion::Parametric),
+            access: PlaceAccess::ReadOnly,
+        })
+    } else {
+        OperandType::Value(ty)
     }
-    ty
+}
+
+fn normalize_interface_function_parameters(function: &mut Func<Raw>) {
+    for index in 0..function.params.len() {
+        let representation = interface_parameter_representation(function.params[index].ty());
+        if representation == *function.params[index].representation() {
+            continue;
+        }
+        let parameter = ParameterId::new(index);
+        let source = function
+            .graph
+            .nodes
+            .iter()
+            .find_map(|(value, definition)| {
+                matches!(
+                    definition.kind(),
+                    ValueKind::FuncParam { parameter: candidate } if *candidate == parameter
+                )
+                .then_some(value)
+            })
+            .expect("function parameter has a graph binding");
+        super::graph_ops::retype_projection_tree(&mut function.graph, source, representation.ty());
+        *function.params[index].representation_mut() = representation;
+    }
+    function.graph.canonicalize_boundary_operands();
+}
+
+fn viewify_interface_arrays(ty: &Type<TypeName>) -> Type<TypeName> {
+    if ty.array_variant().is_some()
+        && (types::is_array_variant_view(ty) || interface_type_binding(ty).is_some())
+    {
+        return types::view_array_of(ty, ty.array_buffer().cloned().unwrap_or_else(types::no_buffer));
+    }
+    match ty {
+        Type::Constructed(name, fields)
+            if matches!(
+                name,
+                TypeName::Tuple(_) | TypeName::Record(_) | TypeName::Unit | TypeName::SideEffect
+            ) =>
+        {
+            Type::Constructed(
+                name.clone(),
+                fields.iter().map(viewify_interface_arrays).collect(),
+            )
+        }
+        _ => ty.clone(),
+    }
 }
 
 fn entry_output_arity(entry: &interface::EntryDecl, ret_type: &Type<TypeName>) -> usize {
@@ -1138,7 +1094,7 @@ struct Converter<'a, 'b> {
     callable_boundaries: &'a LookupMap<
         SymbolId,
         (
-            Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+            Vec<FuncParam<BindingRef, Type<TypeName>>>,
             FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
@@ -1160,9 +1116,6 @@ struct Converter<'a, 'b> {
     /// Module-wide id factory for host-visible auto-storage binding numbers.
     /// Compiler resources never draw from this namespace.
     binding_ids: &'b mut IdSource<u32>,
-    /// Compiler-introduced logical resource declarations accumulated during
-    /// body conversion (runtime `filter` scratch buffers).
-    extra_resource_declarations: Vec<SemanticResourceDecl>,
     /// Program-wide arenas borrowed exclusively for this conversion.
     arenas: &'b mut ConversionArenas,
 }
@@ -1175,7 +1128,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         callable_boundaries: &'a LookupMap<
             SymbolId,
             (
-                Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+                Vec<FuncParam<BindingRef, Type<TypeName>>>,
                 FunctionResult<Type<TypeName>>,
                 CallEffects,
             ),
@@ -1199,7 +1152,6 @@ impl<'a, 'b> Converter<'a, 'b> {
             current_span: None,
             output_sources: Vec::new(),
             binding_ids,
-            extra_resource_declarations: Vec::new(),
             arenas,
         }
     }
@@ -1242,9 +1194,7 @@ impl<'a, 'b> Converter<'a, 'b> {
     // -- Entry-point emission helpers (thin delegations to `graph_ops`) --
 
     fn emit_storage_view(&mut self, binding: BindingRef, view_ty: Type<TypeName>) -> ValueId {
-        let elem_ty = view_ty.elem_type().cloned().unwrap_or_else(|| view_ty.clone());
-        let resource = self.arenas.resources.declare_host(binding, elem_ty, LogicalSize::Unspecified);
-        super::graph_ops::intern_resource_view(&mut self.graph, resource, view_ty, self.current_span)
+        super::graph_ops::intern_interface_view(&mut self.graph, binding, view_ty, self.current_span)
     }
 
     fn emit_storage_store(
@@ -1661,12 +1611,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                     self.lower_storage_store(args)
                 } else if *id == known.storage_len && args.len() == 2 {
                     let binding = literal_binding(args, "storage_len").ok();
-                    if let Some(resource) = binding.map(|binding| self.arenas.resources.host_id(binding)) {
-                        Ok(self.intern_pure(
-                            PureOp::ResourceLen(SemanticResourceRef(resource)),
-                            smallvec![],
-                            ty,
-                        ))
+                    if let Some(binding) = binding {
+                        Ok(self.intern_pure(PureOp::ResourceLen(binding), smallvec![], ty))
                     } else {
                         let arg_nids: SmallVec<[ValueId; 4]> =
                             args.iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
@@ -1688,9 +1634,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                                 .into(),
                         )
                     })?;
-                    let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
                     let coord = self.convert_term(&args[1])?;
-                    Ok(self.intern_pure(PureOp::StorageImageLoad(resource), smallvec![coord], ty))
+                    Ok(self.intern_pure(PureOp::StorageImageLoad(binding), smallvec![coord], ty))
                 } else if *id == known.slice
                     && args.len() == 3
                     && ty.array_variant().is_some_and(types::is_array_variant_view)
@@ -1828,14 +1773,13 @@ impl<'a, 'b> Converter<'a, 'b> {
                     .into(),
             )
         })?;
-        let resource = SemanticResourceRef(self.arenas.resources.host_id(binding));
         let arg_nids: SmallVec<[ValueId; 4]> =
             args[1..].iter().map(|a| self.convert_term(a)).collect::<Result<_, _>>()?;
         let effect_in = self.alloc_effect();
         let effect_out = self.alloc_effect();
         self.graph.skeleton.blocks[self.current_block].side_effects.push(SideEffect {
             kind: SideEffectKind::Effect(EffectOp::Op {
-                tag: op::OpTag::StorageImageStore(resource),
+                tag: op::OpTag::StorageImageStore(binding),
             }),
             operands: arg_nids.into_iter().map(OperandRef::Value).collect(),
             result: None,
@@ -2984,48 +2928,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             .collect::<Result<Vec<_>, _>>()?;
 
         let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
-        let counts_size = LogicalSize::FixedBytes(u64::from(bucket_count) * 4);
-        let counts = self.arenas.resources.allocate_compiler(
-            CompilerResource::new(CompilerResourceKind::BucketCounts, None, 0),
-            u32_type.clone(),
-            counts_size.clone(),
-        );
-        let overflow_size = LogicalSize::FixedBytes(4);
-        let overflow = self.arenas.resources.allocate_compiler(
-            CompilerResource::new(CompilerResourceKind::BucketOverflow, None, 0),
-            u32_type.clone(),
-            overflow_size.clone(),
-        );
-        self.extra_resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(counts),
-            role: interface::StorageRole::Output,
-            elem_ty: u32_type.clone(),
-            size: counts_size,
-        });
-        self.extra_resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(overflow),
-            role: interface::StorageRole::Intermediate,
-            elem_ty: u32_type.clone(),
-            size: overflow_size,
-        });
-        let counts_type = types::view_array_with_size(
-            &u32_type,
-            Type::Constructed(TypeName::Size(bucket_count as usize), vec![]),
-            Type::Constructed(TypeName::Resource(counts), vec![]),
-        );
-        let overflow_type = types::view_array_with_size(
-            &u32_type,
-            Type::Constructed(TypeName::Size(1), vec![]),
-            Type::Constructed(TypeName::Resource(overflow), vec![]),
-        );
-        let counts_view =
-            super::graph_ops::intern_resource_view(&mut self.graph, counts, counts_type, self.current_span);
-        let overflow_view = super::graph_ops::intern_resource_view(
-            &mut self.graph,
-            overflow,
-            overflow_type,
-            self.current_span,
-        );
+        let counts_type = types::sized_array(bucket_count as usize, u32_type.clone());
+        let hist_result_type =
+            Type::Constructed(TypeName::Tuple(2), vec![counts_type.clone(), u32_type.clone()]);
         let bucket_count_node = self.intern_pure(
             PureOp::Int(bucket_count.to_string()),
             smallvec![],
@@ -3035,8 +2940,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             self.intern_pure(PureOp::Int(capacity.to_string()), smallvec![], i32_type.clone());
         let race_factor = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type);
         let body_region = self.function_id(function);
-        let placeholder_type = Type::Constructed(TypeName::Bool, vec![]);
-        let _placeholder = self.emit_soac(
+        let hist_result = self.emit_soac(
             Soac::Hist(hist::Op {
                 inputs: input_arrays
                     .into_iter()
@@ -3065,8 +2969,10 @@ impl<'a, 'b> Converter<'a, 'b> {
                         destinations: vec![self.graph.view_id(dest_view)],
                         update: hist::Update::BucketInsert {
                             value_types: vec![dest.elem_ty.clone()],
-                            counts: self.graph.view_id(counts_view),
-                            overflow: self.graph.view_id(overflow_view),
+                            results: hist::BucketInsertResults {
+                                counts: hist::HistResultId(0),
+                                overflow: hist::HistResultId(1),
+                            },
                             capacity: capacity_node,
                         },
                     }],
@@ -3074,30 +2980,22 @@ impl<'a, 'b> Converter<'a, 'b> {
                 state: hist::RawState,
             }),
             input_nodes.into_iter().collect(),
-            placeholder_type,
+            hist_result_type,
         );
-
-        let zero = super::graph_ops::intern_u32(&mut self.graph, 0, self.current_span);
-        let overflow_value = super::graph_ops::emit_view_load(
-            &mut self.graph,
-            self.current_block,
-            overflow_view,
-            zero,
-            u32_type,
-            self.effect_ids,
-            self.current_span,
+        let counts_value = self.intern_pure(
+            PureOp::Project { index: 0 },
+            smallvec![hist_result],
+            counts_type.clone(),
+        );
+        let overflow_value = self.intern_pure(
+            PureOp::Project { index: 1 },
+            smallvec![hist_result],
+            u32_type.clone(),
         );
         Ok(self.intern_pure(
             PureOp::Tuple(3),
-            smallvec![dest_view, counts_view, overflow_value],
-            Type::Constructed(
-                TypeName::Tuple(3),
-                vec![
-                    dest_view_ty,
-                    self.graph.nodes[counts_view].ty.clone(),
-                    Type::Constructed(TypeName::UInt(32), vec![]),
-                ],
-            ),
+            smallvec![dest_view, counts_value, overflow_value],
+            Type::Constructed(TypeName::Tuple(3), vec![dest_view_ty, counts_type, u32_type]),
         ))
     }
 
@@ -3220,7 +3118,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         pred: &SoacBody,
         input: &ArrayExpr,
         ownership: SoacOwnership,
-        _result_ty: Type<TypeName>,
+        result_ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
         let predicate_symbol = self.lambda_fn_symbol(&pred.lam)?;
         let capture_nids: Vec<ValueId> =
@@ -3271,7 +3169,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         ),
                     },
                     state: filter::RawState {
-                        storage: filter::Output::Local {
+                        output: filter::Output::Local {
                             capacity: size,
                             ownership,
                         },
@@ -3282,50 +3180,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             ));
         }
 
-        // Runtime-sized input: compact the kept elements into a reserved
-        // scratch storage buffer (capacity = input element count), and yield a
-        // runtime-length view over it. The surviving count is the view's `len`
-        // operand. A runtime-sized result cannot back a function-local array.
-        //
-        // The scratch buffer is a compiler resource from birth. A runtime
-        // `filter` reaching here in a standalone function still has no entry
-        // interface that can own the requirement, so `convert_function`
-        // rejects that broken inlining state below.
-        let input_binding = types::array_view_buffer(&arr_ty);
-        let input_elem_bytes = ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
-            ConvertError::GraphError("filter: element type has no static byte size".into())
-        })?;
-        // The scratch buffer holds the kept output values (`f(x)` when a map is
-        // fused), so it is sized in `output_elem_ty`; the surviving-count bound
-        // still comes from the input buffer's element count.
-        let output_elem_bytes = ssa::layout::storage_elem_stride(&output_elem_ty).ok_or_else(|| {
-            ConvertError::GraphError("filter: output element type has no static byte size".into())
-        })?;
-        // A runtime map producer may still be a Composite here. Reserve the
-        // filter resource identity now, but let semantic EGIR resolve its size
-        // after producer fusion exposes the actual input resource/domain.
-        let scratch_size = input_binding
-            .map(|binding| LogicalSize::LikeResource {
-                resource: self.arenas.resources.host_id(binding),
-                elem_bytes: output_elem_bytes,
-                src_elem_bytes: input_elem_bytes,
-            })
-            .unwrap_or(LogicalSize::Unspecified);
-        let scratch_out = self.arenas.resources.allocate_compiler(
-            CompilerResource::new(CompilerResourceKind::FilterScratch, None, 0),
-            output_elem_ty.clone(),
-            scratch_size.clone(),
-        );
-        self.extra_resource_declarations.push(SemanticResourceDecl {
-            resource: SemanticResourceRef(scratch_out),
-            role: interface::StorageRole::Output,
-            elem_ty: output_elem_ty.clone(),
-            size: scratch_size,
-        });
-        let view_result_ty = types::view_array_of(
-            &output_elem_ty,
-            Type::Constructed(TypeName::Resource(scratch_out), vec![]),
-        );
+        // Runtime-sized input: preserve only the semantic result requirement.
+        // Fusion may eliminate it; allocation binds backing and stored length
+        // only if the result crosses an ABI or scheduling boundary.
         Ok(self.emit_soac(
             Soac::Filter(filter::Op {
                 body: filter::Body {
@@ -3338,16 +3195,17 @@ impl<'a, 'b> Converter<'a, 'b> {
                     ),
                 },
                 state: filter::RawState {
-                    storage: filter::Output::Runtime {
-                        scratch: super::program::SemanticResourceRef(scratch_out),
-                        length: filter::RuntimeLength::ViewOnly,
-                    },
+                    output: filter::Output::Runtime(filter::RuntimeOutput {
+                        capacity: filter::RuntimeCapacity::LikeInput {
+                            input: filter::FilterInputId(0),
+                        },
+                        backing: filter::RuntimeBacking::Deferred,
+                        length: filter::RuntimeLength::Implicit,
+                    }),
                 },
-                // Residency or output realization upgrades this to `Stored`
-                // when the compacted array crosses a scheduling/ABI boundary.
             }),
             operands,
-            view_result_ty,
+            result_ty,
         ))
     }
 
@@ -3445,12 +3303,12 @@ impl<'a, 'b> Converter<'a, 'b> {
     /// the value type rather than the source type.
     fn value_array_type(&self, nid: ValueId, fallback: &ArrayExpr) -> Type<TypeName> {
         if let Some(node) = self.graph.nodes.get(nid) {
-            if matches!(&node.ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(&node.ty).is_some()
-            {
-                return node.ty.clone();
+            let ty = strip_existentials(&node.ty);
+            if matches!(ty, Type::Constructed(TypeName::Array, _)) || as_soa_tuple(ty).is_some() {
+                return ty.clone();
             }
         }
-        self.array_expr_type(fallback)
+        strip_existentials(&self.array_expr_type(fallback)).clone()
     }
 
     /// Element type matching `value_array_type`: peel the array / SoA-tuple

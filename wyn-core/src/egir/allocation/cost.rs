@@ -9,10 +9,10 @@ use crate::FunctionId;
 use std::collections::{HashMap, HashSet};
 
 use super::super::graph_ops;
-use super::super::program::Entry;
+use super::super::program::{AllocatedEntry, SemanticResourceRef};
 use super::super::types::{
-    EGraph, EffectOp, PureViewSource, Semantic, SideEffect, SideEffectKind, SkeletonTerminator, Soac,
-    SoacEffect, ValueId, ValueKind,
+    EGraph, EffectOp, PureViewSource, Semantic as SemanticFamily, SideEffect, SideEffectKind,
+    SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use super::ResourcesAllocated;
 use crate::builtins::{catalog, Purity};
@@ -21,6 +21,9 @@ use crate::interface::{EntryInputKind, StorageAccess};
 use crate::op::BinaryOperator;
 use crate::op::OpTag;
 use crate::ssa::types::ConstantValue;
+
+type Semantic = SemanticFamily<SemanticResourceRef>;
+type SemanticGraph = EGraph<Semantic>;
 
 pub(crate) const STORAGE_LOAD_COST: u64 = 4;
 const SCALAR_OP_COST: u64 = 1;
@@ -60,8 +63,8 @@ impl PreludeAnalysis {
 /// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
     program: &ResourcesAllocated,
-    entry: &Entry<Semantic>,
-    recipe: &super::super::graph_projector::ProjectedValueRecipe,
+    entry: &AllocatedEntry,
+    recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
 ) -> Option<PreludeAnalysis> {
     let graph = &recipe.projection.graph;
     let dependence =
@@ -94,7 +97,7 @@ pub(crate) fn analyze_prelude(
 }
 
 fn prelude_materialization_policy(
-    recipe: &super::super::graph_projector::ProjectedValueRecipe,
+    recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
 ) -> PreludeMaterializationPolicy {
     let structured = matches!(
         &recipe.source,
@@ -132,7 +135,7 @@ pub(crate) fn materialization_is_profitable(
     recompute.saturating_mul(4) >= handoff.saturating_mul(5)
 }
 
-pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &Entry<Semantic>, index: usize) -> bool {
+pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &AllocatedEntry, index: usize) -> bool {
     match super::super::stage_variance::entry_parameter_input_kind(entry, index) {
         Some(EntryInputKind::Uniform { .. } | EntryInputKind::PushConstant { .. }) => true,
         Some(EntryInputKind::Storage { access, .. }) => *access == StorageAccess::ReadOnly,
@@ -148,8 +151,8 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &Entry<Semantic>, ind
 
 fn effect_cost(
     program: &ResourcesAllocated,
-    graph: &EGraph,
-    effect: &SideEffect,
+    graph: &SemanticGraph,
+    effect: &SideEffect<Semantic>,
     summaries: &mut HashMap<FunctionId, u64>,
     visiting: &mut HashSet<FunctionId>,
 ) -> Option<u64> {
@@ -259,7 +262,7 @@ fn function_cost(
 
 fn graph_block_costs(
     program: &ResourcesAllocated,
-    graph: &EGraph,
+    graph: &SemanticGraph,
     extra_roots: &HashMap<BlockId, Vec<ValueId>>,
     summaries: &mut HashMap<FunctionId, u64>,
     visiting: &mut HashSet<FunctionId>,
@@ -284,7 +287,7 @@ fn graph_block_costs(
         .collect()
 }
 
-fn local_value_cost(graph: &EGraph, roots: impl IntoIterator<Item = ValueId>) -> Option<u64> {
+fn local_value_cost(graph: &SemanticGraph, roots: impl IntoIterator<Item = ValueId>) -> Option<u64> {
     let mut pending = roots.into_iter().collect::<Vec<_>>();
     let mut seen = HashSet::new();
     let mut cost = 0u64;
@@ -312,12 +315,12 @@ fn local_value_cost(graph: &EGraph, roots: impl IntoIterator<Item = ValueId>) ->
 }
 
 struct StructuredCost<'a> {
-    graph: &'a EGraph,
+    graph: &'a SemanticGraph,
     block_costs: &'a HashMap<BlockId, u64>,
 }
 
 impl<'a> StructuredCost<'a> {
-    fn new(graph: &'a EGraph, block_costs: &'a HashMap<BlockId, u64>) -> Self {
+    fn new(graph: &'a SemanticGraph, block_costs: &'a HashMap<BlockId, u64>) -> Self {
         Self { graph, block_costs }
     }
 
@@ -429,7 +432,7 @@ impl<'a> StructuredCost<'a> {
 }
 
 pub(crate) fn fixed_loop_trip_count(
-    graph: &EGraph,
+    graph: &SemanticGraph,
     header: BlockId,
     continue_block: BlockId,
     merge: BlockId,
@@ -515,7 +518,7 @@ fn branch_argument(term: &SkeletonTerminator, target: BlockId, index: usize) -> 
     }
 }
 
-fn integer_literal(graph: &EGraph, node: ValueId) -> Option<i64> {
+fn integer_literal(graph: &SemanticGraph, node: ValueId) -> Option<i64> {
     match &graph.nodes[node].kind {
         ValueKind::Constant(ConstantValue::I32(value)) => Some(i64::from(*value)),
         ValueKind::Constant(ConstantValue::U32(value)) => Some(i64::from(*value)),

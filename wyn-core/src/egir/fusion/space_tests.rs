@@ -1,8 +1,11 @@
 use super::*;
 use crate::egir::program::SemanticResourceRef;
-use crate::egir::types::{SegExtent, SegSpace, ValueId, ViewId};
+use crate::egir::types::{SegExtent as FamilySegExtent, SegSpace as FamilySegSpace, ValueId, ViewId};
 use crate::ResourceId;
 use slotmap::SlotMap;
+
+type SegExtent = FamilySegExtent<SemanticResourceRef>;
+type SegSpace = FamilySegSpace<SemanticResourceRef>;
 
 fn two_nodes() -> (ValueId, ValueId) {
     let mut sm: SlotMap<ValueId, ()> = SlotMap::with_key();

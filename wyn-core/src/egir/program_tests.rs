@@ -14,7 +14,6 @@ use crate::op;
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::BindingRef;
 use crate::EntryId;
-use crate::IdArena;
 use crate::IdSource;
 use polytype::Type;
 
@@ -53,33 +52,14 @@ fn empty_entry(id: EntryId, name: &str) -> Entry {
 }
 
 fn into_allocated(program: egir::reify::Segmented) -> ResourcesAllocated {
-    let Program {
-        functions,
-        externs,
-        entry_points,
-        constants,
-        data,
-        global_context,
-        state: _,
-    } = program;
-    Program::from_parts(
-        functions,
-        externs,
-        entry_points,
-        constants,
-        AllocatedProgramData {
-            core: data,
-            materializations: IdArena::new(),
-        },
-        global_context,
-    )
+    plan_logical_resources(program.retag()).expect("allocate test program")
 }
 
 fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     let binding = BindingRef::new(0, 7);
     let mut identities = ProgramIdentities::default();
     let main = identities.alloc_entry("main".into());
-    let mut program = semantic_program_for_test(
+    let program = semantic_program_for_test(
         vec![],
         vec![],
         vec![empty_entry(main, "main")],
@@ -87,30 +67,43 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
         PipelineDescriptor::default(),
         identities,
     );
-    let resource = program.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
-    let resource_size = program.data.resources[resource].size.clone();
+    let mut program = into_allocated(program);
+    let resource = program.data.core.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
+    let resource_size = program.data.core.resources[resource].size.clone();
     program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
         resource: SemanticResourceRef(resource),
         role: interface::StorageRole::Input,
         elem_ty: unit_ty(),
         size: resource_size,
     });
-    into_allocated(program)
+    program
 }
 
 #[test]
 fn logical_allocation_introduces_the_allocated_sidecar() {
     let binding = BindingRef::new(2, 3);
-    let mut semantic = semantic_program_for_test(
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(egir::ir::EntryInput {
+        inner: interface::EntryInput {
+            name: "input".into(),
+            ty: unit_ty(),
+            size_hint: None,
+            kind: interface::EntryInputKind::Storage {
+                exposure: interface::BindingExposure::Host(binding),
+                access: interface::StorageAccess::ReadOnly,
+                length: None,
+            },
+        },
+        resource: Some(binding),
+    });
+    let semantic = semantic_program_for_test(
         vec![],
         vec![],
-        vec![],
+        vec![entry],
         vec![],
         PipelineDescriptor::default(),
         ProgramIdentities::default(),
     );
-    semantic.data.resources.allocate(ResourceOrigin::host(binding), unit_ty(), LogicalSize::Unspecified);
-
     let allocated = plan_logical_resources(semantic.retag()).expect("logical resource planning");
 
     assert!(allocated.data.materializations.is_empty());
@@ -304,10 +297,10 @@ fn segbody_identity_selects_its_exact_function() {
     );
 
     assert!(inner.contains_region(op_id));
-    assert_eq!(inner.region_name(op_id), "op");
+    assert_eq!(inner.data.identities.function_name(op_id), "op");
     assert_eq!(inner.region(op_id).unwrap().name, "op");
     assert_ne!(main_id, op_id);
-    assert_eq!(inner.region_name(main_id), "main");
+    assert_eq!(inner.data.identities.function_name(main_id), "main");
 }
 
 #[test]

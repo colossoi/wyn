@@ -11,37 +11,44 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 use crate::egir::soac::{hist, screma};
-use crate::egir::types::{EGraph, Semantic, SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect};
+use crate::egir::types::{
+    EGraph as FamilyGraph, Semantic as SemanticFamily, SideEffect as FamilySideEffect, SideEffectKind,
+    SideEffectSite, Soac, SoacEffect,
+};
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
 use crate::egir::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use crate::egir::program::{
     CompilerResource, CompilerResourceKey, CompilerResourceKind, LogicalResourceArena, LogicalSize,
-    Program, SemanticOpId,
+    Program, SemanticOpId, SemanticResourceRef,
 };
 use crate::egir::types::SegExtent;
 
 use super::capabilities::{self, Strategy};
 
+type Semantic = SemanticFamily<SemanticResourceRef>;
+type EGraph = FamilyGraph<Semantic>;
+type SideEffect = FamilySideEffect<Semantic>;
+
 #[derive(Clone, Copy)]
 pub(super) struct LocatedHist<'a> {
     pub site: SideEffectSite,
     pub owner: SemanticOpId,
-    pub op: &'a hist::Op<egir::types::Semantic>,
+    pub op: &'a hist::Op<Semantic>,
 }
 #[derive(Clone, Copy)]
 pub(super) struct LocatedScrema<'a> {
     pub site: SideEffectSite,
     pub effect: &'a SideEffect,
     pub owner: SemanticOpId,
-    pub op: &'a screma::Op<egir::types::Semantic>,
+    pub op: &'a screma::Op<Semantic>,
 }
 
 #[derive(Clone)]
 pub(super) struct SerialScremaRecipe {
     site: SideEffectSite,
     owner: SemanticOpId,
-    op: screma::Op<egir::types::Semantic>,
+    op: screma::Op<Semantic>,
 }
 
 impl LocatedScrema<'_> {
@@ -176,9 +183,9 @@ pub(super) fn make_screma_serial(graph: &mut EGraph, recipe: SerialScremaRecipe)
 
 /// The target recipe selected for one projected physical kernel. Algorithm
 /// payloads change type when scratch ids are bound; the recipe shape does not.
-pub(super) enum Recipe<Filter, Reduce, Scan> {
+pub(super) enum Recipe<Hist, Filter, Reduce, Scan> {
     Filter(Filter),
-    Hist(super::hist::HistCandidate),
+    Hist(Hist),
     Reduce(Reduce),
     Scan(Scan),
     Map(screma::Segmented<egir::program::SemanticResourceRef>),
@@ -186,11 +193,19 @@ pub(super) enum Recipe<Filter, Reduce, Scan> {
     Unchanged,
 }
 
-type AnalyzedRecipe =
-    Recipe<super::filter::FilterCandidate, super::reduce::ReduceCandidate, super::scan::ScanCandidate>;
+type AnalyzedRecipe = Recipe<
+    super::hist::HistCandidate,
+    super::filter::FilterCandidate,
+    super::reduce::ReduceCandidate,
+    super::scan::ScanCandidate,
+>;
 
-pub(super) type PlannedRecipe =
-    Recipe<super::filter::BoundFilter, super::reduce::BoundReduce, super::scan::BoundScan>;
+pub(super) type PlannedRecipe = Recipe<
+    super::hist::BoundHistCandidate,
+    super::filter::BoundFilter,
+    super::reduce::BoundReduce,
+    super::scan::BoundScan,
+>;
 
 /// One projected physical kernel and its ownership of semantic output slots.
 pub(super) struct PlannedKernel<R = PlannedRecipe> {
@@ -393,7 +408,9 @@ impl AnalyzedPlan {
 fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBindings) -> PlannedKernel {
     let (body, output_projection, recipe) = kernel.into_parts();
     let recipe = match recipe {
-        AnalyzedRecipe::Hist(candidate) => PlannedRecipe::Hist(candidate),
+        AnalyzedRecipe::Hist(candidate) => {
+            PlannedRecipe::Hist(super::hist::BoundHistCandidate::bind(candidate, resources))
+        }
         AnalyzedRecipe::Filter(candidate) => {
             PlannedRecipe::Filter(super::filter::BoundFilter::bind(candidate, resources))
         }
@@ -429,7 +446,7 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
 
 fn analyze_endpoint(
     program: &ResourcesAllocated,
-    entry: &egir::program::Entry<Semantic>,
+    entry: &egir::program::AllocatedEntry,
     endpoint: CompilerFlowEndpoint,
     resources: &LogicalResourceArena,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
@@ -620,8 +637,39 @@ fn analyze_projected_kernel(
     if let [site] = targets.hists.as_slice() {
         let located = located_hist(&body, *site)?;
         if let Some(candidate) = super::hist::analyze_hist_candidate(program, &body, located) {
+            let requests = match &candidate {
+                super::hist::HistCandidate::Atomic(_) => Vec::new(),
+                super::hist::HistCandidate::Bucket(bucket) => {
+                    let mut requests = Vec::new();
+                    if bucket.counts.is_none() {
+                        requests.push(ScratchRequest {
+                            endpoint,
+                            key: CompilerResourceKey {
+                                owner: bucket.owner,
+                                kind: CompilerResourceKind::BucketCounts,
+                                slot: 0,
+                            },
+                            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+                            size: LogicalSize::FixedBytes(u64::from(bucket.bucket_count) * 4),
+                        });
+                    }
+                    if bucket.overflow.is_none() {
+                        requests.push(ScratchRequest {
+                            endpoint,
+                            key: CompilerResourceKey {
+                                owner: bucket.owner,
+                                kind: CompilerResourceKind::BucketOverflow,
+                                slot: 0,
+                            },
+                            elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
+                            size: LogicalSize::FixedBytes(4),
+                        });
+                    }
+                    requests
+                }
+            };
             let kernel = PlannedKernel::new(body, output_projection, AnalyzedRecipe::Hist(candidate));
-            return Ok((kernel, Vec::new()));
+            return Ok((kernel, requests));
         }
         if bucket_histograms != 0 {
             return Err(ParallelizeError::Invalid(

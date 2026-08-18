@@ -2,9 +2,7 @@ use super::*;
 use crate::types;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{
-    semantic_program_for_test, Entry, ProgramIdentities, SemanticOpId, SemanticResourceRef,
-};
+use crate::egir::program::{semantic_program_for_test, Entry, ProgramIdentities, SemanticOpId};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::screma;
 use crate::egir::types::{
@@ -29,10 +27,10 @@ fn u32_ty() -> Type<TypeName> {
 
 fn semantic_params(
     specs: impl IntoIterator<Item = (String, Type<TypeName>)>,
-) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
     specs
         .into_iter()
-        .map(|(name, ty)| callable_parameter::<SemanticResourceRef, WynLanguage>(name, ty))
+        .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name, ty))
         .collect()
 }
 

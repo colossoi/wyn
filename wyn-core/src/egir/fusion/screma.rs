@@ -13,13 +13,14 @@ use super::{capture_types, deduplicate_array_inputs};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::inlining;
-use crate::egir::program::{fresh_region_name, Func, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
     CallEffects, EGraph, FuncParam, OperandRef, ParameterId, PureOp, Semantic, SkeletonTerminator,
     SoacInputType, ValueId, ValueKind,
 };
+use crate::BindingRef;
 use crate::{FunctionId, LookupMap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1603,7 +1604,7 @@ fn finish_lambda(
     context: &mut Context<'_>,
     label: &str,
     graph: EGraph,
-    params: Vec<FuncParam<SemanticResourceRef, Type<TypeName>>>,
+    params: Vec<FuncParam<BindingRef, Type<TypeName>>>,
     captures: Vec<OperandRef>,
     parameter_types: Vec<Type<TypeName>>,
     result_types: Vec<Type<TypeName>>,

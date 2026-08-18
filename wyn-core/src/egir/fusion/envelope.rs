@@ -57,7 +57,7 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
     consumer_op.body.inputs = inputs;
     consumer_op.body.map = lambda;
     consumer_op.state.space = producer_space;
-    if let filter::Output::Local { ownership, .. } = &mut consumer_op.state.storage {
+    if let filter::Output::Local { ownership, .. } = &mut consumer_op.state.output {
         if *ownership == types::SoacOwnership::UniqueInput {
             *ownership = types::SoacOwnership::Fresh;
         }

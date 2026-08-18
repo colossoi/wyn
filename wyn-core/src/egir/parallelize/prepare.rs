@@ -12,6 +12,8 @@ use super::super::program::{PlannedEntry, SemanticResourceRef};
 use super::super::soac::{filter, hist, screma};
 use super::super::types::{EGraph, Scheduled, Semantic, SideEffectKind, Soac, SoacEffect};
 
+type AllocatedSemantic = Semantic<SemanticResourceRef>;
+
 #[derive(Clone, Copy)]
 pub(super) struct ParallelFilterPlan {
     pub(super) stage: filter::ParallelStage,
@@ -45,6 +47,7 @@ enum ParallelHistKind {
     Bucket {
         stage: egir::soac::hist::ParallelStage,
         topology: Option<egir::soac::hist::DispatchTopology>,
+        storage: egir::soac::hist::BucketStorage<SemanticResourceRef>,
     },
 }
 
@@ -63,15 +66,20 @@ impl ParallelHistPlan {
         owner: super::super::program::SemanticOpId,
         stage: egir::soac::hist::ParallelStage,
         topology: Option<egir::soac::hist::DispatchTopology>,
+        storage: egir::soac::hist::BucketStorage<SemanticResourceRef>,
     ) -> Self {
         Self {
             owner,
-            kind: ParallelHistKind::Bucket { stage, topology },
+            kind: ParallelHistKind::Bucket {
+                stage,
+                topology,
+                storage,
+            },
         }
     }
 }
 pub(super) fn entry(
-    entry: PlannedEntry<Semantic>,
+    entry: PlannedEntry<AllocatedSemantic>,
     filter_plan: Option<ParallelFilterPlan>,
     hist_plan: Option<ParallelHistPlan>,
 ) -> Result<PlannedEntry<Scheduled>, String> {
@@ -84,7 +92,7 @@ pub(super) fn entry(
 }
 
 pub(in crate::egir) fn graph(
-    graph: EGraph<Semantic>,
+    graph: EGraph<AllocatedSemantic>,
     serial: bool,
 ) -> Result<(EGraph<Scheduled>, LookupMap<BlockId, BlockId>), String> {
     graph.try_map_phase(|_, _, id, soac| {
@@ -94,7 +102,7 @@ pub(in crate::egir) fn graph(
 
 fn schedule_soac_with_mode(
     id: super::super::program::SemanticOpId,
-    soac: Soac<Semantic>,
+    soac: Soac<AllocatedSemantic>,
     filter_plan: Option<ParallelFilterPlan>,
     hist_plan: Option<ParallelHistPlan>,
     serial: bool,
@@ -112,9 +120,12 @@ fn schedule_soac_with_mode(
             state: schedule_screma_state(state, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {
-            let filter::SemanticState { space, storage } = state;
+            let filter::SemanticState { space, output } = state;
             let state = match filter_plan {
-                None => filter::ScheduledState::Loop { space, storage },
+                None => filter::ScheduledState::Loop {
+                    space,
+                    storage: output,
+                },
                 Some(ParallelFilterPlan {
                     stage,
                     config,
@@ -138,10 +149,15 @@ fn schedule_soac_with_mode(
                         ParallelHistKind::Atomic(operations) => {
                             hist::ScheduledState::Atomic { space, operations }
                         }
-                        ParallelHistKind::Bucket { stage, topology } => hist::ScheduledState::Bucket {
+                        ParallelHistKind::Bucket {
+                            stage,
+                            topology,
+                            storage,
+                        } => hist::ScheduledState::Bucket {
                             space,
                             stage,
                             topology,
+                            storage,
                         },
                     }
                 }

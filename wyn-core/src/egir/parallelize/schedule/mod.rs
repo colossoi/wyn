@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 use crate::egir::program::{
-    Entry, LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement,
-    OutputSlotId, PlannedEntry, PlannedPublication, SemanticResourceRef,
+    LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
+    PlannedEntry, PlannedPublication, SemanticResourceRef,
 };
 use crate::egir::soac::filter;
-use crate::egir::types::{Scheduled, SegExtent, SegResourceAccess, Semantic};
+use crate::egir::types::{Scheduled, SegExtent, SegResourceAccess};
 use crate::flow::ExecutionModel;
 use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
@@ -214,6 +214,7 @@ impl PhaseSpec {
         owner: super::super::program::SemanticOpId,
         stage: egir::soac::hist::ParallelStage,
         topology: Option<egir::soac::hist::DispatchTopology>,
+        storage: egir::soac::hist::BucketStorage<SemanticResourceRef>,
     ) -> Self {
         let label = match stage {
             egir::soac::hist::ParallelStage::Init => "bucket_init",
@@ -225,7 +226,9 @@ impl PhaseSpec {
             body,
             label,
             filter_plan: None,
-            hist_plan: Some(super::prepare::ParallelHistPlan::bucket(owner, stage, topology)),
+            hist_plan: Some(super::prepare::ParallelHistPlan::bucket(
+                owner, stage, topology, storage,
+            )),
             expected_compute: true,
             dispatch,
             resources,
@@ -544,7 +547,7 @@ impl KernelPlan {
         descriptor: &PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
         resources: &LogicalResourceArena,
-        entries: &[Entry<Semantic>],
+        entries: &[egir::program::AllocatedEntry],
     ) -> Result<Self, String> {
         let mut seeded = vec![None; entries.len()];
         let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
@@ -1108,7 +1111,7 @@ impl KernelPlan {
 
 fn phase_from_entry(
     source_entry: Option<EntryId>,
-    entry: &Entry<Semantic>,
+    entry: &egir::program::AllocatedEntry,
     mut selection: KernelDispatch,
     label: &'static str,
     placement: PhasePlacement,
@@ -1186,7 +1189,7 @@ fn phase_from_materialization(
 
 fn graphics_passthrough_phase(
     source_entry: EntryId,
-    entry: &Entry<Semantic>,
+    entry: &egir::program::AllocatedEntry,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
     let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
@@ -1201,7 +1204,7 @@ fn graphics_passthrough_phase(
     Ok(phase)
 }
 
-fn output_projection(entry: &Entry<Semantic>) -> Vec<OutputRouteProjection> {
+fn output_projection(entry: &egir::program::AllocatedEntry) -> Vec<OutputRouteProjection> {
     entry
         .outputs
         .iter()
@@ -1283,7 +1286,9 @@ fn domain_selection_from_stage(
     })
 }
 
-pub(super) fn domain_from_space(space: &egir::types::SegSpace) -> Option<KernelDomain> {
+pub(super) fn domain_from_space(
+    space: &egir::types::SegSpace<SemanticResourceRef>,
+) -> Option<KernelDomain> {
     if space.dims().iter().all(|extent| matches!(extent, SegExtent::Fixed(_))) {
         let count = space.dims().iter().try_fold(1u32, |product, extent| match extent {
             SegExtent::Fixed(n) => product.checked_mul(*n),

@@ -37,7 +37,7 @@ pub type Planned = super::program::Program<
         super::types::Physical,
         interface::StorageBindingDecl,
         super::ir::RealizedOutputRoute,
-        super::program::CoreProgramData,
+        super::program::ResourceProgramData,
     >,
     super::program::PlannedGlobal,
 >;
@@ -86,7 +86,7 @@ use super::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    CompilerResourceKind, Entry, Func, LogicalResourceArena, MaterializationId, MaterializationRequirement,
+    CompilerResourceKind, Func, LogicalResourceArena, MaterializationId, MaterializationRequirement,
     OutputWriter, ResourceId, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
 };
 
@@ -103,13 +103,20 @@ impl Planned {
 }
 use super::soac::screma;
 use super::types::{
-    EGraph, EffectOp, EffectToken, PureOp, SegBody, SegResourceAccess, SegSpace, Semantic, SideEffect,
-    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
+    EGraph as FamilyGraph, EffectOp, EffectToken, PureOp as FamilyPureOp, SegBody, SegResourceAccess,
+    SegSpace as FamilySegSpace, Semantic as SemanticFamily, SideEffect as FamilySideEffect, SideEffectKind,
+    SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
 use crate::{LoweringProfile, SchedulePolicy};
+
+type Semantic = SemanticFamily<SemanticResourceRef>;
+type EGraph = FamilyGraph<Semantic>;
+type PureOp = FamilyPureOp<SemanticResourceRef>;
+type SegSpace = FamilySegSpace<SemanticResourceRef>;
+type SideEffect = FamilySideEffect<Semantic>;
 
 /// A generated body kept together with the exact accesses established while
 /// that body was built. Scheduling consumes this pair without inspecting the
@@ -159,8 +166,9 @@ impl BuiltPhase {
         owner: SemanticOpId,
         stage: egir::soac::hist::ParallelStage,
         topology: Option<egir::soac::hist::DispatchTopology>,
+        storage: egir::soac::hist::BucketStorage<SemanticResourceRef>,
     ) -> schedule::PhaseSpec {
-        schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage, topology)
+        schedule::PhaseSpec::bucket(self.body, dispatch, owner, stage, topology, storage)
             .with_resources(self.resources)
     }
     fn filter(
@@ -382,7 +390,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         Ok(id)
     }
 
-    fn callable(&self, region: FunctionId) -> &Func {
+    fn callable(&self, region: FunctionId) -> &Func<Semantic> {
         self.callables.get(&region).expect("parallel lowering callable boundary")
     }
 
@@ -390,7 +398,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         resources: &'resources LogicalResourceArena,
         descriptor: &pipeline_descriptor::PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
-        entries: &[Entry<Semantic>],
+        entries: &[super::program::AllocatedEntry],
         functions: &[Func<Semantic>],
         flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
@@ -522,11 +530,11 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         &mut self,
         body: super::program::PlannedEntry,
         kernel: schedule::KernelId,
-        candidate: hist::HistCandidate,
+        candidate: hist::BoundHistCandidate,
         output_projection: Option<Vec<usize>>,
     ) -> error::Result<()> {
         match candidate {
-            hist::HistCandidate::Atomic(candidate) => {
+            hist::BoundHistCandidate::Atomic(candidate) => {
                 let domain = schedule::domain_from_space(&candidate.space)
                     .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
                 let phase = BuiltPhase::from_declarations(body)
@@ -539,7 +547,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
                 self.schedule.commit_kernel(kernel, phase)?;
                 Ok(())
             }
-            hist::HistCandidate::Bucket(candidate) => {
+            hist::BoundHistCandidate::Bucket(candidate) => {
                 self.lower_parallel_bucket(body, kernel, candidate, output_projection)
             }
         }

@@ -15,7 +15,7 @@ pub type ResourcesErased = egir::program::Program<
         egir::types::Physical,
         interface::StorageBindingDecl,
         egir::ir::RealizedOutputRoute,
-        egir::program::CoreProgramData,
+        egir::program::ResourceProgramData,
     >,
     egir::program::PlannedGlobal,
 >;

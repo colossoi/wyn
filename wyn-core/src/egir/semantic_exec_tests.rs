@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops::bind_by_value_result;
-use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, PureOp, SkeletonTerminator,
@@ -9,6 +9,7 @@ use crate::egir::types::{
 };
 use crate::op::BinaryOperator;
 use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::BindingRef;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -61,8 +62,8 @@ fn affine_program() -> (FunctionId, Segmented) {
         Span::dummy(),
         None,
         vec![
-            callable_parameter::<SemanticResourceRef, WynLanguage>("left".into(), pair.clone()),
-            callable_parameter::<SemanticResourceRef, WynLanguage>("right".into(), pair),
+            callable_parameter::<BindingRef, WynLanguage>("left".into(), pair.clone()),
+            callable_parameter::<BindingRef, WynLanguage>("right".into(), pair),
         ],
         result_abi,
         CallEffects::Pure,

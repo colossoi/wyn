@@ -333,15 +333,15 @@ impl FilterCandidate {
 
 #[derive(Clone, Copy)]
 struct StoredFilterStorage {
-    scratch: SemanticResourceRef,
+    data: SemanticResourceRef,
     length: SemanticResourceRef,
 }
 
 impl StoredFilterStorage {
     fn runtime(self) -> filter_soac::RuntimeStorage<SemanticResourceRef> {
         filter_soac::RuntimeStorage {
-            scratch: self.scratch,
-            length: filter_soac::RuntimeLength::Stored(self.length),
+            data: self.data,
+            length: self.length,
         }
     }
 }
@@ -352,7 +352,7 @@ pub(super) struct BoundFilter {
 }
 
 pub(super) fn analyze_filter_candidate(
-    entry: &Entry<Semantic>,
+    entry: &egir::program::AllocatedEntry,
     site: SideEffectSite,
 ) -> Option<CandidateSelection<FilterCandidate>> {
     let SideEffectKind::Soac(SoacEffect(
@@ -361,7 +361,7 @@ pub(super) fn analyze_filter_candidate(
             state:
                 filter_soac::SemanticState {
                     space,
-                    storage: filter_soac::Output::Runtime { scratch, length },
+                    output: filter_soac::Output::Runtime(runtime),
                 },
             ..
         }),
@@ -369,20 +369,19 @@ pub(super) fn analyze_filter_candidate(
     else {
         return None;
     };
-    Some(match length {
-        filter_soac::RuntimeLength::Stored(len_out) => CandidateSelection::Selected(FilterCandidate {
-            semantic_id: *semantic_id,
-            space: space.clone(),
-            storage: StoredFilterStorage {
-                scratch: *scratch,
-                length: *len_out,
-            },
-            scan_grid: FilterScanGrid {
-                workgroup_width: REDUCE_PHASE1_WIDTH,
-                workgroups_x: FILTER_SCAN_GROUPS,
-            },
-        }),
-        filter_soac::RuntimeLength::ViewOnly => CandidateSelection::Fallback,
+    Some(match (runtime.backing, runtime.length) {
+        (filter_soac::RuntimeBacking::Bound(data), filter_soac::RuntimeLength::Stored(length)) => {
+            CandidateSelection::Selected(FilterCandidate {
+                semantic_id: *semantic_id,
+                space: space.clone(),
+                storage: StoredFilterStorage { data, length },
+                scan_grid: FilterScanGrid {
+                    workgroup_width: REDUCE_PHASE1_WIDTH,
+                    workgroups_x: FILTER_SCAN_GROUPS,
+                },
+            })
+        }
+        _ => CandidateSelection::Fallback,
     })
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir;
-use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::soac::screma;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, OperandRef, PureOp, SegBody, Semantic,
@@ -9,6 +9,7 @@ use crate::egir::types::{
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types;
+use crate::BindingRef;
 use crate::FunctionId;
 use polytype::Type;
 use smallvec::smallvec;
@@ -177,7 +178,7 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
         "malformed_screma".to_string(),
         Span::dummy(),
         None,
-        vec![callable_parameter::<SemanticResourceRef, WynLanguage>(
+        vec![callable_parameter::<BindingRef, WynLanguage>(
             "xs".into(),
             array_type,
         )],

@@ -3,7 +3,7 @@ use crate::flow;
 use crate::op;
 
 use crate::ast::{Span, TypeName};
-use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities, SemanticResourceRef};
+use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, FuncParam, OperandRef, Semantic,
     SkeletonTerminator, WynLanguage,
@@ -22,10 +22,10 @@ fn u32_ty() -> Type<TypeName> {
 
 fn semantic_params(
     specs: impl IntoIterator<Item = (&'static str, Type<TypeName>)>,
-) -> Vec<FuncParam<SemanticResourceRef, Type<TypeName>>> {
+) -> Vec<FuncParam<BindingRef, Type<TypeName>>> {
     specs
         .into_iter()
-        .map(|(name, ty)| callable_parameter::<SemanticResourceRef, WynLanguage>(name.into(), ty))
+        .map(|(name, ty)| callable_parameter::<BindingRef, WynLanguage>(name.into(), ty))
         .collect()
 }
 
