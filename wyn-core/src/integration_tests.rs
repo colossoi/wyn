@@ -3186,6 +3186,34 @@ entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_root_flattens_nested_record_compute_output() {
+    let lowered = compile_thru_spirv(
+        r#"
+def fullscreen(vertex: vertex_invocation) vertex<()> =
+  let x = if vertex.vertex_index == 2u32 then 3.0 else -1.0
+  let y = if vertex.vertex_index == 1u32 then 3.0 else -1.0 in
+  vertex_output(@[x, y, 0.0, 1.0], ())
+
+def white(fragment: fragment_invocation<()>) vec4f32 =
+  @[1.0, 1.0, 1.0, 1.0]
+
+entry nested_record_output(values: []f32, target: render_target<vec4f32>)
+  ([]f32, render_target<vec4f32>) =
+  let prepared = {
+    world = {
+      values = map(|x| x + 1.0, values),
+    },
+  }
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), fullscreen)
+  let target2 = shade(target, raster, white) in
+  (prepared.world.values, target2)
+"#,
+    )
+    .expect("nested record compute outputs flatten to their storage leaves");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
 fn unified_root_array_result_can_feed_vertex_callback() {
     let lowered = compile_thru_spirv(
         r#"

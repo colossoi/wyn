@@ -1555,6 +1555,7 @@ fn build_compute_stage(
         texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
+    let body = flatten_compute_output(body, &operation.outputs, symbols, term_ids)?;
     let outputs = operation
         .outputs
         .iter()
@@ -1579,6 +1580,90 @@ fn build_compute_stage(
         root,
         symbols,
         term_ids,
+    ))
+}
+
+/// Make a generated compute stage's value shape match its flattened storage
+/// output declarations. Root orchestration may bind arrays inside nested
+/// tuples/records, but entry ABIs expose one storage slot per array leaf.
+/// Bind the original value once and project those leaves in declaration order.
+fn flatten_compute_output(
+    body: Term,
+    outputs: &[ComputedLeaf],
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let [only] = outputs else {
+        if outputs.is_empty() {
+            return None;
+        }
+        return flatten_compute_output_many(body, outputs, symbols, term_ids);
+    };
+    if only.path.is_empty() && only.ty == body.ty {
+        return Some(body);
+    }
+    flatten_compute_output_many(body, outputs, symbols, term_ids)
+}
+
+fn flatten_compute_output_many(
+    body: Term,
+    outputs: &[ComputedLeaf],
+    symbols: &mut SymbolTable,
+    term_ids: &mut TermIdSource,
+) -> Option<Term> {
+    let span = body.span;
+    let source_ty = body.ty.clone();
+    let source = symbols.alloc("_w_compute_output_value".to_string());
+    let mut leaves = outputs
+        .iter()
+        .map(|output| {
+            let mut value = Term::fresh(
+                term_ids,
+                source_ty.clone(),
+                span,
+                TermKind::Var(VarRef::Symbol(source)),
+            );
+            let mut value_ty = source_ty.clone();
+            for &index in &output.path {
+                let Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), components) = &value_ty
+                else {
+                    return None;
+                };
+                let component_ty = components.get(index)?.clone();
+                value = Term::fresh(
+                    term_ids,
+                    component_ty.clone(),
+                    span,
+                    TermKind::TupleProj {
+                        tuple: Box::new(value),
+                        idx: index,
+                    },
+                );
+                value_ty = component_ty;
+            }
+            (value_ty == output.ty).then_some(value)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let result = if leaves.len() == 1 {
+        leaves.pop()?
+    } else {
+        let result_ty = Type::Constructed(
+            TypeName::Tuple(leaves.len()),
+            leaves.iter().map(|leaf| leaf.ty.clone()).collect(),
+        );
+        Term::fresh(term_ids, result_ty, span, TermKind::Tuple(leaves))
+    };
+    let result_ty = result.ty.clone();
+    Some(Term::fresh(
+        term_ids,
+        result_ty,
+        span,
+        TermKind::Let {
+            name: source,
+            name_ty: source_ty,
+            rhs: Box::new(body),
+            body: Box::new(result),
+        },
     ))
 }
 
