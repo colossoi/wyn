@@ -1,21 +1,19 @@
-//! Static-size staticization for i32 constants.
+//! Early integer constant folding and static-size staticization.
 //!
-//! Despite the "folding" framing, the only consumer of this pass is
-//! array-size inference: the type checker derives a static `Size(N)` for a
-//! range / slice / array expression *only* when its bounds are literal
-//! integers (`try_extract_const_int`, which matches bare `IntLiteral` and
-//! nothing else). A named constant or unfolded arithmetic leaves the size a
-//! fresh variable — i.e. runtime / unsized. So this pass exists to expose
+//! Its original consumer is array-size inference: the type checker derives a
+//! static `Size(N)` for a range / slice / array expression *only* when its
+//! bounds are literal integers (`try_extract_const_int`, which matches bare
+//! `IntLiteral` and nothing else). A named constant or unfolded arithmetic
+//! leaves the size a fresh variable — i.e. runtime / unsized. The pass exposes
 //! literal bounds:
 //! - inline i32 constants: `def N = 256; 0..<N` → `0..<256` → `Size(256)`
 //! - fold integer arithmetic: `0..<(2 + 4)` → `0..<6` → `Size(6)`
 //! - resolve named type dimensions: `[N]u32` → `[256]u32`
 //!
-//! It is deliberately limited to **i32** constants, because array sizes are
-//! i32. A u32/i64 constant can never be a size, and inlining one as a bare
-//! `IntLiteral` would silently retype every use to i32 (the literal default).
-//! Such constants — like the float/bool constants this pass also ignores —
-//! flow through as ordinary typed references.
+//! Non-i32 integer constants cannot become array sizes, but they are still
+//! useful compile-time values (for example, fixed graphics draw counts). They
+//! are inlined with an explicit type ascription so replacing `N: u32` never
+//! silently changes a use of `N` into an i32 literal.
 
 use crate::ast;
 use crate::ast::UnaryOp;
@@ -27,9 +25,9 @@ use crate::interface;
 use crate::module_manager;
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::resolve_resources;
-use crate::LookupMap;
+use crate::{LookupMap, NodeCounter};
 
-/// AST after integer constants needed by static-size inference are exposed.
+/// AST after early integer constants have been exposed.
 #[derive(Debug, Clone, Copy)]
 pub enum ConstantsFoldedTag {}
 pub type ConstantsFolded =
@@ -38,14 +36,29 @@ pub type ConstantsFolded =
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
     /// Known integer constants: name → value
-    constants: LookupMap<String, i64>,
+    constants: LookupMap<String, IntegerConstant>,
+    /// Allocator borrowed from the program while folding. Typed literals add
+    /// one inner AST node for their explicit type ascription.
+    node_ids: NodeCounter,
+}
+
+#[derive(Clone)]
+struct IntegerConstant {
+    value: i64,
+    ty: Type,
 }
 
 impl AstConstFolder {
     /// Add a constant for testing purposes
     #[cfg(test)]
     pub fn add_constant(&mut self, name: &str, value: i64) {
-        self.constants.insert(name.to_string(), value);
+        self.constants.insert(
+            name.to_string(),
+            IntegerConstant {
+                value,
+                ty: Self::i32_type(),
+            },
+        );
     }
 }
 
@@ -59,6 +72,7 @@ impl AstConstFolder {
     pub fn new() -> Self {
         Self {
             constants: LookupMap::new(),
+            node_ids: NodeCounter::new(),
         }
     }
 
@@ -68,18 +82,16 @@ impl AstConstFolder {
     /// 1. Collect top-level constant definitions (parameterless defs with integer values)
     /// 2. Fold and inline in expressions and type dimensions
     pub fn fold_program(&mut self, program: &mut resolve_resources::ResourcesResolved) {
+        std::mem::swap(&mut self.node_ids, &mut program.node_ids);
+
         // First pass: collect top-level constant definitions
         for decl in &program.declarations {
             if let Declaration::Decl(d) = decl {
-                // Only parameterless definitions can be constants, and only
-                // i32 ones can become static sizes (see `is_i32_constant`).
-                if d.params.is_empty()
-                    && d.size_params.is_empty()
-                    && d.type_params.is_empty()
-                    && Self::is_i32_constant(d.ty.as_ref(), &d.body)
-                {
-                    if let Some(val) = self.try_eval_const(&d.body) {
-                        self.constants.insert(d.name.clone(), val);
+                if d.params.is_empty() && d.size_params.is_empty() && d.type_params.is_empty() {
+                    if let Some(ty) = Self::integer_constant_type(d.ty.as_ref(), &d.body) {
+                        if let Some(value) = self.try_eval_any_integer_const(&d.body) {
+                            self.constants.insert(d.name.clone(), IntegerConstant { value, ty });
+                        }
                     }
                 }
             }
@@ -89,6 +101,8 @@ impl AstConstFolder {
         for decl in &mut program.declarations {
             self.fold_declaration(decl);
         }
+
+        std::mem::swap(&mut self.node_ids, &mut program.node_ids);
     }
 
     fn fold_declaration(&mut self, decl: &mut Declaration<resolve_resources::ResourcesResolvedFamily>) {
@@ -151,9 +165,11 @@ impl AstConstFolder {
 
         if let TypeName::SizeVar(size_name) = name {
             if !bound_sizes.contains(size_name) {
-                if let Some(size) =
-                    self.constants.get(size_name).and_then(|value| usize::try_from(*value).ok())
-                {
+                if let Some(size) = self.constants.get(size_name).and_then(|constant| {
+                    Self::is_i32_type(&constant.ty)
+                        .then(|| constant.value)
+                        .and_then(|value| usize::try_from(value).ok())
+                }) {
                     *name = TypeName::Size(size);
                 }
             }
@@ -229,8 +245,8 @@ impl AstConstFolder {
             ExprKind::Identifier(identifier) => {
                 // Inline known constants (only for unqualified names)
                 if identifier.qualifiers.is_empty() {
-                    if let Some(&val) = self.constants.get(&identifier.name) {
-                        expr.kind = ExprKind::IntLiteral(val.to_string().into());
+                    if let Some(constant) = self.constants.get(&identifier.name).cloned() {
+                        expr.kind = self.constant_expr_kind(&constant, &expr.h);
                     }
                 }
             }
@@ -369,26 +385,29 @@ impl AstConstFolder {
         // Check if this introduces a constant
         // For simplicity, only handle simple name patterns
         let const_binding = if let ast::PatternKind::Name(name) = &let_in.pattern.kind {
-            if Self::is_i32_constant(let_in.ty.as_ref(), &let_in.value) {
-                self.try_eval_const(&let_in.value).map(|val| (name.clone(), val))
-            } else {
-                None
-            }
+            Self::integer_constant_type(let_in.ty.as_ref(), &let_in.value).and_then(|ty| {
+                self.try_eval_any_integer_const(&let_in.value)
+                    .map(|value| (name.clone(), IntegerConstant { value, ty }))
+            })
         } else {
             None
         };
 
         // If we found a constant, temporarily add it to scope
-        if let Some((name, val)) = &const_binding {
-            self.constants.insert(name.clone(), *val);
-        }
+        let shadowed = const_binding
+            .as_ref()
+            .and_then(|(name, constant)| self.constants.insert(name.clone(), constant.clone()));
 
         // Fold the body
         self.fold_expr_scoped(&mut let_in.body, bound_sizes);
 
         // Remove the temporary binding (it's scoped to this let)
         if let Some((name, _)) = const_binding {
-            self.constants.remove(&name);
+            if let Some(constant) = shadowed {
+                self.constants.insert(name, constant);
+            } else {
+                self.constants.remove(&name);
+            }
         }
     }
 
@@ -435,23 +454,46 @@ impl AstConstFolder {
         self.fold_expr_scoped(&mut range.end, bound_sizes);
     }
 
-    /// Whether a constant is an i32, and therefore eligible to inline as a
-    /// bare `IntLiteral` for static size inference (see the module docs).
-    ///
-    /// Non-i32 integer constants (`u32`, `i64`, ...) must stay references so
-    /// the checker keeps their declared type — inlining one as a bare literal
-    /// would silently retype every use to i32 (the literal default), and it
-    /// could never have been a size anyway. The type is taken from the
-    /// declaration's annotation if present, else a top-level `TypeAscription`
-    /// on the body (the `7u32` suffix form).
-    fn is_i32_constant(annotation: Option<&Type>, body: &Expression) -> bool {
-        let ty = annotation.or(match &body.kind {
-            ExprKind::TypeAscription(_, t) => Some(t),
-            _ => None,
-        });
-        match ty {
-            None => true,
-            Some(t) => matches!(t, Type::Constructed(TypeName::Int(32), _)),
+    fn i32_type() -> Type {
+        Type::Constructed(TypeName::Int(32), vec![])
+    }
+
+    fn is_i32_type(ty: &Type) -> bool {
+        matches!(ty, Type::Constructed(TypeName::Int(32), _))
+    }
+
+    /// Determine the integer type carried by a constant declaration. An
+    /// unannotated integer defaults to i32; a suffixed literal reaches the AST
+    /// as a top-level type ascription.
+    fn integer_constant_type(annotation: Option<&Type>, body: &Expression) -> Option<Type> {
+        let ty = annotation
+            .cloned()
+            .or_else(|| match &body.kind {
+                ExprKind::TypeAscription(_, ty) => Some(ty.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(Self::i32_type);
+        matches!(ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)).then_some(ty)
+    }
+
+    /// Rebuild a reference as a literal while retaining non-i32 integer types.
+    /// i32 deliberately stays bare because static-size inference recognizes a
+    /// bare integer literal.
+    fn constant_expr_kind(&mut self, constant: &IntegerConstant, header: &ast::Header) -> ExprKind {
+        let literal = ExprKind::IntLiteral(constant.value.to_string().into());
+        if Self::is_i32_type(&constant.ty) {
+            literal
+        } else {
+            ExprKind::TypeAscription(
+                Box::new(Expression {
+                    h: ast::Header {
+                        id: self.node_ids.next_id(),
+                        span: header.span,
+                    },
+                    kind: literal,
+                }),
+                constant.ty.clone(),
+            )
         }
     }
 
@@ -460,9 +502,11 @@ impl AstConstFolder {
     fn try_eval_const(&self, expr: &Expression) -> Option<i64> {
         match &expr.kind {
             ExprKind::IntLiteral(n) => i64::try_from(n).ok(),
-            ExprKind::Identifier(identifier) if identifier.qualifiers.is_empty() => {
-                self.constants.get(&identifier.name).copied()
-            }
+            ExprKind::Identifier(identifier) if identifier.qualifiers.is_empty() => self
+                .constants
+                .get(&identifier.name)
+                .filter(|constant| Self::is_i32_type(&constant.ty))
+                .map(|constant| constant.value),
             ExprKind::BinaryOp(op, lhs, rhs) => {
                 let l = self.try_eval_const(lhs)?;
                 let r = self.try_eval_const(rhs)?;
@@ -472,7 +516,35 @@ impl AstConstFolder {
                 let v = self.try_eval_const(operand)?;
                 self.eval_unaryop(&op.op, v)
             }
-            ExprKind::TypeAscription(inner, _) => self.try_eval_const(inner),
+            ExprKind::TypeAscription(inner, ty) if Self::is_i32_type(ty) => self.try_eval_const(inner),
+            _ => None,
+        }
+    }
+
+    /// Evaluate an integer declaration while collecting constants, regardless
+    /// of its explicit integer type. Ordinary expression folding continues to
+    /// use `try_eval_const`, which is i32-only and therefore cannot erase a
+    /// non-i32 type ascription around an arithmetic expression.
+    fn try_eval_any_integer_const(&self, expr: &Expression) -> Option<i64> {
+        match &expr.kind {
+            ExprKind::IntLiteral(n) => i64::try_from(n).ok(),
+            ExprKind::Identifier(identifier) if identifier.qualifiers.is_empty() => {
+                self.constants.get(&identifier.name).map(|constant| constant.value)
+            }
+            ExprKind::BinaryOp(op, lhs, rhs) => {
+                let lhs = self.try_eval_any_integer_const(lhs)?;
+                let rhs = self.try_eval_any_integer_const(rhs)?;
+                self.eval_binop(&op.op, lhs, rhs)
+            }
+            ExprKind::UnaryOp(op, operand) => {
+                let operand = self.try_eval_any_integer_const(operand)?;
+                self.eval_unaryop(&op.op, operand)
+            }
+            ExprKind::TypeAscription(inner, ty)
+                if Self::integer_constant_type(Some(ty), inner).is_some() =>
+            {
+                self.try_eval_any_integer_const(inner)
+            }
             _ => None,
         }
     }
@@ -607,7 +679,7 @@ impl AstConstFolder {
     }
 }
 
-/// Expose literal integer bounds needed by static-size inference.
+/// Expose typed integer constants and literal bounds needed by static-size inference.
 pub fn fold_constants(mut program: resolve_resources::ResourcesResolved) -> ConstantsFolded {
     let mut folder = AstConstFolder::new();
     folder.fold_program(&mut program);

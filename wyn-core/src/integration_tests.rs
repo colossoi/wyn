@@ -3146,6 +3146,45 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
         }
     );
 }
+
+#[test]
+fn unified_root_accepts_named_u32_constants_in_direct_draw() {
+    let program = compile_thru_tlc(
+        r#"
+def WALL_VERTEX_COUNT: u32 = 36u32
+def WALL_INSTANCE_COUNT: u32 = 2632u32
+
+entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(WALL_VERTEX_COUNT, WALL_INSTANCE_COUNT),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+      @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("named u32 constants are exposed before graphics stage extraction");
+    let graphics = program
+        .defs
+        .iter()
+        .find_map(|definition| {
+            let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+                return None;
+            };
+            entry.declaration.graphics_group.as_ref()
+        })
+        .expect("graphics stage group");
+    assert_eq!(
+        graphics.invocation.draw,
+        pipeline_descriptor::DrawCall::Direct {
+            vertex_count: 36,
+            instance_count: 2632,
+            first_vertex: 0,
+            first_instance: 0,
+        }
+    );
+}
+
 #[test]
 fn unified_root_array_result_can_feed_vertex_callback() {
     let lowered = compile_thru_spirv(
