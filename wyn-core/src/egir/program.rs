@@ -401,25 +401,50 @@ pub struct LogicalResourceArena {
 }
 
 impl LogicalResourceArena {
-    /// Declare or refine a host-owned resource at the allocation boundary.
-    /// References may be reserved before descriptor metadata is visited, so a
-    /// later declaration is allowed to replace an unspecified size.
-    pub(crate) fn declare_host(
+    /// Reserve a host-owned resource identity at the allocation boundary.
+    /// Compatible duplicate declarations share the identity; declarations
+    /// with a different element type are rejected.
+    pub(crate) fn reserve_host(
         &mut self,
         binding: BindingRef,
         elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> ResourceId {
+    ) -> Result<ResourceId, String> {
         if let Some(id) = self.host.get(&binding).copied() {
-            let resource = &mut self.resources[id.index()];
-            if matches!(resource.size, LogicalSize::Unspecified)
-                && !matches!(size, LogicalSize::Unspecified)
-            {
-                resource.size = size;
+            let resource = &self.resources[id.index()];
+            if resource.elem_ty != elem_ty {
+                return Err(format!(
+                    "host resource set={} binding={} has conflicting element types: {:?} and {:?}",
+                    binding.set, binding.binding, resource.elem_ty, elem_ty
+                ));
             }
-            return id;
+            return Ok(id);
         }
-        self.allocate(ResourceOrigin::host(binding), elem_ty, size)
+        Ok(self.allocate(ResourceOrigin::host(binding), elem_ty, LogicalSize::Unspecified))
+    }
+
+    /// Apply one host declaration's size policy to an already-reserved
+    /// identity. An unspecified policy makes no claim; repeated concrete
+    /// policies must agree.
+    pub(crate) fn set_host_size(&mut self, binding: BindingRef, size: LogicalSize) -> Result<(), String> {
+        let id = self.host.get(&binding).copied().ok_or_else(|| {
+            format!(
+                "host resource set={} binding={} must be reserved before its size is set",
+                binding.set, binding.binding
+            )
+        })?;
+        let resource = &mut self.resources[id.index()];
+        match (&resource.size, &size) {
+            (LogicalSize::Unspecified, LogicalSize::Unspecified) | (_, LogicalSize::Unspecified) => Ok(()),
+            (LogicalSize::Unspecified, _) => {
+                resource.size = size;
+                Ok(())
+            }
+            (current, proposed) if current == proposed => Ok(()),
+            (current, proposed) => Err(format!(
+                "host resource set={} binding={} has conflicting size policies: {:?} and {:?}",
+                binding.set, binding.binding, current, proposed
+            )),
+        }
     }
 
     pub(crate) fn allocate(

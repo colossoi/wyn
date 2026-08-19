@@ -89,8 +89,8 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 /// or create resources.
 fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
     let mut context = ResourceAllocationContext::default();
-    reserve_host_resources(&program, &mut context);
-    resolve_host_resource_sizes(&program, &mut context)?;
+    reserve_host_resources(&program, &mut context)?;
+    lower_host_size_policies(&program, &mut context)?;
     let program = remap_program_resources(program, context)?;
     Ok(realize_dynamic_publication(program))
 }
@@ -176,59 +176,68 @@ fn remap_program_resources(
     ))
 }
 
-struct InterfaceResource {
+struct InterfaceResource<'a> {
     binding: BindingRef,
     role: Option<interface::StorageRole>,
-    elem_ty: Type<TypeName>,
-    length: Option<BufferLen>,
+    elem_ty: &'a Type<TypeName>,
+    length: Option<&'a BufferLen>,
 }
 
-fn interface_resources(entry: &Entry<Semantic>) -> Vec<InterfaceResource> {
+fn interface_resources(entry: &Entry<Semantic>) -> impl Iterator<Item = InterfaceResource<'_>> {
     let inputs = entry.inputs.iter().filter_map(|input| {
         let binding = input.resource?;
         let (role, length) = match &input.kind {
-            EntryInputKind::Storage { length, .. } => (Some(interface::StorageRole::Input), length.clone()),
+            EntryInputKind::Storage { length, .. } => {
+                (Some(interface::StorageRole::Input), length.as_ref())
+            }
             _ => (None, None),
         };
         Some(InterfaceResource {
             binding,
             role,
-            elem_ty: input.ty.elem_type().cloned().unwrap_or_else(|| input.ty.clone()),
+            elem_ty: input.ty.elem_type().unwrap_or(&input.ty),
             length,
         })
     });
     let outputs = entry.outputs.iter().filter_map(|output| {
         let binding = output.resource?;
         let length = match &output.kind {
-            EntryOutputKind::Storage { length, .. } => length.clone(),
+            EntryOutputKind::Storage { length, .. } => length.as_ref(),
             _ => None,
         };
         Some(InterfaceResource {
             binding,
             role: Some(interface::StorageRole::Output),
-            elem_ty: output.ty.elem_type().cloned().unwrap_or_else(|| output.ty.clone()),
+            elem_ty: output.ty.elem_type().unwrap_or(&output.ty),
             length,
         })
     });
-    inputs.chain(outputs).collect()
+    inputs.chain(outputs)
 }
 
-fn reserve_host_resources(program: &Optimized, context: &mut ResourceAllocationContext) {
-    for entry in &program.entry_points {
-        for resource in interface_resources(entry) {
-            context.resources.declare_host(resource.binding, resource.elem_ty, LogicalSize::Unspecified);
-        }
-    }
-}
-
-fn resolve_host_resource_sizes(
+fn reserve_host_resources(
     program: &Optimized,
     context: &mut ResourceAllocationContext,
 ) -> Result<(), ConvertError> {
     for entry in &program.entry_points {
         for resource in interface_resources(entry) {
-            let size = context.logical_size(resource.length.as_ref())?;
-            context.resources.declare_host(resource.binding, resource.elem_ty, size);
+            context
+                .resources
+                .reserve_host(resource.binding, resource.elem_ty.clone())
+                .map_err(ConvertError::GraphError)?;
+        }
+    }
+    Ok(())
+}
+
+fn lower_host_size_policies(
+    program: &Optimized,
+    context: &mut ResourceAllocationContext,
+) -> Result<(), ConvertError> {
+    for entry in &program.entry_points {
+        for resource in interface_resources(entry) {
+            let size = context.logical_size(resource.length)?;
+            context.resources.set_host_size(resource.binding, size).map_err(ConvertError::GraphError)?;
         }
     }
     Ok(())

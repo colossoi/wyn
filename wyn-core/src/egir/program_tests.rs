@@ -11,7 +11,7 @@ use crate::egir::types::{by_value_function_result, CallEffects, EGraph, Paramete
 use crate::flow::ExecutionModel;
 use crate::interface;
 use crate::op;
-use crate::pipeline_descriptor::PipelineDescriptor;
+use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
 use crate::BindingRef;
 use crate::EntryId;
 use crate::IdSource;
@@ -49,6 +49,27 @@ fn empty_entry(id: EntryId, name: &str) -> Entry {
         by_value_function_result::<WynLanguage>(unit_ty()),
         EGraph::new(),
     )
+}
+
+fn storage_input(
+    name: &str,
+    binding: BindingRef,
+    elem_ty: Type<TypeName>,
+    length: Option<BufferLen>,
+) -> egir::ir::EntryInput<BindingRef, WynLanguage> {
+    egir::ir::EntryInput {
+        inner: interface::EntryInput {
+            name: name.into(),
+            ty: elem_ty,
+            size_hint: None,
+            kind: interface::EntryInputKind::Storage {
+                exposure: interface::BindingExposure::Host(binding),
+                access: interface::StorageAccess::ReadOnly,
+                length,
+            },
+        },
+        resource: Some(binding),
+    }
 }
 
 fn into_allocated(program: egir::reify::Segmented) -> ResourcesAllocated {
@@ -106,6 +127,176 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
     assert!(allocated.data.materializations.is_empty());
     assert_eq!(allocated.data.core.resources.len(), 1);
     assert_eq!(allocated.data.core.resources[0].host_binding(), Some(binding));
+}
+
+#[test]
+fn host_size_policy_can_reference_a_later_interface_binding() {
+    let target_binding = BindingRef::new(1, 0);
+    let source_binding = BindingRef::new(1, 1);
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(storage_input(
+        "target",
+        target_binding,
+        unit_ty(),
+        Some(BufferLen::LikeInput {
+            set: source_binding.set,
+            binding: source_binding.binding,
+            elem_bytes: 4,
+            src_elem_bytes: 8,
+        }),
+    ));
+    entry.inputs.push(storage_input(
+        "source",
+        source_binding,
+        unit_ty(),
+        Some(BufferLen::Fixed { bytes: 32 }),
+    ));
+    let semantic = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        ProgramIdentities::default(),
+    );
+
+    let allocated = plan_logical_resources(semantic.retag()).expect("forward LikeInput reference");
+    let target = allocated.data.core.resources.host_resource(target_binding).unwrap();
+    let source = allocated.data.core.resources.host_resource(source_binding).unwrap();
+    assert_eq!(
+        allocated.data.core.resources[target].size,
+        LogicalSize::LikeResource {
+            resource: source,
+            elem_bytes: 4,
+            src_elem_bytes: 8,
+        }
+    );
+}
+
+#[test]
+fn host_size_policy_rejects_a_reference_to_an_unreserved_binding() {
+    let target_binding = BindingRef::new(1, 0);
+    let missing_binding = BindingRef::new(1, 9);
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(storage_input(
+        "target",
+        target_binding,
+        unit_ty(),
+        Some(BufferLen::LikeInput {
+            set: missing_binding.set,
+            binding: missing_binding.binding,
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+        }),
+    ));
+    let semantic = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        ProgramIdentities::default(),
+    );
+
+    let error = plan_logical_resources(semantic.retag()).expect_err("missing size source must fail");
+    assert!(error.to_string().contains("is not declared"), "{error}");
+}
+
+#[test]
+fn repeated_compatible_host_declarations_share_an_identity() {
+    let binding = BindingRef::new(1, 0);
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(storage_input(
+        "first",
+        binding,
+        unit_ty(),
+        Some(BufferLen::Fixed { bytes: 16 }),
+    ));
+    entry.inputs.push(storage_input(
+        "second",
+        binding,
+        unit_ty(),
+        Some(BufferLen::Fixed { bytes: 16 }),
+    ));
+    let semantic = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        ProgramIdentities::default(),
+    );
+
+    let allocated = plan_logical_resources(semantic.retag()).expect("compatible declarations");
+    assert_eq!(allocated.data.core.resources.len(), 1);
+    assert_eq!(allocated.data.core.resources[0].size, LogicalSize::FixedBytes(16));
+}
+
+#[test]
+fn conflicting_host_element_types_are_rejected() {
+    let binding = BindingRef::new(1, 0);
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(storage_input(
+        "first",
+        binding,
+        Type::Constructed(TypeName::UInt(32), vec![]),
+        None,
+    ));
+    entry.inputs.push(storage_input(
+        "second",
+        binding,
+        Type::Constructed(TypeName::Int(32), vec![]),
+        None,
+    ));
+    let semantic = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        ProgramIdentities::default(),
+    );
+
+    let error = plan_logical_resources(semantic.retag()).expect_err("element types must conflict");
+    assert!(error.to_string().contains("conflicting element types"), "{error}");
+}
+
+#[test]
+fn conflicting_host_size_policies_are_rejected() {
+    let binding = BindingRef::new(1, 0);
+    let mut entry = empty_entry(EntryId::from_index(0), "main");
+    entry.inputs.push(storage_input(
+        "first",
+        binding,
+        unit_ty(),
+        Some(BufferLen::Fixed { bytes: 16 }),
+    ));
+    entry.inputs.push(storage_input(
+        "second",
+        binding,
+        unit_ty(),
+        Some(BufferLen::Fixed { bytes: 32 }),
+    ));
+    let semantic = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![entry],
+        vec![],
+        PipelineDescriptor::default(),
+        ProgramIdentities::default(),
+    );
+
+    let error = plan_logical_resources(semantic.retag()).expect_err("size policies must conflict");
+    assert!(error.to_string().contains("conflicting size policies"), "{error}");
+}
+
+#[test]
+fn host_size_policy_requires_a_reserved_binding() {
+    let mut resources = LogicalResourceArena::default();
+    let error = resources
+        .set_host_size(BindingRef::new(1, 0), LogicalSize::FixedBytes(16))
+        .expect_err("unreserved binding must fail");
+    assert!(error.contains("must be reserved"), "{error}");
 }
 
 #[test]
