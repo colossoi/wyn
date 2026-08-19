@@ -1188,16 +1188,51 @@ fn bool_literal(term: &Term) -> Option<bool> {
 }
 
 fn u32_literal(term: &Term) -> Option<u32> {
-    let TermKind::IntLit(text) = &term.kind else {
-        return None;
-    };
-    text.strip_suffix("u32").unwrap_or(text).replace('_', "").parse().ok()
+    u32::try_from(integer_constant(term)?).ok()
 }
+
 fn i32_literal(term: &Term) -> Option<i32> {
-    let TermKind::IntLit(text) = &term.kind else {
-        return None;
-    };
-    text.strip_suffix("i32").unwrap_or(text).replace('_', "").parse().ok()
+    i32::try_from(integer_constant(term)?).ok()
+}
+
+/// Resolve the small typed-integer constant language accepted by fixed
+/// graphics descriptors. The early AST folder exposes named constants as
+/// literals, while constructor-style casts reach TLC as resolved conversion
+/// builtins (for example, `u32(PROP_WALLS)` becomes `u32.i32(<literal>)`).
+fn integer_constant(term: &Term) -> Option<i64> {
+    match &term.kind {
+        TermKind::IntLit(text) => text
+            .strip_suffix("u32")
+            .or_else(|| text.strip_suffix("i32"))
+            .unwrap_or(text)
+            .replace('_', "")
+            .parse()
+            .ok(),
+        TermKind::App { func, args } => {
+            let TermKind::Var(VarRef::Builtin { id, overload_idx }) = func.kind else {
+                return None;
+            };
+            let [argument] = args.as_slice() else {
+                return None;
+            };
+            let builtins::BuiltinLowering::PrimOp(prim) =
+                &builtins::by_id(id).overloads().get(overload_idx)?.lowering
+            else {
+                return None;
+            };
+            if !matches!(
+                prim,
+                builtins::lowering::PrimOp::SConvert
+                    | builtins::lowering::PrimOp::UConvert
+                    | builtins::lowering::PrimOp::Bitcast
+            ) {
+                return None;
+            }
+            let value = integer_constant(argument)?;
+            Some(crate::scalar_eval::wrap_int(value as i128, &term.ty))
+        }
+        _ => None,
+    }
 }
 #[derive(Clone)]
 struct TargetRead {
