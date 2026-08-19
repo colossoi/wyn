@@ -61,9 +61,8 @@ use crate::IdArena;
 use crate::IdSource;
 use filter::analyze_filter_candidate;
 use kernel::{
-    apply_manifest_resource_sizes, can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs,
-    chunk_view_like, dispatch_worker_logical_size, emit_chunk_arithmetic, synthesize_swap_wrapper,
-    synthesize_u32_add_function,
+    can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, emit_chunk_arithmetic,
+    synthesize_swap_wrapper, synthesize_u32_add_function,
 };
 use model as error;
 use model::{CandidateSelection, DisjointSets};
@@ -286,9 +285,8 @@ fn install_generated_callables(
     })
 }
 
-struct KernelPlanBuilder<'resources, 'effects> {
+struct KernelPlanBuilder<'effects> {
     schedule: schedule::KernelPlan,
-    resources: &'resources LogicalResourceArena,
     flows: model::ResourceFlowIndex,
     recipes: planning::RecipeIndex,
     parallel_scremas: planning::ParallelScremaPlans,
@@ -310,11 +308,7 @@ impl planning::PlannedKernel {
     /// Consume the selected body and its graph-local recipe as one operation.
     /// No caller can retain a recipe handle while independently mutating the
     /// graph it addresses.
-    fn lower(
-        self,
-        lowering: &mut KernelPlanBuilder<'_, '_>,
-        kernel: schedule::KernelId,
-    ) -> error::Result<()> {
+    fn lower(self, lowering: &mut KernelPlanBuilder<'_>, kernel: schedule::KernelId) -> error::Result<()> {
         let (body, output_projection, recipe) = self.into_parts();
         match recipe {
             planning::PlannedRecipe::Hist(candidate) => {
@@ -361,7 +355,7 @@ impl planning::PlannedKernel {
     }
 }
 
-impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
+impl<'effects> KernelPlanBuilder<'effects> {
     fn into_plan(self) -> BuiltPlan {
         (self.schedule, self.generated_callables, self.identities)
     }
@@ -398,7 +392,7 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
     }
 
     fn new(
-        resources: &'resources LogicalResourceArena,
+        resources: &LogicalResourceArena,
         descriptor: &pipeline_descriptor::PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
         entries: &[super::program::AllocatedEntry],
@@ -427,7 +421,6 @@ impl<'resources, 'effects> KernelPlanBuilder<'resources, 'effects> {
         }
         Ok(Self {
             schedule,
-            resources,
             flows,
             recipes,
             parallel_scremas,

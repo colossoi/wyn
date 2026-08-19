@@ -18,7 +18,6 @@ use crate::types::TypeExt;
 use crate::BindingRef;
 use crate::IdArena;
 use polytype::Type;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
@@ -89,6 +88,53 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 /// resource identities. This is intentionally the first pass allowed to own
 /// or create resources.
 fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
+    let mut context = ResourceAllocationContext::default();
+    reserve_host_resources(&program, &mut context);
+    resolve_host_resource_sizes(&program, &mut context)?;
+    let program = remap_program_resources(program, context)?;
+    Ok(realize_dynamic_publication(program))
+}
+
+#[derive(Default)]
+struct ResourceAllocationContext {
+    resources: LogicalResourceArena,
+}
+
+impl ResourceAllocationContext {
+    fn resource_for_binding(&self, binding: BindingRef) -> Result<SemanticResourceRef, ConvertError> {
+        self.resources.host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
+            ConvertError::GraphError(format!(
+                "resource binding set={} binding={} is not declared by an entry interface",
+                binding.set, binding.binding
+            ))
+        })
+    }
+
+    fn logical_size(&self, length: Option<&BufferLen>) -> Result<LogicalSize, ConvertError> {
+        Ok(match length {
+            Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
+            Some(BufferLen::LikeInput {
+                set,
+                binding,
+                elem_bytes,
+                src_elem_bytes,
+            }) => LogicalSize::LikeResource {
+                resource: self.resource_for_binding(BindingRef::new(*set, *binding))?.0,
+                elem_bytes: *elem_bytes,
+                src_elem_bytes: *src_elem_bytes,
+            },
+            Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
+                elem_bytes: *elem_bytes,
+            },
+            None => LogicalSize::Unspecified,
+        })
+    }
+}
+
+fn remap_program_resources(
+    program: Optimized,
+    context: ResourceAllocationContext,
+) -> Result<ResourcesAllocated, ConvertError> {
     let Program {
         functions,
         externs,
@@ -98,28 +144,18 @@ fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated,
         global_context,
         state: _,
     } = program;
-    let resources = RefCell::new(LogicalResourceArena::default());
-
-    // Reserve every authored interface resource first so cross-entry
-    // `LikeInput` sizes can only refer to declared bindings.
-    for entry in &entry_points {
-        reserve_entry_resources(entry, &resources);
-    }
-    for entry in &entry_points {
-        refine_entry_resources(entry, &resources)?;
-    }
 
     let functions = functions
         .into_iter()
-        .map(|function| allocate_function(function, &resources))
+        .map(|function| remap_function_resources(function, &context))
         .collect::<Result<Vec<_>, _>>()?;
     let constants = constants
         .into_iter()
-        .map(|constant| allocate_constant(constant, &resources))
+        .map(|constant| remap_constant_resources(constant, &context))
         .collect::<Result<Vec<_>, _>>()?;
     let entry_points = entry_points
         .into_iter()
-        .map(|entry| allocate_entry(entry, &resources))
+        .map(|entry| remap_entry_resources(entry, &context))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Program::from_parts(
@@ -131,48 +167,13 @@ fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated,
             core: ResourceProgramData {
                 pipeline: data.pipeline,
                 stage_entries: data.stage_entries,
-                resources: resources.into_inner(),
+                resources: context.resources,
                 identities: data.identities,
             },
             materializations: IdArena::new(),
         },
         global_context,
     ))
-}
-
-fn resource_for_binding(
-    resources: &RefCell<LogicalResourceArena>,
-    binding: BindingRef,
-) -> Result<SemanticResourceRef, ConvertError> {
-    resources.borrow().host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
-        ConvertError::GraphError(format!(
-            "resource binding set={} binding={} is not declared by an entry interface",
-            binding.set, binding.binding
-        ))
-    })
-}
-
-fn logical_size(
-    resources: &RefCell<LogicalResourceArena>,
-    length: Option<&BufferLen>,
-) -> Result<LogicalSize, ConvertError> {
-    Ok(match length {
-        Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
-        Some(BufferLen::LikeInput {
-            set,
-            binding,
-            elem_bytes,
-            src_elem_bytes,
-        }) => LogicalSize::LikeResource {
-            resource: resource_for_binding(resources, BindingRef::new(*set, *binding))?.0,
-            elem_bytes: *elem_bytes,
-            src_elem_bytes: *src_elem_bytes,
-        },
-        Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
-            elem_bytes: *elem_bytes,
-        },
-        None => LogicalSize::Unspecified,
-    })
 }
 
 struct InterfaceResource {
@@ -212,39 +213,38 @@ fn interface_resources(entry: &Entry<Semantic>) -> Vec<InterfaceResource> {
     inputs.chain(outputs).collect()
 }
 
-fn reserve_entry_resources(entry: &Entry<Semantic>, resources: &RefCell<LogicalResourceArena>) {
-    for resource in interface_resources(entry) {
-        resources.borrow_mut().declare_host(resource.binding, resource.elem_ty, LogicalSize::Unspecified);
+fn reserve_host_resources(program: &Optimized, context: &mut ResourceAllocationContext) {
+    for entry in &program.entry_points {
+        for resource in interface_resources(entry) {
+            context.resources.declare_host(resource.binding, resource.elem_ty, LogicalSize::Unspecified);
+        }
     }
 }
 
-fn refine_entry_resources(
-    entry: &Entry<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+fn resolve_host_resource_sizes(
+    program: &Optimized,
+    context: &mut ResourceAllocationContext,
 ) -> Result<(), ConvertError> {
-    for resource in interface_resources(entry) {
-        let size = logical_size(resources, resource.length.as_ref())?;
-        resources.borrow_mut().declare_host(resource.binding, resource.elem_ty, size);
+    for entry in &program.entry_points {
+        for resource in interface_resources(entry) {
+            let size = context.logical_size(resource.length.as_ref())?;
+            context.resources.declare_host(resource.binding, resource.elem_ty, size);
+        }
     }
     Ok(())
 }
 
 fn entry_resource_declarations(
     entry: &Entry<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<Vec<SemanticResourceDecl>, ConvertError> {
     let mut seen = HashSet::new();
     let mut declarations = Vec::new();
     for item in interface_resources(entry) {
         let Some(role) = item.role else { continue };
-        let resource = resource_for_binding(resources, item.binding)?;
+        let resource = context.resource_for_binding(item.binding)?;
         if seen.insert(resource) {
-            declarations.push(SemanticResourceDecl {
-                resource,
-                role,
-                elem_ty: item.elem_ty,
-                size: logical_size(resources, item.length.as_ref())?,
-            });
+            declarations.push(SemanticResourceDecl { resource, role });
         }
     }
     Ok(declarations)
@@ -252,12 +252,12 @@ fn entry_resource_declarations(
 
 fn allocate_type_resources(
     ty: &mut Type<TypeName>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<(), ConvertError> {
     let mut error = None;
     super::program::visit_type_names_mut(ty, |name| {
         if let TypeName::Buffer(binding) = *name {
-            match resource_for_binding(resources, binding) {
+            match context.resource_for_binding(binding) {
                 Ok(resource) => *name = TypeName::Resource(resource.0),
                 Err(binding_error) => error = Some(binding_error),
             }
@@ -266,54 +266,14 @@ fn allocate_type_resources(
     error.map_or(Ok(()), Err)
 }
 
-fn allocate_filter_publication(
-    owner: super::program::SemanticOpId,
-    output: filter::Output<SemanticResourceRef>,
-    output_slots: &[super::program::OutputSlotId],
-    accesses: &mut Vec<super::types::SegResourceAccess<SemanticResourceRef>>,
-    resources: &RefCell<LogicalResourceArena>,
-) -> filter::Output<SemanticResourceRef> {
-    let filter::Output::Runtime(mut runtime) = output else {
-        return output;
-    };
-    if !output_slots.is_empty() {
-        if matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
-            runtime.backing = accesses
-                .iter()
-                .find(|access| access.access != crate::ResourceAccess::Read)
-                .map(|access| filter::RuntimeBacking::Bound(access.resource))
-                .unwrap_or(filter::RuntimeBacking::Deferred);
-        }
-        let id = resources.borrow_mut().allocate(
-            ResourceOrigin::Compiler(CompilerResource::new(
-                CompilerResourceKind::FilterLenCell,
-                Some(owner),
-                0,
-            )),
-            Type::Constructed(TypeName::UInt(32), Vec::new()),
-            LogicalSize::FixedBytes(4),
-        );
-        let length = SemanticResourceRef(id);
-        runtime.length = filter::RuntimeLength::Stored(length);
-        accesses.push(super::types::SegResourceAccess {
-            resource: length,
-            access: crate::ResourceAccess::Write,
-        });
-        accesses.sort_by_key(|access| access.resource);
-        accesses.dedup_by_key(|access| access.resource);
-    }
-    filter::Output::Runtime(runtime)
-}
-
-fn allocate_soac(
-    owner: super::program::SemanticOpId,
+fn remap_soac_resources(
     soac: Soac<Semantic>,
     nodes: &crate::LookupMap<ValueId, ValueId>,
     places: &crate::LookupMap<PlaceId, PlaceId>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<Soac<Semantic<SemanticResourceRef>>, ConvertError> {
     let mut remap =
-        super::soac::remap::Remap::new(nodes, places, |binding| resource_for_binding(resources, binding));
+        super::soac::remap::Remap::new(nodes, places, |binding| context.resource_for_binding(binding));
     Ok(match soac {
         Soac::Screma(screma::Op {
             inputs,
@@ -350,21 +310,13 @@ fn allocate_soac(
                 output_slots: state.output_slots,
                 resources: state.resources,
             })?;
-            let mut accesses = segment.resources;
-            let output = allocate_filter_publication(
-                owner,
-                remap.filter_output(state.output)?,
-                &segment.output_slots,
-                &mut accesses,
-                resources,
-            );
             Soac::Filter(filter::Op {
                 body: remap.filter_body(body),
                 state: filter::SemanticState {
                     space: segment.space,
-                    output,
+                    output: remap.filter_output(state.output)?,
                     output_slots: segment.output_slots,
-                    resources: accesses,
+                    resources: segment.resources,
                 },
             })
         }
@@ -381,9 +333,9 @@ fn allocate_soac(
     })
 }
 
-fn allocate_graph(
+fn remap_graph_resources(
     graph: super::types::EGraph<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<
     (
         super::types::EGraph<Semantic<SemanticResourceRef>>,
@@ -393,22 +345,131 @@ fn allocate_graph(
     ConvertError,
 > {
     let (mut graph, nodes, blocks) = graph.try_map_resources_and_phase(
-        |binding| resource_for_binding(resources, binding),
+        |binding| context.resource_for_binding(binding),
         |owner, soac, nodes, places| {
-            Ok::<_, ConvertError>((owner, allocate_soac(owner, soac, nodes, places, resources)?))
+            Ok::<_, ConvertError>((owner, remap_soac_resources(soac, nodes, places, context)?))
         },
     )?;
     let mut type_error = None;
     super::program::rewrite_graph_types(&mut graph, |ty| {
-        if let Err(error) = allocate_type_resources(ty, resources) {
+        if let Err(error) = allocate_type_resources(ty, context) {
             type_error = Some(error);
         }
     });
     if let Some(error) = type_error {
         return Err(error);
     }
-    realize_filter_result_types(&mut graph);
     Ok((graph, nodes, blocks))
+}
+
+fn realize_dynamic_publication(mut program: ResourcesAllocated) -> ResourcesAllocated {
+    let resources = &mut program.data.core.resources;
+    for function in &mut program.functions {
+        realize_graph_dynamic_publication(&mut function.graph, resources);
+    }
+    for constant in &mut program.constants {
+        realize_graph_dynamic_publication(&mut constant.graph, resources);
+    }
+    for entry in &mut program.entry_points {
+        realize_graph_dynamic_publication(&mut entry.graph, resources);
+    }
+    program
+}
+
+fn allocate_filter_storage(
+    resources: &mut LogicalResourceArena,
+    owner: super::program::SemanticOpId,
+    elem_ty: Type<TypeName>,
+    size: LogicalSize,
+    backing: Option<ResourceId>,
+    length: Option<ResourceId>,
+) -> filter::RuntimeStorage<ResourceId> {
+    let data = backing.unwrap_or_else(|| {
+        resources.allocate(
+            ResourceOrigin::Compiler(CompilerResource::new(
+                CompilerResourceKind::FilterScratch,
+                Some(owner),
+                0,
+            )),
+            elem_ty,
+            size,
+        )
+    });
+    let length = length.unwrap_or_else(|| {
+        resources.allocate(
+            ResourceOrigin::Compiler(CompilerResource::new(
+                CompilerResourceKind::FilterLenCell,
+                Some(owner),
+                1,
+            )),
+            Type::Constructed(TypeName::UInt(32), Vec::new()),
+            LogicalSize::FixedBytes(4),
+        )
+    });
+    filter::RuntimeStorage { data, length }
+}
+
+fn realize_graph_dynamic_publication(
+    graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>,
+    resources: &mut LogicalResourceArena,
+) {
+    for (_, block) in &mut graph.skeleton.blocks {
+        for effect in &mut block.side_effects {
+            let SideEffectKind::Soac(SoacEffect(
+                owner,
+                Soac::Filter(filter::Op {
+                    body,
+                    state:
+                        filter::SemanticState {
+                            output: filter::Output::Runtime(runtime),
+                            output_slots,
+                            resources: accesses,
+                            ..
+                        },
+                    ..
+                }),
+            )) = &mut effect.kind
+            else {
+                continue;
+            };
+            if output_slots.is_empty() {
+                continue;
+            }
+
+            if matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
+                runtime.backing = accesses
+                    .iter()
+                    .find(|access| access.access != crate::ResourceAccess::Read)
+                    .map(|access| filter::RuntimeBacking::Bound(access.resource))
+                    .unwrap_or(filter::RuntimeBacking::Deferred);
+            }
+            let filter::RuntimeBacking::Bound(backing) = runtime.backing else {
+                continue;
+            };
+            let length = match runtime.length {
+                filter::RuntimeLength::Implicit => None,
+                filter::RuntimeLength::Stored(length) => Some(length.0),
+            };
+            let storage = allocate_filter_storage(
+                resources,
+                *owner,
+                body.output_element_type(),
+                resources[backing.0].size.clone(),
+                Some(backing.0),
+                length,
+            );
+            runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(storage.data));
+            runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(storage.length));
+            if !accesses.iter().any(|access| access.resource.0 == storage.length) {
+                accesses.push(super::types::SegResourceAccess {
+                    resource: SemanticResourceRef(storage.length),
+                    access: crate::ResourceAccess::Write,
+                });
+                accesses.sort_by_key(|access| access.resource);
+            }
+        }
+    }
+    realize_filter_result_types(graph);
 }
 
 fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>) {
@@ -450,9 +511,9 @@ fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<Semanti
     }
 }
 
-fn allocate_function(
+fn remap_function_resources(
     function: super::program::Func<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<super::program::AllocatedFunc, ConvertError> {
     let super::program::Func {
         region,
@@ -464,17 +525,17 @@ fn allocate_function(
         effects,
         graph,
     } = function;
-    let (graph, _, _) = allocate_graph(graph, resources)?;
+    let (graph, _, _) = remap_graph_resources(graph, context)?;
     let params = params.try_map(
-        &mut |binding| resource_for_binding(resources, binding),
+        &mut |binding| context.resource_for_binding(binding),
         &mut |mut ty| {
-            allocate_type_resources(&mut ty, resources)?;
+            allocate_type_resources(&mut ty, context)?;
             Ok(ty)
         },
     )?;
     let mut result_error = None;
     result.for_each_type_mut(|ty| {
-        if let Err(error) = allocate_type_resources(ty, resources) {
+        if let Err(error) = allocate_type_resources(ty, context) {
             result_error = Some(error);
         }
     });
@@ -493,9 +554,9 @@ fn allocate_function(
     })
 }
 
-fn allocate_constant(
+fn remap_constant_resources(
     constant: super::program::ConstantDef<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<super::program::AllocatedConstantDef, ConvertError> {
     let super::program::ConstantDef {
         id,
@@ -504,8 +565,8 @@ fn allocate_constant(
         mut return_ty,
         graph,
     } = constant;
-    let (graph, _, _) = allocate_graph(graph, resources)?;
-    allocate_type_resources(&mut return_ty, resources)?;
+    let (graph, _, _) = remap_graph_resources(graph, context)?;
+    allocate_type_resources(&mut return_ty, context)?;
     Ok(super::program::ConstantDef {
         id,
         name,
@@ -515,11 +576,11 @@ fn allocate_constant(
     })
 }
 
-fn allocate_entry(
+fn remap_entry_resources(
     entry: Entry<Semantic>,
-    resources: &RefCell<LogicalResourceArena>,
+    context: &ResourceAllocationContext,
 ) -> Result<AllocatedEntry, ConvertError> {
-    let declarations = entry_resource_declarations(&entry, resources)?;
+    let declarations = entry_resource_declarations(&entry, context)?;
     let Entry {
         id,
         name,
@@ -534,16 +595,16 @@ fn allocate_entry(
         mut result,
         graph,
     } = entry;
-    let (graph, _, blocks) = allocate_graph(graph, resources)?;
+    let (graph, _, blocks) = remap_graph_resources(graph, context)?;
     let inputs = inputs
         .into_iter()
         .map(|mut input| {
-            allocate_type_resources(&mut input.ty, resources)?;
+            allocate_type_resources(&mut input.ty, context)?;
             Ok(super::ir::EntryInput {
                 inner: input.inner,
                 resource: input
                     .resource
-                    .map(|binding| resource_for_binding(resources, binding))
+                    .map(|binding| context.resource_for_binding(binding))
                     .transpose()?,
             })
         })
@@ -551,7 +612,7 @@ fn allocate_entry(
     let outputs = outputs
         .into_iter()
         .map(|mut output| {
-            allocate_type_resources(&mut output.ty, resources)?;
+            allocate_type_resources(&mut output.ty, context)?;
             for route in &mut output.routes {
                 route.remap_block_ids(&blocks);
             }
@@ -559,7 +620,7 @@ fn allocate_entry(
                 inner: output.inner,
                 resource: output
                     .resource
-                    .map(|binding| resource_for_binding(resources, binding))
+                    .map(|binding| context.resource_for_binding(binding))
                     .transpose()?,
                 routes: output.routes,
             })
@@ -570,21 +631,21 @@ fn allocate_entry(
         .map(|mut result| {
             result.route.remap_block_ids(&blocks);
             Ok(super::ir::InternalResultRoute {
-                resource: resource_for_binding(resources, result.resource)?,
+                resource: context.resource_for_binding(result.resource)?,
                 route: result.route,
             })
         })
         .collect::<Result<Vec<_>, ConvertError>>()?;
     let params = params.try_map(
-        &mut |binding| resource_for_binding(resources, binding),
+        &mut |binding| context.resource_for_binding(binding),
         &mut |mut ty| {
-            allocate_type_resources(&mut ty, resources)?;
+            allocate_type_resources(&mut ty, context)?;
             Ok(ty)
         },
     )?;
     let mut result_error = None;
     result.for_each_type_mut(|ty| {
-        if let Err(error) = allocate_type_resources(ty, resources) {
+        if let Err(error) = allocate_type_resources(ty, context) {
             result_error = Some(error);
         }
     });
@@ -694,7 +755,6 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
                     declaration.resource.0
                 ));
             }
-            check_size(&declaration.size)?;
         }
         for (slot, output) in entry.outputs.iter().enumerate() {
             if output.routes.is_empty() {
@@ -816,13 +876,6 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
             (&mut data.materializations).into_iter().map(|(_, requirement)| requirement.entry_mut()),
         );
         for entry in entries {
-            if let Some(declaration) = entry
-                .resource_declarations
-                .iter_mut()
-                .find(|declaration| declaration.resource.0 == resource)
-            {
-                declaration.size = size.clone();
-            }
             for output in &mut entry.outputs {
                 if output.resource == Some(SemanticResourceRef(resource)) {
                     *output.storage_length_mut().expect("filter output resource must be storage") =

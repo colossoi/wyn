@@ -275,8 +275,6 @@ pub struct SemanticResourceRef(pub ResourceId);
 pub struct SemanticResourceDecl {
     pub resource: SemanticResourceRef,
     pub role: interface::StorageRole,
-    pub elem_ty: Type<TypeName>,
-    pub size: LogicalSize,
 }
 
 /// Why a compiler-introduced resource exists. The kind fixes its physical
@@ -933,25 +931,15 @@ impl AllocatedEntry {
             .collect()
     }
 
-    pub(crate) fn set_resource_declaration(
-        &mut self,
-        resource: ResourceId,
-        role: interface::StorageRole,
-        elem_ty: &Type<TypeName>,
-        size: &LogicalSize,
-    ) {
+    pub(crate) fn set_resource_declaration(&mut self, resource: ResourceId, role: interface::StorageRole) {
         if let Some(declaration) =
             self.resource_declarations.iter_mut().find(|declaration| declaration.resource.0 == resource)
         {
             declaration.role = role;
-            declaration.elem_ty = elem_ty.clone();
-            declaration.size = size.clone();
         } else {
             self.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(resource),
                 role,
-                elem_ty: elem_ty.clone(),
-                size: size.clone(),
             });
         }
     }
@@ -961,10 +949,9 @@ impl AllocatedEntry {
         resource: ResourceId,
         role: interface::StorageRole,
         elem_ty: &Type<TypeName>,
-        size: &LogicalSize,
     ) -> ValueId {
         let view = super::graph_ops::intern_resource_view(&mut self.graph, resource, elem_ty.clone(), None);
-        self.set_resource_declaration(resource, role, elem_ty, size);
+        self.set_resource_declaration(resource, role);
         view
     }
 
@@ -1316,8 +1303,8 @@ fn publish_entry(
             binding: resources.binding(declaration.resource.0),
             role: declaration.role.clone(),
             logical_resource: resources.logical_name(declaration.resource.0),
-            elem_ty: declaration.elem_ty.clone(),
-            length: buffer_len(&declaration.size, resources),
+            elem_ty: resources.elem_ty(declaration.resource.0).clone(),
+            length: buffer_len(resources.size(declaration.resource.0), resources),
         })
         .collect();
     Ok(EntryPublication {
@@ -1420,6 +1407,8 @@ pub type PhysicalEntry =
 pub struct PhysicalResourceTable {
     bindings: Vec<BindingRef>,
     compiler_owned: Vec<bool>,
+    elem_types: Vec<Type<TypeName>>,
+    sizes: Vec<LogicalSize>,
 }
 
 impl PhysicalResourceTable {
@@ -1441,8 +1430,12 @@ impl PhysicalResourceTable {
         used.extend(reserved);
         let mut bindings = Vec::with_capacity(resources.len());
         let mut compiler_owned = Vec::with_capacity(resources.len());
+        let mut elem_types = Vec::with_capacity(resources.len());
+        let mut sizes = Vec::with_capacity(resources.len());
         for resource in resources {
             compiler_owned.push(matches!(resource.origin, ResourceOrigin::Compiler(_)));
+            elem_types.push(resource.elem_ty.clone());
+            sizes.push(resource.size.clone());
             let binding = match &resource.origin {
                 ResourceOrigin::Host(host) => host.binding,
                 ResourceOrigin::Compiler(_) => loop {
@@ -1457,6 +1450,8 @@ impl PhysicalResourceTable {
         Self {
             bindings,
             compiler_owned,
+            elem_types,
+            sizes,
         }
     }
 
@@ -1466,6 +1461,14 @@ impl PhysicalResourceTable {
 
     pub fn is_compiler(&self, resource: ResourceId) -> bool {
         self.compiler_owned[resource.index()]
+    }
+
+    pub fn elem_ty(&self, resource: ResourceId) -> &Type<TypeName> {
+        &self.elem_types[resource.index()]
+    }
+
+    pub fn size(&self, resource: ResourceId) -> &LogicalSize {
+        &self.sizes[resource.index()]
     }
 
     /// Descriptor-stable identity for one compiler-owned logical resource.
@@ -1792,7 +1795,7 @@ fn physicalize_entry(
         parameter_inputs,
         outputs,
         internal_results: _,
-        resource_declarations: mut declarations,
+        resource_declarations: declarations,
         params,
         result,
         graph,
@@ -1844,17 +1847,18 @@ fn physicalize_entry(
         |slot| slot,
         |parameter| parameter,
     );
-    for declaration in &mut declarations {
-        physicalize_type_resources(&mut declaration.elem_ty, resources);
-    }
     let resource_declarations = declarations
         .into_iter()
-        .map(|declaration| interface::StorageBindingDecl {
-            binding: resources.binding(declaration.resource.0),
-            role: declaration.role,
-            logical_resource: resources.logical_name(declaration.resource.0),
-            elem_ty: declaration.elem_ty,
-            length: buffer_len(&declaration.size, resources),
+        .map(|declaration| {
+            let mut elem_ty = resources.elem_ty(declaration.resource.0).clone();
+            physicalize_type_resources(&mut elem_ty, resources);
+            interface::StorageBindingDecl {
+                binding: resources.binding(declaration.resource.0),
+                role: declaration.role,
+                logical_resource: resources.logical_name(declaration.resource.0),
+                elem_ty,
+                length: buffer_len(resources.size(declaration.resource.0), resources),
+            }
         })
         .collect();
     Ok(PhysicalEntry {

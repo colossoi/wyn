@@ -69,12 +69,9 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     );
     let mut program = into_allocated(program);
     let resource = program.data.core.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
-    let resource_size = program.data.core.resources[resource].size.clone();
     program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
         resource: SemanticResourceRef(resource),
         role: interface::StorageRole::Input,
-        elem_ty: unit_ty(),
-        size: resource_size,
     });
     program
 }
@@ -149,6 +146,27 @@ fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
 fn allocated_resource_verifier_accepts_resource_only_program() {
     let program = allocated_program(LogicalSize::Unspecified);
     verify_allocated_resources(&program).expect("resource-normalized program");
+}
+
+#[test]
+fn entry_publication_reads_type_and_size_from_resource_arena() {
+    let mut program = allocated_program(LogicalSize::FixedBytes(12));
+    let resource = program.entry_points[0].resource_declarations[0].resource.0;
+    program.data.core.resources.reclassify_as_compiler(
+        resource,
+        CompilerResource::new(CompilerResourceKind::Staging, None, 0),
+    );
+    let physical = PhysicalResourceTable::allocate(&program.data.core.resources, &mut IdSource::new());
+
+    let publication = program.entry_points[0].publication(&physical).expect("publish allocated entry");
+    let [binding] = publication.storage_bindings.as_slice() else {
+        panic!("expected one compiler-owned storage declaration")
+    };
+    assert_eq!(binding.elem_ty, unit_ty());
+    assert_eq!(
+        binding.length,
+        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: 12 })
+    );
 }
 
 #[test]

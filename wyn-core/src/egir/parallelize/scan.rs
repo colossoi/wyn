@@ -88,40 +88,19 @@ impl ScanPhase2Spec<'_> {
             semantic_ids,
             effect_ids,
         );
-        let scratch_len = dispatch_worker_logical_size(&self.elem_ty);
-        builder.declare_intermediate_storage_sized(
-            self.scratch.block_sums,
-            self.elem_ty.clone(),
-            scratch_len.clone(),
-        );
-        builder.declare_intermediate_storage_sized(
-            self.scratch.block_offsets,
-            self.elem_ty.clone(),
-            scratch_len,
-        );
+        builder.declare_intermediate_storage(self.scratch.block_sums);
+        builder.declare_intermediate_storage(self.scratch.block_offsets);
         for declaration in self.capture_inputs {
-            builder.declare_input_storage_sized(
-                declaration.resource.0,
-                declaration.elem_ty.clone(),
-                declaration.size.clone(),
-            );
+            builder.declare_input_storage(declaration.resource.0);
         }
         if let Some(len_out) = self.total_out {
-            builder.declare_output_storage_sized(
-                len_out,
-                self.elem_ty.clone(),
-                egir::program::LogicalSize::FixedBytes(4),
-            );
+            builder.declare_output_storage(len_out);
         }
         if let Some(output) = &self.reduction_output {
             let mut declared = std::collections::HashSet::new();
             for store in output.stores {
                 if declared.insert(store.output.0) {
-                    builder.declare_output_storage_sized(
-                        store.output.0,
-                        store.output.1.clone(),
-                        store.output.2.clone(),
-                    );
+                    builder.declare_output_storage(store.output.0);
                 }
             }
         }
@@ -275,7 +254,6 @@ struct ExclusiveScanPhase2 {
 /// One output of the canonical post-scan lambda.
 pub(super) struct ScanPostOutput {
     pub resource: ResourceId,
-    pub elem_ty: Type<TypeName>,
     pub view_ty: Type<TypeName>,
 }
 
@@ -354,31 +332,19 @@ impl ScanPhase3Spec<'_> {
             effect_ids,
         );
         if self.post.is_none() {
-            builder.declare_output_storage(self.output_resource, self.elem_ty.clone());
+            builder.declare_output_storage(self.output_resource);
         } else {
-            builder.declare_intermediate_storage_sized(
-                self.output_resource,
-                self.elem_ty.clone(),
-                dispatch_worker_logical_size(&self.elem_ty),
-            );
+            builder.declare_intermediate_storage(self.output_resource);
         }
         for declaration in &input_declarations {
-            builder.declare_input_storage_sized(
-                declaration.resource.0,
-                declaration.elem_ty.clone(),
-                declaration.size.clone(),
-            );
+            builder.declare_input_storage(declaration.resource.0);
         }
         if let Some(post) = &self.post {
             for output in &post.outputs {
-                builder.declare_output_storage(output.resource, output.elem_ty.clone());
+                builder.declare_output_storage(output.resource);
             }
         }
-        builder.declare_intermediate_storage_sized(
-            self.block_offsets,
-            self.elem_ty.clone(),
-            dispatch_worker_logical_size(&self.elem_ty),
-        );
+        builder.declare_intermediate_storage(self.block_offsets);
         let arr_ty = types::view_array_with_size(&self.elem_ty, Type::Variable(0), types::no_buffer());
         let block_offsets_view = builder.emit_storage_view(self.block_offsets, arr_ty.clone());
         let output_len = graph_ops::intern_resource_len(builder.graph_mut(), self.output_resource, None);
@@ -464,7 +430,6 @@ impl ScanPhase3Spec<'_> {
 }
 
 struct ScanOutput {
-    elem_type: Type<TypeName>,
     resource: SemanticResourceRef,
     view_type: Type<TypeName>,
 }
@@ -561,7 +526,6 @@ pub(super) fn analyze_scan_candidate(
             return Ok(None);
         };
         outputs.push(ScanOutput {
-            elem_type: located.op.form.post.result_types[post_field].clone(),
             resource,
             view_type: result.ty().clone(),
         });
@@ -653,7 +617,7 @@ impl BoundScan {
     }
 }
 
-impl KernelPlanBuilder<'_, '_> {
+impl KernelPlanBuilder<'_> {
     pub(super) fn emit_scan_entry(
         &mut self,
         mut entry: egir::program::PlannedEntry,
@@ -1005,8 +969,6 @@ impl KernelPlanBuilder<'_, '_> {
             entry.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(resource),
                 role: interface::StorageRole::Intermediate,
-                elem_ty: elem_ty.clone(),
-                size: self.resources[resource].size.clone(),
             });
         }
 
@@ -1033,8 +995,7 @@ impl KernelPlanBuilder<'_, '_> {
                 },
             ),
         };
-        let mut phase2 = phase2.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase2.body, self.resources);
+        let phase2 = phase2.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
 
         let swap_elem_ty = elem_ty.clone();
         let operator_capture_types = operator_captures
@@ -1072,7 +1033,6 @@ impl KernelPlanBuilder<'_, '_> {
                 .iter()
                 .map(|output| ScanPostOutput {
                     resource: output.resource.0,
-                    elem_ty: output.elem_type.clone(),
                     view_ty: output.view_type.clone(),
                 })
                 .collect(),
@@ -1089,8 +1049,7 @@ impl KernelPlanBuilder<'_, '_> {
             width: total_threads,
             post: post_phase,
         };
-        let mut phase3 = phase3.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
-        apply_manifest_resource_sizes(&mut phase3.body, self.resources);
+        let phase3 = phase3.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
 
         phase1_resources = merge_scheduled_resources(
             &phase1_resources,

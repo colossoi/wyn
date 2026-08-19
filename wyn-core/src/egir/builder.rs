@@ -12,8 +12,7 @@ use smallvec::SmallVec;
 
 use super::graph_ops;
 use super::program::{
-    AllocatedEntry, LogicalSize, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl,
-    SemanticResourceRef,
+    AllocatedEntry, PlannedEntry, SemanticOpIdSource, SemanticResourceDecl, SemanticResourceRef,
 };
 use super::soac::screma;
 use super::types::{
@@ -63,50 +62,23 @@ impl<'a> EntryBuilder<'a> {
         }
     }
 
-    fn declare(
-        &mut self,
-        resource: ResourceId,
-        role: interface::StorageRole,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) {
+    fn declare(&mut self, resource: ResourceId, role: interface::StorageRole) {
         self.resource_declarations.push(SemanticResourceDecl {
             resource: SemanticResourceRef(resource),
             role,
-            elem_ty,
-            size,
         });
     }
 
-    pub fn declare_intermediate_storage_sized(
-        &mut self,
-        resource: ResourceId,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) {
-        self.declare(resource, interface::StorageRole::Intermediate, elem_ty, size);
+    pub fn declare_intermediate_storage(&mut self, resource: ResourceId) {
+        self.declare(resource, interface::StorageRole::Intermediate);
     }
 
-    pub fn declare_input_storage_sized(
-        &mut self,
-        resource: ResourceId,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) {
-        self.declare(resource, interface::StorageRole::Input, elem_ty, size);
+    pub fn declare_input_storage(&mut self, resource: ResourceId) {
+        self.declare(resource, interface::StorageRole::Input);
     }
 
-    pub fn declare_output_storage(&mut self, resource: ResourceId, elem_ty: Type<TypeName>) {
-        self.declare_output_storage_sized(resource, elem_ty, LogicalSize::Unspecified);
-    }
-
-    pub fn declare_output_storage_sized(
-        &mut self,
-        resource: ResourceId,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) {
-        self.declare(resource, interface::StorageRole::Output, elem_ty, size);
+    pub fn declare_output_storage(&mut self, resource: ResourceId) {
+        self.declare(resource, interface::StorageRole::Output);
     }
 
     pub fn graph_mut(&mut self) -> &mut AllocatedGraph {

@@ -118,12 +118,12 @@ pub(super) fn analyze_reduction_routing(
     let mut stores = Vec::new();
     for (resource, route) in entry.resource_routes() {
         let resource = resource.0;
-        let declaration = entry.resource_declarations.iter().find(|declaration| {
+        entry.resource_declarations.iter().find(|declaration| {
             declaration.role == interface::StorageRole::Output && declaration.resource.0 == resource
         })?;
         let destination = (
             resource,
-            declaration.elem_ty.clone(),
+            resources[resource].elem_ty.clone(),
             resources[resource].size.clone(),
         );
         let value = route.source.value;
@@ -260,7 +260,7 @@ impl BoundReduce {
     }
 }
 
-impl KernelPlanBuilder<'_, '_> {
+impl KernelPlanBuilder<'_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
         mut entry: egir::program::PlannedEntry,
@@ -367,8 +367,6 @@ impl KernelPlanBuilder<'_, '_> {
             entry.resource_declarations.push(SemanticResourceDecl {
                 resource: SemanticResourceRef(accumulator.partial),
                 role: interface::StorageRole::Intermediate,
-                elem_ty: accumulator.scratch_type.clone(),
-                size: self.resources[accumulator.partial].size.clone(),
             });
         }
         // A moved output binding may also carry an Output storage declaration
@@ -895,20 +893,12 @@ impl ReduceCombineSpec<'_> {
             semantic_ids,
             effect_ids,
         );
-        b.declare_intermediate_storage_sized(
-            self.partials,
-            self.elem_ty.clone(),
-            dispatch_worker_logical_size(&self.elem_ty),
-        );
+        b.declare_intermediate_storage(self.partials);
         for declaration in self.capture_inputs {
-            b.declare_input_storage_sized(
-                declaration.resource.0,
-                declaration.elem_ty.clone(),
-                declaration.size.clone(),
-            );
+            b.declare_input_storage(declaration.resource.0);
         }
-        for (resource, ty, size) in &output_declarations {
-            b.declare_output_storage_sized(*resource, ty.clone(), size.clone());
+        for (resource, _, _) in &output_declarations {
+            b.declare_output_storage(*resource);
         }
 
         let neutrals = self

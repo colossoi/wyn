@@ -436,7 +436,7 @@ fn bucket_dispatch_topology(
     ))
 }
 
-impl super::KernelPlanBuilder<'_, '_> {
+impl super::KernelPlanBuilder<'_> {
     pub(super) fn lower_parallel_bucket(
         &mut self,
         body: egir::program::PlannedEntry,
@@ -472,22 +472,17 @@ impl super::KernelPlanBuilder<'_, '_> {
             counts: egir::program::SemanticResourceRef(candidate.counts),
             overflow: egir::program::SemanticResourceRef(candidate.overflow),
         };
-        let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
         let mut declarations = body.resource_declarations.clone();
         if !declarations.iter().any(|declaration| declaration.resource == storage.counts) {
             declarations.push(egir::program::SemanticResourceDecl {
                 resource: storage.counts,
                 role: interface::StorageRole::Intermediate,
-                elem_ty: u32_ty.clone(),
-                size: egir::program::LogicalSize::FixedBytes(u64::from(candidate.bucket_count) * 4),
             });
         }
         if !declarations.iter().any(|declaration| declaration.resource == storage.overflow) {
             declarations.push(egir::program::SemanticResourceDecl {
                 resource: storage.overflow,
                 role: interface::StorageRole::Intermediate,
-                elem_ty: u32_ty,
-                size: egir::program::LogicalSize::FixedBytes(4),
             });
         }
 

@@ -7,20 +7,8 @@ use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::types::OperandRef;
 use crate::interface;
 use crate::op;
-use crate::ssa;
 use crate::types;
 use crate::types::TypeExt;
-
-pub(super) fn apply_manifest_resource_sizes(
-    entry: &mut egir::program::PlannedEntry,
-    resources: &egir::program::LogicalResourceArena,
-) {
-    for declaration in &mut entry.resource_declarations {
-        let resource = declaration.resource.0;
-        let logical = &resources[resource];
-        declaration.size = logical.size.clone();
-    }
-}
 
 /// Input-storage declarations needed when captured operator values are cloned
 /// into a synthesized phase. Non-cloneable captures and captures of writable
@@ -196,12 +184,6 @@ fn cast_u32_to_index(graph: &mut EGraph, v: ValueId, index_ty: &Type<TypeName>) 
         }
         other => Err(format!("chunk arithmetic: unsupported index type {:?}", other)),
     }
-}
-
-pub(super) fn dispatch_worker_logical_size(elem_ty: &Type<TypeName>) -> egir::program::LogicalSize {
-    ssa::layout::type_byte_size(elem_ty).map_or(egir::program::LogicalSize::Unspecified, |bytes| {
-        egir::program::LogicalSize::SameAsDispatch { elem_bytes: bytes }
-    })
 }
 
 /// Build a two-argument (`a`, `b`) helper function of type `T -> T -> T` named

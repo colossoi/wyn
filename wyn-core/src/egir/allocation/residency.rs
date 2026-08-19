@@ -97,7 +97,6 @@ struct RuntimeArrayHandoff {
     length: ResourceId,
     elem_ty: Type<TypeName>,
     result_ty: Type<TypeName>,
-    size: LogicalSize,
 }
 
 struct ParallelPrelude {
@@ -1032,39 +1031,22 @@ fn materialize_runtime_array_result(
         producer_storage,
         projection,
     );
-    let scratch = backing.unwrap_or_else(|| {
-        data.alloc_compiler_resource(
-            CompilerResource::new(CompilerResourceKind::FilterScratch, Some(producer_id), 0),
-            elem_ty.clone(),
-            size.clone(),
-        )
-    });
-    let length = stored_length.unwrap_or_else(|| {
-        data.alloc_compiler_resource(
-            CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(producer_id), 1),
-            Type::Constructed(TypeName::UInt(32), vec![]),
-            LogicalSize::FixedBytes(4),
-        )
-    });
+    let storage = super::allocate_filter_storage(
+        &mut data.core.resources,
+        producer_id,
+        elem_ty.clone(),
+        size.clone(),
+        backing,
+        stored_length,
+    );
     let handoff = RuntimeArrayHandoff {
-        data: scratch,
-        length,
+        data: storage.data,
+        length: storage.length,
         elem_ty,
         result_ty,
-        size,
     };
-    producer_entry.set_resource_declaration(
-        handoff.data,
-        StorageRole::Output,
-        &handoff.elem_ty,
-        &handoff.size,
-    );
-    producer_entry.set_resource_declaration(
-        handoff.length,
-        StorageRole::Output,
-        &Type::Constructed(TypeName::UInt(32), vec![]),
-        &LogicalSize::FixedBytes(4),
-    );
+    producer_entry.set_resource_declaration(handoff.data, StorageRole::Output);
+    producer_entry.set_resource_declaration(handoff.length, StorageRole::Output);
     let effect = producer_entry.graph.skeleton.effect_mut(projected_site);
     let SideEffectKind::Soac(SoacEffect(
         _,
@@ -1139,13 +1121,8 @@ fn rewrite_runtime_array_source(
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    entry.set_resource_declaration(handoff.data, StorageRole::Input, &handoff.elem_ty, &handoff.size);
-    entry.set_resource_declaration(
-        handoff.length,
-        StorageRole::Input,
-        &u32_ty,
-        &LogicalSize::FixedBytes(4),
-    );
+    entry.set_resource_declaration(handoff.data, StorageRole::Input);
+    entry.set_resource_declaration(handoff.length, StorageRole::Input);
     let length_view =
         graph_ops::intern_resource_view(&mut entry.graph, handoff.length, u32_ty.clone(), None);
     let (survivor_count, load_effect) =
@@ -1198,12 +1175,7 @@ fn configure_operation_materialization(
 ) -> Result<(), String> {
     let mut output_views = Vec::new();
     for (&resource, output) in output_resources.iter().zip(output_specs) {
-        output_views.push(producer.declare_resource_view(
-            resource,
-            StorageRole::Output,
-            &output.elem_ty,
-            &output.size,
-        ));
+        output_views.push(producer.declare_resource_view(resource, StorageRole::Output, &output.elem_ty));
         let field = producer_result.field(output.field).expect("materialized output field exists");
         let source = field.single_value().expect("materialized output has one value source");
         producer.internal_results.push(super::super::ir::InternalResultRoute {
@@ -1350,7 +1322,7 @@ fn rewrite_materialized_operation_source(
             view.value()
         };
         replacements.push((source, value, resource));
-        entry.set_resource_declaration(resource, StorageRole::Input, &output.elem_ty, &output.size);
+        entry.set_resource_declaration(resource, StorageRole::Input);
     }
     retarget_input_metadata(&mut entry.graph, &array_replacements)?;
     for &(source, value, _) in &replacements {
@@ -1436,12 +1408,8 @@ fn materialize_stage_prelude(
         .collect::<Vec<_>>();
     let mut producer_entry = producer_entry;
     for (resource, value) in &handoffs {
-        let output_view = producer_entry.declare_resource_view(
-            *resource,
-            StorageRole::Output,
-            &value.elem_ty,
-            &value.size,
-        );
+        let output_view =
+            producer_entry.declare_resource_view(*resource, StorageRole::Output, &value.elem_ty);
         emit_scalar_handoff_store(
             &mut producer_entry.graph,
             result_block,
@@ -1457,7 +1425,7 @@ fn materialize_stage_prelude(
     let mut loaded_values = Vec::with_capacity(handoffs.len());
     let mut load_effects = Vec::with_capacity(handoffs.len());
     for (resource, value) in &handoffs {
-        let view = entry.declare_resource_view(*resource, StorageRole::Input, &value.elem_ty, &value.size);
+        let view = entry.declare_resource_view(*resource, StorageRole::Input, &value.elem_ty);
         let (loaded, load_effect) = detached_scalar_handoff_load(
             &mut entry.graph,
             view,

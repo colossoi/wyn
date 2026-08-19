@@ -181,21 +181,59 @@ Each notes how it's enforced; when you move a sub-pass, check it here.
 
 ### EGIR (Acyclic E-Graph IR)
 
-| Checkpoint transition | Sub-pass sequence | Established result |
-|-----------------------|-------------------|--------------------|
-| TLC input bounds inferred -> `Converted` | `convert_program` | Discover and hoist pure arity-zero constants; convert the remaining functions and entries to raw per-body e-graphs; normalize callable interface parameters. Entry conversion finalizes complete output routes and ABI size policies; no scheduling or physical resource choice occurs here |
-| `Converted` -> `Segmented` | `reify_soacs`, `verify_canonical_resource_accesses` (debug) | Link output routes to semantic producers and reify every reachable raw SOAC with authoritative spaces, bodies, captures, canonical uniform publication/resource effects, placement, and dependencies; in debug builds, verify stored Screma and Filter resource summaries |
-| `Segmented` -> `SemanticOperationsOptimized` | (`semantic_graph::dependencies`, `analyze_dead_seg_ops`, (`apply_dead_seg_ops` \| `rewrite_once`)) to fixpoint | Eliminate dead SegOps and fuse conflict-free operations in one shared fixpoint, rebuilding the dependency graph before every attempted rewrite |
-| `SemanticOperationsOptimized` -> `Optimized` | `lift_stage_uniform_values`, `semantic_graph::verify` (debug) | Lift stage-uniform values and, in debug builds, validate the final semantic dependency graph |
-| `Optimized` -> `ResourcesAllocated` | `allocate_semantic_resources`, `classify_existing_compiler_resources`, `resolve_residency`, `resolve_scratch_sizes`, `strip_compiler_abi`, `verify_allocated_resources` (debug) | Establish target-independent logical resources, residency, output destinations, scratch sizes, and the post-allocation ABI, then validate the result in debug builds |
-| `ResourcesAllocated` -> `Planned` | `bind_mapped_output_destinations`, `planning::analyze`, (`allocate_scratch` \| `serial_plan`), `resource_flows`, (`build_parallel_schedule` \| `build_serial_schedule`), `install_generated_callables`, `KernelPlan::finalize` | Select target-aware recipes, allocate selected work buffers, build the schedule and generated callables, and finalize bindings, physical entries, validation, and the published descriptor |
-| `Planned` -> `SoacsExpanded` | `expand_soacs` | Expand each selected physical SOAC recipe into explicit loop/kernel operations |
-| `SoacsExpanded` -> `PartiallyInlined` | `partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops to a bounded fixpoint so invariant subgraphs can hoist |
-| `PartiallyInlined` -> `Materialized` | `materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control/data flow |
-| `Materialized` -> `Rewritten` | `rewrite` | Add cost-arbitrated equivalent e-graph alternatives, such as multiply chains for constant powers |
-| `Rewritten` -> `SkeletonOptimized` | `optimize_skeleton` | Fold branches and eliminate redundant block parameters in the effect skeleton |
-| `SkeletonOptimized` -> `ResourcesErased` | `erase_resources` | Replace compile-time resource handles with their physical storage representation |
-| `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the physical e-graphs into backend-bound SSA, naturally applying DCE, scoped CSE, and LICM |
+Each row below is one sub-pass. The separate **Checkpoint orchestrator** column
+names the public transition function; an orchestrator is not an additional
+sub-pass merely because it calls the listed rows. Consecutive rows for the same
+orchestrator are in execution order unless the **Role / condition** column marks
+them as alternatives or part of a fixpoint.
+
+`allocate_semantic_resources` is a nested orchestrator within
+`plan_logical_resources`: it runs the first four allocation rows and therefore
+does not receive a sub-pass row of its own.
+
+The global logical-resource arena is authoritative for element types and
+logical sizes. Entry-local `SemanticResourceDecl` values contain only a
+resource identity and its role in that entry. Dynamic Filter storage follows
+one allocation policy: host output slots and cross-scheduling-boundary
+residency determine the required backing and length resources, then the Filter
+publication state is rewritten to name them.
+
+| Checkpoint orchestrator | Sub-pass | Role / condition |
+|-------------------------|----------|------------------|
+| **`to_egraph`** | `convert_program` | Discover and hoist pure arity-zero constants; convert the remaining functions and entries to raw per-body e-graphs; normalize callable interfaces; finalize output routes and ABI size policies without choosing scheduling or physical resources |
+| **`reify_soacs`** | `reify_soacs` | Link output routes to semantic producers and reify reachable raw SOACs with authoritative spaces, bodies, captures, publication/resource effects, placement, and dependencies |
+| **`reify_soacs`** | `verify_canonical_resource_accesses` | Debug builds only: verify stored Screma and Filter resource summaries |
+| **`optimize_semantic_operations`** | `semantic_graph::dependencies` | At the start of every fixpoint iteration, rebuild the dependency graph used by legality checks |
+| **`optimize_semantic_operations`** | `analyze_dead_seg_ops` | Find the next dead segmented operation before attempting fusion |
+| **`optimize_semantic_operations`** | `apply_dead_seg_ops` | Run when dead-operation analysis returns a patch, then restart the fixpoint |
+| **`optimize_semantic_operations`** | `rewrite_once` | Run when there is no dead-operation patch; apply at most one legal fusion rewrite and restart if it changed the graph |
+| **`lift_stage_uniform_values`** | `lift_stage_uniform_values` | Lift values that are uniform at their execution stage after the fused graph is final |
+| **`lift_stage_uniform_values`** | `semantic_graph::verify` | Debug builds only: validate the final semantic dependency graph |
+| **`plan_logical_resources`** | `reserve_host_resources` | Reserve every authored interface binding before any cross-resource size is resolved |
+| **`plan_logical_resources`** | `resolve_host_resource_sizes` | Resolve logical host-resource sizes after all referenced bindings exist |
+| **`plan_logical_resources`** | `remap_program_resources` | Replace descriptor bindings in types, graphs, interfaces, and routes with target-independent logical resource identities |
+| **`plan_logical_resources`** | `realize_dynamic_publication` | Realize direct host publication of dynamic results, binding Filter output backing and allocating its length resource through the shared Filter storage policy |
+| **`plan_logical_resources`** | `classify_existing_compiler_resources` | Classify pre-existing intermediate resources as compiler-owned staging |
+| **`plan_logical_resources`** | `resolve_residency` | Establish target-independent residency, materialization boundaries, and legal output destinations; dynamic results crossing a scheduling boundary use the same Filter storage policy as direct host publication |
+| **`plan_logical_resources`** | `resolve_scratch_sizes` | Derive logical sizes and host ABI lengths for Filter scratch resources |
+| **`plan_logical_resources`** | `strip_compiler_abi` | Remove compiler-only storage resources from the host-facing ABI |
+| **`plan_logical_resources`** | `verify_allocated_resources` | Debug builds only: validate logical-resource references, sizes, declarations, and output routes |
+| **`plan`** | `bind_mapped_output_destinations` | Bind mapped entry outputs to the resource destinations selected during logical planning |
+| **`plan`** | `planning::analyze` | Analyze target-aware physical recipes |
+| **`plan`** | `allocate_scratch` | Parallel schedule only: allocate work buffers required by selected recipes |
+| **`plan`** | `serial_plan` | Serial schedule only: select serial recipes without parallel scratch allocation |
+| **`plan`** | `resource_flows` | Derive compiler-resource producer/consumer edges from rewritten entries |
+| **`plan`** | `build_parallel_schedule` | Parallel schedule only: build dispatches and generated callables |
+| **`plan`** | `build_serial_schedule` | Serial schedule only: build the single-stage schedule and generated callables |
+| **`plan`** | `install_generated_callables` | Add scheduler-generated callables and their identities to the program |
+| **`plan`** | `KernelPlan::finalize` | Finalize bindings, physical entries, validation, and the published descriptor |
+| **`expand_soacs`** | `expand_soacs` | Expand each selected physical SOAC recipe into explicit loop or kernel operations |
+| **`partially_inline_calls`** | `partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops to a bounded fixpoint so invariant subgraphs can hoist |
+| **`materialize_dynamic_extracts`** | `materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control and data flow |
+| **`rewrite`** | `rewrite` | Add cost-arbitrated equivalent e-graph alternatives, such as multiply chains for constant powers |
+| **`optimize_skeleton`** | `optimize_skeleton` | Fold branches and eliminate redundant block parameters in the effect skeleton |
+| **`erase_resources`** | `erase_resources` | Replace compile-time resource handles with their physical storage representation |
+| **`elaborate`** | `elaborate` | Demand-elaborate physical e-graphs into backend-bound SSA, naturally applying DCE, scoped CSE, and LICM |
 
 The EGIR order is also load-bearing:
 

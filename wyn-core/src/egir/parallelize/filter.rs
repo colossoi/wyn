@@ -6,7 +6,7 @@ use crate::egir;
 use crate::egir::soac::filter as filter_soac;
 use crate::interface;
 
-impl KernelPlanBuilder<'_, '_> {
+impl KernelPlanBuilder<'_> {
     pub(super) fn lower_parallel_filter(
         &mut self,
         body: egir::program::PlannedEntry,
@@ -31,17 +31,17 @@ struct FilterKernelFamily {
     scan_grid: FilterScanGrid,
 }
 
-struct FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
-    lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
+struct FilterKernelFamilyBuilder<'lowering, 'effects> {
+    lowering: &'lowering mut KernelPlanBuilder<'effects>,
     entry: egir::program::PlannedEntry,
     candidate: FilterCandidate,
     work: filter_soac::WorkBuffers,
     elem_ty: Type<TypeName>,
 }
 
-impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'resources, 'effects> {
+impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
     fn new(
-        lowering: &'lowering mut KernelPlanBuilder<'resources, 'effects>,
+        lowering: &'lowering mut KernelPlanBuilder<'effects>,
         entry: egir::program::PlannedEntry,
         recipe: BoundFilter,
     ) -> Self {
@@ -146,7 +146,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             total_out: Some(self.candidate.storage.length.0),
             reduction_output: None,
         };
-        let mut combine = combine
+        let combine = combine
             .build(
                 &mut self.lowering.identities,
                 self.lowering.semantic_ids,
@@ -158,7 +158,6 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
                     self.entry.name
                 )
             })?;
-        apply_manifest_resource_sizes(&mut combine.body, self.lowering.resources);
         let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
         let elem_ty = self.elem_ty.clone();
         let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
@@ -176,12 +175,11 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
             width: self.candidate.scan_grid.workgroup_width(),
             post: None,
         };
-        let mut apply_offsets = apply_offsets.build(
+        let apply_offsets = apply_offsets.build(
             &mut self.lowering.identities,
             self.lowering.semantic_ids,
             self.lowering.effect_ids,
         )?;
-        apply_manifest_resource_sizes(&mut apply_offsets.body, self.lowering.resources);
         Ok((combine, apply_offsets))
     }
 
@@ -210,13 +208,7 @@ impl<'lowering, 'resources, 'effects> FilterKernelFamilyBuilder<'lowering, 'reso
         resource: SemanticResourceRef,
         role: interface::StorageRole,
     ) -> SemanticResourceDecl {
-        let logical = &self.lowering.resources[resource.0];
-        SemanticResourceDecl {
-            resource,
-            role,
-            elem_ty: self.elem_ty.clone(),
-            size: logical.size.clone(),
-        }
+        SemanticResourceDecl { resource, role }
     }
 }
 
