@@ -3459,6 +3459,36 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_compute_stage_inlines_nested_render_target_helpers() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+def read_depth(target: render_target<f32>) f32 =
+  target_load(target, @[0i32, 0i32], 0u32)
+
+def keep(target: render_target<f32>) bool =
+  read_depth(target) > 0.0
+
+entry render_target_filter_helper(source: render_target<f32>) render_target<f32> =
+  let visible =
+    let kept = filter(|i| keep(source), iota(1)) in
+    { instances = kept }
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |_| vertex_output(
+      @[f32(length(visible.instances)) * 0.0, 0.0, 0.0, 1.0], ())) in
+  shade(source, raster, |_| 1.0)
+"#;
+            compile_thru_spirv(source)
+                .expect("nested helpers must expose render-target reads before compute-stage extraction");
+        })
+        .expect("spawn nested render-target helper regression")
+        .join()
+        .expect("nested render-target helper regression panicked");
+}
+
+#[test]
 fn unified_root_rejects_reusing_consumed_raster() {
     let source = r#"
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =

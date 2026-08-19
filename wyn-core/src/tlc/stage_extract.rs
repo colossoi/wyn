@@ -143,7 +143,7 @@ fn inline_stage_helpers(
     StageHelperInliner {
         helpers,
         term_ids,
-        changed: false,
+        active: LookupSet::new(),
     }
     .rewrite_owned(term)
 }
@@ -151,7 +151,7 @@ fn inline_stage_helpers(
 struct StageHelperInliner<'a> {
     helpers: &'a LookupMap<SymbolId, StageHelper>,
     term_ids: &'a mut TermIdSource,
-    changed: bool,
+    active: LookupSet<SymbolId>,
 }
 
 impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
@@ -162,16 +162,26 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
     fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
         let candidate = match &term.kind {
             TermKind::App { func, args } => match &func.kind {
-                TermKind::Var(VarRef::Symbol(symbol)) => {
-                    self.helpers.get(symbol).filter(|candidate| candidate.params.len() == args.len())
-                }
+                TermKind::Var(VarRef::Symbol(symbol)) => self
+                    .helpers
+                    .get(symbol)
+                    .filter(|candidate| candidate.params.len() == args.len())
+                    .cloned()
+                    .map(|candidate| {
+                        let carries_render_target =
+                            args.iter().any(|argument| is_render_target_type(&argument.ty));
+                        (*symbol, candidate, carries_render_target)
+                    }),
                 _ => None,
             },
             _ => None,
         };
-        let Some(candidate) = candidate else {
+        let Some((symbol, candidate, carries_render_target)) = candidate else {
             return (term, RewriteDecision::Unchanged);
         };
+        if !self.active.insert(symbol) {
+            return (term, RewriteDecision::Unchanged);
+        }
         let params = candidate.params.clone();
         let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
         let Term { id, span, kind, .. } = term;
@@ -180,7 +190,16 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         };
         let mut replacement = super::inline::build_inline_lets(&params, args, body, span, self.term_ids);
         replacement.id = id;
-        self.changed = true;
+        // The normal post-order rewrite intentionally expands each helper only
+        // once; revisiting every inserted body would explode prelude SOAC
+        // helpers such as filter. Render targets cannot survive as shader-stage
+        // values, though, so recursively expose just those helper chains before
+        // target_load/target_sample rewriting. Active-call tracking leaves a
+        // recursive source edge intact instead of recursing forever.
+        if carries_render_target {
+            replacement = self.rewrite_owned(replacement);
+        }
+        self.active.remove(&symbol);
         (replacement, RewriteDecision::Changed)
     }
 }
