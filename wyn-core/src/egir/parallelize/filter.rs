@@ -81,8 +81,12 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
             .entry
             .resource_declarations
             .iter()
-            .filter(|declaration| declaration.role == StorageRole::Input)
+            .filter(|declaration| declaration.role.reads())
             .cloned()
+            .map(|mut declaration| {
+                declaration.role = StorageRole::Input;
+                declaration
+            })
             .collect::<Vec<_>>();
         storage.push(self.declaration(self.work.flags, StorageRole::Output));
         let name = format!("{}_filter_flags", self.entry.name);

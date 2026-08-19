@@ -394,6 +394,7 @@ fn program_interface<Tag, GlobalContext>(
                 let role = match sb.role {
                     wyn_core::interface::StorageRole::Input => "in",
                     wyn_core::interface::StorageRole::Output => "out",
+                    wyn_core::interface::StorageRole::InputOutput => "inout",
                     wyn_core::interface::StorageRole::Intermediate => "tmp",
                 };
                 inputs.push(EntryBinding {
@@ -460,7 +461,8 @@ fn program_interface<Tag, GlobalContext>(
             let (r, w) = match sb.role {
                 wyn_core::interface::StorageRole::Input => (true, false),
                 wyn_core::interface::StorageRole::Output => (false, true),
-                wyn_core::interface::StorageRole::Intermediate => (true, true),
+                wyn_core::interface::StorageRole::InputOutput
+                | wyn_core::interface::StorageRole::Intermediate => (true, true),
             };
             mark(
                 &mut synth,

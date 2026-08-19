@@ -741,7 +741,7 @@ impl From<StorageRole> for StorageAccess {
         match role {
             StorageRole::Input => Self::ReadOnly,
             StorageRole::Output => Self::WriteOnly,
-            StorageRole::Intermediate => Self::ReadWrite,
+            StorageRole::InputOutput | StorageRole::Intermediate => Self::ReadWrite,
         }
     }
 }
@@ -830,8 +830,28 @@ pub enum StorageRole {
     Input,
     /// Entry writes the user-visible result to this buffer.
     Output,
+    /// Entry both reads from and writes to the same host-visible buffer.
+    InputOutput,
     /// Compiler-introduced pipeline-staging buffer (read or written).
     Intermediate,
+}
+
+impl StorageRole {
+    pub fn reads(self) -> bool {
+        matches!(self, Self::Input | Self::InputOutput | Self::Intermediate)
+    }
+
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Output | Self::InputOutput | Self::Intermediate)
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (left, right) if left == right => left,
+            (Self::Intermediate, _) | (_, Self::Intermediate) => Self::Intermediate,
+            _ => Self::InputOutput,
+        }
+    }
 }
 
 /// A storage-buffer binding the entry point touches, declared as first-class

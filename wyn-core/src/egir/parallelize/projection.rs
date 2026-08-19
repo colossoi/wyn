@@ -152,9 +152,9 @@ fn project_kernel_body_effects(
     .with_parallel_scremas(source.parallel_scremas().iter().copied());
     entry.retain_parameter_indices(&retained_parameters);
     entry.resource_declarations.retain(|declaration| match declaration.role {
-        interface::StorageRole::Input | interface::StorageRole::Output => {
-            retained_resources.contains(&declaration.resource.0)
-        }
+        interface::StorageRole::Input
+        | interface::StorageRole::Output
+        | interface::StorageRole::InputOutput => retained_resources.contains(&declaration.resource.0),
         interface::StorageRole::Intermediate => true,
     });
     Ok((entry, effect_sites))

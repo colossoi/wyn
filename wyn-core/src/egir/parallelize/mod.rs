@@ -672,7 +672,7 @@ fn declared_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceA
 fn declared_input_resources(declarations: &[SemanticResourceDecl]) -> Vec<SegResourceAccess<ResourceId>> {
     declarations
         .iter()
-        .filter(|declaration| declaration.role == interface::StorageRole::Input)
+        .filter(|declaration| declaration.role.reads())
         .map(|declaration| SegResourceAccess::<ResourceId> {
             resource: declaration.resource.0,
             access: ResourceAccess::Read,

@@ -947,6 +947,7 @@ fn storage_role(role: wyn_core::interface::StorageRole) -> String {
     match role {
         wyn_core::interface::StorageRole::Input => "input",
         wyn_core::interface::StorageRole::Output => "output",
+        wyn_core::interface::StorageRole::InputOutput => "input_output",
         wyn_core::interface::StorageRole::Intermediate => "intermediate",
     }
     .to_string()

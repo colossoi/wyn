@@ -845,9 +845,18 @@ impl KernelPlanBuilder<'_> {
         entry.outputs.retain(|output| {
             output.resource.is_none_or(|resource| !moved_reduction_outputs.contains(&resource.0))
         });
-        entry.resource_declarations.retain(|declaration| {
-            declaration.role != interface::StorageRole::Output
-                || !moved_reduction_outputs.contains(&declaration.resource.0)
+        entry.resource_declarations.retain_mut(|declaration| {
+            if !moved_reduction_outputs.contains(&declaration.resource.0) {
+                return true;
+            }
+            match declaration.role {
+                interface::StorageRole::Output => false,
+                interface::StorageRole::InputOutput => {
+                    declaration.role = interface::StorageRole::Input;
+                    true
+                }
+                _ => true,
+            }
         });
         let mut phase1_resources = merge_scheduled_resources(
             &declared_input_resources(&entry.resource_declarations),
@@ -1021,8 +1030,12 @@ impl KernelPlanBuilder<'_> {
         let input_declarations = entry
             .resource_declarations
             .iter()
-            .filter(|declaration| declaration.role == interface::StorageRole::Input)
+            .filter(|declaration| declaration.role.reads())
             .cloned()
+            .map(|mut declaration| {
+                declaration.role = interface::StorageRole::Input;
+                declaration
+            })
             .collect();
         let post_phase = post_lambda.map(|pre| ScanPostPhaseSpec {
             pre,

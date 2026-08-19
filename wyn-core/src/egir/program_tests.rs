@@ -291,15 +291,6 @@ fn conflicting_host_size_policies_are_rejected() {
 }
 
 #[test]
-fn host_size_policy_requires_a_reserved_binding() {
-    let mut resources = LogicalResourceArena::default();
-    let error = resources
-        .set_host_size(BindingRef::new(1, 0), LogicalSize::FixedBytes(16))
-        .expect_err("unreserved binding must fail");
-    assert!(error.contains("must be reserved"), "{error}");
-}
-
-#[test]
 fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
     let mut identities = ProgramIdentities::default();
     let first = identities.alloc_entry("first".into());

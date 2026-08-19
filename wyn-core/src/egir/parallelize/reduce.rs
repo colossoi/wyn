@@ -118,9 +118,10 @@ pub(super) fn analyze_reduction_routing(
     let mut stores = Vec::new();
     for (resource, route) in entry.resource_routes() {
         let resource = resource.0;
-        entry.resource_declarations.iter().find(|declaration| {
-            declaration.role == interface::StorageRole::Output && declaration.resource.0 == resource
-        })?;
+        entry
+            .resource_declarations
+            .iter()
+            .find(|declaration| declaration.role.writes() && declaration.resource.0 == resource)?;
         let destination = (
             resource,
             resources[resource].elem_ty.clone(),
@@ -378,8 +379,18 @@ impl KernelPlanBuilder<'_> {
             .map(|store| store.output.0)
             .collect();
         entry.outputs.retain(|output| output.resource.is_none_or(|resource| !moved.contains(&resource.0)));
-        entry.resource_declarations.retain(|declaration| {
-            declaration.role != interface::StorageRole::Output || !moved.contains(&declaration.resource.0)
+        entry.resource_declarations.retain_mut(|declaration| {
+            if !moved.contains(&declaration.resource.0) {
+                return true;
+            }
+            match declaration.role {
+                interface::StorageRole::Output => false,
+                interface::StorageRole::InputOutput => {
+                    declaration.role = interface::StorageRole::Input;
+                    true
+                }
+                _ => true,
+            }
         });
 
         // 6. Synthesize one phase 2 entry per accumulator. Dropping the phase-1

@@ -179,7 +179,7 @@ pub(crate) type SemanticOpIdSource = IdSource<SemanticOpId>;
 pub enum NoStorageDeclaration {}
 
 /// Target-independent identity of a semantic storage resource. Identities are
-/// issued only by the logical-resource arena during resource allocation;
+/// issued only by logical-resource allocation and committed by the arena;
 /// callers can observe an id's dense index but cannot manufacture one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResourceId(u32);
@@ -187,6 +187,12 @@ pub struct ResourceId(u32);
 impl ResourceId {
     pub const fn index(self) -> usize {
         self.0 as usize
+    }
+
+    /// Reserve the dense identity that logical-resource allocation will
+    /// commit at this arena position.
+    pub(in crate::egir) const fn for_allocation(index: usize) -> Self {
+        Self(index as u32)
     }
 
     #[cfg(test)]
@@ -401,52 +407,6 @@ pub struct LogicalResourceArena {
 }
 
 impl LogicalResourceArena {
-    /// Reserve a host-owned resource identity at the allocation boundary.
-    /// Compatible duplicate declarations share the identity; declarations
-    /// with a different element type are rejected.
-    pub(crate) fn reserve_host(
-        &mut self,
-        binding: BindingRef,
-        elem_ty: Type<TypeName>,
-    ) -> Result<ResourceId, String> {
-        if let Some(id) = self.host.get(&binding).copied() {
-            let resource = &self.resources[id.index()];
-            if resource.elem_ty != elem_ty {
-                return Err(format!(
-                    "host resource set={} binding={} has conflicting element types: {:?} and {:?}",
-                    binding.set, binding.binding, resource.elem_ty, elem_ty
-                ));
-            }
-            return Ok(id);
-        }
-        Ok(self.allocate(ResourceOrigin::host(binding), elem_ty, LogicalSize::Unspecified))
-    }
-
-    /// Apply one host declaration's size policy to an already-reserved
-    /// identity. An unspecified policy makes no claim; repeated concrete
-    /// policies must agree.
-    pub(crate) fn set_host_size(&mut self, binding: BindingRef, size: LogicalSize) -> Result<(), String> {
-        let id = self.host.get(&binding).copied().ok_or_else(|| {
-            format!(
-                "host resource set={} binding={} must be reserved before its size is set",
-                binding.set, binding.binding
-            )
-        })?;
-        let resource = &mut self.resources[id.index()];
-        match (&resource.size, &size) {
-            (LogicalSize::Unspecified, LogicalSize::Unspecified) | (_, LogicalSize::Unspecified) => Ok(()),
-            (LogicalSize::Unspecified, _) => {
-                resource.size = size;
-                Ok(())
-            }
-            (current, proposed) if current == proposed => Ok(()),
-            (current, proposed) => Err(format!(
-                "host resource set={} binding={} has conflicting size policies: {:?} and {:?}",
-                binding.set, binding.binding, current, proposed
-            )),
-        }
-    }
-
     pub(crate) fn allocate(
         &mut self,
         origin: ResourceOrigin,

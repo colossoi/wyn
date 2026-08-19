@@ -88,14 +88,14 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 /// resource identities. This is intentionally the first pass allowed to own
 /// or create resources.
 fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
-    let mut context = ResourceAllocationContext::default();
-    reserve_host_resources(&program, &mut context)?;
-    lower_host_size_policies(&program, &mut context)?;
+    let mut builder = ResourceAllocationBuilder::default();
+    reserve_host_resources(&program, &mut builder)?;
+    lower_host_size_policies(&program, &mut builder)?;
+    let context = builder.finalize()?;
     let program = remap_program_resources(program, context)?;
     Ok(realize_dynamic_publication(program))
 }
 
-#[derive(Default)]
 struct ResourceAllocationContext {
     resources: LogicalResourceArena,
 }
@@ -103,6 +103,53 @@ struct ResourceAllocationContext {
 impl ResourceAllocationContext {
     fn resource_for_binding(&self, binding: BindingRef) -> Result<SemanticResourceRef, ConvertError> {
         self.resources.host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
+            ConvertError::GraphError(format!(
+                "resource binding set={} binding={} is not declared by an entry interface",
+                binding.set, binding.binding
+            ))
+        })
+    }
+}
+
+struct DraftLogicalResource {
+    binding: BindingRef,
+    elem_ty: Type<TypeName>,
+    /// `None` means policy lowering has not visited this resource. Once
+    /// visited, `Some(Unspecified)` records a deliberate external/deferred
+    /// sizing decision rather than an unfinished reservation.
+    size: Option<LogicalSize>,
+}
+
+#[derive(Default)]
+struct ResourceAllocationBuilder {
+    resources: Vec<DraftLogicalResource>,
+    host: HashMap<BindingRef, ResourceId>,
+}
+
+impl ResourceAllocationBuilder {
+    fn reserve_host(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) -> Result<ResourceId, String> {
+        if let Some(id) = self.host.get(&binding).copied() {
+            let resource = &self.resources[id.index()];
+            if resource.elem_ty != elem_ty {
+                return Err(format!(
+                    "host resource set={} binding={} has conflicting element types: {:?} and {:?}",
+                    binding.set, binding.binding, resource.elem_ty, elem_ty
+                ));
+            }
+            return Ok(id);
+        }
+        let id = ResourceId::for_allocation(self.resources.len());
+        self.host.insert(binding, id);
+        self.resources.push(DraftLogicalResource {
+            binding,
+            elem_ty,
+            size: None,
+        });
+        Ok(id)
+    }
+
+    fn resource_for_binding(&self, binding: BindingRef) -> Result<SemanticResourceRef, ConvertError> {
+        self.host.get(&binding).copied().map(SemanticResourceRef).ok_or_else(|| {
             ConvertError::GraphError(format!(
                 "resource binding set={} binding={} is not declared by an entry interface",
                 binding.set, binding.binding
@@ -128,6 +175,58 @@ impl ResourceAllocationContext {
             },
             None => LogicalSize::Unspecified,
         })
+    }
+
+    fn set_host_size(&mut self, binding: BindingRef, size: LogicalSize) -> Result<(), String> {
+        let id = self.host.get(&binding).copied().ok_or_else(|| {
+            format!(
+                "host resource set={} binding={} must be reserved before its size is set",
+                binding.set, binding.binding
+            )
+        })?;
+        let resource = &mut self.resources[id.index()];
+        match (resource.size.as_ref(), &size) {
+            (None, _) => {
+                resource.size = Some(size);
+                Ok(())
+            }
+            (Some(LogicalSize::Unspecified), LogicalSize::Unspecified)
+            | (Some(_), LogicalSize::Unspecified) => Ok(()),
+            (Some(LogicalSize::Unspecified), _) => {
+                resource.size = Some(size);
+                Ok(())
+            }
+            (Some(current), proposed) if current == proposed => Ok(()),
+            (Some(current), proposed) => Err(format!(
+                "host resource set={} binding={} has conflicting size policies: {:?} and {:?}",
+                binding.set, binding.binding, current, proposed
+            )),
+        }
+    }
+
+    fn finalize(self) -> Result<ResourceAllocationContext, ConvertError> {
+        if let Some(resource) = self.resources.iter().find(|resource| resource.size.is_none()) {
+            return Err(ConvertError::GraphError(format!(
+                "host resource set={} binding={} was reserved but its size policy was not processed",
+                resource.binding.set, resource.binding.binding
+            )));
+        }
+        let mut resources = LogicalResourceArena::default();
+        for draft in self.resources {
+            let expected = self.host[&draft.binding];
+            let allocated = resources.allocate(
+                ResourceOrigin::host(draft.binding),
+                draft.elem_ty,
+                draft.size.expect("all draft sizes were checked above"),
+            );
+            if allocated != expected {
+                return Err(ConvertError::GraphError(format!(
+                    "logical resource reservation for set={} binding={} changed identity during finalization",
+                    draft.binding.set, draft.binding.binding
+                )));
+            }
+        }
+        Ok(ResourceAllocationContext { resources })
     }
 }
 
@@ -217,12 +316,11 @@ fn interface_resources(entry: &Entry<Semantic>) -> impl Iterator<Item = Interfac
 
 fn reserve_host_resources(
     program: &Optimized,
-    context: &mut ResourceAllocationContext,
+    builder: &mut ResourceAllocationBuilder,
 ) -> Result<(), ConvertError> {
     for entry in &program.entry_points {
         for resource in interface_resources(entry) {
-            context
-                .resources
+            builder
                 .reserve_host(resource.binding, resource.elem_ty.clone())
                 .map_err(ConvertError::GraphError)?;
         }
@@ -232,12 +330,12 @@ fn reserve_host_resources(
 
 fn lower_host_size_policies(
     program: &Optimized,
-    context: &mut ResourceAllocationContext,
+    builder: &mut ResourceAllocationBuilder,
 ) -> Result<(), ConvertError> {
     for entry in &program.entry_points {
         for resource in interface_resources(entry) {
-            let size = context.logical_size(resource.length)?;
-            context.resources.set_host_size(resource.binding, size).map_err(ConvertError::GraphError)?;
+            let size = builder.logical_size(resource.length)?;
+            builder.set_host_size(resource.binding, size).map_err(ConvertError::GraphError)?;
         }
     }
     Ok(())
@@ -247,14 +345,17 @@ fn entry_resource_declarations(
     entry: &Entry<Semantic>,
     context: &ResourceAllocationContext,
 ) -> Result<Vec<SemanticResourceDecl>, ConvertError> {
-    let mut seen = HashSet::new();
-    let mut declarations = Vec::new();
+    let mut positions: HashMap<SemanticResourceRef, usize> = HashMap::new();
+    let mut declarations: Vec<SemanticResourceDecl> = Vec::new();
     for item in interface_resources(entry) {
         let Some(role) = item.role else { continue };
         let resource = context.resource_for_binding(item.binding)?;
-        if seen.insert(resource) {
-            declarations.push(SemanticResourceDecl { resource, role });
+        if let Some(position) = positions.get(&resource).copied() {
+            declarations[position].role = declarations[position].role.merge(role);
+            continue;
         }
+        positions.insert(resource, declarations.len());
+        declarations.push(SemanticResourceDecl { resource, role });
     }
     Ok(declarations)
 }
@@ -698,11 +799,15 @@ pub(crate) fn resource_flows(program: &ResourcesAllocated) -> Vec<(ResourceId, C
     for (endpoint, entry) in entries_with_endpoints(program) {
         for declaration in &entry.resource_declarations {
             let resource = declaration.resource.0;
-            match &declaration.role {
+            match declaration.role {
                 interface::StorageRole::Output => {
                     producers.entry(resource).or_default().push(endpoint);
                 }
                 interface::StorageRole::Input => {
+                    consumers.entry(resource).or_default().push(endpoint);
+                }
+                interface::StorageRole::InputOutput => {
+                    producers.entry(resource).or_default().push(endpoint);
                     consumers.entry(resource).or_default().push(endpoint);
                 }
                 interface::StorageRole::Intermediate => {}
@@ -930,4 +1035,58 @@ fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
         strip(requirement.entry_mut());
     }
     Program::from_parts(functions, externs, entry_points, constants, data, global_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_ty() -> Type<TypeName> {
+        Type::Constructed(TypeName::Unit, Vec::new())
+    }
+
+    #[test]
+    fn resource_draft_cannot_finalize_before_policy_lowering() {
+        let binding = BindingRef::new(2, 4);
+        let mut builder = ResourceAllocationBuilder::default();
+        builder.reserve_host(binding, unit_ty()).unwrap();
+
+        let Err(error) = builder.finalize() else {
+            panic!("unfinished resource draft must fail")
+        };
+        assert!(
+            error.to_string().contains("size policy was not processed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn processed_unspecified_policy_survives_finalization() {
+        let binding = BindingRef::new(2, 4);
+        let mut builder = ResourceAllocationBuilder::default();
+        let resource = builder.reserve_host(binding, unit_ty()).unwrap();
+        builder.set_host_size(binding, LogicalSize::Unspecified).unwrap();
+
+        let context = builder.finalize().expect("processed draft must finalize");
+        assert_eq!(context.resources[resource].size, LogicalSize::Unspecified);
+    }
+
+    #[test]
+    fn resource_draft_rejects_policy_for_unreserved_binding() {
+        let binding = BindingRef::new(2, 4);
+        let mut builder = ResourceAllocationBuilder::default();
+
+        let error = builder
+            .set_host_size(binding, LogicalSize::FixedBytes(16))
+            .expect_err("unreserved binding must fail");
+        assert!(error.contains("must be reserved"), "{error}");
+    }
+
+    #[test]
+    fn input_and_output_roles_merge_to_explicit_read_write() {
+        assert_eq!(
+            interface::StorageRole::Input.merge(interface::StorageRole::Output),
+            interface::StorageRole::InputOutput
+        );
+    }
 }
