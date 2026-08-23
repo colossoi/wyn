@@ -5,9 +5,9 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::{NodeCounter, Span};
 use wyn_core::egir::ir::{OperandRef, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
-    CompilerResourceKind, LogicalSize, MaterializationRequirement, NoStorageDeclaration, OutputWriter,
-    RealizedOutputRoute, ResourceId, ResourceOrigin, RewriteGlobal, SemanticOpId, SemanticProgramData,
-    SemanticResourceRef,
+    CompilerResourceKind, LogicalResource, LogicalSize, MaterializationRequirement, NoStorageDeclaration,
+    OutputWriter, RealizedOutputRoute, ResourceId, ResourceOrigin, RewriteGlobal, SemanticOpId,
+    SemanticProgramData, SemanticResourceRef,
 };
 use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
 use wyn_core::egir::soac::{filter, hist, screma};
@@ -1174,6 +1174,7 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
             format!("entry:{index}"),
             "entry",
             entry,
+            program.logical_resources(),
             &region_names,
         );
     }
@@ -1196,7 +1197,14 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
                 graph_seg_space::<Semantic<SemanticResourceRef>>(&group, space)
             }),
         });
-        snapshot_allocated_entry(&mut snapshot, group, "materialization", entry, &region_names);
+        snapshot_allocated_entry(
+            &mut snapshot,
+            group,
+            "materialization",
+            entry,
+            program.logical_resources(),
+            &region_names,
+        );
     }
     for function in &program.functions {
         let group = format!("function:{:?}", function.region);
@@ -1228,6 +1236,7 @@ fn snapshot_allocated_entry(
     group: String,
     kind: &str,
     entry: &wyn_core::egir::program::AllocatedEntry,
+    resources: &[LogicalResource],
     region_names: &HashMap<FunctionId, String>,
 ) {
     snapshot.groups.push(GraphGroup {
@@ -1271,11 +1280,14 @@ fn snapshot_allocated_entry(
         resource_declarations: entry
             .resource_declarations
             .iter()
-            .map(|declaration| GraphResourceDeclaration {
-                resource: resource_name(declaration.resource),
-                role: storage_role(declaration.role),
-                elem_ty: wyn_core::diags::format_type(&declaration.elem_ty),
-                size: graph_logical_size(&declaration.size),
+            .map(|declaration| {
+                let resource = &resources[declaration.resource.0.index()];
+                GraphResourceDeclaration {
+                    resource: resource_name(declaration.resource),
+                    role: storage_role(declaration.role),
+                    elem_ty: wyn_core::diags::format_type(&resource.elem_ty),
+                    size: graph_logical_size(&resource.size),
+                }
             })
             .collect(),
     });
