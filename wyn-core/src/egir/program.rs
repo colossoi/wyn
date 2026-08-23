@@ -288,9 +288,6 @@ pub struct SemanticResourceDecl {
 /// `StorageBindingDecl` without re-deriving it from the lowering site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompilerResourceKind {
-    /// A pre-existing generic intermediate surfaced from a
-    /// `StorageBindingDecl` and not owned by a Seg op.
-    Staging,
     /// Array result produced by a compiler-hoisted gather prepass.
     GatherHandoff,
     /// One per-accumulator partial buffer of a parallel `SegRed`.
@@ -322,8 +319,8 @@ pub enum CompilerResourceKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompilerResource {
     pub kind: CompilerResourceKind,
-    /// Semantic operation that owns the resource. Generic staging resources
-    /// introduced before segmentation have no single owner.
+    /// Semantic operation that owns the resource. Some cross-entry resources
+    /// have no single owner.
     pub owner: Option<SemanticOpId>,
     /// Stable resource position within the owner (accumulator/lane/scratch
     /// index, depending on `kind`).
@@ -458,17 +455,6 @@ impl LogicalResourceArena {
         slot: usize,
     ) -> Option<ResourceId> {
         self.compiler.get(&CompilerResourceKey { owner, kind, slot }).copied()
-    }
-
-    pub(crate) fn reclassify_as_compiler(&mut self, id: ResourceId, compiler: CompilerResource) {
-        let resource = &mut self.resources[id.index()];
-        if let ResourceOrigin::Host(host) = &resource.origin {
-            self.host.remove(&host.binding);
-        }
-        if let Some(key) = compiler.key() {
-            self.compiler.insert(key, id);
-        }
-        resource.origin = ResourceOrigin::Compiler(compiler);
     }
 
     pub(crate) fn contains(&self, id: ResourceId) -> bool {

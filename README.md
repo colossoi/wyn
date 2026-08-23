@@ -213,7 +213,6 @@ publication state is rewritten to name them.
 | **`plan_logical_resources`** | `resolve_host_resource_sizes` | Resolve logical host-resource sizes after all referenced bindings exist |
 | **`plan_logical_resources`** | `remap_program_resources` | Replace descriptor bindings in types, graphs, interfaces, and routes with target-independent logical resource identities |
 | **`plan_logical_resources`** | `realize_dynamic_publication` | Realize direct host publication of dynamic results, binding Filter output backing and allocating its length resource through the shared Filter storage policy |
-| **`plan_logical_resources`** | `classify_existing_compiler_resources` | Classify pre-existing intermediate resources as compiler-owned staging |
 | **`plan_logical_resources`** | `resolve_residency` | Establish target-independent residency, materialization boundaries, and legal output destinations; dynamic results crossing a scheduling boundary use the same Filter storage policy as direct host publication |
 | **`plan_logical_resources`** | `resolve_scratch_sizes` | Derive logical sizes and host ABI lengths for Filter scratch resources |
 | **`plan_logical_resources`** | `strip_compiler_abi` | Remove compiler-only storage resources from the host-facing ABI |

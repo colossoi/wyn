@@ -955,7 +955,6 @@ fn storage_role(role: wyn_core::interface::StorageRole) -> String {
 
 fn compiler_resource_kind(kind: CompilerResourceKind) -> String {
     match kind {
-        CompilerResourceKind::Staging => "staging",
         CompilerResourceKind::GatherHandoff => "gather_handoff",
         CompilerResourceKind::ReducePartial => "reduce_partial",
         CompilerResourceKind::ScanBlockSums => "scan_block_sums",

@@ -74,7 +74,6 @@ impl ResourcesAllocated {
 /// Establish target-independent residency and logical resources.
 pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
     let program = allocate_semantic_resources(program)?;
-    let program = classify_existing_compiler_resources(program);
     let program = residency::resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
     let program = strip_compiler_abi(program);
@@ -886,25 +885,6 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
         }
     }
     Ok(())
-}
-
-fn classify_existing_compiler_resources(program: ResourcesAllocated) -> ResourcesAllocated {
-    let mut classifications = HashMap::new();
-    for entry in &program.entry_points {
-        for declaration in &entry.resource_declarations {
-            if declaration.role == interface::StorageRole::Intermediate {
-                classifications
-                    .entry(declaration.resource.0)
-                    .or_insert_with(|| CompilerResource::new(CompilerResourceKind::Staging, None, 0));
-            }
-        }
-    }
-    program.map_data(|mut data| {
-        for (resource, compiler) in classifications {
-            data.core.resources.reclassify_as_compiler(resource, compiler);
-        }
-        data
-    })
 }
 
 fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {

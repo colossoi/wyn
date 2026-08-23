@@ -333,11 +333,16 @@ fn allocated_resource_verifier_accepts_resource_only_program() {
 #[test]
 fn entry_publication_reads_type_and_size_from_resource_arena() {
     let mut program = allocated_program(LogicalSize::FixedBytes(12));
-    let resource = program.entry_points[0].resource_declarations[0].resource.0;
-    program.data.core.resources.reclassify_as_compiler(
-        resource,
-        CompilerResource::new(CompilerResourceKind::Staging, None, 0),
+    let resource = program.data.core.resources.allocate(
+        ResourceOrigin::Compiler(CompilerResource::new(
+            CompilerResourceKind::ScalarHandoff,
+            None,
+            0,
+        )),
+        unit_ty(),
+        LogicalSize::FixedBytes(12),
     );
+    program.entry_points[0].resource_declarations[0].resource = SemanticResourceRef(resource);
     let physical = PhysicalResourceTable::allocate(&program.data.core.resources, &mut IdSource::new());
 
     let publication = program.entry_points[0].publication(&physical).expect("publish allocated entry");
