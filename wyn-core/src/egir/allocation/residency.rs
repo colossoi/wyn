@@ -67,6 +67,11 @@ enum OperationMaterializationPlan {
     },
 }
 
+enum StagePreludeCandidate {
+    ParallelPrelude(StagePreludePlan),
+    DirectStagePrelude(StagePreludePlan),
+}
+
 struct StagePreludePlan {
     entry: usize,
     insertion_site: Option<SideEffectSite>,
@@ -139,61 +144,83 @@ struct InputReplacement {
 
 pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
     loop {
+        // Required operation-result handoffs are a normalization phase, not a
+        // failed attempt whose fallback is speculative prelude extraction.
+        program = normalize_operation_result_residency(program)?;
+
+        // Prelude extraction is a separate, cost-driven phase. Its rewrite
+        // changes the graph, so restart required-residency normalization
+        // before considering another profitable prelude.
+        let dependencies = super::super::semantic_graph::dependencies(&program);
+        let Some(candidate) = select_stage_prelude_candidate(&program, &dependencies) else {
+            break;
+        };
+        let plan = match candidate {
+            StagePreludeCandidate::ParallelPrelude(plan)
+            | StagePreludeCandidate::DirectStagePrelude(plan) => plan,
+        };
+        program = materialize_stage_prelude(
+            program,
+            plan.entry,
+            plan.insertion_site,
+            plan.recipe,
+            plan.outputs,
+        );
+    }
+    Ok(program)
+}
+
+fn normalize_operation_result_residency(
+    mut program: ResourcesAllocated,
+) -> Result<ResourcesAllocated, String> {
+    loop {
         // Every rewrite can change both operation dependencies and which
         // runtime-composite arrays need storage, so neither analysis may be
         // reused across iterations.
         let dependencies = super::super::semantic_graph::dependencies(&program);
         let array_residency_demands = super::super::semantic_graph::array_residency_demands(&program);
 
-        // Operation-result residency has first priority. Applying one rewrite
-        // restarts the full arbitration loop before any prelude is considered.
-        if let Some(plan) = plan_operation_result(&program, &dependencies, &array_residency_demands)? {
-            program = match plan {
-                OperationMaterializationPlan::FixedOperation {
-                    entry,
-                    kind,
-                    operation,
-                    outputs,
-                } => materialize_operation_result(program, entry, kind, operation, outputs)?,
-                OperationMaterializationPlan::RuntimeArray {
-                    entry,
-                    operation,
-                    backing,
-                    length,
-                    elem_ty,
-                    result_ty,
-                    size,
-                } => materialize_runtime_array_result(
-                    program, entry, operation, backing, length, elem_ty, result_ty, size,
-                )?,
+        let plan =
+            if let Some(plan) = plan_operation_result(&program, &dependencies, &array_residency_demands)? {
+                plan
+            } else if let Some(plan) = plan_scalar_result_handoff(&program, &dependencies)? {
+                plan
+            } else {
+                return Ok(program);
             };
-            continue;
-        }
-
-        // Parallel-consumer preludes take priority over whole-stage preludes.
-        if let Some(plan) = plan_parallel_prelude(&program, &dependencies) {
-            program = materialize_stage_prelude(
-                program,
-                plan.entry,
-                plan.insertion_site,
-                plan.recipe,
-                plan.outputs,
-            );
-            continue;
-        }
-        if let Some(plan) = plan_direct_stage_prelude(&program) {
-            program = materialize_stage_prelude(
-                program,
-                plan.entry,
-                plan.insertion_site,
-                plan.recipe,
-                plan.outputs,
-            );
-            continue;
-        }
-        break;
+        program = match plan {
+            OperationMaterializationPlan::FixedOperation {
+                entry,
+                kind,
+                operation,
+                outputs,
+            } => materialize_operation_result(program, entry, kind, operation, outputs)?,
+            OperationMaterializationPlan::RuntimeArray {
+                entry,
+                operation,
+                backing,
+                length,
+                elem_ty,
+                result_ty,
+                size,
+            } => materialize_runtime_array_result(
+                program, entry, operation, backing, length, elem_ty, result_ty, size,
+            )?,
+        };
     }
-    Ok(program)
+}
+
+fn select_stage_prelude_candidate(
+    program: &ResourcesAllocated,
+    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
+) -> Option<StagePreludeCandidate> {
+    if let Some(plan) = plan_parallel_prelude(program, dependency_edges) {
+        return Some(StagePreludeCandidate::ParallelPrelude(plan));
+    }
+    if let Some(plan) = plan_direct_stage_prelude(program) {
+        return Some(StagePreludeCandidate::DirectStagePrelude(plan));
+    }
+    None
 }
 
 fn plan_operation_result(
@@ -203,7 +230,6 @@ fn plan_operation_result(
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     let dependencies = SemanticGraph::new(dependency_edges);
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let uses = graph_ops::ValueUseIndex::build(&entry.graph);
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
                 let Some(result) = effect.result.as_ref() else {
@@ -227,7 +253,6 @@ fn plan_operation_result(
                             source_site,
                             semantic_consumers,
                             array_residency_demands.contains(&id),
-                            &uses,
                         ) else {
                             continue;
                         };
@@ -253,6 +278,58 @@ fn plan_operation_result(
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn plan_scalar_result_handoff(
+    program: &ResourcesAllocated,
+    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
+) -> Result<Option<OperationMaterializationPlan>, String> {
+    let dependencies = SemanticGraph::new(dependency_edges);
+    for (entry_index, entry) in program.entry_points.iter().enumerate() {
+        let uses = graph_ops::ValueUseIndex::build(&entry.graph);
+        for (block_id, block) in &entry.graph.skeleton.blocks {
+            for (effect_index, effect) in block.side_effects.iter().enumerate() {
+                let Some(result) = effect.result.as_ref() else {
+                    continue;
+                };
+                let Some(&id) = effect.kind.soac_id() else {
+                    continue;
+                };
+                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+                    continue;
+                };
+                let semantic_consumers = dependencies.value_consumers(&id).collect::<HashSet<_>>();
+                let source_site = SideEffectSite {
+                    block: block_id,
+                    index: effect_index,
+                };
+                if !scalar_result_requires_handoff(
+                    entry,
+                    op,
+                    result,
+                    source_site,
+                    Some(&semantic_consumers),
+                    &uses,
+                ) {
+                    continue;
+                }
+                let Some(plan) = operation_result_plan(
+                    entry_index,
+                    entry,
+                    op,
+                    result,
+                    id,
+                    source_site,
+                    FixedMaterializationKind::Scalar,
+                )?
+                else {
+                    continue;
+                };
+                return Ok(Some(plan));
             }
         }
     }
@@ -327,8 +404,39 @@ fn operation_result_residency(
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
-    uses: &graph_ops::ValueUseIndex,
 ) -> Option<FixedMaterializationKind> {
+    if op.form.post.result_types.is_empty() {
+        return None;
+    }
+    cloneable_operation_dependencies(entry, op, site)?;
+    array_result_residency(entry, result, consumers, requires_array_storage)
+}
+
+fn scalar_result_requires_handoff(
+    entry: &AllocatedEntry,
+    op: &screma::Op<AllocatedSemantic>,
+    result: &ResultBinding<Type<TypeName>>,
+    site: SideEffectSite,
+    consumers: Option<&HashSet<SemanticOpId>>,
+    uses: &graph_ops::ValueUseIndex,
+) -> bool {
+    if !op.form.post.result_types.is_empty()
+        || !op.is_reduce()
+        || op.form.reductions.len() != 1
+        || !(has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
+        || !result.single_value().is_some_and(|value| scalar_result_is_used(uses, value, site))
+    {
+        return false;
+    }
+    cloneable_operation_dependencies(entry, op, site)
+        .is_some_and(|dependencies| invocation_invariant(entry, site.block, &dependencies))
+}
+
+fn cloneable_operation_dependencies(
+    entry: &AllocatedEntry,
+    op: &screma::Op<AllocatedSemantic>,
+    site: SideEffectSite,
+) -> Option<HashSet<usize>> {
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
@@ -347,19 +455,7 @@ fn operation_result_residency(
     if !cloneable || !dependencies_are_cloneable(&entry.graph, site.block, &upstream) {
         return None;
     }
-
-    if !op.form.post.result_types.is_empty() {
-        array_result_residency(entry, result, consumers, requires_array_storage)
-    } else if op.is_reduce()
-        && op.form.reductions.len() == 1
-        && (has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
-        && result.single_value().is_some_and(|value| scalar_result_is_used(uses, value, site))
-        && invocation_invariant(entry, site.block, &dependencies)
-    {
-        Some(FixedMaterializationKind::Scalar)
-    } else {
-        None
-    }
+    Some(dependencies)
 }
 
 fn array_result_residency(
