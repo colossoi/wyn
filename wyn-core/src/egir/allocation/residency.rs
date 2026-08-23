@@ -1,11 +1,11 @@
 //! Semantic residency planning for arrays and cross-dispatch scalars.
 //!
-//! The pass recognizes shared producers, runtime gathers, invariant scalar
-//! reductions, and cost-eligible preludes of parallel operations after output
-//! realization and semantic fusion. It records each decision as a typed
-//! materialization plan, allocates its logical handoff resource, and rewires
-//! consumers to explicit storage views or loads. Target lowering only chooses
-//! and schedules the physical kernel recipe.
+//! The residency fixpoint recognizes shared producers, runtime gathers,
+//! invariant scalar reductions, and cost-eligible preludes of parallel
+//! operations after output realization and semantic fusion. Each iteration
+//! rebuilds its analyses, selects at most one materialization in priority
+//! order, applies that rewrite, and restarts. Target lowering only chooses and
+//! schedules the physical kernel recipe.
 
 use crate::egir;
 use crate::ssa;
@@ -39,11 +39,15 @@ use crate::interface::StorageRole;
 use crate::pipeline_descriptor::{DispatchSize, Pipeline, StorageTextureSize};
 use crate::types::TypeExt;
 
+#[cfg(test)]
+#[path = "residency_tests.rs"]
+mod residency_tests;
+
 type AllocatedSemantic = SemanticFamily<SemanticResourceRef>;
 type AllocatedGraph = EGraph<AllocatedSemantic>;
 type AllocatedSideEffect = SideEffect<AllocatedSemantic>;
 
-enum MaterializationPlan {
+enum OperationMaterializationPlan {
     FixedOperation {
         entry: usize,
         kind: FixedMaterializationKind,
@@ -61,12 +65,13 @@ enum MaterializationPlan {
         result_ty: Type<TypeName>,
         size: LogicalSize,
     },
-    StagePrelude {
-        entry: usize,
-        insertion_site: Option<SideEffectSite>,
-        recipe: ProjectedValueRecipe<SemanticResourceRef>,
-        outputs: Vec<StagePreludeOutput>,
-    },
+}
+
+struct StagePreludePlan {
+    entry: usize,
+    insertion_site: Option<SideEffectSite>,
+    recipe: ProjectedValueRecipe<SemanticResourceRef>,
+    outputs: Vec<StagePreludeOutput>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,65 +139,68 @@ struct InputReplacement {
 
 pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
     loop {
-        let Some(plan) = next_materialization_plan(&program)? else {
-            break;
-        };
-        program = apply_materialization(program, plan)?;
+        // Every rewrite can change both operation dependencies and which
+        // runtime-composite arrays need storage, so neither analysis may be
+        // reused across iterations.
+        let dependencies = super::super::semantic_graph::dependencies(&program);
+        let array_residency_demands = super::super::semantic_graph::array_residency_demands(&program);
+
+        // Operation-result residency has first priority. Applying one rewrite
+        // restarts the full arbitration loop before any prelude is considered.
+        if let Some(plan) = plan_operation_result(&program, &dependencies, &array_residency_demands)? {
+            program = match plan {
+                OperationMaterializationPlan::FixedOperation {
+                    entry,
+                    kind,
+                    operation,
+                    outputs,
+                } => materialize_operation_result(program, entry, kind, operation, outputs)?,
+                OperationMaterializationPlan::RuntimeArray {
+                    entry,
+                    operation,
+                    backing,
+                    length,
+                    elem_ty,
+                    result_ty,
+                    size,
+                } => materialize_runtime_array_result(
+                    program, entry, operation, backing, length, elem_ty, result_ty, size,
+                )?,
+            };
+            continue;
+        }
+
+        // Parallel-consumer preludes take priority over whole-stage preludes.
+        if let Some(plan) = plan_parallel_prelude(&program, &dependencies) {
+            program = materialize_stage_prelude(
+                program,
+                plan.entry,
+                plan.insertion_site,
+                plan.recipe,
+                plan.outputs,
+            );
+            continue;
+        }
+        if let Some(plan) = plan_direct_stage_prelude(&program) {
+            program = materialize_stage_prelude(
+                program,
+                plan.entry,
+                plan.insertion_site,
+                plan.recipe,
+                plan.outputs,
+            );
+            continue;
+        }
+        break;
     }
     Ok(program)
-}
-
-fn next_materialization_plan(program: &ResourcesAllocated) -> Result<Option<MaterializationPlan>, String> {
-    let dependencies = super::super::semantic_graph::dependencies(program);
-    let array_residency_demands = super::super::semantic_graph::array_residency_demands(program);
-    if let Some(plan) = plan_operation_result(program, &dependencies, &array_residency_demands)? {
-        return Ok(Some(plan));
-    }
-    Ok(plan_parallel_prelude(program, &dependencies).or_else(|| plan_direct_stage_prelude(program)))
-}
-
-fn apply_materialization(
-    program: ResourcesAllocated,
-    plan: MaterializationPlan,
-) -> Result<ResourcesAllocated, String> {
-    match plan {
-        MaterializationPlan::FixedOperation {
-            entry,
-            kind,
-            operation,
-            outputs,
-        } => materialize_operation_result(program, entry, kind, operation, outputs),
-        MaterializationPlan::RuntimeArray {
-            entry,
-            operation,
-            backing,
-            length,
-            elem_ty,
-            result_ty,
-            size,
-        } => materialize_runtime_array_result(
-            program, entry, operation, backing, length, elem_ty, result_ty, size,
-        ),
-        MaterializationPlan::StagePrelude {
-            entry,
-            insertion_site,
-            recipe,
-            outputs,
-        } => Ok(materialize_stage_prelude(
-            program,
-            entry,
-            insertion_site,
-            recipe,
-            outputs,
-        )),
-    }
 }
 
 fn plan_operation_result(
     program: &ResourcesAllocated,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
     array_residency_demands: &HashSet<SemanticOpId>,
-) -> Result<Option<MaterializationPlan>, String> {
+) -> Result<Option<OperationMaterializationPlan>, String> {
     let dependencies = SemanticGraph::new(dependency_edges);
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let uses = graph_ops::ValueUseIndex::build(&entry.graph);
@@ -259,7 +267,7 @@ fn filter_runtime_array_plan(
     producer: SemanticOpId,
     source_site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
-) -> Result<Option<MaterializationPlan>, String> {
+) -> Result<Option<OperationMaterializationPlan>, String> {
     let filter::SemanticState {
         space,
         output: filter::Output::Runtime(runtime),
@@ -287,7 +295,7 @@ fn filter_runtime_array_plan(
         .map_err(|error| format!("runtime-array projection omitted result for {producer:?}: {error}"))?;
     let size = LogicalSize::for_space(space, &elem_ty)
         .ok_or_else(|| format!("runtime-array producer {producer:?} has no legal logical storage size"))?;
-    Ok(Some(MaterializationPlan::RuntimeArray {
+    Ok(Some(OperationMaterializationPlan::RuntimeArray {
         entry: entry_index,
         operation: ProjectedOperation {
             result: result.clone(),
@@ -377,7 +385,7 @@ fn operation_result_plan(
     producer: SemanticOpId,
     source_site: SideEffectSite,
     kind: FixedMaterializationKind,
-) -> Result<Option<MaterializationPlan>, String> {
+) -> Result<Option<OperationMaterializationPlan>, String> {
     let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
         return Err(format!("materialization producer {producer:?} is not segmented"));
     };
@@ -399,7 +407,7 @@ fn operation_result_plan(
     let projected_site = projection
         .effect_site(source_site)
         .ok_or_else(|| format!("materialization projection omitted producer site for {producer:?}"))?;
-    Ok(Some(MaterializationPlan::FixedOperation {
+    Ok(Some(OperationMaterializationPlan::FixedOperation {
         entry: entry_index,
         kind,
         operation: ProjectedOperation {
@@ -418,7 +426,7 @@ fn operation_result_plan(
 fn plan_parallel_prelude(
     program: &ResourcesAllocated,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
-) -> Option<MaterializationPlan> {
+) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let dependencies = SemanticGraph::with_operation_captures(dependency_edges, &entry.graph);
         for prelude in parallel_preludes(entry, &dependencies) {
@@ -470,7 +478,7 @@ fn plan_parallel_prelude(
             if !analysis.should_materialize(invocations) {
                 continue;
             }
-            return Some(MaterializationPlan::StagePrelude {
+            return Some(StagePreludePlan {
                 entry: entry_index,
                 insertion_site: Some(insertion_site),
                 recipe,
@@ -486,7 +494,7 @@ fn plan_parallel_prelude(
 /// uniform work clears the singleton-launch overhead.
 const DIRECT_STAGE_INVOCATION_FALLBACK: u64 = 64;
 
-fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<MaterializationPlan> {
+fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let Ok(analysis) = StageDependenceAnalysis::for_entry(entry) else {
             continue;
@@ -512,7 +520,7 @@ fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<Materializa
         if !analysis.should_materialize(direct_stage_invocations(program, entry)) {
             continue;
         }
-        return Some(MaterializationPlan::StagePrelude {
+        return Some(StagePreludePlan {
             entry: entry_index,
             insertion_site: None,
             recipe,

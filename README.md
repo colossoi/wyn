@@ -187,9 +187,11 @@ sub-pass merely because it calls the listed rows. Consecutive rows for the same
 orchestrator are in execution order unless the **Role / condition** column marks
 them as alternatives or part of a fixpoint.
 
-`allocate_semantic_resources` is a nested orchestrator within
-`plan_logical_resources`: it runs the first four allocation rows and therefore
-does not receive a sub-pass row of its own.
+`allocate_semantic_resources` and `resolve_residency` are nested orchestrators
+within `plan_logical_resources`. The former runs the first four allocation
+rows. The latter drives the residency rows to a shared fixpoint, rebuilding its
+analyses and restarting candidate arbitration after every rewrite. Neither
+orchestrator receives a sub-pass row of its own.
 
 The global logical-resource arena is authoritative for element types and
 logical sizes. Entry-local `SemanticResourceDecl` values contain only a
@@ -213,7 +215,15 @@ publication state is rewritten to name them.
 | **`plan_logical_resources`** | `resolve_host_resource_sizes` | Resolve logical host-resource sizes after all referenced bindings exist |
 | **`plan_logical_resources`** | `remap_program_resources` | Replace descriptor bindings in types, graphs, interfaces, and routes with target-independent logical resource identities |
 | **`plan_logical_resources`** | `realize_dynamic_publication` | Realize direct host publication of dynamic results, binding Filter output backing and allocating its length resource through the shared Filter storage policy |
-| **`plan_logical_resources`** | `resolve_residency` | Establish target-independent residency, materialization boundaries, and legal output destinations; dynamic results crossing a scheduling boundary use the same Filter storage policy as direct host publication |
+| **`plan_logical_resources`** | `semantic_graph::dependencies` | At the start of every residency fixpoint iteration, rebuild operation dependencies used by candidate selection and legality checks |
+| **`plan_logical_resources`** | `semantic_graph::array_residency_demands` | At the start of every residency fixpoint iteration, rediscover runtime-composite array results whose current uses require storage |
+| **`plan_logical_resources`** | `plan_operation_result` | First-priority residency analysis: select at most one shared-array, gather, invariant-scalar, or cross-boundary runtime-array result and project its producer recipe |
+| **`plan_logical_resources`** | `materialize_operation_result` | When the selected operation has fixed outputs, create its producer entry and logical handoffs, rewrite its consumers, then restart the fixpoint |
+| **`plan_logical_resources`** | `materialize_runtime_array_result` | Alternative to `materialize_operation_result`: apply the shared Filter capacity-and-length storage policy to a selected runtime-array result, then restart the fixpoint |
+| **`plan_logical_resources`** | `plan_parallel_prelude` | When no operation-result candidate exists, select at most one cost-eligible scalar prelude shared by parallel consumers |
+| **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_parallel_prelude` succeeds, create its scalar handoff entry, rewrite the consumer prefix, then restart the fixpoint |
+| **`plan_logical_resources`** | `plan_direct_stage_prelude` | When neither earlier planner succeeds, select at most one cost-eligible stage-invariant scalar frontier for a direct shader stage |
+| **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_direct_stage_prelude` succeeds, create its scalar handoff entry, rewrite the stage prefix, then restart the fixpoint; otherwise residency is complete |
 | **`plan_logical_resources`** | `resolve_scratch_sizes` | Derive logical sizes and host ABI lengths for Filter scratch resources |
 | **`plan_logical_resources`** | `strip_compiler_abi` | Remove compiler-only storage resources from the host-facing ABI |
 | **`plan_logical_resources`** | `verify_allocated_resources` | Debug builds only: validate logical-resource references, sizes, declarations, and output routes |
