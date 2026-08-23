@@ -3177,6 +3177,36 @@ entry render_target_record_helper(scene: render_target<f32>,
 }
 
 #[test]
+fn unified_fragment_discards_unused_record_containing_render_target() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+entry unused_render_target_record(
+    scene: render_target<f32>, output: render_target<f32>)
+    render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+  shade(output, raster,
+    |_| let unused = { scene = scene } in 1.0)
+"#,
+            )
+            .expect("an unused record must not retain a render-target stage capture");
+            assert_naga_accepts_spirv(&lowered.spirv);
+            let descriptor = serde_json::to_string(&lowered.pipeline).expect("serialize pipeline");
+            assert!(
+                !descriptor.contains("scene"),
+                "the dead record must not synthesize a scene texture interface: {descriptor}"
+            );
+        })
+        .expect("spawn unused render-target-record regression")
+        .join()
+        .expect("unused render-target-record regression panicked");
+}
+
+#[test]
 fn unified_root_accepts_named_u32_constants_in_direct_draw() {
     let program = compile_thru_tlc(
         r#"

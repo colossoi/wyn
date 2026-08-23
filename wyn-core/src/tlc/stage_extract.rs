@@ -140,12 +140,13 @@ fn inline_stage_helpers(
     helpers: &LookupMap<SymbolId, StageHelper>,
     term_ids: &mut TermIdSource,
 ) -> Term {
-    StageHelperInliner {
+    let term = StageHelperInliner {
         helpers,
         term_ids,
         active: LookupSet::new(),
     }
-    .rewrite_owned(term)
+    .rewrite_owned(term);
+    DeadTargetContainerEliminator { term_ids }.rewrite_owned(term)
 }
 
 struct StageHelperInliner<'a> {
@@ -201,6 +202,38 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         }
         self.active.remove(&symbol);
         (replacement, RewriteDecision::Changed)
+    }
+}
+
+/// Helper inlining can expose an unused record/tuple that retains a render
+/// target. Remove structurally pure instances before capture discovery: render
+/// targets have no shader-value representation, and counting the dead RHS as a
+/// use would synthesize a texture interface for a value the stage never reads.
+struct DeadTargetContainerEliminator<'a> {
+    term_ids: &'a mut TermIdSource,
+}
+
+impl TermRewriter<data::Empty, data::Empty> for DeadTargetContainerEliminator<'_> {
+    fn next_term_id(&mut self) -> super::TermId {
+        self.term_ids.next_id()
+    }
+
+    fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
+        let removable = matches!(
+            &term.kind,
+            TermKind::Let { name, name_ty, rhs, body }
+                if !is_render_target_type(name_ty)
+                    && contains_render_target_type(name_ty)
+                    && is_structural_value(rhs)
+                    && !referenced_symbols(body).contains(name)
+        );
+        if !removable {
+            return (term, RewriteDecision::Unchanged);
+        }
+        let TermKind::Let { body, .. } = term.kind else {
+            unreachable!()
+        };
+        (*body, RewriteDecision::Changed)
     }
 }
 
@@ -786,6 +819,35 @@ fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
 
 fn is_render_target_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
+}
+
+fn contains_render_target_type(ty: &Type) -> bool {
+    match ty {
+        Type::Constructed(TypeName::RenderTarget, _) => true,
+        Type::Constructed(TypeName::Record(_) | TypeName::Tuple(_), components) => {
+            components.iter().any(contains_render_target_type)
+        }
+        _ => false,
+    }
+}
+
+/// Whether evaluating a term only assembles or projects an already-existing
+/// value. This deliberately excludes applications, indexing, control flow,
+/// array work, and loops: dropping any of those merely because their result is
+/// unused could discard an effect.
+fn is_structural_value(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Var(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::UnitLit => true,
+        TermKind::Coerce { inner, .. } => is_structural_value(inner),
+        TermKind::Tuple(values) | TermKind::VecLit(values) => values.iter().all(is_structural_value),
+        TermKind::TupleProj { tuple, .. } => is_structural_value(tuple),
+        TermKind::Let { rhs, body, .. } => is_structural_value(rhs) && is_structural_value(body),
+        _ => false,
+    }
 }
 
 fn builtin_app<'a>(
