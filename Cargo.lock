@@ -1538,6 +1538,7 @@ dependencies = [
  "wyn-graph",
  "wyn-pipeline-descriptor",
  "wyn-spirv",
+ "wyn-staged-ir",
 ]
 
 [[package]]
@@ -1561,6 +1562,14 @@ version = "0.1.0"
 dependencies = [
  "rspirv",
  "spirv",
+]
+
+[[package]]
+name = "wyn-staged-ir"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "wyn-graph",
 ]
 
 [[package]]

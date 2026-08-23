@@ -1,5 +1,13 @@
 [workspace]
-members = ["wyn-core", "wyn", "wyn-analyzer", "wyn-pipeline-descriptor", "wyn-spirv", "wyn-graph"]
+members = [
+    "wyn-core",
+    "wyn",
+    "wyn-analyzer",
+    "wyn-pipeline-descriptor",
+    "wyn-spirv",
+    "wyn-graph",
+    "wyn-staged-ir",
+]
 resolver = "2"
 # wyn-wasm is built only for wasm32 via `wasm-pack`, never the host target the
 # rest of the workspace compiles for, and it carries its own size-tuned

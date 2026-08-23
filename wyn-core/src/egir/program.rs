@@ -22,6 +22,7 @@ use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::TypeExt;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Index, IndexMut};
+use wyn_staged_ir::{StagedIr, StagedIrBuilder};
 
 use super::soac::{filter, hist, screma};
 use super::types::{
@@ -198,28 +199,6 @@ impl ResourceId {
     #[cfg(test)]
     pub(crate) const fn for_test(index: u32) -> Self {
         Self(index)
-    }
-}
-
-/// Stable identity of a semantic requirement to materialize a shared value.
-/// It is deliberately distinct from `EntryId`: a requirement is not
-/// an entry point and cannot be mutated by semantic entry passes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MaterializationId(pub u32);
-
-impl From<u32> for MaterializationId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl MaterializationId {
-    /// Backend-visible name for the synthetic entry owned by this
-    /// materialization. Keeping the authored owner as the prefix preserves a
-    /// useful naming convention for existing tooling; explicit stage-owner
-    /// metadata remains the authoritative relationship.
-    pub(crate) fn entry_name(self, source: &str, role: &str) -> String {
-        format!("{source}_{role}_{}", self.0)
     }
 }
 
@@ -1288,76 +1267,6 @@ fn publish_entry(
     })
 }
 
-/// A semantic shared-value requirement. Nesting the single semantic entry
-/// representation avoids maintaining another entry-shaped record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaterializationKind {
-    SharedArray,
-    Gather,
-    Scalar,
-    /// Runtime-sized array plus a stored logical-length cell.  Producers such
-    /// as filter require this layout when their result crosses a scheduling
-    /// boundary; future variable-cardinality producers can reuse it.
-    RuntimeArray,
-}
-
-#[derive(Debug)]
-pub enum MaterializationRequirement {
-    SharedArray {
-        space: SegSpace<SemanticResourceRef>,
-        entry: AllocatedEntry,
-    },
-    Gather {
-        space: SegSpace<SemanticResourceRef>,
-        entry: AllocatedEntry,
-    },
-    RuntimeArray {
-        space: SegSpace<SemanticResourceRef>,
-        entry: AllocatedEntry,
-    },
-    Scalar {
-        entry: AllocatedEntry,
-    },
-}
-
-impl MaterializationRequirement {
-    pub fn kind(&self) -> MaterializationKind {
-        match self {
-            Self::SharedArray { .. } => MaterializationKind::SharedArray,
-            Self::Gather { .. } => MaterializationKind::Gather,
-            Self::RuntimeArray { .. } => MaterializationKind::RuntimeArray,
-            Self::Scalar { .. } => MaterializationKind::Scalar,
-        }
-    }
-
-    pub fn space(&self) -> Option<&SegSpace<SemanticResourceRef>> {
-        match self {
-            Self::SharedArray { space, .. }
-            | Self::Gather { space, .. }
-            | Self::RuntimeArray { space, .. } => Some(space),
-            Self::Scalar { .. } => None,
-        }
-    }
-
-    pub fn entry(&self) -> &AllocatedEntry {
-        match self {
-            Self::SharedArray { entry, .. }
-            | Self::Gather { entry, .. }
-            | Self::RuntimeArray { entry, .. }
-            | Self::Scalar { entry } => entry,
-        }
-    }
-
-    pub fn entry_mut(&mut self) -> &mut AllocatedEntry {
-        match self {
-            Self::SharedArray { entry, .. }
-            | Self::Gather { entry, .. }
-            | Self::RuntimeArray { entry, .. }
-            | Self::Scalar { entry } => entry,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct EntryPublication {
     /// Compiler identity. The name below remains emitted host ABI metadata.
@@ -1538,11 +1447,79 @@ pub struct ResourceProgramData {
     pub identities: ProgramIdentities,
 }
 
-/// Program-owned data after materialization requirements have been planned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedStageKind {
+    SharedArray,
+    Gather,
+    RuntimeArray,
+    Scalar,
+}
+
+/// Provenance and recipe-relevant semantic context for one staged body.
+#[derive(Clone, Debug)]
+pub enum StageOrigin {
+    Authored,
+    Generated {
+        kind: GeneratedStageKind,
+        space: Option<SegSpace<SemanticResourceRef>>,
+    },
+}
+
+impl StageOrigin {
+    pub fn generated_kind(&self) -> Option<GeneratedStageKind> {
+        match self {
+            Self::Authored => None,
+            Self::Generated { kind, .. } => Some(*kind),
+        }
+    }
+
+    pub fn space(&self) -> Option<&SegSpace<SemanticResourceRef>> {
+        match self {
+            Self::Authored | Self::Generated { space: None, .. } => None,
+            Self::Generated {
+                space: Some(space), ..
+            } => Some(space),
+        }
+    }
+}
+
+/// Complete target-independent storage for one value crossing stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentStorage {
+    pub data: ResourceId,
+    pub length: Option<ResourceId>,
+}
+
+pub type StagedProgram = StagedIr<AllocatedEntry, Type<TypeName>, ResidentStorage, StageOrigin>;
+
+pub(crate) type StagedProgramBuilder =
+    StagedIrBuilder<EntryId, Type<TypeName>, ResidentStorage, StageOrigin>;
+
+/// Private lowering state used while residency discovers stage boundaries.
+#[derive(Debug)]
+pub(crate) struct ResidencyProgramData {
+    pub core: ResourceProgramData,
+    pub stages: StagedProgramBuilder,
+    pub stage_ids: HashMap<EntryId, wyn_staged_ir::StageId>,
+    pub resident_flows: HashMap<ResourceId, wyn_staged_ir::FlowId>,
+}
+
+impl ResidencyProgramData {
+    pub(crate) fn alloc_compiler_resource(
+        &mut self,
+        compiler: CompilerResource,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        self.core.resources.allocate(ResourceOrigin::Compiler(compiler), elem_ty, size)
+    }
+}
+
+/// Program-owned data after target-independent residency has been planned.
 #[derive(Debug)]
 pub struct AllocatedProgramData {
     pub core: ResourceProgramData,
-    pub materializations: IdArena<MaterializationId, MaterializationRequirement>,
+    pub stages: StagedProgram,
 }
 
 impl AllocatedProgramData {

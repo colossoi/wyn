@@ -19,6 +19,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 The project is organized as a Rust workspace:
 
 - **`wyn-core/`** - Compiler library (lexer, parser, type checker, TLC, EGIR mid-end, SSA, SPIR-V/WGSL backends). Includes an in-crate generic SSA framework at `ssa::framework` (blocks, values, instructions, terminators) used only for codegen.
+- **`wyn-staged-ir/`** - Invariant-preserving typed DAG of executable stages and resident flows
 - **`wyn/`** - Command-line executable
 - **`wyn-analyzer/`** - Language server (in development)
 - **`extra/viz/`** - Visualization tool for rendering SPIR-V shaders
@@ -28,7 +29,27 @@ The project is organized as a Rust workspace:
 
 The compiler uses a multi-stage pipeline with typestate-driven phases. Each
 stage consumes `self` and returns the next stage, enforcing valid ordering at
-compile time. The pipeline descriptions distinguish three related units:
+compile time.
+
+The principal IR phases are:
+
+1. **AST** — parsed and typed source structure.
+2. **TLC** — normalized typed functional calculus with explicit ownership and
+   first-order calls.
+3. **Semantic EGIR** — per-body acyclic e-graphs with explicit semantic SOACs,
+   effects, output routes, and logical resources.
+4. **Staged IR** — a typed DAG whose nodes own semantic EGIR bodies and whose
+   resident flows make every cross-stage value explicit.
+5. **Physical EGIR** — target-planned entry bodies with physical resources and
+   selected SOAC recipes.
+6. **SSA** — demand-elaborated backend codegen IR.
+
+Staged IR is a real representation boundary even though its stage bodies are
+still semantic EGIR. It replaces the flat collection of authored entries plus
+separately reconstructed materialization requirements with explicit stage and
+flow topology.
+
+When describing transitions, the tables distinguish three related units:
 
 - A **checkpoint** is a named compiler state whose invariant has been
   established. EGIR inspector checkpoints are snapshots of these states or of
@@ -71,10 +92,12 @@ need these clarifications:
 - `to_egraph` orchestrates the smaller construction sub-passes named in its
   table description, while semantic optimization is exposed as two typed
   transitions and `egir::reify_soacs` is one reification sub-pass;
-- `egir::plan_logical_resources` and `egir::plan` orchestrate resource
-  allocation and target-aware physical planning respectively;
+- `egir::plan_logical_resources` orchestrates semantic resource allocation and
+  residency, then crosses from semantic EGIR into staged IR;
+- `egir::plan` consumes staged IR and crosses into physical EGIR by selecting,
+  scheduling, and publishing target-aware recipes;
 - `lower_egir_to_ssa` is the convenience wrapper over the seven physical EGIR
-  checkpoint transitions listed separately in the EGIR table;
+  checkpoint transitions listed in the Physical EGIR table;
 - `ssa::prepare_spirv` composes the abstract-type and buffer-layout validation
   sub-passes, while `ssa::prepare_wgsl` runs only the abstract-type validator.
 
@@ -179,7 +202,7 @@ Each notes how it's enforced; when you move a sub-pass, check it here.
   realization and semantic optimization. *Enforced by:* the TLC/EGIR typestate
   chain and a physical-expansion assertion rejecting unresolved candidates.
 
-### EGIR (Acyclic E-Graph IR)
+### Semantic EGIR (Acyclic E-Graph IR)
 
 Each row below is one sub-pass. The separate **Checkpoint orchestrator** column
 names the public transition function; an orchestrator is not an additional
@@ -228,17 +251,67 @@ publication state is rewritten to name them.
 | **`plan_logical_resources`** | `plan_direct_stage_prelude` | When neither earlier planner succeeds, select at most one cost-eligible stage-invariant scalar frontier for a direct shader stage |
 | **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_direct_stage_prelude` succeeds, create its scalar handoff entry, rewrite the stage prefix, then restart the fixpoint; otherwise residency is complete |
 | **`plan_logical_resources`** | `resolve_scratch_sizes` | Derive logical sizes and host ABI lengths for Filter scratch resources |
-| **`plan_logical_resources`** | `strip_compiler_abi` | Remove compiler-only storage resources from the host-facing ABI |
-| **`plan_logical_resources`** | `verify_allocated_resources` | Debug builds only: validate logical-resource references, sizes, declarations, and output routes |
-| **`plan`** | `bind_mapped_output_destinations` | Bind mapped entry outputs to the resource destinations selected during logical planning |
-| **`plan`** | `planning::analyze` | Analyze target-aware physical recipes |
+
+The semantic EGIR order is load-bearing:
+
+- **`from_tlc` before `reify_soacs`** - conversion constructs every declared output route; reification then links those routes against the completed graph before constructing semantic SOAC state.
+- **`reify_soacs` before `optimize_semantic_operations`** - fusion legality depends on explicit domains, canonical resource summaries, semantic operation IDs, effects, and dependency edges.
+- **`optimize_semantic_operations` before `lift_stage_uniform_values` before `plan_logical_resources`** - lifting consumes the final fused graph, while residency and uniqueness resolution use its final liveness and demands.
+
+Every dependency above is enforced by the top-level typestate chain. Internal
+sub-passes within a transition are ordered by that transition's body rather
+than by additional public typestates.
+
+### Staged IR
+
+`plan_logical_resources` begins with semantic-EGIR allocation and residency,
+then `finalize_staged_ir` performs the representation change. A finalized
+`StagedIr` owns every executable EGIR body exactly once, distinguishes
+resource-backed host inputs from resident compiler flows, gives each resident
+flow one producer and at least one stage consumer or published output, and
+guarantees that the stage graph is acyclic. Its topology is private; subsequent
+planning may mutate stage bodies but cannot directly create an invalid graph.
+
+The current `finalize_staged_ir` function groups three responsibilities,
+implemented by multiple traversals: it completes consumer edges for stages
+introduced after a flow, records the host-facing input/output boundary, and
+validates/finalizes the builder while moving executable bodies into their
+stages. They remain one table row because they do not yet have separate
+function boundaries.
+
+| Checkpoint orchestrator | Sub-pass | Role / condition |
+|-------------------------|----------|------------------|
+| **`plan_logical_resources`** | `finalize_staged_ir` | Complete resident-flow incidence, publish only host-origin external inputs and outputs, validate destinations and acyclicity, and replace the semantic program's flat entry collection with staged body ownership |
+| **`plan_logical_resources`** | `verify_allocated_resources` | Debug builds only: validate logical-resource references, sizes, declarations, and output routes in every staged body |
+| **`plan`** | `bind_mapped_output_destinations` | Bind mapped stage outputs to the resource destinations selected during logical planning |
+| **`plan`** | `planning::analyze` | Analyze target-aware physical recipes for every staged body |
 | **`plan`** | `allocate_scratch` | Parallel schedule only: allocate work buffers required by selected recipes |
 | **`plan`** | `serial_plan` | Serial schedule only: select serial recipes without parallel scratch allocation |
-| **`plan`** | `resource_flows` | Derive compiler-resource producer/consumer edges from rewritten entries |
-| **`plan`** | `build_parallel_schedule` | Parallel schedule only: build dispatches and generated callables |
-| **`plan`** | `build_serial_schedule` | Serial schedule only: build the single-stage schedule and generated callables |
+| **`plan`** | `build_parallel_schedule` | Parallel schedule only: build dispatches and generated callables, using resident flows as scheduling dependencies |
+| **`plan`** | `build_serial_schedule` | Serial schedule only: build the serial schedule and generated callables, using resident flows as scheduling dependencies |
 | **`plan`** | `install_generated_callables` | Add scheduler-generated callables and their identities to the program |
-| **`plan`** | `KernelPlan::finalize` | Finalize bindings, physical entries, validation, and the published descriptor |
+| **`plan`** | `KernelPlan::finalize` | Publish bindings and the descriptor, consume staged topology, and construct physical EGIR entries |
+
+The staged order is load-bearing:
+
+- **`resolve_scratch_sizes` before `finalize_staged_ir`** — all storage carried
+  by resident flows must have complete target-independent size information
+  before the graph is sealed.
+- **`finalize_staged_ir` before `plan`** — target planning consumes stored stage
+  and flow topology; it no longer reconstructs compiler-resource flow edges
+  from entry declarations.
+- **`planning::analyze` before schedule construction before
+  `KernelPlan::finalize`** — scheduling consumes selected recipes and finalized
+  publication consumes the validated schedule.
+
+### Physical EGIR
+
+`KernelPlan::finalize` exits staged IR by constructing target-planned physical
+entries. The remaining EGIR transitions operate on those entries until resource
+handles have been erased and the program is ready for demand elaboration.
+
+| Checkpoint orchestrator | Sub-pass | Role / condition |
+|-------------------------|----------|------------------|
 | **`expand_soacs`** | `expand_soacs` | Expand each selected physical SOAC recipe into explicit loop or kernel operations |
 | **`partially_inline_calls`** | `partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops to a bounded fixpoint so invariant subgraphs can hoist |
 | **`materialize_dynamic_extracts`** | `materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control and data flow |
@@ -247,23 +320,19 @@ publication state is rewritten to name them.
 | **`erase_resources`** | `erase_resources` | Replace compile-time resource handles with their physical storage representation |
 | **`elaborate`** | `elaborate` | Demand-elaborate physical e-graphs into backend-bound SSA, naturally applying DCE, scoped CSE, and LICM |
 
-The EGIR order is also load-bearing:
+The physical order is also enforced by typestate:
 
-- **`from_tlc` before `reify_soacs`** - conversion constructs every declared output route; reification then links those routes against the completed graph before constructing semantic SOAC state.
-- **`reify_soacs` before `optimize_semantic_operations`** - fusion legality depends on explicit domains, canonical resource summaries, semantic operation IDs, effects, and dependency edges.
-- **`optimize_semantic_operations` before `lift_stage_uniform_values` before `plan_logical_resources`** - lifting consumes the final fused graph, while residency and uniqueness resolution use its final liveness and demands.
-- **`plan_logical_resources` before `plan`** - target scheduling consumes the final semantic residency manifest, then transactionally adds recipe-owned work buffers before choosing bindings, dispatches, and physical entries.
-- **`plan` before `expand_soacs` before `partially_inline_calls` before `materialize_dynamic_extracts` before `rewrite` before `optimize_skeleton` before `erase_resources` before `elaborate`** - every physical transition consumes the checkpoint produced by the preceding transition, and expansion accepts only a validated kernel plan.
-
-Every dependency above is enforced by the top-level typestate chain. Internal
-sub-passes within a transition are ordered by that transition's body rather
-than by additional public typestates.
+- **`plan` before `expand_soacs` before `partially_inline_calls` before
+  `materialize_dynamic_extracts` before `rewrite` before `optimize_skeleton`
+  before `erase_resources` before `elaborate`** — every transition consumes the
+  checkpoint produced by the preceding transition, and expansion accepts only
+  a validated kernel plan.
 
 ### SSA (codegen only)
 
 | Checkpoint transition | Sub-pass sequence | Description |
 |-----------------------|-------------------|-------------|
-| EGIR `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the validated physical program to SSA while retaining its published schedule and descriptor |
+| Physical EGIR `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the validated physical program to SSA while retaining its published schedule and descriptor |
 | `Elaborated` -> `Reachable` | `filter_reachable` | Remove final SSA functions and constants not reachable from an entry point |
 | `Reachable` -> `SpirvReady` | `verify_no_abstract_types`, `verify_buffer_layouts` | Validate abstract types and buffer layouts, recording both checks in the typestate |
 | `Reachable` -> `WgslReady` | `verify_no_abstract_types` | Validate abstract types and record WGSL readiness in the typestate |
@@ -283,12 +352,14 @@ Key properties:
 
 ### SOAC Parallelization Boundary
 
-Parallel semantics live in EGIR. TLC performs source-level normalization and
-uniqueness reasoning but emits no per-entry strategy record. EGIR reifies every
-reachable SOAC, retains it through semantic optimization and logical
-allocation, and destroys it only at the target-aware lower-to-SSA boundary. That terminal
-operation produces SSA kernels, the dependency/resource schedule, and the
-descriptor as one result. Its initial portable scheduler implements:
+Parallel semantics begin in semantic EGIR. TLC performs source-level
+normalization and uniqueness reasoning but emits no per-entry strategy record.
+Semantic EGIR reifies every reachable SOAC; staged IR retains those semantic
+EGIR bodies while making cross-stage residency explicit. `plan` selects recipes
+and constructs scheduled physical EGIR entries, and `expand_soacs` replaces the
+selected SOACs with explicit physical operations before SSA elaboration. The
+published physical program carries its kernels, dependency/resource schedule,
+and descriptor together. Its initial portable scheduler implements:
 
 
 - **Map** — lane-indexed scalar kernel: one thread per element, guarded

@@ -20,9 +20,9 @@ use super::super::graph_projector::{
     GraphProjection, GraphProjector, ProjectedValueRecipe, ValueRecipeSource,
 };
 use super::super::program::{
-    AllocatedEntry, CompilerResource, CompilerResourceKind, LogicalSize, MaterializationId,
-    MaterializationRequirement, OutputWriter, Program, RealizedOutputRoute, ResourceId, SemanticOpId,
-    SemanticResourceDecl, SemanticResourceRef, SlotSource,
+    AllocatedEntry, CompilerResource, CompilerResourceKind, GeneratedStageKind, LogicalSize, OutputWriter,
+    Program, RealizedOutputRoute, ResidentStorage, ResourceId, SemanticOpId, SemanticResourceDecl,
+    SemanticResourceRef, SlotSource, StageOrigin,
 };
 use super::super::semantic_graph::SemanticGraph;
 use super::super::soac::{filter, screma};
@@ -32,12 +32,13 @@ use super::super::types::{
     Semantic as SemanticFamily, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac,
     SoacEffect, ValueId, ValueKind, ViewId, WynLanguage,
 };
-use super::ResourcesAllocated;
+use super::ResidencyDraft;
 use crate::ast::TypeName;
 use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::StorageRole;
 use crate::pipeline_descriptor::{DispatchSize, Pipeline, StorageTextureSize};
 use crate::types::TypeExt;
+use wyn_staged_ir::{FlowId, StageId};
 
 #[cfg(test)]
 #[path = "residency_tests.rs"]
@@ -131,8 +132,42 @@ enum OutputStorage {
 struct OutputSpec {
     field: usize,
     storage: OutputStorage,
+    value_ty: Type<TypeName>,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
+}
+
+fn add_generated_stage(
+    data: &mut super::super::program::ResidencyProgramData,
+    entry_points: &mut Vec<AllocatedEntry>,
+    origin: StageOrigin,
+    entry: AllocatedEntry,
+) -> Result<StageId, String> {
+    let entry_id = entry.id;
+    let stage = data.stages.add_stage(origin, entry_id).map_err(|error| error.to_string())?;
+    if data.stage_ids.insert(entry_id, stage).is_some() {
+        return Err(format!("entry {entry_id:?} already owns a staged body"));
+    }
+    entry_points.push(entry);
+    Ok(stage)
+}
+
+fn connect_resident_flow(
+    data: &mut super::super::program::ResidencyProgramData,
+    producer: StageId,
+    consumer: StageId,
+    value_ty: Type<TypeName>,
+    storage: ResidentStorage,
+) -> Result<FlowId, String> {
+    let flow = if let Some(flow) = data.resident_flows.get(&storage.data).copied() {
+        flow
+    } else {
+        let flow = data.stages.add_flow(producer, value_ty, storage).map_err(|error| error.to_string())?;
+        data.resident_flows.insert(storage.data, flow);
+        flow
+    };
+    data.stages.add_consumer(flow, consumer).map_err(|error| error.to_string())?;
+    Ok(flow)
 }
 
 struct InputReplacement {
@@ -142,7 +177,7 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAllocated, String> {
+pub fn resolve_residency(mut program: ResidencyDraft) -> Result<ResidencyDraft, String> {
     loop {
         // Required operation-result handoffs are a normalization phase, not a
         // failed attempt whose fallback is speculative prelude extraction.
@@ -165,14 +200,12 @@ pub fn resolve_residency(mut program: ResourcesAllocated) -> Result<ResourcesAll
             plan.insertion_site,
             plan.recipe,
             plan.outputs,
-        );
+        )?;
     }
     Ok(program)
 }
 
-fn normalize_operation_result_residency(
-    mut program: ResourcesAllocated,
-) -> Result<ResourcesAllocated, String> {
+fn normalize_operation_result_residency(mut program: ResidencyDraft) -> Result<ResidencyDraft, String> {
     loop {
         // Every rewrite can change both operation dependencies and which
         // runtime-composite arrays need storage, so neither analysis may be
@@ -211,7 +244,7 @@ fn normalize_operation_result_residency(
 }
 
 fn select_stage_prelude_candidate(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
 ) -> Option<StagePreludeCandidate> {
     if let Some(plan) = plan_parallel_prelude(program, dependency_edges) {
@@ -224,7 +257,7 @@ fn select_stage_prelude_candidate(
 }
 
 fn plan_operation_result(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
     array_residency_demands: &HashSet<SemanticOpId>,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
@@ -285,7 +318,7 @@ fn plan_operation_result(
 }
 
 fn plan_scalar_result_handoff(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     let dependencies = SemanticGraph::new(dependency_edges);
@@ -520,7 +553,7 @@ fn operation_result_plan(
 }
 
 fn plan_parallel_prelude(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     dependency_edges: &[super::super::semantic_graph::SemanticDependency],
 ) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
@@ -590,7 +623,7 @@ fn plan_parallel_prelude(
 /// uniform work clears the singleton-launch overhead.
 const DIRECT_STAGE_INVOCATION_FALLBACK: u64 = 64;
 
-fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<StagePreludePlan> {
+fn plan_direct_stage_prelude(program: &ResidencyDraft) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let Ok(analysis) = StageDependenceAnalysis::for_entry(entry) else {
             continue;
@@ -626,7 +659,7 @@ fn plan_direct_stage_prelude(program: &ResourcesAllocated) -> Option<StagePrelud
     None
 }
 
-fn direct_stage_invocations(program: &ResourcesAllocated, entry: &AllocatedEntry) -> u64 {
+fn direct_stage_invocations(program: &ResidencyDraft, entry: &AllocatedEntry) -> u64 {
     let ExecutionModel::Compute { local_size } = &entry.execution_model else {
         return DIRECT_STAGE_INVOCATION_FALLBACK;
     };
@@ -954,12 +987,12 @@ fn dependencies_are_cloneable(graph: &AllocatedGraph, block_id: BlockId, effects
 }
 
 fn materialize_operation_result(
-    program: ResourcesAllocated,
+    program: ResidencyDraft,
     entry_index: usize,
     kind: FixedMaterializationKind,
     operation: ProjectedOperation,
     output_specs: Vec<OutputSpec>,
-) -> Result<ResourcesAllocated, String> {
+) -> Result<ResidencyDraft, String> {
     let Program {
         functions,
         externs,
@@ -978,8 +1011,9 @@ fn materialize_operation_result(
         projection,
         space,
     } = operation;
-    let materialization = data.materializations.alloc_id();
+    let stage_number = data.stages.stage_count();
     let entry = &entry_points[entry_index];
+    let consumer_stage = data.stage_ids[&entry.id];
     let routed_output_resources = output_specs
         .iter()
         .map(|output| {
@@ -1009,7 +1043,7 @@ fn materialize_operation_result(
     let compact_inputs = !entry.execution_model.is_compute();
     let mut producer_entry = projected_materialization_entry(
         &mut data.core.identities,
-        materialization,
+        stage_number,
         entry,
         name_suffix,
         execution_model,
@@ -1062,20 +1096,32 @@ fn materialize_operation_result(
         &output_specs,
         &mut global_context.effect_ids,
     )?;
-    let producer = match kind {
-        FixedMaterializationKind::SharedArray => MaterializationRequirement::SharedArray {
-            space,
-            entry: producer_entry,
-        },
-        FixedMaterializationKind::Gather => MaterializationRequirement::Gather {
-            space,
-            entry: producer_entry,
-        },
-        FixedMaterializationKind::Scalar => MaterializationRequirement::Scalar {
-            entry: producer_entry,
-        },
+    let generated_kind = match kind {
+        FixedMaterializationKind::SharedArray => GeneratedStageKind::SharedArray,
+        FixedMaterializationKind::Gather => GeneratedStageKind::Gather,
+        FixedMaterializationKind::Scalar => GeneratedStageKind::Scalar,
     };
-    data.materializations.insert(materialization, producer);
+    let producer_stage = add_generated_stage(
+        &mut data,
+        &mut entry_points,
+        StageOrigin::Generated {
+            kind: generated_kind,
+            space: (!kind.is_scalar()).then_some(space),
+        },
+        producer_entry,
+    )?;
+    for (resource, output) in output_resources.into_iter().zip(output_specs) {
+        connect_resident_flow(
+            &mut data,
+            producer_stage,
+            consumer_stage,
+            output.value_ty,
+            ResidentStorage {
+                data: resource,
+                length: None,
+            },
+        )?;
+    }
     Ok(Program::from_parts(
         functions,
         externs,
@@ -1087,7 +1133,7 @@ fn materialize_operation_result(
 }
 
 fn materialize_runtime_array_result(
-    program: ResourcesAllocated,
+    program: ResidencyDraft,
     entry_index: usize,
     operation: ProjectedOperation,
     backing: Option<ResourceId>,
@@ -1095,7 +1141,7 @@ fn materialize_runtime_array_result(
     elem_ty: Type<TypeName>,
     result_ty: Type<TypeName>,
     size: LogicalSize,
-) -> Result<ResourcesAllocated, String> {
+) -> Result<ResidencyDraft, String> {
     let Program {
         functions,
         externs,
@@ -1114,8 +1160,9 @@ fn materialize_runtime_array_result(
         projection,
         space,
     } = operation;
-    let materialization = data.materializations.alloc_id();
+    let stage_number = data.stages.stage_count();
     let entry = &entry_points[entry_index];
+    let consumer_stage = data.stage_ids[&entry.id];
     let producer_resources = entry.resources_referenced_by_projection(&projection);
     let producer_storage = entry.resource_declarations_for(&producer_resources);
     let execution_model = match &entry.execution_model {
@@ -1128,7 +1175,7 @@ fn materialize_runtime_array_result(
     };
     let mut producer_entry = projected_materialization_entry(
         &mut data.core.identities,
-        materialization,
+        stage_number,
         entry,
         "materialize_filter",
         execution_model,
@@ -1200,13 +1247,25 @@ fn materialize_runtime_array_result(
         &handoff,
         &mut global_context.effect_ids,
     )?;
-    data.materializations.insert(
-        materialization,
-        MaterializationRequirement::RuntimeArray {
-            space,
-            entry: producer_entry,
+    let producer_stage = add_generated_stage(
+        &mut data,
+        &mut entry_points,
+        StageOrigin::Generated {
+            kind: GeneratedStageKind::RuntimeArray,
+            space: Some(space),
         },
-    );
+        producer_entry,
+    )?;
+    connect_resident_flow(
+        &mut data,
+        producer_stage,
+        consumer_stage,
+        handoff.result_ty.clone(),
+        ResidentStorage {
+            data: handoff.data,
+            length: Some(handoff.length),
+        },
+    )?;
     Ok(Program::from_parts(
         functions,
         externs,
@@ -1457,14 +1516,14 @@ fn rewrite_materialized_operation_source(
 }
 
 fn materialize_stage_prelude(
-    program: ResourcesAllocated,
+    program: ResidencyDraft,
     entry_index: usize,
     insertion_site: Option<SideEffectSite>,
     recipe: ProjectedValueRecipe<SemanticResourceRef>,
     outputs: Vec<StagePreludeOutput>,
-) -> ResourcesAllocated {
+) -> Result<ResidencyDraft, String> {
     if outputs.is_empty() {
-        return program;
+        return Ok(program);
     }
     let Program {
         functions,
@@ -1481,14 +1540,15 @@ fn materialize_stage_prelude(
         source,
         ..
     } = recipe;
-    let materialization = data.materializations.alloc_id();
+    let stage_number = data.stages.stage_count();
+    let consumer_stage = data.stage_ids[&entry_points[entry_index].id];
     let producer_effects = projection.source_effects().clone();
     let producer_entry = {
         let entry = &entry_points[entry_index];
         let producer_resources = entry.resources_referenced_by_projection(&projection);
         projected_materialization_entry(
             &mut data.core.identities,
-            materialization,
+            stage_number,
             entry,
             "prepass_scalar",
             ExecutionModel::Compute {
@@ -1562,25 +1622,47 @@ fn materialize_stage_prelude(
     super::super::semantic_opt::eliminate_dead_seg_ops_in_graph(&mut entry.graph, route_values);
     entry.compact_interface();
 
-    data.materializations.insert(
-        materialization,
-        MaterializationRequirement::Scalar {
-            entry: producer_entry,
+    let producer_stage = add_generated_stage(
+        &mut data,
+        &mut entry_points,
+        StageOrigin::Generated {
+            kind: GeneratedStageKind::Scalar,
+            space: None,
         },
-    );
-    Program::from_parts(functions, externs, entry_points, constants, data, global_context)
+        producer_entry,
+    )?;
+    for (resource, value) in handoffs {
+        connect_resident_flow(
+            &mut data,
+            producer_stage,
+            consumer_stage,
+            value.elem_ty,
+            ResidentStorage {
+                data: resource,
+                length: None,
+            },
+        )?;
+    }
+    Ok(Program::from_parts(
+        functions,
+        externs,
+        entry_points,
+        constants,
+        data,
+        global_context,
+    ))
 }
 
 fn projected_materialization_entry(
     identities: &mut egir::program::ProgramIdentities,
-    materialization: MaterializationId,
+    stage_number: usize,
     source: &AllocatedEntry,
     name_suffix: &str,
     execution_model: ExecutionModel,
     resource_declarations: Vec<SemanticResourceDecl>,
     projection: GraphProjection<SemanticResourceRef>,
 ) -> AllocatedEntry {
-    let name = materialization.entry_name(&source.name, name_suffix);
+    let name = format!("{}_{}_{}", source.name, name_suffix, stage_number);
     let id = identities.alloc_entry(name.clone());
     AllocatedEntry {
         id,
@@ -1714,6 +1796,7 @@ fn output_specs(
             Some(OutputSpec {
                 field,
                 storage,
+                value_ty: field_result.ty().clone(),
                 size,
                 elem_ty,
             })

@@ -14,7 +14,7 @@ use super::super::types::{
     EGraph, EffectOp, PureViewSource, Semantic as SemanticFamily, SideEffect, SideEffectKind,
     SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
 };
-use super::ResourcesAllocated;
+use super::ResidencyDraft;
 use crate::builtins::{catalog, Purity};
 use crate::flow::{BlockId, ControlHeader};
 use crate::interface::{EntryInputKind, StorageAccess};
@@ -62,7 +62,7 @@ impl PreludeAnalysis {
 /// policy separately preserves single evaluation for structured storage
 /// prefixes; all other recipes remain cost-based.
 pub(crate) fn analyze_prelude(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     entry: &AllocatedEntry,
     recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
 ) -> Option<PreludeAnalysis> {
@@ -153,7 +153,7 @@ pub(crate) fn entry_parameter_is_scalar_relocatable(entry: &AllocatedEntry, inde
 }
 
 fn effect_cost(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     graph: &SemanticGraph,
     effect: &SideEffect<Semantic>,
     summaries: &mut HashMap<FunctionId, u64>,
@@ -236,7 +236,7 @@ fn operation_cost(
 }
 
 fn function_cost(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     callee: &FunctionId,
     summaries: &mut HashMap<FunctionId, u64>,
     visiting: &mut HashSet<FunctionId>,
@@ -264,7 +264,7 @@ fn function_cost(
 }
 
 fn graph_block_costs(
-    program: &ResourcesAllocated,
+    program: &ResidencyDraft,
     graph: &SemanticGraph,
     extra_roots: &HashMap<BlockId, Vec<ValueId>>,
     summaries: &mut HashMap<FunctionId, u64>,

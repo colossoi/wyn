@@ -1,9 +1,9 @@
 use super::*;
 use crate::egir;
-use crate::egir::program::MaterializationKind;
+use crate::egir::program::GeneratedStageKind;
 use crate::tlc;
 
-fn allocate_before_residency(source: &str) -> ResourcesAllocated {
+fn allocate_before_residency(source: &str) -> ResidencyDraft {
     let program = crate::compile_thru_tlc(source).expect("compile residency fixture through TLC");
     let program = tlc::infer_input_slice_bounds(program);
     let program = crate::to_egraph(program).expect("convert residency fixture to EGIR");
@@ -13,9 +13,9 @@ fn allocate_before_residency(source: &str) -> ResourcesAllocated {
     super::super::allocate_semantic_resources(program).expect("allocate host resources before residency")
 }
 
-fn materialization_signature(program: &ResourcesAllocated) -> (Vec<MaterializationKind>, usize) {
+fn materialization_signature(program: &ResidencyDraft) -> (Vec<GeneratedStageKind>, usize) {
     (
-        program.data.materializations.values().map(MaterializationRequirement::kind).collect(),
+        program.data.stages.stages().filter_map(|(_, origin, _)| origin.generated_kind()).collect(),
         program.data.core.resources.len(),
     )
 }
@@ -39,7 +39,7 @@ entry e() [8]i32 =
             let first = materialization_signature(&resolved);
             assert_eq!(
                 first.0,
-                vec![MaterializationKind::SharedArray, MaterializationKind::Scalar],
+                vec![GeneratedStageKind::SharedArray, GeneratedStageKind::Scalar],
                 "the shared producer is materialized before its scalar consumer"
             );
 

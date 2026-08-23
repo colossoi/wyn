@@ -52,8 +52,10 @@ fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
 
 fn assert_screma_and_lower(allocated: egir::ResourcesAllocated, scans: usize) {
     let scremas = allocated
-        .entry_points
-        .iter()
+        .data
+        .stages
+        .stages()
+        .map(|(_, stage)| stage.body())
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {

@@ -31,8 +31,7 @@ impl KernelPlan {
                 verification.as_ref().err().map(String::as_str).unwrap_or("unknown verification failure")
             );
         }
-        self.check_explicit_dispatch_coverage(&program.entry_points)
-            .map_err(ConvertError::InvalidDispatch)?;
+        self.check_explicit_dispatch_coverage().map_err(ConvertError::InvalidDispatch)?;
         self.install_phase_shells(&mut program.data.core.pipeline)?;
         let mut reserved_bindings = program
             .data
@@ -48,9 +47,10 @@ impl KernelPlan {
             .collect::<HashSet<_>>();
         reserved_bindings.extend(
             program
-                .entry_points
-                .iter()
-                .flat_map(|entry| &entry.inputs)
+                .data
+                .stages
+                .stages()
+                .flat_map(|(_, stage)| &stage.body().inputs)
                 .filter_map(|input| input.descriptor_binding()),
         );
         for pipeline in &program.data.core.pipeline.pipelines {
@@ -266,10 +266,7 @@ impl KernelPlan {
             .unwrap_or_else(|| phase.entry_point().to_owned())
     }
 
-    fn check_explicit_dispatch_coverage(
-        &self,
-        entries: &[egir::program::AllocatedEntry],
-    ) -> Result<(), String> {
+    fn check_explicit_dispatch_coverage(&self) -> Result<(), String> {
         for phase in
             self.phases.iter().filter(|phase| matches!(phase.placement.group, PhaseGroup::Pipeline(_)))
         {
@@ -280,20 +277,10 @@ impl KernelPlan {
             else {
                 continue;
             };
-            let Some(egir::parallelize::CompilerFlowEndpoint::Entry(source_entry)) = phase.flow_source
-            else {
-                continue;
-            };
-            let entry = entries.get(source_entry.index()).ok_or_else(|| {
-                format!(
-                    "kernel `{}` refers to missing semantic entry {source_entry:?}",
-                    phase.entry_point()
-                )
-            })?;
             let Some(count) = phase.required_elements else {
                 continue;
             };
-            let (wx, wy, wz) = execution_workgroup(&entry.execution_model);
+            let (wx, wy, wz) = execution_workgroup(&phase.entry.execution_model);
             let total = x
                 .saturating_mul(*y)
                 .saturating_mul(*z)

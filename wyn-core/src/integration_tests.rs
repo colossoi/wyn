@@ -72,6 +72,12 @@ fn lower_semantic_egir(
     lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
 }
 
+fn allocated_entries(
+    allocated: &egir::ResourcesAllocated,
+) -> impl Iterator<Item = &egir::program::AllocatedEntry> {
+    allocated.data.stages.stages().map(|(_, stage)| stage.body())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct SemanticSoacStats {
     filters: usize,
@@ -124,11 +130,8 @@ fn semantic_soac_stats(allocated: &egir::ResourcesAllocated) -> SemanticSoacStat
     for function in &allocated.functions {
         visit(&function.graph, &mut stats);
     }
-    for entry in &allocated.entry_points {
-        visit(&entry.graph, &mut stats);
-    }
-    for materialization in allocated.data.materializations.values() {
-        visit(&materialization.entry().graph, &mut stats);
+    for (_, stage) in allocated.data.stages.stages() {
+        visit(&stage.body().graph, &mut stats);
     }
     stats
 }
@@ -239,9 +242,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
   map(|x: i32| x * 2, sums)
 "#,
     );
-    let maps: Vec<_> = allocated
-        .entry_points
-        .iter()
+    let maps: Vec<_> = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -277,9 +278,7 @@ entry mixed() [4]i32 =
   map(|p: (i32, i32)| p.0 + p.1, zip(produced, [10, 20, 30, 40]))
 "#,
     );
-    let maps: Vec<_> = allocated
-        .entry_points
-        .iter()
+    let maps: Vec<_> = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -333,9 +332,7 @@ entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
   (sums, diffs)
 "#,
     );
-    let fused = allocated
-        .entry_points
-        .iter()
+    let fused = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -674,9 +671,7 @@ entry stats(xs: []i32) [4]i32 =
     );
     assert_eq!(stats.reduce_operators, 3, "two reductions plus one shared count");
 
-    let op = allocated
-        .entry_points
-        .iter()
+    let op = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -739,9 +734,7 @@ entry pick(xs: []i32) ?k. [k]i32 =
     let stats = semantic_soac_stats(&allocated);
     assert_eq!(stats.seg_maps, 0, "the producer map should not materialize");
     assert_eq!(stats.filters, 1, "the escaping filter remains the envelope");
-    let has_map_body = allocated
-        .entry_points
-        .iter()
+    let has_map_body = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .any(|effect| match &effect.kind {
             SideEffectKind::Soac(SoacEffect(
@@ -774,9 +767,7 @@ entry accumulate(indices: []i32,
   ()
 "#;
     let allocated = compile_to_semantic_egir(source);
-    let histogram = allocated
-        .entry_points
-        .iter()
+    let histogram = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op),
@@ -816,9 +807,7 @@ entry accumulate(indices: []i32,
         stats.seg_maps, 0,
         "the producer map should fold into the bucket lambda"
     );
-    let histogram = allocated
-        .entry_points
-        .iter()
+    let histogram = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op),
@@ -916,22 +905,23 @@ entry accumulate(indices: []i32,
   ()
 "#;
     let mut allocated = compile_to_semantic_egir(source);
-    let (entry_index, race_factor) = allocated
-        .entry_points
-        .iter()
-        .enumerate()
-        .find_map(|(entry_index, entry)| {
+    let (stage, race_factor) = allocated
+        .data
+        .stages
+        .stages()
+        .find_map(|(stage, staged)| {
+            let entry = staged.body();
             entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).find_map(
                 |effect| match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-                        Some((entry_index, op.form.operations[0].race_factor))
+                        Some((stage, op.form.operations[0].race_factor))
                     }
                     _ => None,
                 },
             )
         })
         .expect("semantic histogram race factor");
-    allocated.entry_points[entry_index].graph.replace_pure_node(
+    allocated.data.stages.stage_body_mut(stage).unwrap().graph.replace_pure_node(
         race_factor,
         PureOp::Int("33".into()),
         smallvec![],
@@ -1341,9 +1331,7 @@ fn ranked_bucket_scatter_records_layout_independently_of_logical_rank() {
 
     fn bucket_layouts(source: &str) -> Vec<ArrayLayout> {
         let program = compile_to_semantic_egir(source);
-        program
-            .entry_points
-            .iter()
+        let layouts = allocated_entries(&program)
             .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
             .find_map(|effect| match &effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Hist(operation))) => {
@@ -1351,7 +1339,8 @@ fn ranked_bucket_scatter_records_layout_independently_of_logical_rank() {
                 }
                 _ => None,
             })
-            .expect("bucket histogram")
+            .expect("bucket histogram");
+        layouts
     }
 
     let bound = r#"
@@ -1650,9 +1639,7 @@ entry write(xs: []i32, dest: *[]i32) () =
         "both map producers should compose into scatter"
     );
     assert_eq!(stats.hists, 1);
-    let input_count = allocated
-        .entry_points
-        .iter()
+    let input_count = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
             SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => Some(op.inputs.len()),
@@ -1675,10 +1662,11 @@ fn semantic_segops_survive_optimization_and_logical_allocation() {
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
     );
-    egir::semantic_graph::verify(&allocated).expect("complete semantic EGIR");
     let seg = allocated
-        .entry_points
-        .iter()
+        .data
+        .stages
+        .stages()
+        .map(|(_, stage)| stage.body())
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -1696,6 +1684,17 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         allocated.data.core.resources.len() >= 2,
         "input and output resources are planned logically"
     );
+    assert!(allocated.data.stages.external_inputs().any(|input| matches!(
+        &allocated.data.core.resources[input.storage().data].origin,
+        egir::program::ResourceOrigin::Host(_)
+    )));
+    assert!(allocated.data.stages.flows().any(|(_, flow)| {
+        flow.is_published()
+            && matches!(
+                &allocated.data.core.resources[flow.storage().data].origin,
+                egir::program::ResourceOrigin::Host(_)
+            )
+    }));
 
     assert!(allocated.semantic_ir().contains("ResourceLength"));
 
@@ -1740,9 +1739,7 @@ entry e() [4]f32 =
     [f32.sum(xs), f32.product(xs), f32.minimum(xs), f32.maximum(xs)]
 "#,
     );
-    let operator_counts: Vec<usize> = allocated
-        .entry_points
-        .iter()
+    let operator_counts: Vec<usize> = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -1756,18 +1753,14 @@ entry e() [4]f32 =
         vec![4],
         "the four same-space reductions fuse into one four-accumulator op"
     );
-    let remaining_maps = allocated
-        .entry_points
-        .iter()
+    let remaining_maps = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter(|effect| {
             matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if op.is_map())
         })
         .count();
     assert_eq!(remaining_maps, 0, "the single-consumer map is vertically fused");
-    let (pre, operators) = allocated
-        .entry_points
-        .iter()
+    let (pre, operators) = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -1804,9 +1797,7 @@ entry e() [3]i32 =
     ]
 "#,
     );
-    let operator_counts: Vec<_> = allocated
-        .entry_points
-        .iter()
+    let operator_counts: Vec<_> = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -1833,9 +1824,7 @@ entry e() [2]i32 =
    reduce(|a: i32, b: i32| a + b, 0, ys)]
 "#;
     let allocated = compile_to_semantic_egir(source);
-    let operators = allocated
-        .entry_points
-        .iter()
+    let operators = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -2760,9 +2749,7 @@ fn multi_consumer_producer_survival_is_characterized() {
 
     fn multi_consumer_producers(src: &str) -> usize {
         let allocated = compile_to_semantic_egir(src);
-        let seg_maps: std::collections::HashSet<_> = allocated
-            .entry_points
-            .iter()
+        let seg_maps: std::collections::HashSet<_> = allocated_entries(&allocated)
             .flat_map(|entry| {
                 entry.graph.skeleton.blocks.iter().flat_map(move |(_, block)| {
                     block.side_effects.iter().filter_map(move |effect| match &effect.kind {
@@ -2773,7 +2760,9 @@ fn multi_consumer_producer_survival_is_characterized() {
             })
             .collect();
         let mut consumers: HashMap<_, usize> = HashMap::new();
-        for dep in egir::semantic_graph::dependencies(&allocated) {
+        for dep in allocated_entries(&allocated)
+            .flat_map(|entry| egir::semantic_graph::graph_dependencies(&entry.graph))
+        {
             if matches!(dep.kind, SemanticDependencyKind::Value) && seg_maps.contains(&dep.producer) {
                 *consumers.entry(dep.producer).or_default() += 1;
             }
@@ -2865,45 +2854,48 @@ entry e() [4]i32 =
         "the surviving producer owns one shared logical buffer"
     );
     let shared_resource = shared[0].id();
-    let shared_requirements = allocated
+    let shared_stages = allocated
         .data
-        .materializations
-        .iter()
-        .filter(|(_, requirement)| requirement.kind() == egir::program::MaterializationKind::SharedArray)
+        .stages
+        .stages()
+        .filter(|(_, stage)| {
+            stage.origin().generated_kind() == Some(egir::program::GeneratedStageKind::SharedArray)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
-        shared_requirements.len(),
+        shared_stages.len(),
         1,
-        "shared producer is represented by one typed requirement"
+        "shared producer is represented by one typed stage"
     );
-    let (&requirement_id, requirement) = shared_requirements[0];
-    let requirement_name = requirement_id.entry_name("e", "materialize_shared");
+    let (producer_stage, producer) = shared_stages[0];
+    let producer_name = producer.body().name.clone();
     assert!(
-        allocated.entry_points.iter().all(|entry| entry.name != requirement_name),
-        "materialization must not be synthesized into the semantic entry arena"
+        producer_name.starts_with("e_materialize_shared_"),
+        "generated stage retains a diagnostic role suffix"
     );
-    assert_eq!(requirement.entry().name, requirement_name);
     let ResourceOrigin::Compiler(_) = &shared[0].origin else {
         unreachable!("shared resource must be compiler-owned")
     };
-    let flow = egir::allocation::resource_flows(&allocated)
-        .into_iter()
-        .find_map(|(resource, flow)| (resource == shared_resource).then_some(flow))
-        .expect("shared resource has an allocated flow");
-    assert!(matches!(
-        flow.producer,
-        egir::allocation::CompilerFlowEndpoint::Materialization(_)
-    ));
+    let flow = allocated
+        .data
+        .stages
+        .flows()
+        .find_map(|(_, flow)| (flow.storage().data == shared_resource).then_some(flow))
+        .expect("shared resource has a staged flow");
+    assert_eq!(flow.producer(), producer_stage);
     let consumer = flow
-        .consumers
+        .consumers()
         .iter()
         .copied()
-        .find_map(|consumer| match consumer {
-            egir::allocation::CompilerFlowEndpoint::Entry(id) => Some(id),
-            egir::allocation::CompilerFlowEndpoint::Materialization(_) => None,
+        .find(|consumer| {
+            allocated
+                .data
+                .stages
+                .stage(*consumer)
+                .is_some_and(|stage| matches!(stage.origin(), egir::program::StageOrigin::Authored))
         })
         .expect("shared array remains an input of the source entry");
-    assert_eq!(allocated.entry_points[consumer.index()].name, "e");
+    assert_eq!(allocated.data.stages.stage(consumer).unwrap().body().name, "e");
     let lowered = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
     let mir = ssa::print::format_program(&lowered);
     assert_eq!(
@@ -2913,7 +2905,7 @@ entry e() [4]i32 =
     );
     let stages: Vec<_> =
         lowered.global_context.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
-    assert_eq!(stages.first(), Some(&requirement_name.as_str()));
+    assert_eq!(stages.first(), Some(&producer_name.as_str()));
     assert_eq!(stages.last(), Some(&"e"));
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
     let phases: Vec<_> = lowered.global_context.kernel_plan.phases().collect();
@@ -4908,9 +4900,7 @@ entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
     xs)
 "#;
     let allocated = compile_to_semantic_egir(source);
-    let scan = allocated
-        .entry_points
-        .iter()
+    let scan = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -5749,30 +5739,21 @@ entry add_sum(xs: []i32) []i32 =
             _ => false,
         })
         .expect("scalar handoff resource");
-    let flow = egir::allocation::resource_flows(&allocated)
-        .into_iter()
-        .find_map(|(candidate, flow)| (candidate == resource.id()).then_some(flow))
-        .expect("scalar handoff has an explicit resource flow");
-    let egir::allocation::CompilerFlowEndpoint::Materialization(producer_id) = flow.producer else {
-        panic!("scalar producer must be a typed materialization requirement")
-    };
-    let producer = allocated
+    let flow = allocated
         .data
-        .materializations
-        .get(producer_id)
-        .expect("materialization flow producer is arena-owned");
-    assert!(producer.entry().name.contains("prepass_scalar"));
-    assert_eq!(flow.consumers.len(), 1);
+        .stages
+        .flows()
+        .find_map(|(_, flow)| (flow.storage().data == resource.id()).then_some(flow))
+        .expect("scalar handoff has an explicit staged flow");
+    let producer = allocated.data.stages.stage(flow.producer()).expect("staged producer");
     assert_eq!(
-        allocated.entry_points[match flow.consumers[0] {
-            egir::allocation::CompilerFlowEndpoint::Entry(id) => id.index(),
-            egir::allocation::CompilerFlowEndpoint::Materialization(_) => {
-                panic!("scalar materialization consumer must be a semantic entry")
-            }
-        }]
-        .name,
-        "add_sum"
+        producer.origin().generated_kind(),
+        Some(egir::program::GeneratedStageKind::Scalar)
     );
+    assert!(producer.body().name.contains("prepass_scalar"));
+    assert_eq!(flow.consumers().len(), 1);
+    let consumer = allocated.data.stages.stage(flow.consumers()[0]).expect("staged consumer");
+    assert_eq!(consumer.body().name, "add_sum");
 }
 
 // =============================================================================
@@ -12159,9 +12140,7 @@ entry e(a: []f32) []f32 =
             stats.map_bodies, expected_lambdas,
             "{label}: canonical pre/post lambda count"
         );
-        let has_post_scan = allocated
-            .entry_points
-            .iter()
+        let has_post_scan = allocated_entries(&allocated)
             .flat_map(|entry| entry.graph.skeleton.blocks.iter())
             .flat_map(|(_, block)| &block.side_effects)
             .any(|effect| {

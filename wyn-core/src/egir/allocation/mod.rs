@@ -1,9 +1,8 @@
 //! Target-independent logical resource allocation.
 //!
 //! This pass resolves legal in-place destinations, materializes values that
-//! must survive a scheduling boundary, assigns logical sizes, and removes
-//! compiler-only storage from the host ABI. Physical descriptor selection
-//! remains the responsibility of target planning.
+//! must survive a scheduling boundary, and assigns logical sizes. Physical
+//! descriptor selection remains the responsibility of target planning.
 
 mod cost;
 mod residency;
@@ -16,21 +15,19 @@ use crate::pipeline_descriptor::BufferLen;
 use crate::ssa;
 use crate::types::TypeExt;
 use crate::BindingRef;
-use crate::IdArena;
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::from_tlc::ConvertError;
 use super::ir::{PlaceId, RemapBlockIds};
 use super::program::{
     AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry,
-    LogicalResourceArena, LogicalSize, MaterializationId, Program, ResourceId, ResourceOrigin,
-    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef,
+    LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId, ResourceOrigin,
+    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef, StageOrigin,
 };
 use super::semantic_opt::Optimized;
 use super::soac::{filter, hist, screma};
 use super::types::{Semantic, SideEffectKind, Soac, SoacEffect, ValueId};
-use crate::EntryId;
 
 /// EGIR after logical resources and materialization entries have been planned.
 #[derive(Debug, Clone, Copy)]
@@ -46,23 +43,39 @@ pub type ResourcesAllocated = super::program::Program<
     RewriteGlobal,
 >;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CompilerFlowEndpoint {
-    Entry(EntryId),
-    Materialization(MaterializationId),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompilerResourceFlow {
-    pub producer: CompilerFlowEndpoint,
-    pub consumers: Vec<CompilerFlowEndpoint>,
-}
+pub(crate) enum ResidencyDraftTag {}
+pub(crate) type ResidencyDraft = super::program::Program<
+    ResidencyDraftTag,
+    super::ir::ProgramFamily<
+        Semantic<SemanticResourceRef>,
+        super::program::SemanticResourceDecl,
+        super::ir::RealizedOutputRoute,
+        ResidencyProgramData,
+    >,
+    RewriteGlobal,
+>;
 
 impl ResourcesAllocated {
     /// Human-readable semantic IR including segmented spaces, captures,
     /// output routing, and logical resource accesses.
     pub fn semantic_ir(&self) -> String {
-        super::semantic_graph::summary(self)
+        let mut output = String::new();
+        for (_, stage) in self.data.stages.stages() {
+            let entry = stage.body();
+            super::semantic_graph::write_graph_summary(
+                &mut output,
+                &format!("entry {}", entry.name),
+                &entry.graph,
+            );
+        }
+        for function in &self.functions {
+            super::semantic_graph::write_graph_summary(
+                &mut output,
+                &format!("function {}", function.name),
+                &function.graph,
+            );
+        }
+        output
     }
 
     /// Target-independent logical resources known before recipe selection.
@@ -76,7 +89,7 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
     let program = allocate_semantic_resources(program)?;
     let program = residency::resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
-    let program = strip_compiler_abi(program);
+    let program = finalize_staged_ir(program)?;
     if cfg!(debug_assertions) {
         verify_allocated_resources(&program).expect("invalid allocated semantic resources");
     }
@@ -86,7 +99,7 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 /// Replace pre-allocation descriptor bindings with target-independent logical
 /// resource identities. This is intentionally the first pass allowed to own
 /// or create resources.
-fn allocate_semantic_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
+fn allocate_semantic_resources(program: Optimized) -> Result<ResidencyDraft, ConvertError> {
     let mut builder = ResourceAllocationBuilder::default();
     reserve_host_resources(&program, &mut builder)?;
     lower_host_size_policies(&program, &mut builder)?;
@@ -232,7 +245,7 @@ impl ResourceAllocationBuilder {
 fn remap_program_resources(
     program: Optimized,
     context: ResourceAllocationContext,
-) -> Result<ResourcesAllocated, ConvertError> {
+) -> Result<ResidencyDraft, ConvertError> {
     let Program {
         functions,
         externs,
@@ -256,19 +269,30 @@ fn remap_program_resources(
         .map(|entry| remap_entry_resources(entry, &context))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut stages = super::program::StagedProgramBuilder::new();
+    let mut stage_ids = HashMap::new();
+    for entry in &entry_points {
+        let stage = stages
+            .add_stage(StageOrigin::Authored, entry.id)
+            .map_err(|error| ConvertError::Internal(error.to_string()))?;
+        stage_ids.insert(entry.id, stage);
+    }
+
     Ok(Program::from_parts(
         functions,
         externs,
         entry_points,
         constants,
-        AllocatedProgramData {
+        ResidencyProgramData {
             core: ResourceProgramData {
                 pipeline: data.pipeline,
                 stage_entries: data.stage_entries,
                 resources: context.resources,
                 identities: data.identities,
             },
-            materializations: IdArena::new(),
+            stages,
+            stage_ids,
+            resident_flows: HashMap::new(),
         },
         global_context,
     ))
@@ -471,7 +495,7 @@ fn remap_graph_resources(
     Ok((graph, nodes, blocks))
 }
 
-fn realize_dynamic_publication(mut program: ResourcesAllocated) -> ResourcesAllocated {
+fn realize_dynamic_publication(mut program: ResidencyDraft) -> ResidencyDraft {
     let resources = &mut program.data.core.resources;
     for function in &mut program.functions {
         realize_graph_dynamic_publication(&mut function.graph, resources);
@@ -777,79 +801,6 @@ fn remap_entry_resources(
     })
 }
 
-pub(crate) fn entries_with_endpoints(
-    program: &ResourcesAllocated,
-) -> impl Iterator<Item = (CompilerFlowEndpoint, &AllocatedEntry)> {
-    program.entry_points.iter().map(|entry| (CompilerFlowEndpoint::Entry(entry.id), entry)).chain(
-        program.data.materializations.ids().map(|id| {
-            (
-                CompilerFlowEndpoint::Materialization(id),
-                program.data.materializations[id].entry(),
-            )
-        }),
-    )
-}
-
-/// Derived resource-flow edges consumed by target scheduling. They are not
-/// stored on resources because entry rewrites are their source of truth.
-pub(crate) fn resource_flows(program: &ResourcesAllocated) -> Vec<(ResourceId, CompilerResourceFlow)> {
-    let mut producers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
-    let mut consumers: HashMap<ResourceId, Vec<CompilerFlowEndpoint>> = HashMap::new();
-    for (endpoint, entry) in entries_with_endpoints(program) {
-        for declaration in &entry.resource_declarations {
-            let resource = declaration.resource.0;
-            match declaration.role {
-                interface::StorageRole::Output => {
-                    producers.entry(resource).or_default().push(endpoint);
-                }
-                interface::StorageRole::Input => {
-                    consumers.entry(resource).or_default().push(endpoint);
-                }
-                interface::StorageRole::InputOutput => {
-                    producers.entry(resource).or_default().push(endpoint);
-                    consumers.entry(resource).or_default().push(endpoint);
-                }
-                interface::StorageRole::Intermediate => {}
-            }
-        }
-    }
-
-    let mut flows = Vec::new();
-    for resource in &program.data.core.resources {
-        let ResourceOrigin::Compiler(compiler) = &resource.origin else {
-            continue;
-        };
-        if !matches!(
-            compiler.kind,
-            CompilerResourceKind::GatherHandoff
-                | CompilerResourceKind::ScalarHandoff
-                | CompilerResourceKind::MultiConsumerArray
-                | CompilerResourceKind::FilterScratch
-                | CompilerResourceKind::FilterLenCell
-        ) {
-            continue;
-        }
-        let mut resource_producers = producers.remove(&resource.id()).unwrap_or_default();
-        resource_producers.sort_unstable();
-        resource_producers.dedup();
-        let [producer] = resource_producers.as_slice() else {
-            continue;
-        };
-        let mut resource_consumers = consumers.remove(&resource.id()).unwrap_or_default();
-        resource_consumers.retain(|consumer| consumer != producer);
-        resource_consumers.sort_unstable();
-        resource_consumers.dedup();
-        flows.push((
-            resource.id(),
-            CompilerResourceFlow {
-                producer: *producer,
-                consumers: resource_consumers,
-            },
-        ));
-    }
-    flows
-}
-
 pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result<(), String> {
     let check_size = |size: &LogicalSize| match size {
         LogicalSize::LikeResource { resource, .. } if !program.data.core.resources.contains(*resource) => {
@@ -860,7 +811,8 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
     for resource in &program.data.core.resources {
         check_size(&resource.size)?;
     }
-    for (_, entry) in entries_with_endpoints(program) {
+    for (_, stage) in program.data.stages.stages() {
+        let entry = stage.body();
         for declaration in &entry.resource_declarations {
             if !program.data.core.resources.contains(declaration.resource.0) {
                 return Err(format!(
@@ -887,9 +839,9 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
     Ok(())
 }
 
-fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
+fn resolve_scratch_sizes(program: ResidencyDraft) -> ResidencyDraft {
     let mut resolved = Vec::new();
-    for (_, entry) in entries_with_endpoints(&program) {
+    for entry in &program.entry_points {
         for (_, block) in &entry.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 let SideEffectKind::Soac(SoacEffect(
@@ -966,10 +918,7 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
     } = program;
     for (resource, size, output_len) in resolved {
         data.core.resources[resource].size = size.clone();
-        let entries = entry_points.iter_mut().chain(
-            (&mut data.materializations).into_iter().map(|(_, requirement)| requirement.entry_mut()),
-        );
-        for entry in entries {
+        for entry in &mut entry_points {
             for output in &mut entry.outputs {
                 if output.resource == Some(SemanticResourceRef(resource)) {
                     *output.storage_length_mut().expect("filter output resource must be storage") =
@@ -981,40 +930,98 @@ fn resolve_scratch_sizes(program: ResourcesAllocated) -> ResourcesAllocated {
     Program::from_parts(functions, externs, entry_points, constants, data, global_context)
 }
 
-fn strip_compiler_abi(program: ResourcesAllocated) -> ResourcesAllocated {
-    let compiler_resources = program
-        .data
-        .core
-        .resources
-        .iter()
-        .filter_map(|resource| {
-            matches!(&resource.origin, ResourceOrigin::Compiler(_)).then_some(resource.id())
-        })
-        .collect::<HashSet<_>>();
-    let strip = |entry: &mut AllocatedEntry| {
-        for input in &mut entry.inputs {
-            if input.resource.is_some_and(|resource| compiler_resources.contains(&resource.0)) {
-                input.make_storage_internal();
-            }
-        }
-    };
-
+fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated, ConvertError> {
     let Program {
         functions,
         externs,
-        mut entry_points,
+        entry_points,
         constants,
         mut data,
         global_context,
         state: _,
     } = program;
-    for entry in &mut entry_points {
-        strip(entry);
+    for entry in &entry_points {
+        let stage = data.stage_ids[&entry.id];
+        for declaration in entry.resource_declarations.iter().filter(|declaration| declaration.role.reads())
+        {
+            let Some(flow) = data.resident_flows.get(&declaration.resource.0).copied() else {
+                continue;
+            };
+            let needs_edge = data.stages.flow(flow).is_some_and(|resident| {
+                resident.producer() != stage && !resident.consumers().contains(&stage)
+            });
+            if needs_edge {
+                data.stages
+                    .add_consumer(flow, stage)
+                    .map_err(|error| ConvertError::Internal(error.to_string()))?;
+            }
+        }
     }
-    for (_, requirement) in &mut data.materializations {
-        strip(requirement.entry_mut());
+    for entry in &entry_points {
+        let stage = data.stage_ids[&entry.id];
+        for input in &entry.inputs {
+            let Some(SemanticResourceRef(resource)) = input.resource else {
+                continue;
+            };
+            if !matches!(&data.core.resources[resource].origin, ResourceOrigin::Host(_)) {
+                continue;
+            }
+            data.stages
+                .add_external_input(
+                    input.ty.clone(),
+                    super::program::ResidentStorage {
+                        data: resource,
+                        length: None,
+                    },
+                    [stage],
+                )
+                .map_err(|error| ConvertError::Internal(error.to_string()))?;
+        }
+        for output in &entry.outputs {
+            let Some(SemanticResourceRef(resource)) = output.resource else {
+                continue;
+            };
+            if !matches!(&data.core.resources[resource].origin, ResourceOrigin::Host(_)) {
+                continue;
+            }
+            let flow = data
+                .stages
+                .add_flow(
+                    stage,
+                    output.ty.clone(),
+                    super::program::ResidentStorage {
+                        data: resource,
+                        length: None,
+                    },
+                )
+                .map_err(|error| ConvertError::Internal(error.to_string()))?;
+            data.stages.publish(flow).map_err(|error| ConvertError::Internal(error.to_string()))?;
+        }
     }
-    Program::from_parts(functions, externs, entry_points, constants, data, global_context)
+
+    let mut entries = entry_points.into_iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
+    let stages = data
+        .stages
+        .finish()
+        .map_err(|error| ConvertError::Internal(error.to_string()))?
+        .map_stage_bodies(|_, entry| {
+            entries.remove(&entry).expect("staged lowering retained every executable entry exactly once")
+        });
+    assert!(
+        entries.is_empty(),
+        "every executable entry must be owned by one staged body"
+    );
+    Ok(Program::from_parts(
+        functions,
+        externs,
+        Vec::new(),
+        constants,
+        AllocatedProgramData {
+            core: data.core,
+            stages,
+        },
+        global_context,
+    ))
 }
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+[package]
+name = "wyn-staged-ir"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Invariant-preserving staged dataflow IR for the Wyn compiler"
+
+[dependencies]
+thiserror.workspace = true
+wyn-graph = { path = "../wyn-graph" }

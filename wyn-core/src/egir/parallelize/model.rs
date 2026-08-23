@@ -1,12 +1,8 @@
 //! Shared target-planning policy, decisions, errors, and immutable indexes.
 
-use crate::ResourceId;
-use std::collections::BTreeMap;
-
 use thiserror::Error;
 
 use super::schedule::KernelMutationError;
-use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 
 pub(super) const REDUCE_PHASE1_WIDTH: u32 = 64;
 pub(super) const REDUCE_PHASE2_WIDTH: u32 = 256;
@@ -72,35 +68,4 @@ impl DisjointSets {
 pub(super) enum CandidateSelection<T> {
     Selected(T),
     Fallback,
-}
-
-/// Canonical compiler-flow edges shared by attachment and coalescing.
-pub(super) struct ResourceFlowIndex {
-    flows: Vec<(ResourceId, CompilerResourceFlow)>,
-    incoming: BTreeMap<CompilerFlowEndpoint, Vec<CompilerFlowEndpoint>>,
-}
-
-impl ResourceFlowIndex {
-    pub(super) fn new(mut flows: Vec<(ResourceId, CompilerResourceFlow)>) -> Self {
-        flows.sort_by_key(|(resource, _)| *resource);
-        let mut incoming = BTreeMap::<_, Vec<_>>::new();
-        for (_, flow) in &flows {
-            for consumer in &flow.consumers {
-                incoming.entry(*consumer).or_default().push(flow.producer);
-            }
-        }
-        for producers in incoming.values_mut() {
-            producers.sort_unstable();
-            producers.dedup();
-        }
-        Self { flows, incoming }
-    }
-
-    pub(super) fn flows(&self) -> &[(ResourceId, CompilerResourceFlow)] {
-        &self.flows
-    }
-
-    pub(super) fn incoming(&self, consumer: CompilerFlowEndpoint) -> &[CompilerFlowEndpoint] {
-        self.incoming.get(&consumer).map(Vec::as_slice).unwrap_or(&[])
-    }
 }

@@ -366,56 +366,65 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn summary<Tag, Shape, GlobalContext, R>(inner: &Program<Tag, Shape, GlobalContext>) -> String
 where
     Shape: ProgramShape<Family = Semantic<R>>,
     R: GraphResource + Copy + Ord,
 {
-    use std::fmt::Write;
-
     let mut output = String::new();
-    let mut print_graph = |scope: &str, graph: &EGraph<Semantic<R>>| {
-        for (_, block) in &graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                match &effect.kind {
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                        let _ = writeln!(
-                            output,
-                            "{scope}: Screma state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
-                            op.semantic_state(),
-                            op.inputs,
-                            op.form.pre,
-                            op.form.scans,
-                            op.form.reductions,
-                            op.form.post,
-                        );
-                    }
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
-                        let _ = writeln!(
-                            output,
-                            "{scope}: Filter state={:?} inputs={:?} map={:?} predicate={:?}",
-                            op.state, op.body.inputs, op.body.map, op.body.predicate
-                        );
-                    }
-                    SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-                        let _ = writeln!(
-                            output,
-                            "{scope}: Hist state={:?} inputs={:?} bucket={:?} operations={:?}",
-                            op.state, op.inputs, op.form.bucket, op.form.operations
-                        );
-                    }
-                    SideEffectKind::Effect(_) => {}
-                }
-            }
-        }
-    };
     for entry in &inner.entry_points {
-        print_graph(&format!("entry {}", entry.name), &entry.graph);
+        write_graph_summary(&mut output, &format!("entry {}", entry.name), &entry.graph);
     }
     for function in &inner.functions {
-        print_graph(&format!("function {}", function.name), &function.graph);
+        write_graph_summary(
+            &mut output,
+            &format!("function {}", function.name),
+            &function.graph,
+        );
     }
     output
+}
+
+pub(crate) fn write_graph_summary<R>(output: &mut String, scope: &str, graph: &EGraph<Semantic<R>>)
+where
+    R: GraphResource + Copy + Ord,
+{
+    use std::fmt::Write;
+
+    for (_, block) in &graph.skeleton.blocks {
+        for effect in &block.side_effects {
+            match &effect.kind {
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
+                    let _ = writeln!(
+                        output,
+                        "{scope}: Screma state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
+                        op.semantic_state(),
+                        op.inputs,
+                        op.form.pre,
+                        op.form.scans,
+                        op.form.reductions,
+                        op.form.post,
+                    );
+                }
+                SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
+                    let _ = writeln!(
+                        output,
+                        "{scope}: Filter state={:?} inputs={:?} map={:?} predicate={:?}",
+                        op.state, op.body.inputs, op.body.map, op.body.predicate
+                    );
+                }
+                SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
+                    let _ = writeln!(
+                        output,
+                        "{scope}: Hist state={:?} inputs={:?} bucket={:?} operations={:?}",
+                        op.state, op.inputs, op.form.bucket, op.form.operations
+                    );
+                }
+                SideEffectKind::Effect(_) => {}
+            }
+        }
+    }
 }
 
 /// An index over `&[SemanticDependency]` answering the questions fusion asks:

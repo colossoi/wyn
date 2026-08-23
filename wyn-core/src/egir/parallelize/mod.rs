@@ -57,7 +57,6 @@ mod schedule;
 use crate::egir;
 use crate::interface;
 use crate::pipeline_descriptor;
-use crate::IdArena;
 use crate::IdSource;
 use filter::analyze_filter_candidate;
 use kernel::{
@@ -81,13 +80,14 @@ use crate::{EntryId, FunctionId, LookupMap, ResourceAccess};
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
+use super::allocation::ResourcesAllocated;
 use super::from_tlc::ConvertError;
 use super::graph_ops;
 use super::program::{
-    CompilerResourceKind, Func, LogicalResourceArena, MaterializationId, MaterializationRequirement,
-    OutputWriter, ResourceId, SemanticOpId, SemanticResourceDecl, SemanticResourceRef,
+    CompilerResourceKind, Func, LogicalResourceArena, OutputWriter, ResourceId, SemanticOpId,
+    SemanticResourceDecl, SemanticResourceRef, StageOrigin, StagedProgram,
 };
+use wyn_staged_ir::StageId;
 
 impl Planned {
     /// Logical resources after target recipe selection has installed only the
@@ -189,7 +189,11 @@ impl From<error::ParallelizeError> for ConvertError {
 }
 
 pub fn plan(mut program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
-    for entry in &mut program.entry_points {
+    let stage_ids = program.data.stages.stages().map(|(stage, _)| stage).collect::<Vec<_>>();
+    for stage in stage_ids {
+        let entry = program.data.stages.stage_body_mut(stage).ok_or_else(|| {
+            ConvertError::Internal(format!("staged body {stage:?} disappeared during planning"))
+        })?;
         entry.bind_mapped_output_destinations().map_err(ConvertError::Internal)?;
     }
     let (program, kernel_plan) = match profile.schedule {
@@ -206,21 +210,19 @@ fn build_parallel_plan(
 ) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
     let analysis = planning::analyze(&program)?;
     let (mut program, recipes, parallel_scremas) = analysis.allocate_scratch(program)?;
-    let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
         &program.data.core.pipeline,
         &program.data.core.stage_entries,
-        &program.entry_points,
+        &program.data.stages,
         &program.functions,
-        flows,
         recipes,
         parallel_scremas,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
         program.data.core.identities.clone(),
     )?
-    .build_parallel_schedule(&program.data.materializations)?;
+    .build_parallel_schedule()?;
     let (schedule, generated_callables, identities) = built.into_plan();
     let program = install_generated_callables(program, generated_callables, identities);
     Ok((program, schedule))
@@ -231,7 +233,8 @@ fn build_parallel_plan(
 fn build_serial_plan(
     mut program: ResourcesAllocated,
 ) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
-    let has_bucket_scatter = program.entry_points.iter().any(|entry| {
+    let has_bucket_scatter = program.data.stages.stages().any(|(_, stage)| {
+        let entry = stage.body();
         entry.graph.skeleton.blocks.iter().any(|(_, block)| {
             block.side_effects.iter().any(|effect| {
                 let super::types::SideEffectKind::Soac(super::types::SoacEffect(
@@ -254,21 +257,19 @@ fn build_serial_plan(
         ));
     }
     let (recipes, parallel_scremas) = planning::analyze(&program)?.serial_plan();
-    let flows = allocation::resource_flows(&program);
     let built = KernelPlanBuilder::new(
         &program.data.core.resources,
         &program.data.core.pipeline,
         &program.data.core.stage_entries,
-        &program.entry_points,
+        &program.data.stages,
         &program.functions,
-        flows,
         recipes,
         parallel_scremas,
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
         program.data.core.identities.clone(),
     )?
-    .build_serial_schedule(&program.data.materializations)?;
+    .build_serial_schedule()?;
     let (schedule, generated_callables, identities) = built.into_plan();
     let program = install_generated_callables(program, generated_callables, identities);
     Ok((program, schedule))
@@ -287,14 +288,14 @@ fn install_generated_callables(
 
 struct KernelPlanBuilder<'effects> {
     schedule: schedule::KernelPlan,
-    flows: model::ResourceFlowIndex,
+    stages: &'effects StagedProgram,
     recipes: planning::RecipeIndex,
     parallel_scremas: planning::ParallelScremaPlans,
     semantic_ids: &'effects mut super::program::SemanticOpIdSource,
     effect_ids: &'effects mut IdSource<EffectToken>,
     generated_callables: Vec<Func<Semantic>>,
     callables: LookupMap<FunctionId, Func<Semantic>>,
-    entry_ids: Vec<EntryId>,
+    authored_stages: Vec<(StageId, EntryId)>,
     identities: super::program::ProgramIdentities,
 }
 
@@ -395,122 +396,130 @@ impl<'effects> KernelPlanBuilder<'effects> {
         resources: &LogicalResourceArena,
         descriptor: &pipeline_descriptor::PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
-        entries: &[super::program::AllocatedEntry],
+        stages: &'effects StagedProgram,
         functions: &[Func<Semantic>],
-        flows: Vec<(ResourceId, allocation::CompilerResourceFlow)>,
         recipes: planning::RecipeIndex,
         parallel_scremas: planning::ParallelScremaPlans,
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
         effect_ids: &'effects mut IdSource<EffectToken>,
         identities: super::program::ProgramIdentities,
     ) -> error::Result<Self> {
-        let flows = model::ResourceFlowIndex::new(flows);
         let mut schedule = schedule::KernelPlan::from_descriptor(
             descriptor,
             stage_entries,
             resources,
-            entries,
+            stages,
             &parallel_scremas,
         )?;
-        for entry in entries {
-            let source = entry.id;
-            let endpoint = CompilerFlowEndpoint::Entry(source);
-            if let Some(count) = recipes.required_elements(endpoint) {
-                schedule.set_required_elements(endpoint, count);
+        let authored_stages = stages
+            .stages()
+            .filter_map(|(stage, body)| {
+                matches!(body.origin(), StageOrigin::Authored).then_some((stage, body.body().id))
+            })
+            .collect::<Vec<_>>();
+        for (stage, _) in &authored_stages {
+            if let Some(count) = recipes.required_elements(*stage) {
+                schedule.set_required_elements(*stage, Some(count));
             }
         }
         Ok(Self {
             schedule,
-            flows,
+            stages,
             recipes,
             parallel_scremas,
             semantic_ids,
             effect_ids,
             generated_callables: Vec::new(),
             callables: functions.iter().map(|function| (function.region, function.clone())).collect(),
-            entry_ids: entries.iter().map(|entry| entry.id).collect(),
+            authored_stages,
             identities,
         })
     }
 
-    fn build_parallel_schedule(
-        mut self,
-        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
-    ) -> error::Result<Self> {
-        self.attach_materializations(materializations)?;
+    fn build_parallel_schedule(mut self) -> error::Result<Self> {
+        self.attach_generated_stages()?;
         self.schedule_entries()?;
-        self.schedule.coalesce_resource_flows(self.flows.flows())?;
+        self.schedule.coalesce_staged_flows(self.stages)?;
         Ok(self)
     }
 
-    fn build_serial_schedule(
-        mut self,
-        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
-    ) -> error::Result<Self> {
-        self.attach_materializations(materializations)?;
+    fn build_serial_schedule(mut self) -> error::Result<Self> {
+        self.attach_generated_stages()?;
         self.schedule.make_serial()?;
-        self.schedule.coalesce_resource_flows(self.flows.flows())?;
+        self.schedule.coalesce_staged_flows(self.stages)?;
         Ok(self)
     }
 
     fn schedule_entries(&mut self) -> error::Result<()> {
-        for source in self.entry_ids.clone() {
+        for (stage, source) in self.authored_stages.clone() {
             let kernel = self.schedule.primary_kernel(source);
-            self.lower_endpoint(CompilerFlowEndpoint::Entry(source), kernel)?;
+            self.lower_endpoint(stage, kernel)?;
         }
         Ok(())
     }
 
-    /// Attach allocation-created producer entries in compiler-flow order and
-    /// immediately lower the recipe owned by each new physical kernel.
-    fn attach_materializations(
-        &mut self,
-        materializations: &IdArena<MaterializationId, MaterializationRequirement>,
-    ) -> error::Result<()> {
-        let mut ready = std::collections::BTreeSet::new();
-        for (_, flow) in self.flows.flows() {
-            for consumer in &flow.consumers {
-                if self.schedule.contains_flow_source(*consumer) {
-                    ready.insert((flow.producer, *consumer));
-                }
-            }
-        }
-
-        while let Some((producer_id, consumer_id)) = ready.pop_first() {
-            if self.schedule.contains_flow_source(producer_id) {
+    /// Attach generated producer stages in reverse topological order so every
+    /// producer can be inserted immediately before an already-seeded consumer.
+    fn attach_generated_stages(&mut self) -> error::Result<()> {
+        let topological = self.stages.topological_stages();
+        let rank = topological
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(rank, stage)| (stage, rank))
+            .collect::<HashMap<_, _>>();
+        for stage in topological.into_iter().rev() {
+            if self.schedule.contains_flow_source(stage) {
                 continue;
             }
-            let consumer = self.schedule.kernel_for_flow_source(consumer_id).ok_or_else(|| {
+            let staged = self.stages.stage(stage).ok_or_else(|| {
                 error::ParallelizeError::Invalid(format!(
-                    "scheduled flow consumer {consumer_id:?} has no kernel handle"
+                    "staged topology references missing producer {stage:?}"
                 ))
             })?;
-            let CompilerFlowEndpoint::Materialization(id) = producer_id else {
+            if matches!(staged.origin(), StageOrigin::Authored) {
                 return Err(error::ParallelizeError::Invalid(
-                    "typed entry/prepass producer was omitted while seeding the kernel plan".into(),
+                    "authored staged body was omitted while seeding the kernel plan".into(),
                 ));
-            };
-            let requirement = materializations.get(id).ok_or_else(|| {
+            }
+            let consumer_stage = staged
+                .outgoing_flows()
+                .iter()
+                .filter_map(|flow| self.stages.flow(*flow))
+                .flat_map(|flow| flow.consumers())
+                .copied()
+                .filter(|consumer| self.schedule.contains_flow_source(*consumer))
+                .min_by_key(|consumer| rank[consumer])
+                .ok_or_else(|| {
+                    error::ParallelizeError::Invalid(format!(
+                        "generated stage {stage:?} has no scheduled downstream consumer"
+                    ))
+                })?;
+            let consumer = self.schedule.kernel_for_flow_source(consumer_stage).ok_or_else(|| {
                 error::ParallelizeError::Invalid(format!(
-                    "materialization flow references missing requirement {id:?}"
+                    "scheduled stage consumer {consumer_stage:?} has no kernel handle"
                 ))
             })?;
-            let parallel_scremas = planning::parallel_scremas_for(&self.parallel_scremas, producer_id)?;
-            let kernel =
-                self.schedule.add_materialization_before(consumer, id, requirement, parallel_scremas)?;
-            self.lower_endpoint(CompilerFlowEndpoint::Materialization(id), kernel)?;
-            for upstream in self.flows.incoming(producer_id) {
-                ready.insert((*upstream, producer_id));
-            }
+            let origin = staged.origin().clone();
+            let entry = staged.body().clone();
+            let parallel_scremas = planning::parallel_scremas_for(&self.parallel_scremas, stage)?;
+            let kernel = self.schedule.add_generated_stage_before(
+                consumer,
+                stage,
+                &origin,
+                &entry,
+                parallel_scremas,
+            )?;
+            self.lower_endpoint(stage, kernel)?;
+            self.schedule.set_required_elements(
+                stage,
+                origin.space().is_some().then(|| self.recipes.required_elements(stage)).flatten(),
+            );
         }
         Ok(())
     }
 
-    fn lower_endpoint(
-        &mut self,
-        endpoint: CompilerFlowEndpoint,
-        kernel: schedule::KernelId,
-    ) -> error::Result<()> {
+    fn lower_endpoint(&mut self, endpoint: StageId, kernel: schedule::KernelId) -> error::Result<()> {
         let Some(plan) = self.recipes.take_endpoint(endpoint)? else {
             return Ok(());
         };

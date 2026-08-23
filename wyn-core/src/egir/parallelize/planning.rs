@@ -17,14 +17,15 @@ use crate::egir::types::{
 };
 
 use super::model::{CandidateSelection, ParallelizeError, Result};
-use crate::egir::allocation::{self, CompilerFlowEndpoint, ResourcesAllocated};
+use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::program::{
     CompilerResource, CompilerResourceKey, CompilerResourceKind, LogicalResourceArena, LogicalSize,
-    Program, SemanticOpId, SemanticResourceRef,
+    Program, SemanticOpId, SemanticResourceRef, StageOrigin,
 };
 use crate::egir::types::SegExtent;
 
 use super::capabilities::{self, Strategy};
+use wyn_staged_ir::StageId;
 
 type Semantic = SemanticFamily<SemanticResourceRef>;
 type EGraph = FamilyGraph<Semantic>;
@@ -33,10 +34,10 @@ type SideEffect = FamilySideEffect<Semantic>;
 /// Semantic Scremas selected for parallel execution after optimization and
 /// logical residency have finalized an endpoint graph.
 pub(super) type ParallelScremas = HashSet<SemanticOpId>;
-pub(super) type ParallelScremaPlans = HashMap<CompilerFlowEndpoint, ParallelScremas>;
+pub(super) type ParallelScremaPlans = HashMap<StageId, ParallelScremas>;
 
 fn analyze_parallel_scremas(
-    endpoint: CompilerFlowEndpoint,
+    origin: &StageOrigin,
     entry: &egir::program::AllocatedEntry,
 ) -> ParallelScremas {
     let semantic_graph =
@@ -52,8 +53,7 @@ fn analyze_parallel_scremas(
                 continue;
             };
             if entry.execution_model.is_compute()
-                && (!output_slots.is_empty()
-                    || matches!(endpoint, CompilerFlowEndpoint::Materialization(_)))
+                && (!output_slots.is_empty() || origin.generated_kind().is_some())
                 && semantic_graph.value_consumer_count(owner) == 0
             {
                 parallel.insert(*owner);
@@ -71,7 +71,7 @@ fn analyze_parallel_scremas(
 
 pub(super) fn parallel_scremas_for(
     plans: &ParallelScremaPlans,
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
 ) -> Result<&ParallelScremas> {
     plans.get(&endpoint).ok_or_else(|| {
         ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no parallel Screma plan"))
@@ -307,8 +307,8 @@ impl<R> EndpointPlan<R> {
 /// Authoritative parallel recipes indexed by the endpoint that owns the
 /// seeded kernel. Serial policy carries no recipe map.
 pub(super) struct RecipeIndex<R = PlannedRecipe> {
-    plans: Option<HashMap<CompilerFlowEndpoint, EndpointPlan<R>>>,
-    required_elements: HashMap<CompilerFlowEndpoint, u32>,
+    plans: Option<HashMap<StageId, EndpointPlan<R>>>,
+    required_elements: HashMap<StageId, u32>,
 }
 
 impl RecipeIndex<AnalyzedRecipe> {
@@ -319,7 +319,7 @@ impl RecipeIndex<AnalyzedRecipe> {
         }
     }
 
-    fn insert(&mut self, endpoint: CompilerFlowEndpoint, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
+    fn insert(&mut self, endpoint: StageId, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
         let Some(endpoints) = &mut self.plans else {
             return Err(ParallelizeError::Invalid(
                 "cannot add a parallel recipe to a serial recipe index".into(),
@@ -363,18 +363,18 @@ impl RecipeIndex<AnalyzedRecipe> {
 }
 
 impl RecipeIndex {
-    fn serial(required_elements: HashMap<CompilerFlowEndpoint, u32>) -> Self {
+    fn serial(required_elements: HashMap<StageId, u32>) -> Self {
         Self {
             plans: None,
             required_elements,
         }
     }
 
-    pub(super) fn required_elements(&self, endpoint: CompilerFlowEndpoint) -> Option<u32> {
+    pub(super) fn required_elements(&self, endpoint: StageId) -> Option<u32> {
         self.required_elements.get(&endpoint).copied()
     }
 
-    pub(super) fn take_endpoint(&mut self, endpoint: CompilerFlowEndpoint) -> Result<Option<EndpointPlan>> {
+    pub(super) fn take_endpoint(&mut self, endpoint: StageId) -> Result<Option<EndpointPlan>> {
         let Some(endpoints) = &mut self.plans else {
             return Ok(None);
         };
@@ -385,7 +385,7 @@ impl RecipeIndex {
 }
 
 struct ScratchRequest {
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     key: CompilerResourceKey,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
@@ -483,16 +483,25 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
     let mut recipes = RecipeIndex::parallel();
     let mut requests = Vec::new();
-    let parallel_scremas = allocation::entries_with_endpoints(inner)
-        .map(|(endpoint, entry)| (endpoint, analyze_parallel_scremas(endpoint, entry)))
+    let parallel_scremas = inner
+        .data
+        .stages
+        .stages()
+        .map(|(stage, body)| (stage, analyze_parallel_scremas(body.origin(), body.body())))
         .collect::<ParallelScremaPlans>();
-    for (endpoint, entry) in allocation::entries_with_endpoints(inner) {
-        let parallel = parallel_scremas_for(&parallel_scremas, endpoint)?;
-        let (plan, endpoint_requests, required_elements) =
-            analyze_endpoint(inner, entry, endpoint, &inner.data.core.resources, parallel)?;
-        recipes.insert(endpoint, plan)?;
+    for (stage, body) in inner.data.stages.stages() {
+        let parallel = parallel_scremas_for(&parallel_scremas, stage)?;
+        let (plan, endpoint_requests, required_elements) = analyze_endpoint(
+            inner,
+            body.body(),
+            stage,
+            body.origin(),
+            &inner.data.core.resources,
+            parallel,
+        )?;
+        recipes.insert(stage, plan)?;
         if let Some(count) = required_elements {
-            recipes.required_elements.insert(endpoint, count);
+            recipes.required_elements.insert(stage, count);
         }
         requests.extend(endpoint_requests);
     }
@@ -506,7 +515,8 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
 fn analyze_endpoint(
     program: &ResourcesAllocated,
     entry: &egir::program::AllocatedEntry,
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
+    origin: &StageOrigin,
     resources: &LogicalResourceArena,
     parallel_scremas: &ParallelScremas,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
@@ -514,9 +524,10 @@ fn analyze_endpoint(
         .with_parallel_scremas(parallel_scremas.iter().copied());
     let targets = RecipeTargets::collect(&projected, parallel_scremas);
     let required_elements = fixed_required_elements(&projected, &targets);
-    let split = match endpoint {
-        CompilerFlowEndpoint::Entry(_) => super::partition_entry_output_domains(&projected)?,
-        CompilerFlowEndpoint::Materialization(_) => None,
+    let split = if origin.generated_kind().is_none() {
+        super::partition_entry_output_domains(&projected)?
+    } else {
+        None
     };
     let Some(split) = split else {
         let (primary, requests) =
@@ -590,7 +601,7 @@ fn fixed_required_elements(entry: &egir::program::PlannedEntry, targets: &Recipe
 
 fn analyze_reduce_recipe(
     body: &egir::program::PlannedEntry,
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
@@ -617,7 +628,7 @@ fn analyze_reduce_recipe(
 
 fn analyze_scan_recipe(
     body: &egir::program::PlannedEntry,
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     resources: &LogicalResourceArena,
     located: LocatedScrema<'_>,
 ) -> Result<(AnalyzedRecipe, Vec<ScratchRequest>)> {
@@ -657,7 +668,7 @@ fn analyze_projected_kernel(
     program: &ResourcesAllocated,
     body: egir::program::PlannedEntry,
     output_projection: Option<Vec<usize>>,
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     resources: &LogicalResourceArena,
     targets: RecipeTargets,
 ) -> Result<(PlannedKernel<AnalyzedRecipe>, Vec<ScratchRequest>)> {
@@ -754,7 +765,7 @@ fn analyze_projected_kernel(
 }
 
 fn filter_scratch_requests(
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     candidate: &super::filter::FilterCandidate,
 ) -> Vec<ScratchRequest> {
     let element_count_size = match candidate.space.dims().first() {
@@ -796,7 +807,7 @@ fn filter_scratch_requests(
 }
 
 fn scratch_request(
-    endpoint: CompilerFlowEndpoint,
+    endpoint: StageId,
     owner: SemanticOpId,
     slot: usize,
     kind: CompilerResourceKind,

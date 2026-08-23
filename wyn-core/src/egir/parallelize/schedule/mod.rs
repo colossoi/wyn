@@ -10,10 +10,9 @@ use crate::egir;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::egir::allocation::{CompilerFlowEndpoint, CompilerResourceFlow};
 use crate::egir::program::{
-    LogicalResourceArena, MaterializationId, MaterializationKind, MaterializationRequirement, OutputSlotId,
-    PlannedEntry, PlannedPublication, SemanticResourceRef,
+    GeneratedStageKind, LogicalResourceArena, OutputSlotId, PlannedEntry, PlannedPublication,
+    SemanticResourceRef, StageOrigin, StagedProgram,
 };
 use crate::egir::soac::filter;
 use crate::egir::types::{Scheduled, SegExtent, SegResourceAccess};
@@ -22,6 +21,7 @@ use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
 use crate::{BindingRef, EntryId, ResourceId};
+use wyn_staged_ir::StageId;
 
 use super::declared_resources;
 
@@ -38,7 +38,7 @@ pub(in crate::egir) struct KernelPlan {
     phases: Vec<KernelPhase>,
     pipelines: Vec<ScheduledPipeline>,
     next_pipeline_order: usize,
-    flow_sources: HashMap<CompilerFlowEndpoint, KernelId>,
+    flow_sources: HashMap<StageId, KernelId>,
     source_entries: Vec<SourceEntryPlan>,
 }
 
@@ -323,7 +323,7 @@ struct KernelPhase {
     /// Typed identity used by compiler-resource flow edges. It is separate
     /// from the projected source ABI because generated requirements have no
     /// semantic entry ABI of their own.
-    flow_source: Option<CompilerFlowEndpoint>,
+    flow_source: Option<StageId>,
     label: &'static str,
     entry: Arc<PlannedEntry<Scheduled>>,
     source_entry: Option<EntryId>,
@@ -520,17 +520,17 @@ impl KernelPlan {
         ids.into_iter().map(|(_, id)| id).collect()
     }
 
-    pub(super) fn contains_flow_source(&self, source: CompilerFlowEndpoint) -> bool {
+    pub(super) fn contains_flow_source(&self, source: StageId) -> bool {
         self.flow_sources.contains_key(&source)
     }
 
-    pub(super) fn kernel_for_flow_source(&self, source: CompilerFlowEndpoint) -> Option<KernelId> {
+    pub(super) fn kernel_for_flow_source(&self, source: StageId) -> Option<KernelId> {
         self.flow_sources.get(&source).copied()
     }
 
     fn flow_resource_phases(
         &self,
-        source: CompilerFlowEndpoint,
+        source: StageId,
         resource: ResourceId,
         writes: bool,
     ) -> impl Iterator<Item = (KernelId, &KernelPhase)> {
@@ -547,11 +547,18 @@ impl KernelPlan {
         descriptor: &PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
         resources: &LogicalResourceArena,
-        entries: &[egir::program::AllocatedEntry],
+        stages: &StagedProgram,
         parallel_screma_plans: &super::planning::ParallelScremaPlans,
     ) -> Result<Self, String> {
-        let mut seeded = vec![None; entries.len()];
-        let entries_by_id = entries.iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
+        let authored = stages
+            .stages()
+            .filter(|(_, stage)| matches!(stage.origin(), StageOrigin::Authored))
+            .collect::<Vec<_>>();
+        let mut seeded = vec![None; authored.len()];
+        let entries_by_id = authored
+            .iter()
+            .map(|(stage, body)| (body.body().id, (*stage, body.body())))
+            .collect::<HashMap<_, _>>();
         if stage_entries.len() != descriptor.pipelines.len() {
             return Err("descriptor pipeline stages are missing structural entry associations".into());
         }
@@ -575,13 +582,13 @@ impl KernelPlan {
                 template.stages.iter().zip(associated_entries).enumerate()
             {
                 let selection = domain_selection_from_stage(stage, resources)?;
-                let entry = entries_by_id
+                let (stage_id, entry) = entries_by_id
                     .get(&source)
                     .copied()
                     .ok_or_else(|| format!("descriptor stage has unknown semantic entry {source:?}"))?;
                 published_sources.insert(source);
                 let phase = phase_from_entry(
-                    Some(source),
+                    stage_id,
                     entry,
                     selection,
                     "serial_compute",
@@ -589,15 +596,12 @@ impl KernelPlan {
                         group: PhaseGroup::Pipeline(pipeline_id),
                         order: stage_order,
                     },
-                    super::planning::parallel_scremas_for(
-                        parallel_screma_plans,
-                        CompilerFlowEndpoint::Entry(source),
-                    )
-                    .map_err(|error| error.to_string())?,
+                    super::planning::parallel_scremas_for(parallel_screma_plans, stage_id)
+                        .map_err(|error| error.to_string())?,
                 )?;
                 let id = KernelId(phases.len() as u32);
                 record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-                flow_sources.insert(CompilerFlowEndpoint::Entry(source), id);
+                flow_sources.insert(stage_id, id);
                 phases.push(phase);
             }
             pipelines.push(ScheduledPipeline {
@@ -617,13 +621,13 @@ impl KernelPlan {
                 return Err("graphics pipeline stage association count differs from descriptor".into());
             }
             for &source in associated_entries {
-                let entry = entries_by_id
+                let (stage_id, entry) = entries_by_id
                     .get(&source)
                     .copied()
                     .ok_or_else(|| format!("graphics stage has unknown semantic entry {source:?}"))?;
                 published_sources.insert(source);
                 let phase = graphics_passthrough_phase(
-                    source,
+                    stage_id,
                     entry,
                     PhasePlacement {
                         group: PhaseGroup::Graphics,
@@ -633,12 +637,13 @@ impl KernelPlan {
                 graphics_order += 1;
                 let id = KernelId(phases.len() as u32);
                 record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-                flow_sources.insert(CompilerFlowEndpoint::Entry(source), id);
+                flow_sources.insert(stage_id, id);
                 phases.push(phase);
             }
         }
         let mut unpublished_order = 0;
-        for entry in entries {
+        for (stage_id, body) in &authored {
+            let entry = body.body();
             let source = entry.id;
             if published_sources.contains(&source) {
                 continue;
@@ -650,24 +655,21 @@ impl KernelPlan {
             unpublished_order += 1;
             let result = if entry.execution_model.is_compute() {
                 phase_from_entry(
-                    Some(source),
+                    *stage_id,
                     entry,
                     KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
                     "serial_compute",
                     placement,
-                    super::planning::parallel_scremas_for(
-                        parallel_screma_plans,
-                        CompilerFlowEndpoint::Entry(source),
-                    )
-                    .map_err(|error| error.to_string())?,
+                    super::planning::parallel_scremas_for(parallel_screma_plans, *stage_id)
+                        .map_err(|error| error.to_string())?,
                 )
             } else {
-                graphics_passthrough_phase(source, entry, placement)
+                graphics_passthrough_phase(*stage_id, entry, placement)
             };
             let phase = result?;
             let id = KernelId(phases.len() as u32);
             record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-            flow_sources.insert(CompilerFlowEndpoint::Entry(source), id);
+            flow_sources.insert(*stage_id, id);
             phases.push(phase);
         }
         let seeded = seeded
@@ -677,9 +679,10 @@ impl KernelPlan {
                 kernel.ok_or_else(|| format!("semantic entry {} has no seeded kernel", index))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let source_entries = entries
+        let source_entries = authored
             .iter()
-            .map(|entry| {
+            .map(|(_, body)| {
+                let entry = body.body();
                 let source = entry.id;
                 let primary = seeded[source.index()];
                 SourceEntryPlan {
@@ -708,9 +711,9 @@ impl KernelPlan {
         self.source_entries[source.index()].primary
     }
 
-    pub(super) fn set_required_elements(&mut self, endpoint: CompilerFlowEndpoint, count: u32) {
+    pub(super) fn set_required_elements(&mut self, endpoint: StageId, count: Option<u32>) {
         if let Some(kernel) = self.flow_sources.get(&endpoint).copied() {
-            self.phase_mut(kernel).required_elements = Some(count);
+            self.phase_mut(kernel).required_elements = count;
         }
     }
 
@@ -737,11 +740,12 @@ impl KernelPlan {
         }
     }
 
-    pub(super) fn add_materialization_before(
+    pub(super) fn add_generated_stage_before(
         &mut self,
         consumer: KernelId,
-        requirement_id: MaterializationId,
-        requirement: &MaterializationRequirement,
+        stage: StageId,
+        origin: &StageOrigin,
+        entry: &egir::program::AllocatedEntry,
         parallel_scremas: &super::planning::ParallelScremas,
     ) -> Result<KernelId, KernelMutationError> {
         let consumer_placement = self.phase(consumer).placement;
@@ -773,9 +777,10 @@ impl KernelPlan {
         };
         let dependencies = self.phase(consumer).dependencies.clone();
         let source_entry = self.phase(consumer).source_entry;
-        let phase = phase_from_materialization(
-            requirement_id,
-            requirement,
+        let phase = phase_from_generated_stage(
+            stage,
+            origin,
+            entry,
             source_entry,
             dependencies,
             placement,
@@ -786,7 +791,7 @@ impl KernelPlan {
             self.pipelines.push(pipeline);
         }
         let id = self.push_phase(phase);
-        self.flow_sources.insert(CompilerFlowEndpoint::Materialization(requirement_id), id);
+        self.flow_sources.insert(stage, id);
         self.phase_mut(consumer).dependencies = vec![id];
         Ok(id)
     }
@@ -963,32 +968,33 @@ impl KernelPlan {
         Ok(())
     }
 
-    pub(super) fn coalesce_resource_flows(
+    pub(super) fn coalesce_staged_flows(
         &mut self,
-        flows: &[(ResourceId, CompilerResourceFlow)],
+        stages: &StagedProgram,
     ) -> Result<(), KernelMutationError> {
-        self.connect_resource_flows(flows)?;
+        self.connect_staged_flows(stages)?;
         self.merge_connected_pipelines()
     }
 
-    fn connect_resource_flows(
-        &mut self,
-        flows: &[(ResourceId, CompilerResourceFlow)],
-    ) -> Result<(), KernelMutationError> {
-        for (resource, flow) in flows {
-            let writers = self
-                .flow_resource_phases(flow.producer, *resource, true)
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>();
+    fn connect_staged_flows(&mut self, stages: &StagedProgram) -> Result<(), KernelMutationError> {
+        for (_, flow) in stages.flows() {
+            if flow.consumers().is_empty() {
+                continue;
+            }
+            let resource = flow.storage().data;
+            let producer = flow.producer();
+            let writers =
+                self.flow_resource_phases(producer, resource, true).map(|(id, _)| id).collect::<Vec<_>>();
             if writers.is_empty() {
                 return Err(KernelMutationError::InvalidKernel(format!(
                     "flow producer {:?} does not declare a writer for {:?}",
-                    flow.producer, resource
+                    producer, resource
                 )));
             }
-            for consumer in &flow.consumers {
+            for consumer in flow.consumers() {
+                let consumer = *consumer;
                 let readers = self
-                    .flow_resource_phases(*consumer, *resource, false)
+                    .flow_resource_phases(consumer, resource, false)
                     .map(|(id, _)| id)
                     .collect::<Vec<_>>();
                 // Allocation records endpoint-level consumers before output-domain
@@ -1128,7 +1134,7 @@ impl KernelPlan {
 }
 
 fn phase_from_entry(
-    source_entry: Option<EntryId>,
+    stage: StageId,
     entry: &egir::program::AllocatedEntry,
     mut selection: KernelDispatch,
     label: &'static str,
@@ -1143,8 +1149,8 @@ fn phase_from_entry(
     let output_routes = output_projection(entry);
     let body = PlannedEntry::project(entry)?.with_parallel_scremas(parallel_scremas.iter().copied());
     let mut phase = phase_from_body(
-        source_entry.map(CompilerFlowEndpoint::Entry),
-        source_entry,
+        Some(stage),
+        Some(entry.id),
         placement,
         PhaseSpec::compute(body, selection, label),
     )?;
@@ -1153,7 +1159,7 @@ fn phase_from_entry(
 }
 
 fn phase_from_body(
-    flow_source: Option<CompilerFlowEndpoint>,
+    flow_source: Option<StageId>,
     source_entry: Option<EntryId>,
     placement: PhasePlacement,
     spec: PhaseSpec,
@@ -1175,51 +1181,44 @@ fn phase_from_body(
     Ok(phase)
 }
 
-fn phase_from_materialization(
-    requirement_id: MaterializationId,
-    requirement: &MaterializationRequirement,
+fn phase_from_generated_stage(
+    stage: StageId,
+    origin: &StageOrigin,
+    entry: &egir::program::AllocatedEntry,
     source_entry: Option<EntryId>,
     dependencies: Vec<KernelId>,
     placement: PhasePlacement,
     parallel_scremas: &super::planning::ParallelScremas,
 ) -> Result<KernelPhase, String> {
-    let kind = requirement.kind();
+    let kind = origin
+        .generated_kind()
+        .ok_or_else(|| format!("authored stage {stage:?} cannot be attached as generated work"))?;
     let domain =
-        requirement.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+        origin.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
     let spec = PhaseSpec::compute(
-        PlannedEntry::project(requirement.entry())?.with_parallel_scremas(parallel_scremas.iter().copied()),
+        PlannedEntry::project(entry)?.with_parallel_scremas(parallel_scremas.iter().copied()),
         KernelDispatch::explicit(domain),
         match kind {
-            MaterializationKind::SharedArray => "shared_array_materialization",
-            MaterializationKind::Gather => "gather_prepass",
-            MaterializationKind::Scalar => "scalar_prepass",
-            MaterializationKind::RuntimeArray => "runtime_array_materialization",
+            GeneratedStageKind::SharedArray => "shared_array_materialization",
+            GeneratedStageKind::Gather => "gather_prepass",
+            GeneratedStageKind::Scalar => "scalar_prepass",
+            GeneratedStageKind::RuntimeArray => "runtime_array_materialization",
         },
     );
-    let mut phase = phase_from_body(
-        Some(CompilerFlowEndpoint::Materialization(requirement_id)),
-        source_entry,
-        placement,
-        spec,
-    )?;
+    let mut phase = phase_from_body(Some(stage), source_entry, placement, spec)?;
     phase.serial_single_workgroup = true;
     phase.dependencies = dependencies;
     Ok(phase)
 }
 
 fn graphics_passthrough_phase(
-    source_entry: EntryId,
+    stage: StageId,
     entry: &egir::program::AllocatedEntry,
     placement: PhasePlacement,
 ) -> Result<KernelPhase, String> {
     let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
     let spec = PhaseSpec::graphics(PlannedEntry::project(entry)?, KernelDispatch::inferred(domain));
-    let mut phase = phase_from_body(
-        Some(CompilerFlowEndpoint::Entry(source_entry)),
-        Some(source_entry),
-        placement,
-        spec,
-    )?;
+    let mut phase = phase_from_body(Some(stage), Some(entry.id), placement, spec)?;
     phase.output_routes = output_projection(entry);
     Ok(phase)
 }

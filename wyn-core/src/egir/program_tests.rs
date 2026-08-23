@@ -3,10 +3,7 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir;
-use crate::egir::allocation::{
-    entries_with_endpoints, plan_logical_resources, verify_allocated_resources, CompilerFlowEndpoint,
-    ResourcesAllocated,
-};
+use crate::egir::allocation::{plan_logical_resources, verify_allocated_resources, ResourcesAllocated};
 use crate::egir::types::{by_value_function_result, CallEffects, EGraph, Parameters, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::interface;
@@ -90,10 +87,13 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
     );
     let mut program = into_allocated(program);
     let resource = program.data.core.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
-    program.entry_points[0].resource_declarations.push(SemanticResourceDecl {
-        resource: SemanticResourceRef(resource),
-        role: interface::StorageRole::Input,
-    });
+    let stage = program.data.stages.stages().next().expect("allocated stage").0;
+    program.data.stages.stage_body_mut(stage).expect("allocated entry").resource_declarations.push(
+        SemanticResourceDecl {
+            resource: SemanticResourceRef(resource),
+            role: interface::StorageRole::Input,
+        },
+    );
     program
 }
 
@@ -124,7 +124,8 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
     );
     let allocated = plan_logical_resources(semantic.retag()).expect("logical resource planning");
 
-    assert!(allocated.data.materializations.is_empty());
+    assert_eq!(allocated.data.stages.stages().len(), 1);
+    assert_eq!(allocated.data.stages.flows().len(), 0);
     assert_eq!(allocated.data.core.resources.len(), 1);
     assert_eq!(allocated.data.core.resources[0].host_binding(), Some(binding));
 }
@@ -313,13 +314,11 @@ fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
         "entry optimization must not remint semantic identity"
     );
     let allocated = into_allocated(program);
-    let entries = entries_with_endpoints(&allocated)
-        .map(|(endpoint, entry)| {
-            let CompilerFlowEndpoint::Entry(id) = endpoint else {
-                unreachable!("program has no materializations")
-            };
-            (id, entry.name.as_str())
-        })
+    let entries = allocated
+        .data
+        .stages
+        .stages()
+        .map(|(_, stage)| (stage.body().id, stage.body().name.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(entries, vec![(before[0], "renamed"), (before[1], "second")]);
 }
@@ -342,10 +341,19 @@ fn entry_publication_reads_type_and_size_from_resource_arena() {
         unit_ty(),
         LogicalSize::FixedBytes(12),
     );
-    program.entry_points[0].resource_declarations[0].resource = SemanticResourceRef(resource);
+    let stage = program.data.stages.stages().next().expect("allocated stage").0;
+    program.data.stages.stage_body_mut(stage).unwrap().resource_declarations[0].resource =
+        SemanticResourceRef(resource);
     let physical = PhysicalResourceTable::allocate(&program.data.core.resources, &mut IdSource::new());
 
-    let publication = program.entry_points[0].publication(&physical).expect("publish allocated entry");
+    let publication = program
+        .data
+        .stages
+        .stage(stage)
+        .unwrap()
+        .body()
+        .publication(&physical)
+        .expect("publish allocated entry");
     let [binding] = publication.storage_bindings.as_slice() else {
         panic!("expected one compiler-owned storage declaration")
     };
