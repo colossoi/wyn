@@ -675,8 +675,13 @@ fn graphics_operation<'a>(
 ) -> Option<GraphicsOperation<'a>> {
     let (shade_builtin, shade_args) = shade_app(shade_term, builtins)?;
     let target_index = usize::from(shade_builtin == builtins.shade_with);
-    let target_symbol = term_symbol(shade_args.get(target_index)?)?;
-    let raster_symbol = term_symbol(shade_args.get(target_index + 1)?)?;
+    let target_origins = known_target_origins(targets.keys().copied());
+    let TargetOrigin::Target(target_symbol) =
+        target_origin(shade_args.get(target_index)?, &target_origins)?
+    else {
+        return None;
+    };
+    let raster_symbol = direct_symbol(shade_args.get(target_index + 1)?)?;
     let target = targets.get(&target_symbol)?;
     let target_name = target.name.clone();
     let target_color_ty = render_target_color_type(&target.ty)?.clone();
@@ -760,7 +765,7 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
     collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves).then_some(leaves)
 }
 
-fn term_symbol(term: &Term) -> Option<SymbolId> {
+fn direct_symbol(term: &Term) -> Option<SymbolId> {
     match term.kind {
         TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
         _ => None,
@@ -1262,6 +1267,62 @@ struct TargetRead {
 type TargetReads = LookupMap<SymbolId, TargetRead>;
 type ExternalSubstitutions = LookupMap<(SymbolId, Vec<usize>), (SymbolId, Type)>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TargetOrigin {
+    Target(SymbolId),
+    Aggregate(Vec<Option<TargetOrigin>>),
+}
+
+type TargetOrigins = LookupMap<SymbolId, TargetOrigin>;
+
+fn target_origin(term: &Term, origins: &TargetOrigins) -> Option<TargetOrigin> {
+    match &term.kind {
+        TermKind::Var(VarRef::Symbol(symbol)) => origins.get(symbol).cloned(),
+        TermKind::Tuple(values) => {
+            let fields = values.iter().map(|value| target_origin(value, origins)).collect::<Vec<_>>();
+            fields.iter().any(Option::is_some).then_some(TargetOrigin::Aggregate(fields))
+        }
+        TermKind::TupleProj { tuple, idx } => {
+            let TargetOrigin::Aggregate(fields) = target_origin(tuple, origins)? else {
+                return None;
+            };
+            fields.get(*idx)?.clone()
+        }
+        TermKind::Let { body, .. } => target_origin(body, origins),
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_origin = target_origin(then_branch, origins)?;
+            (target_origin(else_branch, origins).as_ref() == Some(&then_origin)).then_some(then_origin)
+        }
+        _ => None,
+    }
+}
+
+fn collect_target_origins(term: &Term, origins: &mut TargetOrigins) {
+    if let TermKind::Let { name, rhs, body, .. } = &term.kind {
+        collect_target_origins(rhs, origins);
+        if let Some(origin) = target_origin(rhs, origins) {
+            origins.insert(*name, origin);
+        }
+        collect_target_origins(body, origins);
+        return;
+    }
+    term.for_each_child(&mut |child| collect_target_origins(child, origins));
+}
+
+fn target_origins(body: &Term, reads: &TargetReads) -> TargetOrigins {
+    let mut origins = known_target_origins(reads.keys().copied());
+    collect_target_origins(body, &mut origins);
+    origins
+}
+
+fn known_target_origins(symbols: impl IntoIterator<Item = SymbolId>) -> TargetOrigins {
+    symbols.into_iter().map(|symbol| (symbol, TargetOrigin::Target(symbol))).collect()
+}
+
 type StageCaptures = (
     Vec<(SymbolId, Type)>,
     Vec<interface::EntryParamDecl>,
@@ -1564,10 +1625,12 @@ fn build_compute_stage(
     );
 
     let body = clone_term_with_fresh_ids(operation.rhs, term_ids);
+    let target_origins = target_origins(&body, &target_reads);
     let body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
+        target_origins,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
@@ -1690,6 +1753,7 @@ struct ExternalValueRewriter<'a> {
     term_ids: &'a mut TermIdSource,
     substitutions: ExternalSubstitutions,
     target_reads: TargetReads,
+    target_origins: TargetOrigins,
     target_load: builtins::BuiltinId,
     target_sample: builtins::BuiltinId,
     texture_load: builtins::BuiltinId,
@@ -1718,7 +1782,8 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         if args.len() != 3 || (id != self.target_load && id != self.target_sample) {
             return (term, RewriteDecision::Unchanged);
         }
-        let Some(target_symbol) = term_symbol(&args[0]) else {
+        let Some(TargetOrigin::Target(target_symbol)) = target_origin(&args[0], &self.target_origins)
+        else {
             return (term, RewriteDecision::Unchanged);
         };
         let Some(read) = self.target_reads.get(&target_symbol).cloned() else {
@@ -1741,6 +1806,24 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         };
         replacement.id = term.id;
         (replacement, RewriteDecision::Changed)
+    }
+
+    fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
+        let removable = matches!(
+            &term.kind,
+            TermKind::Let { name, name_ty, body, .. }
+                if is_render_target_type(name_ty) && !referenced_symbols(body).contains(name)
+        );
+        if !removable {
+            return (term, RewriteDecision::Unchanged);
+        }
+        // Render targets have no shader-value representation. Once all uses of
+        // an alias have been rewritten to texture operations, discard the now
+        // dead binding together with its unrepresentable right-hand side.
+        let TermKind::Let { body, .. } = term.kind else {
+            unreachable!()
+        };
+        (*body, RewriteDecision::Changed)
     }
 }
 
@@ -2075,10 +2158,12 @@ fn build_vertex_stage(
     }
 
     let mut body = clone_term_with_fresh_ids(&callback.body, term_ids);
+    let target_origins = target_origins(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
+        target_origins,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,
@@ -2363,10 +2448,12 @@ fn build_fragment_stage(
     }
 
     let mut body = clone_term_with_fresh_ids(&callback.body, term_ids);
+    let target_origins = target_origins(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
         substitutions,
         target_reads,
+        target_origins,
         target_load: builtins.target_load,
         target_sample: builtins.target_sample,
         texture_load: builtins.texture_load,

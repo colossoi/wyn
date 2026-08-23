@@ -3148,6 +3148,35 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_fragment_helper_can_load_render_target_packed_in_record() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+def read_scene(scene: render_target<f32>) f32 =
+  target_load(scene, @[0i32, 0i32], 0u32)
+
+entry render_target_record_helper(scene: render_target<f32>,
+                                  screen: render_target<f32>)
+    render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
+  let value = { scene = scene } in
+  shade(screen, raster,
+    |_| read_scene(value.scene))
+"#,
+            )
+            .expect("a render target retains its identity through a record projection and helper");
+            assert_naga_accepts_spirv(&lowered.spirv);
+        })
+        .expect("spawn record-packed render-target regression")
+        .join()
+        .expect("record-packed render-target regression panicked");
+}
+
+#[test]
 fn unified_root_accepts_named_u32_constants_in_direct_draw() {
     let program = compile_thru_tlc(
         r#"
