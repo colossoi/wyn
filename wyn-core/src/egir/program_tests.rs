@@ -124,8 +124,8 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
     );
     let allocated = plan_logical_resources(semantic.retag()).expect("logical resource planning");
 
-    assert_eq!(allocated.data.stages.stages().len(), 1);
-    assert_eq!(allocated.data.stages.flows().len(), 0);
+    assert_eq!(allocated.data.stages.stages().count(), 1);
+    assert_eq!(allocated.data.stages.flows().count(), 0);
     assert_eq!(allocated.data.core.resources.len(), 1);
     assert_eq!(allocated.data.core.resources[0].host_binding(), Some(binding));
 }

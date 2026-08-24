@@ -1577,6 +1577,7 @@ name = "wyn-staged-ir"
 version = "0.1.0"
 dependencies = [
  "thiserror 1.0.69",
+ "wyn-base",
  "wyn-graph",
 ]
 

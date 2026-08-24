@@ -9,28 +9,34 @@
 #![forbid(unsafe_code)]
 
 use thiserror::Error;
+use wyn_base::IdArena;
 use wyn_graph::{topo_sort_by_dependencies, WalkOrder};
 
-macro_rules! dense_id {
-    ($name:ident, $description:literal) => {
-        #[doc = $description]
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(u32);
+/// Opaque identity of one executable stage, issued by [`StagedIrBuilder`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StageId(StageKey);
 
-        impl $name {
-            pub const fn from_index(index: u32) -> Self {
-                Self(index)
-            }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct StageKey(u32);
 
-            pub const fn index(self) -> usize {
-                self.0 as usize
-            }
-        }
-    };
+impl From<u32> for StageKey {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
 }
 
-dense_id!(StageId, "Identity of one executable stage.");
-dense_id!(FlowId, "Identity of one typed resident value flow.");
+/// Opaque identity of one typed resident value flow, issued by [`StagedIrBuilder`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlowId(FlowKey);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct FlowKey(u32);
+
+impl From<u32> for FlowKey {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
 
 /// One executable body and its staged incidence.
 #[derive(Clone, Debug)]
@@ -116,26 +122,26 @@ impl<ValueType, Storage> ExternalInput<ValueType, Storage> {
 /// Finalized target-independent staged IR.
 #[derive(Clone, Debug)]
 pub struct StagedIr<Body, ValueType, Storage, Origin = ()> {
-    stages: Vec<Stage<Body, Origin>>,
-    flows: Vec<ResidentFlow<ValueType, Storage>>,
+    stages: IdArena<StageKey, Stage<Body, Origin>>,
+    flows: IdArena<FlowKey, ResidentFlow<ValueType, Storage>>,
     external_inputs: Vec<ExternalInput<ValueType, Storage>>,
 }
 
 impl<Body, ValueType, Storage, Origin> StagedIr<Body, ValueType, Storage, Origin> {
     pub fn stage(&self, id: StageId) -> Option<&Stage<Body, Origin>> {
-        self.stages.get(id.index())
+        self.stages.get(id.0)
     }
 
     pub fn flow(&self, id: FlowId) -> Option<&ResidentFlow<ValueType, Storage>> {
-        self.flows.get(id.index())
+        self.flows.get(id.0)
     }
 
-    pub fn stages(&self) -> impl ExactSizeIterator<Item = (StageId, &Stage<Body, Origin>)> {
-        self.stages.iter().enumerate().map(|(index, stage)| (StageId(index as u32), stage))
+    pub fn stages(&self) -> impl Iterator<Item = (StageId, &Stage<Body, Origin>)> {
+        self.stages.iter().map(|(&id, stage)| (StageId(id), stage))
     }
 
-    pub fn flows(&self) -> impl ExactSizeIterator<Item = (FlowId, &ResidentFlow<ValueType, Storage>)> {
-        self.flows.iter().enumerate().map(|(index, flow)| (FlowId(index as u32), flow))
+    pub fn flows(&self) -> impl Iterator<Item = (FlowId, &ResidentFlow<ValueType, Storage>)> {
+        self.flows.iter().map(|(&id, flow)| (FlowId(id), flow))
     }
 
     pub fn external_inputs(&self) -> impl ExactSizeIterator<Item = &ExternalInput<ValueType, Storage>> {
@@ -143,7 +149,7 @@ impl<Body, ValueType, Storage, Origin> StagedIr<Body, ValueType, Storage, Origin
     }
 
     pub fn stage_body_mut(&mut self, id: StageId) -> Option<&mut Body> {
-        self.stages.get_mut(id.index()).map(|stage| &mut stage.body)
+        self.stages.get_mut(id.0).map(|stage| &mut stage.body)
     }
 
     /// Change the body representation without rebuilding validated topology.
@@ -151,17 +157,17 @@ impl<Body, ValueType, Storage, Origin> StagedIr<Body, ValueType, Storage, Origin
         self,
         mut map: impl FnMut(StageId, Body) -> NewBody,
     ) -> StagedIr<NewBody, ValueType, Storage, Origin> {
-        let stages = self
-            .stages
-            .into_iter()
-            .enumerate()
-            .map(|(index, stage)| Stage {
+        let mut stages = IdArena::new();
+        for (key, stage) in self.stages {
+            let id = StageId(key);
+            let mapped_key = stages.alloc(Stage {
                 origin: stage.origin,
-                body: map(StageId(index as u32), stage.body),
+                body: map(id, stage.body),
                 incoming_flows: stage.incoming_flows,
                 outgoing_flows: stage.outgoing_flows,
-            })
-            .collect();
+            });
+            debug_assert_eq!(mapped_key, key, "stage mapping must retain arena identities");
+        }
         StagedIr {
             stages,
             flows: self.flows,
@@ -196,11 +202,11 @@ impl<Body, ValueType, Storage, Origin> Default for StagedIrBuilder<Body, ValueTy
 }
 
 impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage, Origin> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             ir: StagedIr {
-                stages: Vec::new(),
-                flows: Vec::new(),
+                stages: IdArena::new(),
+                flows: IdArena::new(),
                 external_inputs: Vec::new(),
             },
         }
@@ -210,7 +216,7 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
         self.ir.stages.len()
     }
 
-    pub fn stages(&self) -> impl ExactSizeIterator<Item = (StageId, &Origin, &Body)> {
+    pub fn stages(&self) -> impl Iterator<Item = (StageId, &Origin, &Body)> {
         self.ir.stages().map(|(id, stage)| (id, stage.origin(), stage.body()))
     }
 
@@ -223,14 +229,13 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
     }
 
     pub fn add_stage(&mut self, origin: Origin, body: Body) -> Result<StageId, BuildError> {
-        let id = StageId(dense_index(self.ir.stages.len(), "stages")?);
-        self.ir.stages.push(Stage {
+        ensure_id_capacity(self.ir.stages.len(), "stages")?;
+        Ok(StageId(self.ir.stages.alloc(Stage {
             origin,
             body,
             incoming_flows: Vec::new(),
             outgoing_flows: Vec::new(),
-        });
-        Ok(id)
+        })))
     }
 
     pub fn add_flow(
@@ -240,15 +245,15 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
         storage: Storage,
     ) -> Result<FlowId, BuildError> {
         self.stage(producer)?;
-        let id = FlowId(dense_index(self.ir.flows.len(), "resident flows")?);
-        self.ir.flows.push(ResidentFlow {
+        ensure_id_capacity(self.ir.flows.len(), "resident flows")?;
+        let id = FlowId(self.ir.flows.alloc(ResidentFlow {
             value_type,
             storage,
             producer,
             consumers: Vec::new(),
             published: false,
-        });
-        self.ir.stages[producer.index()].outgoing_flows.push(id);
+        }));
+        self.ir.stages[producer.0].outgoing_flows.push(id);
         Ok(id)
     }
 
@@ -261,17 +266,17 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
         if self.stage_reaches(consumer, producer) {
             return Err(BuildError::Cycle { producer, consumer });
         }
-        if self.ir.flows[flow.index()].consumers.contains(&consumer) {
+        if self.ir.flows[flow.0].consumers.contains(&consumer) {
             return Err(BuildError::DuplicateConsumer { flow, consumer });
         }
-        self.ir.flows[flow.index()].consumers.push(consumer);
-        self.ir.stages[consumer.index()].incoming_flows.push(flow);
+        self.ir.flows[flow.0].consumers.push(consumer);
+        self.ir.stages[consumer.0].incoming_flows.push(flow);
         Ok(())
     }
 
     pub fn publish(&mut self, flow: FlowId) -> Result<(), BuildError> {
         self.require_flow(flow)?;
-        self.ir.flows[flow.index()].published = true;
+        self.ir.flows[flow.0].published = true;
         Ok(())
     }
 
@@ -344,8 +349,12 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
     }
 }
 
-fn dense_index(length: usize, collection: &'static str) -> Result<u32, BuildError> {
-    u32::try_from(length).map_err(|_| BuildError::CapacityExceeded { collection })
+fn ensure_id_capacity(length: usize, collection: &'static str) -> Result<(), BuildError> {
+    if length < u32::MAX as usize {
+        Ok(())
+    } else {
+        Err(BuildError::CapacityExceeded { collection })
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -374,7 +383,7 @@ pub enum BuildError {
     },
     #[error("stage graph contains a cycle")]
     CycleDetected,
-    #[error("{collection} exceeded the dense 32-bit identity space")]
+    #[error("{collection} exceeded the 32-bit identity space")]
     CapacityExceeded {
         collection: &'static str,
     },

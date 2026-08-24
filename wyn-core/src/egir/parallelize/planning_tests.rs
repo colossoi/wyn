@@ -3,7 +3,7 @@
 use super::*;
 use crate::egir::program::{LogicalResourceArena, ResourceOrigin};
 use crate::ResourceId;
-use wyn_staged_ir::StageId;
+use wyn_staged_ir::StagedIrBuilder;
 
 fn resource(
     resources: &mut LogicalResourceArena,
@@ -52,6 +52,7 @@ fn resource_arena_interns_compiler_ownership_keys() {
 
 #[test]
 fn serial_recipe_index_carries_no_parallel_recipe_state() {
+    let stage = StagedIrBuilder::<(), (), ()>::new().add_stage((), ()).expect("stage allocation");
     let mut serial = RecipeIndex::serial(std::collections::HashMap::new());
-    assert!(serial.take_endpoint(StageId::from_index(0)).expect("serial endpoint lookup").is_none());
+    assert!(serial.take_endpoint(stage).expect("serial endpoint lookup").is_none());
 }
