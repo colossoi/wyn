@@ -12,18 +12,8 @@
 /// Physical EGIR after pure-graph rewrite alternatives have been installed.
 #[derive(Debug, Clone, Copy)]
 pub enum RewrittenTag {}
-pub type Rewritten = super::program::Program<
-    RewrittenTag,
-    super::ir::ProgramFamily<
-        super::types::Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type Rewritten = super::program::PhysicalProgram<RewrittenTag>;
 
-use crate::interface;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -116,7 +106,7 @@ pub fn rewrite(program: super::materialize::Materialized) -> Rewritten {
             rules.apply_to_graph(&mut graph);
             graph
         })
-        .retag()
+        .retag_physical()
 }
 
 /// Every rule whose outcome is arbitrated by cost extraction.

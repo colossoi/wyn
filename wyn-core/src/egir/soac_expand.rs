@@ -9,20 +9,10 @@
 /// Physical EGIR whose SOAC effects have been expanded into explicit CFGs.
 #[derive(Debug, Clone, Copy)]
 pub enum SoacsExpandedTag {}
-pub type SoacsExpanded = super::program::Program<
-    SoacsExpandedTag,
-    super::ir::ProgramFamily<
-        super::types::Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type SoacsExpanded = super::program::PhysicalProgram<SoacsExpandedTag>;
 
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader};
-use crate::interface;
 use crate::types;
 use wyn_base::IdSource;
 
@@ -79,7 +69,7 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
     program = program.try_map_graphs_with_state(|_, graph, _, context| {
         run_one_body(graph, &callables, &mut context.effect_ids)
     })?;
-    Ok(program.retag())
+    Ok(program.retag_physical())
 }
 
 /// Expand every physical SOAC in the skeleton.

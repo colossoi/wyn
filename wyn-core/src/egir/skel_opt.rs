@@ -26,19 +26,9 @@
 /// Physical EGIR after skeleton control-flow simplification.
 #[derive(Debug, Clone, Copy)]
 pub enum SkeletonOptimizedTag {}
-pub type SkeletonOptimized = super::program::Program<
-    SkeletonOptimizedTag,
-    super::ir::ProgramFamily<
-        super::types::Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type SkeletonOptimized = super::program::PhysicalProgram<SkeletonOptimizedTag>;
 
 use crate::flow::BlockId;
-use crate::interface;
 use crate::{LookupMap, LookupSet, SortedSet};
 
 use crate::ssa::types::ConstantValue;
@@ -54,7 +44,7 @@ pub fn optimize_skeleton(program: super::rewrite::Rewritten) -> SkeletonOptimize
             graph.install_aliases(aliases);
             graph
         })
-        .retag()
+        .retag_physical()
 }
 
 /// Run all enabled skeleton rewrites to fixpoint. Returns an alias map

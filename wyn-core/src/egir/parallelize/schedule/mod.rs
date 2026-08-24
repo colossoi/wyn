@@ -89,7 +89,7 @@ impl KernelPlan {
 pub struct KernelId(u32);
 
 impl KernelId {
-    fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self.0 as usize
     }
 
@@ -391,20 +391,132 @@ impl KernelPhase {
     }
 }
 
-/// Graph-free schedule summary retained after physical EGIR has lowered to SSA.
+/// Persistent physical kernel graph.
+///
+/// Kernel bodies remain in the surrounding physical program's entry arena and
+/// are named here by [`EntryId`]. This keeps the existing EGIR body traversal
+/// machinery reusable while retaining kernel identity, physical dependencies,
+/// dispatch, resource access, provenance, and output routing as first-class
+/// program structure.
 #[derive(Clone, Debug, Default)]
-pub struct KernelPlanSummary {
-    phases: Vec<KernelPhaseSummary>,
+pub struct PhysicalKernelGraph {
+    kernels: Vec<PhysicalKernel>,
 }
 
-impl KernelPlanSummary {
-    pub fn phases(&self) -> impl Iterator<Item = &KernelPhaseSummary> {
-        self.phases.iter()
+impl PhysicalKernelGraph {
+    pub fn len(&self) -> usize {
+        self.kernels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kernels.is_empty()
+    }
+
+    pub fn kernels(&self) -> impl ExactSizeIterator<Item = &PhysicalKernel> {
+        self.kernels.iter()
+    }
+
+    /// Compatibility name for callers that present kernels as schedule
+    /// phases. New compiler code should prefer [`Self::kernels`].
+    pub fn phases(&self) -> impl ExactSizeIterator<Item = &PhysicalKernel> {
+        self.kernels()
+    }
+
+    pub fn kernel(&self, id: KernelId) -> Option<&PhysicalKernel> {
+        self.kernels.iter().find(|kernel| kernel.id == id)
+    }
+
+    /// Kernel identities in dependency order. Stable schedule order breaks
+    /// ties between simultaneously ready kernels.
+    pub fn topological_kernel_ids(&self) -> Vec<KernelId> {
+        let mut emitted = HashSet::new();
+        let mut order = Vec::with_capacity(self.kernels.len());
+        while order.len() < self.kernels.len() {
+            let Some(kernel) = self.kernels.iter().find(|kernel| {
+                !emitted.contains(&kernel.id)
+                    && kernel.dependencies.iter().all(|dependency| emitted.contains(dependency))
+            }) else {
+                unreachable!("physical kernel graphs are validated when finalized")
+            };
+            emitted.insert(kernel.id);
+            order.push(kernel.id);
+        }
+        order
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        let mut entries = HashSet::new();
+        for kernel in &self.kernels {
+            if !ids.insert(kernel.id) {
+                return Err(format!("duplicate physical kernel identity {:?}", kernel.id));
+            }
+            if !entries.insert(kernel.entry) {
+                return Err(format!(
+                    "physical entry {:?} is owned by multiple kernels",
+                    kernel.entry
+                ));
+            }
+        }
+        for kernel in &self.kernels {
+            let mut dependencies = HashSet::new();
+            for dependency in &kernel.dependencies {
+                if !dependencies.insert(*dependency) {
+                    return Err(format!(
+                        "physical kernel {:?} repeats dependency {:?}",
+                        kernel.id, dependency
+                    ));
+                }
+                if *dependency == kernel.id {
+                    return Err(format!("physical kernel {:?} depends on itself", kernel.id));
+                }
+                if !ids.contains(dependency) {
+                    return Err(format!(
+                        "physical kernel {:?} depends on unknown kernel {:?}",
+                        kernel.id, dependency
+                    ));
+                }
+            }
+        }
+        let mut emitted = HashSet::new();
+        while emitted.len() < self.kernels.len() {
+            let Some(kernel) = self.kernels.iter().find(|kernel| {
+                !emitted.contains(&kernel.id)
+                    && kernel.dependencies.iter().all(|dependency| emitted.contains(dependency))
+            }) else {
+                return Err("physical kernel dependency graph contains a cycle".into());
+            };
+            emitted.insert(kernel.id);
+        }
+        Ok(())
+    }
+
+    pub(in crate::egir) fn validate_entry_ids(
+        &self,
+        entry_ids: impl IntoIterator<Item = EntryId>,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let expected = self.kernels.iter().map(|kernel| kernel.entry).collect::<HashSet<_>>();
+        let actual_ids = entry_ids.into_iter().collect::<Vec<_>>();
+        let actual = actual_ids.iter().copied().collect::<HashSet<_>>();
+        if actual.len() != actual_ids.len() {
+            return Err("physical body arena repeats an entry identity".into());
+        }
+        if expected != actual {
+            let mut missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+            let mut unowned = actual.difference(&expected).copied().collect::<Vec<_>>();
+            missing.sort_unstable();
+            unowned.sort_unstable();
+            return Err(format!(
+                "physical kernel/body ownership mismatch; missing bodies: {missing:?}; unowned bodies: {unowned:?}"
+            ));
+        }
+        Ok(())
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct KernelPhaseSummary {
+pub struct PhysicalKernel {
     pub id: KernelId,
     pub entry: EntryId,
     pub entry_point: String,
@@ -417,15 +529,20 @@ pub struct KernelPhaseSummary {
     pub dependencies: Vec<KernelId>,
 }
 
-impl From<&KernelPlan> for KernelPlanSummary {
+impl From<&KernelPlan> for PhysicalKernelGraph {
     fn from(plan: &KernelPlan) -> Self {
-        let phases =
-            plan.phases_with_ids().map(|(id, phase)| KernelPhaseSummary::from_phase(id, phase)).collect();
-        Self { phases }
+        let kernels =
+            plan.phases_with_ids().map(|(id, phase)| PhysicalKernel::from_phase(id, phase)).collect();
+        let graph = Self { kernels };
+        debug_assert!(
+            graph.validate().is_ok(),
+            "validated kernel-plan construction produced an invalid persistent physical graph"
+        );
+        graph
     }
 }
 
-impl KernelPhaseSummary {
+impl PhysicalKernel {
     fn from_phase(id: KernelId, phase: &KernelPhase) -> Self {
         Self {
             id,

@@ -13,20 +13,10 @@
 /// Physical EGIR after copy- and placement-sensitive partial inlining.
 #[derive(Debug, Clone, Copy)]
 pub enum PartiallyInlinedTag {}
-pub type PartiallyInlined = super::program::Program<
-    PartiallyInlinedTag,
-    super::ir::ProgramFamily<
-        Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type PartiallyInlined = super::program::PhysicalProgram<PartiallyInlinedTag>;
 
 use crate::ast;
 use crate::flow;
-use crate::interface;
 use crate::types;
 use crate::types::TypeExt;
 use crate::FunctionId;
@@ -96,7 +86,7 @@ pub fn partially_inline_calls(
                 .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
             Ok(graph)
         })
-        .map(|program| program.retag())
+        .map(|program| program.retag_physical())
 }
 
 fn inline_body(

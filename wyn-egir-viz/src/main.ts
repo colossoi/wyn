@@ -10,6 +10,7 @@ type Side = "before" | "after";
 type PassId =
   | "egir::optimize_semantic_operations"
   | "egir::plan_logical_resources"
+  | "egir::plan"
   | "egir::reify_soacs";
 
 const passInfo: Record<PassId, { before: string; after: string }> = {
@@ -19,7 +20,11 @@ const passInfo: Record<PassId, { before: string; after: string }> = {
   },
   "egir::plan_logical_resources": {
     before: "Optimized EGIR",
-    after: "Resources allocated",
+    after: "Staged IR",
+  },
+  "egir::plan": {
+    before: "Staged IR",
+    after: "Physical EGIR",
   },
   "egir::reify_soacs": {
     before: "Converted EGIR",
@@ -165,8 +170,8 @@ interface GraphOperation {
 }
 
 interface GraphSoacState {
-  phase: "raw" | "semantic";
-  variant: "raw" | "serial" | "segmented";
+  phase: "raw" | "semantic" | "physical";
+  variant: string;
   space: GraphSegExtent[];
   output_slots: number[];
   resources: GraphResourceAccess[];
@@ -239,19 +244,51 @@ interface GraphBlock {
 
 interface GraphSnapshot {
   resources: GraphResource[];
-  materializations: GraphMaterialization[];
+  stages: GraphStage[];
+  flows: GraphFlow[];
+  external_inputs: GraphExternalInput[];
+  kernels: GraphKernel[];
   groups: GraphGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
   blocks: GraphBlock[];
 }
 
-interface GraphMaterialization {
+interface GraphStage {
   id: string;
-  variant: "shared_array" | "gather" | "runtime_array" | "scalar";
   entry_group: string;
   entry_name: string;
-  space: GraphSegExtent[];
+  origin: string;
+  incoming_flows: string[];
+  outgoing_flows: string[];
+}
+
+interface GraphFlow {
+  id: string;
+  producer: string;
+  consumers: string[];
+  published: boolean;
+  ty: string;
+  data_resource: string;
+  length_resource?: string;
+}
+
+interface GraphExternalInput {
+  id: string;
+  consumers: string[];
+  ty: string;
+  data_resource: string;
+  length_resource?: string;
+}
+
+interface GraphKernel {
+  id: string;
+  entry_group: string;
+  entry_name: string;
+  label: string;
+  dependencies: string[];
+  domain: string;
+  resources: GraphResourceAccess[];
 }
 
 interface NodeRelation {
@@ -295,6 +332,7 @@ app.innerHTML = `
           <option value="egir::reify_soacs"${initialPass === "egir::reify_soacs" ? " selected" : ""}>egir::reify_soacs</option>
           <option value="egir::optimize_semantic_operations"${initialPass === "egir::optimize_semantic_operations" ? " selected" : ""}>egir::optimize_semantic_operations</option>
           <option value="egir::plan_logical_resources"${initialPass === "egir::plan_logical_resources" ? " selected" : ""}>egir::plan_logical_resources</option>
+          <option value="egir::plan"${initialPass === "egir::plan" ? " selected" : ""}>egir::plan</option>
         </select>
       </label>
       <button class="run-button" id="run-button" type="button" disabled>
@@ -1036,33 +1074,63 @@ function renderEntryInterface(group: GraphGroup, names: Names): string {
 
 function renderProgramMetadata(snapshot: GraphSnapshot): string {
   const resources = snapshot.resources ?? [];
-  const materializations = snapshot.materializations ?? [];
-  if (!resources.length && !materializations.length) return "";
+  const stages = snapshot.stages ?? [];
+  const flows = snapshot.flows ?? [];
+  const externalInputs = snapshot.external_inputs ?? [];
+  const kernels = snapshot.kernels ?? [];
+  if (!resources.length && !stages.length && !flows.length && !externalInputs.length && !kernels.length) return "";
   const resourceRows = resources.map((resource) => [
     sourceRow(0, `<span class="ir-keyword">RESOURCE</span> ${resourceToken(resource.id)}<span class="punct">:</span> ${typeToken(resource.elem_ty)} <span class="ir-keyword">WITH</span> <span class="punct">{</span>`),
     sourceRow(1, comma(irField("origin", renderResourceOrigin(resource.origin)))),
     sourceRow(1, irField("size", renderSize(resource.size))),
     sourceRow(0, `<span class="punct">}</span>`),
   ].join("")).join("");
-  const materializationRows = materializations.map((materialization, index) => {
-    const groupNodes = snapshot.nodes.filter((node) => node.group === materialization.entry_group);
-    const groupBlocks = snapshot.blocks.filter((block) => block.group === materialization.entry_group);
-    const names = buildNames(groupNodes, groupBlocks);
-    const fields = materialization.variant === "scalar"
-      ? [irField("entry", `<span class="ir-symbol">@${escapeHtml(materialization.entry_name)}</span>`)]
-      : [
-          irField("space", listTerm(materialization.space.map((extent) => renderSegExtent(extent, names)))),
-          irField("entry", `<span class="ir-symbol">@${escapeHtml(materialization.entry_name)}</span>`),
-        ];
-    return sourceRow(2, `${variantTerm("materialization", [
-      irField("id", `<span class="ir-symbol">${escapeHtml(materialization.id)}</span>`),
-      irField("requirement", variantTerm(materialization.variant, fields)),
-    ])}${index + 1 < materializations.length ? `<span class="punct">,</span>` : ""}`);
-  });
-  const programRows = materializations.length
-    ? `${sourceRow(0, `<span class="ir-keyword">PROGRAM WITH</span> <span class="punct">{</span>`)}${sourceRow(1, irField("materializations", `<span class="punct">[</span>`))}${materializationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}`
+  const symbol = (value: string) => `<span class="ir-symbol">${escapeHtml(value)}</span>`;
+  const stageRows = stages.map((stage) => variantTerm("stage", [
+    irField("id", symbol(stage.id)),
+    irField("body", `<span class="ir-symbol">@${escapeHtml(stage.entry_name)}</span>`),
+    irField("origin", literalTerm(stage.origin)),
+    irField("incoming_flows", listTerm(stage.incoming_flows.map(symbol))),
+    irField("outgoing_flows", listTerm(stage.outgoing_flows.map(symbol))),
+  ]));
+  const flowRows = flows.map((flow) => variantTerm("flow", [
+    irField("id", symbol(flow.id)),
+    irField("type", typeToken(flow.ty)),
+    irField("producer", symbol(flow.producer)),
+    irField("consumers", listTerm(flow.consumers.map(symbol))),
+    irField("storage", recordTerm([
+      irField("data", resourceToken(flow.data_resource)),
+      irField("length", flow.length_resource ? resourceToken(flow.length_resource) : keywordTerm("none")),
+    ])),
+    irField("published", keywordTerm(String(flow.published))),
+  ]));
+  const inputRows = externalInputs.map((input) => variantTerm("external_input", [
+    irField("id", symbol(input.id)),
+    irField("type", typeToken(input.ty)),
+    irField("consumers", listTerm(input.consumers.map(symbol))),
+    irField("storage", recordTerm([
+      irField("data", resourceToken(input.data_resource)),
+      irField("length", input.length_resource ? resourceToken(input.length_resource) : keywordTerm("none")),
+    ])),
+  ]));
+  const kernelRows = kernels.map((kernel) => variantTerm("kernel", [
+    irField("id", symbol(kernel.id)),
+    irField("body", `<span class="ir-symbol">@${escapeHtml(kernel.entry_name)}</span>`),
+    irField("label", literalTerm(kernel.label)),
+    irField("dependencies", listTerm(kernel.dependencies.map(symbol))),
+    irField("domain", literalTerm(kernel.domain)),
+    irField("resources", listTerm(kernel.resources.map(renderResourceAccess))),
+  ]));
+  const topologyFields = [
+    ...(stageRows.length ? [irField("stages", listTerm(stageRows))] : []),
+    ...(flowRows.length ? [irField("flows", listTerm(flowRows))] : []),
+    ...(inputRows.length ? [irField("external_inputs", listTerm(inputRows))] : []),
+    ...(kernelRows.length ? [irField("kernels", listTerm(kernelRows))] : []),
+  ];
+  const programRows = topologyFields.length
+    ? `${sourceRow(0, `<span class="ir-keyword">PROGRAM WITH</span> <span class="punct">{</span>`)}${topologyFields.map((field, index) => sourceRow(1, index + 1 < topologyFields.length ? comma(field) : field)).join("")}${sourceRow(0, `<span class="punct">}</span>`)}`
     : "";
-  return `<section class="ir-program-metadata"><div class="ir-comment">; program-owned logical resources and requirements (sidecar)</div><div class="ir-metadata-line">${resourceRows}${programRows}</div></section>`;
+  return `<section class="ir-program-metadata"><div class="ir-comment">; program-owned resources and execution topology</div><div class="ir-metadata-line">${resourceRows}${programRows}</div></section>`;
 }
 
 function renderResourceOrigin(origin: GraphResourceOrigin): string {

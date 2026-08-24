@@ -822,7 +822,7 @@ entry accumulate(indices: []i32,
     let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan direct-atomic histogram");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["hist_atomic"]
     );
 
@@ -862,7 +862,7 @@ entry accumulate(indices: []i32,
     let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan compare-exchange histogram");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["hist_atomic"]
     );
 
@@ -929,7 +929,7 @@ entry accumulate(indices: []i32,
 
     let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan high-contention histogram");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["serial_compute"],
         "without replica storage, a high race-factor hint must not select the direct-atomic recipe"
     );
@@ -1968,7 +1968,7 @@ entry add_sum(xs: []i32) []i32 =
         "a reduction rejected before mutation must not retain speculative scratch"
     );
     assert_eq!(
-        fallback.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        fallback.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["serial_compute"],
         "an unsupported parallel recipe must preserve serial execution"
     );
@@ -2032,7 +2032,7 @@ entry sums() (i32, i32) =
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
-        multi_reduce.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        multi_reduce.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["reduce_phase1", "reduce_combine", "reduce_combine"]
     );
     let owner = scratch[0].1.expect("scratch has an operation owner");
@@ -2116,7 +2116,7 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
 
     let reduce = compile_thru_ssa(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)")
         .expect("parallel reduction reaches SSA");
-    let phases = reduce.global_context.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = reduce.global_context.physical_kernels.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["reduce_phase1", "reduce_combine"]
@@ -2130,7 +2130,7 @@ fn parallel_reduce_and_scan_recipe_shapes_are_stable() {
 
     let scan = compile_thru_ssa(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)")
         .expect("parallel scan reaches SSA");
-    let phases = scan.global_context.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = scan.global_context.physical_kernels.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
@@ -2169,7 +2169,7 @@ fn chunked_recipes_accept_empty_small_uneven_and_unsigned_ranges() {
     for (source, expected) in cases {
         let lowered = compile_thru_ssa(source).expect("edge-domain recipe reaches SSA");
         assert_eq!(
-            lowered.global_context.kernel_plan.phases().next().map(|phase| phase.label.as_str()),
+            lowered.global_context.physical_kernels.phases().next().map(|phase| phase.label.as_str()),
             Some(expected),
             "edge-domain shape must retain its selected parallel recipe"
         );
@@ -2220,7 +2220,12 @@ entry compose_all(xs: []i32) i32 =
     )
     .expect("ordered tuple reduction reaches SSA");
     assert_eq!(
-        reduce.global_context.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        reduce
+            .global_context
+            .physical_kernels
+            .phases()
+            .map(|phase| phase.label.as_str())
+            .collect::<Vec<_>>(),
         ["reduce_phase1", "reduce_combine"]
     );
 
@@ -2243,7 +2248,7 @@ entry compose_prefix(xs: []i32) []i32 =
     )
     .expect("ordered tuple scan reaches SSA");
     assert_eq!(
-        scan.global_context.kernel_plan.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        scan.global_context.physical_kernels.phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
 }
@@ -2259,7 +2264,7 @@ fn runtime_filter_lowers_to_flag_scan_scatter_pipeline() {
 entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = compile_thru_ssa(r4).expect("runtime filter reaches SSA");
-    let phases: Vec<_> = converted.global_context.kernel_plan.phases().collect();
+    let phases: Vec<_> = converted.global_context.physical_kernels.phases().collect();
     assert_eq!(phases.len(), 5);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
     assert_eq!(phases[1].entry_point, "r_filter_scan");
@@ -2350,7 +2355,7 @@ entry mixed() ([]i32, []i32) =
   (mapped, compacted)
 "#;
     let converted = compile_thru_ssa(source).expect("mixed map/filter reaches SSA");
-    let phases = converted.global_context.kernel_plan.phases().collect::<Vec<_>>();
+    let phases = converted.global_context.physical_kernels.phases().collect::<Vec<_>>();
     assert_eq!(
         phases.iter().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         [
@@ -2904,11 +2909,11 @@ entry e() [4]i32 =
         "consumers read the shared storage prepass rather than copying a composite per consumer"
     );
     let stages: Vec<_> =
-        lowered.global_context.kernel_plan.phases().map(|phase| phase.entry_point.as_str()).collect();
+        lowered.global_context.physical_kernels.phases().map(|phase| phase.entry_point.as_str()).collect();
     assert_eq!(stages.first(), Some(&producer_name.as_str()));
     assert_eq!(stages.last(), Some(&"e"));
     assert!(stages.iter().any(|stage| stage.contains("prepass_scalar")));
-    let phases: Vec<_> = lowered.global_context.kernel_plan.phases().collect();
+    let phases: Vec<_> = lowered.global_context.physical_kernels.phases().collect();
     assert!(phases[0].resources.iter().any(|resource| {
         resource.resource == shared_resource && resource.access == ResourceAccess::Write
     }));
@@ -2939,7 +2944,7 @@ entry e() [4]i32 =
         compile_to_semantic_egir(reduce_then_map),
         LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     );
-    let single_phases: Vec<_> = single.global_context.kernel_plan.phases().collect();
+    let single_phases: Vec<_> = single.global_context.physical_kernels.phases().collect();
     assert_eq!(
         single_phases.len(),
         3,
@@ -2989,7 +2994,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         }
     }
     let first = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
-    let phases: Vec<_> = first.global_context.kernel_plan.phases().collect();
+    let phases: Vec<_> = first.global_context.physical_kernels.phases().collect();
     assert!(phases.len() >= 2, "parallel reduction owns at least two phases");
     assert!(phases.iter().skip(1).any(|phase| !phase.dependencies.is_empty()));
     assert!(phases.iter().all(|phase| !phase.resources.is_empty()));
@@ -3013,7 +3018,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         allocated,
         LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     );
-    assert_eq!(lowered.global_context.kernel_plan.phases().count(), 1);
+    assert_eq!(lowered.global_context.physical_kernels.phases().count(), 1);
     assert!(!lowered.entry_points.iter().any(|entry| entry.name.contains("phase2")));
 }
 #[test]
@@ -12164,7 +12169,7 @@ entry e(a: []f32) []f32 =
             &["serial_compute"]
         };
         assert_eq!(
-            planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+            planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
             expected_phases,
             "{label}: recipe selection"
         );
@@ -12204,7 +12209,7 @@ entry paired_prefixes(xs: []i32) ([]i32, []i32) =
     let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan independent scans");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
     compile_thru_spirv(source).expect("parallel product scan compiles to SPIR-V");
@@ -12230,7 +12235,7 @@ entry e(xs: []i32) ([]i32, [1]i32) =
     let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan mixed scan/reduction");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
     compile_to_spirv(source).expect("middle-barrier-normalized Screma lowers to SPIR-V");
@@ -12257,7 +12262,7 @@ entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
     let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
         .expect("plan collective product");
     assert_eq!(
-        planned.kernel_plan().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
+        planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["scan_phase1", "scan_block", "scan_apply_offsets"]
     );
     compile_thru_spirv(source).expect("collective product compiles to SPIR-V");

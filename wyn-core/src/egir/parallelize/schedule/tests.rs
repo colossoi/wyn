@@ -191,3 +191,28 @@ fn dense_handles_survive_entry_changes_and_chain_insertions() {
         ]
     );
 }
+
+#[test]
+fn finalized_physical_graph_retains_identity_dependencies_and_body_ownership() {
+    let mut identities = egir::program::ProgramIdentities::default();
+    let first = KernelId::for_test(0);
+    let second = KernelId::for_test(1);
+    let mut draft = plan(vec![
+        phase("first", "serial_compute", 0, &mut identities),
+        phase("second", "serial_compute", 1, &mut identities),
+    ]);
+    draft.add_dependency(second, first).unwrap();
+
+    let graph = PhysicalKernelGraph::from(&draft);
+    assert!(graph.validate().is_ok());
+    assert_eq!(graph.topological_kernel_ids(), [first, second]);
+    assert_eq!(graph.kernel(second).unwrap().dependencies, [first]);
+    assert!(graph.validate_entry_ids(graph.kernels().map(|kernel| kernel.entry)).is_ok());
+    assert!(graph.validate_entry_ids([graph.kernel(first).unwrap().entry]).is_err());
+    assert!(graph
+        .validate_entry_ids([
+            graph.kernel(first).unwrap().entry,
+            graph.kernel(first).unwrap().entry,
+        ])
+        .is_err());
+}

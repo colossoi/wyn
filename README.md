@@ -40,14 +40,21 @@ The principal IR phases are:
    effects, output routes, and logical resources.
 4. **Staged IR** — a typed DAG whose nodes own semantic EGIR bodies and whose
    resident flows make every cross-stage value explicit.
-5. **Physical EGIR** — target-planned entry bodies with physical resources and
-   selected SOAC recipes.
+5. **Physical EGIR** — a validated physical kernel DAG whose nodes reference
+   target-planned `EGraph<Physical>` bodies by stable entry identity.
 6. **SSA** — demand-elaborated backend codegen IR.
 
 Staged IR is a real representation boundary even though its stage bodies are
 still semantic EGIR. It replaces the flat collection of authored entries plus
 separately reconstructed materialization requirements with explicit stage and
 flow topology.
+
+Physical EGIR is graph-based at both levels. `PhysicalKernelGraph` retains
+stable kernel identities, dependency edges, dispatch domains, resource
+accesses, output projection, and one-to-one body ownership. Each referenced
+body is itself an e-graph sea plus a CFG skeleton. The bodies remain in the
+program's existing entry arena so generic EGIR body traversals stay reusable;
+the arena is storage, not an alternative flat-program authority.
 
 When describing transitions, the tables distinguish three related units:
 
@@ -290,7 +297,11 @@ function boundaries.
 | **`plan`** | `build_parallel_schedule` | Parallel schedule only: build dispatches and generated callables, using resident flows as scheduling dependencies |
 | **`plan`** | `build_serial_schedule` | Serial schedule only: build the serial schedule and generated callables, using resident flows as scheduling dependencies |
 | **`plan`** | `install_generated_callables` | Add scheduler-generated callables and their identities to the program |
-| **`plan`** | `KernelPlan::finalize` | Publish bindings and the descriptor, consume staged topology, and construct physical EGIR entries |
+| **`plan`** | `KernelPlan::validate` | Debug builds only: validate kernel identities, placements, and dependency acyclicity before physical publication |
+| **`plan`** | `publish_physical_layout` | Allocate physical bindings and derive descriptor stages, dispatches, binding uses, graphics I/O, and the frame graph from the kernel plan |
+| **`plan`** | `PhysicalKernelGraph::from` | Freeze stable kernel identities and dependency/resource topology without copying physical bodies |
+| **`plan`** | `physicalize_program` | Convert scheduled semantic bodies and resources to `EGraph<Physical>` bodies while establishing one-to-one kernel/body ownership |
+| **`plan`** | `verify_physical::check` | Validate the newly physicalized body graphs and interfaces |
 
 The staged order is load-bearing:
 
@@ -306,9 +317,11 @@ The staged order is load-bearing:
 
 ### Physical EGIR
 
-`KernelPlan::finalize` exits staged IR by constructing target-planned physical
-entries. The remaining EGIR transitions operate on those entries until resource
-handles have been erased and the program is ready for demand elaboration.
+`KernelPlan::finalize` exits staged IR by freezing a `PhysicalKernelGraph` and
+physicalizing its bodies. Every later checkpoint is the same
+`PhysicalProgram<Tag>` family: the typestate changes body invariants while the
+kernel DAG, identities, and body associations remain intact. Functions and
+constants remain ordinary auxiliary body arenas rather than kernel nodes.
 
 | Checkpoint orchestrator | Sub-pass | Role / condition |
 |-------------------------|----------|------------------|

@@ -32,6 +32,27 @@ impl KernelPlan {
             );
         }
         self.check_explicit_dispatch_coverage().map_err(ConvertError::InvalidDispatch)?;
+        let physical_resources = self.publish_physical_layout(&mut program)?;
+        let physical_kernels = super::PhysicalKernelGraph::from(&self);
+        let entries = self.into_physical_entries();
+        let physical = physicalize_program(
+            program,
+            entries,
+            &physical_resources,
+            profile.schedule == SchedulePolicy::Serial,
+            physical_kernels,
+            profile,
+        )?;
+        egir::verify_physical::check(&physical, &physical_resources)?;
+        Ok(physical)
+    }
+
+    /// Publish physical binding/layout facts derived from the validated
+    /// kernel graph without consuming its topology or bodies.
+    fn publish_physical_layout(
+        &self,
+        program: &mut ResourcesAllocated,
+    ) -> Result<PhysicalResourceTable, ConvertError> {
         self.install_phase_shells(&mut program.data.core.pipeline)?;
         let mut reserved_bindings = program
             .data
@@ -82,19 +103,7 @@ impl KernelPlan {
         let input_names = host_resource_names(&program.data.core.resources);
         program.data.core.pipeline.relabel_input_storage_names(&input_names);
         program.data.core.pipeline.rebuild_frame_graph();
-
-        let summary = super::KernelPlanSummary::from(&self);
-        let entries = self.into_physical_entries();
-        let physical = physicalize_program(
-            program,
-            entries,
-            &physical_resources,
-            profile.schedule == SchedulePolicy::Serial,
-            summary,
-            profile,
-        )?;
-        egir::verify_physical::check(&physical, &physical_resources)?;
-        Ok(physical)
+        Ok(physical_resources)
     }
 
     /// Entry ABI records in deterministic descriptor-publication order. The

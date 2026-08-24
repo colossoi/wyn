@@ -183,7 +183,7 @@ entry evens(xs: []i32) []i32 =
 }
 
 #[test]
-fn logical_resource_planning_exposes_filter_materialization() {
+fn logical_resource_planning_exposes_filter_stage_and_flow() {
     let result = inspect_pass_impl(
         r#"
 entry main(xs: []i32) []i32 =
@@ -197,7 +197,8 @@ entry main(xs: []i32) []i32 =
     let before = result.before.expect("optimized snapshot");
     let after = result.after.expect("allocated snapshot");
     assert!(before.resources.is_empty());
-    assert!(before.materializations.is_empty());
+    assert!(before.stages.is_empty());
+    assert!(before.flows.is_empty());
 
     let scratch = after
         .resources
@@ -215,11 +216,17 @@ entry main(xs: []i32) []i32 =
     assert_eq!(length.size.variant, "fixed_bytes");
     assert_eq!(length.size.bytes, Some(4));
 
-    let [materialization] = after.materializations.as_slice() else {
-        panic!("expected one Filter materialization")
-    };
-    assert_eq!(materialization.variant, "runtime_array");
-    assert!(materialization.entry_name.starts_with("main_materialize_filter_"));
+    let producer_stage = after
+        .stages
+        .iter()
+        .find(|stage| stage.entry_name.starts_with("main_materialize_filter_"))
+        .expect("generated Filter producer stage");
+    let main_stage =
+        after.stages.iter().find(|stage| stage.entry_name == "main").expect("authored consumer stage");
+    assert!(after
+        .flows
+        .iter()
+        .any(|flow| { flow.producer == producer_stage.id && flow.consumers.contains(&main_stage.id) }));
 
     let before_filter = before
         .nodes
@@ -232,7 +239,7 @@ entry main(xs: []i32) []i32 =
         .find(|node| node.operation.as_ref().and_then(|op| op.semantic_id.as_deref()) == Some("op:0"))
         .expect("allocated Filter");
     assert_eq!(before_filter.group, "entry:0");
-    assert_eq!(after_filter.group, materialization.entry_group);
+    assert_eq!(after_filter.group, producer_stage.entry_group);
     let before_output = before_filter
         .operation
         .as_ref()
@@ -262,7 +269,8 @@ entry main(xs: []i32) []i32 =
         Some(length.id.as_str())
     );
 
-    let main = after.groups.iter().find(|group| group.id == "entry:0").expect("main entry");
+    let main =
+        after.groups.iter().find(|group| group.id == main_stage.entry_group).expect("main stage body");
     assert!(main
         .resource_declarations
         .iter()
@@ -270,12 +278,42 @@ entry main(xs: []i32) []i32 =
     let producer = after
         .groups
         .iter()
-        .find(|group| group.id == materialization.entry_group)
-        .expect("materialization entry");
+        .find(|group| group.id == producer_stage.entry_group)
+        .expect("producer stage body");
     assert!(producer
         .resource_declarations
         .iter()
         .any(|decl| { decl.resource == scratch.id && decl.role == "output" }));
+}
+
+#[test]
+fn physical_planning_exposes_kernel_dag_and_owned_bodies() {
+    let result = inspect_pass_impl(
+        r#"
+entry sum(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, xs)
+"#,
+        InspectPass::PlanPhysicalKernels,
+    );
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.pass, InspectPass::PLAN_PHYSICAL_KERNELS);
+    let before = result.before.expect("staged snapshot");
+    let after = result.after.expect("physical snapshot");
+    assert!(!before.stages.is_empty());
+    assert!(before.kernels.is_empty());
+    assert!(after.stages.is_empty());
+    assert!(
+        after.kernels.len() >= 2,
+        "parallel reduction should produce a kernel chain"
+    );
+    assert_eq!(
+        after.kernels.len(),
+        after.groups.iter().filter(|group| group.kind == "kernel").count()
+    );
+    assert!(after.kernels.iter().skip(1).any(|kernel| !kernel.dependencies.is_empty()));
+    for kernel in &after.kernels {
+        assert!(after.groups.iter().any(|group| group.id == kernel.entry_group));
+    }
 }
 
 #[test]

@@ -505,7 +505,7 @@ impl FuncBody {
 // =============================================================================
 
 pub mod context {
-    use crate::egir::parallelize::KernelPlanSummary;
+    use crate::egir::parallelize::PhysicalKernelGraph;
     use crate::pipeline_descriptor::PipelineDescriptor;
     use crate::LoweringProfile;
 
@@ -514,7 +514,7 @@ pub mod context {
     pub struct BackendGlobal {
         pub pipeline: PipelineDescriptor,
         pub profile: LoweringProfile,
-        pub kernel_plan: KernelPlanSummary,
+        pub physical_kernels: PhysicalKernelGraph,
     }
 }
 

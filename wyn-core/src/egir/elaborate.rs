@@ -41,6 +41,10 @@ use super::types::*;
 /// elaborated to a `FuncBody`, externs pass through, and the result is
 /// assembled into a backend-bound SSA program.
 pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage::Elaborated {
+    debug_assert!(
+        inner.validate_kernel_bodies().is_ok(),
+        "SSA elaboration requires a valid physical kernel/body graph"
+    );
     let super::ir::Program {
         functions,
         externs,
@@ -52,6 +56,8 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
     } = inner;
     let pipeline = data.pipeline;
     let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline, &data.stage_entries);
+    let kernel_entries =
+        global_context.physical_kernels.kernels().map(|kernel| kernel.entry).collect::<Vec<_>>();
     let functions: Vec<Function> = functions
         .into_iter()
         .map(|f| {
@@ -67,9 +73,14 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
         .chain(externs.into_iter().map(elaborate_extern))
         .collect();
 
-    let entry_points: Vec<EntryPoint> = entry_points
+    let mut physical_bodies =
+        entry_points.into_iter().map(|entry| (entry.id, entry)).collect::<LookupMap<_, _>>();
+    let entry_points: Vec<EntryPoint> = kernel_entries
         .into_iter()
-        .map(|e| {
+        .map(|entry| {
+            let e = physical_bodies
+                .remove(&entry)
+                .expect("validated physical kernel references its owned body");
             let body = elaborate_one_body(e.graph, &e.params, e.result.ty().clone());
             let entry_pipeline_accesses = pipeline_storage_accesses.get(&e.id).cloned().unwrap_or_default();
             EntryPoint {
@@ -90,6 +101,10 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
             }
         })
         .collect();
+    assert!(
+        physical_bodies.is_empty(),
+        "validated physical body arena contains no entries outside the kernel graph"
+    );
 
     let constants = constants
         .into_iter()
@@ -105,7 +120,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
         .collect();
     let program = Program::bare(functions, entry_points, constants);
     let PlannedGlobal {
-        kernel_plan,
+        physical_kernels,
         profile,
         effect_ids: _,
         semantic_ids: _,
@@ -113,7 +128,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
     program.with_context::<ssa::stage::ElaboratedTag, _>(ssa::context::BackendGlobal {
         pipeline,
         profile,
-        kernel_plan,
+        physical_kernels,
     })
 }
 

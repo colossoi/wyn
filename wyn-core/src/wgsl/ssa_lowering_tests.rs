@@ -281,7 +281,7 @@ fn lower_empty_program_succeeds() {
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
             profile: LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
-            kernel_plan: Default::default(),
+            physical_kernels: Default::default(),
         },
     );
     let out = super::lower(&program).expect("empty program should lower");

@@ -31,16 +31,7 @@
 /// EGIR rebuilt from a validated target-specific kernel plan.
 #[derive(Debug, Clone, Copy)]
 pub enum PlannedTag {}
-pub type Planned = super::program::Program<
-    PlannedTag,
-    super::ir::ProgramFamily<
-        super::types::Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type Planned = super::program::PhysicalProgram<PlannedTag>;
 
 mod capabilities;
 mod filter;
@@ -55,7 +46,6 @@ mod scan;
 mod schedule;
 
 use crate::egir;
-use crate::interface;
 use crate::pipeline_descriptor;
 use filter::analyze_filter_candidate;
 use kernel::{
@@ -70,7 +60,7 @@ use projection::{
 };
 use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
-pub use schedule::{KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection};
+pub use schedule::{KernelDomain, KernelId, OutputRouteProjection, PhysicalKernel, PhysicalKernelGraph};
 use std::collections::{HashMap, HashSet};
 use wyn_base::IdSource;
 
@@ -94,10 +84,6 @@ impl Planned {
     /// work buffers required by the selected recipes.
     pub fn logical_resources(&self) -> &[super::program::LogicalResource] {
         &self.data.resources
-    }
-
-    pub fn kernel_plan(&self) -> &KernelPlanSummary {
-        &self.global_context.kernel_plan
     }
 }
 use super::soac::screma;

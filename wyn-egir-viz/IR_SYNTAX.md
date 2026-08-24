@@ -277,14 +277,14 @@ serialized in the `PROGRAM WITH { ... }` record:
 - the compiler phase/checkpoint name;
 - pipeline descriptor and `stage_entries` associations;
 - the logical resource arena, whose members become `RESOURCE` declarations;
-- materialization requirements when present; and
+- staged nodes, resident flows, and external inputs when present; and
 - selected lowering profile or kernel-plan metadata when present.
 
-A materialization requirement is
-`shared_array(space: ..., entry: @e)`, `gather(space: ..., entry: @e)`,
-`runtime_array(space: ..., entry: @e)`, or `scalar(entry: @e)`. Its owned entry
-is still printed once as an ordinary `ENTRY`; the requirement references it by
-symbol.
+A staged node names its owned semantic EGIR body and lists incoming and outgoing
+resident flows. Each flow records one producer, all consumers, typed logical
+storage, and whether it is published. Physical snapshots replace that topology
+with `kernels`; each kernel names one physical body and records stable kernel
+identity, dependencies, dispatch domain, and logical-resource accesses.
 
 Identity arenas are used to resolve function, global, and entry IDs to the
 symbols printed elsewhere. ID-source counters and phase proof tags are
@@ -393,13 +393,22 @@ therefore includes program-owned `RESOURCE` declarations and entry-local
 `resource_decl(...)` sidecars. A logical size may be `fixed_bytes(...)`,
 `like_resource(...)`, `same_as_dispatch(...)`, or `unspecified`.
 
-Residency planning may also extract a producer into a compiler-owned
-materialization entry. Such entries use the same body and interface grammar as
-authored entries and are referenced from `PROGRAM WITH { materializations:
-[...] }`. Runtime-array materialization binds a Filter's backing and stored
-length to `filter_scratch` and `filter_len_cell` resources. This pass does not
-choose descriptor bindings for compiler resources, a target recipe, dispatch
+Residency planning may also extract a compiler-owned producer stage. Such
+stages use the same body and interface grammar as authored stages and connect
+to their consumers through `PROGRAM WITH { stages: [...], flows: [...] }`.
+Runtime-array residency binds a Filter's backing and stored length to
+`filter_scratch` and `filter_len_cell` resources. This pass does not choose
+descriptor bindings for compiler resources, a target recipe, dispatch
 geometry, or a physical schedule; those decisions belong to `egir::plan`.
+
+### `plan` checkpoint boundary
+
+The left pane is staged IR: semantic EGIR bodies are connected by typed
+resident flows. The right pane is Physical EGIR: `PROGRAM WITH { kernels:
+[...] }` is the physical kernel DAG, and each `kernel` body uses physical
+bindings and scheduled SOAC state. Kernel dependency entries refer to stable
+kernel identities; body names and resource accesses can be matched directly
+against the corresponding kernel record.
 
 ## Floating values and places
 

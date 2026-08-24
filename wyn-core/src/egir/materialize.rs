@@ -20,7 +20,6 @@
 //! source never selected. Only genuinely in-register composites need the
 //! rewrite.
 
-use crate::interface;
 use smallvec::smallvec;
 use wyn_base::IdSource;
 
@@ -33,16 +32,7 @@ use crate::types::TypeExt;
 /// Physical EGIR with dynamic composite extraction made explicit.
 #[derive(Debug, Clone, Copy)]
 pub enum MaterializedTag {}
-pub type Materialized = super::program::Program<
-    MaterializedTag,
-    super::ir::ProgramFamily<
-        super::types::Physical,
-        interface::StorageBindingDecl,
-        super::ir::RealizedOutputRoute,
-        super::program::ResourceProgramData,
-    >,
-    super::program::PlannedGlobal,
->;
+pub type Materialized = super::program::PhysicalProgram<MaterializedTag>;
 
 use super::types::{
     EGraph, EffectOp, EffectToken, Family, PureOp, ResultBinding, ResultDestination, SideEffectKind,
@@ -57,7 +47,7 @@ pub fn materialize_dynamic_extracts(program: super::partial_inline::PartiallyInl
             Ok::<_, std::convert::Infallible>(graph)
         })
         .unwrap()
-        .retag()
+        .retag_physical()
 }
 
 /// Rewrite all dynamic Index nodes in the e-graph to Materialize +

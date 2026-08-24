@@ -9,16 +9,7 @@
 /// Physical EGIR with compile-time-only resource handles erased.
 #[derive(Debug, Clone, Copy)]
 pub enum ResourcesErasedTag {}
-pub type ResourcesErased = egir::program::Program<
-    ResourcesErasedTag,
-    egir::ir::ProgramFamily<
-        egir::types::Physical,
-        interface::StorageBindingDecl,
-        egir::ir::RealizedOutputRoute,
-        egir::program::ResourceProgramData,
-    >,
-    egir::program::PlannedGlobal,
->;
+pub type ResourcesErased = egir::program::PhysicalProgram<ResourcesErasedTag>;
 
 #[cfg(test)]
 #[path = "resource_erasure_tests.rs"]
@@ -29,7 +20,6 @@ use crate::egir;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{Func, Program};
 use crate::egir::types::{EGraph, Family, OperandType, Physical, ValueKind};
-use crate::interface;
 use crate::FunctionId;
 use crate::{LookupMap, LookupSet};
 use polytype::Type;
@@ -75,14 +65,12 @@ pub fn erase_resources(
         .into_iter()
         .map(|constant| constant.try_map_graph(|graph| rewrite_graph(graph, &erasures)))
         .collect::<Result<_, ConvertError>>()?;
-    Ok(Program::from_parts(
-        functions,
-        externs,
-        entry_points,
-        constants,
-        data,
-        global_context,
-    ))
+    let program = Program::from_parts(functions, externs, entry_points, constants, data, global_context);
+    debug_assert!(
+        program.validate_kernel_bodies().is_ok(),
+        "resource erasure broke physical kernel/body ownership"
+    );
+    Ok(program)
 }
 
 fn is_storage_image(ty: &Type<TypeName>) -> bool {

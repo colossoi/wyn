@@ -1545,10 +1545,68 @@ pub struct RewriteGlobal {
 /// Non-tree state retained after target-specific planning.
 #[derive(Debug)]
 pub struct PlannedGlobal {
-    pub kernel_plan: super::parallelize::KernelPlanSummary,
+    pub physical_kernels: super::parallelize::PhysicalKernelGraph,
     pub profile: LoweringProfile,
     pub effect_ids: IdSource<super::types::EffectToken>,
     pub semantic_ids: SemanticOpIdSource,
+}
+
+/// One physical-EGIR family shared by every post-planning typestate.
+///
+/// The entry arena owns each physical EGIR body while `physical_kernels`
+/// supplies the first-class kernel topology and names bodies by stable
+/// [`EntryId`]. Typestate tags describe body invariants without rebuilding or
+/// duplicating the kernel graph.
+pub type PhysicalProgram<Tag> = Program<
+    Tag,
+    super::ir::ProgramFamily<
+        Physical,
+        interface::StorageBindingDecl,
+        RealizedOutputRoute,
+        ResourceProgramData,
+    >,
+    PlannedGlobal,
+>;
+
+impl<Tag> PhysicalProgram<Tag> {
+    pub fn physical_kernels(&self) -> &super::parallelize::PhysicalKernelGraph {
+        &self.global_context.physical_kernels
+    }
+
+    pub fn kernel_body(&self, kernel: super::parallelize::KernelId) -> Option<&PhysicalEntry> {
+        let entry = self.physical_kernels().kernel(kernel)?.entry;
+        self.entry_points.iter().find(|body| body.id == entry)
+    }
+
+    pub fn kernel_body_mut(&mut self, kernel: super::parallelize::KernelId) -> Option<&mut PhysicalEntry> {
+        let entry = self.physical_kernels().kernel(kernel)?.entry;
+        self.entry_points.iter_mut().find(|body| body.id == entry)
+    }
+
+    pub fn kernel_bodies(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (super::parallelize::KernelId, &PhysicalEntry)> {
+        self.physical_kernels().kernels().map(|kernel| {
+            let body = self
+                .entry_points
+                .iter()
+                .find(|body| body.id == kernel.entry)
+                .expect("physical kernel/body ownership is validated at every typestate transition");
+            (kernel.id, body)
+        })
+    }
+
+    pub fn validate_kernel_bodies(&self) -> Result<(), String> {
+        self.physical_kernels().validate_entry_ids(self.entry_points.iter().map(|entry| entry.id))
+    }
+
+    pub(crate) fn retag_physical<NewTag>(self) -> PhysicalProgram<NewTag> {
+        debug_assert!(
+            self.validate_kernel_bodies().is_ok(),
+            "physical EGIR typestate transition broke kernel/body ownership"
+        );
+        self.retag()
+    }
 }
 
 fn physicalize_function(
@@ -1831,7 +1889,7 @@ pub(in crate::egir) fn physicalize_program(
     entries: impl IntoIterator<Item = PlannedEntry<Scheduled>>,
     physical_resources: &PhysicalResourceTable,
     serial: bool,
-    kernel_plan: super::parallelize::KernelPlanSummary,
+    physical_kernels: super::parallelize::PhysicalKernelGraph,
     profile: LoweringProfile,
 ) -> Result<super::parallelize::Planned, String> {
     let Program {
@@ -1847,6 +1905,7 @@ pub(in crate::egir) fn physicalize_program(
         .into_iter()
         .map(|entry| physicalize_entry(entry, physical_resources, &mut global_context.effect_ids))
         .collect::<Result<Vec<_>, _>>()?;
+    physical_kernels.validate_entry_ids(entry_points.iter().map(|entry| entry.id))?;
     let functions = functions
         .into_iter()
         .map(|function| physicalize_function(function, physical_resources, serial))
@@ -1867,7 +1926,7 @@ pub(in crate::egir) fn physicalize_program(
             identities: data.core.identities,
         },
         PlannedGlobal {
-            kernel_plan,
+            physical_kernels,
             profile,
             effect_ids: global_context.effect_ids,
             semantic_ids: global_context.semantic_ids,
