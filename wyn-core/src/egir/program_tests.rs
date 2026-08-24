@@ -11,8 +11,8 @@ use crate::op;
 use crate::pipeline_descriptor::{BufferLen, PipelineDescriptor};
 use crate::BindingRef;
 use crate::EntryId;
-use crate::IdSource;
 use polytype::Type;
+use wyn_base::IdSource;
 
 fn unit_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Unit, vec![])

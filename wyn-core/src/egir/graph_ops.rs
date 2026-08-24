@@ -17,13 +17,13 @@ use crate::op;
 use crate::ssa;
 use crate::types;
 use crate::FunctionId;
-use crate::IdSource;
 use crate::LookupMap;
 use crate::ResourceId;
 use crate::StableMap;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 use std::collections::{HashMap, HashSet};
+use wyn_base::IdSource;
 
 use crate::ast::{Span, TypeName};
 use crate::builtins::{catalog, BuiltinId};

@@ -40,9 +40,9 @@ use crate::interface;
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::types;
 use crate::types::{buffer_tag, TypeExt};
-use crate::IdSource;
 use crate::{BindingRef, LookupMap, SymbolId};
 use polytype::Type;
+use wyn_base::IdSource;
 
 /// TLC after entry-parameter buffer regions are pinned into their types.
 pub type Polymorphic = super::TreeFamily<data::PolymorphicDefinition, data::PinnedEntry, Empty, Empty>;

@@ -5,9 +5,9 @@ use crate::ast::{Span, TypeName};
 use crate::tlc;
 use crate::tlc::{Def, DefMeta, Program, Term, TermIdSource, TermKind};
 use crate::types;
-use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
+use wyn_base::IdSource;
 
 fn empty_program() -> Defunctionalized {
     Program::from_parts(

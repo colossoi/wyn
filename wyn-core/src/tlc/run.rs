@@ -3,7 +3,7 @@
 use super::{TermIdSource, Transformer};
 use crate::ast_type_holes;
 use crate::error;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 /// Polymorphic TLC definitions retain their type schemes in-tree.
 pub type UnpinnedPolymorphic =

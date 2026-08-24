@@ -30,8 +30,8 @@ use crate::interface;
 use crate::types;
 use crate::types::TypeExt;
 use crate::FunctionId;
-use crate::IdSource;
 use crate::LookupMap;
+use wyn_base::IdSource;
 
 use super::inlining;
 use super::ir::Language;

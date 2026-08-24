@@ -4,7 +4,7 @@ use super::array_io::emit_length;
 use super::*;
 use crate::op;
 use crate::ssa;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 /// One expanded-loop iteration. A body can finish in a different CFG block
 /// when its effectful work is conditionally executed.

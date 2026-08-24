@@ -3,7 +3,7 @@ use crate::op;
 use crate::types;
 use crate::BindingRef;
 use crate::FunctionId;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{

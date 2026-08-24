@@ -10,8 +10,8 @@
 use crate::egir;
 use crate::ssa;
 use crate::types;
-use crate::IdSource;
 use std::collections::{HashMap, HashSet};
+use wyn_base::IdSource;
 
 use polytype::Type;
 

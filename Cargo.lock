@@ -1518,6 +1518,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyn-base"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+]
+
+[[package]]
 name = "wyn-core"
 version = "0.1.0"
 dependencies = [
@@ -1535,6 +1542,7 @@ dependencies = [
  "smallvec",
  "spirv",
  "thiserror 1.0.69",
+ "wyn-base",
  "wyn-graph",
  "wyn-pipeline-descriptor",
  "wyn-spirv",

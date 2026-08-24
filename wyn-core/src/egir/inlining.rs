@@ -5,8 +5,8 @@
 //! no profitability or placement policy; callers decide which calls to inline.
 
 use crate::ast;
-use crate::IdSource;
 use std::collections::VecDeque;
+use wyn_base::IdSource;
 
 use crate::{LookupMap, LookupSet};
 

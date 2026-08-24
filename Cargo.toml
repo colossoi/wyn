@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "wyn-base",
     "wyn-core",
     "wyn",
     "wyn-analyzer",

@@ -12,8 +12,8 @@ use crate::interface;
 use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::types;
-use crate::IdSource;
 use polytype::Type;
+use wyn_base::IdSource;
 
 use crate::ast::TypeName;
 use crate::interface::{

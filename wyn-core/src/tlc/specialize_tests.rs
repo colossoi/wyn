@@ -10,8 +10,9 @@ use crate::tlc::data::PolymorphicDefinition;
 use crate::tlc::test_support::TestBuilder;
 use crate::tlc::{Def, DefMeta, Program, Term, TermKind};
 use crate::types;
-use crate::{IdSource, LookupSet};
+use crate::LookupSet;
 use polytype::Type;
+use wyn_base::IdSource;
 
 #[test]
 fn test_specialize_sign_f32() {

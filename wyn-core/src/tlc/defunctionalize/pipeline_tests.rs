@@ -4,9 +4,9 @@ use crate::tlc;
 use crate::tlc::test_support::TestBuilder;
 use crate::tlc::{Def, DefMeta, Family, Lambda, LoopKind, Payload, Program, Term, TermKind, VarRef};
 use crate::types;
-use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
+use wyn_base::IdSource;
 
 /// End-to-end runner for the three internal defunctionalization algorithms. Mirrors what
 /// `tlc::defunctionalize` does in production.

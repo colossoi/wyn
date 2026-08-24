@@ -57,7 +57,6 @@ mod schedule;
 use crate::egir;
 use crate::interface;
 use crate::pipeline_descriptor;
-use crate::IdSource;
 use filter::analyze_filter_candidate;
 use kernel::{
     can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, emit_chunk_arithmetic,
@@ -73,6 +72,7 @@ use reduce::{analyze_reduce_candidate, BoundReduce};
 use scan::{analyze_scan_candidate, BoundScan, ScanPhase2Spec, ScanPhase3Spec, ScanScratch};
 pub use schedule::{KernelDomain, KernelId, KernelPhaseSummary, KernelPlanSummary, OutputRouteProjection};
 use std::collections::{HashMap, HashSet};
+use wyn_base::IdSource;
 
 use crate::interface::StorageAccess;
 use crate::{EntryId, FunctionId, LookupMap, ResourceAccess};

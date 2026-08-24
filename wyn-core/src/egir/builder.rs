@@ -5,10 +5,10 @@ use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
 use crate::types;
 use crate::EntryId;
-use crate::IdSource;
 use crate::{FunctionId, ResourceId};
 use polytype::Type;
 use smallvec::SmallVec;
+use wyn_base::IdSource;
 
 use super::graph_ops;
 use super::program::{

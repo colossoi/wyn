@@ -273,7 +273,7 @@ where
 /// Program-wide context selected by TLC pipeline checkpoints.
 pub mod context {
     use super::*;
-    use crate::IdSource;
+    use wyn_base::IdSource;
 
     /// Global state immediately after AST-to-TLC conversion.
     ///

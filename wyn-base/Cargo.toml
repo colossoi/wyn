@@ -1,0 +1,10 @@
+[package]
+name = "wyn-base"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Foundational data structures shared by Wyn crates"
+
+[dependencies]
+indexmap = "2.7"

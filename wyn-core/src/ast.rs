@@ -12,7 +12,8 @@ pub(crate) mod rebuild;
 use crate::builtins::BuiltinId;
 use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDecl, FeedbackPair};
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
-use crate::{IdSource, SymbolId};
+use crate::SymbolId;
+use wyn_base::IdSource;
 
 /// Qualified name representing a path through modules to a name
 /// E.g., M.N.x is represented as QualName { qualifiers: ["M", "N"], name: "x" }

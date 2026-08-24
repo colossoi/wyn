@@ -17,7 +17,7 @@ use crate::interface;
 use crate::op;
 use crate::types;
 use crate::FunctionId;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;

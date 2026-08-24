@@ -11,7 +11,8 @@ use crate::ssa;
 use crate::LoweringProfile;
 use crate::ResourceAccess;
 use crate::SortedSet;
-use crate::{BindingRef, EntryId, FunctionId, GlobalId, IdArena, IdSource, LookupMap};
+use crate::{BindingRef, EntryId, FunctionId, GlobalId, LookupMap};
+use wyn_base::{IdArena, IdSource};
 
 use polytype::Type;
 

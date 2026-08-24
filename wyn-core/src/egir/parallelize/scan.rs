@@ -11,8 +11,8 @@ use crate::interface;
 use crate::op;
 use crate::ssa;
 use crate::types;
-use crate::IdSource;
 use crate::ResourceAccess;
+use wyn_base::IdSource;
 
 #[derive(Clone, Copy)]
 pub(super) struct ScanScratch {

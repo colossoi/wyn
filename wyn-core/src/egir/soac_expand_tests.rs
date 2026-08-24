@@ -24,9 +24,9 @@ use crate::to_egraph;
 use crate::types;
 use crate::BindingRef;
 use crate::FunctionId;
-use crate::IdSource;
 use crate::LoweringProfile;
 use polytype::Type;
+use wyn_base::IdSource;
 
 /// Compile source through the pipeline to just-past `expand_soacs`,
 /// returning the EGraph for the (single) entry point so tests can

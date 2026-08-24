@@ -3,7 +3,7 @@
 use super::*;
 use crate::egir;
 use crate::egir::builder::EntryBuilder;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 fn body(name: &str, identities: &mut egir::program::ProgramIdentities) -> PlannedEntry {
     let mut semantic_ids = egir::program::SemanticOpIdSource::default();

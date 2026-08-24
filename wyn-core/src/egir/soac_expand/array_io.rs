@@ -5,7 +5,7 @@ use crate::egir;
 use crate::egir::types::soac_element_type;
 use crate::op;
 use crate::types;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 pub(super) fn emit_seg_space_len(
     graph: &mut EGraph<Physical>,

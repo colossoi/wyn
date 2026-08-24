@@ -32,8 +32,8 @@ use crate::types;
 use crate::EntryId;
 use crate::FunctionId;
 use crate::GlobalId;
-use crate::IdSource;
 use crate::{LookupMap, LookupSet};
+use wyn_base::IdSource;
 
 use super::types::EffectToken;
 use crate::ast::{Span, TypeName};

@@ -21,8 +21,8 @@
 //! rewrite.
 
 use crate::interface;
-use crate::IdSource;
 use smallvec::smallvec;
+use wyn_base::IdSource;
 
 use polytype::Type;
 

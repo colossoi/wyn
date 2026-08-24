@@ -1,8 +1,8 @@
 use super::super::ir::Language;
 use super::*;
 use crate::types;
-use crate::IdSource;
 use crate::SortedSet;
+use wyn_base::IdSource;
 
 #[derive(Clone, Copy)]
 enum EdgeArm {

@@ -10,8 +10,8 @@ use crate::interface;
 use crate::op;
 use crate::ssa;
 use crate::types;
-use crate::IdSource;
 use crate::ResourceAccess;
+use wyn_base::IdSource;
 /// Complete graph-local reduction recipe, consumed before entry mutation.
 pub(super) struct ReduceCandidate {
     pub site: SideEffectSite,

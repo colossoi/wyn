@@ -5,9 +5,9 @@ use crate::tlc::{
     self, ArrayExpr, Def, DefMeta, Lambda, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind, VarRef,
 };
 use crate::types;
-use crate::IdSource;
 use crate::{SymbolId, SymbolTable};
 use polytype::Type;
+use wyn_base::IdSource;
 
 fn span() -> Span {
     Span::dummy()

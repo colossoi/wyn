@@ -20,12 +20,12 @@ use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::VarRef;
 use crate::tlc::{Term, TermKind};
 use crate::types;
-use crate::IdSource;
 use crate::LoweringProfile;
 use crate::SymbolTable;
 use crate::{BindingRef, SymbolId};
 use polytype::Type;
 use std::collections::{HashMap, HashSet};
+use wyn_base::IdSource;
 
 /// Compile a source string through the full TLC pipeline, then convert
 /// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton

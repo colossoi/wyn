@@ -8,11 +8,11 @@ use crate::tlc::{
     Def, DefMeta, Lambda, Payload, Place, Program, SoacBody, SoacOp, Term, TermIdSource, TermKind,
 };
 use crate::types;
-use crate::IdSource;
 use crate::LookupSet;
 use crate::SymbolId;
 use crate::SymbolTable;
 use polytype::Type;
+use wyn_base::IdSource;
 
 fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
     use crate::tlc::{ArrayExpr, TermKind};

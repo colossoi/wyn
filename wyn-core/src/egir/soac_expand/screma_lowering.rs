@@ -3,7 +3,7 @@
 use super::array_io::{emit_read_element, emit_seg_space_len};
 use super::*;
 use crate::op;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 pub(super) fn emit_screma_lambda(
     graph: &mut EGraph<Physical>,

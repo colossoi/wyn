@@ -24,7 +24,7 @@ use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader};
 use crate::interface;
 use crate::types;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};

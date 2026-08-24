@@ -15,11 +15,11 @@ use crate::resolve_opens;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
 use crate::ssa;
 use crate::types;
-use crate::IdSource;
 use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
 use log::debug;
 use polytype::Context;
 use std::collections::BTreeSet;
+use wyn_base::IdSource;
 
 // Import type helper functions from parent module
 use super::patterns::coverage::{check_match, format_cov_pat, CoverageError};

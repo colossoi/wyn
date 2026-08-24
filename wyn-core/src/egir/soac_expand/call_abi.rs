@@ -3,9 +3,9 @@ use crate::flow;
 use crate::types;
 use crate::types::TypeExt;
 use crate::FunctionId;
-use crate::IdSource;
 use crate::{BindingRef, LookupMap};
 use polytype::Type;
+use wyn_base::IdSource;
 
 use super::super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
 use super::super::ir::PlaceOp;

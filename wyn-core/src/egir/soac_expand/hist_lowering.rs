@@ -10,7 +10,7 @@ use super::*;
 use crate::builtins;
 use crate::op;
 use crate::ssa;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 /// Inputs for canonical serial histogram expansion. The form owns all bucket
 /// result routing and operation metadata; the loop supplies co-iterated input

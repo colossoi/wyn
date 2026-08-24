@@ -6,9 +6,9 @@ use crate::tlc::{
     VarRef,
 };
 use crate::types;
-use crate::IdSource;
 use crate::SymbolTable;
 use polytype::Type;
+use wyn_base::IdSource;
 
 fn input_ae(boxed: Box<tlc::Term>) -> tlc::ArrayExpr {
     use crate::tlc::{ArrayExpr, TermKind};

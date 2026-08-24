@@ -5,7 +5,7 @@ use crate::op;
 use crate::ssa;
 use crate::types;
 use crate::BindingRef;
-use crate::IdSource;
+use wyn_base::IdSource;
 
 use super::*;
 
