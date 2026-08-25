@@ -2,6 +2,7 @@
 
 use super::array_io::{emit_read_element, emit_seg_space_len};
 use super::*;
+use crate::egir::graph_ops::{bind_by_value_result, emit_result_to_indexed_destination};
 use crate::op;
 use wyn_base::IdSource;
 
@@ -80,7 +81,7 @@ pub(super) fn emit_screma_lambda(
             .zip(&lambda.result_types)
             .map(|(argument, ty)| {
                 let abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
-                super::super::graph_ops::bind_by_value_result(graph, &abi, argument)
+                bind_by_value_result(graph, &abi, argument)
             })
             .collect();
     }
@@ -135,7 +136,7 @@ pub(super) fn build_parallel_screma_map(
     output_views: &[ResultBinding<Type<TypeName>>],
     next_effect: &mut IdSource<EffectToken>,
     callables: &CallableMap,
-) {
+) -> Result<(), String> {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
@@ -197,18 +198,11 @@ pub(super) fn build_parallel_screma_map(
     assert_eq!(results.len(), output_views.len());
     let mut tail = body;
     for (output, result) in output_views.iter().zip(results) {
-        tail = super::super::graph_ops::emit_result_to_indexed_destination(
-            graph,
-            tail,
-            &result,
-            output,
-            lane,
-            next_effect,
-        )
-        .expect("mapped result must be writable through its selected destination");
+        tail = emit_result_to_indexed_destination(graph, tail, &result, output, lane, next_effect)?;
     }
     graph.skeleton.blocks[tail].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],
     };
+    Ok(())
 }

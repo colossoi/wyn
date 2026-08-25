@@ -2,6 +2,8 @@
 
 use super::array_io::emit_length;
 use super::*;
+use crate::egir::graph_ops::{bind_by_value_result, rebind_physical_result};
+use crate::egir::types::by_value_function_result;
 use crate::op;
 use crate::ssa;
 use wyn_base::IdSource;
@@ -24,9 +26,15 @@ fn build_loop<F>(
     results: &[LoopResultBinding],
     next_effect: &mut IdSource<EffectToken>,
     mut emit_body: F,
-) -> BlockId
+) -> Result<BlockId, String>
 where
-    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> Result<LoopBody, String>,
 {
     let handles = build_loop_skeleton(
         graph,
@@ -37,14 +45,14 @@ where
             results: results.to_vec(),
             len_input: len_input.clone(),
         },
-    );
+    )?;
     let body = emit_body(
         graph,
         next_effect,
         handles.body,
         handles.idx_nid,
         &handles.carried,
-    );
+    )?;
     debug_assert_eq!(body.carried.len(), carried.len());
     let next_i_nid = increment(graph, handles.idx_nid);
     let mut args = body.carried;
@@ -54,7 +62,7 @@ where
         target: handles.header,
         args,
     };
-    handles.after
+    Ok(handles.after)
 }
 
 /// Try to unroll a small loop; if the trip count isn't statically small (or
@@ -70,9 +78,15 @@ pub(super) fn expand_loop<F>(
     next_effect: &mut IdSource<EffectToken>,
     allow_unroll: bool,
     mut emit_body: F,
-) -> BlockId
+) -> Result<BlockId, String>
 where
-    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> Result<LoopBody, String>,
 {
     if allow_unroll {
         if let Some(continuation) = try_unroll(
@@ -84,8 +98,8 @@ where
             results,
             next_effect,
             &mut emit_body,
-        ) {
-            return continuation;
+        )? {
+            return Ok(continuation);
         }
     }
     build_loop(
@@ -114,25 +128,31 @@ fn try_unroll<F>(
     results: &[LoopResultBinding],
     next_effect: &mut IdSource<EffectToken>,
     mut emit_body: F,
-) -> Option<BlockId>
+) -> Result<Option<BlockId>, String>
 where
-    F: FnMut(&mut EGraph<Physical>, &mut IdSource<EffectToken>, BlockId, ValueId, &[ValueId]) -> LoopBody,
+    F: FnMut(
+        &mut EGraph<Physical>,
+        &mut IdSource<EffectToken>,
+        BlockId,
+        ValueId,
+        &[ValueId],
+    ) -> Result<LoopBody, String>,
 {
     const UNROLL_THRESHOLD: usize = 16;
 
     // SoA-tuple driving inputs don't have a direct `array_size`; skip.
     if as_soa_tuple(&len_input.1).is_some() {
-        return None;
+        return Ok(None);
     }
     let Some(size_ty) = len_input.1.array_size() else {
-        return None;
+        return Ok(None);
     };
     let n = match size_ty {
         Type::Constructed(TypeName::Size(n), _) => *n,
-        _ => return None,
+        _ => return Ok(None),
     };
     if n > UNROLL_THRESHOLD {
-        return None;
+        return Ok(None);
     }
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -151,19 +171,19 @@ where
     let mut current = bid;
     for i in 0..n {
         let idx_nid = graph.intern_pure(PureOp::Int(i.to_string()), smallvec![], i32_ty.clone(), None);
-        let body = emit_body(graph, next_effect, current, idx_nid, &carried_nids);
+        let body = emit_body(graph, next_effect, current, idx_nid, &carried_nids)?;
         debug_assert_eq!(body.carried.len(), carried.len());
         carried_nids = body.carried;
         current = body.tail;
     }
 
     for binding in results {
-        bind_unrolled_result(graph, binding, &carried_nids);
+        bind_unrolled_result(graph, binding, &carried_nids)?;
     }
 
     graph.skeleton.blocks[current].side_effects.extend(suffix);
     graph.skeleton.blocks[current].term = original_term;
-    Some(current)
+    Ok(Some(current))
 }
 
 /// Description of an accumulator-only SOAC (Reduce, reducing Screma): loop over one or
@@ -212,7 +232,7 @@ fn build_loop_skeleton(
     bid: BlockId,
     idx_in_block: usize,
     spec: LoopSkeletonSpec,
-) -> LoopHandles {
+) -> Result<LoopHandles, String> {
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
 
@@ -230,12 +250,9 @@ fn build_loop_skeleton(
             LoopResultSource::Carried(index) => {
                 let (ty, _) = &spec.carried[*index];
                 let value = graph.add_block_param(after, ty.clone());
-                let abi = super::super::types::by_value_function_result::<WynLanguage>(
-                    binding.result.ty().clone(),
-                );
-                let replacement = super::super::graph_ops::bind_by_value_result(graph, &abi, value);
-                super::super::graph_ops::rebind_physical_result(graph, &binding.result, &replacement)
-                    .expect("loop result must preserve its physical ABI");
+                let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
+                let replacement = bind_by_value_result(graph, &abi, value);
+                rebind_physical_result(graph, &binding.result, &replacement)?;
                 after_args.push(*index);
             }
             LoopResultSource::ConstantFalse => {
@@ -288,23 +305,25 @@ fn build_loop_skeleton(
         continue_block: body,
     });
 
-    LoopHandles {
+    Ok(LoopHandles {
         header,
         body,
         after,
         carried: carried_nids,
         idx_nid,
-    }
+    })
 }
 
-fn bind_unrolled_result(graph: &mut EGraph<Physical>, binding: &LoopResultBinding, carried: &[ValueId]) {
+fn bind_unrolled_result(
+    graph: &mut EGraph<Physical>,
+    binding: &LoopResultBinding,
+    carried: &[ValueId],
+) -> Result<(), String> {
     match &binding.source {
         LoopResultSource::Carried(index) => {
-            let abi =
-                super::super::types::by_value_function_result::<WynLanguage>(binding.result.ty().clone());
-            let replacement = super::super::graph_ops::bind_by_value_result(graph, &abi, carried[*index]);
-            super::super::graph_ops::rebind_physical_result(graph, &binding.result, &replacement)
-                .expect("unrolled loop result must preserve its physical ABI");
+            let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
+            let replacement = bind_by_value_result(graph, &abi, carried[*index]);
+            rebind_physical_result(graph, &binding.result, &replacement)?;
         }
         LoopResultSource::ConstantFalse => {
             graph.replace_node_preserving_type(
@@ -313,6 +332,7 @@ fn bind_unrolled_result(graph: &mut EGraph<Physical>, binding: &LoopResultBindin
             );
         }
     }
+    Ok(())
 }
 
 /// Emit `idx + 1` as a pure op.

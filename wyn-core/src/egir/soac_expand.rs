@@ -440,14 +440,13 @@ fn expand_one(
                             sink,
                             lane,
                             next_effect,
-                        )
-                        .expect("mapped result must be writable through its selected destination");
+                        )?;
                     }
                     next.extend(new_scans);
                     next.extend(new_reductions);
-                    LoopBody { tail, carried: next }
+                    Ok(LoopBody { tail, carried: next })
                 },
-            );
+            )?;
             for result in place_backed_results {
                 super::graph_ops::materialize_place_backed_projections(
                     graph,
@@ -596,7 +595,7 @@ fn expand_one(
                     }
                 },
                 hist::ScheduledState::Serial => {
-                    build_hist_loop(graph, bid, idx, hist, next_effect, callables)
+                    build_hist_loop(graph, bid, idx, hist, next_effect, callables)?
                 }
             }
         }
@@ -660,7 +659,7 @@ fn expand_one(
                 &destinations,
                 next_effect,
                 callables,
-            );
+            )?;
         }
         _ => return Err("SOAC expansion target changed after selection".into()),
     }

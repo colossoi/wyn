@@ -8,6 +8,7 @@ use super::loop_builder::{expand_loop, LoopBody};
 use super::screma_lowering::emit_screma_lambda;
 use super::*;
 use crate::builtins;
+use crate::egir::graph_ops::rebind_physical_result;
 use crate::op;
 use crate::ssa;
 use wyn_base::IdSource;
@@ -373,7 +374,7 @@ pub(super) fn build_hist_loop(
     spec: HistLoop,
     next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
-) {
+) -> Result<(), String> {
     use super::super::graph_ops::{emit_storage_store, emit_view_load};
     let HistLoop {
         form,
@@ -513,12 +514,13 @@ pub(super) fn build_hist_loop(
                 };
                 current = next;
             }
-            LoopBody {
+            Ok(LoopBody {
                 tail: current,
                 carried: vec![],
-            }
+            })
         },
-    );
+    )?;
+    Ok(())
 }
 
 fn emit_thread_lane(graph: &mut EGraph<Physical>) -> ValueId {
@@ -1024,13 +1026,13 @@ pub(super) fn build_bucket_finish(
     );
     super::super::graph_ops::retype_projection_tree(graph, result_node, &ty);
     super::super::graph_ops::retype_projection_tree(graph, *counts_result, &graph.nodes[counts].ty.clone());
-    super::super::graph_ops::rebind_physical_result(
+    rebind_physical_result(
         graph,
         &graph.value_result(*counts_result),
         &graph.value_result(counts),
     )
     .expect("bucket count result must preserve its physical ABI");
-    super::super::graph_ops::rebind_physical_result(
+    rebind_physical_result(
         graph,
         &graph.value_result(*overflow_result),
         &graph.value_result(overflow),
