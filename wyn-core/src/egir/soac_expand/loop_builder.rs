@@ -3,7 +3,11 @@
 use super::array_io::emit_length;
 use super::*;
 use crate::egir::graph_ops::{bind_by_value_result, rebind_physical_result};
-use crate::egir::types::by_value_function_result;
+use crate::egir::structured_cfg::{
+    detach_effect_for_inline_replacement, finish_counted_loop_iteration, replace_effect_with_counted_loop,
+    restore_inline_effect_continuation,
+};
+use crate::egir::types::{by_value_function_result, SideEffectSite};
 use crate::op;
 use crate::ssa;
 use wyn_base::IdSource;
@@ -36,33 +40,48 @@ where
         &[ValueId],
     ) -> Result<LoopBody, String>,
 {
-    let handles = build_loop_skeleton(
+    let mut exit_bindings = Vec::new();
+    for binding in results {
+        match binding.source {
+            LoopResultSource::Carried(index) => exit_bindings.push((binding, index)),
+            LoopResultSource::ConstantFalse => {
+                let result = binding
+                    .result
+                    .single_value()
+                    .ok_or_else(|| "a boolean loop result must have one by-value leaf".to_owned())?;
+                graph.replace_node_preserving_type(
+                    result,
+                    ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
+                );
+            }
+        }
+    }
+    let exit_carried = exit_bindings.iter().map(|(_, index)| *index).collect::<Vec<_>>();
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let handles = replace_effect_with_counted_loop(
         graph,
-        bid,
-        idx_in_block,
-        LoopSkeletonSpec {
-            carried: carried.to_vec(),
-            results: results.to_vec(),
-            len_input: len_input.clone(),
+        SideEffectSite {
+            block: bid,
+            index: idx_in_block,
+        },
+        carried,
+        &exit_carried,
+        |graph| emit_length(graph, len_input.0, &len_input.1, &i32_ty),
+        |graph, exit, value| {
+            let binding = exit_bindings[exit].0;
+            let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
+            let replacement = bind_by_value_result(graph, &abi, value);
+            rebind_physical_result(graph, &binding.result, &replacement)
         },
     )?;
-    let body = emit_body(
-        graph,
-        next_effect,
-        handles.body,
-        handles.idx_nid,
-        &handles.carried,
-    )?;
+    let body = emit_body(graph, next_effect, handles.body, handles.index, &handles.carried)?;
     debug_assert_eq!(body.carried.len(), carried.len());
-    let next_i_nid = increment(graph, handles.idx_nid);
+    let next_i_nid = increment(graph, handles.index);
     let mut args = body.carried;
     args.push(next_i_nid);
-    let args = graph.admit_flow_values(args);
-    graph.skeleton.blocks[body.tail].term = SkeletonTerminator::Branch {
-        target: handles.header,
-        args,
-    };
-    Ok(handles.after)
+    finish_counted_loop_iteration(graph, body.tail, handles.header, args);
+    let _replaced_effect = handles.effect;
+    Ok(handles.continuation)
 }
 
 /// Try to unroll a small loop; if the trip count isn't statically small (or
@@ -157,15 +176,15 @@ where
 
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
 
-    // Stash side-effects and the original continuation. A body may introduce
-    // selections, so the suffix belongs to its final continuation block, not
-    // necessarily the original block.
-    let suffix: Vec<SideEffect<Physical>> =
-        graph.skeleton.blocks[bid].side_effects.drain(idx_in_block..).collect();
-    let original_term = std::mem::replace(
-        &mut graph.skeleton.blocks[bid].term,
-        SkeletonTerminator::Unreachable,
-    );
+    // A body may introduce selections, so the original continuation belongs
+    // to its final tail rather than necessarily the source block.
+    let continuation = detach_effect_for_inline_replacement(
+        graph,
+        SideEffectSite {
+            block: bid,
+            index: idx_in_block,
+        },
+    )?;
 
     let mut carried_nids: Vec<ValueId> = carried.iter().map(|(_, init)| *init).collect();
     let mut current = bid;
@@ -181,26 +200,8 @@ where
         bind_unrolled_result(graph, binding, &carried_nids)?;
     }
 
-    graph.skeleton.blocks[current].side_effects.extend(suffix);
-    graph.skeleton.blocks[current].term = original_term;
+    restore_inline_effect_continuation(graph, current, continuation);
     Ok(Some(current))
-}
-
-/// Description of an accumulator-only SOAC (Reduce, reducing Screma): loop over one or
-/// more input arrays, thread a scalar accumulator through a per-iteration call,
-/// and yield the final accumulator as the result. No output array.
-
-/// Common skeleton shared by every SOAC expansion: split the enclosing block
-/// at the SOAC's index, create header/body/after blocks, wire the preheader
-/// branch, and install the condbr on the header.
-struct LoopSkeletonSpec {
-    /// Per loop-carried value: (type, initial value in preheader).
-    /// These become `header`'s block params, in order, followed by the index.
-    carried: Vec<(Type<TypeName>, ValueId)>,
-    /// How the original SOAC result ValueId should be rebound after expansion.
-    results: Vec<LoopResultBinding>,
-    /// Input array for length calculation: (arr_nid, arr_ty).
-    len_input: (ValueId, Type<TypeName>),
 }
 
 #[derive(Clone)]
@@ -215,105 +216,6 @@ pub(super) enum LoopResultSource {
     ConstantFalse,
 }
 
-struct LoopHandles {
-    header: BlockId,
-    body: BlockId,
-    after: BlockId,
-    /// One ValueId per loop-carried, matching the order in `spec.carried`.
-    /// These are the header block-param ValueNodeIds, available inside body and
-    /// on the else branch into `after`.
-    pub(super) carried: Vec<ValueId>,
-    /// The header's index block param.
-    idx_nid: ValueId,
-}
-
-fn build_loop_skeleton(
-    graph: &mut EGraph<Physical>,
-    bid: BlockId,
-    idx_in_block: usize,
-    spec: LoopSkeletonSpec,
-) -> Result<LoopHandles, String> {
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-
-    // Split `bid` into preheader (bid) + after (holding suffix side-effects + old term).
-    let after = graph.skeleton.split_block_before_effect(bid, idx_in_block);
-
-    // The split moves the branching terminator to `after`: if `bid`
-    // carries structured-control-flow header metadata (e.g. a Selection
-    // whose CondBranch is in `old_term`), that metadata follows to
-    // `after`, since `bid`'s new terminator is an unconditional branch to
-    // the loop header — `after` is the selection/loop header now.
-    let mut after_args = Vec::new();
-    for binding in &spec.results {
-        match &binding.source {
-            LoopResultSource::Carried(index) => {
-                let (ty, _) = &spec.carried[*index];
-                let value = graph.add_block_param(after, ty.clone());
-                let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
-                let replacement = bind_by_value_result(graph, &abi, value);
-                rebind_physical_result(graph, &binding.result, &replacement)?;
-                after_args.push(*index);
-            }
-            LoopResultSource::ConstantFalse => {
-                graph.replace_node_preserving_type(
-                    binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
-                    ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
-                );
-            }
-        }
-    }
-    // Build header with one block-param per carried plus the index.
-    let header = graph.skeleton.create_block();
-    let body = graph.skeleton.create_block();
-    let mut carried_nids = Vec::with_capacity(spec.carried.len());
-    for (ty, _) in &spec.carried {
-        let nid = graph.add_block_param(header, ty.clone());
-        carried_nids.push(nid);
-    }
-    let idx_nid = graph.add_block_param(header, i32_ty.clone());
-
-    // Preheader terminator: br header(init_carried..., 0).
-    let zero_nid = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
-    let mut preheader_args: Vec<ValueId> = spec.carried.iter().map(|(_, init)| *init).collect();
-    preheader_args.push(zero_nid);
-    let preheader_args = graph.admit_flow_values(preheader_args);
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
-        target: header,
-        args: preheader_args,
-    };
-
-    // Header terminator: condbr i<len -> body / after(result_carried).
-    let len_nid = emit_length(graph, spec.len_input.0, &spec.len_input.1, &i32_ty);
-    let cond_nid = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Less),
-        smallvec![idx_nid, len_nid],
-        bool_ty,
-        None,
-    );
-    let else_args = graph.admit_flow_values(after_args.iter().map(|idx| carried_nids[*idx]));
-    graph.skeleton.blocks[header].term = SkeletonTerminator::CondBranch {
-        cond: cond_nid,
-        then_target: body,
-        then_args: vec![],
-        else_target: after,
-        else_args,
-    };
-
-    graph.skeleton.blocks[header].control_header = Some(ControlHeader::Loop {
-        merge: after,
-        continue_block: body,
-    });
-
-    Ok(LoopHandles {
-        header,
-        body,
-        after,
-        carried: carried_nids,
-        idx_nid,
-    })
-}
-
 fn bind_unrolled_result(
     graph: &mut EGraph<Physical>,
     binding: &LoopResultBinding,
@@ -326,8 +228,12 @@ fn bind_unrolled_result(
             rebind_physical_result(graph, &binding.result, &replacement)?;
         }
         LoopResultSource::ConstantFalse => {
+            let result = binding
+                .result
+                .single_value()
+                .ok_or_else(|| "a boolean loop result must have one by-value leaf".to_owned())?;
             graph.replace_node_preserving_type(
-                binding.result.single_value().expect("a boolean loop result has one by-value leaf"),
+                result,
                 ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
             );
         }

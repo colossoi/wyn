@@ -41,6 +41,7 @@ pub mod reify;
 pub(crate) mod semantic_graph;
 pub(crate) mod semantic_opt;
 pub(crate) mod stage_lift;
+pub(crate) mod structured_cfg;
 // Keep the complete query surface available to later scheduling consumers;
 // lifting and residency currently use only a subset of the recorded facts.
 #[allow(dead_code)]

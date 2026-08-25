@@ -3,6 +3,10 @@
 use super::array_io::{emit_read_element, emit_seg_space_len};
 use super::*;
 use crate::egir::graph_ops::{bind_by_value_result, emit_result_to_indexed_destination};
+use crate::egir::physical_call_abi::emit_call;
+use crate::egir::soac::lambda::logical_result_fields;
+use crate::egir::structured_cfg::{finish_guarded_selection, replace_effect_with_guarded_selection};
+use crate::egir::types::{by_value_function_result, SideEffectSite};
 use crate::op;
 use wyn_base::IdSource;
 
@@ -80,7 +84,7 @@ pub(super) fn emit_screma_lambda(
             .into_iter()
             .zip(&lambda.result_types)
             .map(|(argument, ty)| {
-                let abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
+                let abi = by_value_function_result::<WynLanguage>(ty.clone());
                 bind_by_value_result(graph, &abi, argument)
             })
             .collect();
@@ -90,13 +94,11 @@ pub(super) fn emit_screma_lambda(
     let mut operands = arguments.drain(..).map(|argument| graph.operand_ref(argument)).collect::<Vec<_>>();
     operands.extend(body.captures.iter().copied());
     let result = match mapped_destinations {
-        None => {
-            super::super::physical_call_abi::emit_call(graph, block, callee, operands, None, next_effect)
-        }
+        None => emit_call(graph, block, callee, operands, None, next_effect),
         Some((destinations, lane)) => match mapped_call_mode(callee, lambda, destinations)
             .expect("mapped Screma result must have a recognized destination shape")
         {
-            MappedCallMode::DirectDestinationPassing => super::super::physical_call_abi::emit_call(
+            MappedCallMode::DirectDestinationPassing => emit_call(
                 graph,
                 block,
                 callee,
@@ -104,18 +106,11 @@ pub(super) fn emit_screma_lambda(
                 Some((destinations, lane)),
                 next_effect,
             ),
-            MappedCallMode::StructuredStore => super::super::physical_call_abi::emit_call(
-                graph,
-                block,
-                callee,
-                operands,
-                None,
-                next_effect,
-            ),
+            MappedCallMode::StructuredStore => emit_call(graph, block, callee, operands, None, next_effect),
         },
     }
     .expect("Screma lambda call must match its canonical boundary");
-    super::super::soac::lambda::logical_result_fields(&result, &lambda.result_types)
+    logical_result_fields(&result, &lambda.result_types)
 }
 
 /// `Scan[OutputView]`: `new_acc = func(acc, elem, ...caps); view[i] = new_acc`
@@ -140,45 +135,50 @@ pub(super) fn build_parallel_screma_map(
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
-    let after = graph.skeleton.split_block_before_effect(block, effect_index);
-    let body = graph.skeleton.create_block();
-    let known = catalog().known();
-    let thread = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: known.thread_id,
-            overload_idx: 0,
+    let mut lane = None;
+    let guarded = replace_effect_with_guarded_selection(
+        graph,
+        SideEffectSite {
+            block,
+            index: effect_index,
         },
-        smallvec![],
-        u32_type,
-        None,
-    );
-    let bitcast = catalog()
-        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
-        .expect("catalog has structural u32-to-i32 conversion");
-    let lane = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: bitcast,
-            overload_idx: 0,
+        |graph| {
+            let known = catalog().known();
+            let thread = graph.intern_pure(
+                PureOp::Intrinsic {
+                    id: known.thread_id,
+                    overload_idx: 0,
+                },
+                smallvec![],
+                u32_type,
+                None,
+            );
+            let bitcast = catalog()
+                .conversion(&TypeName::Int(32), &TypeName::UInt(32))
+                .ok_or_else(|| "catalog has no structural u32-to-i32 conversion".to_owned())?;
+            let thread_lane = graph.intern_pure(
+                PureOp::Intrinsic {
+                    id: bitcast,
+                    overload_idx: 0,
+                },
+                smallvec![thread],
+                i32_type.clone(),
+                None,
+            );
+            lane = Some(thread_lane);
+            let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
+            Ok(graph.intern_pure(
+                PureOp::BinOp(op::BinaryOperator::Less),
+                smallvec![thread_lane, length],
+                bool_type,
+                None,
+            ))
         },
-        smallvec![thread],
-        i32_type.clone(),
-        None,
-    );
-    let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
-    let condition = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Less),
-        smallvec![lane, length],
-        bool_type,
-        None,
-    );
-    graph.skeleton.blocks[block].term = SkeletonTerminator::CondBranch {
-        cond: condition,
-        then_target: body,
-        then_args: vec![],
-        else_target: after,
-        else_args: vec![],
-    };
-    graph.skeleton.blocks[block].control_header = Some(ControlHeader::Selection { merge: after });
+    )?;
+    let body = guarded.body;
+    let after = guarded.continuation;
+    let lane = lane.ok_or_else(|| "guard construction did not record its lane".to_owned())?;
+    let _replaced_effect = guarded.effect;
 
     let elements = read_inputs
         .iter()
@@ -200,9 +200,6 @@ pub(super) fn build_parallel_screma_map(
     for (output, result) in output_views.iter().zip(results) {
         tail = emit_result_to_indexed_destination(graph, tail, &result, output, lane, next_effect)?;
     }
-    graph.skeleton.blocks[tail].term = SkeletonTerminator::Branch {
-        target: after,
-        args: vec![],
-    };
+    finish_guarded_selection(graph, tail, after);
     Ok(())
 }

@@ -216,7 +216,7 @@ fn expand_one(
     next_effect: &mut IdSource<EffectToken>,
     callables: &CallableMap,
 ) -> Result<(), String> {
-    let se = graph.skeleton.blocks[bid].side_effects.remove(idx);
+    let se = graph.skeleton.blocks[bid].side_effects[idx].clone();
     match &se.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
             if op.is_serial()
@@ -457,6 +457,7 @@ fn expand_one(
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
+            graph.skeleton.blocks[bid].side_effects.remove(idx);
             let input_count = op.body.inputs.len();
             let read_inputs = se.operands[..input_count]
                 .iter()
@@ -535,6 +536,9 @@ fn expand_one(
             }
         }
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
+            if !matches!(op.state, hist::ScheduledState::Serial) {
+                graph.skeleton.blocks[bid].side_effects.remove(idx);
+            }
             let n_inputs = op.inputs.len();
             let input_nids = &se.operands[..n_inputs];
             let read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>, Vec<u8>, ArrayLayout)> =
@@ -591,7 +595,7 @@ fn expand_one(
                         callables,
                     ),
                     hist::ParallelStage::Finish => {
-                        build_bucket_finish(graph, bid, idx, hist.result_node, storage, next_effect)
+                        build_bucket_finish(graph, bid, idx, hist.result_node, storage, next_effect)?
                     }
                 },
                 hist::ScheduledState::Serial => {

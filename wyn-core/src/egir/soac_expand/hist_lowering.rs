@@ -991,7 +991,7 @@ pub(super) fn build_bucket_finish(
     result_node: ValueId,
     storage: &hist::BucketStorage<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
-) {
+) -> Result<(), String> {
     let after = graph.skeleton.split_block_before_effect(block, effect_index);
     let Type::Constructed(TypeName::Tuple(2), fields) = graph.nodes[result_node].ty.clone() else {
         unreachable!("bucket insertion result is counts and overflow")
@@ -1026,20 +1026,15 @@ pub(super) fn build_bucket_finish(
     );
     super::super::graph_ops::retype_projection_tree(graph, result_node, &ty);
     super::super::graph_ops::retype_projection_tree(graph, *counts_result, &graph.nodes[counts].ty.clone());
-    rebind_physical_result(
-        graph,
-        &graph.value_result(*counts_result),
-        &graph.value_result(counts),
-    )
-    .expect("bucket count result must preserve its physical ABI");
-    rebind_physical_result(
-        graph,
-        &graph.value_result(*overflow_result),
-        &graph.value_result(overflow),
-    )
-    .expect("bucket overflow result must preserve its physical ABI");
+    let counts_result = graph.value_result(*counts_result);
+    let counts_replacement = graph.value_result(counts);
+    rebind_physical_result(graph, &counts_result, &counts_replacement)?;
+    let overflow_result = graph.value_result(*overflow_result);
+    let overflow_replacement = graph.value_result(overflow);
+    rebind_physical_result(graph, &overflow_result, &overflow_replacement)?;
     graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],
     };
+    Ok(())
 }
