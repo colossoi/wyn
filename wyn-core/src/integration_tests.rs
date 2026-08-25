@@ -5782,6 +5782,87 @@ entry add_sum(xs: []i32) []i32 =
     assert_eq!(consumer.body().name, "add_sum");
 }
 
+#[test]
+fn scalar_prepass_precedes_every_phase_of_an_expanded_filter_consumer() {
+    use crate::pipeline_descriptor::Pipeline;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+def clampi(v: i32, hi: i32) i32 = if v > hi then hi else v
+
+def tile(f: vec2f32, front: bool) (f32, i32, i32, bool) =
+  if !front then (0.0, 0i32, 0i32, false)
+  else (0.0, 0i32, i32(f.y), true)
+
+def history_visible(f: vec2f32, history: render_target<f32>) bool =
+  let (_, _, _, infront) = tile(f, true) in
+  if !infront then false
+  else
+    let sampled =
+      loop m = 0.0 for k < 1 do
+        let x = clampi(k, (i32(f.x) + 1) - 1) in
+        0.0
+    in sampled > 0.0
+
+def inner(a: i32, b: i32) (i32, i32) = (1i32, b)
+def outer(v: i32) (i32, i32) = inner(0i32, v)
+
+def other_visible(i: i32) bool =
+  let (_, v) = outer(i) in v > 0
+
+def keep(f: vec2f32, history: render_target<f32>, i: i32) bool =
+  if i < 1 then history_visible(f, history) else other_visible(i)
+
+entry scheduler_resource_cycle(f: vec2f32, history: render_target<f32>)
+    ([]i32, render_target<f32>) =
+  let visible =
+    let kept = filter(|i| keep(f, history, i), iota(2)) in
+    { values = map(|i| 0i32, kept) }
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
+  let history' = shade(history, raster, |_| 1.0)
+  in (visible.values, history')
+"#,
+            )
+            .expect("a nested scalar prepass must be inserted before filter flags and scan phases");
+            let stages = lowered
+                .pipeline
+                .pipelines
+                .iter()
+                .find_map(|pipeline| match pipeline {
+                    Pipeline::Compute(compute)
+                        if compute
+                            .stages
+                            .iter()
+                            .any(|stage| stage.entry_point.contains("_filter_flags")) =>
+                    {
+                        Some(&compute.stages)
+                    }
+                    _ => None,
+                })
+                .expect("expanded filter pipeline");
+            let prepass = stages
+                .iter()
+                .position(|stage| stage.entry_point.contains("_prepass_scalar_"))
+                .expect("nested scalar prepass");
+            let flags = stages
+                .iter()
+                .position(|stage| stage.entry_point.contains("_filter_flags"))
+                .expect("filter flags phase");
+            assert!(
+                prepass < flags,
+                "the scalar prepass must dominate the whole filter phase chain: {stages:?}"
+            );
+        })
+        .expect("spawn nested scalar-prepass scheduling regression")
+        .join()
+        .expect("nested scalar-prepass scheduling regression panicked");
+}
+
 // =============================================================================
 // Bound-symbol verification through TLC passes
 // =============================================================================

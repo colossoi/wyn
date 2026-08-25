@@ -865,7 +865,25 @@ impl KernelPlan {
         entry: &egir::program::AllocatedEntry,
         parallel_scremas: &super::planning::ParallelScremas,
     ) -> Result<KernelId, KernelMutationError> {
-        let consumer_placement = self.phase(consumer).placement;
+        // Recipe lowering may have expanded the consumer stage into a phase
+        // chain while generated stages farther upstream were still waiting to
+        // be attached. The stable stage handle names the chain's anchor, not
+        // necessarily its first phase (for a filter it names scatter, after
+        // flags and scan). A generated producer must precede the whole stage,
+        // otherwise final resource-flow wiring can discover that an earlier
+        // phase reads the producer and create an opposing dependency cycle.
+        let consumer_phase = self.phase(consumer);
+        let consumer_group = consumer_phase.placement.group;
+        let insertion_anchor = consumer_phase.flow_source.map_or(consumer, |source| {
+            self.phases_with_ids()
+                .filter(|(_, phase)| {
+                    phase.flow_source == Some(source) && phase.placement.group == consumer_group
+                })
+                .min_by_key(|(_, phase)| phase.placement.order)
+                .map(|(id, _)| id)
+                .unwrap_or(consumer)
+        });
+        let consumer_placement = self.phase(insertion_anchor).placement;
         let generated_pipeline = consumer_placement.group.is_graphics().then(|| {
             let id = PipelineId(self.pipelines.len() as u32);
             let pipeline = ScheduledPipeline {
@@ -892,7 +910,7 @@ impl KernelPlan {
                 order: consumer_placement.order,
             }
         };
-        let dependencies = self.phase(consumer).dependencies.clone();
+        let dependencies = self.phase(insertion_anchor).dependencies.clone();
         let source_entry = self.phase(consumer).source_entry;
         let phase = phase_from_generated_stage(
             stage,
@@ -909,7 +927,7 @@ impl KernelPlan {
         }
         let id = self.push_phase(phase);
         self.flow_sources.insert(stage, id);
-        self.phase_mut(consumer).dependencies = vec![id];
+        self.phase_mut(insertion_anchor).dependencies = vec![id];
         Ok(id)
     }
 
