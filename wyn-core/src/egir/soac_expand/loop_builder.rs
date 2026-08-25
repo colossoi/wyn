@@ -1,15 +1,22 @@
 //! Generic loop construction for physical SOAC expansion.
 
 use super::array_io::emit_length;
-use super::*;
+use crate::ast::TypeName;
 use crate::egir::graph_ops::{bind_by_value_result, rebind_physical_result};
 use crate::egir::structured_cfg::{
     detach_effect_for_inline_replacement, finish_counted_loop_iteration, replace_effect_with_counted_loop,
     restore_inline_effect_continuation,
 };
-use crate::egir::types::{by_value_function_result, SideEffectSite};
+use crate::egir::types::{
+    as_soa_tuple, by_value_function_result, EGraph, EffectToken, Physical, PureOp, ResultBinding,
+    SideEffectSite, ValueId, ValueKind, WynLanguage,
+};
+use crate::flow::BlockId;
 use crate::op;
 use crate::ssa;
+use crate::types::TypeExt;
+use polytype::Type;
+use smallvec::smallvec;
 use wyn_base::IdSource;
 
 /// One expanded-loop iteration. A body can finish in a different CFG block

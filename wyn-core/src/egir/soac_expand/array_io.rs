@@ -1,10 +1,21 @@
 //! Array length and element-access helpers for SOAC expansion.
 
-use super::*;
+use super::{is_plain_array_source, is_view_source, is_virtual_source};
+use crate::ast::TypeName;
+use crate::builtins::catalog;
 use crate::egir;
-use crate::egir::types::soac_element_type;
+use crate::egir::graph_ops::{alloc_effect, emit_load, project_value};
+use crate::egir::ir::Language;
+use crate::egir::types::{
+    as_soa_tuple, soac_element_type, soac_leaf_type, ArrayLayout, EGraph, EffectOp, EffectToken, Physical,
+    PureOp, SegSpace, SideEffect, SideEffectKind, ValueId, WynLanguage,
+};
+use crate::flow::BlockId;
 use crate::op;
-use crate::types;
+use crate::types::{self, TypeExt};
+use crate::BindingRef;
+use polytype::Type;
+use smallvec::{smallvec, SmallVec};
 use wyn_base::IdSource;
 
 pub(super) fn emit_seg_space_len(
@@ -119,8 +130,7 @@ pub(super) fn emit_length(
         graph.nodes.get(arr_nid).map(|node| &node.ty).filter(|ty| is_plain_array_source(ty)).cloned();
     let arr_ty = actual_arr_ty.as_ref().unwrap_or(arr_ty);
     if let Some(components) = as_soa_tuple(arr_ty) {
-        let first_arr =
-            super::super::graph_ops::project_value(graph, arr_nid, 0, components[0].clone(), None);
+        let first_arr = project_value(graph, arr_nid, 0, components[0].clone(), None);
         return emit_length(graph, first_arr, &components[0], result_ty);
     }
     let length_id = catalog().known().length;
@@ -167,7 +177,7 @@ pub(super) fn emit_read_element(
             .collect();
         let mut elem_nids: SmallVec<[ValueId; 4]> = SmallVec::with_capacity(components.len());
         for (i, (comp_ty, comp_elem_ty)) in components.iter().zip(elem_components.iter()).enumerate() {
-            let comp_arr = super::super::graph_ops::project_value(graph, arr_nid, i, comp_ty.clone(), None);
+            let comp_arr = project_value(graph, arr_nid, i, comp_ty.clone(), None);
             let e = emit_read_element(graph, body, comp_arr, idx_nid, comp_ty, comp_elem_ty, next_effect);
             elem_nids.push(e);
         }
@@ -175,7 +185,7 @@ pub(super) fn emit_read_element(
     }
     if is_view_node(graph, arr_nid, arr_ty) {
         let place = graph.add_view_index_place(graph.view_id(arr_nid), idx_nid, elem_ty.clone(), None);
-        if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(elem_ty) {
+        if <WynLanguage as Language>::is_materialized_aggregate(elem_ty) {
             let region = arr_ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
             let view_ty = types::view_array_of(elem_ty, region);
             return graph.add_place_view(place, view_ty, None).value();
@@ -325,7 +335,7 @@ pub(super) fn emit_read_ranked_coordinates(
                 component_ty.clone(),
                 None,
             );
-            let component_leaf = super::super::types::soac_leaf_type(
+            let component_leaf = soac_leaf_type(
                 component_ty,
                 u8::try_from(coordinates.len()).expect("SOAC input rank exceeds u8"),
             );
@@ -354,7 +364,7 @@ pub(super) fn emit_read_ranked_coordinates(
             place = graph.add_index_place(place, *coordinate, next_ty.clone(), None);
             current_ty = next_ty;
         }
-        if <WynLanguage as super::super::types::Language>::is_materialized_aggregate(leaf_ty) {
+        if <WynLanguage as Language>::is_materialized_aggregate(leaf_ty) {
             let region = arr_ty.array_buffer().cloned().unwrap_or_else(types::no_buffer);
             let view_ty = types::view_array_of(leaf_ty, region);
             return graph.add_place_view(place, view_ty, None).value();

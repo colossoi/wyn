@@ -59,10 +59,19 @@ pub(crate) fn install_loop<P: Family>(
     });
 }
 
-fn split_out_effect<P: Family>(
+/// Effect removed from a block together with the continuation that retains its
+/// suffix, terminator, and structured-control ownership.
+pub(crate) struct EffectContinuation<P: Family> {
+    pub(crate) effect: SideEffect<P>,
+    pub(crate) continuation: BlockId,
+}
+
+/// Replace an effect with an empty branchable gap while preserving everything
+/// that originally followed it in a continuation block.
+pub(crate) fn replace_effect_with_continuation<P: Family>(
     graph: &mut EGraph<P>,
     site: SideEffectSite,
-) -> Result<(SideEffect<P>, BlockId), String> {
+) -> Result<EffectContinuation<P>, String> {
     let source = graph
         .skeleton
         .blocks
@@ -76,7 +85,7 @@ fn split_out_effect<P: Family>(
     }
     let continuation = graph.skeleton.split_block_before_effect(site.block, site.index);
     let effect = graph.skeleton.blocks[continuation].side_effects.remove(0);
-    Ok((effect, continuation))
+    Ok(EffectContinuation { effect, continuation })
 }
 
 /// Handles for an effect replaced by a guarded body and continuation.
@@ -95,7 +104,9 @@ pub(crate) fn replace_effect_with_guarded_selection<P: Family>(
     site: SideEffectSite,
     emit_condition: impl FnOnce(&mut EGraph<P>) -> Result<ValueId, String>,
 ) -> Result<GuardedEffect<P>, String> {
-    let (effect, continuation) = split_out_effect(graph, site)?;
+    let replacement = replace_effect_with_continuation(graph, site)?;
+    let effect = replacement.effect;
+    let continuation = replacement.continuation;
     let body = graph.skeleton.create_block();
     let condition = emit_condition(graph)?;
     install_selection(graph, site.block, condition, body, continuation, continuation);
@@ -153,7 +164,9 @@ pub(crate) fn replace_effect_with_counted_loop<P: Family>(
         }
     }
 
-    let (effect, continuation) = split_out_effect(graph, site)?;
+    let replacement = replace_effect_with_continuation(graph, site)?;
+    let effect = replacement.effect;
+    let continuation = replacement.continuation;
     let mut continuation_args = Vec::with_capacity(exit_carried.len());
     for (exit, index) in exit_carried.iter().copied().enumerate() {
         let value = graph.add_block_param(continuation, carried[index].0.clone());

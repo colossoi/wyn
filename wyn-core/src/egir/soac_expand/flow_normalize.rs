@@ -1,7 +1,17 @@
-use super::super::ir::Language;
-use super::*;
-use crate::types;
+use crate::ast::TypeName;
+use crate::egir::graph_ops::{
+    bind_by_value_result, detached_alloca, emit_result_to_place, fold_exposed_projections,
+    rebind_result_projection_references, rewrite_result_store_consumers,
+};
+use crate::egir::ir::Language;
+use crate::egir::types::{
+    by_value_function_result, EGraph, EffectToken, FlowValueId, Physical, PlaceDestination, PlaceId,
+    ResultBinding, ResultDestination, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+};
+use crate::flow::BlockId;
+use crate::types::{self, TypeExt};
 use crate::SortedSet;
+use polytype::Type;
 use wyn_base::IdSource;
 
 #[derive(Clone, Copy)]
@@ -16,7 +26,7 @@ struct IncomingEdge {
     predecessor: BlockId,
     arm: EdgeArm,
     argument: ValueId,
-    arguments: Vec<super::super::types::FlowValueId>,
+    arguments: Vec<FlowValueId>,
 }
 
 struct ArrayLeaf {
@@ -65,12 +75,12 @@ fn normalize_parameter(
         ));
     }
 
-    let abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
+    let abi = by_value_function_result::<WynLanguage>(ty.clone());
     let leaf_types = abi.destination_leaves().into_iter().map(|leaf| leaf.ty().clone()).collect::<Vec<_>>();
     let incoming_leaves = incoming
         .iter()
         .map(|edge| {
-            let binding = super::super::graph_ops::bind_by_value_result(graph, &abi, edge.argument);
+            let binding = bind_by_value_result(graph, &abi, edge.argument);
             let values = binding.values();
             if values.len() != leaf_types.len() {
                 return Err("flow argument does not match its parameter result tree".to_owned());
@@ -78,7 +88,7 @@ fn normalize_parameter(
             Ok(values)
         })
         .collect::<Result<Vec<_>, String>>()?;
-    super::super::graph_ops::fold_exposed_projections(graph);
+    fold_exposed_projections(graph);
     let old_parameter = graph.skeleton.blocks[block].params[slot].value();
 
     let mut replacements = Vec::with_capacity(leaf_types.len());
@@ -136,9 +146,9 @@ fn normalize_parameter(
         leaf += 1;
         destination
     });
-    super::super::graph_ops::rewrite_result_store_consumers(graph, old_parameter, &rebuilt, effect_ids)?;
-    super::super::graph_ops::rebind_result_projection_references(graph, old_parameter, &rebuilt)?;
-    super::super::graph_ops::fold_exposed_projections(graph);
+    rewrite_result_store_consumers(graph, old_parameter, &rebuilt, effect_ids)?;
+    rebind_result_projection_references(graph, old_parameter, &rebuilt)?;
+    fold_exposed_projections(graph);
 
     for (edge_index, edge) in incoming.iter().enumerate() {
         let mut arguments = edge.arguments.clone();
@@ -173,7 +183,7 @@ fn normalize_parameter(
     }
 
     graph.remove_block_param_slots(block, &SortedSet::from([slot]));
-    super::super::graph_ops::fold_exposed_projections(graph);
+    fold_exposed_projections(graph);
     Ok(())
 }
 
@@ -214,7 +224,7 @@ fn incoming_edges(
 fn edge(
     predecessor: BlockId,
     arm: EdgeArm,
-    args: &[super::super::types::FlowValueId],
+    args: &[FlowValueId],
     slot: usize,
 ) -> Result<IncomingEdge, String> {
     let argument = args
@@ -229,11 +239,7 @@ fn edge(
     })
 }
 
-fn set_edge_arguments(
-    graph: &mut EGraph<Physical>,
-    edge: &IncomingEdge,
-    arguments: Vec<super::super::types::FlowValueId>,
-) {
+fn set_edge_arguments(graph: &mut EGraph<Physical>, edge: &IncomingEdge, arguments: Vec<FlowValueId>) {
     match (&mut graph.skeleton.blocks[edge.predecessor].term, edge.arm) {
         (SkeletonTerminator::Branch { args, .. }, EdgeArm::Branch) => *args = arguments,
         (SkeletonTerminator::CondBranch { then_args, .. }, EdgeArm::Then) => *then_args = arguments,
@@ -289,12 +295,5 @@ fn emit_array_transfer(
 ) -> Result<BlockId, String> {
     let source = graph.canonical_value(source);
     let result = ResultBinding::destination(destination.ty.clone(), ResultDestination::ReturnValue(source));
-    super::super::graph_ops::emit_result_to_place(
-        graph,
-        block,
-        &result,
-        destination.place,
-        effect_ids,
-        None,
-    )
+    emit_result_to_place(graph, block, &result, destination.place, effect_ids, None)
 }
