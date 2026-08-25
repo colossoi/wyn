@@ -25,10 +25,11 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, Index, IndexMut};
 use wyn_staged_ir::{StagedIr, StagedIrBuilder};
 
+use super::ir::Language;
 use super::soac::{filter, hist, screma};
 use super::types::{
-    EGraph, Family, Physical, Raw, Scheduled, SegExtent, SegSpace, Semantic, SideEffectKind, Soac,
-    SoacEffect, ValueId, ValueKind, WynLanguage,
+    EGraph, Family, OperandType, Physical, PlaceAccess, PlaceRegion, PlaceType, Raw, Scheduled, SegExtent,
+    SegSpace, Semantic, SideEffectKind, Soac, SoacEffect, ValueId, ValueKind, ViewType, WynLanguage,
 };
 
 pub use super::ir::{OutputSlotId, OutputWriter, RealizedOutputRoute, SlotSource};
@@ -1787,6 +1788,54 @@ fn emit_entry_output_writes(
     Ok(())
 }
 
+fn materialize_parameter_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
+    if WynLanguage::is_materialized_aggregate(ty) || WynLanguage::is_view(ty) {
+        return super::graph_ops::materialized_array_type(ty);
+    }
+    match ty {
+        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => Type::Constructed(
+            name.clone(),
+            fields.iter().map(materialize_parameter_leaves).collect(),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+fn physical_entry_parameter(
+    ty: &Type<TypeName>,
+    resource: Option<BindingRef>,
+) -> OperandType<BindingRef, Type<TypeName>> {
+    if WynLanguage::is_materialized_aggregate(ty) {
+        return match resource {
+            Some(resource) => OperandType::View(ViewType {
+                array: crate::types::view_array_of(ty, crate::types::buffer_tag(resource)),
+                region: PlaceRegion::Resource(resource),
+                access: PlaceAccess::ReadOnly,
+            }),
+            None => OperandType::Place(PlaceType {
+                pointee: super::graph_ops::materialized_array_type(ty),
+                region: PlaceRegion::Parametric,
+                access: PlaceAccess::ReadOnly,
+            }),
+        };
+    }
+    let logical_abi = super::types::by_value_function_result::<WynLanguage>(ty.clone());
+    if logical_abi.destination_leaves().iter().any(|leaf| {
+        (WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()))
+            && !matches!(
+                leaf.ty().array_buffer(),
+                Some(Type::Constructed(TypeName::Buffer(_), _))
+            )
+    }) {
+        return OperandType::Place(PlaceType {
+            pointee: materialize_parameter_leaves(ty),
+            region: PlaceRegion::Parametric,
+            access: PlaceAccess::ReadOnly,
+        });
+    }
+    OperandType::Value(super::graph_ops::place_reference_type(ty))
+}
+
 fn physicalize_entry(
     mut entry: PlannedEntry<Scheduled>,
     resources: &PhysicalResourceTable,
@@ -1807,7 +1856,7 @@ fn physicalize_entry(
         result,
         graph,
     } = entry.into_inner();
-    let (graph, nodes, blocks) = physicalize_graph_resources(graph, resources)?;
+    let (mut graph, nodes, blocks) = physicalize_graph_resources(graph, resources)?;
     let inputs = inputs
         .into_iter()
         .map(|mut input| {
@@ -1818,7 +1867,7 @@ fn physicalize_entry(
                 resource,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
     let outputs = outputs
         .into_iter()
         .map(|mut output| {
@@ -1839,13 +1888,61 @@ fn physicalize_entry(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let params = params.map(
+    let mut params = params.map(
         |resource| resources.binding(resource.0),
         |mut ty| {
             physicalize_type_resources(&mut ty, resources);
             ty
         },
     );
+    let parameter_ids = params.ids().collect::<Vec<_>>();
+    for (index, parameter_id) in parameter_ids.into_iter().enumerate() {
+        let OperandType::Value(ty) = params.get(parameter_id).unwrap().representation() else {
+            continue;
+        };
+        let ty = ty.clone();
+        let resource = parameter_inputs.get(index).and_then(|slots| {
+            slots.iter().find_map(|slot| inputs.get(slot.0).and_then(|input| input.resource))
+        });
+        let representation = physical_entry_parameter(&ty, resource);
+        if representation == *params.get(parameter_id).unwrap().representation() {
+            continue;
+        }
+        let source = graph
+            .nodes
+            .iter()
+            .find_map(|(value, definition)| {
+                matches!(
+                    definition.kind(),
+                    ValueKind::FuncParam { parameter } if *parameter == parameter_id
+                )
+                .then_some(value)
+            })
+            .ok_or_else(|| format!("physical parameter {index} has no graph binding"))?;
+        if let OperandType::Place(place_ty) = &representation {
+            let place = graph.add_place_parameter(parameter_id, place_ty.clone());
+            let block = graph.skeleton.entry;
+            let span = graph.nodes[source].span();
+            let result = super::graph_ops::bind_result_from_place(
+                &mut graph,
+                &super::types::by_value_function_result::<WynLanguage>(ty),
+                place,
+                block,
+                effect_ids,
+                span,
+            )?;
+            super::graph_ops::rebind_result_projection_references(&mut graph, source, &result)?;
+            if result.is_product() {
+                let reference = super::graph_ops::pack_result_references(&mut graph, &result)?;
+                graph.replace_value_references(source, reference);
+            }
+            graph.remove_func_param(source);
+        } else {
+            super::graph_ops::retype_projection_tree(&mut graph, source, representation.ty());
+        }
+        *params.get_mut(parameter_id).unwrap().representation_mut() = representation;
+    }
+    super::graph_ops::synchronize_soac_input_types(&mut graph);
     let result = result.map(
         |mut ty| {
             physicalize_type_resources(&mut ty, resources);

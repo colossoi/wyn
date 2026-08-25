@@ -409,6 +409,12 @@ resident flows. The right pane is Physical EGIR: `PROGRAM WITH { kernels:
 bindings and scheduled SOAC state. Kernel dependency entries refer to stable
 kernel identities; body names and resource accesses can be matched directly
 against the corresponding kernel record.
+Physical entry construction also selects the ABI channel required by each
+published input. Scalars remain `%` values and resource-backed storage uses
+`~` views. A materialized aggregate without a resource binding, such as a
+fixed array passed through the parametric entry interface, is constructed as
+a read-only `&` place; an explicit `place.view` supplies its uses. There is no
+intermediate Physical EGIR state whose boundary and body disagree.
 
 ## Floating values and places
 

@@ -1,7 +1,6 @@
 use crate::ast::TypeName;
 use crate::flow;
 use crate::types;
-use crate::types::TypeExt;
 use crate::FunctionId;
 use crate::{BindingRef, LookupMap};
 use polytype::Type;
@@ -12,29 +11,15 @@ use super::super::ir::PlaceOp;
 use super::super::program::Func;
 use super::super::types::{
     by_value_function_result, destination_passing_function_result, CallEffects, CallSiteId, EGraph,
-    EffectOp, EffectToken, FuncParam, FunctionResult, Language, OperandRef, OperandType, Parameters,
-    Physical, PlaceAccess, PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect,
-    SideEffectKind, SkeletonTerminator, ValueId, ValueKind, ViewType, WynLanguage,
+    EffectOp, EffectToken, FuncParam, FunctionResult, Language, OperandRef, Parameters, Physical,
+    PlaceAccess, PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect,
+    SideEffectKind, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 
 pub(super) fn resolve(
-    mut program: super::super::parallelize::Planned,
+    program: super::super::parallelize::Planned,
 ) -> Result<super::super::parallelize::Planned, String> {
-    for entry in &mut program.entry_points {
-        let parameter_resources = entry
-            .parameter_inputs
-            .iter()
-            .map(|inputs| {
-                inputs.iter().find_map(|input| entry.inputs.get(input.0).and_then(|input| input.resource))
-            })
-            .collect::<Vec<_>>();
-        resolve_entry_parameter_representations(
-            &mut entry.params,
-            &mut entry.graph,
-            &parameter_resources,
-            &mut program.global_context.effect_ids,
-        )?;
-    }
+    let mut program = program;
     for function in &mut program.functions {
         resolve_function_parameters(function)?;
     }
@@ -310,58 +295,6 @@ fn bind_call_boundary(
     Ok((arguments, result, prelude))
 }
 
-fn resolve_entry_parameter_representations(
-    params: &mut Parameters<BindingRef, Type<TypeName>>,
-    graph: &mut EGraph<Physical>,
-    parameter_resources: &[Option<BindingRef>],
-    effect_ids: &mut IdSource<EffectToken>,
-) -> Result<(), String> {
-    let parameter_ids = params.ids().collect::<Vec<_>>();
-    for (index, parameter_id) in parameter_ids.into_iter().enumerate() {
-        let OperandType::Value(ty) = params.get(parameter_id).unwrap().representation() else {
-            continue;
-        };
-        let ty = ty.clone();
-        let resource = parameter_resources.get(index).copied().flatten();
-        let representation = physical_parameter_representation(&ty, resource);
-        if representation == *params.get(parameter_id).unwrap().representation() {
-            continue;
-        }
-        let source = graph
-            .nodes
-            .iter()
-            .find_map(|(value, definition)| {
-                matches!(
-                    definition.kind(),
-                    ValueKind::FuncParam { parameter } if *parameter == parameter_id
-                )
-                .then_some(value)
-            })
-            .ok_or_else(|| format!("physical parameter {index} has no graph binding"))?;
-        if let OperandType::Place(place_ty) = &representation {
-            let place = graph.add_place_parameter(parameter_id, place_ty.clone());
-            let span = graph.nodes[source].span();
-            let result = super::super::graph_ops::bind_result_from_place(
-                graph,
-                &super::super::types::by_value_function_result::<WynLanguage>(ty.clone()),
-                place,
-                graph.skeleton.entry,
-                effect_ids,
-                span,
-            )?;
-            super::super::graph_ops::rebind_result_projection_references(graph, source, &result)?;
-            let reference = super::super::graph_ops::pack_result_references(graph, &result)?;
-            graph.replace_value_references(source, reference);
-            graph.remove_func_param(source);
-        } else {
-            super::super::graph_ops::retype_projection_tree(graph, source, representation.ty());
-        }
-        *params.get_mut(parameter_id).unwrap().representation_mut() = representation;
-    }
-    synchronize_soac_input_types(graph);
-    Ok(())
-}
-
 fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), String> {
     let old_params = function.params.drain_ordered();
     let mut old_parameter_nodes = Vec::new();
@@ -398,7 +331,7 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
                 let id = function.params.push(FuncParam::place(
                     name,
                     super::super::types::PlaceType {
-                        pointee: materialized_array_type(leaf.ty()),
+                        pointee: super::super::graph_ops::materialized_array_type(leaf.ty()),
                         region: PlaceRegion::Parametric,
                         access: PlaceAccess::ReadOnly,
                     },
@@ -449,66 +382,8 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
     for parameter in old_parameter_nodes {
         function.graph.remove_func_param(parameter);
     }
-    synchronize_soac_input_types(&mut function.graph);
+    super::super::graph_ops::synchronize_soac_input_types(&mut function.graph);
     Ok(())
-}
-
-fn materialized_array_type(ty: &Type<TypeName>) -> Type<TypeName> {
-    let Type::Constructed(TypeName::Array, args) = ty else {
-        return ty.clone();
-    };
-    let mut args = args.clone();
-    args[1] = types::array_variant_composite();
-    *args.last_mut().expect("array has a buffer argument") = types::no_buffer();
-    Type::Constructed(TypeName::Array, args)
-}
-
-fn physical_parameter_representation(
-    ty: &Type<TypeName>,
-    resource: Option<BindingRef>,
-) -> OperandType<BindingRef, Type<TypeName>> {
-    if WynLanguage::is_materialized_aggregate(ty) {
-        return match resource {
-            Some(resource) => OperandType::View(ViewType {
-                array: types::view_array_of(ty, types::buffer_tag(resource)),
-                region: PlaceRegion::Resource(resource),
-                access: PlaceAccess::ReadOnly,
-            }),
-            None => OperandType::Place(super::super::types::PlaceType {
-                pointee: materialized_array_type(ty),
-                region: PlaceRegion::Parametric,
-                access: PlaceAccess::ReadOnly,
-            }),
-        };
-    }
-    let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(ty.clone());
-    if logical_abi.destination_leaves().iter().any(|leaf| {
-        (WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()))
-            && !matches!(
-                leaf.ty().array_buffer(),
-                Some(Type::Constructed(TypeName::Buffer(_), _))
-            )
-    }) {
-        return OperandType::Place(super::super::types::PlaceType {
-            pointee: materialize_product_leaves(ty),
-            region: PlaceRegion::Parametric,
-            access: PlaceAccess::ReadOnly,
-        });
-    }
-    OperandType::Value(super::super::graph_ops::place_reference_type(ty))
-}
-
-fn materialize_product_leaves(ty: &Type<TypeName>) -> Type<TypeName> {
-    if WynLanguage::is_materialized_aggregate(ty) || WynLanguage::is_view(ty) {
-        return materialized_array_type(ty);
-    }
-    match ty {
-        Type::Constructed(name, fields) if WynLanguage::product_fields(ty).is_some() => Type::Constructed(
-            name.clone(),
-            fields.iter().map(materialize_product_leaves).collect(),
-        ),
-        _ => ty.clone(),
-    }
 }
 
 fn flatten_call_arguments(
@@ -532,26 +407,6 @@ fn flatten_call_arguments(
         flattened.extend(binding.values().into_iter().map(|value| graph.operand_ref(value)));
     }
     Ok(flattened)
-}
-
-fn synchronize_soac_input_types(graph: &mut EGraph<Physical>) {
-    let types = graph
-        .nodes
-        .iter()
-        .map(|(value, definition)| (value, definition.ty().clone()))
-        .collect::<LookupMap<_, _>>();
-    for (_, block) in &mut graph.skeleton.blocks {
-        for effect in &mut block.side_effects {
-            let SideEffectKind::Soac(super::super::types::SoacEffect(_, soac)) = &mut effect.kind else {
-                continue;
-            };
-            for (input, operand) in soac.input_types_mut().iter_mut().zip(&effect.operands) {
-                if let Some(ty) = operand.value().and_then(|value| types.get(&value)) {
-                    input.array = ty.clone();
-                }
-            }
-        }
-    }
 }
 
 fn resolve_function(

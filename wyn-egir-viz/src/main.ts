@@ -129,6 +129,7 @@ interface GraphNode {
   label: string;
   category: string;
   variant: string;
+  representation: "value" | "view" | "place" | null;
   detail: string;
   ty?: string;
   span?: SourceSpan;
@@ -669,6 +670,9 @@ function typedDefinition(node: GraphNode, name: string): string {
 }
 
 function definitionName(node: GraphNode, names: Names): string {
+  if (node.representation === "view") {
+    return withReferenceSigil(names.values.get(node.id) ?? "%?", "view");
+  }
   return node.category === "place"
     ? names.places.get(node.id) ?? "&?"
     : names.values.get(node.id) ?? "%?";

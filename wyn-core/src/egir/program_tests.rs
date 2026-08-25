@@ -438,6 +438,24 @@ fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
 }
 
 #[test]
+fn physical_entry_parameters_select_value_view_and_place_channels() {
+    let scalar = Type::Constructed(TypeName::Int(32), vec![]);
+    let array = crate::types::sized_array(4, scalar.clone());
+    assert!(matches!(
+        physical_entry_parameter(&scalar, None),
+        egir::types::OperandType::Value(_)
+    ));
+    assert!(matches!(
+        physical_entry_parameter(&array, Some(BindingRef::new(0, 1))),
+        egir::types::OperandType::View(_)
+    ));
+    assert!(matches!(
+        physical_entry_parameter(&array, None),
+        egir::types::OperandType::Place(_)
+    ));
+}
+
+#[test]
 fn compiler_binding_allocation_avoids_non_resource_descriptor_slots() {
     let mut resources = LogicalResourceArena::default();
     let first = resources.allocate(

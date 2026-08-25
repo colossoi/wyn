@@ -300,7 +300,7 @@ function boundaries.
 | **`plan`** | `KernelPlan::validate` | Debug builds only: validate kernel identities, placements, and dependency acyclicity before physical publication |
 | **`plan`** | `publish_physical_layout` | Allocate physical bindings and derive descriptor stages, dispatches, binding uses, graphics I/O, and the frame graph from the kernel plan |
 | **`plan`** | `PhysicalKernelGraph::from` | Freeze stable kernel identities and dependency/resource topology without copying physical bodies |
-| **`plan`** | `physicalize_program` | Convert scheduled semantic bodies and resources to `EGraph<Physical>` bodies while establishing one-to-one kernel/body ownership |
+| **`plan`** | `physicalize_program` | Convert scheduled semantic bodies and resources to `EGraph<Physical>` bodies, establish one-to-one kernel/body ownership, and construct entry parameters directly on their value, resource-view, or read-only-place ABI channels |
 | **`plan`** | `verify_physical::check` | Validate the newly physicalized body graphs and interfaces |
 
 The staged order is load-bearing:
@@ -325,7 +325,11 @@ constants remain ordinary auxiliary body arenas rather than kernel nodes.
 
 | Checkpoint orchestrator | Sub-pass | Role / condition |
 |-------------------------|----------|------------------|
-| **`expand_soacs`** | `expand_soacs` | Expand each selected physical SOAC recipe into explicit loop or kernel operations |
+| **`expand_soacs`** | `resolve_function_parameters` | Flatten callable parameter products and pass materialized aggregate leaves through read-only places |
+| **`expand_soacs`** | `resolve_function` | Convert materialized callable results to destination parameters and redirect returns into them |
+| **`expand_soacs`** | `resolve_calls` | Rewrite every call site against the completed physical callable boundaries, inserting argument and result adapters where required |
+| **`expand_soacs`** | `expand_one` to fixpoint | Expand each selected physical SOAC recipe into explicit loop or kernel operations |
+| **`expand_soacs`** | `normalize_place_backed_flow` | Normalize CFG-carried results that still refer to addressable places after SOAC expansion |
 | **`partially_inline_calls`** | `partially_inline_calls` | Inline profitable mixed-variance calls inside explicit loops to a bounded fixpoint so invariant subgraphs can hoist |
 | **`materialize_dynamic_extracts`** | `materialize_dynamic_extracts` | Materialize dynamic aggregate extraction where the SSA boundary requires explicit control and data flow |
 | **`rewrite`** | `rewrite` | Add cost-arbitrated equivalent e-graph alternatives, such as multiply chains for constant powers |

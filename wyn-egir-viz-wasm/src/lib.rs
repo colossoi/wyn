@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wyn_core::ast::{NodeCounter, Span};
-use wyn_core::egir::ir::{OperandRef, PlaceOp, ProgramFamily, SideEffectKind};
+use wyn_core::egir::ir::{OperandRef, OperandType, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
     CompilerResourceKind, LogicalResource, LogicalResourceArena, LogicalSize, NoStorageDeclaration,
     OutputWriter, RealizedOutputRoute, ResourceId, ResourceOrigin, RewriteGlobal, SemanticOpId,
@@ -177,6 +177,7 @@ pub struct GraphNode {
     pub label: String,
     pub category: String,
     pub variant: String,
+    pub representation: Option<String>,
     pub detail: String,
     pub ty: Option<String>,
     pub span: Option<SourceSpan>,
@@ -595,22 +596,23 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
             error: None,
         };
     }
+    let before_planning =
+        (pass == InspectPass::PlanPhysicalKernels).then(|| snapshot_allocated_program(&allocated));
+    let planned = match wyn_core::egir::plan(allocated, LoweringProfile::PORTABLE) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR physical-kernel planning error: {error:?}"),
+                None,
+            )
+        }
+    };
     if pass == InspectPass::PlanPhysicalKernels {
-        let before = snapshot_allocated_program(&allocated);
-        let planned = match wyn_core::egir::plan(allocated, LoweringProfile::PORTABLE) {
-            Ok(program) => program,
-            Err(error) => {
-                return InspectResult::error(
-                    pass.id(),
-                    format!("EGIR physical-kernel planning error: {error:?}"),
-                    None,
-                )
-            }
-        };
         return InspectResult {
             success: true,
             pass: pass.id().to_string(),
-            before: Some(before),
+            before: before_planning,
             after: Some(snapshot_physical_program(&planned)),
             relations: Vec::new(),
             error: None,
@@ -1259,7 +1261,13 @@ fn snapshot_auxiliary_bodies<Tag, P, ResourceDecl, Route, ProgramData, GlobalCon
             outputs: Vec::new(),
             resource_declarations: Vec::new(),
         });
-        snapshot_graph(snapshot, &group, &function.graph, region_names);
+        snapshot_graph(
+            snapshot,
+            &group,
+            &function.graph,
+            Some(function.params()),
+            region_names,
+        );
     }
     for (index, constant) in program.constants.iter().enumerate() {
         let group = format!("constant:{index}");
@@ -1270,7 +1278,7 @@ fn snapshot_auxiliary_bodies<Tag, P, ResourceDecl, Route, ProgramData, GlobalCon
             outputs: Vec::new(),
             resource_declarations: Vec::new(),
         });
-        snapshot_graph(snapshot, &group, &constant.graph, region_names);
+        snapshot_graph(snapshot, &group, &constant.graph, None, region_names);
     }
 }
 
@@ -1332,7 +1340,13 @@ where
                 .collect(),
             resource_declarations: Vec::new(),
         });
-        snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
+        snapshot_graph(
+            &mut snapshot,
+            &group,
+            &entry.graph,
+            Some(entry.params()),
+            &region_names,
+        );
     }
     snapshot_auxiliary_bodies(&mut snapshot, program, &region_names);
     snapshot
@@ -1531,7 +1545,13 @@ fn snapshot_physical_program(program: &wyn_core::egir::parallelize::Planned) -> 
                 })
                 .collect(),
         });
-        snapshot_graph(&mut snapshot, &group, &entry.graph, &region_names);
+        snapshot_graph(
+            &mut snapshot,
+            &group,
+            &entry.graph,
+            Some(entry.params()),
+            &region_names,
+        );
     }
     snapshot_auxiliary_bodies(&mut snapshot, program, &region_names);
     snapshot
@@ -1597,13 +1617,14 @@ fn snapshot_allocated_entry(
             })
             .collect(),
     });
-    snapshot_graph(snapshot, &group, &entry.graph, region_names);
+    snapshot_graph(snapshot, &group, &entry.graph, Some(entry.params()), region_names);
 }
 
 fn snapshot_graph<P: SnapshotPhase>(
     snapshot: &mut GraphSnapshot,
     group: &str,
     graph: &wyn_core::egir::types::EGraph<P>,
+    parameters: Option<&wyn_core::egir::types::Parameters<P::Resource, wyn_core::types::Type>>,
     region_names: &HashMap<FunctionId, String>,
 ) {
     for (value_id, value) in graph.values() {
@@ -1615,6 +1636,17 @@ fn snapshot_graph<P: SnapshotPhase>(
             label,
             category: "value".to_string(),
             variant,
+            representation: match value.kind() {
+                ValueKind::FuncParam { parameter } => parameters
+                    .and_then(|parameters| parameters.get(*parameter))
+                    .map(|parameter| match parameter.representation() {
+                        OperandType::Value(_) => "value",
+                        OperandType::View(_) => "view",
+                        OperandType::Place(_) => "place",
+                    })
+                    .map(str::to_string),
+                _ => None,
+            },
             detail: format!(
                 "{:#?}\n\ntype: {}",
                 value.kind(),
@@ -1645,6 +1677,7 @@ fn snapshot_graph<P: SnapshotPhase>(
             label,
             category: "place".to_string(),
             variant,
+            representation: matches!(place.op(), PlaceOp::Parameter { .. }).then(|| "place".to_string()),
             detail: format!("{:#?}\n\ntype: {:#?}", place.op(), place.ty()),
             ty: Some(wyn_core::diags::format_type(&place.ty().pointee)),
             span: place.span().map(Into::into),
@@ -1660,6 +1693,7 @@ fn snapshot_graph<P: SnapshotPhase>(
             label: format!("block {block_id:?}"),
             category: "block".to_string(),
             variant: "block".to_string(),
+            representation: None,
             detail: format!("{:#?}", block.term),
             ty: None,
             span: None,
@@ -1678,6 +1712,7 @@ fn snapshot_graph<P: SnapshotPhase>(
                 label: display.label,
                 category: "operation".to_string(),
                 variant: display.variant,
+                representation: None,
                 detail: display.detail,
                 ty: None,
                 span: effect.span().map(Into::into),

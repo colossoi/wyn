@@ -777,6 +777,34 @@ pub(crate) fn place_reference_type(ty: &Type<TypeName>) -> Type<TypeName> {
     }
 }
 
+pub(crate) fn materialized_array_type(ty: &Type<TypeName>) -> Type<TypeName> {
+    let Type::Constructed(TypeName::Array, args) = ty else {
+        return ty.clone();
+    };
+    let mut args = args.clone();
+    args[1] = types::array_variant_composite();
+    *args.last_mut().expect("array has a buffer argument") = types::no_buffer();
+    Type::Constructed(TypeName::Array, args)
+}
+
+pub(crate) fn synchronize_soac_input_types(graph: &mut EGraph<Physical>) {
+    let types = graph
+        .nodes
+        .iter()
+        .map(|(value, definition)| (value, definition.ty().clone()))
+        .collect::<LookupMap<_, _>>();
+    for effect in graph.skeleton.blocks.values_mut().flat_map(|block| &mut block.side_effects) {
+        let SideEffectKind::Soac(SoacEffect(_, soac)) = &mut effect.kind else {
+            continue;
+        };
+        for (input, operand) in soac.input_types_mut().iter_mut().zip(&effect.operands) {
+            if let Some(ty) = operand.value().and_then(|value| types.get(&value)) {
+                input.array = ty.clone();
+            }
+        }
+    }
+}
+
 /// Construct the value-channel handle for a result tree without loading its
 /// aggregate leaves. Place leaves become views and product structure contains
 /// only those handles and scalar values.

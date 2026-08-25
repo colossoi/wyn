@@ -317,6 +317,72 @@ entry sum(xs: []i32) i32 =
 }
 
 #[test]
+fn physical_planning_exposes_entry_parameter_channels() {
+    let result = inspect_pass_impl(
+        r#"
+entry shifted(xs: [4]i32, offsets: []i32, index: i32) [4]i32 =
+  map(|x: i32| x + offsets[index], xs)
+"#,
+        InspectPass::PlanPhysicalKernels,
+    );
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.pass, InspectPass::PLAN_PHYSICAL_KERNELS);
+    let before = result.before.expect("staged snapshot");
+    let after = result.after.expect("physical snapshot");
+
+    let before_parameters = before
+        .nodes
+        .iter()
+        .filter(|node| node.variant == "parameter")
+        .collect::<Vec<_>>();
+    let after_parameters = after
+        .nodes
+        .iter()
+        .filter(|node| node.variant == "parameter")
+        .collect::<Vec<_>>();
+    assert!(
+        before_parameters.iter().any(|parameter| {
+            parameter.representation.as_deref() == Some("value")
+                && parameter.ty.as_deref() == Some("[4]i32")
+        }),
+        "the fixed array starts on the value channel: {before_parameters:#?}"
+    );
+    assert!(
+        after_parameters.iter().any(|parameter| {
+            parameter.representation.as_deref() == Some("place")
+                && parameter.ty.as_deref() == Some("[4]i32")
+        }),
+        "the fixed array moves to the read-only-place channel: {after_parameters:#?}"
+    );
+    assert!(
+        after_parameters.iter().any(|parameter| {
+            parameter.representation.as_deref() == Some("view")
+                && parameter.ty.as_deref().is_some_and(|ty| ty.starts_with("[?"))
+        }),
+        "runtime view parameter: {after_parameters:#?}"
+    );
+    assert!(after_parameters.iter().any(|parameter| {
+        parameter.representation.as_deref() == Some("value")
+            && parameter.ty.as_deref() == Some("i32")
+    }));
+    let fixed_group = after_parameters
+        .iter()
+        .find(|parameter| parameter.representation.as_deref() == Some("place"))
+        .unwrap()
+        .group
+        .clone();
+    assert_eq!(
+        after
+            .nodes
+            .iter()
+            .filter(|node| node.group == fixed_group && node.variant == "place")
+            .count(),
+        1,
+        "the fixed input should have one place.view"
+    );
+}
+
+#[test]
 fn inline_debug_preserves_long_constructs() {
     let value = "ResourceLen(SemanticResourceRef(ResourceIdentifierThatMustRemainVisible))";
     let rendered = inline_debug(&value);
