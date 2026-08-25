@@ -1958,11 +1958,13 @@ pub fn emit_result_to_place<P: Family>(
 
 /// Write one produced logical result into an indexed destination.
 ///
-/// A single destination is an array-of-products: select its indexed element
-/// and let [`emit_result_to_place`] recursively write the produced tree.
-/// Product destinations are products-of-arrays and recurse fieldwise. The
-/// array leaf may be represented by a view, a fixed place, or the storage
-/// place of a bounded destination.
+/// A single destination is an array whose element matches the complete
+/// produced result. For a product result, this is the intentional
+/// array-of-products representation: select its indexed element and let
+/// [`emit_result_to_place`] recursively write the produced tree. Product
+/// destinations are products-of-arrays and recurse fieldwise. The array leaf
+/// may be represented by a view, a fixed place, or the storage place of a
+/// bounded destination.
 pub fn emit_result_to_indexed_destination<P: Family>(
     graph: &mut EGraph<P>,
     block: BlockId,
