@@ -1363,6 +1363,25 @@ fn target_origin(term: &Term, origins: &TargetOrigins) -> Option<TargetOrigin> {
     }
 }
 
+/// Whether evaluating `term` only assembles or projects already-available
+/// values. This deliberately excludes applications and control flow: a dead
+/// target-containing aggregate may be discarded, but doing so must not erase
+/// an effectful computation that happened to produce one of its fields.
+fn is_trivially_discardable_value(term: &Term) -> bool {
+    match &term.kind {
+        TermKind::Var(_)
+        | TermKind::IntLit(_)
+        | TermKind::FloatLit(_)
+        | TermKind::BoolLit(_)
+        | TermKind::UnitLit => true,
+        TermKind::Tuple(values) | TermKind::VecLit(values) => {
+            values.iter().all(is_trivially_discardable_value)
+        }
+        TermKind::TupleProj { tuple, .. } => is_trivially_discardable_value(tuple),
+        _ => false,
+    }
+}
+
 fn collect_target_origins(term: &Term, origins: &mut TargetOrigins) {
     if let TermKind::Let { name, rhs, body, .. } = &term.kind {
         collect_target_origins(rhs, origins);
@@ -1873,15 +1892,20 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
     fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
         let removable = matches!(
             &term.kind,
-            TermKind::Let { name, name_ty, body, .. }
-                if is_render_target_type(name_ty) && !referenced_symbols(body).contains(name)
+            TermKind::Let { name, name_ty, rhs, body }
+                if !referenced_symbols(body).contains(name)
+                    && (is_render_target_type(name_ty)
+                        || (target_origin(rhs, &self.target_origins).is_some()
+                            && is_trivially_discardable_value(rhs)))
         );
         if !removable {
             return (term, RewriteDecision::Unchanged);
         }
         // Render targets have no shader-value representation. Once all uses of
         // an alias have been rewritten to texture operations, discard the now
-        // dead binding together with its unrepresentable right-hand side.
+        // dead binding together with its unrepresentable right-hand side. The
+        // same applies when the dead alias is packed in a tuple/record: helper
+        // inlining can expose such aggregates after capture analysis.
         let TermKind::Let { body, .. } = term.kind else {
             unreachable!()
         };
