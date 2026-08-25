@@ -5,6 +5,65 @@ use super::*;
 use crate::op;
 use wyn_base::IdSource;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappedCallMode {
+    DirectDestinationPassing,
+    StructuredStore,
+}
+
+fn mapped_call_mode(
+    callee: &Func<Physical>,
+    lambda: &screma::Lambda,
+    destinations: &[ResultBinding<Type<TypeName>>],
+) -> Result<MappedCallMode, String> {
+    let results = match lambda.result_types.as_slice() {
+        [] => Vec::new(),
+        [_] => vec![callee.result().clone()],
+        _ => callee.result().top_level_fields(),
+    };
+    if results.len() != destinations.len() {
+        return Err(format!(
+            "mapped lambda has {} logical results but {} destinations",
+            results.len(),
+            destinations.len()
+        ));
+    }
+
+    let mut has_structured_store = false;
+    for (index, (result, destination)) in results.iter().zip(destinations).enumerate() {
+        let result_leaves = result.destination_leaves();
+        let destination_leaves = destination.destination_leaves();
+        let direct = result_leaves.len() == destination_leaves.len()
+            && result_leaves.iter().zip(&destination_leaves).all(|(result_leaf, destination_leaf)| {
+                destination_leaf.single_destination().and_then(|(array_ty, _)| types::array_elem(array_ty))
+                    == Some(result_leaf.ty())
+            });
+        if direct {
+            continue;
+        }
+
+        let structured = result.is_product()
+            && destination.single_destination().and_then(|(array_ty, _)| types::array_elem(array_ty))
+                == Some(result.ty());
+        if structured {
+            has_structured_store = true;
+            continue;
+        }
+
+        return Err(format!(
+            "mapped lambda result {index} of type {:?} does not match destination type {:?}",
+            result.ty(),
+            destination.ty()
+        ));
+    }
+
+    Ok(if has_structured_store {
+        MappedCallMode::StructuredStore
+    } else {
+        MappedCallMode::DirectDestinationPassing
+    })
+}
+
 pub(super) fn emit_screma_lambda(
     graph: &mut EGraph<Physical>,
     block: BlockId,
@@ -29,9 +88,25 @@ pub(super) fn emit_screma_lambda(
     let callee = callables.get(&body.region).expect("Screma lambda callable boundary");
     let mut operands = arguments.drain(..).map(|argument| graph.operand_ref(argument)).collect::<Vec<_>>();
     operands.extend(body.captures.iter().copied());
-    let result =
-        super::call_abi::emit_call(graph, block, callee, operands, mapped_destinations, next_effect)
-            .expect("Screma lambda call must match its canonical boundary");
+    let result = match mapped_destinations {
+        None => super::call_abi::emit_call(graph, block, callee, operands, None, next_effect),
+        Some((destinations, lane)) => match mapped_call_mode(callee, lambda, destinations)
+            .expect("mapped Screma result must have a recognized destination shape")
+        {
+            MappedCallMode::DirectDestinationPassing => super::call_abi::emit_call(
+                graph,
+                block,
+                callee,
+                operands,
+                Some((destinations, lane)),
+                next_effect,
+            ),
+            MappedCallMode::StructuredStore => {
+                super::call_abi::emit_call(graph, block, callee, operands, None, next_effect)
+            }
+        },
+    }
+    .expect("Screma lambda call must match its canonical boundary");
     super::super::soac::lambda::logical_result_fields(&result, &lambda.result_types)
 }
 

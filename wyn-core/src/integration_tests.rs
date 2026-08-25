@@ -4052,6 +4052,27 @@ entry prepare_and_draw<[n]>(values: [n]vec4f32,
 }
 
 #[test]
+fn map_can_return_a_dynamic_array_of_records() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+type pair = { x: i32, y: i32 }
+
+entry structured_map_result() []pair =
+  map(|i| { x = i, y = i }, iota(1))
+"#,
+            )
+            .expect("a mapped record result must match the lambda's physical result boundary");
+            assert_naga_accepts_spirv(&lowered.spirv);
+        })
+        .expect("spawn structured map regression")
+        .join()
+        .expect("structured map regression panicked");
+}
+
+#[test]
 fn unified_root_uses_computed_indirect_draw_command() {
     let lowered = compile_thru_spirv(
         r#"
