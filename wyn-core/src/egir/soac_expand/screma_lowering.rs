@@ -197,7 +197,15 @@ pub(super) fn build_parallel_screma_map(
     assert_eq!(results.len(), output_views.len());
     let mut tail = body;
     for (output, result) in output_views.iter().zip(results) {
-        tail = super::emit_mapped_result_stores(graph, tail, lane, &result, output, next_effect);
+        tail = super::super::graph_ops::emit_result_to_indexed_destination(
+            graph,
+            tail,
+            &result,
+            output,
+            lane,
+            next_effect,
+        )
+        .expect("mapped result must be writable through its selected destination");
     }
     graph.skeleton.blocks[tail].term = SkeletonTerminator::Branch {
         target: after,

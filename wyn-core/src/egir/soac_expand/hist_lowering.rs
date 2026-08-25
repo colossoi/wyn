@@ -1024,8 +1024,18 @@ pub(super) fn build_bucket_finish(
     );
     super::super::graph_ops::retype_projection_tree(graph, result_node, &ty);
     super::super::graph_ops::retype_projection_tree(graph, *counts_result, &graph.nodes[counts].ty.clone());
-    super::bind_result_alias(graph, *counts_result, counts);
-    super::bind_result_alias(graph, *overflow_result, overflow);
+    super::super::graph_ops::rebind_physical_result(
+        graph,
+        &graph.value_result(*counts_result),
+        &graph.value_result(counts),
+    )
+    .expect("bucket count result must preserve its physical ABI");
+    super::super::graph_ops::rebind_physical_result(
+        graph,
+        &graph.value_result(*overflow_result),
+        &graph.value_result(overflow),
+    )
+    .expect("bucket overflow result must preserve its physical ABI");
     graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
         target: after,
         args: vec![],

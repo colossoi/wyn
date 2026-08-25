@@ -169,46 +169,6 @@ fn is_virtual_source(arr_ty: &Type<TypeName>) -> bool {
     is_virtual_array(arr_ty)
 }
 
-fn bind_result_alias(graph: &mut EGraph<Physical>, result: ValueId, replacement: ValueId) {
-    if result == replacement {
-        return;
-    }
-    graph.replace_value_references(result, replacement);
-    graph.install_aliases([(result, replacement)]);
-}
-
-fn bind_result_value(
-    graph: &mut EGraph<Physical>,
-    result: &ResultBinding<Type<TypeName>>,
-    replacement: ValueId,
-) {
-    let abi = super::types::by_value_function_result::<WynLanguage>(result.ty().clone());
-    let replacement = super::graph_ops::bind_by_value_result(graph, &abi, replacement);
-    bind_result_binding(graph, result, &replacement);
-}
-
-fn bind_result_binding(
-    graph: &mut EGraph<Physical>,
-    result: &ResultBinding<Type<TypeName>>,
-    replacement: &ResultBinding<Type<TypeName>>,
-) {
-    assert_eq!(result.ty(), replacement.ty());
-    let results = result.values();
-    let replacements = replacement.values();
-    assert_eq!(
-        results.len(),
-        replacements.len(),
-        "result ABI changed during SOAC expansion"
-    );
-    for (result, replacement) in results.into_iter().zip(replacements) {
-        bind_result_alias(graph, result, replacement);
-    }
-    super::graph_ops::fold_exposed_projections(graph);
-    for replacement in replacement.values() {
-        super::graph_ops::normalize_place_backed_value_consumers(graph, replacement);
-    }
-}
-
 fn value_binding(
     graph: &mut EGraph<Physical>,
     ty: &Type<TypeName>,
@@ -247,40 +207,6 @@ fn result_is_addressable(graph: &EGraph<Physical>, result: &ResultBinding<Type<T
                 })
             })
             .count()
-}
-
-fn emit_mapped_result_stores(
-    graph: &mut EGraph<Physical>,
-    block: BlockId,
-    lane: ValueId,
-    produced: &ResultBinding<Type<TypeName>>,
-    destination: &ResultBinding<Type<TypeName>>,
-    next_effect: &mut IdSource<EffectToken>,
-) -> BlockId {
-    if let Some((array_ty, destination)) = destination.single_destination() {
-        let element_ty = types::array_elem(array_ty).expect("mapped result destination is not an array");
-        assert_eq!(element_ty, produced.ty());
-        let place = match destination {
-            ResultDestination::ReturnValue(view) => {
-                graph.add_view_index_place(graph.view_id(*view), lane, element_ty.clone(), None)
-            }
-            ResultDestination::Place(PlaceDestination::Fixed(place)) => {
-                graph.add_index_place(*place, lane, element_ty.clone(), None)
-            }
-            ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => {
-                graph.add_index_place(*storage, lane, element_ty.clone(), None)
-            }
-        };
-        return super::graph_ops::emit_result_to_place(graph, block, produced, place, next_effect, None)
-            .expect("mapped result must be writable through its selected destination");
-    }
-
-    let produced_fields = produced.top_level_fields();
-    let destination_fields = destination.top_level_fields();
-    assert_eq!(produced_fields.len(), destination_fields.len());
-    produced_fields.iter().zip(&destination_fields).fold(block, |tail, (produced, destination)| {
-        emit_mapped_result_stores(graph, tail, lane, produced, destination, next_effect)
-    })
 }
 
 fn expand_one(
@@ -354,7 +280,7 @@ fn expand_one(
                                     views.next().expect("fresh destination view count changed"),
                                 )
                             });
-                            bind_result_binding(graph, result, &binding);
+                            super::graph_ops::rebind_physical_result(graph, result, &binding)?;
                             sink
                         }
                         SoacOwnership::UniqueInput => {
@@ -365,7 +291,7 @@ fn expand_one(
                             }
                             let output = input_nids[0];
                             let output = value_binding(graph, result.ty(), output);
-                            bind_result_binding(graph, result, &output);
+                            super::graph_ops::rebind_physical_result(graph, result, &output)?;
                             output
                         }
                     }
@@ -507,7 +433,15 @@ fn expand_one(
                     let mut next = Vec::with_capacity(carried_values.len());
                     let mut tail = body;
                     for (produced, sink) in post_results.iter().zip(&post_sinks) {
-                        tail = emit_mapped_result_stores(graph, tail, lane, produced, sink, next_effect);
+                        tail = super::graph_ops::emit_result_to_indexed_destination(
+                            graph,
+                            tail,
+                            produced,
+                            sink,
+                            lane,
+                            next_effect,
+                        )
+                        .expect("mapped result must be writable through its selected destination");
                     }
                     next.extend(new_scans);
                     next.extend(new_reductions);
@@ -699,7 +633,7 @@ fn expand_one(
                 } else if op.ownership(field) == Some(SoacOwnership::UniqueInput) && input_nodes.len() == 1
                 {
                     let destination = value_binding(graph, result.ty(), input_nodes[0]);
-                    bind_result_binding(graph, result, &destination);
+                    super::graph_ops::rebind_physical_result(graph, result, &destination)?;
                     destination
                 } else {
                     return Err(format!(

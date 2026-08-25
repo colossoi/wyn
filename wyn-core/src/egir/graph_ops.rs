@@ -667,6 +667,26 @@ pub fn rebind_result_value_references<P: Family>(
     Ok(replacements)
 }
 
+/// Replace one physical result tree with another without leaking the old
+/// physical representation to its consumers.
+///
+/// Result leaves are rebound in ABI order, then any projections exposed by
+/// the replacement are folded. Place-backed replacement leaves additionally
+/// normalize operations such as `length` and `slice` that cannot remain pure
+/// value consumers after the rewrite.
+pub fn rebind_physical_result<P: Family>(
+    graph: &mut EGraph<P>,
+    old: &ResultBinding<Type<TypeName>>,
+    new: &ResultBinding<Type<TypeName>>,
+) -> Result<(), String> {
+    rebind_result_value_references(graph, old, new)?;
+    fold_exposed_projections(graph);
+    for replacement in new.values() {
+        normalize_place_backed_value_consumers(graph, replacement);
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_result_to_view<P: Family, R: Clone, D: Clone>(
     graph: &mut EGraph<P>,
     result: &ResultTree<Type<TypeName>, R, D>,
@@ -1934,6 +1954,66 @@ pub fn emit_result_to_place<P: Family>(
             }
         }
     }
+}
+
+/// Write one produced logical result into an indexed destination.
+///
+/// A single destination is an array-of-products: select its indexed element
+/// and let [`emit_result_to_place`] recursively write the produced tree.
+/// Product destinations are products-of-arrays and recurse fieldwise. The
+/// array leaf may be represented by a view, a fixed place, or the storage
+/// place of a bounded destination.
+pub fn emit_result_to_indexed_destination<P: Family>(
+    graph: &mut EGraph<P>,
+    block: BlockId,
+    produced: &ResultBinding<Type<TypeName>>,
+    destination: &ResultBinding<Type<TypeName>>,
+    index: ValueId,
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<BlockId, String> {
+    if let Some((array_ty, destination)) = destination.single_destination() {
+        let element_ty = types::array_elem(array_ty)
+            .ok_or_else(|| format!("indexed result destination is not an array: {array_ty:?}"))?;
+        if element_ty != produced.ty() {
+            return Err(format!(
+                "indexed result element type {:?} does not match produced type {:?}",
+                element_ty,
+                produced.ty()
+            ));
+        }
+        let place = match destination {
+            ResultDestination::ReturnValue(view) => {
+                graph.add_view_index_place(graph.view_id(*view), index, element_ty.clone(), None)
+            }
+            ResultDestination::Place(PlaceDestination::Fixed(place)) => {
+                graph.add_index_place(*place, index, element_ty.clone(), None)
+            }
+            ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => {
+                graph.add_index_place(*storage, index, element_ty.clone(), None)
+            }
+        };
+        return emit_result_to_place(graph, block, produced, place, effect_ids, None);
+    }
+
+    if !produced.is_product() {
+        return Err(format!(
+            "product-of-arrays destination {:?} cannot receive non-product result {:?}",
+            destination.ty(),
+            produced.ty()
+        ));
+    }
+    let produced_fields = produced.top_level_fields();
+    let destination_fields = destination.top_level_fields();
+    if produced_fields.len() != destination_fields.len() {
+        return Err(format!(
+            "indexed result has {} fields but its destination has {}",
+            produced_fields.len(),
+            destination_fields.len()
+        ));
+    }
+    produced_fields.iter().zip(&destination_fields).try_fold(block, |tail, (produced, destination)| {
+        emit_result_to_indexed_destination(graph, tail, produced, destination, index, effect_ids)
+    })
 }
 
 pub fn rewrite_result_store_consumers<P: Family>(

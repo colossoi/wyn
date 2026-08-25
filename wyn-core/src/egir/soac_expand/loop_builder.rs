@@ -230,7 +230,12 @@ fn build_loop_skeleton(
             LoopResultSource::Carried(index) => {
                 let (ty, _) = &spec.carried[*index];
                 let value = graph.add_block_param(after, ty.clone());
-                super::bind_result_value(graph, &binding.result, value);
+                let abi = super::super::types::by_value_function_result::<WynLanguage>(
+                    binding.result.ty().clone(),
+                );
+                let replacement = super::super::graph_ops::bind_by_value_result(graph, &abi, value);
+                super::super::graph_ops::rebind_physical_result(graph, &binding.result, &replacement)
+                    .expect("loop result must preserve its physical ABI");
                 after_args.push(*index);
             }
             LoopResultSource::ConstantFalse => {
@@ -295,7 +300,11 @@ fn build_loop_skeleton(
 fn bind_unrolled_result(graph: &mut EGraph<Physical>, binding: &LoopResultBinding, carried: &[ValueId]) {
     match &binding.source {
         LoopResultSource::Carried(index) => {
-            super::bind_result_value(graph, &binding.result, carried[*index]);
+            let abi =
+                super::super::types::by_value_function_result::<WynLanguage>(binding.result.ty().clone());
+            let replacement = super::super::graph_ops::bind_by_value_result(graph, &abi, carried[*index]);
+            super::super::graph_ops::rebind_physical_result(graph, &binding.result, &replacement)
+                .expect("unrolled loop result must preserve its physical ABI");
         }
         LoopResultSource::ConstantFalse => {
             graph.replace_node_preserving_type(
