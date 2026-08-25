@@ -151,18 +151,10 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
         result,
         effects,
         graph,
+        abi: _,
     } = function;
     let (graph, _) = map_graph(graph, facts, semantic_ids);
-    Func {
-        region,
-        name,
-        span,
-        linkage_name,
-        params,
-        result,
-        effects,
-        graph,
-    }
+    Func::new(region, name, span, linkage_name, params, result, effects, graph)
 }
 
 fn reify_entry(mut entry: RawEntry, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {

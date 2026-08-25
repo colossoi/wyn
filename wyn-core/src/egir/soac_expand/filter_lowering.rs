@@ -56,8 +56,15 @@ fn filter_kept_value(
             let mut operands =
                 elements.into_iter().map(|element| graph.operand_ref(element)).collect::<Vec<_>>();
             operands.extend(spec.map_captures.iter().copied());
-            let result = super::call_abi::emit_call(graph, block, function, operands, None, next_effect)
-                .expect("Filter map call must match its canonical boundary");
+            let result = super::super::physical_call_abi::emit_call(
+                graph,
+                block,
+                function,
+                operands,
+                None,
+                next_effect,
+            )
+            .expect("Filter map call must match its canonical boundary");
             result.single_value().expect("Filter map has one by-value result")
         }
         None => {
@@ -190,9 +197,15 @@ fn build_serial_filter_cfg(
     let kept = filter_kept_value(graph, body, index, spec, next_effect);
     let mut pred_operands = vec![graph.operand_ref(kept)];
     pred_operands.extend(spec.captures.iter().copied());
-    let predicate =
-        super::call_abi::emit_call(graph, body, &spec.pred_func, pred_operands, None, next_effect)
-            .expect("Filter predicate call must match its canonical boundary");
+    let predicate = super::super::physical_call_abi::emit_call(
+        graph,
+        body,
+        &spec.pred_func,
+        pred_operands,
+        None,
+        next_effect,
+    )
+    .expect("Filter predicate call must match its canonical boundary");
     let predicate = predicate.single_value().expect("Filter predicate has one by-value result");
     graph.skeleton.blocks[body].term = SkeletonTerminator::CondBranch {
         cond: predicate,
@@ -318,8 +331,15 @@ pub(super) fn build_filter_flags(
     let kept = filter_kept_value(graph, in_range, gid, &spec, next_effect);
     let mut operands = vec![graph.operand_ref(kept)];
     operands.extend(spec.captures.iter().copied());
-    let pred = super::call_abi::emit_call(graph, in_range, &spec.pred_func, operands, None, next_effect)
-        .expect("Filter predicate call must match its canonical boundary");
+    let pred = super::super::physical_call_abi::emit_call(
+        graph,
+        in_range,
+        &spec.pred_func,
+        operands,
+        None,
+        next_effect,
+    )
+    .expect("Filter predicate call must match its canonical boundary");
     let pred = pred.single_value().expect("Filter predicate has one by-value result");
     graph.skeleton.blocks[in_range].term = SkeletonTerminator::CondBranch {
         cond: pred,

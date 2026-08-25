@@ -37,7 +37,8 @@ pub type ConstantDef<P = Semantic, Lang = WynLanguage> = super::ir::ConstantDef<
 pub type AllocatedConstantDef<Lang = WynLanguage> =
     super::ir::ConstantDef<Semantic<SemanticResourceRef>, Lang>;
 pub use crate::types::ExternDecl;
-pub type Func<P = Semantic, Lang = WynLanguage> = super::ir::Func<P, Lang>;
+pub type Func<P = Semantic, Lang = WynLanguage, Abi = super::ir::StableCallableAbi> =
+    super::ir::Func<P, Lang, Abi>;
 pub type AllocatedFunc<Lang = WynLanguage> = super::ir::Func<Semantic<SemanticResourceRef>, Lang>;
 pub type Entry<
     P = Semantic,
@@ -1614,6 +1615,7 @@ fn physicalize_function(
     function: AllocatedFunc,
     resources: &PhysicalResourceTable,
     serial: bool,
+    effect_ids: &mut IdSource<super::types::EffectToken>,
 ) -> Result<Func<Physical>, String> {
     let Func {
         region,
@@ -1624,6 +1626,7 @@ fn physicalize_function(
         result,
         effects,
         graph,
+        abi: _,
     } = function;
     let (graph, _) = super::parallelize::prepare::graph(graph, serial)?;
     let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
@@ -1642,16 +1645,19 @@ fn physicalize_function(
         |slot| slot,
         |parameter| parameter,
     );
-    Ok(Func {
-        region,
-        name,
-        span,
-        linkage_name,
-        params,
-        result,
-        effects,
-        graph,
-    })
+    super::physical_call_abi::physicalize_function_boundary(
+        Func::<Physical, WynLanguage, super::ir::PhysicalizingCallableAbi>::new(
+            region,
+            name,
+            span,
+            linkage_name,
+            params,
+            result,
+            effects,
+            graph,
+        ),
+        effect_ids,
+    )
 }
 
 fn physicalize_constant(
@@ -1998,19 +2004,33 @@ pub(in crate::egir) fn physicalize_program(
         mut global_context,
         state: _,
     } = program;
-    let entry_points = entries
+    let mut entry_points = entries
         .into_iter()
         .map(|entry| physicalize_entry(entry, physical_resources, &mut global_context.effect_ids))
         .collect::<Result<Vec<_>, _>>()?;
     physical_kernels.validate_entry_ids(entry_points.iter().map(|entry| entry.id))?;
-    let functions = functions
+    let mut functions = functions
         .into_iter()
-        .map(|function| physicalize_function(function, physical_resources, serial))
+        .map(|function| {
+            physicalize_function(
+                function,
+                physical_resources,
+                serial,
+                &mut global_context.effect_ids,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let constants = constants
+    let mut constants = constants
         .into_iter()
         .map(|constant| physicalize_constant(constant, physical_resources))
         .collect::<Result<Vec<_>, _>>()?;
+    super::physical_call_abi::reconcile_program_calls(
+        &mut functions,
+        &mut entry_points,
+        &mut constants,
+        &externs,
+        &mut global_context.effect_ids,
+    )?;
     Ok(Program::from_parts(
         functions,
         externs,

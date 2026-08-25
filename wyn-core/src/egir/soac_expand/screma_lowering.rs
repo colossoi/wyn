@@ -89,11 +89,13 @@ pub(super) fn emit_screma_lambda(
     let mut operands = arguments.drain(..).map(|argument| graph.operand_ref(argument)).collect::<Vec<_>>();
     operands.extend(body.captures.iter().copied());
     let result = match mapped_destinations {
-        None => super::call_abi::emit_call(graph, block, callee, operands, None, next_effect),
+        None => {
+            super::super::physical_call_abi::emit_call(graph, block, callee, operands, None, next_effect)
+        }
         Some((destinations, lane)) => match mapped_call_mode(callee, lambda, destinations)
             .expect("mapped Screma result must have a recognized destination shape")
         {
-            MappedCallMode::DirectDestinationPassing => super::call_abi::emit_call(
+            MappedCallMode::DirectDestinationPassing => super::super::physical_call_abi::emit_call(
                 graph,
                 block,
                 callee,
@@ -101,9 +103,14 @@ pub(super) fn emit_screma_lambda(
                 Some((destinations, lane)),
                 next_effect,
             ),
-            MappedCallMode::StructuredStore => {
-                super::call_abi::emit_call(graph, block, callee, operands, None, next_effect)
-            }
+            MappedCallMode::StructuredStore => super::super::physical_call_abi::emit_call(
+                graph,
+                block,
+                callee,
+                operands,
+                None,
+                next_effect,
+            ),
         },
     }
     .expect("Screma lambda call must match its canonical boundary");

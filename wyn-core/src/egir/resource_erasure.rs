@@ -105,6 +105,7 @@ fn erase_function_resources(
         result,
         effects,
         graph,
+        abi: _,
     } = function;
     let mut graph = rewrite_graph(graph, erasures)?;
     let erase: Vec<bool> = params

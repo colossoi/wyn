@@ -12856,6 +12856,111 @@ entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
     .expect("record-of-arrays as a function param should compile");
 }
 
+#[test]
+fn physical_planning_finalizes_internal_and_extern_callable_abis() {
+    use egir::types::{OperandType, PlaceAccess, ResultDestination, ValueKind};
+
+    let planned = egir::plan(
+        compile_to_semantic_egir(
+            r#"
+def countdown(n: i32) i32 =
+  if n <= 0 then 0 else countdown(n - 1)
+def fixed_loop(xs: [4]i32, n: i32) i32 =
+  if n <= 0 then xs[0] else fixed_loop(xs, n - 1)
+
+entry run(xs: [4]i32, n: i32) [2]i32 =
+  [countdown(n), fixed_loop(xs, n)]
+"#,
+        ),
+        LoweringProfile::PORTABLE,
+    )
+    .expect("plan scalar, fixed-array, and recursive call boundaries");
+
+    let countdown =
+        planned.functions.iter().find(|function| function.name.contains("countdown")).unwrap_or_else(
+            || {
+                panic!(
+                    "countdown boundary not found among {:?}",
+                    planned.functions.iter().map(|function| &function.name).collect::<Vec<_>>()
+                )
+            },
+        );
+    assert!(matches!(
+        countdown.params().iter().next().unwrap().representation(),
+        OperandType::Value(_)
+    ));
+    assert!(matches!(
+        countdown.result().single_destination().unwrap().1,
+        ResultDestination::ReturnValue(_)
+    ));
+
+    let fixed = planned.functions.iter().find(|function| function.name.contains("fixed_loop")).unwrap();
+    assert!(matches!(
+        fixed.params().iter().next().unwrap().representation(),
+        OperandType::Place(place) if place.access == PlaceAccess::ReadOnly
+    ));
+
+    let recursive = countdown
+        .graph
+        .calls()
+        .values()
+        .find(|call| call.callee() == countdown.region)
+        .expect("recursive call remains in countdown");
+    assert_eq!(
+        recursive.argument_bindings().keys().copied().collect::<Vec<_>>(),
+        countdown.params().ids().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        recursive
+            .result()
+            .destination_leaves_with_paths()
+            .iter()
+            .map(|(path, _)| path.as_ref())
+            .collect::<Vec<_>>(),
+        countdown
+            .result()
+            .destination_leaves_with_paths()
+            .iter()
+            .map(|(path, _)| path.as_ref())
+            .collect::<Vec<_>>()
+    );
+    for function in &planned.functions {
+        let declared = function.params().ids().collect::<std::collections::HashSet<_>>();
+        assert!(function.graph.values().values().all(|node| {
+            !matches!(node.kind(), ValueKind::FuncParam { parameter } if !declared.contains(parameter))
+        }));
+    }
+
+    let extern_planned = egir::plan(
+        compile_to_semantic_egir(
+            r#"
+#[linked("keep_abi")]
+extern keep_abi(xs: [4]i32) [4]i32
+entry call_extern(xs: [4]i32) [4]i32 = keep_abi(xs)
+"#,
+        ),
+        LoweringProfile::PORTABLE,
+    )
+    .expect("plan an explicitly declared extern ABI");
+    let declaration = &extern_planned.externs[0];
+    assert_eq!(declaration.params.len(), 1);
+    let call = extern_planned
+        .entry_points
+        .iter()
+        .flat_map(|entry| entry.graph.calls().values())
+        .find(|call| call.callee() == declaration.id)
+        .expect("entry calls the extern");
+    assert_eq!(call.arguments().len(), 1);
+    assert!(matches!(
+        call.arguments().next().unwrap(),
+        egir::types::OperandRef::Value(_)
+    ));
+    assert!(matches!(
+        call.result().single_destination().unwrap().1,
+        ResultDestination::ReturnValue(_)
+    ));
+}
+
 /// Construct a record-of-runtime-arrays from `map` outputs and RETURN it.
 /// The declared `world` return must unify with the body's concrete
 /// `composite`/`no_buffer` map-result arrays.

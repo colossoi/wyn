@@ -1128,17 +1128,6 @@ impl<Ty> CallSite<Ty> {
         self.arguments.values_mut()
     }
 
-    pub(crate) fn replace_boundary(
-        &mut self,
-        arguments: StableMap<ParameterId, OperandRef>,
-        result: ResultBinding<Ty>,
-        effects: CallEffects,
-    ) {
-        self.arguments = arguments;
-        self.result = result;
-        self.effects = effects;
-    }
-
     pub fn result(&self) -> &ResultBinding<Ty> {
         &self.result
     }
@@ -1869,9 +1858,9 @@ impl SegBody {
     ///
     /// Segment bodies bind their lane/element parameters first and append one
     /// function parameter for each capture.
-    pub(crate) fn leading_parameter_count<P: Family, Lang: Language>(
+    pub(crate) fn leading_parameter_count<P: Family, Lang: Language, Abi>(
         &self,
-        function: &Func<P, Lang>,
+        function: &Func<P, Lang, Abi>,
     ) -> Result<usize, String> {
         function.params.len().checked_sub(self.captures.len()).ok_or_else(|| {
             format!(
@@ -1884,9 +1873,9 @@ impl SegBody {
     }
 
     /// Map this body's capture parameters to their enclosing graph values.
-    pub(crate) fn capture_bindings<P: Family, Lang: Language>(
+    pub(crate) fn capture_bindings<P: Family, Lang: Language, Abi>(
         &self,
-        function: &Func<P, Lang>,
+        function: &Func<P, Lang, Abi>,
     ) -> Result<LookupMap<ValueId, OperandRef>, String> {
         let leading = self.leading_parameter_count(function)?;
         let mut bindings = LookupMap::new();
@@ -2719,6 +2708,47 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if !self.skeleton.blocks.contains_key(block) {
             return Err(format!("call to {callee:?} names missing block {block:?}"));
         }
+        let arguments = self.bind_call_arguments(callee, parameters, arguments)?;
+        self.validate_call_destinations(callee, parameters, function_result)?;
+        let nodes = &mut self.nodes;
+        let mut result = None;
+        let site = self.calls.insert_with_key(|site| {
+            let binding = function_result.bind(
+                |slot, ty| {
+                    nodes.insert(Value {
+                        kind: ValueKind::CallResult { call: site, slot },
+                        ty: ty.clone(),
+                        span,
+                        alias: None,
+                        result_origins: Vec::new(),
+                    })
+                },
+                |parameter| {
+                    arguments[&parameter].place().expect("destination parameter requires a place argument")
+                },
+            );
+            result = Some(binding.clone());
+            CallSite::new(callee, arguments.clone(), binding, effects)
+        });
+        self.skeleton.blocks[block].side_effects.push(SideEffect::new(
+            SideEffectKind::Effect(EffectOp::Call { site }),
+            smallvec::smallvec![],
+            None,
+            effect_tokens,
+            span,
+        ));
+        Ok((
+            site,
+            result.expect("call result is constructed with its call site"),
+        ))
+    }
+
+    fn bind_call_arguments(
+        &self,
+        callee: FunctionId,
+        parameters: &Parameters<P::Resource, Lang::Ty>,
+        arguments: impl IntoIterator<Item = OperandRef>,
+    ) -> Result<StableMap<ParameterId, OperandRef>, String> {
         let ordered_arguments =
             arguments.into_iter().map(|argument| self.canonical_operand(argument)).collect::<Vec<_>>();
         if ordered_arguments.len() != parameters.len() {
@@ -2753,6 +2783,15 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                 ));
             }
         }
+        Ok(parameters.ids().zip(ordered_arguments).collect())
+    }
+
+    fn validate_call_destinations(
+        &self,
+        callee: FunctionId,
+        parameters: &Parameters<P::Resource, Lang::Ty>,
+        function_result: &FunctionResult<Lang::Ty>,
+    ) -> Result<(), String> {
         let mut destination_error = None;
         function_result.for_each_destination(|_, destination| {
             let mut require_place = |parameter: ParameterId| {
@@ -2777,38 +2816,151 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         if let Some(error) = destination_error {
             return Err(error);
         }
-        let arguments = parameters.ids().zip(ordered_arguments).collect::<StableMap<_, _>>();
-        let nodes = &mut self.nodes;
-        let mut result = None;
-        let site = self.calls.insert_with_key(|site| {
-            let binding = function_result.bind(
-                |slot, ty| {
-                    nodes.insert(Value {
-                        kind: ValueKind::CallResult { call: site, slot },
-                        ty: ty.clone(),
-                        span,
-                        alias: None,
-                        result_origins: Vec::new(),
-                    })
-                },
-                |parameter| {
-                    arguments[&parameter].place().expect("destination parameter requires a place argument")
-                },
-            );
-            result = Some(binding.clone());
-            CallSite::new(callee, arguments.clone(), binding, effects)
+        Ok(())
+    }
+
+    /// Replace a call's complete boundary through the same validation path as
+    /// initial construction. Concrete destination bindings are derived from
+    /// the validated arguments rather than accepted as independent state.
+    pub(crate) fn rebind_call_boundary(
+        &mut self,
+        site: CallSiteId,
+        parameters: &Parameters<P::Resource, Lang::Ty>,
+        function_result: &FunctionResult<Lang::Ty>,
+        arguments: impl IntoIterator<Item = OperandRef>,
+        return_values: &StableMap<ReturnSlotId, ValueId>,
+        effects: CallEffects,
+    ) -> Result<(), String> {
+        let callee =
+            self.calls.get(site).ok_or_else(|| format!("cannot rebind missing call {site:?}"))?.callee;
+        let arguments = self.bind_call_arguments(callee, parameters, arguments)?;
+        self.validate_call_destinations(callee, parameters, function_result)?;
+
+        let mut expected_returns = StableMap::new();
+        function_result.for_each_destination(|ty, destination| {
+            if let ResultDestination::ReturnValue(slot) = destination {
+                expected_returns.insert(*slot, ty.clone());
+            }
         });
-        self.skeleton.blocks[block].side_effects.push(SideEffect::new(
-            SideEffectKind::Effect(EffectOp::Call { site }),
-            smallvec::smallvec![],
-            None,
-            effect_tokens,
-            span,
-        ));
-        Ok((
-            site,
-            result.expect("call result is constructed with its call site"),
-        ))
+        if return_values.len() != expected_returns.len() {
+            return Err(format!(
+                "call to {callee:?} preserves {} returned values for {} physical return slots",
+                return_values.len(),
+                expected_returns.len()
+            ));
+        }
+        for (slot, ty) in &expected_returns {
+            let value = return_values.get(slot).ok_or_else(|| {
+                format!("call to {callee:?} has no preserved value for return slot {slot:?}")
+            })?;
+            let node = self
+                .nodes
+                .get(*value)
+                .ok_or_else(|| format!("call to {callee:?} preserves missing return value {value:?}"))?;
+            if node.ty() != ty {
+                return Err(format!(
+                    "call to {callee:?} return slot {slot:?} has type {:?}, expected {ty:?}",
+                    node.ty()
+                ));
+            }
+            if !matches!(node.kind(), ValueKind::CallResult { call, .. } if *call == site) {
+                return Err(format!(
+                    "call to {callee:?} return slot {slot:?} is not owned by call {site:?}"
+                ));
+            }
+        }
+
+        let result = function_result.bind(
+            |slot, _| return_values[&slot],
+            |parameter| {
+                arguments[&parameter].place().expect("validated destination parameter uses a place")
+            },
+        );
+        for (slot, value) in return_values {
+            let ValueKind::CallResult {
+                call,
+                slot: current_slot,
+            } = &mut self.nodes[*value].kind
+            else {
+                unreachable!("return ownership validated above")
+            };
+            debug_assert_eq!(*call, site);
+            *current_slot = *slot;
+        }
+        let call = self.calls.get_mut(site).expect("call remains live while its boundary is rebound");
+        call.arguments = arguments;
+        call.result = result;
+        call.effects = effects;
+        Ok(())
+    }
+
+    /// Check a stored call against its canonical callable boundary. Call
+    /// construction and rebinding establish these facts; this is the compact
+    /// typestate-transition assertion for graph rewrites that remap IDs.
+    pub(crate) fn verify_call_boundary(
+        &self,
+        site: CallSiteId,
+        parameters: &Parameters<P::Resource, Lang::Ty>,
+        function_result: &FunctionResult<Lang::Ty>,
+        effects: CallEffects,
+    ) -> Result<(), String> {
+        let call = self.calls.get(site).ok_or_else(|| format!("missing call {site:?}"))?;
+        let expected_arguments =
+            self.bind_call_arguments(call.callee, parameters, call.arguments().copied())?;
+        self.validate_call_destinations(call.callee, parameters, function_result)?;
+        if call.arguments != expected_arguments {
+            return Err(format!("call {site:?} uses stale callee parameter identities"));
+        }
+        if call.effects != effects {
+            return Err(format!("call {site:?} uses stale effect metadata"));
+        }
+
+        let expected = function_result.destination_leaves_with_paths();
+        let actual = call.result.destination_leaves_with_paths();
+        if expected.len() != actual.len() {
+            return Err(format!("call {site:?} result arity disagrees with its callee"));
+        }
+        for ((expected_path, expected), (actual_path, actual)) in expected.into_iter().zip(actual) {
+            let (expected_ty, expected_destination) =
+                expected.single_destination().expect("physical result leaf");
+            let (actual_ty, actual_destination) = actual.single_destination().expect("call result leaf");
+            if expected_path != actual_path || expected_ty != actual_ty {
+                return Err(format!("call {site:?} result tree disagrees with its callee"));
+            }
+            let valid = match (expected_destination, actual_destination) {
+                (ResultDestination::ReturnValue(slot), ResultDestination::ReturnValue(value)) => {
+                    self.nodes.get(*value).is_some_and(|node| {
+                        node.ty() == expected_ty
+                            && matches!(
+                                node.kind(),
+                                ValueKind::CallResult { call, slot: actual_slot }
+                                    if *call == site && actual_slot == slot
+                            )
+                    })
+                }
+                (
+                    ResultDestination::Place(PlaceDestination::Fixed(parameter)),
+                    ResultDestination::Place(PlaceDestination::Fixed(place)),
+                ) => call.argument(*parameter) == Some(OperandRef::Place(*place)),
+                (
+                    ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
+                    ResultDestination::Place(PlaceDestination::Bounded {
+                        storage: actual_storage,
+                        length: actual_length,
+                    }),
+                ) => {
+                    call.argument(*storage) == Some(OperandRef::Place(*actual_storage))
+                        && call.argument(*length) == Some(OperandRef::Place(*actual_length))
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(format!(
+                    "call {site:?} result destinations disagree with its callee"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn add_projected_call(
@@ -3671,8 +3823,18 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 // Program and body containers
 // ---------------------------------------------------------------------------
 
+/// A callable whose declared boundary is synchronized with its graph body.
+/// Semantic and finalized physical functions both use this stable state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StableCallableAbi;
+
+/// Private construction state used while a physical function's logical
+/// boundary is being replaced. It cannot inhabit a published `Program`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PhysicalizingCallableAbi;
+
 #[derive(Clone, Debug)]
-pub struct Func<P: Family, Lang: Language> {
+pub struct Func<P: Family, Lang: Language, Abi = StableCallableAbi> {
     /// Stable identity used by segmented bodies that call this region.
     pub region: FunctionId,
     /// Diagnostic and emitted-symbol metadata; never used to resolve a call.
@@ -3687,9 +3849,10 @@ pub struct Func<P: Family, Lang: Language> {
     pub(crate) result: FunctionResult<Lang::Ty>,
     pub(crate) effects: CallEffects,
     pub graph: EGraph<P, Lang>,
+    pub(crate) abi: std::marker::PhantomData<fn() -> Abi>,
 }
 
-impl<P: Family, Lang: Language> Func<P, Lang> {
+impl<P: Family, Lang: Language, Abi> Func<P, Lang, Abi> {
     pub fn map_graph(mut self, map: impl FnOnce(EGraph<P, Lang>) -> EGraph<P, Lang>) -> Self {
         self.graph = map(self.graph);
         self
@@ -3722,6 +3885,7 @@ impl<P: Family, Lang: Language> Func<P, Lang> {
             result,
             effects,
             graph,
+            abi: std::marker::PhantomData,
         }
     }
 

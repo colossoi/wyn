@@ -2,32 +2,63 @@ use crate::ast::TypeName;
 use crate::flow;
 use crate::types;
 use crate::FunctionId;
-use crate::{BindingRef, LookupMap};
+use crate::{BindingRef, LookupMap, StableMap};
 use polytype::Type;
 use wyn_base::IdSource;
 
-use super::super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
-use super::super::ir::PlaceOp;
-use super::super::program::Func;
-use super::super::types::{
+use super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
+use super::ir::PlaceOp;
+use super::program::{ConstantDef, Func, PhysicalEntry};
+use super::types::{
     by_value_function_result, destination_passing_function_result, CallEffects, CallSiteId, EGraph,
     EffectOp, EffectToken, FuncParam, FunctionResult, Language, OperandRef, Parameters, Physical,
     PlaceAccess, PlaceDestination, PlaceRegion, ResultBinding, ResultDestination, SideEffect,
     SideEffectKind, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 
-pub(super) fn resolve(
-    program: super::super::parallelize::Planned,
-) -> Result<super::super::parallelize::Planned, String> {
-    let mut program = program;
-    for function in &mut program.functions {
-        resolve_function_parameters(function)?;
-    }
-    for function in &mut program.functions {
-        resolve_function(function, &mut program.global_context.effect_ids)?;
-    }
-    let mut boundaries = program
-        .functions
+pub(crate) type CallableBoundary = (
+    Parameters<BindingRef, Type<TypeName>>,
+    FunctionResult<Type<TypeName>>,
+    CallEffects,
+);
+
+/// Consume a physical function whose body types have been lowered and return
+/// it only after its complete callable boundary and every return have been
+/// converted to the physical ABI.
+pub(crate) fn physicalize_function_boundary(
+    mut function: Func<Physical, WynLanguage, super::ir::PhysicalizingCallableAbi>,
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<Func<Physical>, String> {
+    physicalize_function_parameters(&mut function)?;
+    physicalize_function_results(&mut function, effect_ids)?;
+    let Func {
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        result,
+        effects,
+        graph,
+        abi: _,
+    } = function;
+    Ok(Func::new(
+        region,
+        name,
+        span,
+        linkage_name,
+        params,
+        result,
+        effects,
+        graph,
+    ))
+}
+
+pub(crate) fn callable_boundaries(
+    functions: &[Func<Physical>],
+    externs: &[crate::types::ExternDecl<Type<TypeName>>],
+) -> LookupMap<FunctionId, CallableBoundary> {
+    let mut boundaries = functions
         .iter()
         .map(|function| {
             (
@@ -40,7 +71,7 @@ pub(super) fn resolve(
             )
         })
         .collect::<LookupMap<_, _>>();
-    for declaration in &program.externs {
+    for declaration in externs {
         boundaries.insert(
             declaration.id,
             (
@@ -52,28 +83,30 @@ pub(super) fn resolve(
             ),
         );
     }
-    for function in &mut program.functions {
-        resolve_calls(
-            &mut function.graph,
-            &boundaries,
-            &mut program.global_context.effect_ids,
-        )?;
+    boundaries
+}
+
+/// Reconcile every existing call only after all internal callable boundaries
+/// have reached their final physical representation. This ordering supports
+/// recursive and mutually recursive functions without traversal dependence.
+pub(crate) fn reconcile_program_calls(
+    functions: &mut [Func<Physical>],
+    entries: &mut [PhysicalEntry],
+    constants: &mut [ConstantDef<Physical>],
+    externs: &[crate::types::ExternDecl<Type<TypeName>>],
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<(), String> {
+    let boundaries = callable_boundaries(functions, externs);
+    for function in functions {
+        reconcile_calls(&mut function.graph, &boundaries, effect_ids)?;
     }
-    for entry in &mut program.entry_points {
-        resolve_calls(
-            &mut entry.graph,
-            &boundaries,
-            &mut program.global_context.effect_ids,
-        )?;
+    for entry in entries {
+        reconcile_calls(&mut entry.graph, &boundaries, effect_ids)?;
     }
-    for constant in &mut program.constants {
-        resolve_calls(
-            &mut constant.graph,
-            &boundaries,
-            &mut program.global_context.effect_ids,
-        )?;
+    for constant in constants {
+        reconcile_calls(&mut constant.graph, &boundaries, effect_ids)?;
     }
-    Ok(program)
+    Ok(())
 }
 
 enum CallResultRouting {
@@ -91,7 +124,7 @@ type BoundCall = (
     Vec<SideEffect<Physical>>,
 );
 
-pub(super) fn emit_call(
+pub(crate) fn emit_call(
     graph: &mut EGraph<Physical>,
     block: flow::BlockId,
     callee: &Func<Physical>,
@@ -253,9 +286,7 @@ fn bind_call_boundary(
                     ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => *storage,
                     ResultDestination::ReturnValue(value) => {
                         let value = graph.canonical_value(*value);
-                        if let Some(place) =
-                            super::super::graph_ops::addressable_value_place(graph, value, ty)
-                        {
+                        if let Some(place) = super::graph_ops::addressable_value_place(graph, value, ty) {
                             place
                         } else {
                             let span = graph.nodes[value].span();
@@ -295,32 +326,35 @@ fn bind_call_boundary(
     Ok((arguments, result, prelude))
 }
 
-fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), String> {
+fn physicalize_function_parameters(
+    function: &mut Func<Physical, WynLanguage, super::ir::PhysicalizingCallableAbi>,
+) -> Result<(), String> {
     let old_params = function.params.drain_ordered();
-    let mut old_parameter_nodes = Vec::new();
     for (old_index, (old_parameter, parameter)) in old_params.into_iter().enumerate() {
         let logical_ty = parameter.ty().clone();
-        let logical_abi = super::super::types::by_value_function_result::<WynLanguage>(logical_ty.clone());
-        let physical_ty = super::super::graph_ops::place_reference_type(&logical_ty);
-        let source = function
+        let logical_abi = super::types::by_value_function_result::<WynLanguage>(logical_ty.clone());
+        let physical_ty = super::graph_ops::place_reference_type(&logical_ty);
+        let sources = function
             .graph
             .nodes
             .iter()
-            .find_map(|(value, definition)| {
+            .filter_map(|(value, definition)| {
                 matches!(
                     definition.kind(),
                     ValueKind::FuncParam { parameter } if *parameter == old_parameter
                 )
                 .then_some(value)
             })
-            .ok_or_else(|| {
-                format!(
-                    "function `{}` parameter {old_index} has no value binding",
-                    function.name
-                )
-            })?;
-        old_parameter_nodes.push(source);
-        super::super::graph_ops::retype_projection_tree(&mut function.graph, source, &physical_ty);
+            .collect::<Vec<_>>();
+        if sources.is_empty() {
+            return Err(format!(
+                "function `{}` parameter {old_index} has no value binding",
+                function.name
+            ));
+        }
+        for source in &sources {
+            super::graph_ops::retype_projection_tree(&mut function.graph, *source, &physical_ty);
+        }
 
         let mut group = Vec::new();
         for (path, leaf) in logical_abi.destination_leaves_with_paths() {
@@ -330,8 +364,8 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
             if WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()) {
                 let id = function.params.push(FuncParam::place(
                     name,
-                    super::super::types::PlaceType {
-                        pointee: super::super::graph_ops::materialized_array_type(leaf.ty()),
+                    super::types::PlaceType {
+                        pointee: super::graph_ops::materialized_array_type(leaf.ty()),
                         region: PlaceRegion::Parametric,
                         access: PlaceAccess::ReadOnly,
                     },
@@ -342,7 +376,7 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
                 group.push(id);
             }
         }
-        let abi = super::super::types::by_value_function_result::<WynLanguage>(physical_ty);
+        let abi = super::types::by_value_function_result::<WynLanguage>(physical_ty);
         let leaves = abi.destination_leaves();
         if leaves.len() != group.len() {
             return Err(format!(
@@ -372,17 +406,47 @@ fn resolve_function_parameters(function: &mut Func<Physical>) -> Result<(), Stri
             |slot, _| values[slot.index()],
             |_| unreachable!("parameter products bind place leaves through view values"),
         );
-        super::super::graph_ops::rebind_result_projection_references(
-            &mut function.graph,
-            source,
-            &binding,
-        )?;
+        for source in sources {
+            super::graph_ops::rebind_result_projection_references(&mut function.graph, source, &binding)?;
+        }
     }
-    super::super::graph_ops::fold_exposed_projections(&mut function.graph);
-    for parameter in old_parameter_nodes {
+    super::graph_ops::fold_exposed_projections(&mut function.graph);
+    let mut roots = Vec::new();
+    for (_, block) in &function.graph.skeleton.blocks {
+        for effect in &block.side_effects {
+            roots.extend(function.graph.effect_boundary_value_dependencies(effect));
+        }
+        roots.extend(block.term.referenced_nodes());
+    }
+    let live = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
+        out.extend(function.graph.nodes[node].children());
+        match function.graph.nodes[node].kind() {
+            ValueKind::CallResult { call, .. } => out.extend(function.graph.call_value_dependencies(*call)),
+            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
+                out.extend(function.graph.place_value_dependencies(*place))
+            }
+            _ => {}
+        }
+    });
+    let obsolete = function
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|(value, definition)| match definition.kind() {
+            ValueKind::FuncParam { parameter } if function.params.get(*parameter).is_none() => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for parameter in obsolete {
+        if live.contains(&parameter) {
+            return Err(format!(
+                "function `{}` retains a live binding for a removed parameter",
+                function.name
+            ));
+        }
         function.graph.remove_func_param(parameter);
     }
-    super::super::graph_ops::synchronize_soac_input_types(&mut function.graph);
+    super::graph_ops::synchronize_soac_input_types(&mut function.graph);
     Ok(())
 }
 
@@ -402,15 +466,15 @@ fn flatten_call_arguments(
             flattened.push(argument);
             continue;
         }
-        let abi = super::super::types::by_value_function_result::<WynLanguage>(ty);
-        let binding = super::super::graph_ops::bind_by_value_result(graph, &abi, value);
+        let abi = super::types::by_value_function_result::<WynLanguage>(ty);
+        let binding = super::graph_ops::bind_by_value_result(graph, &abi, value);
         flattened.extend(binding.values().into_iter().map(|value| graph.operand_ref(value)));
     }
     Ok(flattened)
 }
 
-fn resolve_function(
-    function: &mut Func<Physical>,
+fn physicalize_function_results(
+    function: &mut Func<Physical, WynLanguage, super::ir::PhysicalizingCallableAbi>,
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let mut params = std::mem::take(&mut function.params);
@@ -532,13 +596,13 @@ fn resolve_function(
     Ok(())
 }
 
-fn resolve_calls(
+fn reconcile_calls(
     graph: &mut EGraph<Physical>,
     boundaries: &LookupMap<
         FunctionId,
         (
             Parameters<BindingRef, Type<TypeName>>,
-            super::super::types::FunctionResult<Type<TypeName>>,
+            FunctionResult<Type<TypeName>>,
             CallEffects,
         ),
     >,
@@ -560,7 +624,7 @@ fn resolve_call(
     site: CallSiteId,
     boundary: &(
         Parameters<BindingRef, Type<TypeName>>,
-        super::super::types::FunctionResult<Type<TypeName>>,
+        FunctionResult<Type<TypeName>>,
         CallEffects,
     ),
     effect_ids: &mut IdSource<EffectToken>,
@@ -582,14 +646,24 @@ fn resolve_call(
     if !prelude.is_empty() {
         graph.skeleton.blocks[anchor.block].side_effects.splice(anchor.index..anchor.index, prelude);
     }
-    graph
-        .calls
-        .get_mut(site)
-        .expect("call site remains live while its ABI is rewritten")
-        .replace_boundary(
-            boundary.0.ids().zip(arguments).collect(),
-            result.expect("existing call preserves its logical result bindings"),
-            boundary.2,
-        );
+    let result = result.expect("existing call preserves its logical result bindings");
+    let mut return_values = StableMap::new();
+    for (route, binding) in boundary.1.destination_leaves().into_iter().zip(result.destination_leaves()) {
+        if let (
+            Some((_, ResultDestination::ReturnValue(slot))),
+            Some((_, ResultDestination::ReturnValue(value))),
+        ) = (route.single_destination(), binding.single_destination())
+        {
+            return_values.insert(*slot, *value);
+        }
+    }
+    graph.rebind_call_boundary(
+        site,
+        &boundary.0,
+        &boundary.1,
+        arguments,
+        &return_values,
+        boundary.2,
+    )?;
     Ok(())
 }

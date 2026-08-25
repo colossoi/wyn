@@ -19,6 +19,7 @@ pub mod ir;
 mod loop_analysis;
 pub(crate) mod materialize;
 pub(crate) mod partial_inline;
+pub(crate) mod physical_call_abi;
 pub mod program;
 pub mod publish;
 pub(crate) mod resource_erasure;

@@ -38,7 +38,6 @@ use crate::{BindingRef, FunctionId, LookupMap};
 type CallableMap = LookupMap<FunctionId, Func<Physical>>;
 
 mod array_io;
-mod call_abi;
 mod filter_lowering;
 mod flow_normalize;
 mod hist_lowering;
@@ -60,7 +59,7 @@ use screma_lowering::{build_parallel_screma_map, emit_screma_lambda};
 /// Expand every graph-bearing body and rebuild the program at the
 /// post-expansion checkpoint.
 pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
-    let mut program = call_abi::resolve(program)?;
+    let mut program = program;
     let callables = program
         .functions
         .iter()

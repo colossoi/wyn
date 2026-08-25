@@ -2004,6 +2004,26 @@ fn effect_display<P: SnapshotPhase>(
         }
         SideEffectKind::Effect(operation) => {
             let (label, variant) = effect_operation_name(operation);
+            let operand_groups = match operation {
+                EffectOp::Call { site } => vec![GraphOperandGroup {
+                    role: "arguments".to_string(),
+                    values: graph
+                        .call(*site)
+                        .arguments()
+                        .map(|argument| graph_reference(group, *argument))
+                        .collect(),
+                }],
+                _ if !effect.operands().is_empty() => vec![GraphOperandGroup {
+                    role: "operands".to_string(),
+                    values: effect
+                        .operands()
+                        .iter()
+                        .copied()
+                        .map(|operand| graph_reference(group, operand))
+                        .collect(),
+                }],
+                _ => Vec::new(),
+            };
             EffectDisplay {
                 id: format!("{group}/effect/{block:?}/{index}"),
                 label,
@@ -2011,18 +2031,7 @@ fn effect_display<P: SnapshotPhase>(
                 detail: format!("{operation:#?}"),
                 operation: Some(GraphOperation {
                     semantic_id: None,
-                    operand_groups: (!effect.operands().is_empty())
-                        .then(|| GraphOperandGroup {
-                            role: "operands".to_string(),
-                            values: effect
-                                .operands()
-                                .iter()
-                                .copied()
-                                .map(|operand| graph_reference(group, operand))
-                                .collect(),
-                        })
-                        .into_iter()
-                        .collect(),
+                    operand_groups,
                     regions: Vec::new(),
                     results: graph_results(group, graph.effect_result_binding(effect)),
                     soac_state: None,

@@ -383,6 +383,61 @@ entry shifted(xs: [4]i32, offsets: []i32, index: i32) [4]i32 =
 }
 
 #[test]
+fn physical_planning_exposes_final_callable_boundaries_and_calls() {
+    let result = inspect_pass_impl(
+        r#"
+open f32
+def use_world(points: [4]vec2f32, items: [4]vec4f32, dom: [4]u32) f32 =
+  use_world(points, items, dom)
+
+entry step(dom: [4]u32, points_in: [4]vec2f32, items_in: [4]vec4f32)
+  f32 =
+  use_world(points_in, items_in, dom)
+"#,
+        InspectPass::PlanPhysicalKernels,
+    );
+    assert!(result.success, "{:?}", result.error);
+    let after = result.after.expect("physical snapshot");
+    let function = after
+        .groups
+        .iter()
+        .find(|group| group.label.starts_with("fn use_world"))
+        .unwrap_or_else(|| {
+            panic!(
+                "use_world function group among {:?}",
+                after.groups.iter().map(|group| &group.label).collect::<Vec<_>>()
+            )
+        });
+    let parameters = after
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.group == function.id
+                && node.variant == "parameter"
+                && node.representation.as_deref() == Some("place")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parameters.iter().filter(|parameter| parameter.detail.contains("ReadOnly")).count(),
+        3,
+        "the record fields and domain are final read-only place inputs: {parameters:#?}"
+    );
+    assert!(
+        after.nodes.iter().any(|node| {
+            node.variant == "call"
+                && node.operation.as_ref().is_some_and(|operation| {
+                    operation
+                        .operand_groups
+                        .iter()
+                        .find(|group| group.role == "arguments")
+                        .is_some_and(|arguments| arguments.values.len() == 3)
+                })
+        }),
+        "the caller should expose three correspondingly adapted arguments"
+    );
+}
+
+#[test]
 fn inline_debug_preserves_long_constructs() {
     let value = "ResourceLen(SemanticResourceRef(ResourceIdentifierThatMustRemainVisible))";
     let rendered = inline_debug(&value);

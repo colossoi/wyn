@@ -657,6 +657,7 @@ fn remap_function_resources(
         mut result,
         effects,
         graph,
+        abi: _,
     } = function;
     let (graph, _, _) = remap_graph_resources(graph, context)?;
     let params = params.try_map(
@@ -675,7 +676,7 @@ fn remap_function_resources(
     if let Some(error) = result_error {
         return Err(error);
     }
-    Ok(super::program::Func {
+    Ok(super::program::Func::new(
         region,
         name,
         span,
@@ -684,7 +685,7 @@ fn remap_function_resources(
         result,
         effects,
         graph,
-    })
+    ))
 }
 
 fn remap_constant_resources(

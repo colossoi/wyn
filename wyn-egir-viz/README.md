@@ -8,8 +8,9 @@ compiler passes. The current checkpoints are:
   inputs;
 - `egir::plan`: staged IR to the physical kernel DAG, including kernel-owned
   physical EGIR bodies, dependencies, dispatch domains, resource accesses, and
-  entry parameters constructed on their physical value, view, or place ABI
-  channels;
+  entry and auxiliary-function boundaries constructed on their final physical
+  value, view, or place ABI channels, with reconciled call arguments and
+  results;
 - `egir::optimize_semantic_operations`: segmented semantic EGIR through the
   shared dead-operation-elimination and fusion fixpoint, with compiler-authored
   operation provenance; and

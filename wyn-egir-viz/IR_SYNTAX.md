@@ -415,6 +415,10 @@ published input. Scalars remain `%` values and resource-backed storage uses
 fixed array passed through the parametric entry interface, is constructed as
 a read-only `&` place; an explicit `place.view` supplies its uses. There is no
 intermediate Physical EGIR state whose boundary and body disagree.
+Auxiliary functions likewise expose flattened physical inputs, appended result
+destinations, rewritten returns, and calls whose displayed arguments already
+follow the callee's final parameter order. SOAC expansion consumes this state;
+it does not repair callable boundaries.
 
 ## Floating values and places
 
