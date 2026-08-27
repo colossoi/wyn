@@ -32,13 +32,11 @@ type CallableMap = LookupMap<FunctionId, Func<Physical>>;
 
 mod array_io;
 mod filter_lowering;
-mod flow_normalize;
 mod hist_lowering;
 mod loop_builder;
 mod screma_lowering;
 
 use filter_lowering::expand_filter;
-use flow_normalize::normalize_place_backed_flow;
 use hist_lowering::expand_hist;
 use screma_lowering::expand_screma;
 
@@ -83,7 +81,7 @@ pub fn run_one_body(
             effect.kind
         ));
     }
-    normalize_place_backed_flow(&mut graph, effect_ids)?;
+    super::verify_physical::check_graph_flow(&graph, "SOAC expansion result")?;
     Ok(graph)
 }
 

@@ -1,15 +1,15 @@
 //! Generic loop construction for physical SOAC expansion.
 
 use super::array_io::emit_length;
+use super::value_binding;
 use crate::ast::TypeName;
-use crate::egir::graph_ops::{bind_by_value_result, rebind_physical_result};
+use crate::egir::graph_ops::rebind_physical_result;
 use crate::egir::structured_cfg::{
     detach_effect_for_inline_replacement, finish_counted_loop_iteration, replace_effect_with_counted_loop,
     restore_inline_effect_continuation,
 };
 use crate::egir::types::{
-    as_soa_tuple, by_value_function_result, EGraph, EffectToken, Physical, PureOp, ResultBinding,
-    SideEffectSite, ValueId, ValueKind, WynLanguage,
+    as_soa_tuple, EGraph, EffectToken, Physical, PureOp, ResultBinding, SideEffectSite, ValueId, ValueKind,
 };
 use crate::flow::BlockId;
 use crate::op;
@@ -23,7 +23,7 @@ use wyn_base::IdSource;
 /// when its effectful work is conditionally executed.
 pub(super) struct LoopBody {
     pub(super) tail: BlockId,
-    pub(super) carried: Vec<ValueId>,
+    pub(super) carried: Vec<ResultBinding<Type<TypeName>>>,
 }
 
 /// Emit a real loop via `build_loop_skeleton`, invoking `emit_body` in the
@@ -44,7 +44,7 @@ where
         &mut IdSource<EffectToken>,
         BlockId,
         ValueId,
-        &[ValueId],
+        &[ResultBinding<Type<TypeName>>],
     ) -> Result<LoopBody, String>,
 {
     let mut exit_bindings = Vec::new();
@@ -64,6 +64,7 @@ where
         }
     }
     let exit_carried = exit_bindings.iter().map(|(_, index)| *index).collect::<Vec<_>>();
+    let carried = carried.iter().map(|(ty, value)| value_binding(graph, ty, *value)).collect::<Vec<_>>();
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let handles = replace_effect_with_counted_loop(
         graph,
@@ -71,22 +72,28 @@ where
             block: bid,
             index: idx_in_block,
         },
-        carried,
+        &carried,
         &exit_carried,
+        next_effect,
         |graph| emit_length(graph, len_input.0, &len_input.1, &i32_ty),
-        |graph, exit, value| {
+        |graph, exit, replacement| {
             let binding = exit_bindings[exit].0;
-            let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
-            let replacement = bind_by_value_result(graph, &abi, value);
-            rebind_physical_result(graph, &binding.result, &replacement)
+            rebind_physical_result(graph, &binding.result, replacement)
         },
     )?;
-    let body = emit_body(graph, next_effect, handles.body, handles.index, &handles.carried)?;
+    let carried =
+        handles.carried.bindings().iter().map(|binding| binding.result().clone()).collect::<Vec<_>>();
+    let body = emit_body(graph, next_effect, handles.body, handles.index, &carried)?;
     debug_assert_eq!(body.carried.len(), carried.len());
     let next_i_nid = increment(graph, handles.index);
-    let mut args = body.carried;
-    args.push(next_i_nid);
-    finish_counted_loop_iteration(graph, body.tail, handles.header, args);
+    finish_counted_loop_iteration(
+        graph,
+        body.tail,
+        &handles.carried,
+        &body.carried,
+        next_i_nid,
+        next_effect,
+    )?;
     let _replaced_effect = handles.effect;
     Ok(handles.continuation)
 }
@@ -111,7 +118,7 @@ where
         &mut IdSource<EffectToken>,
         BlockId,
         ValueId,
-        &[ValueId],
+        &[ResultBinding<Type<TypeName>>],
     ) -> Result<LoopBody, String>,
 {
     if allow_unroll {
@@ -161,7 +168,7 @@ where
         &mut IdSource<EffectToken>,
         BlockId,
         ValueId,
-        &[ValueId],
+        &[ResultBinding<Type<TypeName>>],
     ) -> Result<LoopBody, String>,
 {
     const UNROLL_THRESHOLD: usize = 16;
@@ -193,18 +200,19 @@ where
         },
     )?;
 
-    let mut carried_nids: Vec<ValueId> = carried.iter().map(|(_, init)| *init).collect();
+    let mut carried_results =
+        carried.iter().map(|(ty, value)| value_binding(graph, ty, *value)).collect::<Vec<_>>();
     let mut current = bid;
     for i in 0..n {
         let idx_nid = graph.intern_pure(PureOp::Int(i.to_string()), smallvec![], i32_ty.clone(), None);
-        let body = emit_body(graph, next_effect, current, idx_nid, &carried_nids)?;
+        let body = emit_body(graph, next_effect, current, idx_nid, &carried_results)?;
         debug_assert_eq!(body.carried.len(), carried.len());
-        carried_nids = body.carried;
+        carried_results = body.carried;
         current = body.tail;
     }
 
     for binding in results {
-        bind_unrolled_result(graph, binding, &carried_nids)?;
+        bind_unrolled_result(graph, binding, &carried_results)?;
     }
 
     restore_inline_effect_continuation(graph, current, continuation);
@@ -226,13 +234,11 @@ pub(super) enum LoopResultSource {
 fn bind_unrolled_result(
     graph: &mut EGraph<Physical>,
     binding: &LoopResultBinding,
-    carried: &[ValueId],
+    carried: &[ResultBinding<Type<TypeName>>],
 ) -> Result<(), String> {
     match &binding.source {
         LoopResultSource::Carried(index) => {
-            let abi = by_value_function_result::<WynLanguage>(binding.result.ty().clone());
-            let replacement = bind_by_value_result(graph, &abi, carried[*index]);
-            rebind_physical_result(graph, &binding.result, &replacement)?;
+            rebind_physical_result(graph, &binding.result, &carried[*index])?;
         }
         LoopResultSource::ConstantFalse => {
             let result = binding

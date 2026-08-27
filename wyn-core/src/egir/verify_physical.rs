@@ -172,6 +172,7 @@ fn graph(
         .skeleton
         .verify_branch_arities()
         .map_err(|error| format!("physical body `{owner}` has invalid control flow: {error}"))?;
+    check_graph_flow(graph, owner)?;
     for node in graph.values().values() {
         physical_type(node.ty(), owner)?;
         if matches!(
@@ -223,6 +224,20 @@ fn graph(
         graph
             .verify_call_boundary(site, &boundary.0, &boundary.1, boundary.2)
             .map_err(|error| format!("physical body `{owner}`: {error}"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn check_graph_flow(graph: &EGraph<Physical>, owner: &str) -> Result<(), String> {
+    for (block, contents) in &graph.skeleton.blocks {
+        for (slot, parameter) in contents.params.iter().enumerate() {
+            let ty = graph.value(parameter.value()).ty();
+            if super::physical_flow::type_contains_materialized_flow(ty) {
+                return Err(format!(
+                    "physical body `{owner}` has materialized block parameter {slot} in {block:?}: {ty:?}"
+                ));
+            }
+        }
     }
     Ok(())
 }

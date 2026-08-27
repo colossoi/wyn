@@ -581,7 +581,7 @@ fn rewrite_node_types<P: Family>(graph: &mut EGraph<P>, mut rewrite: impl FnMut(
     }
 }
 
-fn physicalize_soac(
+pub(crate) fn physicalize_soac(
     soac: Soac<Scheduled>,
     nodes: &LookupMap<ValueId, ValueId>,
     places: &LookupMap<super::ir::PlaceId, super::ir::PlaceId>,
@@ -677,6 +677,7 @@ fn physicalize_soac(
 pub(crate) fn physicalize_graph_resources(
     graph: EGraph<Scheduled>,
     bindings: &PhysicalResourceTable,
+    effect_ids: &mut IdSource<super::types::EffectToken>,
 ) -> Result<
     (
         EGraph<Physical>,
@@ -685,13 +686,8 @@ pub(crate) fn physicalize_graph_resources(
     ),
     String,
 > {
-    let (mut graph, node_map, block_map) = graph.try_map_resources_and_phase(
-        |reference| {
-            let resource = reference.0;
-            Ok::<_, String>(bindings.binding(resource))
-        },
-        |id, soac, nodes, places| physicalize_soac(soac, nodes, places, bindings).map(|soac| (id, soac)),
-    )?;
+    let (mut graph, node_map, block_map) =
+        super::physical_flow::construct_physical_graph(graph, bindings, effect_ids)?;
     let pure_nodes = graph.nodes.keys().collect::<Vec<_>>();
     for node in pure_nodes {
         let resource_len = match graph.nodes.get(node).map(|node| &node.kind) {
@@ -1629,7 +1625,7 @@ fn physicalize_function(
         abi: _,
     } = function;
     let (graph, _) = super::parallelize::prepare::graph(graph, serial)?;
-    let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
+    let (graph, _, _) = physicalize_graph_resources(graph, resources, effect_ids)?;
     let params = params.map(
         |resource| resources.binding(resource.0),
         |mut ty| {
@@ -1663,6 +1659,7 @@ fn physicalize_function(
 fn physicalize_constant(
     constant: AllocatedConstantDef,
     resources: &PhysicalResourceTable,
+    effect_ids: &mut IdSource<super::types::EffectToken>,
 ) -> Result<ConstantDef<Physical>, String> {
     let ConstantDef {
         id,
@@ -1672,7 +1669,7 @@ fn physicalize_constant(
         graph,
     } = constant;
     let (graph, _) = super::parallelize::prepare::graph(graph, false)?;
-    let (graph, _, _) = physicalize_graph_resources(graph, resources)?;
+    let (graph, _, _) = physicalize_graph_resources(graph, resources, effect_ids)?;
     physicalize_type_resources(&mut return_ty, resources);
     Ok(ConstantDef {
         id,
@@ -1862,7 +1859,7 @@ fn physicalize_entry(
         result,
         graph,
     } = entry.into_inner();
-    let (mut graph, nodes, blocks) = physicalize_graph_resources(graph, resources)?;
+    let (mut graph, nodes, blocks) = physicalize_graph_resources(graph, resources, effect_ids)?;
     let inputs = inputs
         .into_iter()
         .map(|mut input| {
@@ -2022,7 +2019,7 @@ pub(in crate::egir) fn physicalize_program(
         .collect::<Result<Vec<_>, _>>()?;
     let mut constants = constants
         .into_iter()
-        .map(|constant| physicalize_constant(constant, physical_resources))
+        .map(|constant| physicalize_constant(constant, physical_resources, &mut global_context.effect_ids))
         .collect::<Result<Vec<_>, _>>()?;
     super::physical_call_abi::reconcile_program_calls(
         &mut functions,

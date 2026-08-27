@@ -28,10 +28,8 @@ use crate::LoweringProfile;
 use polytype::Type;
 use wyn_base::IdSource;
 
-/// Compile source through the pipeline to just-past `expand_soacs`,
-/// returning the EGraph for the (single) entry point so tests can
-/// introspect node structure.
-fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
+/// Compile source through construction of target-planned Physical EGIR.
+fn compile_to_planned(input: &str) -> egir::parallelize::Planned {
     let program = compile_thru_tlc(input).expect("compile_thru_tlc");
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program).expect("to_egraph");
@@ -39,7 +37,11 @@ fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
     let program = egir::optimize_semantic_operations(program);
     let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
-    let program = egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule");
+    egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule")
+}
+
+fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
+    let program = compile_to_planned(input);
     let program = egir::expand_soacs(program).expect("physical SOAC expansion");
     let inner = &program;
     inner
@@ -49,6 +51,38 @@ fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
         .expect("test expects an extracted fragment stage")
         .graph
         .clone()
+}
+
+#[test]
+fn source_loop_materialized_state_is_lowered_during_physical_construction() {
+    let program = compile_to_planned(
+        r#"
+entry carry(events: []i32) [1]i32 =
+  loop last = [0] for k < 32 do
+    [events[k]]
+"#,
+    );
+    let graph = &program
+        .entry_points
+        .iter()
+        .find(|entry| entry.name.contains("carry"))
+        .expect("planned source entry")
+        .graph;
+
+    assert!(graph.skeleton.blocks.values().all(|block| {
+        block
+            .params
+            .iter()
+            .all(|parameter| !WynLanguage::contains_materialized_flow(graph.value(parameter.value()).ty()))
+    }));
+    assert!(graph.skeleton.blocks.values().any(|block| {
+        block.side_effects.iter().any(|effect| {
+            matches!(
+                effect.kind,
+                SideEffectKind::<Physical>::Effect(EffectOp::Alloca { .. })
+            )
+        })
+    }));
 }
 
 /// Collect all `_w_intrinsic_array_with_inplace` nodes in the graph.

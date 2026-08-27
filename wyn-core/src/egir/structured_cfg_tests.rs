@@ -1,5 +1,5 @@
 use super::*;
-use crate::egir::types::{EffectOp, EffectToken, Physical, SideEffectKind};
+use crate::egir::types::{EffectOp, EffectToken, Language, Physical, SideEffectKind, WynLanguage};
 use crate::ssa::types::ConstantValue;
 use smallvec::smallvec;
 
@@ -71,6 +71,8 @@ fn counted_effect_replacement_keeps_continuation_and_control_in_sync() {
     let initial = graph.intern_constant(ConstantValue::I32(7), i32_ty.clone());
     let trip_count = graph.intern_constant(ConstantValue::I32(4), i32_ty.clone());
     let mut exit = None;
+    let mut effect_ids = IdSource::new();
+    let carried = graph.value_result(initial);
 
     let loop_cfg = replace_effect_with_counted_loop(
         &mut graph,
@@ -78,11 +80,12 @@ fn counted_effect_replacement_keeps_continuation_and_control_in_sync() {
             block: entry,
             index: 0,
         },
-        &[(i32_ty, initial)],
+        &[carried],
         &[0],
+        &mut effect_ids,
         |_| trip_count,
-        |_, _, value| {
-            exit = Some(value);
+        |_, _, binding| {
+            exit = binding.single_value();
             Ok(())
         },
     )
@@ -95,16 +98,68 @@ fn counted_effect_replacement_keeps_continuation_and_control_in_sync() {
         SkeletonTerminator::Return(None)
     ));
     assert!(matches!(
-        graph.skeleton.blocks[loop_cfg.header].control_header,
+        graph.skeleton.blocks[loop_cfg.carried.block()].control_header,
         Some(ControlHeader::Loop { merge, continue_block })
             if merge == loop_cfg.continuation && continue_block == loop_cfg.body
     ));
     assert!(matches!(
-        graph.skeleton.blocks[loop_cfg.header].term,
+        graph.skeleton.blocks[loop_cfg.carried.block()].term,
         SkeletonTerminator::CondBranch { then_target, else_target, .. }
             if then_target == loop_cfg.body && else_target == loop_cfg.continuation
     ));
     graph.skeleton.verify_branch_arities().unwrap();
+}
+
+#[test]
+fn counted_loop_constructs_materialized_state_in_one_fixed_place() {
+    let mut graph = EGraph::<Physical>::new();
+    let entry = graph.skeleton.entry;
+    graph.skeleton.blocks[entry].side_effects = vec![effect(0)];
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let array_ty = Type::Constructed(
+        TypeName::Array,
+        vec![
+            i32_ty.clone(),
+            crate::types::array_variant_composite(),
+            Type::Constructed(TypeName::Size(1), vec![]),
+            crate::types::no_buffer(),
+        ],
+    );
+    let zero = graph.intern_constant(ConstantValue::I32(0), i32_ty.clone());
+    let initial = graph.intern_pure(PureOp::ArrayLit(1), smallvec![zero], array_ty, None);
+    let trip_count = graph.intern_constant(ConstantValue::I32(4), i32_ty);
+    let carried = graph.value_result(initial);
+    let mut exit = None;
+    let mut effect_ids = IdSource::new();
+
+    let loop_cfg = replace_effect_with_counted_loop(
+        &mut graph,
+        SideEffectSite {
+            block: entry,
+            index: 0,
+        },
+        &[carried],
+        &[0],
+        &mut effect_ids,
+        |_| trip_count,
+        |_, _, binding| {
+            exit = Some(binding.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let carried = loop_cfg.carried.bindings()[0].result();
+    let exit = exit.unwrap();
+    assert_eq!(carried.places(), exit.places());
+    assert_eq!(carried.places().len(), 1);
+    assert!(graph.skeleton.blocks.values().all(|block| {
+        block
+            .params
+            .iter()
+            .all(|parameter| !WynLanguage::contains_materialized_flow(graph.value(parameter.value()).ty()))
+    }));
 }
 
 #[test]

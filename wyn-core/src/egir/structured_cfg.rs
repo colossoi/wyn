@@ -9,9 +9,14 @@ use crate::flow::{BlockId, ControlHeader};
 use crate::op;
 use polytype::Type;
 use smallvec::smallvec;
+use wyn_base::IdSource;
 
 use super::ir::Family;
-use super::types::{EGraph, FlowValueId, PureOp, SideEffect, SideEffectSite, SkeletonTerminator, ValueId};
+use super::physical_flow::PhysicalMerge;
+use super::types::{
+    EGraph, EffectToken, FlowValueId, Physical, PureOp, ResultBinding, SideEffect, SideEffectSite,
+    SkeletonTerminator, ValueId,
+};
 
 /// Install a guarded selection and its structured merge annotation as one
 /// operation.
@@ -131,30 +136,34 @@ pub(crate) fn finish_guarded_selection<P: Family>(
 }
 
 /// Handles exposed to a pass emitting one counted-loop iteration.
-pub(crate) struct CountedLoop<P: Family> {
-    pub(crate) effect: SideEffect<P>,
-    pub(crate) header: BlockId,
+pub(crate) struct CountedLoop {
+    pub(crate) effect: SideEffect<Physical>,
     pub(crate) body: BlockId,
     pub(crate) continuation: BlockId,
-    pub(crate) carried: Vec<ValueId>,
+    pub(crate) carried: PhysicalMerge,
     pub(crate) index: ValueId,
 }
 
-/// Replace an effect with an i32 counted loop carrying typed values.
+/// Replace an effect with an i32 counted loop carrying structured physical
+/// result bindings.
 ///
 /// `exit_carried` selects which carried values become continuation block
-/// parameters. `bind_exit` lets the pass bind those values to its logical
+/// parameters or fixed places. `bind_exit` lets the pass bind those physical
 /// results without taking ownership of any CFG surgery. `emit_trip_count`
-/// remains pass policy and is invoked at the same point as the prior local
-/// loop builder.
-pub(crate) fn replace_effect_with_counted_loop<P: Family>(
-    graph: &mut EGraph<P>,
+/// remains pass policy.
+pub(crate) fn replace_effect_with_counted_loop(
+    graph: &mut EGraph<Physical>,
     site: SideEffectSite,
-    carried: &[(Type<TypeName>, ValueId)],
+    carried: &[ResultBinding<Type<TypeName>>],
     exit_carried: &[usize],
-    emit_trip_count: impl FnOnce(&mut EGraph<P>) -> ValueId,
-    mut bind_exit: impl FnMut(&mut EGraph<P>, usize, ValueId) -> Result<(), String>,
-) -> Result<CountedLoop<P>, String> {
+    effect_ids: &mut IdSource<EffectToken>,
+    emit_trip_count: impl FnOnce(&mut EGraph<Physical>) -> ValueId,
+    mut bind_exit: impl FnMut(
+        &mut EGraph<Physical>,
+        usize,
+        &ResultBinding<Type<TypeName>>,
+    ) -> Result<(), String>,
+) -> Result<CountedLoop, String> {
     for index in exit_carried {
         if *index >= carried.len() {
             return Err(format!(
@@ -167,28 +176,32 @@ pub(crate) fn replace_effect_with_counted_loop<P: Family>(
     let replacement = replace_effect_with_continuation(graph, site)?;
     let effect = replacement.effect;
     let continuation = replacement.continuation;
-    let mut continuation_args = Vec::with_capacity(exit_carried.len());
-    for (exit, index) in exit_carried.iter().copied().enumerate() {
-        let value = graph.add_block_param(continuation, carried[index].0.clone());
-        bind_exit(graph, exit, value)?;
-        continuation_args.push(index);
-    }
-
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
-    let mut carried_values = Vec::with_capacity(carried.len());
-    for (ty, _) in carried {
-        carried_values.push(graph.add_block_param(header, ty.clone()));
+    let carried_state = PhysicalMerge::new(
+        graph,
+        header,
+        carried.iter().map(|binding| {
+            super::types::by_value_function_result::<super::types::WynLanguage>(binding.ty().clone())
+        }),
+        effect_ids,
+    )?;
+    let exit_sources =
+        exit_carried.iter().map(|index| &carried_state.bindings()[*index]).collect::<Vec<_>>();
+    let exit_state = PhysicalMerge::reusing_places(graph, continuation, exit_sources, effect_ids)?;
+    for (exit, binding) in exit_state.bindings().iter().enumerate() {
+        bind_exit(graph, exit, binding.result())?;
     }
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
     let index = graph.add_block_param(header, i32_ty.clone());
 
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
-    let mut initial = carried.iter().map(|(_, value)| *value).collect::<Vec<_>>();
-    initial.push(zero);
-    graph.skeleton.blocks[site.block].term = SkeletonTerminator::Branch {
+    let (initial_tail, mut initial_args) =
+        carried_state.connect_results(graph, site.block, carried, effect_ids)?;
+    initial_args.push(graph.admit_flow_value(zero));
+    graph.skeleton.blocks[initial_tail].term = SkeletonTerminator::Branch {
         target: header,
-        args: graph.admit_flow_values(initial),
+        args: initial_args,
     };
 
     let trip_count = emit_trip_count(graph);
@@ -198,31 +211,41 @@ pub(crate) fn replace_effect_with_counted_loop<P: Family>(
         Type::Constructed(TypeName::Bool, vec![]),
         None,
     );
-    let merge_args = graph
-        .admit_flow_values(continuation_args.iter().map(|carried_index| carried_values[*carried_index]));
+    let exit_values = exit_carried
+        .iter()
+        .map(|index| carried_state.bindings()[*index].result().clone())
+        .collect::<Vec<_>>();
+    let (exit_tail, merge_args) = exit_state.connect_results(graph, header, &exit_values, effect_ids)?;
+    if exit_tail != header {
+        return Err("counted-loop exit unexpectedly required a place transfer".into());
+    }
     install_loop(graph, header, condition, body, continuation, merge_args, body);
 
     Ok(CountedLoop {
         effect,
-        header,
         body,
         continuation,
-        carried: carried_values,
+        carried: carried_state,
         index,
     })
 }
 
 /// Wire the emitted iteration tail back to a counted-loop header.
-pub(crate) fn finish_counted_loop_iteration<P: Family>(
-    graph: &mut EGraph<P>,
+pub(crate) fn finish_counted_loop_iteration(
+    graph: &mut EGraph<Physical>,
     tail: BlockId,
-    header: BlockId,
-    carried: impl IntoIterator<Item = ValueId>,
-) {
+    state: &PhysicalMerge,
+    carried: &[ResultBinding<Type<TypeName>>],
+    index: ValueId,
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<(), String> {
+    let (tail, mut arguments) = state.connect_results(graph, tail, carried, effect_ids)?;
+    arguments.push(graph.admit_flow_value(index));
     graph.skeleton.blocks[tail].term = SkeletonTerminator::Branch {
-        target: header,
-        args: graph.admit_flow_values(carried),
+        target: state.block(),
+        args: arguments,
     };
+    Ok(())
 }
 
 /// Original executable continuation detached while an effect is replaced by

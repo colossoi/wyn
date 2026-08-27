@@ -71,9 +71,9 @@ new_key_type! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReturnSlotId(usize);
 
-/// A value that has been admitted to CFG-carried state. Materialized
-/// aggregates can occur before physical flow normalization, which replaces
-/// them with scalar or view-backed state before lowering continues.
+/// A value that has been admitted to CFG-carried state. Logical families may
+/// carry materialized aggregates; Physical EGIR admits only scalar or
+/// value-sized view channels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlowValueId(ValueId);
 
@@ -1196,6 +1196,12 @@ pub trait Language: Clone + std::fmt::Debug + Eq + std::hash::Hash {
     fn is_view(ty: &Self::Ty) -> bool;
     fn product_fields(ty: &Self::Ty) -> Option<&[Self::Ty]>;
 
+    fn contains_materialized_flow(ty: &Self::Ty) -> bool {
+        Self::is_materialized_aggregate(ty)
+            || Self::product_fields(ty)
+                .is_some_and(|fields| fields.iter().any(Self::contains_materialized_flow))
+    }
+
     fn view_argument_matches(parameter: &Self::Ty, argument: &Self::Ty) -> bool {
         parameter == argument
     }
@@ -1928,6 +1934,11 @@ pub trait Family: Clone + std::fmt::Debug {
     type Resource: GraphResource;
     type Soac: Clone + std::fmt::Debug;
 
+    /// Whether this family may carry logical materialized aggregates through
+    /// CFG parameters. Physical EGIR overrides this because addressable
+    /// aggregates must be represented by stable places.
+    const ALLOWS_MATERIALIZED_FLOW: bool = true;
+
     fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId);
 }
 
@@ -2092,7 +2103,8 @@ impl<Ty> flow::Terminator<ValueId, FlowValueId, ResultBinding<Ty>> {
 /// A block in the skeleton CFG.
 #[derive(Clone, Debug)]
 pub struct SkeletonBlock<P: Family, Lang: Language> {
-    /// Materialized aggregates have no representation in this sequence.
+    /// Physical blocks admit no materialized aggregates in this sequence;
+    /// logical families may retain them until Physical construction.
     pub params: Vec<FlowValueId>,
     /// Explicitly located instructions, in order. Pure calls are anchored here
     /// even though they do not participate in effect ordering.
@@ -2609,6 +2621,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     pub fn admit_flow_value(&self, id: ValueId) -> FlowValueId {
         let id = self.canonical_value(id);
+        assert!(
+            P::ALLOWS_MATERIALIZED_FLOW || !Lang::contains_materialized_flow(self.value(id).ty()),
+            "physical CFG flow cannot carry materialized value {id:?} of type {:?}",
+            self.value(id).ty()
+        );
         FlowValueId(id)
     }
 
@@ -3623,6 +3640,10 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
 
     /// Append a parameter to a block and allocate its corresponding node.
     pub fn add_block_param(&mut self, block: BlockId, ty: Lang::Ty) -> ValueId {
+        assert!(
+            P::ALLOWS_MATERIALIZED_FLOW || !Lang::contains_materialized_flow(&ty),
+            "physical block {block:?} cannot have materialized parameter type {ty:?}"
+        );
         let index = self.skeleton.blocks[block].params.len();
         let id = self.insert_node(ValueKind::BlockParam { block, index }, ty, None);
         let flow = self.admit_flow_value(id);

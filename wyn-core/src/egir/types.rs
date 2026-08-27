@@ -13,7 +13,7 @@ use crate::ast::TypeName;
 use crate::flow::{BlockId, ControlHeader};
 use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
-use crate::LookupMap;
+use crate::{LookupMap, LookupSet};
 
 #[cfg(test)]
 use smallvec::SmallVec;
@@ -424,6 +424,8 @@ impl Family for Physical {
     type Resource = BindingRef;
     type Soac = SoacEffect<Self>;
 
+    const ALLOWS_MATERIALIZED_FLOW: bool = false;
+
     fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
         match &mut soac.1 {
             Soac::Screma(op) => {
@@ -469,7 +471,10 @@ impl WynSoacPhase for Physical {
     type HistState = hist::ScheduledState<BindingRef>;
 }
 
-fn remap_control_header(header: ControlHeader, blocks: &LookupMap<BlockId, BlockId>) -> ControlHeader {
+pub(crate) fn remap_control_header(
+    header: ControlHeader,
+    blocks: &LookupMap<BlockId, BlockId>,
+) -> ControlHeader {
     match header {
         ControlHeader::Loop {
             merge,
@@ -481,6 +486,204 @@ fn remap_control_header(header: ControlHeader, blocks: &LookupMap<BlockId, Block
         ControlHeader::Selection { merge } => ControlHeader::Selection {
             merge: blocks[&merge],
         },
+    }
+}
+
+/// Shared state for rebuilding a graph across a phase/resource boundary.
+///
+/// Phase-specific CFG lowering may bind selected source values before
+/// [`Self::map_graph_data`] runs. Ordinary nodes, places, calls, effects, and
+/// result bindings then use the same remapping implementation as the default
+/// one-to-one phase conversion.
+pub(crate) struct GraphPhaseRemap<P: WynSoacPhase, Q: WynSoacPhase> {
+    pub(in crate::egir) source: super::ir::EGraphParts<P, WynLanguage>,
+    pub(crate) target: EGraph<Q>,
+    pub(crate) nodes: LookupMap<ValueId, ValueId>,
+    pub(crate) places: LookupMap<PlaceId, PlaceId>,
+    pub(crate) calls: LookupMap<CallSiteId, CallSiteId>,
+    pub(crate) blocks: LookupMap<BlockId, BlockId>,
+}
+
+impl<P: WynSoacPhase, Q: WynSoacPhase> GraphPhaseRemap<P, Q> {
+    pub(crate) fn new(source: EGraph<P>) -> Self {
+        let source = source.into_parts();
+        let mut target = EGraph::<Q>::new();
+        let mut blocks = LookupMap::new();
+        blocks.insert(source.skeleton.entry, target.skeleton.entry);
+        for block in source.skeleton.blocks.keys() {
+            if block != source.skeleton.entry {
+                blocks.insert(block, target.skeleton.create_block());
+            }
+        }
+        Self {
+            source,
+            target,
+            nodes: LookupMap::new(),
+            places: LookupMap::new(),
+            calls: LookupMap::new(),
+            blocks,
+        }
+    }
+
+    pub(crate) fn node(&self, source: ValueId) -> ValueId {
+        self.nodes[&source]
+    }
+
+    pub(crate) fn block(&self, source: BlockId) -> BlockId {
+        self.blocks[&source]
+    }
+
+    pub(crate) fn map_graph_data<E>(
+        &mut self,
+        map_resource: &mut impl FnMut(P::Resource) -> Result<Q::Resource, E>,
+    ) -> Result<(), E> {
+        let substitutions = self.nodes.keys().copied().collect::<LookupSet<_>>();
+        for (source, node) in &self.source.nodes {
+            if self.nodes.contains_key(&source) {
+                continue;
+            }
+            let target = self.target.nodes.insert(super::ir::Value {
+                kind: super::ir::ValueKind::Constant(ConstantValue::Bool(false)),
+                ty: node.ty.clone(),
+                span: node.span,
+                alias: None,
+                result_origins: Vec::new(),
+            });
+            self.nodes.insert(source, target);
+        }
+
+        for (source, place) in &self.source.places {
+            let place = place.clone().try_map(
+                &mut *map_resource,
+                |value| Ok::<_, E>(self.nodes[&value]),
+                |place| Ok::<_, E>(self.places[&place]),
+            )?;
+            self.places.insert(source, self.target.places.insert(place));
+        }
+
+        for (source, call) in &self.source.calls {
+            let call = call.clone().try_remap_bindings(
+                |value| Ok::<_, E>(self.nodes[&value]),
+                |place| Ok::<_, E>(self.places[&place]),
+            )?;
+            self.calls.insert(source, self.target.calls.insert(call));
+        }
+
+        for (source, node) in &self.source.nodes {
+            if substitutions.contains(&source) {
+                continue;
+            }
+            let kind = match node.kind.clone() {
+                super::ir::ValueKind::Pure { op, operands } => super::ir::ValueKind::Pure {
+                    op: op.try_map_resource(&mut *map_resource)?,
+                    operands: operands.into_iter().map(|node| self.nodes[&node]).collect(),
+                },
+                super::ir::ValueKind::Union { left, right } => super::ir::ValueKind::Union {
+                    left: self.nodes[&left],
+                    right: self.nodes[&right],
+                },
+                super::ir::ValueKind::FuncParam { parameter } => {
+                    super::ir::ValueKind::FuncParam { parameter }
+                }
+                super::ir::ValueKind::BlockParam { block, index } => super::ir::ValueKind::BlockParam {
+                    block: self.blocks[&block],
+                    index,
+                },
+                super::ir::ValueKind::CallResult { call, slot } => super::ir::ValueKind::CallResult {
+                    call: self.calls[&call],
+                    slot,
+                },
+                super::ir::ValueKind::PlaceLength { place } => super::ir::ValueKind::PlaceLength {
+                    place: self.places[&place],
+                },
+                super::ir::ValueKind::PlaceView { place } => super::ir::ValueKind::PlaceView {
+                    place: self.places[&place],
+                },
+                super::ir::ValueKind::Constant(value) => super::ir::ValueKind::Constant(value),
+                super::ir::ValueKind::SideEffectResult => super::ir::ValueKind::SideEffectResult,
+            };
+            self.target.nodes[self.nodes[&source]] = super::ir::Value {
+                kind,
+                ty: node.ty.clone(),
+                span: node.span,
+                alias: node.alias.map(|alias| self.nodes[&alias]),
+                result_origins: node
+                    .result_origins
+                    .iter()
+                    .cloned()
+                    .map(|origin| self.map_result(origin))
+                    .collect::<Result<_, E>>()?,
+            };
+        }
+        let target = std::mem::replace(&mut self.target, EGraph::new());
+        self.target = EGraph::from_parts(target.into_parts());
+        Ok(())
+    }
+
+    pub(crate) fn map_result<E>(
+        &self,
+        result: ResultBinding<Type<TypeName>>,
+    ) -> Result<ResultBinding<Type<TypeName>>, E> {
+        result.try_map(
+            &mut |ty| Ok::<_, E>(ty),
+            &mut |value| Ok::<_, E>(self.nodes[&value]),
+            &mut |place| Ok::<_, E>(self.places[&place]),
+        )
+    }
+
+    pub(crate) fn map_effect<E>(
+        &self,
+        effect: SideEffect<P>,
+        map_resource: &mut impl FnMut(P::Resource) -> Result<Q::Resource, E>,
+        map_soac: &mut impl FnMut(
+            P::SoacId,
+            Soac<P>,
+            &LookupMap<ValueId, ValueId>,
+            &LookupMap<PlaceId, PlaceId>,
+        ) -> Result<(Q::SoacId, Soac<Q>), E>,
+    ) -> Result<SideEffect<Q>, E> {
+        let kind = match effect.kind {
+            super::ir::SideEffectKind::Effect(effect) => {
+                super::ir::SideEffectKind::Effect(effect.try_map(
+                    &mut *map_resource,
+                    |call| Ok::<_, E>(self.calls[&call]),
+                    |place| Ok::<_, E>(self.places[&place]),
+                )?)
+            }
+            super::ir::SideEffectKind::Soac(SoacEffect(id, soac)) => {
+                let (id, soac) = map_soac(id, soac, &self.nodes, &self.places)?;
+                super::ir::SideEffectKind::Soac(SoacEffect(id, soac))
+            }
+        };
+        let operands = effect
+            .operands
+            .into_iter()
+            .map(|operand| {
+                operand.try_map(
+                    |value| Ok::<_, E>(self.nodes[&value]),
+                    |view| view.try_remap(|value| Ok::<_, E>(self.nodes[&value])),
+                    |place| Ok::<_, E>(self.places[&place]),
+                )
+            })
+            .collect::<Result<_, E>>()?;
+        let result = effect.result.map(|result| self.map_result(result)).transpose()?;
+        Ok(SideEffect {
+            kind,
+            operands,
+            result,
+            effects: effect.effects,
+            span: effect.span,
+        })
+    }
+
+    pub(crate) fn finish(
+        self,
+    ) -> (
+        EGraph<Q>,
+        LookupMap<ValueId, ValueId>,
+        LookupMap<BlockId, BlockId>,
+    ) {
+        (self.target, self.nodes, self.blocks)
     }
 }
 
@@ -592,187 +795,37 @@ impl<P: Family> super::ir::EGraph<P, WynLanguage> {
         P: WynSoacPhase,
         Q: WynSoacPhase,
     {
-        let super::ir::EGraphParts {
-            nodes,
-            places,
-            calls,
-            skeleton,
-        } = self.into_parts();
-        let source_entry = skeleton.entry;
-        let source_blocks = skeleton.blocks.into_iter().collect::<Vec<_>>();
-        let mut blocks = SlotMap::with_key();
-        let mut block_map = LookupMap::new();
-        for (source, _) in &source_blocks {
-            block_map.insert(
-                *source,
-                blocks.insert(super::ir::SkeletonBlock::<Q, WynLanguage>::new()),
-            );
-        }
-
-        let source_nodes = nodes.into_iter().collect::<Vec<_>>();
-        let mut nodes = SlotMap::with_key();
-        let mut node_map = LookupMap::new();
-        for (source, node) in &source_nodes {
-            node_map.insert(
-                *source,
-                nodes.insert(super::ir::Value {
-                    kind: super::ir::ValueKind::<Q::Resource, WynLanguage>::Constant(ConstantValue::Bool(
-                        false,
-                    )),
-                    ty: node.ty.clone(),
-                    span: node.span,
-                    alias: None,
-                    result_origins: Vec::new(),
-                }),
-            );
-        }
-
-        let mut mapped_places = SlotMap::with_key();
-        let mut place_map = LookupMap::new();
-        for (source, place) in places {
-            let place = place.try_map(
-                &mut map_resource,
-                |value| Ok::<_, E>(node_map[&value]),
-                |place| Ok::<_, E>(place_map[&place]),
-            )?;
-            place_map.insert(source, mapped_places.insert(place));
-        }
-
-        let mut mapped_calls = SlotMap::with_key();
-        let mut call_map = LookupMap::new();
-        for (source, call) in calls {
-            let call = call.try_remap_bindings(
-                |value| Ok::<_, E>(node_map[&value]),
-                |place| Ok::<_, E>(place_map[&place]),
-            )?;
-            call_map.insert(source, mapped_calls.insert(call));
-        }
-
-        for (source, node) in source_nodes {
-            let kind = match node.kind {
-                super::ir::ValueKind::Pure { op, operands } => super::ir::ValueKind::Pure {
-                    op: op.try_map_resource(&mut map_resource)?,
-                    operands: operands.into_iter().map(|node| node_map[&node]).collect(),
-                },
-                super::ir::ValueKind::Union { left, right } => super::ir::ValueKind::Union {
-                    left: node_map[&left],
-                    right: node_map[&right],
-                },
-                super::ir::ValueKind::FuncParam { parameter } => {
-                    super::ir::ValueKind::FuncParam { parameter }
-                }
-                super::ir::ValueKind::BlockParam { block, index } => super::ir::ValueKind::BlockParam {
-                    block: block_map[&block],
-                    index,
-                },
-                super::ir::ValueKind::CallResult { call, slot } => super::ir::ValueKind::CallResult {
-                    call: call_map[&call],
-                    slot,
-                },
-                super::ir::ValueKind::PlaceLength { place } => super::ir::ValueKind::PlaceLength {
-                    place: place_map[&place],
-                },
-                super::ir::ValueKind::PlaceView { place } => super::ir::ValueKind::PlaceView {
-                    place: place_map[&place],
-                },
-                super::ir::ValueKind::Constant(value) => super::ir::ValueKind::Constant(value),
-                super::ir::ValueKind::SideEffectResult => super::ir::ValueKind::SideEffectResult,
-            };
-            nodes[node_map[&source]] = super::ir::Value {
-                kind,
-                ty: node.ty,
-                span: node.span,
-                alias: node.alias.map(|alias| node_map[&alias]),
-                result_origins: node
-                    .result_origins
-                    .into_iter()
-                    .map(|origin| origin.map(|ty| ty, |value| node_map[&value], |place| place_map[&place]))
-                    .collect(),
-            };
-        }
-
+        let mut remap = GraphPhaseRemap::<P, Q>::new(self);
+        remap.map_graph_data(&mut map_resource)?;
+        let source_blocks =
+            remap.source.skeleton.blocks.iter().map(|(id, block)| (id, block.clone())).collect::<Vec<_>>();
         for (source, block) in source_blocks {
             let side_effects = block
                 .side_effects
                 .into_iter()
-                .map(|effect| {
-                    let kind = match effect.kind {
-                        super::ir::SideEffectKind::Effect(effect) => {
-                            super::ir::SideEffectKind::Effect(effect.try_map(
-                                &mut map_resource,
-                                |call| Ok::<_, E>(call_map[&call]),
-                                |place| Ok::<_, E>(place_map[&place]),
-                            )?)
-                        }
-                        super::ir::SideEffectKind::Soac(SoacEffect(id, soac)) => {
-                            let (id, soac) = map_soac(id, soac, &node_map, &place_map)?;
-                            super::ir::SideEffectKind::Soac(SoacEffect(id, soac))
-                        }
-                    };
-                    let operands = effect
-                        .operands
-                        .into_iter()
-                        .map(|operand| {
-                            operand.try_map(
-                                |value| Ok::<_, E>(node_map[&value]),
-                                |view| view.try_remap(|value| Ok::<_, E>(node_map[&value])),
-                                |place| Ok::<_, E>(place_map[&place]),
-                            )
-                        })
-                        .collect::<Result<_, E>>()?;
-                    let result = effect
-                        .result
-                        .map(|result| {
-                            result.try_map(
-                                &mut |ty| Ok::<_, E>(ty),
-                                &mut |value| Ok::<_, E>(node_map[&value]),
-                                &mut |place| Ok::<_, E>(place_map[&place]),
-                            )
-                        })
-                        .transpose()?;
-                    Ok(super::ir::SideEffect::<Q, WynLanguage> {
-                        kind,
-                        operands,
-                        result,
-                        effects: effect.effects,
-                        span: effect.span,
-                    })
-                })
+                .map(|effect| remap.map_effect(effect, &mut map_resource, &mut map_soac))
                 .collect::<Result<Vec<_>, E>>()?;
             let term = block.term.try_map_parts(
-                |condition| Ok::<_, E>(node_map[&condition]),
-                |argument| argument.try_remap(|value| Ok::<_, E>(node_map[&value])),
-                |result| {
-                    result.try_map(
-                        &mut |ty| Ok::<_, E>(ty),
-                        &mut |value| Ok::<_, E>(node_map[&value]),
-                        &mut |place| Ok::<_, E>(place_map[&place]),
-                    )
-                },
-                |target| Ok::<_, E>(block_map[&target]),
+                |condition| Ok::<_, E>(remap.node(condition)),
+                |argument| argument.try_remap(|value| Ok::<_, E>(remap.node(value))),
+                |result| remap.map_result(result),
+                |target| Ok::<_, E>(remap.block(target)),
             )?;
-            blocks[block_map[&source]] = super::ir::SkeletonBlock {
+            let target_block = remap.block(source);
+            remap.target.skeleton.blocks[target_block] = super::ir::SkeletonBlock {
                 params: block
                     .params
                     .into_iter()
-                    .map(|argument| argument.try_remap(|value| Ok::<_, E>(node_map[&value])))
+                    .map(|argument| argument.try_remap(|value| Ok::<_, E>(remap.node(value))))
                     .collect::<Result<_, E>>()?,
                 side_effects,
                 term,
-                control_header: block.control_header.map(|header| remap_control_header(header, &block_map)),
+                control_header: block
+                    .control_header
+                    .map(|header| remap_control_header(header, &remap.blocks)),
             };
         }
-
-        let graph = super::ir::EGraph::<Q, WynLanguage>::from_parts(super::ir::EGraphParts {
-            nodes,
-            places: mapped_places,
-            calls: mapped_calls,
-            skeleton: super::ir::Skeleton {
-                entry: block_map[&source_entry],
-                blocks,
-            },
-        });
-        Ok((graph, node_map, block_map))
+        Ok(remap.finish())
     }
 }
 

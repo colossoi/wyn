@@ -292,6 +292,7 @@ fn expand_serial_screma(
         next_effect,
         false,
         |graph, next_effect, body, lane, carried_values| {
+            let carried_values = load_result_arguments(graph, body, carried_values, next_effect);
             let input_elements = read_inputs
                 .iter()
                 .map(|(array, array_type, element_type)| {
@@ -390,7 +391,14 @@ fn expand_serial_screma(
             }
             next.extend(new_scans);
             next.extend(new_reductions);
-            Ok(LoopBody { tail, carried: next })
+            let carried = next
+                .into_iter()
+                .map(|value| {
+                    let ty = graph.nodes[value].ty().clone();
+                    value_binding(graph, &ty, value)
+                })
+                .collect();
+            Ok(LoopBody { tail, carried })
         },
     )?;
     for result in place_backed_results {
