@@ -22,8 +22,14 @@ export const passDefinitions = {
   "egir::lift_stage_uniform_values": {
     before: "Semantic optimization fixpoint",
     after: "Stage-uniform values lifted",
-    example: `entry uniform_capture(xs: [4]i32, bias: i32) [4]i32 =
-  map(|x: i32| x + bias * bias, xs)`,
+    example: `def mixed_curve(lane: f32, uniform: f32) f32 =
+  let a = uniform * uniform + 1.0
+  let b = a * uniform + 2.0
+  let c = b * uniform + 3.0
+  let d = c * uniform + 4.0 in
+  lane + d
+entry lift_uniform(points: [64]f32, phase: f32) [64]f32 =
+  map(|point: f32| mixed_curve(point, phase), points)`,
   },
   "egir::allocate_semantic_resources": {
     before: "Stage-uniform semantic EGIR",
