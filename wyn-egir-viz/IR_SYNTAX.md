@@ -343,7 +343,7 @@ RESOURCE $r0: i32 WITH {
 `origin` is `host(...)` or
 `compiler(kind: ..., owner: ..., slot: ...)`. Compiler kinds are `staging`,
 `gather_handoff`, `reduce_partial`, `scan_block_sums`, `scan_block_offsets`,
-`scan_prefixes`, `filter_scratch`, `filter_len_cell`, `filter_flags`,
+`scan_prefixes`, `filter_data`, `filter_len_cell`, `filter_flags`,
 `filter_offsets`, `filter_scan_block_sums`, `filter_scan_block_offsets`,
 `bucket_counts`, `bucket_overflow`, `scalar_handoff`, and
 `multi_consumer_array`.
@@ -396,8 +396,8 @@ therefore includes program-owned `RESOURCE` declarations and entry-local
 Residency planning may also extract a compiler-owned producer stage. Such
 stages use the same body and interface grammar as authored stages and connect
 to their consumers through `PROGRAM WITH { stages: [...], flows: [...] }`.
-Runtime-array residency binds a Filter's backing and stored length to
-`filter_scratch` and `filter_len_cell` resources. This pass does not choose
+Runtime-array residency binds a Filter's capacity backing and stored length to
+`filter_data` and `filter_len_cell` resources. This pass does not choose
 descriptor bindings for compiler resources, a target recipe, dispatch
 geometry, or a physical schedule; those decisions belong to `egir::plan`.
 

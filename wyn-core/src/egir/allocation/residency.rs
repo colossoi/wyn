@@ -390,9 +390,6 @@ fn filter_runtime_array_plan(
         return Ok(None);
     }
     let elem_ty = op.body.output_element_type().clone();
-    ssa::layout::storage_elem_stride(&elem_ty).ok_or_else(|| {
-        format!("runtime-array producer {producer:?} has no legal storage element layout")
-    })?;
     let result_ty = result.ty().clone();
     let projection = GraphProjector::new(&entry.graph)
         .selected_operation_recipe(HashSet::from([source_site]))
@@ -403,8 +400,7 @@ fn filter_runtime_array_plan(
     let projected_result = projection
         .result(result)
         .map_err(|error| format!("runtime-array projection omitted result for {producer:?}: {error}"))?;
-    let size = LogicalSize::for_space(space, &elem_ty)
-        .ok_or_else(|| format!("runtime-array producer {producer:?} has no legal logical storage size"))?;
+    let size = super::filter_capacity_size(producer, space, &elem_ty)?;
     Ok(Some(OperationMaterializationPlan::RuntimeArray {
         entry: entry_index,
         operation: ProjectedOperation {
@@ -1182,14 +1178,14 @@ fn materialize_runtime_array_result(
         producer_storage,
         projection,
     );
-    let storage = super::allocate_filter_storage(
+    let storage = super::bind_filter_storage(
         &mut data.core.resources,
         producer_id,
         elem_ty.clone(),
         size.clone(),
         backing,
         stored_length,
-    );
+    )?;
     let handoff = RuntimeArrayHandoff {
         data: storage.data,
         length: storage.length,

@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
-use crate::egir::program::{LogicalResourceArena, ResourceOrigin};
+use crate::egir::program::LogicalResourceArena;
 use crate::ResourceId;
 use wyn_staged_ir::StagedIrBuilder;
 
@@ -11,12 +11,8 @@ fn resource(
     kind: CompilerResourceKind,
     slot: usize,
 ) -> ResourceId {
-    resources.allocate(
-        ResourceOrigin::Compiler(CompilerResource::new(
-            kind,
-            Some(SemanticOpId::for_test(owner)),
-            slot,
-        )),
+    resources.allocate_compiler(
+        CompilerResource::new(kind, Some(SemanticOpId::for_test(owner)), slot),
         Type::Constructed(TypeName::UInt(32), vec![]),
         LogicalSize::FixedBytes(4),
     )

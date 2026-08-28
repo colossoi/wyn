@@ -1685,14 +1685,14 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         "input and output resources are planned logically"
     );
     assert!(allocated.data.stages.external_inputs().any(|input| matches!(
-        &allocated.data.core.resources[input.storage().data].origin,
-        egir::program::ResourceOrigin::Host(_)
+        allocated.data.core.resources[input.storage().data].origin(),
+        egir::program::ResourceOrigin::Host { .. }
     )));
     assert!(allocated.data.stages.flows().any(|(_, flow)| {
         flow.is_published()
             && matches!(
-                &allocated.data.core.resources[flow.storage().data].origin,
-                egir::program::ResourceOrigin::Host(_)
+                allocated.data.core.resources[flow.storage().data].origin(),
+                egir::program::ResourceOrigin::Host { .. }
             )
     }));
 
@@ -1708,8 +1708,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         .iter()
         .filter(|resource| {
             matches!(
-                resource.origin,
-                ResourceOrigin::Compiler(ref compiler)
+                resource.origin(),
+                ResourceOrigin::Compiler { resource: compiler, .. }
                     if compiler.kind == CompilerResourceKind::ReducePartial
             )
         })
@@ -1717,8 +1717,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     assert_eq!(partials, 0, "pre-target allocation has no reduce scratch");
     let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan parallel reduction");
     assert!(planned.logical_resources().iter().any(|resource| matches!(
-        resource.origin,
-        ResourceOrigin::Compiler(ref compiler)
+        resource.origin(),
+        ResourceOrigin::Compiler { resource: compiler, .. }
             if compiler.kind == CompilerResourceKind::ReducePartial && compiler.owner.is_some()
     )));
 }
@@ -1862,9 +1862,11 @@ fn target_planning_owns_parallel_work_scratch() {
     let kinds = |resources: &[egir::program::LogicalResource]| {
         resources
             .iter()
-            .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
-                ResourceOrigin::Host(_) => None,
+            .filter_map(|resource| match resource.origin() {
+                ResourceOrigin::Compiler {
+                    resource: compiler, ..
+                } => Some(compiler.kind),
+                ResourceOrigin::Host { .. } => None,
             })
             .collect::<std::collections::HashSet<_>>()
     };
@@ -1881,12 +1883,13 @@ fn target_planning_owns_parallel_work_scratch() {
     let scan_resource_count = scan
         .logical_resources()
         .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler)
-                if matches!(
-                    compiler.kind,
-                    CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
-                ) =>
+        .filter_map(|resource| match resource.origin() {
+            ResourceOrigin::Compiler {
+                resource: compiler, ..
+            } if matches!(
+                compiler.kind,
+                CompilerResourceKind::ScanBlockSums | CompilerResourceKind::ScanBlockOffsets
+            ) =>
             {
                 Some(())
             }
@@ -1907,7 +1910,7 @@ fn target_planning_owns_parallel_work_scratch() {
         filter
             .logical_resources()
             .iter()
-            .filter(|resource| matches!(resource.origin, ResourceOrigin::Host(_)))
+            .filter(|resource| matches!(resource.origin(), ResourceOrigin::Host { .. }))
             .count()
             >= 2,
         "the input and returned filter capacity remain host ABI resources"
@@ -1942,8 +1945,8 @@ entry add_sum(xs: []i32) []i32 =
     );
     assert!(scalar_handoff.logical_resources().iter().any(|resource| {
         matches!(
-            &resource.origin,
-            ResourceOrigin::Compiler(compiler)
+            resource.origin(),
+            ResourceOrigin::Compiler { resource: compiler, .. }
                 if compiler.kind == CompilerResourceKind::ScalarHandoff
         )
     }));
@@ -1981,24 +1984,25 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
     let planned_scratch = |resources: &[egir::program::LogicalResource]| {
         resources
             .iter()
-            .filter_map(|resource| match &resource.origin {
-                ResourceOrigin::Compiler(compiler)
-                    if matches!(
-                        compiler.kind,
-                        Kind::ReducePartial
-                            | Kind::ScanBlockSums
-                            | Kind::ScanBlockOffsets
-                            | Kind::FilterFlags
-                            | Kind::FilterOffsets
-                            | Kind::FilterScanBlockSums
-                            | Kind::FilterScanBlockOffsets
-                    ) =>
+            .filter_map(|resource| match resource.origin() {
+                ResourceOrigin::Compiler {
+                    resource: compiler, ..
+                } if matches!(
+                    compiler.kind,
+                    Kind::ReducePartial
+                        | Kind::ScanBlockSums
+                        | Kind::ScanBlockOffsets
+                        | Kind::FilterFlags
+                        | Kind::FilterOffsets
+                        | Kind::FilterScanBlockSums
+                        | Kind::FilterScanBlockOffsets
+                ) =>
                 {
                     Some((
                         compiler.kind,
                         compiler.owner,
                         compiler.slot,
-                        resource.size.clone(),
+                        resource.size().expect("compiler scratch has a concrete size").clone(),
                     ))
                 }
                 _ => None,
@@ -2847,8 +2851,8 @@ entry e() [4]i32 =
         .iter()
         .filter(|resource| {
             matches!(
-                &resource.origin,
-                ResourceOrigin::Compiler(compiler)
+                resource.origin(),
+                ResourceOrigin::Compiler { resource: compiler, .. }
                     if compiler.kind == CompilerResourceKind::MultiConsumerArray
             )
         })
@@ -2878,7 +2882,7 @@ entry e() [4]i32 =
         producer_name.starts_with("e_materialize_shared_"),
         "generated stage retains a diagnostic role suffix"
     );
-    let ResourceOrigin::Compiler(_) = &shared[0].origin else {
+    let ResourceOrigin::Compiler { .. } = shared[0].origin() else {
         unreachable!("shared resource must be compiler-owned")
     };
     let flow = allocated
@@ -5758,10 +5762,10 @@ entry add_sum(xs: []i32) []i32 =
     let resource = allocated
         .logical_resources()
         .iter()
-        .find(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler) if compiler.kind == CompilerResourceKind::ScalarHandoff => {
-                true
-            }
+        .find(|resource| match resource.origin() {
+            ResourceOrigin::Compiler {
+                resource: compiler, ..
+            } if compiler.kind == CompilerResourceKind::ScalarHandoff => true,
             _ => false,
         })
         .expect("scalar handoff resource");
@@ -10128,8 +10132,10 @@ entry gen(xs: []i32) []i32 =
         .core
         .resources
         .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Compiler(compiler) => Some(compiler.kind),
+        .filter_map(|resource| match resource.origin() {
+            ResourceOrigin::Compiler {
+                resource: compiler, ..
+            } => Some(compiler.kind),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -12280,8 +12286,8 @@ entry e(a: []f32) []f32 =
                 .logical_resources()
                 .iter()
                 .filter(|resource| matches!(
-                    &resource.origin,
-                    egir::program::ResourceOrigin::Compiler(compiler)
+                    resource.origin(),
+                    egir::program::ResourceOrigin::Compiler { resource: compiler, .. }
                         if compiler.kind == egir::program::CompilerResourceKind::ScanPrefixes
                 ))
                 .count(),

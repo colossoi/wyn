@@ -22,7 +22,7 @@ use crate::interface::{self, EntryInput, EntryOutput};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::TypeExt;
 use std::collections::{HashMap, HashSet};
-use std::ops::{Deref, Index, IndexMut};
+use std::ops::{Deref, Index};
 use wyn_staged_ir::{StagedIr, StagedIrBuilder};
 
 use super::ir::Language;
@@ -220,7 +220,14 @@ pub enum LogicalSize {
     SameAsDispatch {
         elem_bytes: u32,
     },
-    Unspecified,
+}
+
+/// Host ABI sizing may remain runtime-provided. Compiler resources cannot use
+/// this state and always carry a concrete [`LogicalSize`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostSizePolicy {
+    RuntimeProvided,
+    Known(LogicalSize),
 }
 
 impl LogicalSize {
@@ -279,8 +286,8 @@ pub enum CompilerResourceKind {
     ScanBlockOffsets,
     /// Per-element local prefixes retained until phase 3 applies global offsets.
     ScanPrefixes,
-    /// A runtime `filter`'s compaction buffer and its paired length cell.
-    FilterScratch,
+    /// A runtime `filter`'s capacity backing and its paired length cell.
+    FilterData,
     FilterLenCell,
     FilterFlags,
     FilterOffsets,
@@ -342,13 +349,22 @@ pub struct HostResource {
 
 #[derive(Clone, Debug)]
 pub enum ResourceOrigin {
-    Host(HostResource),
-    Compiler(CompilerResource),
+    Host {
+        resource: HostResource,
+        size: HostSizePolicy,
+    },
+    Compiler {
+        resource: CompilerResource,
+        size: LogicalSize,
+    },
 }
 
 impl ResourceOrigin {
-    pub fn host(binding: BindingRef) -> Self {
-        Self::Host(HostResource { binding, name: None })
+    pub fn host(binding: BindingRef, size: HostSizePolicy) -> Self {
+        Self::Host {
+            resource: HostResource { binding, name: None },
+            size,
+        }
     }
 }
 
@@ -357,9 +373,8 @@ pub struct LogicalResource {
     /// Dense planning-session identity. Compiler-owned ids may change when
     /// target recipes change and must not be treated as host ABI bindings.
     id: ResourceId,
-    pub origin: ResourceOrigin,
-    pub elem_ty: Type<TypeName>,
-    pub size: LogicalSize,
+    origin: ResourceOrigin,
+    elem_ty: Type<TypeName>,
 }
 
 impl LogicalResource {
@@ -367,10 +382,47 @@ impl LogicalResource {
         self.id
     }
 
+    pub fn origin(&self) -> &ResourceOrigin {
+        &self.origin
+    }
+
+    pub fn elem_ty(&self) -> &Type<TypeName> {
+        &self.elem_ty
+    }
+
+    pub fn size(&self) -> Option<&LogicalSize> {
+        match &self.origin {
+            ResourceOrigin::Host {
+                size: HostSizePolicy::RuntimeProvided,
+                ..
+            } => None,
+            ResourceOrigin::Host {
+                size: HostSizePolicy::Known(size),
+                ..
+            }
+            | ResourceOrigin::Compiler { size, .. } => Some(size),
+        }
+    }
+
     pub fn host_binding(&self) -> Option<BindingRef> {
         match &self.origin {
-            ResourceOrigin::Host(host) => Some(host.binding),
-            ResourceOrigin::Compiler(_) => None,
+            ResourceOrigin::Host { resource, .. } => Some(resource.binding),
+            ResourceOrigin::Compiler { .. } => None,
+        }
+    }
+
+    pub(crate) fn refine_size(&mut self, expected: &LogicalSize) -> Result<(), &LogicalSize> {
+        match &mut self.origin {
+            ResourceOrigin::Host { size, .. } => match size {
+                HostSizePolicy::RuntimeProvided => {
+                    *size = HostSizePolicy::Known(expected.clone());
+                    Ok(())
+                }
+                HostSizePolicy::Known(actual) if actual == expected => Ok(()),
+                HostSizePolicy::Known(actual) => Err(actual),
+            },
+            ResourceOrigin::Compiler { size, .. } if size == expected => Ok(()),
+            ResourceOrigin::Compiler { size, .. } => Err(size),
         }
     }
 }
@@ -386,37 +438,42 @@ pub struct LogicalResourceArena {
 }
 
 impl LogicalResourceArena {
-    pub(crate) fn allocate(
+    pub(crate) fn allocate_host(
         &mut self,
-        origin: ResourceOrigin,
+        resource: HostResource,
         elem_ty: Type<TypeName>,
-        size: LogicalSize,
+        size: HostSizePolicy,
     ) -> ResourceId {
-        let existing = match &origin {
-            ResourceOrigin::Host(host) => self.host.get(&host.binding).copied(),
-            ResourceOrigin::Compiler(compiler) => {
-                compiler.key().and_then(|key| self.compiler.get(&key).copied())
-            }
-        };
-        if let Some(id) = existing {
+        if let Some(id) = self.host.get(&resource.binding).copied() {
             return id;
         }
         let id = ResourceId(self.resources.len() as u32);
-        match &origin {
-            ResourceOrigin::Host(host) => {
-                self.host.insert(host.binding, id);
-            }
-            ResourceOrigin::Compiler(compiler) => {
-                if let Some(key) = compiler.key() {
-                    self.compiler.insert(key, id);
-                }
-            }
+        self.host.insert(resource.binding, id);
+        self.resources.push(LogicalResource {
+            id,
+            origin: ResourceOrigin::Host { resource, size },
+            elem_ty,
+        });
+        id
+    }
+
+    pub(crate) fn allocate_compiler(
+        &mut self,
+        resource: CompilerResource,
+        elem_ty: Type<TypeName>,
+        size: LogicalSize,
+    ) -> ResourceId {
+        if let Some(id) = resource.key().and_then(|key| self.compiler.get(&key).copied()) {
+            return id;
+        }
+        let id = ResourceId(self.resources.len() as u32);
+        if let Some(key) = resource.key() {
+            self.compiler.insert(key, id);
         }
         self.resources.push(LogicalResource {
             id,
-            origin,
+            origin: ResourceOrigin::Compiler { resource, size },
             elem_ty,
-            size,
         });
         id
     }
@@ -443,6 +500,10 @@ impl LogicalResourceArena {
         id.index() < self.resources.len()
     }
 
+    pub(crate) fn get_mut(&mut self, id: ResourceId) -> &mut LogicalResource {
+        &mut self.resources[id.index()]
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, LogicalResource> {
         self.resources.iter()
     }
@@ -465,12 +526,6 @@ impl Index<ResourceId> for LogicalResourceArena {
 
     fn index(&self, id: ResourceId) -> &Self::Output {
         &self.resources[id.index()]
-    }
-}
-
-impl IndexMut<ResourceId> for LogicalResourceArena {
-    fn index_mut(&mut self, id: ResourceId) -> &mut Self::Output {
-        &mut self.resources[id.index()]
     }
 }
 
@@ -511,11 +566,11 @@ impl<'a> IntoIterator for &'a mut LogicalResourceArena {
 pub(crate) fn host_resource_names(resources: &[LogicalResource]) -> LookupMap<(u32, u32), String> {
     resources
         .iter()
-        .filter_map(|resource| match &resource.origin {
-            ResourceOrigin::Host(host) => {
+        .filter_map(|resource| match resource.origin() {
+            ResourceOrigin::Host { resource: host, .. } => {
                 Some(((host.binding.set, host.binding.binding), host.name.clone()?))
             }
-            ResourceOrigin::Compiler(_) => None,
+            ResourceOrigin::Compiler { .. } => None,
         })
         .collect()
 }
@@ -727,15 +782,15 @@ pub(crate) fn physicalize_type_resources(ty: &mut Type<TypeName>, bindings: &Phy
 /// Verify the allocation typestate. From this boundary through validation,
 /// every executable storage identity is a `ResourceId`; bindings survive only
 /// in the host ABI fields and `ResourceOrigin::Host` constraints.
-/// Physical `BufferLen` for a logical size, or `None` for `Unspecified` (a
-/// host-supplied length). Inverse of `logical_size`, used when a compiler
+/// Physical `BufferLen` for a known logical size, or `None` for a runtime-
+/// provided host size. Inverse of logical-size lowering, used when a compiler
 /// resource is published as a `StorageBindingDecl`.
 pub fn buffer_len(
-    size: &LogicalSize,
+    size: Option<&LogicalSize>,
     resources: &PhysicalResourceTable,
 ) -> Option<pipeline_descriptor::BufferLen> {
     use crate::pipeline_descriptor::BufferLen;
-    match size {
+    match size? {
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
         LogicalSize::LikeResource {
             resource,
@@ -753,7 +808,6 @@ pub fn buffer_len(
         LogicalSize::SameAsDispatch { elem_bytes } => Some(BufferLen::SameAsDispatch {
             elem_bytes: *elem_bytes,
         }),
-        LogicalSize::Unspecified => None,
     }
 }
 
@@ -1287,7 +1341,7 @@ pub struct PhysicalResourceTable {
     bindings: Vec<BindingRef>,
     compiler_owned: Vec<bool>,
     elem_types: Vec<Type<TypeName>>,
-    sizes: Vec<LogicalSize>,
+    sizes: Vec<Option<LogicalSize>>,
 }
 
 impl PhysicalResourceTable {
@@ -1312,12 +1366,12 @@ impl PhysicalResourceTable {
         let mut elem_types = Vec::with_capacity(resources.len());
         let mut sizes = Vec::with_capacity(resources.len());
         for resource in resources {
-            compiler_owned.push(matches!(resource.origin, ResourceOrigin::Compiler(_)));
-            elem_types.push(resource.elem_ty.clone());
-            sizes.push(resource.size.clone());
-            let binding = match &resource.origin {
-                ResourceOrigin::Host(host) => host.binding,
-                ResourceOrigin::Compiler(_) => loop {
+            compiler_owned.push(matches!(resource.origin(), ResourceOrigin::Compiler { .. }));
+            elem_types.push(resource.elem_ty().clone());
+            sizes.push(resource.size().cloned());
+            let binding = match resource.origin() {
+                ResourceOrigin::Host { resource: host, .. } => host.binding,
+                ResourceOrigin::Compiler { .. } => loop {
                     let candidate = BindingRef::new(super::from_tlc::AUTO_STORAGE_SET, ids.next_id());
                     if used.insert(candidate) {
                         break candidate;
@@ -1346,8 +1400,8 @@ impl PhysicalResourceTable {
         &self.elem_types[resource.index()]
     }
 
-    pub fn size(&self, resource: ResourceId) -> &LogicalSize {
-        &self.sizes[resource.index()]
+    pub fn size(&self, resource: ResourceId) -> Option<&LogicalSize> {
+        self.sizes[resource.index()].as_ref()
     }
 
     /// Descriptor-stable identity for one compiler-owned logical resource.
@@ -1509,7 +1563,7 @@ impl ResidencyProgramData {
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
-        self.core.resources.allocate(ResourceOrigin::Compiler(compiler), elem_ty, size)
+        self.core.resources.allocate_compiler(compiler, elem_ty, size)
     }
 }
 
@@ -1527,7 +1581,7 @@ impl AllocatedProgramData {
         elem_ty: Type<TypeName>,
         size: LogicalSize,
     ) -> ResourceId {
-        self.core.resources.allocate(ResourceOrigin::Compiler(compiler), elem_ty, size)
+        self.core.resources.allocate_compiler(compiler, elem_ty, size)
     }
 }
 

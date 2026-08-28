@@ -3,7 +3,9 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir;
-use crate::egir::allocation::{plan_logical_resources, verify_allocated_resources, ResourcesAllocated};
+use crate::egir::allocation::{
+    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources, ResourcesAllocated,
+};
 use crate::egir::types::{by_value_function_result, CallEffects, EGraph, Parameters, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::interface;
@@ -73,7 +75,7 @@ fn into_allocated(program: egir::reify::Segmented) -> ResourcesAllocated {
     plan_logical_resources(program.retag()).expect("allocate test program")
 }
 
-fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
+fn allocated_program(size: HostSizePolicy) -> ResourcesAllocated {
     let binding = BindingRef::new(0, 7);
     let mut identities = ProgramIdentities::default();
     let main = identities.alloc_entry("main".into());
@@ -86,7 +88,8 @@ fn allocated_program(size: LogicalSize) -> ResourcesAllocated {
         identities,
     );
     let mut program = into_allocated(program);
-    let resource = program.data.core.resources.allocate(ResourceOrigin::host(binding), unit_ty(), size);
+    let resource =
+        program.data.core.resources.allocate_host(HostResource { binding, name: None }, unit_ty(), size);
     let stage = program.data.stages.stages().next().expect("allocated stage").0;
     program.data.stages.stage_body_mut(stage).expect("allocated entry").resource_declarations.push(
         SemanticResourceDecl {
@@ -165,12 +168,12 @@ fn host_size_policy_can_reference_a_later_interface_binding() {
     let target = allocated.data.core.resources.host_resource(target_binding).unwrap();
     let source = allocated.data.core.resources.host_resource(source_binding).unwrap();
     assert_eq!(
-        allocated.data.core.resources[target].size,
-        LogicalSize::LikeResource {
+        allocated.data.core.resources[target].size(),
+        Some(&LogicalSize::LikeResource {
             resource: source,
             elem_bytes: 4,
             src_elem_bytes: 8,
-        }
+        })
     );
 }
 
@@ -230,7 +233,10 @@ fn repeated_compatible_host_declarations_share_an_identity() {
 
     let allocated = plan_logical_resources(semantic.retag()).expect("compatible declarations");
     assert_eq!(allocated.data.core.resources.len(), 1);
-    assert_eq!(allocated.data.core.resources[0].size, LogicalSize::FixedBytes(16));
+    assert_eq!(
+        allocated.data.core.resources[0].size(),
+        Some(&LogicalSize::FixedBytes(16))
+    );
 }
 
 #[test]
@@ -324,20 +330,16 @@ fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
 }
 
 #[test]
-fn allocated_resource_verifier_accepts_resource_only_program() {
-    let program = allocated_program(LogicalSize::Unspecified);
-    verify_allocated_resources(&program).expect("resource-normalized program");
+fn runtime_provided_host_size_survives_allocation() {
+    let program = allocated_program(HostSizePolicy::RuntimeProvided);
+    assert_eq!(program.data.core.resources[0].size(), None);
 }
 
 #[test]
 fn entry_publication_reads_type_and_size_from_resource_arena() {
-    let mut program = allocated_program(LogicalSize::FixedBytes(12));
-    let resource = program.data.core.resources.allocate(
-        ResourceOrigin::Compiler(CompilerResource::new(
-            CompilerResourceKind::ScalarHandoff,
-            None,
-            0,
-        )),
+    let mut program = allocated_program(HostSizePolicy::Known(LogicalSize::FixedBytes(12)));
+    let resource = program.data.core.resources.allocate_compiler(
+        CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 0),
         unit_ty(),
         LogicalSize::FixedBytes(12),
     );
@@ -367,10 +369,13 @@ fn entry_publication_reads_type_and_size_from_resource_arena() {
 #[test]
 fn semantic_resource_ref_has_no_binding_constructor() {
     let mut resources = LogicalResourceArena::default();
-    let resource = resources.allocate(
-        ResourceOrigin::host(BindingRef::new(0, 0)),
+    let resource = resources.allocate_host(
+        HostResource {
+            binding: BindingRef::new(0, 0),
+            name: None,
+        },
         unit_ty(),
-        LogicalSize::Unspecified,
+        HostSizePolicy::RuntimeProvided,
     );
     let reference = SemanticResourceRef(resource);
     assert_eq!(reference.0, resource);
@@ -379,17 +384,20 @@ fn semantic_resource_ref_has_no_binding_constructor() {
 #[test]
 fn logical_resource_arena_owns_dense_identity_assignment() {
     let mut resources = LogicalResourceArena::default();
-    let first = resources.allocate(
-        ResourceOrigin::host(BindingRef::new(0, 1)),
+    let first = resources.allocate_host(
+        HostResource {
+            binding: BindingRef::new(0, 1),
+            name: None,
+        },
         unit_ty(),
-        LogicalSize::Unspecified,
+        HostSizePolicy::RuntimeProvided,
     );
-    let second = resources.allocate(
-        ResourceOrigin::Compiler(CompilerResource::new(
+    let second = resources.allocate_compiler(
+        CompilerResource::new(
             CompilerResourceKind::ReducePartial,
             Some(SemanticOpId::for_test(7)),
             0,
-        )),
+        ),
         unit_ty(),
         LogicalSize::FixedBytes(4),
     );
@@ -404,10 +412,10 @@ fn logical_resource_arena_owns_dense_identity_assignment() {
 fn physicalization_rebuilds_resource_nodes_as_binding_nodes() {
     let binding = BindingRef::new(3, 5);
     let mut resources = LogicalResourceArena::default();
-    let resource = resources.allocate(
-        ResourceOrigin::host(binding),
+    let resource = resources.allocate_host(
+        HostResource { binding, name: None },
         Type::Constructed(TypeName::UInt(32), vec![]),
-        LogicalSize::Unspecified,
+        HostSizePolicy::RuntimeProvided,
     );
     let table = PhysicalResourceTable::allocate(&resources, &mut IdSource::new());
     let mut graph = EGraph::new();
@@ -534,21 +542,13 @@ fn physical_entry_parameters_select_value_view_and_place_channels() {
 #[test]
 fn compiler_binding_allocation_avoids_non_resource_descriptor_slots() {
     let mut resources = LogicalResourceArena::default();
-    let first = resources.allocate(
-        ResourceOrigin::Compiler(CompilerResource::new(
-            CompilerResourceKind::ScalarHandoff,
-            None,
-            0,
-        )),
+    let first = resources.allocate_compiler(
+        CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 0),
         unit_ty(),
         LogicalSize::FixedBytes(4),
     );
-    let second = resources.allocate(
-        ResourceOrigin::Compiler(CompilerResource::new(
-            CompilerResourceKind::ScalarHandoff,
-            None,
-            1,
-        )),
+    let second = resources.allocate_compiler(
+        CompilerResource::new(CompilerResourceKind::ScalarHandoff, None, 1),
         unit_ty(),
         LogicalSize::FixedBytes(4),
     );
@@ -564,14 +564,33 @@ fn compiler_binding_allocation_avoids_non_resource_descriptor_slots() {
 }
 
 #[test]
-fn allocated_resource_verifier_rejects_missing_size_source() {
-    let program = allocated_program(LogicalSize::LikeResource {
-        resource: ResourceId::for_test(1),
-        elem_bytes: 4,
-        src_elem_bytes: 4,
-    });
-    let error = verify_allocated_resources(&program).expect_err("missing size source must be rejected");
-    assert!(error.contains("missing source"), "{error}");
+fn staged_finalization_rejects_missing_size_source_inline() {
+    let mut identities = ProgramIdentities::default();
+    let main = identities.alloc_entry("main".into());
+    let program = semantic_program_for_test(
+        vec![],
+        vec![],
+        vec![empty_entry(main, "main")],
+        vec![],
+        PipelineDescriptor::default(),
+        identities,
+    );
+    let mut program = allocate_semantic_resources(program.retag()).expect("allocate test program");
+    program.data.core.resources.allocate_host(
+        HostResource {
+            binding: BindingRef::new(0, 7),
+            name: None,
+        },
+        unit_ty(),
+        HostSizePolicy::Known(LogicalSize::LikeResource {
+            resource: ResourceId::for_test(1),
+            elem_bytes: 4,
+            src_elem_bytes: 4,
+        }),
+    );
+
+    let error = finalize_staged_ir(program).expect_err("missing size source must fail finalization");
+    assert!(error.to_string().contains("missing source"), "{error}");
 }
 
 #[test]

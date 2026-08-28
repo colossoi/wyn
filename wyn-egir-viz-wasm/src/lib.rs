@@ -30,9 +30,7 @@ enum InspectPass {
     LiftStageUniformValues,
     AllocateSemanticResources,
     ResolveResidency,
-    ResolveScratchSizes,
     FinalizeStagedIr,
-    VerifyAllocatedResources,
     BindMappedOutputDestinations,
     AnalyzeKernelRecipes,
     AllocateRecipeScratch,
@@ -57,9 +55,7 @@ impl InspectPass {
     const LIFT_STAGE_UNIFORM_VALUES: &'static str = "egir::lift_stage_uniform_values";
     const ALLOCATE_SEMANTIC_RESOURCES: &'static str = "egir::allocate_semantic_resources";
     const RESOLVE_RESIDENCY: &'static str = "egir::resolve_residency";
-    const RESOLVE_SCRATCH_SIZES: &'static str = "egir::resolve_scratch_sizes";
     const FINALIZE_STAGED_IR: &'static str = "egir::finalize_staged_ir";
-    const VERIFY_ALLOCATED_RESOURCES: &'static str = "egir::verify_allocated_resources";
     const BIND_MAPPED_OUTPUT_DESTINATIONS: &'static str = "egir::bind_mapped_output_destinations";
     const ANALYZE_KERNEL_RECIPES: &'static str = "egir::analyze_kernel_recipes";
     const ALLOCATE_RECIPE_SCRATCH: &'static str = "egir::allocate_recipe_scratch";
@@ -84,9 +80,7 @@ impl InspectPass {
             Self::LIFT_STAGE_UNIFORM_VALUES => Some(Self::LiftStageUniformValues),
             Self::ALLOCATE_SEMANTIC_RESOURCES => Some(Self::AllocateSemanticResources),
             Self::RESOLVE_RESIDENCY => Some(Self::ResolveResidency),
-            Self::RESOLVE_SCRATCH_SIZES => Some(Self::ResolveScratchSizes),
             Self::FINALIZE_STAGED_IR => Some(Self::FinalizeStagedIr),
-            Self::VERIFY_ALLOCATED_RESOURCES => Some(Self::VerifyAllocatedResources),
             Self::BIND_MAPPED_OUTPUT_DESTINATIONS => Some(Self::BindMappedOutputDestinations),
             Self::ANALYZE_KERNEL_RECIPES => Some(Self::AnalyzeKernelRecipes),
             Self::ALLOCATE_RECIPE_SCRATCH => Some(Self::AllocateRecipeScratch),
@@ -114,9 +108,7 @@ impl InspectPass {
             Self::LiftStageUniformValues => Self::LIFT_STAGE_UNIFORM_VALUES,
             Self::AllocateSemanticResources => Self::ALLOCATE_SEMANTIC_RESOURCES,
             Self::ResolveResidency => Self::RESOLVE_RESIDENCY,
-            Self::ResolveScratchSizes => Self::RESOLVE_SCRATCH_SIZES,
             Self::FinalizeStagedIr => Self::FINALIZE_STAGED_IR,
-            Self::VerifyAllocatedResources => Self::VERIFY_ALLOCATED_RESOURCES,
             Self::BindMappedOutputDestinations => Self::BIND_MAPPED_OUTPUT_DESTINATIONS,
             Self::AnalyzeKernelRecipes => Self::ANALYZE_KERNEL_RECIPES,
             Self::AllocateRecipeScratch => Self::ALLOCATE_RECIPE_SCRATCH,
@@ -719,17 +711,6 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         );
     }
 
-    let before_scratch_sizes =
-        (pass == InspectPass::ResolveScratchSizes).then(|| snapshot_residency_program(&residency_draft));
-    let residency_draft = wyn_core::egir::resolve_scratch_sizes(residency_draft);
-    if pass == InspectPass::ResolveScratchSizes {
-        return successful_inspection(
-            pass,
-            before_scratch_sizes,
-            snapshot_residency_program(&residency_draft),
-        );
-    }
-
     let before_finalization =
         (pass == InspectPass::FinalizeStagedIr).then(|| snapshot_residency_program(&residency_draft));
     let allocated = match wyn_core::egir::finalize_staged_ir(residency_draft) {
@@ -746,18 +727,6 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         return successful_inspection(pass, before_finalization, snapshot_allocated_program(&allocated));
     }
 
-    let before_verification =
-        (pass == InspectPass::VerifyAllocatedResources).then(|| snapshot_allocated_program(&allocated));
-    if let Err(error) = wyn_core::egir::verify_allocated_resources(&allocated) {
-        return InspectResult::error(
-            pass.id(),
-            format!("EGIR allocated-resource verification error: {error}"),
-            None,
-        );
-    }
-    if pass == InspectPass::VerifyAllocatedResources {
-        return successful_inspection(pass, before_verification, snapshot_allocated_program(&allocated));
-    }
     if pass == InspectPass::PlanLogicalResources {
         return successful_inspection(
             pass,
@@ -1447,9 +1416,9 @@ fn resource_name(resource: SemanticResourceRef) -> String {
     resource_id_name(resource.0)
 }
 
-fn graph_logical_size(size: &LogicalSize) -> GraphSize {
+fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
     match size {
-        LogicalSize::FixedBytes(bytes) => GraphSize {
+        Some(LogicalSize::FixedBytes(bytes)) => GraphSize {
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
             binding: None,
@@ -1457,11 +1426,11 @@ fn graph_logical_size(size: &LogicalSize) -> GraphSize {
             elem_bytes: None,
             src_elem_bytes: None,
         },
-        LogicalSize::LikeResource {
+        Some(LogicalSize::LikeResource {
             resource,
             elem_bytes,
             src_elem_bytes,
-        } => GraphSize {
+        }) => GraphSize {
             variant: "like_resource".to_string(),
             bytes: None,
             binding: None,
@@ -1469,7 +1438,7 @@ fn graph_logical_size(size: &LogicalSize) -> GraphSize {
             elem_bytes: Some(*elem_bytes),
             src_elem_bytes: Some(*src_elem_bytes),
         },
-        LogicalSize::SameAsDispatch { elem_bytes } => GraphSize {
+        Some(LogicalSize::SameAsDispatch { elem_bytes }) => GraphSize {
             variant: "same_as_dispatch".to_string(),
             bytes: None,
             binding: None,
@@ -1477,7 +1446,7 @@ fn graph_logical_size(size: &LogicalSize) -> GraphSize {
             elem_bytes: Some(*elem_bytes),
             src_elem_bytes: None,
         },
-        LogicalSize::Unspecified => GraphSize {
+        None => GraphSize {
             variant: "unspecified".to_string(),
             bytes: None,
             binding: None,
@@ -1505,7 +1474,7 @@ fn compiler_resource_kind(kind: CompilerResourceKind) -> String {
         CompilerResourceKind::ScanBlockSums => "scan_block_sums",
         CompilerResourceKind::ScanBlockOffsets => "scan_block_offsets",
         CompilerResourceKind::ScanPrefixes => "scan_prefixes",
-        CompilerResourceKind::FilterScratch => "filter_scratch",
+        CompilerResourceKind::FilterData => "filter_data",
         CompilerResourceKind::FilterLenCell => "filter_len_cell",
         CompilerResourceKind::FilterFlags => "filter_flags",
         CompilerResourceKind::FilterOffsets => "filter_offsets",
@@ -1523,8 +1492,8 @@ fn graph_logical_resources(resources: &LogicalResourceArena) -> Vec<GraphResourc
     resources
         .iter()
         .map(|resource| {
-            let origin = match &resource.origin {
-                ResourceOrigin::Host(host) => GraphResourceOrigin {
+            let origin = match resource.origin() {
+                ResourceOrigin::Host { resource: host, .. } => GraphResourceOrigin {
                     variant: "host".to_string(),
                     binding: Some(graph_binding(host.binding)),
                     name: host.name.clone(),
@@ -1532,7 +1501,9 @@ fn graph_logical_resources(resources: &LogicalResourceArena) -> Vec<GraphResourc
                     owner: None,
                     slot: None,
                 },
-                ResourceOrigin::Compiler(compiler) => GraphResourceOrigin {
+                ResourceOrigin::Compiler {
+                    resource: compiler, ..
+                } => GraphResourceOrigin {
                     variant: "compiler".to_string(),
                     binding: None,
                     name: None,
@@ -1543,9 +1514,9 @@ fn graph_logical_resources(resources: &LogicalResourceArena) -> Vec<GraphResourc
             };
             GraphResource {
                 id: resource_id_name(resource.id()),
-                elem_ty: wyn_core::diags::format_type(&resource.elem_ty),
+                elem_ty: wyn_core::diags::format_type(resource.elem_ty()),
                 origin,
-                size: graph_logical_size(&resource.size),
+                size: graph_logical_size(resource.size()),
             }
         })
         .collect()
@@ -2017,8 +1988,8 @@ fn snapshot_allocated_entry(
                 GraphResourceDeclaration {
                     resource: resource_name(declaration.resource),
                     role: storage_role(declaration.role),
-                    elem_ty: wyn_core::diags::format_type(&resource.elem_ty),
-                    size: graph_logical_size(&resource.size),
+                    elem_ty: wyn_core::diags::format_type(resource.elem_ty()),
+                    size: graph_logical_size(resource.size()),
                 }
             })
             .collect(),

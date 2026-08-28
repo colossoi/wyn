@@ -44,12 +44,6 @@ entry lift_uniform(points: [64]f32, phase: f32) [64]f32 =
   let selected = filter(|x: i32| x > 0, xs) in
   map(|x: i32| x + 1, selected)`,
   },
-  "egir::resolve_scratch_sizes": {
-    before: "Cross-stage residency resolved",
-    after: "Scratch sizes resolved",
-    example: `entry sized_filter(xs: []i32) []i32 =
-  filter(|x: i32| x % 3 == 0, xs)`,
-  },
   "egir::finalize_staged_ir": {
     before: "Residency draft",
     after: "Finalized staged IR",
@@ -57,14 +51,8 @@ entry lift_uniform(points: [64]f32, phase: f32) [64]f32 =
   let selected = filter(|x: i32| x != 0, xs) in
   map(|x: i32| x * x, selected)`,
   },
-  "egir::verify_allocated_resources": {
-    before: "Finalized staged IR",
-    after: "Allocated resources verified",
-    example: `entry verified_sum(xs: []i32) i32 =
-  reduce(|a: i32, b: i32| a + b, 0, xs)`,
-  },
   "egir::bind_mapped_output_destinations": {
-    before: "Verified staged IR",
+    before: "Finalized staged IR",
     after: "Mapped output destinations bound",
     example: `entry mapped_output(xs: [4]i32) [4]i32 =
   map(|x: i32| x + 1, xs)`,

@@ -124,8 +124,11 @@ pub(super) fn analyze_reduction_routing(
             .find(|declaration| declaration.role.writes() && declaration.resource.0 == resource)?;
         let destination = (
             resource,
-            resources[resource].elem_ty.clone(),
-            resources[resource].size.clone(),
+            resources[resource].elem_ty().clone(),
+            resources[resource]
+                .size()
+                .expect("mapped reduction output must have a known logical size")
+                .clone(),
         );
         let value = route.source.value;
         let producers = graph_ops::value_producer_closure(&entry.graph, [value]);

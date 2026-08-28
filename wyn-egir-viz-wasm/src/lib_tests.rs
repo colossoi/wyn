@@ -200,18 +200,18 @@ entry main(xs: []i32) []i32 =
     assert!(before.stages.is_empty());
     assert!(before.flows.is_empty());
 
-    let scratch = after
+    let data = after
         .resources
         .iter()
-        .find(|resource| resource.origin.compiler_kind.as_deref() == Some("filter_scratch"))
-        .expect("filter scratch resource");
+        .find(|resource| resource.origin.compiler_kind.as_deref() == Some("filter_data"))
+        .expect("filter data resource");
     let length = after
         .resources
         .iter()
         .find(|resource| resource.origin.compiler_kind.as_deref() == Some("filter_len_cell"))
         .expect("filter length resource");
-    assert_eq!(scratch.origin.owner.as_deref(), Some("op:0"));
-    assert_eq!(scratch.size.variant, "like_resource");
+    assert_eq!(data.origin.owner.as_deref(), Some("op:0"));
+    assert_eq!(data.size.variant, "like_resource");
     assert_eq!(length.origin.owner.as_deref(), Some("op:0"));
     assert_eq!(length.size.variant, "fixed_bytes");
     assert_eq!(length.size.bytes, Some(4));
@@ -262,7 +262,7 @@ entry main(xs: []i32) []i32 =
         .expect("allocated Filter output state");
     assert_eq!(
         after_output.backing.as_ref().and_then(|value| value.resource.as_deref()),
-        Some(scratch.id.as_str())
+        Some(data.id.as_str())
     );
     assert_eq!(
         after_output.length.as_ref().and_then(|value| value.resource.as_deref()),
@@ -274,7 +274,7 @@ entry main(xs: []i32) []i32 =
     assert!(main
         .resource_declarations
         .iter()
-        .any(|decl| { decl.resource == scratch.id && decl.role == "input" }));
+        .any(|decl| { decl.resource == data.id && decl.role == "input" }));
     let producer = after
         .groups
         .iter()
@@ -283,7 +283,7 @@ entry main(xs: []i32) []i32 =
     assert!(producer
         .resource_declarations
         .iter()
-        .any(|decl| { decl.resource == scratch.id && decl.role == "output" }));
+        .any(|decl| { decl.resource == data.id && decl.role == "output" }));
 }
 
 #[test]
@@ -528,20 +528,10 @@ fn semantic_and_allocation_subpasses_are_individually_inspectable() {
   map(|x: i32| x + 1, selected)"#,
         ),
         (
-            InspectPass::ResolveScratchSizes,
-            r#"entry sized_filter(xs: []i32) []i32 =
-  filter(|x: i32| x % 3 == 0, xs)"#,
-        ),
-        (
             InspectPass::FinalizeStagedIr,
             r#"entry staged_filter(xs: []i32) []i32 =
   let selected = filter(|x: i32| x != 0, xs) in
   map(|x: i32| x * x, selected)"#,
-        ),
-        (
-            InspectPass::VerifyAllocatedResources,
-            r#"entry verified_sum(xs: []i32) i32 =
-  reduce(|a: i32, b: i32| a + b, 0, xs)"#,
         ),
     ];
 

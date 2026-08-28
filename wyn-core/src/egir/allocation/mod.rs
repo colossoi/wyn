@@ -12,9 +12,7 @@ pub use residency::resolve_residency;
 use crate::ast::TypeName;
 use crate::interface;
 use crate::interface::{EntryInputKind, EntryOutputKind};
-use crate::pipeline_descriptor;
 use crate::pipeline_descriptor::BufferLen;
-use crate::ssa;
 use crate::types::TypeExt;
 use crate::BindingRef;
 use polytype::Type;
@@ -23,9 +21,10 @@ use std::collections::HashMap;
 use super::from_tlc::ConvertError;
 use super::ir::{PlaceId, RemapBlockIds};
 use super::program::{
-    AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry,
-    LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId, ResourceOrigin,
-    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef, StageOrigin,
+    AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry, HostResource,
+    HostSizePolicy, LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId,
+    ResourceOrigin, ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef,
+    StageOrigin,
 };
 use super::semantic_opt::Optimized;
 use super::soac::{filter, hist, screma};
@@ -90,12 +89,7 @@ impl ResourcesAllocated {
 pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
     let program = allocate_semantic_resources(program)?;
     let program = resolve_residency(program)?;
-    let program = resolve_scratch_sizes(program);
-    let program = finalize_staged_ir(program)?;
-    if cfg!(debug_assertions) {
-        verify_allocated_resources(&program).expect("invalid allocated semantic resources");
-    }
-    Ok(program)
+    finalize_staged_ir(program)
 }
 
 /// Replace pre-allocation descriptor bindings with target-independent logical
@@ -107,7 +101,7 @@ pub fn allocate_semantic_resources(program: Optimized) -> Result<ResidencyDraft,
     lower_host_size_policies(&program, &mut builder)?;
     let context = builder.finalize()?;
     let program = remap_program_resources(program, context)?;
-    Ok(realize_dynamic_publication(program))
+    realize_dynamic_publication(program)
 }
 
 struct ResourceAllocationContext {
@@ -129,9 +123,9 @@ struct DraftLogicalResource {
     binding: BindingRef,
     elem_ty: Type<TypeName>,
     /// `None` means policy lowering has not visited this resource. Once
-    /// visited, `Some(Unspecified)` records a deliberate external/deferred
+    /// visited, `Some(RuntimeProvided)` records a deliberate external/deferred
     /// sizing decision rather than an unfinished reservation.
-    size: Option<LogicalSize>,
+    size: Option<HostSizePolicy>,
 }
 
 #[derive(Default)]
@@ -171,27 +165,29 @@ impl ResourceAllocationBuilder {
         })
     }
 
-    fn logical_size(&self, length: Option<&BufferLen>) -> Result<LogicalSize, ConvertError> {
+    fn logical_size(&self, length: Option<&BufferLen>) -> Result<HostSizePolicy, ConvertError> {
         Ok(match length {
-            Some(BufferLen::Fixed { bytes }) => LogicalSize::FixedBytes(*bytes),
+            Some(BufferLen::Fixed { bytes }) => HostSizePolicy::Known(LogicalSize::FixedBytes(*bytes)),
             Some(BufferLen::LikeInput {
                 set,
                 binding,
                 elem_bytes,
                 src_elem_bytes,
-            }) => LogicalSize::LikeResource {
+            }) => HostSizePolicy::Known(LogicalSize::LikeResource {
                 resource: self.resource_for_binding(BindingRef::new(*set, *binding))?.0,
                 elem_bytes: *elem_bytes,
                 src_elem_bytes: *src_elem_bytes,
-            },
-            Some(BufferLen::SameAsDispatch { elem_bytes }) => LogicalSize::SameAsDispatch {
-                elem_bytes: *elem_bytes,
-            },
-            None => LogicalSize::Unspecified,
+            }),
+            Some(BufferLen::SameAsDispatch { elem_bytes }) => {
+                HostSizePolicy::Known(LogicalSize::SameAsDispatch {
+                    elem_bytes: *elem_bytes,
+                })
+            }
+            None => HostSizePolicy::RuntimeProvided,
         })
     }
 
-    fn set_host_size(&mut self, binding: BindingRef, size: LogicalSize) -> Result<(), String> {
+    fn set_host_size(&mut self, binding: BindingRef, size: HostSizePolicy) -> Result<(), String> {
         let id = self.host.get(&binding).copied().ok_or_else(|| {
             format!(
                 "host resource set={} binding={} must be reserved before its size is set",
@@ -204,9 +200,9 @@ impl ResourceAllocationBuilder {
                 resource.size = Some(size);
                 Ok(())
             }
-            (Some(LogicalSize::Unspecified), LogicalSize::Unspecified)
-            | (Some(_), LogicalSize::Unspecified) => Ok(()),
-            (Some(LogicalSize::Unspecified), _) => {
+            (Some(HostSizePolicy::RuntimeProvided), HostSizePolicy::RuntimeProvided)
+            | (Some(_), HostSizePolicy::RuntimeProvided) => Ok(()),
+            (Some(HostSizePolicy::RuntimeProvided), _) => {
                 resource.size = Some(size);
                 Ok(())
             }
@@ -228,8 +224,11 @@ impl ResourceAllocationBuilder {
         let mut resources = LogicalResourceArena::default();
         for draft in self.resources {
             let expected = self.host[&draft.binding];
-            let allocated = resources.allocate(
-                ResourceOrigin::host(draft.binding),
+            let allocated = resources.allocate_host(
+                HostResource {
+                    binding: draft.binding,
+                    name: None,
+                },
                 draft.elem_ty,
                 draft.size.expect("all draft sizes were checked above"),
             );
@@ -497,57 +496,93 @@ fn remap_graph_resources(
     Ok((graph, nodes, blocks))
 }
 
-fn realize_dynamic_publication(mut program: ResidencyDraft) -> ResidencyDraft {
+fn realize_dynamic_publication(mut program: ResidencyDraft) -> Result<ResidencyDraft, ConvertError> {
     let resources = &mut program.data.core.resources;
     for function in &mut program.functions {
-        realize_graph_dynamic_publication(&mut function.graph, resources);
+        let _ = realize_graph_dynamic_publication(&mut function.graph, resources)
+            .map_err(ConvertError::GraphError)?;
     }
     for constant in &mut program.constants {
-        realize_graph_dynamic_publication(&mut constant.graph, resources);
+        let _ = realize_graph_dynamic_publication(&mut constant.graph, resources)
+            .map_err(ConvertError::GraphError)?;
     }
     for entry in &mut program.entry_points {
-        realize_graph_dynamic_publication(&mut entry.graph, resources);
+        let filter_data = realize_graph_dynamic_publication(&mut entry.graph, resources)
+            .map_err(ConvertError::GraphError)?;
+        realize_filter_output_capacities(entry, resources, &filter_data)
+            .map_err(ConvertError::GraphError)?;
     }
-    program
+    Ok(program)
 }
 
-fn allocate_filter_storage(
+fn filter_capacity_size(
+    owner: super::program::SemanticOpId,
+    space: &super::types::SegSpace<SemanticResourceRef>,
+    elem_ty: &Type<TypeName>,
+) -> Result<LogicalSize, String> {
+    LogicalSize::for_space(space, elem_ty).ok_or_else(|| {
+        format!("runtime Filter {owner:?} has no legal storage layout for element type {elem_ty:?}")
+    })
+}
+
+fn require_filter_resource(
+    resources: &mut LogicalResourceArena,
+    owner: super::program::SemanticOpId,
+    resource: ResourceId,
+    role: &str,
+    elem_ty: &Type<TypeName>,
+    size: &LogicalSize,
+) -> Result<(), String> {
+    let actual = resources.get_mut(resource);
+    if actual.elem_ty() != elem_ty {
+        return Err(format!(
+            "runtime Filter {owner:?} {role} resource {resource:?} has element type {:?}, expected {elem_ty:?}",
+            actual.elem_ty()
+        ));
+    }
+    if let Err(actual_size) = actual.refine_size(size) {
+        return Err(format!(
+            "runtime Filter {owner:?} {role} resource {resource:?} has logical size {actual_size:?}, expected {size:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn bind_filter_storage(
     resources: &mut LogicalResourceArena,
     owner: super::program::SemanticOpId,
     elem_ty: Type<TypeName>,
     size: LogicalSize,
     backing: Option<ResourceId>,
     length: Option<ResourceId>,
-) -> filter::RuntimeStorage<ResourceId> {
+) -> Result<filter::RuntimeStorage<ResourceId>, String> {
     let data = backing.unwrap_or_else(|| {
-        resources.allocate(
-            ResourceOrigin::Compiler(CompilerResource::new(
-                CompilerResourceKind::FilterScratch,
-                Some(owner),
-                0,
-            )),
-            elem_ty,
-            size,
+        resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::FilterData, Some(owner), 0),
+            elem_ty.clone(),
+            size.clone(),
         )
     });
+    require_filter_resource(resources, owner, data, "data", &elem_ty, &size)?;
+
+    let length_ty = Type::Constructed(TypeName::UInt(32), Vec::new());
+    let length_size = LogicalSize::FixedBytes(4);
     let length = length.unwrap_or_else(|| {
-        resources.allocate(
-            ResourceOrigin::Compiler(CompilerResource::new(
-                CompilerResourceKind::FilterLenCell,
-                Some(owner),
-                1,
-            )),
-            Type::Constructed(TypeName::UInt(32), Vec::new()),
-            LogicalSize::FixedBytes(4),
+        resources.allocate_compiler(
+            CompilerResource::new(CompilerResourceKind::FilterLenCell, Some(owner), 1),
+            length_ty.clone(),
+            length_size.clone(),
         )
     });
-    filter::RuntimeStorage { data, length }
+    require_filter_resource(resources, owner, length, "length", &length_ty, &length_size)?;
+    Ok(filter::RuntimeStorage { data, length })
 }
 
 fn realize_graph_dynamic_publication(
     graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>,
     resources: &mut LogicalResourceArena,
-) {
+) -> Result<Vec<ResourceId>, String> {
+    let mut filter_data = Vec::new();
     for (_, block) in &mut graph.skeleton.blocks {
         for effect in &mut block.side_effects {
             let SideEffectKind::Soac(SoacEffect(
@@ -556,6 +591,7 @@ fn realize_graph_dynamic_publication(
                     body,
                     state:
                         filter::SemanticState {
+                            space,
                             output: filter::Output::Runtime(runtime),
                             output_slots,
                             resources: accesses,
@@ -585,14 +621,10 @@ fn realize_graph_dynamic_publication(
                 filter::RuntimeLength::Implicit => None,
                 filter::RuntimeLength::Stored(length) => Some(length.0),
             };
-            let storage = allocate_filter_storage(
-                resources,
-                *owner,
-                body.output_element_type(),
-                resources[backing.0].size.clone(),
-                Some(backing.0),
-                length,
-            );
+            let elem_ty = body.output_element_type();
+            let size = filter_capacity_size(*owner, space, &elem_ty)?;
+            let storage = bind_filter_storage(resources, *owner, elem_ty, size, Some(backing.0), length)?;
+            filter_data.push(storage.data);
             runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(storage.data));
             runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(storage.length));
             if !accesses.iter().any(|access| access.resource.0 == storage.length) {
@@ -605,6 +637,60 @@ fn realize_graph_dynamic_publication(
         }
     }
     realize_filter_result_types(graph);
+    Ok(filter_data)
+}
+
+fn filter_capacity_buffer_len(
+    resources: &LogicalResourceArena,
+    size: &LogicalSize,
+) -> Result<Option<BufferLen>, String> {
+    Ok(match size {
+        LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
+        LogicalSize::LikeResource {
+            resource,
+            elem_bytes,
+            src_elem_bytes,
+        } => {
+            let binding = resources[*resource].host_binding().ok_or_else(|| {
+                format!("host Filter output capacity depends on non-host resource {resource:?}")
+            })?;
+            Some(BufferLen::LikeInput {
+                set: binding.set,
+                binding: binding.binding,
+                elem_bytes: *elem_bytes,
+                src_elem_bytes: *src_elem_bytes,
+            })
+        }
+        LogicalSize::SameAsDispatch { elem_bytes } => Some(BufferLen::SameAsDispatch {
+            elem_bytes: *elem_bytes,
+        }),
+    })
+}
+
+fn realize_filter_output_capacities(
+    entry: &mut AllocatedEntry,
+    resources: &LogicalResourceArena,
+    filter_data: &[ResourceId],
+) -> Result<(), String> {
+    for output in &mut entry.outputs {
+        let Some(SemanticResourceRef(resource)) = output.resource else {
+            continue;
+        };
+        if !filter_data.contains(&resource) {
+            continue;
+        }
+        let capacity = filter_capacity_buffer_len(
+            resources,
+            resources[resource].size().expect("runtime Filter data size was refined while binding storage"),
+        )?;
+        *output.storage_length_mut().ok_or_else(|| {
+            format!(
+                "entry `{}` publishes runtime Filter data {resource:?} through a non-storage output",
+                entry.name
+            )
+        })? = capacity;
+    }
+    Ok(())
 }
 
 fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>) {
@@ -804,135 +890,6 @@ fn remap_entry_resources(
     })
 }
 
-pub fn verify_allocated_resources(program: &ResourcesAllocated) -> Result<(), String> {
-    let check_size = |size: &LogicalSize| match size {
-        LogicalSize::LikeResource { resource, .. } if !program.data.core.resources.contains(*resource) => {
-            Err(format!("resource size references missing source {resource:?}"))
-        }
-        _ => Ok(()),
-    };
-    for resource in &program.data.core.resources {
-        check_size(&resource.size)?;
-    }
-    for (_, stage) in program.data.stages.stages() {
-        let entry = stage.body();
-        for declaration in &entry.resource_declarations {
-            if !program.data.core.resources.contains(declaration.resource.0) {
-                return Err(format!(
-                    "entry references missing resource {:?}",
-                    declaration.resource.0
-                ));
-            }
-        }
-        for (slot, output) in entry.outputs.iter().enumerate() {
-            if output.routes.is_empty() {
-                return Err(format!(
-                    "entry `{}` output slot {slot} has no explicit route",
-                    entry.name
-                ));
-            }
-            if output.routes.iter().any(|route| route.writers.is_empty()) {
-                return Err(format!(
-                    "entry `{}` output slot {slot} has a source value but no producer",
-                    entry.name
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn resolve_scratch_sizes(program: ResidencyDraft) -> ResidencyDraft {
-    let mut resolved = Vec::new();
-    for entry in &program.entry_points {
-        for (_, block) in &entry.graph.skeleton.blocks {
-            for effect in &block.side_effects {
-                let SideEffectKind::Soac(SoacEffect(
-                    _,
-                    Soac::Filter(filter::Op {
-                        body,
-                        state:
-                            filter::SemanticState {
-                                space,
-                                output:
-                                    filter::Output::Runtime(filter::RuntimeOutput {
-                                        backing: filter::RuntimeBacking::Bound(scratch),
-                                        ..
-                                    }),
-                                ..
-                            },
-                    }),
-                )) = &effect.kind
-                else {
-                    continue;
-                };
-                let elem_bytes = ssa::layout::storage_elem_stride(&body.output_element_type()).unwrap_or(1);
-                let size = match space.dims() {
-                    [super::types::SegExtent::Fixed(count)] => {
-                        LogicalSize::FixedBytes(*count as u64 * elem_bytes as u64)
-                    }
-                    [super::types::SegExtent::ResourceLength {
-                        resource,
-                        elem_bytes: src_elem_bytes,
-                        ..
-                    }] => LogicalSize::LikeResource {
-                        resource: resource.0,
-                        elem_bytes,
-                        src_elem_bytes: *src_elem_bytes,
-                    },
-                    _ => LogicalSize::SameAsDispatch { elem_bytes },
-                };
-                let output_len = match &size {
-                    LogicalSize::FixedBytes(bytes) => {
-                        Some(pipeline_descriptor::BufferLen::Fixed { bytes: *bytes })
-                    }
-                    LogicalSize::LikeResource {
-                        resource,
-                        elem_bytes,
-                        src_elem_bytes,
-                    } => program.data.core.resources[*resource].host_binding().map(|binding| {
-                        pipeline_descriptor::BufferLen::LikeInput {
-                            set: binding.set,
-                            binding: binding.binding,
-                            elem_bytes: *elem_bytes,
-                            src_elem_bytes: *src_elem_bytes,
-                        }
-                    }),
-                    LogicalSize::SameAsDispatch { elem_bytes } => {
-                        Some(pipeline_descriptor::BufferLen::SameAsDispatch {
-                            elem_bytes: *elem_bytes,
-                        })
-                    }
-                    LogicalSize::Unspecified => None,
-                };
-                resolved.push((scratch.0, size, output_len));
-            }
-        }
-    }
-
-    let Program {
-        functions,
-        externs,
-        mut entry_points,
-        constants,
-        mut data,
-        global_context,
-        state: _,
-    } = program;
-    for (resource, size, output_len) in resolved {
-        data.core.resources[resource].size = size.clone();
-        for entry in &mut entry_points {
-            for output in &mut entry.outputs {
-                if output.resource == Some(SemanticResourceRef(resource)) {
-                    *output.storage_length_mut().expect("filter output resource must be storage") =
-                        output_len.clone();
-                }
-            }
-        }
-    }
-    Program::from_parts(functions, externs, entry_points, constants, data, global_context)
-}
-
 pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated, ConvertError> {
     let Program {
         functions,
@@ -943,6 +900,68 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
         global_context,
         state: _,
     } = program;
+    for resource in &data.core.resources {
+        if let Some(LogicalSize::LikeResource { resource: source, .. }) = resource.size() {
+            if !data.core.resources.contains(*source) {
+                return Err(ConvertError::Internal(format!(
+                    "resource {:?} has a logical size that references missing source {source:?}",
+                    resource.id()
+                )));
+            }
+        }
+    }
+    for entry in &entry_points {
+        for declaration in &entry.resource_declarations {
+            if !data.core.resources.contains(declaration.resource.0) {
+                return Err(ConvertError::Internal(format!(
+                    "entry `{}` declares missing resource {:?}",
+                    entry.name, declaration.resource.0
+                )));
+            }
+        }
+        for input in &entry.inputs {
+            if let Some(resource) = input.resource {
+                if !data.core.resources.contains(resource.0) {
+                    return Err(ConvertError::Internal(format!(
+                        "entry `{}` input references missing resource {:?}",
+                        entry.name, resource.0
+                    )));
+                }
+            }
+        }
+        for output in &entry.outputs {
+            if let Some(resource) = output.resource {
+                if !data.core.resources.contains(resource.0) {
+                    return Err(ConvertError::Internal(format!(
+                        "entry `{}` output references missing resource {:?}",
+                        entry.name, resource.0
+                    )));
+                }
+            }
+        }
+        for result in &entry.internal_results {
+            if !data.core.resources.contains(result.resource.0) {
+                return Err(ConvertError::Internal(format!(
+                    "entry `{}` internal result references missing resource {:?}",
+                    entry.name, result.resource.0
+                )));
+            }
+        }
+        for (slot, output) in entry.outputs.iter().enumerate() {
+            if output.routes.is_empty() {
+                return Err(ConvertError::Internal(format!(
+                    "entry `{}` output slot {slot} has no explicit route",
+                    entry.name
+                )));
+            }
+            if output.routes.iter().any(|route| route.writers.is_empty()) {
+                return Err(ConvertError::Internal(format!(
+                    "entry `{}` output slot {slot} has a source value but no producer",
+                    entry.name
+                )));
+            }
+        }
+    }
     for entry in &entry_points {
         let stage = data.stage_ids[&entry.id];
         for declaration in entry.resource_declarations.iter().filter(|declaration| declaration.role.reads())
@@ -966,7 +985,10 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
             let Some(SemanticResourceRef(resource)) = input.resource else {
                 continue;
             };
-            if !matches!(&data.core.resources[resource].origin, ResourceOrigin::Host(_)) {
+            if !matches!(
+                data.core.resources[resource].origin(),
+                ResourceOrigin::Host { .. }
+            ) {
                 continue;
             }
             data.stages
@@ -984,7 +1006,10 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
             let Some(SemanticResourceRef(resource)) = output.resource else {
                 continue;
             };
-            if !matches!(&data.core.resources[resource].origin, ResourceOrigin::Host(_)) {
+            if !matches!(
+                data.core.resources[resource].origin(),
+                ResourceOrigin::Host { .. }
+            ) {
                 continue;
             }
             let flow = data
@@ -1035,6 +1060,10 @@ mod tests {
         Type::Constructed(TypeName::Unit, Vec::new())
     }
 
+    fn u32_ty() -> Type<TypeName> {
+        Type::Constructed(TypeName::UInt(32), Vec::new())
+    }
+
     #[test]
     fn resource_draft_cannot_finalize_before_policy_lowering() {
         let binding = BindingRef::new(2, 4);
@@ -1055,10 +1084,10 @@ mod tests {
         let binding = BindingRef::new(2, 4);
         let mut builder = ResourceAllocationBuilder::default();
         let resource = builder.reserve_host(binding, unit_ty()).unwrap();
-        builder.set_host_size(binding, LogicalSize::Unspecified).unwrap();
+        builder.set_host_size(binding, HostSizePolicy::RuntimeProvided).unwrap();
 
         let context = builder.finalize().expect("processed draft must finalize");
-        assert_eq!(context.resources[resource].size, LogicalSize::Unspecified);
+        assert_eq!(context.resources[resource].size(), None);
     }
 
     #[test]
@@ -1067,7 +1096,7 @@ mod tests {
         let mut builder = ResourceAllocationBuilder::default();
 
         let error = builder
-            .set_host_size(binding, LogicalSize::FixedBytes(16))
+            .set_host_size(binding, HostSizePolicy::Known(LogicalSize::FixedBytes(16)))
             .expect_err("unreserved binding must fail");
         assert!(error.contains("must be reserved"), "{error}");
     }
@@ -1078,5 +1107,93 @@ mod tests {
             interface::StorageRole::Input.merge(interface::StorageRole::Output),
             interface::StorageRole::InputOutput
         );
+    }
+
+    #[test]
+    fn filter_storage_rejects_existing_capacity_mismatch_inline() {
+        let owner = super::super::program::SemanticOpId::for_test(3);
+        let mut resources = LogicalResourceArena::default();
+        let backing = resources.allocate_host(
+            HostResource {
+                binding: BindingRef::new(0, 1),
+                name: None,
+            },
+            u32_ty(),
+            HostSizePolicy::Known(LogicalSize::FixedBytes(8)),
+        );
+
+        let error = bind_filter_storage(
+            &mut resources,
+            owner,
+            u32_ty(),
+            LogicalSize::FixedBytes(16),
+            Some(backing),
+            None,
+        )
+        .expect_err("an incompatible published capacity must fail while it is bound");
+
+        assert!(error.contains("data resource"), "{error}");
+        assert!(error.contains("logical size"), "{error}");
+    }
+
+    #[test]
+    fn filter_storage_refines_unspecified_capacity_inline() {
+        let owner = super::super::program::SemanticOpId::for_test(5);
+        let mut resources = LogicalResourceArena::default();
+        let backing = resources.allocate_host(
+            HostResource {
+                binding: BindingRef::new(0, 1),
+                name: None,
+            },
+            u32_ty(),
+            HostSizePolicy::RuntimeProvided,
+        );
+
+        bind_filter_storage(
+            &mut resources,
+            owner,
+            u32_ty(),
+            LogicalSize::FixedBytes(16),
+            Some(backing),
+            None,
+        )
+        .expect("an unresolved capacity should be completed while it is bound");
+
+        assert_eq!(resources[backing].size(), Some(&LogicalSize::FixedBytes(16)));
+    }
+
+    #[test]
+    fn filter_storage_rejects_existing_length_mismatch_inline() {
+        let owner = super::super::program::SemanticOpId::for_test(4);
+        let mut resources = LogicalResourceArena::default();
+        let backing = resources.allocate_host(
+            HostResource {
+                binding: BindingRef::new(0, 1),
+                name: None,
+            },
+            u32_ty(),
+            HostSizePolicy::Known(LogicalSize::FixedBytes(16)),
+        );
+        let length = resources.allocate_host(
+            HostResource {
+                binding: BindingRef::new(0, 2),
+                name: None,
+            },
+            u32_ty(),
+            HostSizePolicy::Known(LogicalSize::FixedBytes(8)),
+        );
+
+        let error = bind_filter_storage(
+            &mut resources,
+            owner,
+            u32_ty(),
+            LogicalSize::FixedBytes(16),
+            Some(backing),
+            Some(length),
+        )
+        .expect_err("an incompatible stored length must fail while it is bound");
+
+        assert!(error.contains("length resource"), "{error}");
+        assert!(error.contains("logical size"), "{error}");
     }
 }

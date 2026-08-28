@@ -257,7 +257,6 @@ publication state is rewritten to name them.
 | **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_parallel_prelude` succeeds, create its scalar handoff entry, rewrite the consumer prefix, then restart the fixpoint |
 | **`plan_logical_resources`** | `plan_direct_stage_prelude` | When neither earlier planner succeeds, select at most one cost-eligible stage-invariant scalar frontier for a direct shader stage |
 | **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_direct_stage_prelude` succeeds, create its scalar handoff entry, rewrite the stage prefix, then restart the fixpoint; otherwise residency is complete |
-| **`plan_logical_resources`** | `resolve_scratch_sizes` | Derive logical sizes and host ABI lengths for Filter scratch resources |
 
 The semantic EGIR order is load-bearing:
 
@@ -282,14 +281,13 @@ planning may mutate stage bodies but cannot directly create an invalid graph.
 The current `finalize_staged_ir` function groups three responsibilities,
 implemented by multiple traversals: it completes consumer edges for stages
 introduced after a flow, records the host-facing input/output boundary, and
-validates/finalizes the builder while moving executable bodies into their
-stages. They remain one table row because they do not yet have separate
-function boundaries.
+checks resource references and output routes while finalizing the builder and
+moving executable bodies into their stages. Inconsistencies return from this
+construction boundary; there is no later resource-verification pass.
 
 | Checkpoint orchestrator | Sub-pass | Role / condition |
 |-------------------------|----------|------------------|
-| **`plan_logical_resources`** | `finalize_staged_ir` | Complete resident-flow incidence, publish only host-origin external inputs and outputs, validate destinations and acyclicity, and replace the semantic program's flat entry collection with staged body ownership |
-| **`plan_logical_resources`** | `verify_allocated_resources` | Debug builds only: validate logical-resource references, sizes, declarations, and output routes in every staged body |
+| **`plan_logical_resources`** | `finalize_staged_ir` | Check resource references and output routes, complete resident-flow incidence, publish only host-origin external inputs and outputs, validate destinations and acyclicity, and replace the semantic program's flat entry collection with staged body ownership |
 | **`plan`** | `bind_mapped_output_destinations` | Bind mapped stage outputs to the resource destinations selected during logical planning |
 | **`plan`** | `planning::analyze` | Analyze target-aware physical recipes for every staged body |
 | **`plan`** | `allocate_scratch` | Parallel schedule only: allocate work buffers required by selected recipes |
@@ -307,9 +305,10 @@ function boundaries.
 
 The staged order is load-bearing:
 
-- **`resolve_scratch_sizes` before `finalize_staged_ir`** — all storage carried
-  by resident flows must have complete target-independent size information
-  before the graph is sealed.
+- **Filter storage construction before `finalize_staged_ir`** — direct
+  publication and residency materialization derive and check capacity sizes
+  when they bind backing resources, so every resident flow is complete before
+  the graph is sealed.
 - **`finalize_staged_ir` before `plan`** — target planning consumes stored stage
   and flow topology; it no longer reconstructs compiler-resource flow edges
   from entry declarations.

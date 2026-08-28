@@ -53,7 +53,7 @@ pub(crate) mod verify_physical;
 
 pub use allocation::{
     allocate_semantic_resources, finalize_staged_ir, plan_logical_resources, resolve_residency,
-    resolve_scratch_sizes, verify_allocated_resources, ResidencyDraft, ResourcesAllocated,
+    ResidencyDraft, ResourcesAllocated,
 };
 pub use elaborate::elaborate;
 pub use eliminate_call_places::{
