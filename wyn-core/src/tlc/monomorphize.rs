@@ -439,21 +439,42 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
         Type::Variable(id) => format!("v{id}"),
         Type::Constructed(TypeName::Size(n), _) => format!("n{n}"),
         Type::Constructed(TypeName::Bool, _) => "bool".to_string(),
-        _ if ty.is_array() => {
+        Type::Constructed(TypeName::Array, args) => {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+                return format!("Array_{args}");
+            };
+            let Some(storage) = ty.array_storage() else {
+                return format!(
+                    "Array_{}",
+                    args.iter().map(format_type_compact).collect::<Vec<_>>().join("_")
+                );
+            };
+            let dims = tensor.dims.iter().map(format_type_compact).collect::<Vec<_>>().join("x");
             format!(
                 "arr{}_{}{}",
-                format_type_compact(ty.elem_type().expect("Array has elem")),
-                format_type_compact(ty.array_size().expect("Array has size")),
-                format_type_compact(ty.array_variant().expect("Array has variant"))
+                format_type_compact(tensor.elem),
+                dims,
+                format_type_compact(storage.variant)
             )
         }
         Type::Constructed(TypeName::Tuple(arity), args) => {
             let args = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
             format!("tup{arity}_{args}")
         }
-        _ if ty.is_vec() => {
-            let elem = format_type_compact(ty.elem_type().expect("Vec has elem"));
-            let size = format_type_compact(ty.vec_size_type().expect("Vec has size"));
+        Type::Constructed(TypeName::Vec, args) => {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type_compact).collect::<Vec<_>>().join("_");
+                return format!("Vec_{args}");
+            };
+            let Some(size) = tensor.dim(0) else {
+                return format!(
+                    "Vec_{}",
+                    args.iter().map(format_type_compact).collect::<Vec<_>>().join("_")
+                );
+            };
+            let elem = format_type_compact(tensor.elem);
+            let size = format_type_compact(size);
             format!("vec_{elem}_{size}")
         }
         Type::Constructed(TypeName::Float(bits), _) => format!("f{bits}"),

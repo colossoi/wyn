@@ -43,9 +43,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // to match the result type.
                 let mut operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
                 let result_ssa_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
-                let result_is_vec = result_ssa_ty.as_ref().is_some_and(|t| t.is_vec());
-                if result_is_vec {
-                    let result_ssa_ty = result_ssa_ty.as_ref().unwrap();
+                if let Some(result_ssa_ty) = result_ssa_ty.as_ref().filter(|ty| ty.is_vec()) {
                     for &pos in *splat_args {
                         if self.get_value_type_ref(value_refs[pos]).is_scalar() {
                             let splatted = self.splat_scalar(arg_ids[pos], result_ssa_ty, result_ty)?;
@@ -89,7 +87,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                     let image_ty = self
                         .constructor
-                        .polytype_to_spirv(&PolyType::Constructed(TypeName::Texture2D, vec![]));
+                        .polytype_to_spirv(&PolyType::Constructed(TypeName::Texture2D, vec![]))?;
                     let sampled_img_ty =
                         *self.constructor.builder.type_sampled_image(builder::TypeId::new(image_ty));
                     let sampled = self.constructor.builder.sampled_image(
@@ -141,8 +139,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let idx_u32 = self.constructor.builder.bitcast(u32_ty, None, idx)?;
                         let final_index =
                             self.constructor.builder.i_add(u32_ty, None, base_offset, idx_u32)?;
-                        let elem_ty = arr_ty.elem_type().expect("View has elem").clone();
-                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty);
+                        let Some(tensor) = arr_ty.as_tensor() else {
+                            bail_spirv!("malformed view array in array_with: {:?}", arr_ty);
+                        };
+                        let elem_ty = tensor.elem.clone();
+                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty)?;
                         let elem_ptr_type = self
                             .constructor
                             .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
@@ -175,14 +176,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .map(|v| matches!(v, PolyType::Constructed(TypeName::ArrayVariantBounded, _)))
                         .unwrap_or(false);
                     if is_bounded {
-                        let elem_ty = arr_ty.elem_type().expect("Bounded has elem").clone();
-                        let n = match arr_ty.array_size() {
+                        let Some(tensor) = arr_ty.as_tensor() else {
+                            bail_spirv!("malformed bounded array in array_with: {:?}", arr_ty);
+                        };
+                        let elem_ty = tensor.elem.clone();
+                        let n = match tensor.dim(0) {
                             Some(PolyType::Constructed(TypeName::Size(n), _)) => *n as u32,
                             other => {
                                 bail_spirv!("Bounded array_with requires Size(N) capacity, got {:?}", other)
                             }
                         };
-                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty);
+                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty)?;
                         let size_const = self.constructor.const_u32(n);
                         let buf_type = *self
                             .constructor
@@ -287,9 +291,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         // is i32. Extract with the actual field type, then
                         // bitcast if needed.
                         PolyType::Constructed(TypeName::ArrayVariantVirtual, _) => {
-                            let elem_spirv = self
-                                .constructor
-                                .polytype_to_spirv(arr_ty.elem_type().expect("virtual array has elem"));
+                            let Some(tensor) = arr_ty.as_tensor() else {
+                                bail_spirv!("malformed virtual array in length: {:?}", arr_ty);
+                            };
+                            let elem_spirv = self.constructor.polytype_to_spirv(tensor.elem)?;
                             if elem_spirv == result_ty {
                                 Ok(self.constructor.builder.composite_extract(
                                     result_ty,
@@ -309,8 +314,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         }
                         // Composite: sized SPIR-V array — length is known from the type.
                         PolyType::Constructed(TypeName::ArrayVariantComposite, _) => {
-                            match arr_ty.array_size().expect("Array has size") {
-                                PolyType::Constructed(TypeName::Size(n), _) => {
+                            let Some(tensor) = arr_ty.as_tensor() else {
+                                bail_spirv!("malformed composite array in length: {:?}", arr_ty);
+                            };
+                            match tensor.dim(0) {
+                                Some(PolyType::Constructed(TypeName::Size(n), _)) => {
                                     Ok(self.constructor.const_i32(*n as i32))
                                 }
                                 _ => bail_spirv!("length: composite array has unknown size"),
@@ -340,7 +348,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .unwrap_or(false);
 
                     if is_view {
-                        let elem_ty = arr_ty.elem_type().expect("Array has elem").clone();
+                        let Some(tensor) = arr_ty.as_tensor() else {
+                            bail_spirv!("malformed view array in slice: {:?}", arr_ty);
+                        };
+                        let elem_ty = tensor.elem.clone();
                         let u32_ty = self.constructor.u32_type;
                         let base_offset =
                             self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;

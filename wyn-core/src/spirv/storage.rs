@@ -108,14 +108,14 @@ impl Constructor {
         set: u32,
         binding: u32,
         writable: bool,
-    ) -> spirv::Word {
+    ) -> Result<spirv::Word> {
         let use_key = StorageBufferUse {
             binding: BindingRef::new(set, binding),
             writable,
         };
         // Return existing if already created
         if let Some(&(var_id, _, _)) = self.storage_buffers.get(&use_key) {
-            return var_id;
+            return Ok(var_id);
         }
         // Storage buffers can be either an array-shaped view (`[]T` → elem is
         // `T`) or a scalar / vec / struct output (e.g. a reduce result, which
@@ -127,7 +127,7 @@ impl Constructor {
             Some(elem) => elem.clone(),
             None => array_ty.clone(),
         };
-        let elem_spirv = self.polytype_to_spirv(&elem_ty);
+        let elem_spirv = self.polytype_to_spirv(&elem_ty)?;
 
         // The std430 array stride is the element size rounded up to the
         // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
@@ -140,8 +140,12 @@ impl Constructor {
         let stride = match &layout {
             Some(l) => l.size,
             None => {
-                let elem_size = ssa::layout::storage_elem_stride(&elem_ty)
-                    .expect("storage buffer element type must have known size");
+                let Some(elem_size) = ssa::layout::storage_elem_stride(&elem_ty) else {
+                    return Err(err_spirv!(
+                        "storage buffer element type has no known std430 size: {:?}",
+                        elem_ty
+                    ));
+                };
                 let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
                 elem_size.div_ceil(elem_align) * elem_align
             }
@@ -159,13 +163,12 @@ impl Constructor {
             PolyType::Constructed(TypeName::Tuple(_), _) | PolyType::Constructed(TypeName::Record(_), _)
         );
         if is_struct && self.builder.mark_buffer_layout_decorated_once(builder::TypeId::new(elem_spirv)) {
-            let layout = layout.as_ref().unwrap_or_else(|| {
-                panic!(
-                    "storage buffer element {:?}: struct members must be 32-bit \
-                     scalars or vectors of them (std430)",
+            let Some(layout) = layout.as_ref() else {
+                return Err(err_spirv!(
+                    "storage buffer element {:?} has no supported std430 struct layout",
                     elem_ty
-                )
-            });
+                ));
+            };
             for (i, &offset) in layout.member_offsets.iter().enumerate() {
                 self.builder.member_decorate(
                     elem_spirv,
@@ -203,7 +206,7 @@ impl Constructor {
         // Store for later lookup (ptr_type used for StorageView struct construction)
         self.storage_buffers.insert(use_key, (var_id, block_struct, ptr_type));
 
-        var_id
+        Ok(var_id)
     }
 
     /// Create (once) the `#[storage_image]` global for `br`: a format-aware

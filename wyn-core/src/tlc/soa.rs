@@ -60,10 +60,15 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
         // function-local composite arrays remain eligible for SoA.
         _ if is_storage_backed_array(ty) => ty.clone(),
         _ if ty.is_array() => {
-            let elem = soa_type(ty.elem_type().expect("Array has elem"));
-            let size = ty.array_size().expect("Array has size").clone();
-            let region = ty.array_buffer().expect("Array has region").clone();
-            let variant = match ty.array_variant().expect("Array has variant") {
+            let Some(tensor) = ty.as_tensor() else {
+                return ty.clone();
+            };
+            let Some(storage) = ty.array_storage() else {
+                return ty.clone();
+            };
+            let elem = soa_type(tensor.elem);
+            let dims = tensor.dims.to_vec();
+            let variant = match storage.variant {
                 // Resolve unresolved variant variables to Composite when distributing.
                 Type::Variable(_) => Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
                 v => v.clone(),
@@ -76,15 +81,17 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
                 let distributed: Vec<Type<TypeName>> = component_types
                     .iter()
                     .map(|ct| {
-                        soa_type(&Type::Constructed(
-                            TypeName::Array,
-                            vec![ct.clone(), variant.clone(), size.clone(), region.clone()],
+                        soa_type(&array_type(
+                            ct.clone(),
+                            variant.clone(),
+                            &dims,
+                            storage.region.clone(),
                         ))
                     })
                     .collect();
                 Type::Constructed(TypeName::Tuple(n), distributed)
             } else {
-                Type::Constructed(TypeName::Array, vec![elem, variant, size, region])
+                array_type(elem, variant, &dims, storage.region.clone())
             }
         }
         Type::Constructed(TypeName::Tuple(n), args) => {
@@ -101,6 +108,20 @@ pub fn soa_type(ty: &Type<TypeName>) -> Type<TypeName> {
         }
         Type::Variable(_) => ty.clone(),
     }
+}
+
+fn array_type(
+    elem: Type<TypeName>,
+    variant: Type<TypeName>,
+    dims: &[Type<TypeName>],
+    region: Type<TypeName>,
+) -> Type<TypeName> {
+    let mut args = Vec::with_capacity(dims.len() + 3);
+    args.push(elem);
+    args.push(variant);
+    args.extend_from_slice(dims);
+    args.push(region);
+    Type::Constructed(TypeName::Array, args)
 }
 
 fn is_storage_backed_array(ty: &Type<TypeName>) -> bool {
@@ -137,7 +158,7 @@ fn soa_yields_tuple_arrays(ty: &Type<TypeName>) -> Option<usize> {
 }
 
 /// Extract the parts of an array whose element is DIRECTLY a tuple:
-/// `(arity, component_types, variant, size, region)`. Returns `None` for any
+/// `(arity, component_types, variant, dimensions, region)`. Returns `None` for any
 /// other type — including the nested array-of-tuple case that
 /// `soa_yields_tuple_arrays` accepts but for which no flat components exist.
 ///
@@ -150,19 +171,19 @@ fn array_of_tuple_parts(
     usize,
     Vec<Type<TypeName>>,
     Type<TypeName>,
-    Type<TypeName>,
+    Vec<Type<TypeName>>,
     Type<TypeName>,
 )> {
-    if !ty.is_array() {
-        return None;
-    }
-    match ty.elem_type()? {
-        Type::Constructed(TypeName::Tuple(n), components) => {
-            let variant = ty.array_variant().expect("Array has variant").clone();
-            let size = ty.array_size().expect("Array has size").clone();
-            let region = ty.array_buffer().expect("Array has region").clone();
-            Some((*n, components.clone(), variant, size, region))
-        }
+    let tensor = ty.as_tensor()?;
+    let storage = ty.array_storage()?;
+    match tensor.elem {
+        Type::Constructed(TypeName::Tuple(n), components) => Some((
+            *n,
+            components.clone(),
+            storage.variant.clone(),
+            tensor.dims.to_vec(),
+            storage.region.clone(),
+        )),
         _ => None,
     }
 }
@@ -230,13 +251,13 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         match &term.kind {
             TermKind::App { func, args } => self.rewrite_special_app(func, args, &term.ty, term.span),
             TermKind::Index { array, index } => {
-                let (n, component_types, variant, size, region) = array_of_tuple_parts(&array.ty)?;
+                let (n, component_types, variant, dims, region) = array_of_tuple_parts(&array.ty)?;
                 Some(self.rewrite_index_aot(
                     array,
                     index,
                     &component_types,
                     &variant,
-                    &size,
+                    &dims,
                     &region,
                     n,
                     term.span,
@@ -261,9 +282,9 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             // array_with(arr, i, val) where arr was [n](A,B)
             if (id == known.array_with || id == known.array_with_in_place) && args.len() == 3 {
                 let arr_orig_ty = &args[0].ty;
-                if let Some((n, comp_tys, variant, size, region)) = array_of_tuple_parts(arr_orig_ty) {
+                if let Some((n, comp_tys, variant, dims, region)) = array_of_tuple_parts(arr_orig_ty) {
                     return Some(self.rewrite_array_with_aot(
-                        &args[0], &args[1], &args[2], &comp_tys, &variant, &size, &region, n, span,
+                        &args[0], &args[1], &args[2], &comp_tys, &variant, &dims, &region, n, span,
                     ));
                 }
             }
@@ -310,7 +331,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         idx: &Term<Empty, Empty>,
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
-        size: &Type<TypeName>,
+        dims: &[Type<TypeName>],
         region: &Type<TypeName>,
         n: usize,
         span: Span,
@@ -319,14 +340,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             .map(|i| {
                 // Recursively soa_type the constructed array so nested array-of-tuples
                 // like [8](int, vec3) are further distributed to ([8]int, [8]vec3).
-                let comp_arr_ty = soa_type(&Type::Constructed(
-                    TypeName::Array,
-                    vec![
-                        soa_type(&comp_tys[i]),
-                        variant.clone(),
-                        size.clone(),
-                        region.clone(),
-                    ],
+                let comp_arr_ty = soa_type(&array_type(
+                    soa_type(&comp_tys[i]),
+                    variant.clone(),
+                    dims,
+                    region.clone(),
                 ));
                 let proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty, span);
                 let elem_ty = soa_type(&comp_tys[i]);
@@ -348,7 +366,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         val: &Term<Empty, Empty>,
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
-        size: &Type<TypeName>,
+        dims: &[Type<TypeName>],
         region: &Type<TypeName>,
         n: usize,
         span: Span,
@@ -356,9 +374,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         let components: Vec<Term<Empty, Empty>> = (0..n)
             .map(|i| {
                 let soa_comp_ty = soa_type(&comp_tys[i]);
-                let comp_arr_ty = soa_type(&Type::Constructed(
-                    TypeName::Array,
-                    vec![soa_comp_ty.clone(), variant.clone(), size.clone(), region.clone()],
+                let comp_arr_ty = soa_type(&array_type(
+                    soa_comp_ty.clone(),
+                    variant.clone(),
+                    dims,
+                    region.clone(),
                 ));
                 let arr_proj = self.mk_tuple_proj(arr.clone(), i, comp_arr_ty.clone(), span);
                 let val_proj = self.mk_tuple_proj(val.clone(), i, soa_comp_ty, span);
@@ -370,14 +390,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             TypeName::Tuple(n),
             (0..n)
                 .map(|i| {
-                    soa_type(&Type::Constructed(
-                        TypeName::Array,
-                        vec![
-                            soa_type(&comp_tys[i]),
-                            variant.clone(),
-                            size.clone(),
-                            region.clone(),
-                        ],
+                    soa_type(&array_type(
+                        soa_type(&comp_tys[i]),
+                        variant.clone(),
+                        dims,
+                        region.clone(),
                     ))
                 })
                 .collect(),
@@ -392,7 +409,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         elems: &[Term<Empty, Empty>],
         comp_tys: &[Type<TypeName>],
         variant: &Type<TypeName>,
-        size: &Type<TypeName>,
+        dims: &[Type<TypeName>],
         region: &Type<TypeName>,
         span: Span,
     ) -> Term<Empty, Empty> {
@@ -404,10 +421,7 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
                     .iter()
                     .map(|e| self.mk_tuple_proj(e.clone(), i, soa_comp_ty.clone(), span))
                     .collect();
-                let arr_ty = soa_type(&Type::Constructed(
-                    TypeName::Array,
-                    vec![soa_comp_ty, variant.clone(), size.clone(), region.clone()],
-                ));
+                let arr_ty = soa_type(&array_type(soa_comp_ty, variant.clone(), dims, region.clone()));
                 self.mk_array_lit(projected_elems, arr_ty, span)
             })
             .collect();
@@ -416,14 +430,11 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
             TypeName::Tuple(n),
             (0..n)
                 .map(|i| {
-                    soa_type(&Type::Constructed(
-                        TypeName::Array,
-                        vec![
-                            soa_type(&comp_tys[i]),
-                            variant.clone(),
-                            size.clone(),
-                            region.clone(),
-                        ],
+                    soa_type(&array_type(
+                        soa_type(&comp_tys[i]),
+                        variant.clone(),
+                        dims,
+                        region.clone(),
                     ))
                 })
                 .collect(),
@@ -508,9 +519,9 @@ impl<'a, 'ids> SoaTransformer<'a, 'ids> {
         // Array-of-tuple literal: distribute into per-component arrays.
         if let ArrayExpr::Literal(elems) = ae {
             if !elems.is_empty() {
-                if let Some((_n, comp_tys, variant, size, region)) = array_of_tuple_parts(orig_ty) {
+                if let Some((_n, comp_tys, variant, dims, region)) = array_of_tuple_parts(orig_ty) {
                     return Some(
-                        self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &size, &region, span),
+                        self.rewrite_array_lit_aot(elems, &comp_tys, &variant, &dims, &region, span),
                     );
                 }
             }

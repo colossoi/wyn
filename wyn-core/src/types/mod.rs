@@ -517,6 +517,41 @@ impl polytype::Name for TypeName {
 // Type extension traits
 // =============================================================================
 
+/// Borrowed, structurally complete view of a non-scalar tensor type.
+///
+/// Vectors, matrices, and arrays all expose the same arbitrary-rank shape.
+/// Operational and storage semantics remain properties of the source type,
+/// rather than part of its mathematical shape.
+#[derive(Debug, Clone, Copy)]
+pub struct TensorType<'a> {
+    pub elem: &'a Type,
+    pub dims: &'a [Type],
+}
+
+impl<'a> TensorType<'a> {
+    pub fn rank(self) -> usize {
+        self.dims.len()
+    }
+
+    pub fn dim(self, index: usize) -> Option<&'a Type> {
+        self.dims.get(index)
+    }
+
+    pub fn concrete_dim(self, index: usize) -> Option<usize> {
+        let Type::Constructed(TypeName::Size(size), _) = self.dim(index)? else {
+            return None;
+        };
+        Some(*size)
+    }
+}
+
+/// Storage metadata carried specifically by an array type.
+#[derive(Debug, Clone, Copy)]
+pub struct ArrayStorage<'a> {
+    pub variant: &'a Type,
+    pub region: &'a Type,
+}
+
 /// Extension trait for common type operations.
 ///
 /// Centralizes type queries so passes don't need to pattern-match
@@ -524,16 +559,22 @@ impl polytype::Name for TypeName {
 ///
 /// ## Constructed type argument layouts
 ///
-/// | Type    | args[0]       | args[1]          | args[2..]                |
-/// |---------|---------------|------------------|--------------------------|
-/// | `Vec`   | elem_type     | Size(n)          | —                        |
-/// | `Mat`   | elem_type     | Size(cols)       | Size(rows)               |
-/// | `Array` | elem_type     | variant          | dim_0, dim_1, …, dim_R-1 |
+/// | Type    | element   | dimensions                         | representation metadata |
+/// |---------|-----------|------------------------------------|-------------------------|
+/// | `Vec`   | `args[0]` | `args[1..]` (rank 1)               | —                       |
+/// | `Mat`   | `args[0]` | `args[1..]` (columns, rows)        | —                       |
+/// | `Array` | `args[0]` | `args[2..args.len()-1]`            | variant, trailing region |
 ///
-/// Array rank is implicit: `args.len() - 2`. All arrays are rank-1
-/// today; the variadic dim suffix is the entry point for multi-dim
-/// representations in a future effort.
+/// Array rank is implicit: `args.len() - 3`. Current constructors produce
+/// rank-1 arrays, while the representation and tensor view support arbitrary
+/// non-zero rank.
 pub trait TypeExt {
+    /// View this type as one complete non-scalar tensor shape.
+    fn as_tensor(&self) -> Option<TensorType<'_>>;
+
+    /// Return the runtime storage metadata of a structurally valid array.
+    fn array_storage(&self) -> Option<ArrayStorage<'_>>;
+
     /// Check if this type is an array type
     fn is_array(&self) -> bool;
 
@@ -571,19 +612,17 @@ pub trait TypeExt {
     /// Array.
     fn array_variant(&self) -> Option<&Type>;
 
-    /// Get the array's first (and, today, only) dimension size
-    /// (`args[2]`), or `None` if not an Array. Equivalent to
-    /// `array_dim(0)`; kept as the dominant accessor while all arrays
-    /// are rank-1.
+    /// Get the array's outermost dimension size (`args[2]`), or `None`
+    /// if not an Array. Equivalent to `array_dim(0)`.
     fn array_size(&self) -> Option<&Type>;
 
-    /// Number of array dimensions (`args.len() - 2`), or `None` if not
-    /// an Array. Always 1 today; the variadic dim suffix is the entry
-    /// point for multi-dim representations.
+    /// Number of dimensions in this array node (`args.len() - 3`), or
+    /// `None` if not an Array. Source-level multidimensional arrays may
+    /// also be represented as nested rank-1 array nodes.
     fn array_rank(&self) -> Option<usize>;
 
-    /// Per-dimension sizes (`&args[2..]`), or `None` if not an Array.
-    /// One entry today (rank-1).
+    /// Per-dimension sizes (`&args[2..args.len()-1]`), or `None` if
+    /// not an Array.
     fn array_dims(&self) -> Option<&[Type]>;
 
     /// Size of the i-th dimension (`&args[2 + i]`), or `None` if not
@@ -604,6 +643,55 @@ pub trait TypeExt {
 }
 
 impl TypeExt for Type {
+    fn as_tensor(&self) -> Option<TensorType<'_>> {
+        let Type::Constructed(name, args) = self else {
+            return None;
+        };
+        match name {
+            TypeName::Vec => {
+                let [elem, _] = args.as_slice() else {
+                    return None;
+                };
+                Some(TensorType {
+                    elem,
+                    dims: &args[1..],
+                })
+            }
+            TypeName::Mat => {
+                let [elem, _, _] = args.as_slice() else {
+                    return None;
+                };
+                Some(TensorType {
+                    elem,
+                    dims: &args[1..],
+                })
+            }
+            TypeName::Array => {
+                let [elem, _, dims @ .., _] = args.as_slice() else {
+                    return None;
+                };
+                if dims.is_empty() {
+                    return None;
+                }
+                Some(TensorType { elem, dims })
+            }
+            _ => None,
+        }
+    }
+
+    fn array_storage(&self) -> Option<ArrayStorage<'_>> {
+        let Type::Constructed(TypeName::Array, args) = self else {
+            return None;
+        };
+        let [_, variant, dims @ .., region] = args.as_slice() else {
+            return None;
+        };
+        if dims.is_empty() {
+            return None;
+        }
+        Some(ArrayStorage { variant, region })
+    }
+
     fn is_array(&self) -> bool {
         matches!(self, Type::Constructed(TypeName::Array, _))
     }
@@ -624,176 +712,79 @@ impl TypeExt for Type {
     }
 
     fn elem_type(&self) -> Option<&Type> {
-        match self {
-            // All three have elem_type at args[0]
-            Type::Constructed(TypeName::Vec, args) => {
-                debug_assert_eq!(
-                    args.len(),
-                    2,
-                    "Vec must have exactly 2 args [elem, size], got {:?}",
-                    args
-                );
-                debug_assert!(
-                    !matches!(&args[0], Type::Constructed(TypeName::Size(_), _)),
-                    "Vec args[0] looks like a Size, expected elem type: {:?}",
-                    args
-                );
-                args.first()
-            }
-            Type::Constructed(TypeName::Mat, args) => {
-                debug_assert_eq!(
-                    args.len(),
-                    3,
-                    "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
-                    args
-                );
-                debug_assert!(
-                    !matches!(&args[0], Type::Constructed(TypeName::Size(_), _)),
-                    "Mat args[0] looks like a Size, expected elem type: {:?}",
-                    args
-                );
-                args.first()
-            }
-            Type::Constructed(TypeName::Array, args) => {
-                debug_assert_array_args(args);
-                args.first()
-            }
-            _ => None,
-        }
+        Some(self.as_tensor()?.elem)
     }
 
     fn vec_size(&self) -> Option<usize> {
-        if let Type::Constructed(TypeName::Vec, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                2,
-                "Vec must have exactly 2 args [elem, size], got {:?}",
-                args
-            );
-            if let Type::Constructed(TypeName::Size(n), _) = &args[1] {
-                return Some(*n);
-            }
+        let tensor = self.as_tensor()?;
+        if !self.is_vec() {
+            return None;
         }
-        None
+        tensor.concrete_dim(0)
     }
 
     fn vec_size_type(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Vec, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                2,
-                "Vec must have exactly 2 args [elem, size], got {:?}",
-                args
-            );
-            return Some(&args[1]);
+        let tensor = self.as_tensor()?;
+        if !self.is_vec() {
+            return None;
         }
-        None
+        tensor.dim(0)
     }
 
     fn mat_cols(&self) -> Option<usize> {
-        if let Type::Constructed(TypeName::Mat, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                3,
-                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
-                args
-            );
-            debug_assert!(
-                matches!(
-                    &args[1],
-                    Type::Constructed(TypeName::Size(_), _) | Type::Variable(_)
-                ),
-                "Mat args[1] should be Size or Variable (cols), got {:?}",
-                args[1]
-            );
-            if let Type::Constructed(TypeName::Size(n), _) = &args[1] {
-                return Some(*n);
-            }
+        let tensor = self.as_tensor()?;
+        if !self.is_mat() {
+            return None;
         }
-        None
+        tensor.concrete_dim(0)
     }
 
     fn mat_rows(&self) -> Option<usize> {
-        if let Type::Constructed(TypeName::Mat, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                3,
-                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
-                args
-            );
-            debug_assert!(
-                matches!(
-                    &args[2],
-                    Type::Constructed(TypeName::Size(_), _) | Type::Variable(_)
-                ),
-                "Mat args[2] should be Size or Variable (rows), got {:?}",
-                args[2]
-            );
-            if let Type::Constructed(TypeName::Size(n), _) = &args[2] {
-                return Some(*n);
-            }
+        let tensor = self.as_tensor()?;
+        if !self.is_mat() {
+            return None;
         }
-        None
+        tensor.concrete_dim(1)
     }
 
     fn mat_cols_type(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Mat, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                3,
-                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
-                args
-            );
-            return Some(&args[1]);
+        let tensor = self.as_tensor()?;
+        if !self.is_mat() {
+            return None;
         }
-        None
+        tensor.dim(0)
     }
 
     fn mat_rows_type(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Mat, args) = self {
-            debug_assert_eq!(
-                args.len(),
-                3,
-                "Mat must have exactly 3 args [elem, cols, rows], got {:?}",
-                args
-            );
-            return Some(&args[2]);
+        let tensor = self.as_tensor()?;
+        if !self.is_mat() {
+            return None;
         }
-        None
+        tensor.dim(1)
     }
 
     fn array_size(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_array_args(args);
-            return Some(&args[2]);
-        }
-        None
+        self.array_dim(0)
     }
 
     fn array_variant(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_array_args(args);
-            return Some(&args[1]);
-        }
-        None
+        Some(self.array_storage()?.variant)
     }
 
     fn array_rank(&self) -> Option<usize> {
-        if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_array_args(args);
-            // [elem, variant, dim_0, …, dim_{rank-1}, region] → rank = len - 3.
-            return Some(args.len() - 3);
+        let tensor = self.as_tensor()?;
+        if !self.is_array() {
+            return None;
         }
-        None
+        Some(tensor.rank())
     }
 
     fn array_dims(&self) -> Option<&[Type]> {
-        if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_array_args(args);
-            // Dims are the variadic middle; the trailing arg is the region.
-            return Some(&args[2..args.len() - 1]);
+        let tensor = self.as_tensor()?;
+        if !self.is_array() {
+            return None;
         }
-        None
+        Some(tensor.dims)
     }
 
     fn array_dim(&self, i: usize) -> Option<&Type> {
@@ -801,11 +792,7 @@ impl TypeExt for Type {
     }
 
     fn array_buffer(&self) -> Option<&Type> {
-        if let Type::Constructed(TypeName::Array, args) = self {
-            debug_assert_array_args(args);
-            return args.last();
-        }
-        None
+        Some(self.array_storage()?.region)
     }
 
     fn is_runtime_sized_array(&self) -> bool {
@@ -971,7 +958,10 @@ pub fn array_with_buffer(ty: &Type, region: Type) -> Type {
         Type::Constructed(TypeName::Array, args) => {
             debug_assert_array_args(args);
             let mut args = args.clone();
-            *args.last_mut().expect("array has >= 4 args") = region;
+            let Some(region_slot) = args.last_mut() else {
+                return ty.clone();
+            };
+            *region_slot = region;
             Type::Constructed(TypeName::Array, args)
         }
         _ => ty.clone(),
@@ -1529,16 +1519,16 @@ pub fn extract_function_signature(ty: &Type) -> (Vec<Type>, Type) {
 /// Check if a type is a storage array that requires BoundSlice-style access.
 /// Storage arrays with unsized length need pointer-based indexing at runtime.
 pub fn is_bound_slice_access(ty: &Type) -> bool {
-    if !ty.is_array() {
+    let Some(tensor) = ty.as_tensor() else {
         return false;
-    }
-    let is_storage = matches!(
-        ty.array_variant().expect("Array has variant"),
-        Type::Constructed(TypeName::ArrayVariantView, _)
-    );
+    };
+    let Some(storage) = ty.array_storage() else {
+        return false;
+    };
+    let is_storage = matches!(storage.variant, Type::Constructed(TypeName::ArrayVariantView, _));
     let is_unsized = matches!(
-        ty.array_size().expect("Array has size"),
-        Type::Constructed(TypeName::SizePlaceholder, _)
+        tensor.dim(0),
+        Some(Type::Constructed(TypeName::SizePlaceholder, _))
     );
     is_storage && is_unsized
 }
@@ -1554,39 +1544,56 @@ pub fn format_type(ty: &Type) -> String {
             format!("({})", arg_strs.join(", "))
         }
         // Array[elem, variant, dim_0, ...]
-        _ if ty.is_array() => {
-            let elem = format_type(ty.elem_type().expect("Array has elem"));
-            let size = ty.array_size().expect("Array has size");
-            match size {
-                Type::Constructed(TypeName::Size(n), _) => format!("[{}]{}", n, elem),
-                Type::Constructed(TypeName::SizePlaceholder, _) => format!("[]{}", elem),
-                _ => format!("[{}]{}", format_type(size), elem),
-            }
+        Type::Constructed(TypeName::Array, args) => {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Array[{}]", args);
+            };
+            let elem = format_type(tensor.elem);
+            let dims = tensor
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    Type::Constructed(TypeName::Size(n), _) => format!("[{}]", n),
+                    Type::Constructed(TypeName::SizePlaceholder, _) => "[]".to_string(),
+                    _ => format!("[{}]", format_type(dim)),
+                })
+                .collect::<String>();
+            format!("{}{}", dims, elem)
         }
         // Vec[elem, Size(n)] -> vecNelem (e.g., vec3f32)
-        _ if ty.is_vec() => {
-            let elem = format_type(ty.elem_type().expect("Vec has elem"));
-            if let Some(n) = ty.vec_size() {
+        Type::Constructed(TypeName::Vec, args) => {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Vec[{}]", args);
+            };
+            let elem = format_type(tensor.elem);
+            if let Some(n) = tensor.concrete_dim(0) {
                 format!("vec{}{}", n, elem)
             } else {
-                format!(
-                    "vec{}{}",
-                    format_type(ty.vec_size_type().expect("Vec has size")),
-                    elem
-                )
+                let Some(size) = tensor.dim(0) else {
+                    let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                    return format!("Vec[{}]", args);
+                };
+                format!("vec{}{}", format_type(size), elem)
             }
         }
         // Mat[elem, Size(cols), Size(rows)] -> matCxRelem (e.g., mat4x4f32)
-        _ if ty.is_mat() => {
-            let elem = format_type(ty.elem_type().expect("Mat has elem"));
-            match (ty.mat_cols(), ty.mat_rows()) {
+        Type::Constructed(TypeName::Mat, args) => {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Mat[{}]", args);
+            };
+            let elem = format_type(tensor.elem);
+            match (tensor.concrete_dim(0), tensor.concrete_dim(1)) {
                 (Some(cols), Some(rows)) => format!("mat{}x{}{}", cols, rows, elem),
-                _ => format!(
-                    "mat{}x{}{}",
-                    format_type(ty.mat_cols_type().expect("Mat has cols")),
-                    format_type(ty.mat_rows_type().expect("Mat has rows")),
-                    elem
-                ),
+                _ => {
+                    let [cols, rows] = tensor.dims else {
+                        let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                        return format!("Mat[{}]", args);
+                    };
+                    format!("mat{}x{}{}", format_type(cols), format_type(rows), elem)
+                }
             }
         }
         Type::Constructed(name, args)

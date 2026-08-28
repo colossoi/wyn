@@ -245,7 +245,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     pub(super) fn lower_inst(&mut self, inst: &WynInstNode) -> Result<()> {
         let ssa_result_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
-        let result_ty = ssa_result_ty.as_ref().map(|t| self.constructor.polytype_to_spirv(t)).unwrap_or(0);
+        let result_ty = match ssa_result_ty.as_ref() {
+            Some(ty) => self.constructor.polytype_to_spirv(ty)?,
+            None => 0,
+        };
         self.current_span = inst.span;
 
         let spirv_result = match &inst.data {
@@ -357,8 +360,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                     // If base is a pointer, load it first
                     let composite_id = if types::is_pointer(&base_ty) {
-                        let pointee_ty = types::pointee(&base_ty).expect("Pointer should have pointee");
-                        let value_type = self.constructor.polytype_to_spirv(pointee_ty);
+                        let Some(pointee_ty) = types::pointee(&base_ty) else {
+                            bail_spirv!("malformed pointer in projection: {:?}", base_ty);
+                        };
+                        let value_type = self.constructor.polytype_to_spirv(pointee_ty)?;
                         self.constructor.builder.load(value_type, None, base_id, None, [])?
                     } else {
                         base_id
@@ -547,7 +552,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let value = operands[0];
                     let value_id = self.get_value_ref(value)?;
                     let value_ty = self.get_value_type_ref(value);
-                    let spirv_type = self.constructor.polytype_to_spirv(&value_ty);
+                    let spirv_type = self.constructor.polytype_to_spirv(&value_ty)?;
                     if self.constructor.builder.is_constant(builder::ConstId::new(value_id)) {
                         // A compile-time-constant array (e.g. a literal table)
                         // materialized only so a runtime index can address it:
@@ -613,7 +618,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             },
 
             InstKind::Alloca { elem_ty, result } => {
-                let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty);
+                let elem_spirv_ty = self.constructor.polytype_to_spirv(elem_ty)?;
                 let ptr = self.constructor.declare_variable("_alloca", elem_spirv_ty)?;
                 self.place_ptr_id.insert(*result, ptr);
                 self.place_storage_class.insert(*result, spirv::StorageClass::Function);
@@ -682,7 +687,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         .builder
                         .atomic_exchange(result_ty, None, ptr_id, scope, semantics, *value)?,
                     (AtomicOp::CompareExchange, [comparison, replacement]) => {
-                        let elem_ty = self.constructor.polytype_to_spirv(self.body.place_elem_ty(*place));
+                        let elem_ty =
+                            self.constructor.polytype_to_spirv(self.body.place_elem_ty(*place))?;
                         let old = self.constructor.builder.atomic_compare_exchange(
                             elem_ty,
                             None,
@@ -754,7 +760,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // Infer element SPIR-V type from the place's elem_ty — the
                 // place's type is what `Load` will return / `Store` writes.
                 let place_elem = self.body.place_elem_ty(*result).clone();
-                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem);
+                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem)?;
                 let elem_ptr_type =
                     self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_ty_id);
                 let ptr = self.constructor.builder.access_chain(
@@ -777,7 +783,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let base_ptr = self.place_ptr(*place)?;
                 let index_id = self.get_value_ref(*index)?;
                 let place_elem = self.body.place_elem_ty(*result).clone();
-                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem);
+                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem)?;
                 let storage_class = self.place_storage_class.get(place).copied().ok_or_else(|| {
                     err_spirv_at!(
                         self.blame_span(),
@@ -934,7 +940,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         for ((block_id, param_idx), incoming) in phi_map {
             let block = &self.body.inner.blocks[block_id];
             let param = block.params[param_idx];
-            let param_ty = self.constructor.polytype_to_spirv(self.body.inner.value_type(param));
+            let param_ty = self.constructor.polytype_to_spirv(self.body.inner.value_type(param))?;
 
             let phi_id = self.value_map[&param];
 

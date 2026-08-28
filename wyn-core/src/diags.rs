@@ -65,36 +65,59 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Array => {
             // Array[elem, variant, dim_0, ...]
             let ty = &PolyType::Constructed(name.clone(), args.to_vec());
-            let elem = format_type(ty.elem_type().expect("Array has elem"));
-            let size = ty.array_size().expect("Array has size");
-            format!("[{}]{}", format_type(size), elem)
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Array[{}]", args);
+            };
+            let dims = tensor
+                .dims
+                .iter()
+                .map(|dim| match dim {
+                    PolyType::Constructed(TypeName::SizePlaceholder, _) => "[]".to_string(),
+                    _ => format!("[{}]", format_type(dim)),
+                })
+                .collect::<String>();
+            format!("{}{}", dims, format_type(tensor.elem))
         }
         TypeName::Vec => {
             // Vec[elem, Size(n)]
             let ty = &PolyType::Constructed(name.clone(), args.to_vec());
-            let elem = format_type(ty.elem_type().expect("Vec has elem"));
-            if let Some(n) = ty.vec_size() {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Vec[{}]", args);
+            };
+            let elem = format_type(tensor.elem);
+            if let Some(n) = tensor.concrete_dim(0) {
                 format!("vec{}{}", n, elem)
             } else {
-                format!(
-                    "vec{}{}",
-                    format_type(ty.vec_size_type().expect("Vec has size")),
-                    elem
-                )
+                let Some(size) = tensor.dim(0) else {
+                    return format!(
+                        "Vec[{}]",
+                        args.iter().map(format_type).collect::<Vec<_>>().join(", ")
+                    );
+                };
+                format!("vec{}{}", format_type(size), elem)
             }
         }
         TypeName::Mat => {
             // Mat[elem, Size(cols), Size(rows)]
             let ty = &PolyType::Constructed(name.clone(), args.to_vec());
-            let elem = format_type(ty.elem_type().expect("Mat has elem"));
-            match (ty.mat_cols(), ty.mat_rows()) {
+            let Some(tensor) = ty.as_tensor() else {
+                let args = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+                return format!("Mat[{}]", args);
+            };
+            let elem = format_type(tensor.elem);
+            match (tensor.concrete_dim(0), tensor.concrete_dim(1)) {
                 (Some(cols), Some(rows)) => format!("mat{}x{}{}", cols, rows, elem),
-                _ => format!(
-                    "mat{}x{}{}",
-                    format_type(ty.mat_cols_type().expect("Mat has cols")),
-                    format_type(ty.mat_rows_type().expect("Mat has rows")),
-                    elem,
-                ),
+                _ => {
+                    let [cols, rows] = tensor.dims else {
+                        return format!(
+                            "Mat[{}]",
+                            args.iter().map(format_type).collect::<Vec<_>>().join(", ")
+                        );
+                    };
+                    format!("mat{}x{}{}", format_type(cols), format_type(rows), elem)
+                }
             }
         }
         TypeName::Record(fields) => {

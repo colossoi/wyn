@@ -69,6 +69,54 @@ fn rank1_arr(size: usize) -> Type {
     )
 }
 
+fn size(n: usize) -> Type {
+    Type::Constructed(TypeName::Size(n), vec![])
+}
+
+#[test]
+fn tensor_view_separates_shape_from_array_storage() {
+    let array = Type::Constructed(
+        TypeName::Array,
+        vec![
+            f32_ty(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            size(3),
+            size(4),
+            no_buffer(),
+        ],
+    );
+
+    let tensor = array.as_tensor().unwrap();
+    assert_eq!(tensor.elem, &f32_ty());
+    assert_eq!(tensor.rank(), 2);
+    assert_eq!(tensor.concrete_dim(0), Some(3));
+    assert_eq!(tensor.concrete_dim(1), Some(4));
+
+    let storage = array.array_storage().unwrap();
+    assert!(matches!(
+        storage.variant,
+        Type::Constructed(TypeName::ArrayVariantComposite, _)
+    ));
+    assert_eq!(storage.region, &no_buffer());
+}
+
+#[test]
+fn tensor_view_rejects_malformed_shapes() {
+    let malformed_vector = Type::Constructed(TypeName::Vec, vec![f32_ty()]);
+    let malformed_array = Type::Constructed(
+        TypeName::Array,
+        vec![
+            f32_ty(),
+            Type::Constructed(TypeName::ArrayVariantComposite, vec![]),
+            no_buffer(),
+        ],
+    );
+
+    assert!(malformed_vector.as_tensor().is_none());
+    assert!(malformed_array.as_tensor().is_none());
+    assert!(malformed_array.array_storage().is_none());
+}
+
 #[test]
 fn array_rank_reports_dim_count() {
     assert_eq!(rank1_arr(8).array_rank(), Some(1));

@@ -495,7 +495,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     bail_spirv!("Bitcast requires 1 arg");
                 }
                 let operand_ty = self.get_value_type_ref(value_refs[0]);
-                let operand_ty = self.constructor.polytype_to_spirv(&operand_ty);
+                let operand_ty = self.constructor.polytype_to_spirv(&operand_ty)?;
                 if operand_ty == result_ty {
                     Ok(arg_ids[0])
                 } else {

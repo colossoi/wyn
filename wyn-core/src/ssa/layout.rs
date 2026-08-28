@@ -65,22 +65,22 @@ pub fn type_byte_size(ty: &Type) -> Option<u32> {
         Type::Constructed(TypeName::Float(bits), _) => Some((*bits / 8) as u32),
         Type::Constructed(TypeName::Unit, _) => Some(0),
         _ if ty.is_vec() => {
-            let size = ty.vec_size()? as u32;
-            let elem_size = type_byte_size(ty.elem_type().expect("Vec has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let size = tensor.concrete_dim(0)? as u32;
+            let elem_size = type_byte_size(tensor.elem)?;
             Some(size * elem_size)
         }
         _ if ty.is_mat() => {
-            let cols = ty.mat_cols()? as u32;
-            let rows = ty.mat_rows()? as u32;
-            let elem_size = type_byte_size(ty.elem_type().expect("Mat has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let cols = tensor.concrete_dim(0)? as u32;
+            let rows = tensor.concrete_dim(1)? as u32;
+            let elem_size = type_byte_size(tensor.elem)?;
             Some(cols * rows * elem_size)
         }
         _ if ty.is_array() => {
-            let elem_size = type_byte_size(ty.elem_type().expect("Array has elem"))?;
-            let size = match ty.array_size().expect("Array has size") {
-                Type::Constructed(TypeName::Size(n), _) => *n as u32,
-                _ => return None,
-            };
+            let tensor = ty.as_tensor()?;
+            let elem_size = type_byte_size(tensor.elem)?;
+            let size = tensor.concrete_dim(0)? as u32;
             Some(size * elem_size)
         }
         Type::Constructed(TypeName::Tuple(arity), args) => {
@@ -110,16 +110,18 @@ pub fn std430_alignment(ty: &Type) -> Option<u32> {
         Type::Constructed(TypeName::Float(bits), _) => Some((*bits / 8) as u32),
         Type::Constructed(TypeName::Unit, _) => Some(1),
         _ if ty.is_vec() => {
-            let size = ty.vec_size()? as u32;
-            let elem_align = std430_alignment(ty.elem_type().expect("Vec has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let size = tensor.concrete_dim(0)? as u32;
+            let elem_align = std430_alignment(tensor.elem)?;
             Some(if size == 2 { 2 * elem_align } else { 4 * elem_align })
         }
         _ if ty.is_mat() => {
-            let rows = ty.mat_rows()? as u32;
-            let elem_align = std430_alignment(ty.elem_type().expect("Mat has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let rows = tensor.concrete_dim(1)? as u32;
+            let elem_align = std430_alignment(tensor.elem)?;
             Some(if rows == 2 { 2 * elem_align } else { 4 * elem_align })
         }
-        _ if ty.is_array() => std430_alignment(ty.elem_type().expect("Array has elem")),
+        _ if ty.is_array() => std430_alignment(ty.as_tensor()?.elem),
         // A struct's std430 alignment is its largest member alignment.
         Type::Constructed(TypeName::Tuple(_), args) | Type::Constructed(TypeName::Record(_), args) => {
             let mut align = 1u32;
@@ -158,16 +160,19 @@ pub fn std140_alignment(ty: &Type) -> Option<u32> {
         Type::Constructed(TypeName::Float(bits), _) => Some((*bits / 8) as u32),
         Type::Constructed(TypeName::Unit, _) => Some(1),
         _ if ty.is_vec() => {
-            let size = ty.vec_size()? as u32;
-            let elem_align = std140_alignment(ty.elem_type().expect("Vec has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let size = tensor.concrete_dim(0)? as u32;
+            let elem_align = std140_alignment(tensor.elem)?;
             Some(if size == 2 { 2 * elem_align } else { 4 * elem_align })
         }
         _ if ty.is_mat() => {
-            let elem_align = std140_alignment(ty.elem_type().expect("Mat has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let elem_align = std140_alignment(tensor.elem)?;
             Some(4 * elem_align) // Always vec4 alignment in std140
         }
         _ if ty.is_array() => {
-            let elem_align = std140_alignment(ty.elem_type().expect("Array has elem"))?;
+            let tensor = ty.as_tensor()?;
+            let elem_align = std140_alignment(tensor.elem)?;
             Some(((elem_align + 15) / 16) * 16)
         }
         _ => None,
@@ -185,18 +190,24 @@ pub fn buffer_array_strides(ty: &Type) -> Vec<u32> {
 }
 
 fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
-    if ty.is_array() {
-        let variant = ty.array_variant().expect("Array has variant");
-        let is_composite = matches!(variant, Type::Constructed(TypeName::ArrayVariantComposite, _));
-        if is_composite {
-            if let Type::Constructed(TypeName::Size(_), _) = ty.array_size().expect("Array has size") {
-                let elem = ty.elem_type().expect("Array has elem");
-                if let Some(elem_stride) = storage_elem_stride(elem) {
-                    out.push(elem_stride);
-                }
-                collect_array_strides(elem, out);
-            }
+    if !ty.is_array() {
+        return;
+    }
+    let Some(tensor) = ty.as_tensor() else {
+        return;
+    };
+    let Some(storage) = ty.array_storage() else {
+        return;
+    };
+    let is_composite = matches!(
+        storage.variant,
+        Type::Constructed(TypeName::ArrayVariantComposite, _)
+    );
+    if is_composite && tensor.concrete_dim(0).is_some() {
+        if let Some(elem_stride) = storage_elem_stride(tensor.elem) {
+            out.push(elem_stride);
         }
+        collect_array_strides(tensor.elem, out);
     }
 }
 

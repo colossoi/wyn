@@ -31,7 +31,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             .ok_or_else(|| err_spirv!("slice_view_to_composite: end must be a constant"))?
             as u32;
 
-        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
+        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty)?;
         let elem_ptr_type =
             self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
         let zero = self.constructor.const_i32(0);
@@ -125,26 +125,35 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             _ if base_ty.is_array() => {
-                let variant = base_ty.array_variant().expect("Array has variant");
-                let elem = base_ty.elem_type().expect("Array has elem");
+                let Some(tensor) = base_ty.as_tensor() else {
+                    bail_spirv!("malformed array reached index lowering: {:?}", base_ty);
+                };
+                let Some(storage) = base_ty.array_storage() else {
+                    bail_spirv!(
+                        "array storage metadata is missing during index lowering: {:?}",
+                        base_ty
+                    );
+                };
+                let variant = storage.variant;
+                let elem = tensor.elem;
 
                 if types::is_array_variant_view(variant) {
                     // View variant: {offset, len} struct; backing buffer
                     // recovered from the view type's region.
-                    self.lower_view_index(
-                        base.as_ssa().expect("view base must be SSA"),
-                        base_id,
-                        index_id,
-                        result_ty,
-                        elem,
-                    )
+                    let Some(base_ssa) = base.as_ssa() else {
+                        bail_spirv!("view index base must be an SSA value");
+                    };
+                    self.lower_view_index(base_ssa, base_id, index_id, result_ty, elem)
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
                     self.lower_virtual_index(base_id, index_id, result_ty)
                 } else if types::is_array_variant_bounded(variant) {
                     // Bounded variant: {buffer: [N]T, len: u32} struct.
                     // Extract the buffer (member 0), then index it as a Composite.
-                    let n = match base_ty.array_size().expect("Array has size") {
+                    let Some(size) = tensor.dim(0) else {
+                        bail_spirv!("bounded array has no capacity dimension: {:?}", base_ty);
+                    };
+                    let n = match size {
                         PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
                         _ => bail_spirv!("Bounded array must have Size(N) capacity"),
                     };
@@ -171,7 +180,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             vec![
                                 elem.clone(),
                                 PolyType::Constructed(TypeName::ArrayVariantComposite, vec![]),
-                                base_ty.array_size().expect("Array has size").clone(),
+                                size.clone(),
                                 types::no_buffer(),
                             ],
                         );
@@ -281,7 +290,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             self.constructor.builder.i_add(self.constructor.u32_type, None, offset_val, index_u32)?;
 
         // Access chain directly on the buffer variable
-        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty);
+        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty)?;
         let elem_ptr_type =
             self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
         let zero = self.constructor.const_u32(0);
@@ -319,7 +328,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             Ok(self.constructor.builder.composite_extract(result_ty, None, array_id, [literal_idx])?)
         } else {
             // Runtime index - must materialize to local variable
-            let spirv_array_type = self.constructor.polytype_to_spirv(array_ty);
+            let spirv_array_type = self.constructor.polytype_to_spirv(array_ty)?;
             let array_var = self.constructor.declare_variable("_w_index_tmp", spirv_array_type)?;
             self.constructor.builder.store(array_var, array_id, None, [])?;
 

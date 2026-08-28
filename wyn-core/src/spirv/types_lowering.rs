@@ -25,28 +25,31 @@ impl Constructor {
     }
 
     /// Convert a polytype Type to a SPIR-V type ID
-    pub(super) fn polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
+    pub(super) fn polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> Result<spirv::Word> {
         if let Some(&cached) = self.polytype_cache.get(ty) {
-            return cached;
+            return Ok(cached);
         }
-        let result = self.polytype_to_spirv_uncached(ty);
+        let result = self.polytype_to_spirv_uncached(ty)?;
         self.polytype_cache.insert(ty.clone(), result);
-        result
+        Ok(result)
     }
 
-    pub(super) fn polytype_to_spirv_uncached(&mut self, ty: &PolyType<TypeName>) -> spirv::Word {
-        match ty {
+    pub(super) fn polytype_to_spirv_uncached(&mut self, ty: &PolyType<TypeName>) -> Result<spirv::Word> {
+        let result = match ty {
             PolyType::Variable(id) => {
-                panic!("BUG: Unresolved type variable Variable({}) reached lowering.", id);
+                return Err(err_spirv!(
+                    "unresolved type variable Variable({}) reached SPIR-V lowering",
+                    id
+                ));
             }
             PolyType::Constructed(name, args) => {
                 // Assert that no UserVar or SizeVar reaches lowering
                 match name {
                     TypeName::UserVar(v) => {
-                        panic!("BUG: UserVar('{}') reached lowering.", v);
+                        return Err(err_spirv!("user type variable '{}' reached SPIR-V lowering", v));
                     }
                     TypeName::SizeVar(v) => {
-                        panic!("BUG: SizeVar('{}') reached lowering.", v);
+                        return Err(err_spirv!("size variable '{}' reached SPIR-V lowering", v));
                     }
                     _ => {}
                 }
@@ -68,22 +71,29 @@ impl Constructor {
                         // - Unit values are bound to _ (not stored)
                         // - Empty closures are handled specially in map (dummy i32 passed directly)
                         if args.is_empty() {
-                            panic!(
-                                "BUG: Empty tuple type reached lowering. Empty tuples/unit values should be \
-                                handled at call sites (let _ = ..., map with empty closures, etc.)"
-                            );
+                            return Err(err_spirv!(
+                                "empty tuple reached SPIR-V lowering; unit values must be handled at call sites"
+                            ));
                         }
                         // Non-empty tuple becomes struct
-                        let field_types: Vec<spirv::Word> =
-                            args.iter().map(|a| self.polytype_to_spirv(a)).collect();
+                        let field_types = args
+                            .iter()
+                            .map(|arg| self.polytype_to_spirv(arg))
+                            .collect::<Result<Vec<_>>>()?;
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Array => {
-                        // Array[elem, variant, dim_0, ...]
-                        let elem = ty.elem_type().expect("Array has elem");
-                        let elem_type = self.polytype_to_spirv(elem);
-                        let size = ty.array_size().expect("Array has size");
-                        let variant = ty.array_variant().expect("Array has variant");
+                        let Some(tensor) = ty.as_tensor() else {
+                            return Err(err_spirv!(
+                                "malformed array type reached SPIR-V lowering: {:?}",
+                                ty
+                            ));
+                        };
+                        let Some(storage) = ty.array_storage() else {
+                            return Err(err_spirv!("array storage metadata is missing: {:?}", ty));
+                        };
+                        let elem_type = self.polytype_to_spirv(tensor.elem)?;
+                        let variant = storage.variant;
 
                         // Dispatch on variant first - View arrays are always {offset, len} structs
                         if let PolyType::Constructed(TypeName::ArrayVariantView, _) = variant {
@@ -104,76 +114,63 @@ impl Constructor {
                             // The buffer member is a Composite [N]T (sized SPIR-V array).
                             // The len field is i32 to match the language's `length()`
                             // result type and the index type expected by `array_with`.
-                            let n = match size {
-                                PolyType::Constructed(TypeName::Size(n), _) => *n as u32,
-                                _ => panic!("BUG: Bounded array requires Size(N) capacity, got {:?}", size),
-                            };
-                            let size_const = self.const_u32(n);
-                            let buf_type =
-                                *self.builder.type_array(builder::TypeId::new(elem_type), size_const);
-                            self.builder.register_array_element(
-                                builder::TypeId::new(buf_type),
-                                builder::TypeId::new(elem_type),
-                            );
+                            let buf_type = self.sized_tensor_to_spirv(elem_type, tensor.dims)?;
                             self.get_or_create_struct_type(vec![buf_type, self.i32_type])
                         } else {
                             // Composite variant (or placeholder): sized array value
-                            match size {
-                                PolyType::Constructed(TypeName::Size(n), _) => {
-                                    // Fixed-size array (use unsigned int for array size per SPIR-V convention)
-                                    let size_const = self.const_u32(*n as u32);
-                                    let arr_type = *self
-                                        .builder
-                                        .type_array(builder::TypeId::new(elem_type), size_const);
-                                    self.builder.register_array_element(
-                                        builder::TypeId::new(arr_type),
-                                        builder::TypeId::new(elem_type),
-                                    );
-                                    arr_type
-                                }
-                                PolyType::Constructed(TypeName::SizePlaceholder, _) => {
-                                    panic!("SizePlaceholder should be resolved before SPIR-V lowering");
-                                }
-                                PolyType::Variable(_) => {
-                                    // Unsized composite array - not supported
-                                    panic!("BUG: Composite variant unsized arrays not supported: {:?}", ty);
-                                }
-                                _ => {
-                                    panic!(
-                                        "BUG: Array type has invalid size argument: {:?}. This should have been resolved during type checking.",
-                                        size
-                                    );
-                                }
-                            }
+                            self.sized_tensor_to_spirv(elem_type, tensor.dims)?
                         }
                     }
                     TypeName::Vec => {
-                        // Vec[elem, Size(n)]
-                        let elem = ty.elem_type().expect("Vec has elem");
-                        let elem_type = self.polytype_to_spirv(elem);
-                        let size = ty.vec_size().expect("Vec has concrete size") as u32;
+                        let Some(tensor) = ty.as_tensor() else {
+                            return Err(err_spirv!(
+                                "malformed vector type reached SPIR-V lowering: {:?}",
+                                ty
+                            ));
+                        };
+                        let Some(size) = tensor.concrete_dim(0) else {
+                            return Err(err_spirv!("vector size is not concrete: {:?}", ty));
+                        };
+                        let size = u32::try_from(size)
+                            .map_err(|_| err_spirv!("vector size exceeds SPIR-V limits: {:?}", ty))?;
+                        let elem_type = self.polytype_to_spirv(tensor.elem)?;
                         self.get_or_create_vec_type(elem_type, size)
                     }
                     TypeName::Mat => {
-                        // Mat[elem, Size(cols), Size(rows)]
-                        let elem = ty.elem_type().expect("Mat has elem");
-                        let elem_type = self.polytype_to_spirv(elem);
-                        let cols = ty.mat_cols().expect("Mat has concrete cols") as u32;
-                        let rows = ty.mat_rows().expect("Mat has concrete rows") as u32;
+                        let Some(tensor) = ty.as_tensor() else {
+                            return Err(err_spirv!(
+                                "malformed matrix type reached SPIR-V lowering: {:?}",
+                                ty
+                            ));
+                        };
+                        let Some(cols) = tensor.concrete_dim(0) else {
+                            return Err(err_spirv!("matrix column count is not concrete: {:?}", ty));
+                        };
+                        let Some(rows) = tensor.concrete_dim(1) else {
+                            return Err(err_spirv!("matrix row count is not concrete: {:?}", ty));
+                        };
+                        let cols = u32::try_from(cols).map_err(|_| {
+                            err_spirv!("matrix column count exceeds SPIR-V limits: {:?}", ty)
+                        })?;
+                        let rows = u32::try_from(rows)
+                            .map_err(|_| err_spirv!("matrix row count exceeds SPIR-V limits: {:?}", ty))?;
+                        let elem_type = self.polytype_to_spirv(tensor.elem)?;
                         let col_vec_type = self.get_or_create_vec_type(elem_type, rows);
                         *self.builder.type_matrix(builder::TypeId::new(col_vec_type), cols)
                     }
                     TypeName::Record(_fields) => {
-                        let field_types: Vec<spirv::Word> =
-                            args.iter().map(|a| self.polytype_to_spirv(a)).collect();
+                        let field_types = args
+                            .iter()
+                            .map(|arg| self.polytype_to_spirv(arg))
+                            .collect::<Result<Vec<_>>>()?;
                         self.get_or_create_struct_type(field_types)
                     }
                     TypeName::Pointer => {
                         // Pointer type: args[0] is pointee type, args[1] is address space
-                        if args.is_empty() {
-                            panic!("BUG: Pointer type requires a pointee type argument.");
-                        }
-                        let pointee_type = self.polytype_to_spirv(&args[0]);
+                        let Some(pointee) = args.first() else {
+                            return Err(err_spirv!("pointer type is missing its pointee: {:?}", ty));
+                        };
+                        let pointee_type = self.polytype_to_spirv(pointee)?;
                         let sc = args
                             .get(1)
                             .map(Constructor::resolve_storage_class)
@@ -183,8 +180,10 @@ impl Constructor {
                     TypeName::Existential(_) => {
                         // Existential type: unwrap and convert the inner type (in args[0])
                         // The size variable is runtime-determined, handled by Slice representation
-                        let inner = &args[0];
-                        self.polytype_to_spirv(inner)
+                        let Some(inner) = args.first() else {
+                            return Err(err_spirv!("existential type is missing its inner type: {:?}", ty));
+                        };
+                        self.polytype_to_spirv(inner)?
                     }
                     TypeName::Arrow => {
                         // Arrow types (function types) come from closures that have been defunctionalized.
@@ -203,14 +202,17 @@ impl Constructor {
                     | TypeName::PointerStorage => {
                         // Address space markers are used within Array/Pointer types but shouldn't appear
                         // as standalone types requiring SPIR-V representation.
-                        panic!(
-                            "BUG: Address space marker {:?} reached polytype_to_spirv as standalone type. \
-                            This should only appear as part of Array[elem, addrspace, size] or Pointer[pointee, addrspace]. Full type: {:?}",
-                            name, ty
-                        );
+                        return Err(err_spirv!(
+                            "address-space marker {:?} reached SPIR-V lowering as a standalone type: {:?}",
+                            name,
+                            ty
+                        ));
                     }
                     TypeName::AddressPlaceholder | TypeName::SizePlaceholder => {
-                        panic!("Placeholders should be resolved before SPIR-V lowering");
+                        return Err(err_spirv!(
+                            "unresolved placeholder reached SPIR-V lowering: {:?}",
+                            ty
+                        ));
                     }
                     TypeName::Texture2D => {
                         // 2D float sampled image. sampled=1 (used with a
@@ -229,26 +231,44 @@ impl Constructor {
                     }
                     TypeName::Sampler => *self.builder.type_sampler(),
                     TypeName::Raster => {
-                        panic!(
-                            "BUG: raster<V> reached runtime SPIR-V type lowering; \
-                             raster stage tokens must be eliminated before backend lowering"
-                        )
+                        return Err(err_spirv!(
+                            "raster stage token reached runtime SPIR-V type lowering"
+                        ));
                     }
                     TypeName::StorageTexture => {
-                        panic!(
-                            "BUG: StorageTexture reached runtime SPIR-V type lowering; \
-                             terminal EGIR resource erasure must remove image handles from SSA"
-                        )
+                        return Err(err_spirv!("storage texture reached runtime SPIR-V type lowering"));
                     }
                     _ => {
-                        panic!(
-                            "BUG: Unknown type reached lowering: {:?}. This should have been caught during type checking.",
-                            name
-                        )
+                        return Err(err_spirv!("unsupported type reached SPIR-V lowering: {:?}", name));
                     }
                 }
             }
+        };
+        Ok(result)
+    }
+
+    fn sized_tensor_to_spirv(
+        &mut self,
+        elem_type: spirv::Word,
+        dims: &[PolyType<TypeName>],
+    ) -> Result<spirv::Word> {
+        let mut result = elem_type;
+        for dim in dims.iter().rev() {
+            let PolyType::Constructed(TypeName::Size(size), _) = dim else {
+                return Err(err_spirv!(
+                    "composite tensor dimension is not concrete at SPIR-V lowering: {:?}",
+                    dim
+                ));
+            };
+            let size = u32::try_from(*size)
+                .map_err(|_| err_spirv!("tensor dimension exceeds SPIR-V limits: {:?}", dim))?;
+            let size_const = self.const_u32(size);
+            let array_type = *self.builder.type_array(builder::TypeId::new(result), size_const);
+            self.builder
+                .register_array_element(builder::TypeId::new(array_type), builder::TypeId::new(result));
+            result = array_type;
         }
+        Ok(result)
     }
 
     pub(super) fn get_or_create_vec_type(&mut self, elem_type: spirv::Word, size: u32) -> spirv::Word {

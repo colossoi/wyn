@@ -84,8 +84,10 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         .collect();
     let pc_var = if !pc_inputs.is_empty() {
         // Build member types for push constant block
-        let member_types: Vec<spirv::Word> =
-            pc_inputs.iter().map(|&(i, _)| constructor.polytype_to_spirv(&entry.inputs[i].ty)).collect();
+        let member_types = pc_inputs
+            .iter()
+            .map(|&(i, _)| constructor.polytype_to_spirv(&entry.inputs[i].ty))
+            .collect::<Result<Vec<_>>>()?;
         let member_offsets: Vec<u32> = pc_inputs.iter().map(|&(_, off)| off).collect();
         let member_poly_types: Vec<&PolyType<TypeName>> =
             pc_inputs.iter().map(|&(i, _)| &entry.inputs[i].ty).collect();
@@ -145,7 +147,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             continue;
         }
 
-        let input_type = constructor.polytype_to_spirv(&input.ty);
+        let input_type = constructor.polytype_to_spirv(&input.ty)?;
 
         if let Some(IoDecoration::BuiltIn(builtin)) = input.decoration() {
             // WGSL's `@builtin(position)` is stage-aware (vertex-out vs
@@ -226,8 +228,10 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                             input.name, input.ty
                         )
                     });
-                let member_types: Vec<spirv::Word> =
-                    args.iter().map(|a| constructor.polytype_to_spirv(a)).collect();
+                let member_types = args
+                    .iter()
+                    .map(|arg| constructor.polytype_to_spirv(arg))
+                    .collect::<Result<Vec<_>>>()?;
                 let member_poly_types: Vec<&PolyType<TypeName>> = args.iter().collect();
                 let block = constructor.create_interface_block_type(
                     InterfaceBlockKind::Uniform,
@@ -290,7 +294,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         } else if let Some(br) = input.storage_binding() {
             let storage_use = constructor.storage_use(br);
             let var_id =
-                constructor.create_storage_buffer(&input.ty, br.set, br.binding, storage_use.writable);
+                constructor.create_storage_buffer(&input.ty, br.set, br.binding, storage_use.writable)?;
             // Mark input storage buffers as non-writable ONLY if no other
             // entry point writes to the same binding. In multi-entry modules
             // (e.g., reduce phase1 + phase2), the partials buffer is written
@@ -332,18 +336,18 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         if let Some(br) = output.storage_binding() {
             let storage_use = constructor.storage_use(br);
             let var_id =
-                constructor.create_storage_buffer(&output.ty, br.set, br.binding, storage_use.writable);
+                constructor.create_storage_buffer(&output.ty, br.set, br.binding, storage_use.writable)?;
             interfaces.push(var_id);
             // Don't add to output_vars - storage buffers are accessed differently
         } else if let Some(IoDecoration::BuiltIn(builtin)) = output.decoration() {
-            let output_type = constructor.polytype_to_spirv(&output.ty);
+            let output_type = constructor.polytype_to_spirv(&output.ty)?;
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
             constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(builtin)]);
             output_vars.push(var_id);
             interfaces.push(var_id);
         } else {
-            let output_type = constructor.polytype_to_spirv(&output.ty);
+            let output_type = constructor.polytype_to_spirv(&output.ty)?;
             let loc = output
                 .decoration()
                 .and_then(|d| match d {
@@ -407,7 +411,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // (Block-wrap this array, keep the decorated type) or an undecorated
             // shared type with component-wise value reconciliation at the
             // buffer<->shared boundary; deferred.
-            let elem_spirv = constructor.polytype_to_spirv(&elem_ty);
+            let elem_spirv = constructor.polytype_to_spirv(&elem_ty)?;
             let count_const = constructor.const_u32(*count);
             let arr_ty = *constructor.builder.type_array(wspirv::TypeId::new(elem_spirv), count_const);
             let ptr_ty = constructor.get_or_create_ptr_type(spirv::StorageClass::Workgroup, arr_ty);
@@ -424,7 +428,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             declaration.binding.set,
             declaration.binding.binding,
             storage_use.writable,
-        );
+        )?;
         if !interfaces.contains(&var_id) {
             interfaces.push(var_id);
         }
@@ -447,7 +451,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     if let Some(pc_var_id) = pc_var {
         for (member_idx, &(input_idx, _offset)) in pc_inputs.iter().enumerate() {
             let input = &entry.inputs[input_idx];
-            let member_type = constructor.polytype_to_spirv(&input.ty);
+            let member_type = constructor.polytype_to_spirv(&input.ty)?;
             let member_ptr_type =
                 constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, member_type);
             let idx_const = constructor.const_u32(member_idx as u32);
@@ -539,7 +543,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 None,
             )
         } else {
-            constructor.polytype_to_spirv(&input.ty)
+            constructor.polytype_to_spirv(&input.ty)?
         };
         if let Some(input_param) = input_params[input_index] {
             if let Some(&var_id) = constructor.env.get(&input_param) {

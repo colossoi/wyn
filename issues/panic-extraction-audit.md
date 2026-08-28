@@ -25,24 +25,24 @@ and `values[index]` operations when a cluster is changed.
 The starting tree contained 584 production panic points detected by this scan:
 466 `unwrap`/`expect` extractions and 118 explicit `panic!` calls.
 
-This change removes 56 of them. The remaining 528 are:
+The completed changes remove 136 of them. The remaining 448 are:
 
 | Kind | Count |
 | --- | ---: |
-| `Option`/`Result::expect` | 306 |
-| `Option`/`Result::unwrap` | 104 |
-| `panic!` | 118 |
+| `Option`/`Result::expect` | 244 |
+| `Option`/`Result::unwrap` | 101 |
+| `panic!` | 103 |
 
 The remaining sites are concentrated by compiler layer:
 
 | Layer | Count |
 | --- | ---: |
 | EGIR | 224 |
-| TLC | 89 |
-| SPIR-V lowering | 46 |
-| type checker/type model | 35 |
-| other `wyn-core` code | 107 |
-| SSA | 18 |
+| other `wyn-core` code | 100 |
+| TLC | 77 |
+| type checker/type model | 23 |
+| SPIR-V lowering | 10 |
+| SSA | 5 |
 | frontend | 4 |
 | other crates | 5 |
 
@@ -73,6 +73,15 @@ of source-derived or pass-derived state should migrate with the same clusters.
   for a separate design pass.
 - Resource/open resolution: missing bindings, feedback, modules, or scope
   frames now return compiler errors.
+- Tensor shapes: vectors, matrices, and arrays now share a representation-free
+  borrowed `TensorType { elem, dims }`. Array runtime encoding is exposed
+  separately as `ArrayStorage { variant, region }`. Layout, diagnostics, TLC
+  SoA/monomorphization, and SPIR-V lowering consume the complete shape instead
+  of independently extracting positional fields. SoA preserves all dimensions,
+  and SPIR-V constructs nested physical arrays from the dimension slice.
+- SPIR-V type lowering is fallible. Malformed or unresolved types now produce
+  contextual compiler errors, and storage/interface/body consumers propagate
+  them instead of panicking.
 
 No-extraction Clippy gates now protect the completed planner, graph crate, and
 typed SPIR-V builder scopes.
@@ -81,21 +90,7 @@ typed SPIR-V builder scopes.
 
 The remaining calls should not receive one mechanical treatment.
 
-### 1. Replace encoded type layouts with aggregate views
-
-Clusters in `ssa/layout.rs`, `types/mod.rs`, `diags.rs`, `tlc/soa.rs`,
-`tlc/monomorphize.rs`, and `spirv/types_lowering.rs` first test `is_array`,
-`is_vec`, or `is_mat` and then independently extract element, size, variant,
-and region fields. This is a tuple/SoA representation problem.
-
-Introduce borrowed and owned shape records such as `ArrayType { elem, variant,
-size, region }`, `VectorType { elem, size }`, and `MatrixType { elem, rows,
-cols }`, returned by one pattern match. At the EGIR boundary, use the narrower
-rank-1 array aggregate already called out in `typestate-invariant-backlog.md`.
-Do not replace each field extraction with a separate `ok_or_else`; that keeps
-partially valid type shapes representable.
-
-### 2. Co-locate IDs with the data that makes them valid
+### 1. Co-locate IDs with the data that makes them valid
 
 Repeated symbol/function/node lookups dominate `tlc/from_ast.rs`,
 `egir/from_tlc.rs`, `egir/elaborate.rs`, and several fusion/reification files.
@@ -111,7 +106,7 @@ These changes remove both the reported extraction and neighboring indexing
 operations. Adding an error to every internal lookup would merely turn a data
 ownership bug into repetitive plumbing.
 
-### 3. Make pass-specific variants structural
+### 2. Make pass-specific variants structural
 
 The TLC phase-only variants and post-pass assumptions listed in
 `typestate-invariant-backlog.md` account for many `panic!`/`expect` arms in
@@ -119,16 +114,17 @@ The TLC phase-only variants and post-pass assumptions listed in
 Split phase-specific enums or add phase-typed wrappers so a pass cannot receive
 variants that should have been eliminated earlier.
 
-### 4. Propagate failures at validation and backend boundaries
+### 3. Propagate failures at validation and backend boundaries
 
 Verifiers, source-driven lowering, builder calls, resource publication, and
 external ABI construction should return contextual `CompilerError` or their
-existing local error type. This applies especially to the remaining SPIR-V
-lowering cluster and EGIR physical-call/reification boundaries. These are real
-fallible boundaries; changing their signatures is preferable to asserting an
-upstream phase ran correctly.
+existing local error type. The remaining SPIR-V sites are mostly thread,
+emission-table, and instruction-shape assumptions; EGIR physical-call and
+reification boundaries remain the larger target. These are real fallible
+boundaries; changing their signatures is preferable to asserting an upstream
+phase ran correctly.
 
-### 5. Retain only explicit process-exhaustion invariants
+### 4. Retain only explicit process-exhaustion invariants
 
 `wyn-base::IdSource` still has one checked-add assertion for exhausting the
 32-bit compiler ID space. It is not source-recoverable with the current
@@ -138,16 +134,14 @@ which would silently alias IDs.
 
 ## Next slices
 
-1. Land the aggregate type-shape accessors and migrate the six type-layout
-   clusters together.
-2. Make `SymbolTable` own symbol allocation, then remove the associated TLC and
+1. Make `SymbolTable` own symbol allocation, then remove the associated TLC and
    TLC-to-EGIR lookup assertions.
-3. Introduce aggregate call/result boundary records in EGIR elaboration and
+2. Introduce aggregate call/result boundary records in EGIR elaboration and
    reification.
-4. Split phase-scoped TLC variants, starting with array expressions.
-5. Enable the no-extraction Clippy gate for each migrated module, and finally
+3. Split phase-scoped TLC variants, starting with array expressions.
+4. Enable the no-extraction Clippy gate for each migrated module, and finally
    for `wyn-core` as a whole.
-6. Design a WGSL emission sink that makes writes to an in-memory `String`
+5. Design a WGSL emission sink that makes writes to an in-memory `String`
    structurally infallible at call sites. Avoid both per-line `unwrap()` and
    propagating `fmt::Error` through every lowering routine; migrate the
    formatting cluster only after that abstraction exists.

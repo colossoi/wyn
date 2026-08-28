@@ -450,9 +450,11 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     for func in &program.functions {
         if let Some(linkage_name) = &func.linkage_name {
             let body = &func.body;
-            let param_types: Vec<spirv::Word> =
-                body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
-            let return_type = constructor.polytype_to_spirv(&body.return_ty);
+            let param_types = body
+                .params()
+                .map(|(_, ty, _)| constructor.polytype_to_spirv(ty))
+                .collect::<Result<Vec<_>>>()?;
+            let return_type = constructor.polytype_to_spirv(&body.return_ty)?;
             let func_id =
                 constructor.forward_declare_linked_function(linkage_name, &param_types, return_type)?;
             constructor.linked_functions.insert(func.id, func_id);
@@ -474,15 +476,15 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         let accesses = entry.shader_storage_accesses();
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding() {
-                constructor.create_storage_buffer(&input.ty, br.set, br.binding, true);
+                constructor.create_storage_buffer(&input.ty, br.set, br.binding, true)?;
                 if !accesses[&br].writes() {
-                    constructor.create_storage_buffer(&input.ty, br.set, br.binding, false);
+                    constructor.create_storage_buffer(&input.ty, br.set, br.binding, false)?;
                 }
             }
         }
         for output in &entry.outputs {
             if let Some(br) = output.storage_binding() {
-                constructor.create_storage_buffer(&output.ty, br.set, br.binding, true);
+                constructor.create_storage_buffer(&output.ty, br.set, br.binding, true)?;
             }
         }
     }
@@ -493,9 +495,14 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     for entry in &program.entry_points {
         let accesses = entry.shader_storage_accesses();
         for sb in &entry.storage_bindings {
-            constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true);
+            constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true)?;
             if !accesses[&sb.binding].writes() {
-                constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, false);
+                constructor.create_storage_buffer(
+                    &sb.elem_ty,
+                    sb.binding.set,
+                    sb.binding.binding,
+                    false,
+                )?;
             }
         }
     }
@@ -554,7 +561,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     constructor.select_storage_accesses(&function_variants.accesses_for(program, None));
     constructor.select_functions(function_variants.emissions_for_context(None));
     for constant in &program.constants {
-        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty);
+        let return_type = constructor.polytype_to_spirv(&constant.body.return_ty)?;
         let (_, param_ids, first_code_block) =
             constructor.begin_function(Some(constructor.globals[&constant.id]), &[], return_type)?;
         lower::LowerCtx::new(
@@ -673,10 +680,10 @@ fn lower_ssa_function(
     let body = &func.body;
 
     // Convert function parameter types to their SPIR-V representations.
-    let param_types: Vec<spirv::Word> =
-        body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
+    let param_types =
+        body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect::<Result<Vec<_>>>()?;
 
-    let return_type = constructor.polytype_to_spirv(&body.return_ty);
+    let return_type = constructor.polytype_to_spirv(&body.return_ty)?;
 
     let (_, param_ids, first_code_block) = constructor.begin_function(
         Some(constructor.emitted_functions[&emission]),
