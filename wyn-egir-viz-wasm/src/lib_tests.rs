@@ -330,16 +330,10 @@ entry shifted(xs: [4]i32, offsets: []i32, index: i32) [4]i32 =
     let before = result.before.expect("staged snapshot");
     let after = result.after.expect("physical snapshot");
 
-    let before_parameters = before
-        .nodes
-        .iter()
-        .filter(|node| node.variant == "parameter")
-        .collect::<Vec<_>>();
-    let after_parameters = after
-        .nodes
-        .iter()
-        .filter(|node| node.variant == "parameter")
-        .collect::<Vec<_>>();
+    let before_parameters =
+        before.nodes.iter().filter(|node| node.variant == "parameter").collect::<Vec<_>>();
+    let after_parameters =
+        after.nodes.iter().filter(|node| node.variant == "parameter").collect::<Vec<_>>();
     assert!(
         before_parameters.iter().any(|parameter| {
             parameter.representation.as_deref() == Some("value")
@@ -362,8 +356,7 @@ entry shifted(xs: [4]i32, offsets: []i32, index: i32) [4]i32 =
         "runtime view parameter: {after_parameters:#?}"
     );
     assert!(after_parameters.iter().any(|parameter| {
-        parameter.representation.as_deref() == Some("value")
-            && parameter.ty.as_deref() == Some("i32")
+        parameter.representation.as_deref() == Some("value") && parameter.ty.as_deref() == Some("i32")
     }));
     let fixed_group = after_parameters
         .iter()
@@ -372,11 +365,7 @@ entry shifted(xs: [4]i32, offsets: []i32, index: i32) [4]i32 =
         .group
         .clone();
     assert_eq!(
-        after
-            .nodes
-            .iter()
-            .filter(|node| node.group == fixed_group && node.variant == "place")
-            .count(),
+        after.nodes.iter().filter(|node| node.group == fixed_group && node.variant == "place").count(),
         1,
         "the fixed input should have one place.view"
     );
@@ -398,11 +387,8 @@ entry step(dom: [4]u32, points_in: [4]vec2f32, items_in: [4]vec4f32)
     );
     assert!(result.success, "{:?}", result.error);
     let after = result.after.expect("physical snapshot");
-    let function = after
-        .groups
-        .iter()
-        .find(|group| group.label.starts_with("fn use_world"))
-        .unwrap_or_else(|| {
+    let function =
+        after.groups.iter().find(|group| group.label.starts_with("fn use_world")).unwrap_or_else(|| {
             panic!(
                 "use_world function group among {:?}",
                 after.groups.iter().map(|group| &group.label).collect::<Vec<_>>()
@@ -443,4 +429,126 @@ fn inline_debug_preserves_long_constructs() {
     let rendered = inline_debug(&value);
     assert!(rendered.contains("ResourceIdentifierThatMustRemainVisible"));
     assert!(!rendered.contains('…'));
+}
+
+#[test]
+fn physical_subpasses_are_individually_inspectable() {
+    let cases = [
+        (
+            InspectPass::ExpandSoacs,
+            r#"entry scan_offsets(xs: []i32) []i32 =
+  scan(|a: i32, b: i32| a + b, 0, xs)"#,
+        ),
+        (
+            InspectPass::EliminateInternalPlaceCalls,
+            r#"def choose_sum(values: [4]i32, flag: u32) i32 =
+  let left = values[0] + values[1] in
+  let right = values[2] + values[3] in
+  if flag == 0u32 then left else right
+
+entry call_place(values: [4]i32, flag: u32) i32 =
+  choose_sum(values, flag)"#,
+        ),
+        (
+            InspectPass::PartiallyInlineCalls,
+            r#"def choose_and_scale(varying: u32, invariant: u32) u32 =
+  let scale = invariant * invariant in
+  if varying == 0u32 then scale else varying + scale
+
+entry mixed_loop(seed: u32, scale: u32) u32 =
+  loop value = seed for i < 4 do
+    let stable = choose_and_scale(0u32, scale) in
+    choose_and_scale(value + u32.i32(i), stable)"#,
+        ),
+        (
+            InspectPass::MaterializeDynamicExtracts,
+            r#"entry dynamic_local(index: i32) i32 =
+  let values = [10, 20, 30, 40] in
+  values[index]"#,
+        ),
+        (
+            InspectPass::Rewrite,
+            r#"entry power_chain(x: f32) f32 =
+  x ** 5.0f32"#,
+        ),
+        (
+            InspectPass::OptimizeSkeleton,
+            r#"def choose_and_scale(varying: u32, invariant: u32) u32 =
+  let scale = invariant * invariant in
+  if varying == 0u32 then scale else varying + scale
+
+entry mixed_loop(seed: u32, scale: u32) u32 =
+  loop value = seed for i < 4 do
+    let stable = choose_and_scale(0u32, scale) in
+    choose_and_scale(value + u32.i32(i), stable)"#,
+        ),
+        (
+            InspectPass::EraseResources,
+            r#"entry unchanged_scalar(value: i32) i32 = value + 1"#,
+        ),
+    ];
+
+    for (pass, source) in cases {
+        let result = inspect_pass_impl(source, pass);
+        assert!(result.success, "{} failed: {:?}", pass.id(), result.error);
+        assert!(result.before.is_some(), "{} has no before snapshot", pass.id());
+        assert!(result.after.is_some(), "{} has no after snapshot", pass.id());
+    }
+}
+
+#[test]
+fn semantic_and_allocation_subpasses_are_individually_inspectable() {
+    let cases = [
+        (
+            InspectPass::EliminateDeadSemanticOperations,
+            r#"entry discard_map(xs: [4]i32) [4]i32 =
+  let dead = map(|x: i32| x + 99, xs) in
+  xs"#,
+        ),
+        (
+            InspectPass::FuseSemanticOperations,
+            r#"entry fuse_maps(xs: [4]i32) [4]i32 =
+  let shifted = map(|x: i32| x + 1, xs) in
+  map(|x: i32| x * 2, shifted)"#,
+        ),
+        (
+            InspectPass::LiftStageUniformValues,
+            r#"entry uniform_capture(xs: [4]i32, bias: i32) [4]i32 =
+  map(|x: i32| x + bias * bias, xs)"#,
+        ),
+        (
+            InspectPass::AllocateSemanticResources,
+            r#"entry allocate_filter(xs: []i32) []i32 =
+  filter(|x: i32| x % 2 == 0, xs)"#,
+        ),
+        (
+            InspectPass::ResolveResidency,
+            r#"entry resident_filter(xs: []i32) []i32 =
+  let selected = filter(|x: i32| x > 0, xs) in
+  map(|x: i32| x + 1, selected)"#,
+        ),
+        (
+            InspectPass::ResolveScratchSizes,
+            r#"entry sized_filter(xs: []i32) []i32 =
+  filter(|x: i32| x % 3 == 0, xs)"#,
+        ),
+        (
+            InspectPass::FinalizeStagedIr,
+            r#"entry staged_filter(xs: []i32) []i32 =
+  let selected = filter(|x: i32| x != 0, xs) in
+  map(|x: i32| x * x, selected)"#,
+        ),
+        (
+            InspectPass::VerifyAllocatedResources,
+            r#"entry verified_sum(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, xs)"#,
+        ),
+    ];
+
+    for (pass, source) in cases {
+        let result = inspect_pass_impl(source, pass);
+        assert!(result.success, "{} failed: {:?}", pass.id(), result.error);
+        assert!(result.before.is_some(), "{} has no before snapshot", pass.id());
+        assert!(result.after.is_some(), "{} has no after snapshot", pass.id());
+    }
 }

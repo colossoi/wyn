@@ -25,6 +25,21 @@ enum InspectPass {
     PlanLogicalResources,
     PlanPhysicalKernels,
     ReifySoacs,
+    EliminateDeadSemanticOperations,
+    FuseSemanticOperations,
+    LiftStageUniformValues,
+    AllocateSemanticResources,
+    ResolveResidency,
+    ResolveScratchSizes,
+    FinalizeStagedIr,
+    VerifyAllocatedResources,
+    ExpandSoacs,
+    EliminateInternalPlaceCalls,
+    PartiallyInlineCalls,
+    MaterializeDynamicExtracts,
+    Rewrite,
+    OptimizeSkeleton,
+    EraseResources,
 }
 
 impl InspectPass {
@@ -32,6 +47,21 @@ impl InspectPass {
     const PLAN_LOGICAL_RESOURCES: &'static str = "egir::plan_logical_resources";
     const PLAN_PHYSICAL_KERNELS: &'static str = "egir::plan";
     const REIFY_SOACS: &'static str = "egir::reify_soacs";
+    const ELIMINATE_DEAD_SEMANTIC_OPERATIONS: &'static str = "egir::eliminate_dead_semantic_operations";
+    const FUSE_SEMANTIC_OPERATIONS: &'static str = "egir::fuse_semantic_operations";
+    const LIFT_STAGE_UNIFORM_VALUES: &'static str = "egir::lift_stage_uniform_values";
+    const ALLOCATE_SEMANTIC_RESOURCES: &'static str = "egir::allocate_semantic_resources";
+    const RESOLVE_RESIDENCY: &'static str = "egir::resolve_residency";
+    const RESOLVE_SCRATCH_SIZES: &'static str = "egir::resolve_scratch_sizes";
+    const FINALIZE_STAGED_IR: &'static str = "egir::finalize_staged_ir";
+    const VERIFY_ALLOCATED_RESOURCES: &'static str = "egir::verify_allocated_resources";
+    const EXPAND_SOACS: &'static str = "egir::expand_soacs";
+    const ELIMINATE_INTERNAL_PLACE_CALLS: &'static str = "egir::eliminate_internal_place_calls";
+    const PARTIALLY_INLINE_CALLS: &'static str = "egir::partially_inline_calls";
+    const MATERIALIZE_DYNAMIC_EXTRACTS: &'static str = "egir::materialize_dynamic_extracts";
+    const REWRITE: &'static str = "egir::rewrite";
+    const OPTIMIZE_SKELETON: &'static str = "egir::optimize_skeleton";
+    const ERASE_RESOURCES: &'static str = "egir::erase_resources";
 
     fn parse(value: &str) -> Option<Self> {
         match value {
@@ -39,6 +69,21 @@ impl InspectPass {
             Self::PLAN_LOGICAL_RESOURCES => Some(Self::PlanLogicalResources),
             Self::PLAN_PHYSICAL_KERNELS => Some(Self::PlanPhysicalKernels),
             Self::REIFY_SOACS => Some(Self::ReifySoacs),
+            Self::ELIMINATE_DEAD_SEMANTIC_OPERATIONS => Some(Self::EliminateDeadSemanticOperations),
+            Self::FUSE_SEMANTIC_OPERATIONS => Some(Self::FuseSemanticOperations),
+            Self::LIFT_STAGE_UNIFORM_VALUES => Some(Self::LiftStageUniformValues),
+            Self::ALLOCATE_SEMANTIC_RESOURCES => Some(Self::AllocateSemanticResources),
+            Self::RESOLVE_RESIDENCY => Some(Self::ResolveResidency),
+            Self::RESOLVE_SCRATCH_SIZES => Some(Self::ResolveScratchSizes),
+            Self::FINALIZE_STAGED_IR => Some(Self::FinalizeStagedIr),
+            Self::VERIFY_ALLOCATED_RESOURCES => Some(Self::VerifyAllocatedResources),
+            Self::EXPAND_SOACS => Some(Self::ExpandSoacs),
+            Self::ELIMINATE_INTERNAL_PLACE_CALLS => Some(Self::EliminateInternalPlaceCalls),
+            Self::PARTIALLY_INLINE_CALLS => Some(Self::PartiallyInlineCalls),
+            Self::MATERIALIZE_DYNAMIC_EXTRACTS => Some(Self::MaterializeDynamicExtracts),
+            Self::REWRITE => Some(Self::Rewrite),
+            Self::OPTIMIZE_SKELETON => Some(Self::OptimizeSkeleton),
+            Self::ERASE_RESOURCES => Some(Self::EraseResources),
             _ => None,
         }
     }
@@ -49,6 +94,21 @@ impl InspectPass {
             Self::PlanLogicalResources => Self::PLAN_LOGICAL_RESOURCES,
             Self::PlanPhysicalKernels => Self::PLAN_PHYSICAL_KERNELS,
             Self::ReifySoacs => Self::REIFY_SOACS,
+            Self::EliminateDeadSemanticOperations => Self::ELIMINATE_DEAD_SEMANTIC_OPERATIONS,
+            Self::FuseSemanticOperations => Self::FUSE_SEMANTIC_OPERATIONS,
+            Self::LiftStageUniformValues => Self::LIFT_STAGE_UNIFORM_VALUES,
+            Self::AllocateSemanticResources => Self::ALLOCATE_SEMANTIC_RESOURCES,
+            Self::ResolveResidency => Self::RESOLVE_RESIDENCY,
+            Self::ResolveScratchSizes => Self::RESOLVE_SCRATCH_SIZES,
+            Self::FinalizeStagedIr => Self::FINALIZE_STAGED_IR,
+            Self::VerifyAllocatedResources => Self::VERIFY_ALLOCATED_RESOURCES,
+            Self::ExpandSoacs => Self::EXPAND_SOACS,
+            Self::EliminateInternalPlaceCalls => Self::ELIMINATE_INTERNAL_PLACE_CALLS,
+            Self::PartiallyInlineCalls => Self::PARTIALLY_INLINE_CALLS,
+            Self::MaterializeDynamicExtracts => Self::MATERIALIZE_DYNAMIC_EXTRACTS,
+            Self::Rewrite => Self::REWRITE,
+            Self::OptimizeSkeleton => Self::OPTIMIZE_SKELETON,
+            Self::EraseResources => Self::ERASE_RESOURCES,
         }
     }
 }
@@ -549,52 +609,141 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let segmented = wyn_core::egir::reify_soacs(program);
-    let before = snapshot_program(&segmented);
-    let (semantic_operations_optimized, trace) =
-        wyn_core::egir::optimize_semantic_operations_with_trace(segmented);
+    let mut segmented = wyn_core::egir::reify_soacs(program);
+    let aggregate_semantic_before =
+        (pass == InspectPass::OptimizeSemanticOperations).then(|| snapshot_program(&segmented));
+    let mut aggregate_semantic_relations = Vec::new();
+    loop {
+        let before_dead =
+            (pass == InspectPass::EliminateDeadSemanticOperations).then(|| snapshot_program(&segmented));
+        let (rewritten, changed, trace) = wyn_core::egir::eliminate_dead_semantic_operations(segmented);
+        segmented = rewritten;
+        let relations = trace_relations(trace);
+        if pass == InspectPass::EliminateDeadSemanticOperations {
+            return inspection_with_relations(pass, before_dead, snapshot_program(&segmented), relations);
+        }
+        aggregate_semantic_relations.extend(relations);
+        if changed {
+            continue;
+        }
+
+        let before_fusion =
+            (pass == InspectPass::FuseSemanticOperations).then(|| snapshot_program(&segmented));
+        let (rewritten, changed, trace) = wyn_core::egir::fuse_semantic_operations(segmented);
+        segmented = rewritten;
+        let relations = trace_relations(trace);
+        if pass == InspectPass::FuseSemanticOperations {
+            return inspection_with_relations(pass, before_fusion, snapshot_program(&segmented), relations);
+        }
+        aggregate_semantic_relations.extend(relations);
+        if !changed {
+            break;
+        }
+    }
+    let semantic_operations_optimized: wyn_core::egir::SemanticOperationsOptimized = segmented.retag();
     if pass == InspectPass::OptimizeSemanticOperations {
-        let after = snapshot_program(&semantic_operations_optimized);
-        let relations = trace
-            .relations
-            .into_iter()
-            .map(|relation| NodeRelation {
-                before: relation.before.into_iter().map(operation_node_id).collect(),
-                after: relation.after.into_iter().map(operation_node_id).collect(),
-            })
-            .collect();
-        return InspectResult {
-            success: true,
-            pass: pass.id().to_string(),
-            before: Some(before),
-            after: Some(after),
-            relations,
-            error: None,
-        };
+        return inspection_with_relations(
+            pass,
+            aggregate_semantic_before,
+            snapshot_program(&semantic_operations_optimized),
+            aggregate_semantic_relations,
+        );
     }
 
+    let before_stage_lift = (pass == InspectPass::LiftStageUniformValues)
+        .then(|| snapshot_program(&semantic_operations_optimized));
     let optimized = wyn_core::egir::lift_stage_uniform_values(semantic_operations_optimized);
-    let before_allocation =
+    if pass == InspectPass::LiftStageUniformValues {
+        return successful_inspection(pass, before_stage_lift, snapshot_program(&optimized));
+    }
+
+    let aggregate_allocation_before =
         (pass == InspectPass::PlanLogicalResources).then(|| snapshot_program(&optimized));
-    let allocated = match wyn_core::egir::plan_logical_resources(optimized) {
+    let before_resource_allocation =
+        (pass == InspectPass::AllocateSemanticResources).then(|| snapshot_program(&optimized));
+    let residency_draft = match wyn_core::egir::allocate_semantic_resources(optimized) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
                 pass.id(),
-                format!("EGIR logical-resource planning error: {error:?}"),
+                format!("EGIR semantic-resource allocation error: {error:?}"),
                 None,
             )
         }
     };
+    if pass == InspectPass::AllocateSemanticResources {
+        return successful_inspection(
+            pass,
+            before_resource_allocation,
+            snapshot_residency_program(&residency_draft),
+        );
+    }
+
+    let before_residency =
+        (pass == InspectPass::ResolveResidency).then(|| snapshot_residency_program(&residency_draft));
+    let residency_draft = match wyn_core::egir::resolve_residency(residency_draft) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR residency resolution error: {error}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::ResolveResidency {
+        return successful_inspection(
+            pass,
+            before_residency,
+            snapshot_residency_program(&residency_draft),
+        );
+    }
+
+    let before_scratch_sizes =
+        (pass == InspectPass::ResolveScratchSizes).then(|| snapshot_residency_program(&residency_draft));
+    let residency_draft = wyn_core::egir::resolve_scratch_sizes(residency_draft);
+    if pass == InspectPass::ResolveScratchSizes {
+        return successful_inspection(
+            pass,
+            before_scratch_sizes,
+            snapshot_residency_program(&residency_draft),
+        );
+    }
+
+    let before_finalization =
+        (pass == InspectPass::FinalizeStagedIr).then(|| snapshot_residency_program(&residency_draft));
+    let allocated = match wyn_core::egir::finalize_staged_ir(residency_draft) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR staged-IR finalization error: {error:?}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::FinalizeStagedIr {
+        return successful_inspection(pass, before_finalization, snapshot_allocated_program(&allocated));
+    }
+
+    let before_verification =
+        (pass == InspectPass::VerifyAllocatedResources).then(|| snapshot_allocated_program(&allocated));
+    if let Err(error) = wyn_core::egir::verify_allocated_resources(&allocated) {
+        return InspectResult::error(
+            pass.id(),
+            format!("EGIR allocated-resource verification error: {error}"),
+            None,
+        );
+    }
+    if pass == InspectPass::VerifyAllocatedResources {
+        return successful_inspection(pass, before_verification, snapshot_allocated_program(&allocated));
+    }
     if pass == InspectPass::PlanLogicalResources {
-        return InspectResult {
-            success: true,
-            pass: pass.id().to_string(),
-            before: before_allocation,
-            after: Some(snapshot_allocated_program(&allocated)),
-            relations: Vec::new(),
-            error: None,
-        };
+        return successful_inspection(
+            pass,
+            aggregate_allocation_before,
+            snapshot_allocated_program(&allocated),
+        );
     }
     let before_planning =
         (pass == InspectPass::PlanPhysicalKernels).then(|| snapshot_allocated_program(&allocated));
@@ -618,7 +767,133 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
             error: None,
         };
     }
+
+    let before_expansion = (pass == InspectPass::ExpandSoacs).then(|| snapshot_physical_program(&planned));
+    let expanded = match wyn_core::egir::expand_soacs(planned) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(pass.id(), format!("EGIR SOAC expansion error: {error}"), None)
+        }
+    };
+    if pass == InspectPass::ExpandSoacs {
+        return successful_inspection(pass, before_expansion, snapshot_physical_program(&expanded));
+    }
+
+    let before_place_elimination =
+        (pass == InspectPass::EliminateInternalPlaceCalls).then(|| snapshot_physical_program(&expanded));
+    let calls_place_free = match wyn_core::egir::eliminate_internal_place_calls(expanded) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR place-call elimination error: {error}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::EliminateInternalPlaceCalls {
+        return successful_inspection(
+            pass,
+            before_place_elimination,
+            snapshot_physical_program(&calls_place_free),
+        );
+    }
+
+    let before_partial_inlining =
+        (pass == InspectPass::PartiallyInlineCalls).then(|| snapshot_physical_program(&calls_place_free));
+    let partially_inlined = match wyn_core::egir::partially_inline_calls(calls_place_free) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(pass.id(), format!("EGIR partial-inlining error: {error}"), None)
+        }
+    };
+    if pass == InspectPass::PartiallyInlineCalls {
+        return successful_inspection(
+            pass,
+            before_partial_inlining,
+            snapshot_physical_program(&partially_inlined),
+        );
+    }
+
+    let before_materialization = (pass == InspectPass::MaterializeDynamicExtracts)
+        .then(|| snapshot_physical_program(&partially_inlined));
+    let materialized = wyn_core::egir::materialize_dynamic_extracts(partially_inlined);
+    if pass == InspectPass::MaterializeDynamicExtracts {
+        return successful_inspection(
+            pass,
+            before_materialization,
+            snapshot_physical_program(&materialized),
+        );
+    }
+
+    let before_rewrite = (pass == InspectPass::Rewrite).then(|| snapshot_physical_program(&materialized));
+    let rewritten = wyn_core::egir::rewrite(materialized);
+    if pass == InspectPass::Rewrite {
+        return successful_inspection(pass, before_rewrite, snapshot_physical_program(&rewritten));
+    }
+
+    let before_skeleton_optimization =
+        (pass == InspectPass::OptimizeSkeleton).then(|| snapshot_physical_program(&rewritten));
+    let skeleton_optimized = wyn_core::egir::optimize_skeleton(rewritten);
+    if pass == InspectPass::OptimizeSkeleton {
+        return successful_inspection(
+            pass,
+            before_skeleton_optimization,
+            snapshot_physical_program(&skeleton_optimized),
+        );
+    }
+
+    let before_resource_erasure =
+        (pass == InspectPass::EraseResources).then(|| snapshot_physical_program(&skeleton_optimized));
+    let resources_erased = match wyn_core::egir::erase_resources(skeleton_optimized) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(pass.id(), format!("EGIR resource-erasure error: {error:?}"), None)
+        }
+    };
+    if pass == InspectPass::EraseResources {
+        return successful_inspection(
+            pass,
+            before_resource_erasure,
+            snapshot_physical_program(&resources_erased),
+        );
+    }
     unreachable!("all inspector passes return at their checkpoint")
+}
+
+fn successful_inspection(
+    pass: InspectPass,
+    before: Option<GraphSnapshot>,
+    after: GraphSnapshot,
+) -> InspectResult {
+    inspection_with_relations(pass, before, after, Vec::new())
+}
+
+fn inspection_with_relations(
+    pass: InspectPass,
+    before: Option<GraphSnapshot>,
+    after: GraphSnapshot,
+    relations: Vec<NodeRelation>,
+) -> InspectResult {
+    InspectResult {
+        success: true,
+        pass: pass.id().to_string(),
+        before,
+        after: Some(after),
+        relations,
+        error: None,
+    }
+}
+
+fn trace_relations(trace: wyn_core::egir::SemanticOptimizationTrace) -> Vec<NodeRelation> {
+    trace
+        .relations
+        .into_iter()
+        .map(|relation| NodeRelation {
+            before: relation.before.into_iter().map(operation_node_id).collect(),
+            after: relation.after.into_iter().map(operation_node_id).collect(),
+        })
+        .collect()
 }
 
 fn operation_node_id(id: SemanticOpId) -> String {
@@ -1352,6 +1627,28 @@ where
     snapshot
 }
 
+fn snapshot_residency_program(program: &wyn_core::egir::ResidencyDraft) -> GraphSnapshot {
+    let mut snapshot = GraphSnapshot::default();
+    snapshot.resources = graph_logical_resources(&program.data.core.resources);
+    let region_names = program
+        .functions
+        .iter()
+        .map(|function| (function.region, function.name.clone()))
+        .collect::<HashMap<_, _>>();
+    for (index, entry) in program.entry_points.iter().enumerate() {
+        snapshot_allocated_entry(
+            &mut snapshot,
+            format!("entry:{index}"),
+            "entry",
+            entry,
+            &program.data.core.resources,
+            &region_names,
+        );
+    }
+    snapshot_auxiliary_bodies(&mut snapshot, program, &region_names);
+    snapshot
+}
+
 fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> GraphSnapshot {
     let mut snapshot = GraphSnapshot::default();
     snapshot.resources = graph_logical_resources(&program.data.core.resources);
@@ -1443,7 +1740,9 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
     snapshot
 }
 
-fn snapshot_physical_program(program: &wyn_core::egir::parallelize::Planned) -> GraphSnapshot {
+fn snapshot_physical_program<Tag>(
+    program: &wyn_core::egir::program::PhysicalProgram<Tag>,
+) -> GraphSnapshot {
     let mut snapshot = GraphSnapshot::default();
     snapshot.resources = graph_logical_resources(&program.data.resources);
     let region_names = program

@@ -4,39 +4,20 @@ import initWasm, {
 } from "./wasm-pkg/wyn_egir_viz_wasm.js";
 import appPackage from "../package.json";
 import wasmPackage from "./wasm-pkg/package.json";
+import {
+  defaultPassId,
+  isPassId,
+  passDefinitions,
+  passIds,
+  type PassId,
+} from "./passes";
 import "./style.css";
 
 type Side = "before" | "after";
-type PassId =
-  | "egir::optimize_semantic_operations"
-  | "egir::plan_logical_resources"
-  | "egir::plan"
-  | "egir::reify_soacs";
-
-const passInfo: Record<PassId, { before: string; after: string }> = {
-  "egir::optimize_semantic_operations": {
-    before: "Segmented EGIR",
-    after: "Semantic operations optimized",
-  },
-  "egir::plan_logical_resources": {
-    before: "Optimized EGIR",
-    after: "Staged IR",
-  },
-  "egir::plan": {
-    before: "Staged IR",
-    after: "Physical EGIR",
-  },
-  "egir::reify_soacs": {
-    before: "Converted EGIR",
-    after: "Segmented EGIR",
-  },
-};
 
 const passStorageKey = "wyn-egir-viz:pass";
 const savedPass = localStorage.getItem(passStorageKey);
-const initialPass: PassId = savedPass && savedPass in passInfo
-  ? savedPass as PassId
-  : "egir::reify_soacs";
+const initialPass: PassId = isPassId(savedPass) ? savedPass : defaultPassId;
 
 interface SourceSpan {
   start_line: number;
@@ -330,10 +311,7 @@ app.innerHTML = `
       <label class="pass-block">
         <span>Pass</span>
         <select id="pass-select" aria-label="Compiler pass">
-          <option value="egir::reify_soacs"${initialPass === "egir::reify_soacs" ? " selected" : ""}>egir::reify_soacs</option>
-          <option value="egir::optimize_semantic_operations"${initialPass === "egir::optimize_semantic_operations" ? " selected" : ""}>egir::optimize_semantic_operations</option>
-          <option value="egir::plan_logical_resources"${initialPass === "egir::plan_logical_resources" ? " selected" : ""}>egir::plan_logical_resources</option>
-          <option value="egir::plan"${initialPass === "egir::plan" ? " selected" : ""}>egir::plan</option>
+          ${passIds.map((pass) => `<option value="${pass}"${initialPass === pass ? " selected" : ""}>${pass}</option>`).join("")}
         </select>
       </label>
       <button class="run-button" id="run-button" type="button" disabled>
@@ -345,7 +323,15 @@ app.innerHTML = `
     <section class="source-panel" aria-labelledby="source-heading">
       <div class="section-heading">
         <h2 id="source-heading">Source</h2>
-        <span class="status" id="status" aria-live="polite">Compiler loading…</span>
+        <div class="source-status">
+          <span class="diff-legend" id="diff-legend" hidden>
+            <span class="diff-summary" id="diff-summary"></span>
+            <span class="diff-key diff-key-removed">Removed</span>
+            <span class="diff-key diff-key-changed">Changed</span>
+            <span class="diff-key diff-key-added">Added</span>
+          </span>
+          <span class="status" id="status" aria-live="polite">Compiler loading…</span>
+        </div>
       </div>
       <textarea
         id="source-editor"
@@ -367,8 +353,8 @@ app.innerHTML = `
     ><span aria-hidden="true"></span></div>
 
     <section class="comparison" aria-label="EGIR before and after comparison">
-      ${listingPane("before", "01", "Before", passInfo[initialPass].before)}
-      ${listingPane("after", "02", "After", passInfo[initialPass].after)}
+      ${listingPane("before", "01", "Before", passDefinitions[initialPass].before)}
+      ${listingPane("after", "02", "After", passDefinitions[initialPass].after)}
     </section>
 
     <aside class="node-detail" id="node-detail" aria-live="polite" hidden>
@@ -416,6 +402,8 @@ const passSelect = document.querySelector<HTMLSelectElement>("#pass-select")!;
 const runButton = document.querySelector<HTMLButtonElement>("#run-button")!;
 const status = document.querySelector<HTMLSpanElement>("#status")!;
 const errorMessage = document.querySelector<HTMLButtonElement>("#error-message")!;
+const diffLegend = document.querySelector<HTMLElement>("#diff-legend")!;
+const diffSummary = document.querySelector<HTMLElement>("#diff-summary")!;
 const detail = document.querySelector<HTMLElement>("#node-detail")!;
 const detailSide = document.querySelector<HTMLSpanElement>("#detail-side")!;
 const detailLabel = document.querySelector<HTMLElement>("#detail-label")!;
@@ -447,11 +435,10 @@ if (Number.isFinite(savedSourceHeight) && savedSourceHeight > 0) {
   updateSourceResizerValue();
 }
 
-const savedSource = localStorage.getItem("wyn-egir-viz:source");
-if (savedSource !== null) editor.value = savedSource;
+editor.value = sourceForPass(initialPass);
 
 editor.addEventListener("input", () => {
-  localStorage.setItem("wyn-egir-viz:source", editor.value);
+  localStorage.setItem(sourceStorageKey(selectedPass()), editor.value);
   clearError();
 });
 editor.addEventListener("keydown", (event) => {
@@ -462,10 +449,11 @@ editor.addEventListener("keydown", (event) => {
 });
 runButton.addEventListener("click", () => void runPass());
 passSelect.addEventListener("change", () => {
-  const pass = passSelect.value as PassId;
+  const pass = selectedPass();
   localStorage.setItem(passStorageKey, pass);
-  stageLabels.before.textContent = passInfo[pass].before;
-  stageLabels.after.textContent = passInfo[pass].after;
+  stageLabels.before.textContent = passDefinitions[pass].before;
+  stageLabels.after.textContent = passDefinitions[pass].after;
+  editor.value = sourceForPass(pass);
   clearComparison();
   status.textContent = "Ready";
 });
@@ -577,6 +565,7 @@ async function runPass(): Promise<void> {
     detail.hidden = true;
     renderListing("before", result.before);
     renderListing("after", result.after);
+    highlightDifferences(result.before, result.after);
     scrollers.before.scrollTop = 0;
     scrollers.after.scrollTop = 0;
     requestAnimationFrame(drawDependencyGutters);
@@ -595,11 +584,124 @@ function clearComparison(): void {
   result = undefined;
   selection = undefined;
   detail.hidden = true;
+  diffLegend.hidden = true;
   for (const side of ["before", "after"] as const) {
     listings[side].hidden = true;
     listings[side].replaceChildren();
     document.querySelector<HTMLElement>(`#${side}-empty`)!.hidden = false;
   }
+}
+
+function selectedPass(): PassId {
+  return isPassId(passSelect.value) ? passSelect.value : defaultPassId;
+}
+
+function sourceStorageKey(pass: PassId): string {
+  return `wyn-egir-viz:source:${pass}`;
+}
+
+function sourceForPass(pass: PassId): string {
+  return localStorage.getItem(sourceStorageKey(pass)) ?? passDefinitions[pass].example;
+}
+
+type DifferenceKind = "added" | "changed" | "removed";
+
+function highlightDifferences(before: GraphSnapshot, after: GraphSnapshot): void {
+  clearDifferenceHighlights();
+  const beforeRecords = diffRecords(before);
+  const afterRecords = diffRecords(after);
+  let differenceCount = 0;
+
+  for (const [id, record] of beforeRecords) {
+    const counterpart = afterRecords.get(id);
+    const kind: DifferenceKind | undefined = counterpart === undefined
+      ? "removed"
+      : record !== counterpart
+        ? "changed"
+        : undefined;
+    if (kind) differenceCount += markRecordDifference("before", id, kind);
+  }
+  for (const [id, record] of afterRecords) {
+    const counterpart = beforeRecords.get(id);
+    const kind: DifferenceKind | undefined = counterpart === undefined
+      ? "added"
+      : record !== counterpart
+        ? "changed"
+        : undefined;
+    if (kind) differenceCount += markRecordDifference("after", id, kind);
+  }
+
+  differenceCount += highlightUnmatchedMetadataLines("before", "removed");
+  differenceCount += highlightUnmatchedMetadataLines("after", "added");
+  diffSummary.textContent = differenceCount === 0
+    ? "No structural changes"
+    : `${differenceCount} highlighted`;
+  diffLegend.hidden = false;
+}
+
+function clearDifferenceHighlights(): void {
+  for (const listing of Object.values(listings)) {
+    for (const element of listing.querySelectorAll<HTMLElement>(".diff-added, .diff-changed, .diff-removed")) {
+      element.classList.remove("diff-added", "diff-changed", "diff-removed");
+    }
+  }
+}
+
+function diffRecords(snapshot: GraphSnapshot): Map<string, string> {
+  const records = new Map<string, string>();
+  for (const node of snapshot.nodes) records.set(node.id, normalizedRecord(node));
+  for (const block of snapshot.blocks) records.set(block.id, normalizedRecord(block));
+  return records;
+}
+
+function normalizedRecord(record: GraphNode | GraphBlock): string {
+  if (!("span" in record)) return JSON.stringify(record);
+  const { span: _span, ...semanticRecord } = record;
+  return JSON.stringify(semanticRecord);
+}
+
+function markRecordDifference(side: Side, id: string, kind: DifferenceKind): number {
+  const selector = `[data-node-id="${cssEscape(id)}"]`;
+  const element = listings[side].querySelector<HTMLElement>(selector);
+  if (!element) return 0;
+  element.classList.add(`diff-${kind}`);
+  return 1;
+}
+
+function highlightUnmatchedMetadataLines(side: Side, kind: "added" | "removed"): number {
+  const other: Side = side === "before" ? "after" : "before";
+  const otherCounts = lineCounts(metadataLines(other));
+  let differences = 0;
+  for (const line of metadataLines(side)) {
+    const text = normalizedLineText(line);
+    const remaining = otherCounts.get(text) ?? 0;
+    if (remaining > 0) {
+      otherCounts.set(text, remaining - 1);
+      continue;
+    }
+    line.classList.add(`diff-${kind}`);
+    differences += 1;
+  }
+  return differences;
+}
+
+function metadataLines(side: Side): HTMLElement[] {
+  return Array.from(listings[side].querySelectorAll<HTMLElement>(
+    ".ir-program-metadata .ir-source-row, .ir-body > .ir-metadata-line .ir-source-row",
+  ));
+}
+
+function lineCounts(lines: HTMLElement[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of lines) {
+    const text = normalizedLineText(line);
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function normalizedLineText(line: HTMLElement): string {
+  return (line.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
 function renderListing(side: Side, snapshot: GraphSnapshot): void {
