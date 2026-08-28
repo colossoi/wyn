@@ -95,7 +95,7 @@ impl KernelPlan {
         );
         let publications = self.publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
-        let stage_entries = self.stage_entry_associations(&program.data.core.pipeline);
+        let stage_entries = self.stage_entry_associations(&program.data.core.pipeline)?;
         program.data.core.pipeline.publish_implicit_bindings(&publication_refs, &stage_entries)?;
         program.data.core.pipeline.publish_graphics_io(&publication_refs, &stage_entries);
         self.publish(&mut program.data.core.pipeline, &physical_resources)?;
@@ -126,33 +126,45 @@ impl KernelPlan {
         Ok(publications)
     }
 
-    fn stage_entry_associations(&self, descriptor: &PipelineDescriptor) -> StageEntryAssociations {
+    fn stage_entry_associations(
+        &self,
+        descriptor: &PipelineDescriptor,
+    ) -> Result<StageEntryAssociations, String> {
         let mut graphics = self.phase_ids_in(PhaseGroup::Graphics).into_iter();
-        descriptor
+        let associations = descriptor
             .pipelines
             .iter()
             .enumerate()
-            .map(|(index, pipeline)| match pipeline {
-                Pipeline::Compute(_) => self
-                    .pipelines
-                    .iter()
-                    .find(|scheduled| scheduled.order == index)
-                    .map(|scheduled| self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id)))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|phase| self.phase(phase).entry.id)
-                    .collect(),
-                Pipeline::Graphics(graphics_pipeline) => graphics_pipeline
-                    .stages
-                    .iter()
-                    .map(|_| {
-                        self.phase(graphics.next().expect("graphics descriptor stage missing phase"))
-                            .entry
-                            .id
-                    })
-                    .collect(),
+            .map(|(index, pipeline)| -> Result<Vec<_>, String> {
+                Ok(match pipeline {
+                    Pipeline::Compute(_) => self
+                        .pipelines
+                        .iter()
+                        .find(|scheduled| scheduled.order == index)
+                        .map(|scheduled| self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id)))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|phase| self.phase(phase).entry.id)
+                        .collect(),
+                    Pipeline::Graphics(graphics_pipeline) => {
+                        let mut entries = Vec::with_capacity(graphics_pipeline.stages.len());
+                        for _ in &graphics_pipeline.stages {
+                            let Some(phase) = graphics.next() else {
+                                return Err(
+                                    "graphics descriptor has more stages than the kernel plan".to_string()
+                                );
+                            };
+                            entries.push(self.phase(phase).entry.id);
+                        }
+                        entries
+                    }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if graphics.next().is_some() {
+            return Err("kernel plan has more graphics phases than the descriptor has stages".to_string());
+        }
+        Ok(associations)
     }
     fn install_phase_shells(&self, descriptor: &mut PipelineDescriptor) -> Result<(), String> {
         let mut rebuilt = descriptor

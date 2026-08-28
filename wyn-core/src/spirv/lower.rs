@@ -561,7 +561,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         *self.constructor.builder.hoist_constant_global(
                             builder::ConstId::new(value_id),
                             builder::TypeId::new(spirv_type),
-                        )
+                        )?
                     } else {
                         let var = self.constructor.declare_variable("_materialize", spirv_type)?;
                         self.constructor.builder.store(var, value_id, None, [])?;

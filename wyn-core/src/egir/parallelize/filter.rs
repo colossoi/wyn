@@ -13,7 +13,7 @@ impl KernelPlanBuilder<'_> {
         kernel: schedule::KernelId,
         recipe: BoundFilter,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         let family = FilterKernelFamilyBuilder::new(self, body, recipe).build()?;
         family.install(kernel, &mut self.schedule, output_projection)
     }
@@ -54,7 +54,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         }
     }
 
-    fn build(mut self) -> error::Result<FilterKernelFamily> {
+    fn build(mut self) -> ParallelizeResult<FilterKernelFamily> {
         let domain = schedule::domain_from_space(&self.candidate.space)
             .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         let flags = self.build_flags()?;
@@ -74,7 +74,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         })
     }
 
-    fn build_flags(&mut self) -> error::Result<BuiltPhase> {
+    fn build_flags(&mut self) -> ParallelizeResult<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let mut storage = self
@@ -99,7 +99,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         )?))
     }
 
-    fn build_scan(&mut self) -> error::Result<BuiltPhase> {
+    fn build_scan(&mut self) -> ParallelizeResult<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let storage = [
@@ -126,14 +126,14 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         )?))
     }
 
-    fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> error::Result<(BuiltPhase, BuiltPhase)> {
+    fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> ParallelizeResult<(BuiltPhase, BuiltPhase)> {
         let zero = graph_ops::intern_u32(&mut scan.body.graph, 0, None);
         let add_name = format!("{}_filter_scan_add", self.entry.name);
         let span = self.entry.span;
         let add_region = self.lowering.define_callable(add_name, |region, name| {
             synthesize_u32_add_function(region, name, span)
         })?;
-        let add_function = self.lowering.callable(add_region).clone();
+        let add_function = self.lowering.callable(add_region)?.clone();
         let scan_scratch = ScanScratch {
             block_sums: self.work.block_sums.0,
             block_offsets: self.work.block_offsets.0,
@@ -187,7 +187,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         Ok((combine, apply_offsets))
     }
 
-    fn build_scatter(&self) -> error::Result<BuiltPhase> {
+    fn build_scatter(&self) -> ParallelizeResult<BuiltPhase> {
         use crate::interface::StorageRole;
 
         let mut resources = self.entry.resource_declarations.clone();
@@ -222,7 +222,7 @@ impl FilterKernelFamily {
         kernel: schedule::KernelId,
         schedule: &mut schedule::KernelPlan,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         use schedule::KernelDomain;
 
         let FilterKernelFamily {

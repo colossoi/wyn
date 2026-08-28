@@ -125,10 +125,7 @@ pub(super) fn analyze_reduction_routing(
         let destination = (
             resource,
             resources[resource].elem_ty().clone(),
-            resources[resource]
-                .size()
-                .expect("mapped reduction output must have a known logical size")
-                .clone(),
+            resources[resource].size()?.clone(),
         );
         let value = route.source.value;
         let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
@@ -188,7 +185,7 @@ pub(super) fn analyze_reduce_candidate(
     entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     resources: &egir::program::LogicalResourceArena,
-) -> error::Result<Option<ReduceCandidate>> {
+) -> ParallelizeResult<Option<ReduceCandidate>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
         super::capabilities::Strategy::Reduce
@@ -201,6 +198,7 @@ pub(super) fn analyze_reduce_candidate(
     let n_maps = located.op.form.post.result_types.len();
     let operands =
         screma::ScremaOperands::decode(located.op, &side_effect.operands, side_effect.result.as_ref())?;
+    let mut input_views = Vec::with_capacity(located.op.inputs.len());
     for input in operands.inputs() {
         let Some(input) = input.operand.value() else {
             return Ok(None);
@@ -208,6 +206,7 @@ pub(super) fn analyze_reduce_candidate(
         if !can_chunk_view(&entry.graph, input) {
             return Ok(None);
         }
+        input_views.push((input, entry.graph.nodes[input].ty.clone()));
     }
     let results = operands.result_fields();
     let mut map_outputs = Vec::with_capacity(n_maps);
@@ -226,13 +225,6 @@ pub(super) fn analyze_reduce_candidate(
     }
     let reduction_values = results[..reduction_results].to_vec();
     let owner = located.owner;
-    let input_views = operands
-        .inputs()
-        .map(|input| {
-            let input = input.operand.value().expect("reduction input was validated as a value or view");
-            (input, entry.graph.nodes[input].ty.clone())
-        })
-        .collect();
     let Some(accumulators) =
         analyze_reduction_accumulators(entry, located.op, &reduction_values, resources)
     else {
@@ -269,7 +261,7 @@ impl KernelPlanBuilder<'_> {
         &mut self,
         mut entry: egir::program::PlannedEntry,
         bound: BoundReduce,
-    ) -> error::Result<(BuiltPhase, Vec<BuiltPhase>)> {
+    ) -> ParallelizeResult<(BuiltPhase, Vec<BuiltPhase>)> {
         let BoundReduce {
             candidate,
             partials: partial_resources,
@@ -296,17 +288,19 @@ impl KernelPlanBuilder<'_> {
         let accumulators = accumulators
             .into_iter()
             .zip(partial_resources)
-            .map(|(accumulator, partial)| EmissionAccumulator {
-                component_types: accumulator.component_types,
-                scratch_type: accumulator.scratch_type,
-                operator: self.callable(accumulator.combine_region).clone(),
-                operator_captures: accumulator.combine_captures,
-                capture_inputs: accumulator.capture_inputs,
-                neutrals: accumulator.neutrals,
-                stores: accumulator.stores,
-                partial,
+            .map(|(accumulator, partial)| {
+                Ok(EmissionAccumulator {
+                    component_types: accumulator.component_types,
+                    scratch_type: accumulator.scratch_type,
+                    operator: self.callable(accumulator.combine_region)?.clone(),
+                    operator_captures: accumulator.combine_captures,
+                    capture_inputs: accumulator.capture_inputs,
+                    neutrals: accumulator.neutrals,
+                    stores: accumulator.stores,
+                    partial,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<ParallelizeResult<Vec<_>>>()?;
         // 3. Chunk every input view and bind mapped results to their matching
         // resource slices.
         let chunked = chunk_soac_inputs(&mut entry.graph, &input_view_data, total_threads, "SegRed")?;
@@ -344,10 +338,9 @@ impl KernelPlanBuilder<'_> {
             let components = results
                 .iter()
                 .map(|result| {
-                    graph_ops::pack_result_values(&mut entry.graph, result)
-                        .expect("reduction component is returned by value")
+                    graph_ops::pack_result_values(&mut entry.graph, result).map_err(ParallelizeError::from)
                 })
-                .collect::<Vec<_>>();
+                .collect::<ParallelizeResult<Vec<_>>>()?;
             result_field += components.len();
             let packed =
                 lambda_ops::pack_results(&mut entry.graph, &components, &accumulator.component_types);
@@ -480,7 +473,7 @@ impl ReduceCombineSpec<'_> {
         left: ValueId,
         right: ValueId,
         captures: &[OperandRef],
-    ) -> ValueId {
+    ) -> Result<ValueId, String> {
         let mut operands = lambda_ops::unpack_results(graph, left, self.component_types)
             .into_iter()
             .map(|value| graph.operand_ref(value))
@@ -502,9 +495,10 @@ impl ReduceCombineSpec<'_> {
                 None,
                 None,
             )
-            .expect("reduction operator call must match its canonical boundary");
+            .map_err(|cause| {
+                format!("reduction operator call does not match its canonical boundary: {cause}")
+            })?;
         graph_ops::pack_result_values(graph, &result)
-            .expect("reduction operator result is returned by value")
     }
 
     fn emit_tree(
@@ -628,7 +622,7 @@ impl ReduceCombineSpec<'_> {
         // grid_body: acc' = op(acc, partials[i]); → grid_cont(acc')
         let elem_i =
             graph_ops::emit_view_load(graph, grid_body, partials_view, i_in, elem_ty.clone(), eff, None);
-        let acc_next = self.emit_operator(graph, grid_body, acc_in, elem_i, operator_captures);
+        let acc_next = self.emit_operator(graph, grid_body, acc_in, elem_i, operator_captures)?;
         graph.skeleton.blocks[grid_body].term = SkeletonTerminator::Branch {
             target: grid_cont,
             args: graph.admit_flow_values([acc_next]),
@@ -747,7 +741,7 @@ impl ReduceCombineSpec<'_> {
             eff,
             None,
         );
-        let combined = self.emit_operator(graph, tree_then, a, bb, operator_captures);
+        let combined = self.emit_operator(graph, tree_then, a, bb, operator_captures)?;
         graph_ops::emit_storage_store(
             graph,
             tree_then,

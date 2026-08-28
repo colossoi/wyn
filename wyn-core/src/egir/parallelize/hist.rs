@@ -21,6 +21,7 @@ use crate::types::TypeExt;
 use crate::ResourceId;
 use std::collections::HashSet;
 
+use super::model::{ParallelizeError, Result as ParallelizeResult};
 use super::planning::LocatedHist;
 
 type Semantic = SemanticFamily<SemanticResourceRef>;
@@ -443,7 +444,7 @@ impl super::KernelPlanBuilder<'_> {
         kernel: super::schedule::KernelId,
         candidate: BoundBucketCandidate,
         output_projection: Option<Vec<usize>>,
-    ) -> super::error::Result<()> {
+    ) -> ParallelizeResult<()> {
         use super::{project_kernel_body, project_single_effect_body, BuiltPhase, ProjectionSpec};
         use crate::ResourceAccess;
 
@@ -452,18 +453,18 @@ impl super::KernelPlanBuilder<'_> {
             _ => (1, 1, 1),
         };
         let fixed_dispatch = bucket_dispatch_topology(&body.graph, &candidate.space, local_size)
-            .map_err(super::error::ParallelizeError::Invalid)?;
+            .map_err(ParallelizeError::Invalid)?;
         let (insert_domain, insert_topology) = if let Some((topology, domain)) = fixed_dispatch {
             (domain, Some(topology))
         } else if candidate.space.dims().len() == 1 {
             let domain = super::schedule::domain_from_space(&candidate.space).ok_or_else(|| {
-                super::error::ParallelizeError::Invalid(
+                ParallelizeError::Invalid(
                     "bucket_scatter dynamic rank-one domain is not host-dispatchable".into(),
                 )
             })?;
             (domain, None)
         } else {
-            return Err(super::error::ParallelizeError::Invalid(
+            return Err(ParallelizeError::Invalid(
                 "bucket_scatter resource-derived multidimensional dispatch is not representable in the current descriptor"
                     .into(),
             ));

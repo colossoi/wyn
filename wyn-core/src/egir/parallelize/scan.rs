@@ -113,7 +113,7 @@ impl ScanPhase2Spec<'_> {
                 graph_ops::clone_operand_subgraph(self.source_graph, builder.graph_mut(), *capture)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let phase = self.emit_loop(&mut builder, neutral, &operator_captures);
+        let phase = self.emit_loop(&mut builder, neutral, &operator_captures)?;
         if let (Some(len_out), Some(total)) = (self.total_out, phase.total) {
             let (graph, effect_ids) = builder.construction_parts_mut();
             let len_view = graph_ops::intern_resource_view(graph, len_out, self.elem_ty.clone(), None);
@@ -164,7 +164,7 @@ impl ScanPhase2Spec<'_> {
         builder: &mut egir::builder::EntryBuilder,
         neutral: ValueId,
         operator_captures: &[OperandRef],
-    ) -> ExclusiveScanPhase2 {
+    ) -> Result<ExclusiveScanPhase2, String> {
         let elem_ty = self.elem_ty.clone();
         let want_total = self.total_out.is_some() || self.reduction_output.is_some();
         let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
@@ -225,9 +225,10 @@ impl ScanPhase2Spec<'_> {
                 None,
                 None,
             )
-            .expect("scan operator call must match its canonical boundary");
-        let next_accumulator = graph_ops::pack_result_values(graph, &result)
-            .expect("scan operator result is returned by value");
+            .map_err(|cause| {
+                format!("scan operator call does not match its canonical boundary: {cause}")
+            })?;
+        let next_accumulator = graph_ops::pack_result_values(graph, &result)?;
         graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
             target: continuation,
             args: graph.admit_flow_values([next_accumulator]),
@@ -241,7 +242,7 @@ impl ScanPhase2Spec<'_> {
         };
         let total = if want_total { Some(graph.add_block_param(after, elem_ty)) } else { None };
         builder.set_current_block(after);
-        ExclusiveScanPhase2 { total, after, zero }
+        Ok(ExclusiveScanPhase2 { total, after, zero })
     }
 }
 
@@ -470,7 +471,7 @@ pub(super) fn analyze_scan_candidate(
     entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     resources: &egir::program::LogicalResourceArena,
-) -> error::Result<Option<ScanCandidate>> {
+) -> ParallelizeResult<Option<ScanCandidate>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
         super::capabilities::Strategy::Scan
@@ -622,7 +623,7 @@ impl KernelPlanBuilder<'_> {
         &mut self,
         mut entry: egir::program::PlannedEntry,
         analysis: BoundScan,
-    ) -> error::Result<[BuiltPhase; 3]> {
+    ) -> ParallelizeResult<[BuiltPhase; 3]> {
         let BoundScan {
             candidate,
             block_sums: block_sums_resource,
@@ -667,24 +668,20 @@ impl KernelPlanBuilder<'_> {
             .map(|scan| scan.operator.clone())
             .chain(reductions.iter().map(|reduction| reduction.operator.clone()))
             .collect::<Vec<_>>();
-        let original_operator_functions = original_operators
-            .iter()
+        let original_operators = original_operators
+            .into_iter()
             .map(|operator| {
-                let region = operator.seg_body().expect("scan operator has a callable region").region;
-                self.callable(region).clone()
+                let Some(body) = operator.seg_body() else {
+                    return Err("scan operator does not have a callable region".into());
+                };
+                let region = body.region;
+                Ok((operator, self.callable(region)?.clone()))
             })
-            .collect::<Vec<_>>();
+            .collect::<ParallelizeResult<Vec<_>>>()?;
         let phase_operator = if reductions.is_empty() && scans.len() == 1 && component_count == 1 {
             scans[0].operator.clone()
         } else {
-            let capture_types = operator_captures
-                .iter()
-                .map(|capture| {
-                    entry.graph.nodes[capture.value().expect("scan operator capture is a value or view")]
-                        .ty
-                        .clone()
-                })
-                .collect::<Vec<_>>();
+            let capture_types = operand_types(&entry.graph, &operator_captures, "scan operator capture")?;
             let wrapper_component_types = component_types.clone();
             let wrapper_scratch_type = elem_ty.clone();
             let span = entry.span;
@@ -695,7 +692,6 @@ impl KernelPlanBuilder<'_> {
                         region,
                         name,
                         original_operators,
-                        original_operator_functions,
                         wrapper_component_types,
                         capture_types,
                         wrapper_scratch_type,
@@ -712,8 +708,10 @@ impl KernelPlanBuilder<'_> {
                 vec![elem_ty.clone()],
             )
         };
-        let operator_region =
-            phase_operator.seg_body().expect("parallel scan phase operator has a region").region;
+        let Some(operator_body) = phase_operator.seg_body() else {
+            return Err("parallel scan phase operator does not have a callable region".into());
+        };
+        let operator_region = operator_body.region;
         let combine_region = operator_region;
         let neutrals = scans
             .iter()
@@ -733,16 +731,10 @@ impl KernelPlanBuilder<'_> {
                 .into_iter()
                 .flat_map(|body| body.captures.iter().copied())
                 .collect::<Vec<_>>();
-            let capture_types = captures
-                .iter()
-                .map(|capture| {
-                    entry.graph.nodes[capture.value().expect("scan pre capture is a value or view")]
-                        .ty
-                        .clone()
-                })
-                .collect::<Vec<_>>();
+            let capture_types = operand_types(&entry.graph, &captures, "scan pre capture")?;
             let source = pre.clone();
-            let source_function = source.seg_body().map(|body| self.callable(body.region).clone());
+            let source_function =
+                source.seg_body().map(|body| self.callable(body.region).cloned()).transpose()?;
             let parameter_types = pre.parameter_types.clone();
             let result_type = elem_ty.clone();
             let span = entry.span;
@@ -775,19 +767,13 @@ impl KernelPlanBuilder<'_> {
                 .flat_map(|body| body.captures.iter().copied())
                 .chain(post.seg_body().into_iter().flat_map(|body| body.captures.iter().copied()))
                 .collect::<Vec<_>>();
-            let capture_types = captures
-                .iter()
-                .map(|capture| {
-                    entry.graph.nodes[capture.value().expect("scan post capture is a value or view")]
-                        .ty
-                        .clone()
-                })
-                .collect::<Vec<_>>();
+            let capture_types = operand_types(&entry.graph, &captures, "scan post capture")?;
             let source_pre = pre.clone();
             let source_post = post.clone();
-            let source_pre_function = source_pre.seg_body().map(|body| self.callable(body.region).clone());
+            let source_pre_function =
+                source_pre.seg_body().map(|body| self.callable(body.region).cloned()).transpose()?;
             let source_post_function =
-                source_post.seg_body().map(|body| self.callable(body.region).clone());
+                source_post.seg_body().map(|body| self.callable(body.region).cloned()).transpose()?;
             let mut parameter_types = vec![elem_ty.clone()];
             parameter_types.extend(pre.parameter_types.iter().cloned());
             let result_types = post.result_types.clone();
@@ -824,10 +810,9 @@ impl KernelPlanBuilder<'_> {
         let reduction_result_components = screma_results[..reduction_component_types.len()]
             .iter()
             .map(|result| {
-                graph_ops::pack_result_values(&mut entry.graph, result)
-                    .expect("scan reduction component is returned by value")
+                graph_ops::pack_result_values(&mut entry.graph, result).map_err(ParallelizeError::from)
             })
-            .collect::<Vec<_>>();
+            .collect::<ParallelizeResult<Vec<_>>>()?;
         let reduction_stores = reduction_routing.stores;
         let reduction_output_declarations = reduction_stores.iter().map(|store| store.output.clone()).fold(
             Vec::new(),
@@ -952,9 +937,10 @@ impl KernelPlanBuilder<'_> {
             self.effect_ids,
             None,
         );
-        let block_sum_result = reduce_result.field(0).expect("the block reduction has one logical result");
-        let block_sum = graph_ops::pack_result_values(&mut entry.graph, &block_sum_result)
-            .expect("the block reduction result is returned by value");
+        let Some(block_sum_result) = reduce_result.field(0) else {
+            return Err("the block reduction does not have its required logical result".into());
+        };
+        let block_sum = graph_ops::pack_result_values(&mut entry.graph, &block_sum_result)?;
         let scratch_array_type =
             types::view_array_with_size(&elem_ty, Type::Variable(0), types::no_buffer());
         let block_sums_view = graph_ops::intern_resource_view(
@@ -981,7 +967,7 @@ impl KernelPlanBuilder<'_> {
             });
         }
 
-        let combine_function = self.callable(combine_region).clone();
+        let combine_function = self.callable(combine_region)?.clone();
         let phase2 = ScanPhase2Spec {
             entry_name: entry.name.clone(),
             operator: &combine_function,
@@ -1007,14 +993,8 @@ impl KernelPlanBuilder<'_> {
         let phase2 = phase2.build(&mut self.identities, self.semantic_ids, self.effect_ids)?;
 
         let swap_elem_ty = elem_ty.clone();
-        let operator_capture_types = operator_captures
-            .iter()
-            .map(|capture| {
-                entry.graph.nodes[capture.value().expect("scan operator capture is a value or view")]
-                    .ty
-                    .clone()
-            })
-            .collect::<Vec<_>>();
+        let operator_capture_types =
+            operand_types(&entry.graph, &operator_captures, "scan operator capture")?;
         let span = entry.span;
         let swap_region =
             self.define_callable(format!("{}_scan_op_swap", entry.name), |region, name| {
@@ -1088,41 +1068,47 @@ impl KernelPlanBuilder<'_> {
 fn synthesize_packed_operator_function(
     region: FunctionId,
     name: String,
-    operators: Vec<screma::Lambda>,
-    operator_functions: Vec<Func<Semantic>>,
+    operators: Vec<(screma::Lambda, Func<Semantic>)>,
     component_types: Vec<Type<TypeName>>,
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
     span: ast::Span,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let mut parameter_types = vec![scratch_type.clone(), scratch_type.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let left = lambda_ops::unpack_results(
-        &mut graph,
-        arguments[0].value().expect("packed operator parameter is a value"),
-        &component_types,
-    );
-    let right = lambda_ops::unpack_results(
-        &mut graph,
-        arguments[1].value().expect("packed operator parameter is a value"),
-        &component_types,
-    );
+    let [left_argument, right_argument, ..] = arguments.as_slice() else {
+        return Err("packed scan operator did not produce its two declared value parameters".into());
+    };
+    let Some(left_value) = left_argument.value() else {
+        return Err("packed scan operator's left parameter is not a value".into());
+    };
+    let Some(right_value) = right_argument.value() else {
+        return Err("packed scan operator's right parameter is not a value".into());
+    };
+    let left = lambda_ops::unpack_results(&mut graph, left_value, &component_types);
+    let right = lambda_ops::unpack_results(&mut graph, right_value, &component_types);
     let mut component_cursor = 0;
     let mut capture_cursor = 2;
     let mut results = Vec::with_capacity(component_types.len());
-    for (operator, function) in operators.iter().zip(&operator_functions) {
+    for (operator, function) in &operators {
         let component_end = component_cursor + operator.result_types.len();
         let capture_end = capture_cursor + operator.capture_count();
-        let mut operator_arguments = left[component_cursor..component_end]
-            .iter()
-            .map(|value| graph.operand_ref(*value))
-            .collect::<Vec<_>>();
-        operator_arguments
-            .extend(right[component_cursor..component_end].iter().map(|value| graph.operand_ref(*value)));
-        operator_arguments.extend_from_slice(&arguments[capture_cursor..capture_end]);
+        let Some(left_components) = left.get(component_cursor..component_end) else {
+            return Err("packed scan operator's left component layout is inconsistent".into());
+        };
+        let Some(right_components) = right.get(component_cursor..component_end) else {
+            return Err("packed scan operator's right component layout is inconsistent".into());
+        };
+        let Some(captures) = arguments.get(capture_cursor..capture_end) else {
+            return Err("packed scan operator's capture layout is inconsistent".into());
+        };
+        let mut operator_arguments =
+            left_components.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
+        operator_arguments.extend(right_components.iter().map(|value| graph.operand_ref(*value)));
+        operator_arguments.extend_from_slice(captures);
         let entry = graph.skeleton.entry;
         let operator_results =
             lambda_ops::emit_call(&mut graph, entry, operator, Some(function), operator_arguments);
@@ -1134,7 +1120,7 @@ fn synthesize_packed_operator_function(
     debug_assert_eq!(capture_cursor, arguments.len());
     let packed = lambda_ops::pack_results(&mut graph, &results, &component_types);
     let entry = graph.skeleton.entry;
-    lambda_ops::finish_function(
+    Ok(lambda_ops::finish_function(
         graph,
         entry,
         region,
@@ -1143,7 +1129,7 @@ fn synthesize_packed_operator_function(
         params,
         &[scratch_type],
         &[packed],
-    )
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1156,7 +1142,7 @@ fn synthesize_scan_input_function(
     component_count: usize,
     result_type: Type<TypeName>,
     span: ast::Span,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let mut parameter_types = pre.parameter_types.clone();
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
@@ -1165,13 +1151,15 @@ fn synthesize_scan_input_function(
     let entry = graph.skeleton.entry;
     let results = lambda_ops::emit_call(&mut graph, entry, &pre, pre_function.as_ref(), arguments);
     let results = lambda_ops::result_argument_values(&mut graph, &results);
-    let packed = lambda_ops::pack_results(
-        &mut graph,
-        &results[..component_count],
-        &pre.result_types[..component_count],
-    );
+    let Some(results) = results.get(..component_count) else {
+        return Err("scan pre returned fewer components than its packed result requires".into());
+    };
+    let Some(result_types) = pre.result_types.get(..component_count) else {
+        return Err("scan pre declares fewer components than its packed result requires".into());
+    };
+    let packed = lambda_ops::pack_results(&mut graph, results, result_types);
     let entry = graph.skeleton.entry;
-    lambda_ops::finish_function(
+    Ok(lambda_ops::finish_function(
         graph,
         entry,
         region,
@@ -1180,7 +1168,7 @@ fn synthesize_scan_input_function(
         params,
         &[result_type],
         &[packed],
-    )
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1196,7 +1184,7 @@ fn synthesize_scan_post_function(
     scratch_type: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: ast::Span,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let mut element_types = vec![scratch_type];
     element_types.extend(pre.parameter_types.iter().cloned());
     let element_count = element_types.len();
@@ -1207,28 +1195,39 @@ fn synthesize_scan_post_function(
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
 
-    let mut pre_arguments = arguments[1..element_count].to_vec();
-    pre_arguments.extend_from_slice(&arguments[element_count..element_count + pre_capture_count]);
+    let Some(element_arguments) = arguments.get(1..element_count) else {
+        return Err("scan post element parameter layout is inconsistent".into());
+    };
+    let Some(pre_captures) = arguments.get(element_count..element_count + pre_capture_count) else {
+        return Err("scan post pre-capture layout is inconsistent".into());
+    };
+    let mut pre_arguments = element_arguments.to_vec();
+    pre_arguments.extend_from_slice(pre_captures);
     let entry = graph.skeleton.entry;
     let pre_results = lambda_ops::emit_call(&mut graph, entry, &pre, pre_function.as_ref(), pre_arguments);
     let pre_results = lambda_ops::result_argument_values(&mut graph, &pre_results);
-    let prefix_components = lambda_ops::unpack_results(
-        &mut graph,
-        arguments[0].value().expect("scan post prefix is a value"),
-        &component_types,
-    );
-    let mut post_arguments = prefix_components[..scan_component_count]
-        .iter()
-        .map(|value| graph.operand_ref(*value))
-        .collect::<Vec<_>>();
-    post_arguments
-        .extend(pre_results[component_types.len()..].iter().map(|value| graph.operand_ref(*value)));
-    post_arguments.extend_from_slice(&arguments[element_count + pre_capture_count..]);
+    let Some(prefix) = arguments.first().and_then(|argument| argument.value()) else {
+        return Err("scan post prefix parameter is not a value".into());
+    };
+    let prefix_components = lambda_ops::unpack_results(&mut graph, prefix, &component_types);
+    let Some(scan_components) = prefix_components.get(..scan_component_count) else {
+        return Err("scan post prefix has fewer scan components than required".into());
+    };
+    let Some(mapped_results) = pre_results.get(component_types.len()..) else {
+        return Err("scan pre returned fewer accumulator components than declared".into());
+    };
+    let Some(post_captures) = arguments.get(element_count + pre_capture_count..) else {
+        return Err("scan post capture layout is inconsistent".into());
+    };
+    let mut post_arguments =
+        scan_components.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
+    post_arguments.extend(mapped_results.iter().map(|value| graph.operand_ref(*value)));
+    post_arguments.extend_from_slice(post_captures);
     let post_results =
         lambda_ops::emit_call(&mut graph, entry, &post, post_function.as_ref(), post_arguments);
     let post_results = lambda_ops::result_argument_values(&mut graph, &post_results);
     let entry = graph.skeleton.entry;
-    lambda_ops::finish_function(
+    Ok(lambda_ops::finish_function(
         graph,
         entry,
         region,
@@ -1237,5 +1236,23 @@ fn synthesize_scan_post_function(
         params,
         &post.result_types,
         &post_results,
-    )
+    ))
+}
+
+fn operand_types(
+    graph: &EGraph,
+    operands: &[OperandRef],
+    context: &str,
+) -> ParallelizeResult<Vec<Type<TypeName>>> {
+    let mut types = Vec::with_capacity(operands.len());
+    for operand in operands {
+        let Some(value) = operand.value() else {
+            return Err(format!("{context} is not a value or view").into());
+        };
+        let Some(node) = graph.nodes.get(value) else {
+            return Err(format!("{context} {value:?} is missing from its graph").into());
+        };
+        types.push(node.ty.clone());
+    }
+    Ok(types)
 }

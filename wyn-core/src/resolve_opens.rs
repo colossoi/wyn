@@ -72,12 +72,14 @@ pub fn resolve_opens(mut program: resolve_placeholders::TypePlaceholdersResolved
     let module_names: Vec<String> =
         program.global_context.module_manager.elaborated_modules_mut().keys().cloned().collect();
     for module_name in module_names {
-        let elaborated = program
-            .global_context
-            .module_manager
-            .elaborated_modules_mut()
-            .get_mut(&module_name)
-            .expect("module exists");
+        let Some(elaborated) =
+            program.global_context.module_manager.elaborated_modules_mut().get_mut(&module_name)
+        else {
+            return Err(err_module!(
+                "module '{}' disappeared during open resolution",
+                module_name
+            ));
+        };
         for item in &mut elaborated.items {
             if let module_manager::ElaboratedItem::Decl(declaration) = item {
                 run_in_module_with_index(&mut declaration.body, &module_name, &index)?;
@@ -191,7 +193,7 @@ impl<'a> OpenResolver<'a> {
         // an opened module member.
         for decl in declarations.iter() {
             if let Some(name) = top_level_name(decl) {
-                self.locals.last_mut().unwrap().insert(name);
+                self.current_frame_mut()?.insert(name);
             }
         }
         for decl in declarations {
@@ -211,7 +213,7 @@ impl<'a> OpenResolver<'a> {
             Declaration::Decl(d) => {
                 self.locals.push(LookupSet::new());
                 for p in &d.params {
-                    self.bind_pattern(p);
+                    self.bind_pattern(p)?;
                 }
                 self.resolve_expression(&mut d.body)?;
                 self.locals.pop();
@@ -220,7 +222,7 @@ impl<'a> OpenResolver<'a> {
             Declaration::Entry(e) => {
                 self.locals.push(LookupSet::new());
                 for p in &e.params {
-                    self.bind_pattern(p);
+                    self.bind_pattern(p)?;
                 }
                 self.resolve_expression(&mut e.body)?;
                 self.locals.pop();
@@ -254,11 +256,19 @@ impl<'a> OpenResolver<'a> {
         }
     }
 
-    fn bind_pattern<A>(&mut self, pat: &Pattern<ast::SourceTree, A>) {
-        let frame = self.locals.last_mut().unwrap();
+    fn current_frame_mut(&mut self) -> Result<&mut LookupSet<String>> {
+        let Some(frame) = self.locals.last_mut() else {
+            return Err(err_module!("open resolver has no local scope"));
+        };
+        Ok(frame)
+    }
+
+    fn bind_pattern<A>(&mut self, pat: &Pattern<ast::SourceTree, A>) -> Result<()> {
+        let frame = self.current_frame_mut()?;
         for n in pat.bound_names() {
             frame.insert(n);
         }
+        Ok(())
     }
 
     fn locally_bound(&self, name: &str) -> bool {
@@ -298,9 +308,10 @@ impl<'a> OpenResolver<'a> {
             match candidates.len() {
                 0 => {} // Rule 4: leave bare for downstream resolution.
                 1 => {
-                    let m = candidates.into_iter().next().unwrap();
-                    if let ExprKind::Identifier(identifier) = &mut expr.kind {
-                        identifier.qualifiers.push(m);
+                    for module in candidates {
+                        if let ExprKind::Identifier(identifier) = &mut expr.kind {
+                            identifier.qualifiers.push(module);
+                        }
                     }
                 }
                 _ => {
@@ -326,7 +337,7 @@ impl<'a> OpenResolver<'a> {
             ExprKind::Lambda(lambda) => {
                 self.locals.push(LookupSet::new());
                 for p in &lambda.params {
-                    self.bind_pattern(p);
+                    self.bind_pattern(p)?;
                 }
                 self.resolve_expression(&mut lambda.body)?;
                 self.locals.pop();
@@ -342,7 +353,7 @@ impl<'a> OpenResolver<'a> {
                 self.resolve_expression(&mut let_in.value)?;
                 // Body sees the let-bound names.
                 self.locals.push(LookupSet::new());
-                self.bind_pattern(&let_in.pattern);
+                self.bind_pattern(&let_in.pattern)?;
                 self.resolve_expression(&mut let_in.body)?;
                 self.locals.pop();
             }
@@ -415,7 +426,7 @@ impl<'a> OpenResolver<'a> {
                 self.resolve_expression(&mut m.scrutinee)?;
                 for case in &mut m.cases {
                     self.locals.push(LookupSet::new());
-                    self.bind_pattern(&case.pattern);
+                    self.bind_pattern(&case.pattern)?;
                     self.resolve_expression(&mut case.body)?;
                     self.locals.pop();
                 }
@@ -429,13 +440,13 @@ impl<'a> OpenResolver<'a> {
                 }
                 // Loop pattern binds names visible in form + body.
                 self.locals.push(LookupSet::new());
-                self.bind_pattern(&loop_expr.pattern);
+                self.bind_pattern(&loop_expr.pattern)?;
                 match &mut loop_expr.form {
                     ast::LoopForm::For(_, bound) => {
                         self.resolve_expression(bound)?;
                     }
                     ast::LoopForm::ForIn(pat, iter) => {
-                        self.bind_pattern(pat);
+                        self.bind_pattern(pat)?;
                         self.resolve_expression(iter)?;
                     }
                     ast::LoopForm::While(cond) => {

@@ -194,15 +194,22 @@ fn synthesize_binary_fn(
     elem_ty: Type<TypeName>,
     span: ast::Span,
     body: impl FnOnce(&mut EGraph, ValueId, ValueId) -> ValueId,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let params = lambda_ops::named_parameters(&[elem_ty.clone(), elem_ty.clone()], "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let a_nid = arguments[0].value().expect("binary helper parameter is a value");
-    let b_nid = arguments[1].value().expect("binary helper parameter is a value");
+    let [a, b] = arguments.as_slice() else {
+        return Err("binary helper did not produce its two declared parameters".into());
+    };
+    let Some(a_nid) = a.value() else {
+        return Err("binary helper's first parameter is not passed by value".into());
+    };
+    let Some(b_nid) = b.value() else {
+        return Err("binary helper's second parameter is not passed by value".into());
+    };
     let result = body(&mut graph, a_nid, b_nid);
     let entry_block = graph.skeleton.entry;
-    lambda_ops::finish_function(
+    Ok(lambda_ops::finish_function(
         graph,
         entry_block,
         region,
@@ -211,7 +218,7 @@ fn synthesize_binary_fn(
         params,
         &[elem_ty],
         &[result],
-    )
+    ))
 }
 
 /// A two-argument helper whose body is `inner(b, a)` — an arg-swapped wrapper
@@ -223,14 +230,17 @@ pub(super) fn synthesize_swap_wrapper(
     elem_ty: Type<TypeName>,
     capture_types: Vec<Type<TypeName>>,
     span: ast::Span,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let mut parameter_types = vec![elem_ty.clone(), elem_ty.clone()];
     parameter_types.extend(capture_types);
     let params = lambda_ops::named_parameters(&parameter_types, "arg");
     let mut graph = EGraph::new();
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let mut inner_arguments = vec![arguments[1], arguments[0]];
-    inner_arguments.extend_from_slice(&arguments[2..]);
+    let [left, right, captures @ ..] = arguments.as_slice() else {
+        return Err("swap wrapper did not produce its two declared value parameters".into());
+    };
+    let mut inner_arguments = vec![*right, *left];
+    inner_arguments.extend_from_slice(captures);
     let entry = graph.skeleton.entry;
     let (_, result) = graph
         .emit_call(
@@ -243,10 +253,9 @@ pub(super) fn synthesize_swap_wrapper(
             None,
             None,
         )
-        .expect("swap wrapper call must match the operator boundary");
-    let result = graph_ops::pack_result_values(&mut graph, &result)
-        .expect("swap wrapper operator result is returned by value");
-    lambda_ops::finish_function(
+        .map_err(|cause| format!("swap wrapper call does not match the operator boundary: {cause}"))?;
+    let result = graph_ops::pack_result_values(&mut graph, &result)?;
+    Ok(lambda_ops::finish_function(
         graph,
         entry,
         region,
@@ -255,14 +264,14 @@ pub(super) fn synthesize_swap_wrapper(
         params,
         &[elem_ty],
         &[result],
-    )
+    ))
 }
 
 pub(super) fn synthesize_u32_add_function(
     region: FunctionId,
     name: String,
     span: ast::Span,
-) -> Func<Semantic> {
+) -> ParallelizeResult<Func<Semantic>> {
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let result_ty = u32_ty.clone();
     synthesize_binary_fn(region, name, u32_ty, span, move |graph, a_nid, b_nid| {

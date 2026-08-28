@@ -249,14 +249,14 @@ impl Constructor {
         linkage_name: &str,
         param_types: &[spirv::Word],
         return_type: spirv::Word,
-    ) -> spirv::Word {
+    ) -> Result<spirv::Word> {
         let param_types_typed: Vec<builder::TypeId> =
             param_types.iter().map(|&w| builder::TypeId::new(w)).collect();
-        *self.builder.forward_declare_linked_function(
+        Ok(*self.builder.forward_declare_linked_function(
             linkage_name,
             &param_types_typed,
             builder::TypeId::new(return_type),
-        )
+        )?)
     }
 
     /// Begin a new function. Returns `(func_id, param_ids, first_code_block)`.
@@ -454,7 +454,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
                 body.params().map(|(_, ty, _)| constructor.polytype_to_spirv(ty)).collect();
             let return_type = constructor.polytype_to_spirv(&body.return_ty);
             let func_id =
-                constructor.forward_declare_linked_function(linkage_name, &param_types, return_type);
+                constructor.forward_declare_linked_function(linkage_name, &param_types, return_type)?;
             constructor.linked_functions.insert(func.id, func_id);
             constructor.linked_functions_by_linkage.insert(linkage_name.clone(), func_id);
             constructor.current_functions.insert(func.id, func_id);

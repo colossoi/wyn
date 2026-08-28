@@ -503,8 +503,8 @@ impl<'a> Parser<'a> {
                 );
             };
         // One output → its diet; several → an aggregate mirroring the tuple.
-        let return_diet = if return_diets.len() == 1 {
-            return_diets.into_iter().next().unwrap()
+        let return_diet = if let [diet] = return_diets.as_slice() {
+            diet.clone()
         } else {
             Diet::Aggregate {
                 unique: false,
@@ -1159,7 +1159,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok((types::f32(), Diet::Leaf(false)))
             }
-            Some(Token::Identifier(name)) if name.chars().next().unwrap().is_lowercase() => {
+            Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_lowercase) => {
                 let type_name = name.clone();
                 self.advance();
 
@@ -1242,10 +1242,16 @@ impl<'a> Parser<'a> {
 
                 // If exactly one type with no comma, it's just grouping parens, not a tuple
                 if tuple_types.len() == 1 && !has_comma {
-                    Ok((
-                        tuple_types.into_iter().next().unwrap(),
-                        tuple_diets.into_iter().next().unwrap(),
-                    ))
+                    let Some(ty) = tuple_types.pop() else {
+                        return Err(err_parse_at!(self.previous_span(), "missing parenthesized type"));
+                    };
+                    let Some(diet) = tuple_diets.pop() else {
+                        return Err(err_parse_at!(
+                            self.previous_span(),
+                            "missing parenthesized type diet"
+                        ));
+                    };
+                    Ok((ty, diet))
                 } else {
                     let diet = Diet::Aggregate {
                         unique: false,
@@ -1258,7 +1264,7 @@ impl<'a> Parser<'a> {
                 // Record type {field1: type1, field2: type2} or empty record {}
                 self.parse_record_type()
             }
-            Some(Token::Identifier(name)) if name.chars().next().unwrap().is_uppercase() => {
+            Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_uppercase) => {
                 let name = name.clone();
                 self.advance();
 
@@ -1566,8 +1572,9 @@ impl<'a> Parser<'a> {
                     }
                     let mut components: Vec<u8> = Vec::with_capacity(swizzle_str.len());
                     for c in swizzle_str.chars() {
-                        let idx = types::swizzle_component_index(c)
-                            .expect("is_swizzle_field accepted this letter");
+                        let Some(idx) = types::swizzle_component_index(c) else {
+                            bail_parse_at!(swizzle_span, "invalid swizzle component `{c}`");
+                        };
                         if components.contains(&(idx as u8)) {
                             bail_parse_at!(
                                 swizzle_span,
@@ -1909,7 +1916,9 @@ impl<'a> Parser<'a> {
             let span = start_span.merge(&end_span);
 
             // start_expr must be Some here since we didn't see DotDot
-            let index = start_expr.expect("index expression should exist for array indexing");
+            let Some(index) = start_expr else {
+                return Err(err_parse_at!(start_span, "array index expression is missing"));
+            };
             Ok(self.node_counter.mk_node(ExprKind::ArrayIndex(Box::new(array), index), span))
         }
     }

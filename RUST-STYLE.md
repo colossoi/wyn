@@ -23,6 +23,10 @@ formatter cannot make.
   This includes indirect results such as poisoned lock guards.
 - Prefer `?`, structured error types, and useful context at subsystem
   boundaries. Wyn uses `thiserror` for structured errors.
+- When a required `Option` value is missing, prefer a diverging
+  `let Some(value) = option else { return Err(...); };` over
+  `option.ok_or(...)?` or `option.ok_or_else(...)?`. This keeps the exceptional
+  path explicit and the successful binding on the main path.
 - Use `Option` only when absence is an expected state. Use `Result` when the
   caller needs to distinguish failure from absence.
 - Do not silently discard a `Result`. Handle it, propagate it, or document why

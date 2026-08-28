@@ -158,14 +158,15 @@ pub fn validate_wgsl_identifier(name: &str) -> core::result::Result<(), String> 
         return Err("identifier must not be empty".to_string());
     }
     let mut chars = name.chars();
-    match chars.next().unwrap() {
-        'A'..='Z' | 'a'..='z' | '_' => {}
-        c => {
+    match chars.next() {
+        Some('A'..='Z' | 'a'..='z' | '_') => {}
+        Some(c) => {
             return Err(format!(
                 "identifier '{}' must start with a letter or underscore, got '{}'",
                 name, c
             ));
         }
+        None => return Err("identifier must not be empty".to_string()),
     }
     for c in chars {
         if !matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
@@ -1050,7 +1051,11 @@ impl<'a> LowerCtx<'a> {
                     ..
                 } = &inst.data
                 {
-                    let result = inst.result.expect("StorageView(Workgroup) must have a result");
+                    let Some(result) = inst.result else {
+                        return Err(err_wgsl!(
+                            "workgroup StorageView instruction is missing its result"
+                        ));
+                    };
                     let view_ty = entry.body.get_value_type(result);
                     // Array-shaped workgroup view → elem; scalar / vec /
                     // struct-shaped (single-element reduce) → view IS the elem.
@@ -1298,7 +1303,12 @@ impl<'a> LowerCtx<'a> {
                 // words like `target` or `loop`.
                 let field_name = self.mangle_tracked(&raw_name)?;
                 let ty_str = self.type_emitter.type_to_wgsl(&inp.ty)?;
-                let slot = inp.push_constant().expect("pc_inputs contains only push constants");
+                let Some(slot) = inp.push_constant() else {
+                    return Err(err_wgsl!(
+                        "push-constant input `{}` is missing its ABI slot",
+                        inp.name
+                    ));
+                };
                 fields.push(PcField {
                     input_index: *i,
                     source_name: inp.name.clone(),

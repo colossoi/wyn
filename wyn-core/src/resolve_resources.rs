@@ -11,7 +11,6 @@
 //! looks exactly as if the bindings had been written inline.
 
 use crate::ast::{self, Declaration, Pattern};
-use crate::err_type_at;
 use crate::error::Result;
 use crate::interface;
 use crate::interface::{
@@ -21,6 +20,7 @@ use crate::module_manager;
 use crate::name_resolution;
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
+use crate::{err_type, err_type_at};
 
 pub type ResourcesResolvedFamily = ast::AstFamily<
     ast::SourceTree,
@@ -203,7 +203,13 @@ fn rewrite_view_param(
                         resource
                     );
                 }
-                let binding = resolved.current_storage.expect("storage usage implies a storage slot");
+                let Some(binding) = resolved.current_storage else {
+                    return Err(err_type_at!(
+                        span,
+                        "resource '{}' has no storage binding",
+                        resource
+                    ));
+                };
                 Attribute::StorageImage {
                     set: binding.set,
                     binding: binding.binding,
@@ -241,7 +247,14 @@ fn rewrite_view_param(
                     }
                     previous_binding
                 } else {
-                    resolved.current_sampled.expect("sampled usage implies a sampled slot")
+                    let Some(current_sampled) = resolved.current_sampled else {
+                        return Err(err_type_at!(
+                            span,
+                            "resource '{}' has no sampled binding",
+                            resource
+                        ));
+                    };
+                    current_sampled
                 };
                 Attribute::Texture {
                     set: binding.set,
@@ -264,10 +277,12 @@ fn materialize(
         for declaration in declarations {
             let declaration = match declaration {
                 Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
-                Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(
-                    entry,
-                    entry_feedback.pop_front().expect("resource analysis records every entry"),
-                )?)),
+                Declaration::Entry(entry) => {
+                    let Some(feedback) = entry_feedback.pop_front() else {
+                        return Err(err_type!("resource analysis omitted entry feedback"));
+                    };
+                    Some(Declaration::Entry(materialize_entry(entry, feedback)?))
+                }
                 Declaration::Extern(ext) => Some(Declaration::Extern(ext)),
                 Declaration::Frontend(frontend) => {
                     materialize_frontend(frontend).map(Declaration::Frontend)

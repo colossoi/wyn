@@ -4,6 +4,8 @@
 //! universe and tiny successor/dependency callbacks; the crate supplies the
 //! bookkeeping: reachability, topological ordering, and dominator trees.
 
+#![deny(clippy::expect_used, clippy::unwrap_used)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
@@ -207,8 +209,8 @@ where
             if !universe.contains(&dependency) || !unique_deps.insert(dependency) {
                 continue;
             }
-            *remaining.get_mut(&node).expect("node came from the node list") += 1;
-            dependents.get_mut(&dependency).expect("dependency passed the universe filter").push(node);
+            *remaining.entry(node).or_default() += 1;
+            dependents.entry(dependency).or_default().push(node);
         }
     }
 
@@ -286,13 +288,17 @@ where
                     continue;
                 }
 
-                let preds = &predecessors[&node];
-                let (first, rest) = preds
-                    .split_first()
-                    .expect("a reachable non-entry node was discovered from some predecessor");
-                let mut new_set = doms[first].clone();
-                for pred in rest {
-                    new_set = new_set.intersection(&doms[pred]).copied().collect();
+                let mut predecessor_sets =
+                    predecessors[&node].iter().map(|predecessor| doms[predecessor].clone());
+                let Some(mut new_set) = predecessor_sets.next() else {
+                    // Reachability discovery records the edge that first found
+                    // every non-entry node. Keep the conservative initial set
+                    // if a future traversal implementation violates that
+                    // contract, rather than panicking in graph analysis.
+                    continue;
+                };
+                for predecessor_set in predecessor_sets {
+                    new_set = new_set.intersection(&predecessor_set).copied().collect();
                 }
                 new_set.insert(node);
 
@@ -426,7 +432,7 @@ where
     while let Some(node) = ready.pop_front() {
         result.push(node);
         for &next in &dependents[&node] {
-            let count = remaining.get_mut(&next).expect("dependent came from the node list");
+            let count = remaining.entry(next).or_default();
             *count -= 1;
             if *count == 0 {
                 ready.push_back(next);

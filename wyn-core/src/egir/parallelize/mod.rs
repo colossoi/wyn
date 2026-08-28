@@ -52,8 +52,7 @@ use kernel::{
     can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, emit_chunk_arithmetic,
     synthesize_swap_wrapper, synthesize_u32_add_function,
 };
-use model as error;
-use model::{CandidateSelection, DisjointSets};
+use model::{CandidateSelection, DisjointSets, ParallelizeError, Result as ParallelizeResult};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
 use projection::{
     partition_entry_output_domains, project_kernel_body, project_single_effect_body, ProjectionSpec,
@@ -168,8 +167,8 @@ impl BuiltPhase {
     }
 }
 
-impl From<error::ParallelizeError> for ConvertError {
-    fn from(error: error::ParallelizeError) -> Self {
+impl From<ParallelizeError> for ConvertError {
+    fn from(error: ParallelizeError) -> Self {
         Self::Internal(error.to_string())
     }
 }
@@ -320,7 +319,7 @@ pub fn plan(program: ResourcesAllocated, profile: LoweringProfile) -> Result<Pla
     finalize_kernel_schedule(program)
 }
 
-fn verify_serial_policy(program: &ResourcesAllocated) -> error::Result<()> {
+fn verify_serial_policy(program: &ResourcesAllocated) -> ParallelizeResult<()> {
     let has_bucket_scatter = program.data.stages.stages().any(|(_, stage)| {
         let entry = stage.body();
         entry.graph.skeleton.blocks.iter().any(|(_, block)| {
@@ -339,7 +338,7 @@ fn verify_serial_policy(program: &ResourcesAllocated) -> error::Result<()> {
         })
     });
     if has_bucket_scatter {
-        return Err(error::ParallelizeError::Invalid(
+        return Err(ParallelizeError::Invalid(
             "bucket_scatter requires its init/insert/finish pipeline and cannot be compiled with --single-stage"
                 .into(),
         ));
@@ -381,7 +380,11 @@ impl planning::PlannedKernel {
     /// Consume the selected body and its graph-local recipe as one operation.
     /// No caller can retain a recipe handle while independently mutating the
     /// graph it addresses.
-    fn lower(self, lowering: &mut KernelPlanBuilder<'_>, kernel: schedule::KernelId) -> error::Result<()> {
+    fn lower(
+        self,
+        lowering: &mut KernelPlanBuilder<'_>,
+        kernel: schedule::KernelId,
+    ) -> ParallelizeResult<()> {
         let (body, output_projection, recipe) = self.into_parts();
         match recipe {
             planning::PlannedRecipe::Hist(candidate) => {
@@ -436,32 +439,34 @@ impl<'effects> KernelPlanBuilder<'effects> {
     fn define_callable(
         &mut self,
         name: String,
-        build: impl FnOnce(FunctionId, String) -> Func<Semantic>,
-    ) -> error::Result<FunctionId> {
+        build: impl FnOnce(FunctionId, String) -> ParallelizeResult<Func<Semantic>>,
+    ) -> ParallelizeResult<FunctionId> {
         if self.identities.function_names().any(|existing| existing == name) {
-            return Err(error::ParallelizeError::Invalid(format!(
+            return Err(ParallelizeError::Invalid(format!(
                 "planner-generated callable `{}` collides with an existing callable",
                 name
             )));
         }
         let id = self.identities.alloc_function(name.clone());
-        let function = build(id, name);
-        assert_eq!(
-            function.region, id,
-            "planner-generated callable did not retain its reserved region"
-        );
-        assert_eq!(
-            &function.name,
-            self.identities.function_name(id),
-            "planner-generated callable did not retain its reserved name"
-        );
+        let function = build(id, name)?;
+        if function.region != id {
+            return Err("planner-generated callable did not retain its reserved region".into());
+        }
+        if function.name != self.identities.function_name(id) {
+            return Err("planner-generated callable did not retain its reserved name".into());
+        }
+        self.callables.insert(id, function.clone());
         self.generated_callables.push(function);
-        self.callables.insert(id, self.generated_callables.last().unwrap().clone());
         Ok(id)
     }
 
-    fn callable(&self, region: FunctionId) -> &Func<Semantic> {
-        self.callables.get(&region).expect("parallel lowering callable boundary")
+    fn callable(&self, region: FunctionId) -> ParallelizeResult<&Func<Semantic>> {
+        let Some(callable) = self.callables.get(&region) else {
+            return Err(ParallelizeError::Invalid(format!(
+                "parallel lowering references missing callable {region:?}"
+            )));
+        };
+        Ok(callable)
     }
 
     fn new(
@@ -475,7 +480,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         semantic_ids: &'effects mut super::program::SemanticOpIdSource,
         effect_ids: &'effects mut IdSource<EffectToken>,
         identities: super::program::ProgramIdentities,
-    ) -> error::Result<Self> {
+    ) -> ParallelizeResult<Self> {
         let mut schedule = schedule::KernelPlan::from_descriptor(
             descriptor,
             stage_entries,
@@ -508,21 +513,21 @@ impl<'effects> KernelPlanBuilder<'effects> {
         })
     }
 
-    fn build_parallel_schedule(mut self) -> error::Result<Self> {
+    fn build_parallel_schedule(mut self) -> ParallelizeResult<Self> {
         self.attach_generated_stages()?;
         self.schedule_entries()?;
         self.schedule.coalesce_staged_flows(self.stages)?;
         Ok(self)
     }
 
-    fn build_serial_schedule(mut self) -> error::Result<Self> {
+    fn build_serial_schedule(mut self) -> ParallelizeResult<Self> {
         self.attach_generated_stages()?;
         self.schedule.make_serial()?;
         self.schedule.coalesce_staged_flows(self.stages)?;
         Ok(self)
     }
 
-    fn schedule_entries(&mut self) -> error::Result<()> {
+    fn schedule_entries(&mut self) -> ParallelizeResult<()> {
         for (stage, source) in self.authored_stages.clone() {
             let kernel = self.schedule.primary_kernel(source);
             self.lower_endpoint(stage, kernel)?;
@@ -532,7 +537,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
 
     /// Attach generated producer stages in reverse topological order so every
     /// producer can be inserted immediately before an already-seeded consumer.
-    fn attach_generated_stages(&mut self) -> error::Result<()> {
+    fn attach_generated_stages(&mut self) -> ParallelizeResult<()> {
         let topological = self.stages.topological_stages();
         let rank = topological
             .iter()
@@ -545,12 +550,10 @@ impl<'effects> KernelPlanBuilder<'effects> {
                 continue;
             }
             let staged = self.stages.stage(stage).ok_or_else(|| {
-                error::ParallelizeError::Invalid(format!(
-                    "staged topology references missing producer {stage:?}"
-                ))
+                ParallelizeError::Invalid(format!("staged topology references missing producer {stage:?}"))
             })?;
             if matches!(staged.origin(), StageOrigin::Authored) {
-                return Err(error::ParallelizeError::Invalid(
+                return Err(ParallelizeError::Invalid(
                     "authored staged body was omitted while seeding the kernel plan".into(),
                 ));
             }
@@ -563,12 +566,12 @@ impl<'effects> KernelPlanBuilder<'effects> {
                 .filter(|consumer| self.schedule.contains_flow_source(*consumer))
                 .min_by_key(|consumer| rank[consumer])
                 .ok_or_else(|| {
-                    error::ParallelizeError::Invalid(format!(
+                    ParallelizeError::Invalid(format!(
                         "generated stage {stage:?} has no scheduled downstream consumer"
                     ))
                 })?;
             let consumer = self.schedule.kernel_for_flow_source(consumer_stage).ok_or_else(|| {
-                error::ParallelizeError::Invalid(format!(
+                ParallelizeError::Invalid(format!(
                     "scheduled stage consumer {consumer_stage:?} has no kernel handle"
                 ))
             })?;
@@ -591,7 +594,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         Ok(())
     }
 
-    fn lower_endpoint(&mut self, endpoint: StageId, kernel: schedule::KernelId) -> error::Result<()> {
+    fn lower_endpoint(&mut self, endpoint: StageId, kernel: schedule::KernelId) -> ParallelizeResult<()> {
         let Some(plan) = self.recipes.take_endpoint(endpoint)? else {
             return Ok(());
         };
@@ -618,7 +621,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         kernel: schedule::KernelId,
         candidate: hist::BoundHistCandidate,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         match candidate {
             hist::BoundHistCandidate::Atomic(candidate) => {
                 let domain = schedule::domain_from_space(&candidate.space)
@@ -644,7 +647,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         kernel: schedule::KernelId,
         candidate: BoundReduce,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         use schedule::KernelDomain;
 
         let domain = schedule::domain_from_space(&candidate.segment().space)
@@ -672,7 +675,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         kernel: schedule::KernelId,
         candidate: BoundScan,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         use schedule::KernelDomain;
 
         let phase1_domain = schedule::domain_from_space(&candidate.segment().space)
@@ -702,7 +705,7 @@ impl<'effects> KernelPlanBuilder<'effects> {
         kernel: schedule::KernelId,
         recipe: SerialScremaRecipe,
         output_projection: Option<Vec<usize>>,
-    ) -> error::Result<()> {
+    ) -> ParallelizeResult<()> {
         make_screma_serial(&mut body.graph, recipe);
         let recipe = schedule::PhaseSpec::compute(
             body,

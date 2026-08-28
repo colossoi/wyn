@@ -3,6 +3,8 @@
 //! caches, and re-exports `rspirv::{binary, dr, spirv}` so consumers
 //! don't need a direct rspirv dep.
 
+#![deny(clippy::expect_used, clippy::unwrap_used)]
+
 pub use rspirv::{binary, dr, spirv};
 
 use rspirv::dr::Builder;
@@ -360,18 +362,22 @@ impl SpirvBuilder {
     /// the current block is deselected around the `variable` call — rspirv
     /// routes `OpVariable` there only when no block is selected (the same
     /// reason workgroup-shared globals are emitted between functions).
-    pub fn hoist_constant_global(&mut self, const_id: ConstId, value_type: TypeId) -> VarId {
+    pub fn hoist_constant_global(
+        &mut self,
+        const_id: ConstId,
+        value_type: TypeId,
+    ) -> Result<VarId, dr::Error> {
         if let Some(&var) = self.private_global_cache.get(&const_id) {
-            return var;
+            return Ok(var);
         }
         let ptr_type = self.type_pointer(spirv::StorageClass::Private, value_type);
         let saved = self.inner.selected_block();
-        self.inner.select_block(None).expect("deselect block for module-scope variable");
+        self.inner.select_block(None)?;
         let var =
             VarId::new(self.inner.variable(*ptr_type, None, spirv::StorageClass::Private, Some(*const_id)));
-        self.inner.select_block(saved).expect("restore selected block");
+        self.inner.select_block(saved)?;
         self.private_global_cache.insert(const_id, var);
-        var
+        Ok(var)
     }
 
     /// All hoisted `Private` constant globals, for `OpEntryPoint`
@@ -704,18 +710,16 @@ impl SpirvBuilder {
         linkage_name: &str,
         param_types: &[TypeId],
         return_type: TypeId,
-    ) -> FuncId {
+    ) -> Result<FuncId, dr::Error> {
         self.inner.capability(Capability::Linkage);
         let func_type =
             self.inner.type_function(*return_type, param_types.iter().map(|t| **t).collect::<Vec<_>>());
-        let func_id = self
-            .inner
-            .begin_function(*return_type, None, spirv::FunctionControl::NONE, func_type)
-            .expect("rspirv begin_function failed for linked function");
+        let func_id =
+            self.inner.begin_function(*return_type, None, spirv::FunctionControl::NONE, func_type)?;
         for &param_ty in param_types {
-            self.inner.function_parameter(*param_ty).expect("rspirv function_parameter failed");
+            self.inner.function_parameter(*param_ty)?;
         }
-        self.inner.end_function().expect("rspirv end_function failed for linked function");
+        self.inner.end_function()?;
         self.inner.decorate(
             func_id,
             spirv::Decoration::LinkageAttributes,
@@ -724,7 +728,7 @@ impl SpirvBuilder {
                 dr::Operand::LinkageType(spirv::LinkageType::Import),
             ],
         );
-        FuncId::new(func_id)
+        Ok(FuncId::new(func_id))
     }
 
     /// Open a function, optionally using a previously reserved id. Opens both
@@ -766,7 +770,9 @@ impl SpirvBuilder {
     /// open-function layout state.
     pub fn end_function(&mut self) -> Result<(), dr::Error> {
         if let (Some(vars_block), Some(code_block)) = (self.variables_block, self.first_code_block) {
-            let func = self.inner.module_ref().functions.last().expect("end_function: no open function");
+            let Some(func) = self.inner.module_ref().functions.last() else {
+                return Err(dr::Error::FunctionNotFound);
+            };
             let vars_idx = func
                 .blocks
                 .iter()
@@ -788,13 +794,19 @@ impl SpirvBuilder {
     pub fn declare_variable(&mut self, value_type: TypeId) -> Result<VarId, dr::Error> {
         let ptr_type = self.type_pointer(spirv::StorageClass::Function, value_type);
         let current_idx = self.inner.selected_block();
-        let vars_block = self.variables_block.expect("declare_variable called outside an open function");
-        let func = self.inner.module_ref().functions.last().expect("declare_variable: no open function");
-        let vars_idx = func
+        let Some(vars_block) = self.variables_block else {
+            return Err(dr::Error::BlockNotFound);
+        };
+        let Some(func) = self.inner.module_ref().functions.last() else {
+            return Err(dr::Error::FunctionNotFound);
+        };
+        let Some(vars_idx) = func
             .blocks
             .iter()
             .position(|b| b.label.as_ref().map(|l| l.result_id) == Some(Some(*vars_block)))
-            .expect("declare_variable: variables block not in module");
+        else {
+            return Err(dr::Error::BlockNotFound);
+        };
         self.inner.select_block(Some(vars_idx))?;
         let var_id = self.inner.variable(*ptr_type, None, spirv::StorageClass::Function, None);
         self.inner.select_block(current_idx)?;
