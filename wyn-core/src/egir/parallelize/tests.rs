@@ -26,8 +26,13 @@ pub(crate) fn planned_callable_names(
     program: ResourcesAllocated,
 ) -> std::result::Result<Vec<String>, String> {
     let existing = program.functions.len();
-    let (program, _) = build_parallel_plan(program).map_err(|error| error.to_string())?;
-    let names = program.functions[existing..].iter().map(|function| function.name.clone()).collect();
+    let program = bind_mapped_output_destinations(program).map_err(|error| error.to_string())?;
+    let program =
+        analyze_kernel_recipes(program, LoweringProfile::PORTABLE).map_err(|error| error.to_string())?;
+    let program = allocate_recipe_scratch(program).map_err(|error| error.to_string())?;
+    let program = build_kernel_schedule(program).map_err(|error| error.to_string())?;
+    let names =
+        program.program().functions[existing..].iter().map(|function| function.name.clone()).collect();
     Ok(names)
 }
 

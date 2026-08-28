@@ -61,7 +61,11 @@ pub use eliminate_call_places::{
     CallsPlaceFree, RequiredCallInliningStats, RequiredCallInliningTrace,
 };
 pub use materialize::{materialize_dynamic_extracts, Materialized};
-pub use parallelize::plan;
+pub use parallelize::{
+    allocate_recipe_scratch, analyze_kernel_recipes, bind_mapped_output_destinations,
+    build_kernel_schedule, finalize_kernel_schedule, plan, KernelRecipesAnalyzed, KernelScheduleBuilt,
+    OutputDestinationsBound, RecipeScratchAllocated,
+};
 pub use partial_inline::{
     partially_inline_calls, partially_inline_calls_with_trace, PartialInliningReason,
     PartialInliningReasonStats, PartialInliningStats, PartialInliningTermination, PartialInliningTrace,

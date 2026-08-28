@@ -174,7 +174,60 @@ impl From<error::ParallelizeError> for ConvertError {
     }
 }
 
-pub fn plan(mut program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
+/// Allocated EGIR after mapped outputs have explicit destination places.
+pub struct OutputDestinationsBound {
+    program: ResourcesAllocated,
+}
+
+impl OutputDestinationsBound {
+    pub fn program(&self) -> &ResourcesAllocated {
+        &self.program
+    }
+}
+
+/// An immutable recipe analysis paired with the program it describes.
+pub struct KernelRecipesAnalyzed {
+    program: ResourcesAllocated,
+    analysis: planning::AnalyzedPlan,
+    profile: LoweringProfile,
+}
+
+impl KernelRecipesAnalyzed {
+    pub fn program(&self) -> &ResourcesAllocated {
+        &self.program
+    }
+}
+
+/// Recipe-owned scratch has been allocated and recipe handles are bound.
+pub struct RecipeScratchAllocated {
+    program: ResourcesAllocated,
+    recipes: planning::RecipeIndex,
+    parallel_scremas: planning::ParallelScremaPlans,
+    profile: LoweringProfile,
+}
+
+impl RecipeScratchAllocated {
+    pub fn program(&self) -> &ResourcesAllocated {
+        &self.program
+    }
+}
+
+/// A complete kernel schedule awaiting physical layout publication.
+pub struct KernelScheduleBuilt {
+    program: ResourcesAllocated,
+    schedule: schedule::KernelPlan,
+    profile: LoweringProfile,
+}
+
+impl KernelScheduleBuilt {
+    pub fn program(&self) -> &ResourcesAllocated {
+        &self.program
+    }
+}
+
+pub fn bind_mapped_output_destinations(
+    mut program: ResourcesAllocated,
+) -> Result<OutputDestinationsBound, ConvertError> {
     let stage_ids = program.data.stages.stages().map(|(stage, _)| stage).collect::<Vec<_>>();
     for stage in stage_ids {
         let entry = program.data.stages.stage_body_mut(stage).ok_or_else(|| {
@@ -182,21 +235,55 @@ pub fn plan(mut program: ResourcesAllocated, profile: LoweringProfile) -> Result
         })?;
         entry.bind_mapped_output_destinations().map_err(ConvertError::Internal)?;
     }
-    let (program, kernel_plan) = match profile.schedule {
-        SchedulePolicy::Parallel => build_parallel_plan(program),
-        SchedulePolicy::Serial => build_serial_plan(program),
-    }?;
-    kernel_plan.finalize(program, profile)
+    Ok(OutputDestinationsBound { program })
 }
 
-/// Analyze target recipes, allocate their scratch resources, and build the
-/// executable parallel kernel plan.
-fn build_parallel_plan(
-    program: ResourcesAllocated,
-) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
-    let analysis = planning::analyze(&program)?;
-    let (mut program, recipes, parallel_scremas) = analysis.allocate_scratch(program)?;
-    let built = KernelPlanBuilder::new(
+pub fn analyze_kernel_recipes(
+    input: OutputDestinationsBound,
+    profile: LoweringProfile,
+) -> Result<KernelRecipesAnalyzed, ConvertError> {
+    if profile.schedule == SchedulePolicy::Serial {
+        verify_serial_policy(&input.program)?;
+    }
+    let analysis = planning::analyze(&input.program)?;
+    Ok(KernelRecipesAnalyzed {
+        program: input.program,
+        analysis,
+        profile,
+    })
+}
+
+pub fn allocate_recipe_scratch(
+    input: KernelRecipesAnalyzed,
+) -> Result<RecipeScratchAllocated, ConvertError> {
+    let KernelRecipesAnalyzed {
+        program,
+        analysis,
+        profile,
+    } = input;
+    let (program, recipes, parallel_scremas) = match profile.schedule {
+        SchedulePolicy::Parallel => analysis.allocate_scratch(program)?,
+        SchedulePolicy::Serial => {
+            let (recipes, parallel_scremas) = analysis.serial_plan();
+            (program, recipes, parallel_scremas)
+        }
+    };
+    Ok(RecipeScratchAllocated {
+        program,
+        recipes,
+        parallel_scremas,
+        profile,
+    })
+}
+
+pub fn build_kernel_schedule(input: RecipeScratchAllocated) -> Result<KernelScheduleBuilt, ConvertError> {
+    let RecipeScratchAllocated {
+        mut program,
+        recipes,
+        parallel_scremas,
+        profile,
+    } = input;
+    let builder = KernelPlanBuilder::new(
         &program.data.core.resources,
         &program.data.core.pipeline,
         &program.data.core.stage_entries,
@@ -207,18 +294,33 @@ fn build_parallel_plan(
         &mut program.global_context.semantic_ids,
         &mut program.global_context.effect_ids,
         program.data.core.identities.clone(),
-    )?
-    .build_parallel_schedule()?;
+    )?;
+    let built = match profile.schedule {
+        SchedulePolicy::Parallel => builder.build_parallel_schedule(),
+        SchedulePolicy::Serial => builder.build_serial_schedule(),
+    }?;
     let (schedule, generated_callables, identities) = built.into_plan();
     let program = install_generated_callables(program, generated_callables, identities);
-    Ok((program, schedule))
+    Ok(KernelScheduleBuilt {
+        program,
+        schedule,
+        profile,
+    })
 }
 
-/// Build a kernel plan that selects serial recipes without allocating
-/// algorithm-specific parallel scratch resources.
-fn build_serial_plan(
-    mut program: ResourcesAllocated,
-) -> error::Result<(ResourcesAllocated, schedule::KernelPlan)> {
+pub fn finalize_kernel_schedule(input: KernelScheduleBuilt) -> Result<Planned, ConvertError> {
+    input.schedule.finalize(input.program, input.profile)
+}
+
+pub fn plan(program: ResourcesAllocated, profile: LoweringProfile) -> Result<Planned, ConvertError> {
+    let program = bind_mapped_output_destinations(program)?;
+    let program = analyze_kernel_recipes(program, profile)?;
+    let program = allocate_recipe_scratch(program)?;
+    let program = build_kernel_schedule(program)?;
+    finalize_kernel_schedule(program)
+}
+
+fn verify_serial_policy(program: &ResourcesAllocated) -> error::Result<()> {
     let has_bucket_scatter = program.data.stages.stages().any(|(_, stage)| {
         let entry = stage.body();
         entry.graph.skeleton.blocks.iter().any(|(_, block)| {
@@ -242,23 +344,7 @@ fn build_serial_plan(
                 .into(),
         ));
     }
-    let (recipes, parallel_scremas) = planning::analyze(&program)?.serial_plan();
-    let built = KernelPlanBuilder::new(
-        &program.data.core.resources,
-        &program.data.core.pipeline,
-        &program.data.core.stage_entries,
-        &program.data.stages,
-        &program.functions,
-        recipes,
-        parallel_scremas,
-        &mut program.global_context.semantic_ids,
-        &mut program.global_context.effect_ids,
-        program.data.core.identities.clone(),
-    )?
-    .build_serial_schedule()?;
-    let (schedule, generated_callables, identities) = built.into_plan();
-    let program = install_generated_callables(program, generated_callables, identities);
-    Ok((program, schedule))
+    Ok(())
 }
 
 fn install_generated_callables(
