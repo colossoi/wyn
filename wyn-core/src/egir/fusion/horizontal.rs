@@ -8,13 +8,13 @@ use crate::egir;
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::graph_and_span;
 use super::screma as fusion_screma;
 use super::space::seg_space_fusable;
 use super::support;
+use super::{graph_and_span, FusionEffect, FusionInput};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, BodySite};
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{Func, OutputSlotId, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -27,24 +27,17 @@ use crate::LookupMap;
 
 #[derive(Clone, Copy)]
 pub(super) struct Candidate {
-    site: BodySite,
-    block: BlockId,
-    left: usize,
-    right: usize,
+    left: FusionEffect,
+    right: FusionEffect,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, _)| {
-        find_in_graph(graph, oracle).map(|(block, left, right)| Candidate {
-            site,
-            block,
-            left,
-            right,
-        })
+    super::bodies(inner).find_map(|(_, graph, _)| {
+        find_in_graph(graph, oracle).map(|(left, right)| Candidate { left, right })
     })
 }
 
-fn find_in_graph(graph: &EGraph, oracle: &SemanticGraph) -> Option<(BlockId, usize, usize)> {
+fn find_in_graph(graph: &EGraph, oracle: &SemanticGraph) -> Option<(FusionEffect, FusionEffect)> {
     for (block_id, block) in &graph.skeleton.blocks {
         let scremas = (0..block.side_effects.len())
             .filter(|&index| is_segmented_screma(&block.side_effects[index].kind))
@@ -53,7 +46,10 @@ fn find_in_graph(graph: &EGraph, oracle: &SemanticGraph) -> Option<(BlockId, usi
             for right in (left + 1)..scremas.len() {
                 let pair = (scremas[left], scremas[right]);
                 if sibling_fusable(graph, block_id, pair.0, pair.1, oracle) {
-                    return Some((block_id, pair.0, pair.1));
+                    return Some((
+                        FusionEffect::from_effect(&block.side_effects[pair.0])?,
+                        FusionEffect::from_effect(&block.side_effects[pair.1])?,
+                    ));
                 }
             }
         }
@@ -128,27 +124,41 @@ fn sibling_fusable(
     })
 }
 
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
-    let (graph, span, scope) = graph_and_span(&inner, candidate.site);
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> super::FusionResult<Segmented> {
+    let (left_location, right_location) = super::resolve_pair(&inner, candidate.left, candidate.right)?;
+    let (graph, span, scope) = graph_and_span(&inner, left_location.body)?;
     let outer_types =
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
-    let left = extract_screma(graph, candidate.block, candidate.left);
-    let right = extract_screma(graph, candidate.block, candidate.right);
+    let left = extract_screma(graph, left_location.block, left_location.index)?;
+    let right = extract_screma(graph, right_location.block, right_location.index)?;
     let mut identities = inner.data.identities.clone();
-    let plan = build_plan(&inner, &mut identities, &scope, span, &outer_types, left, right);
+    let plan = build_plan(&inner, &mut identities, &scope, span, &outer_types, left, right)?;
     let synthesized = plan.synthesized.clone();
 
-    let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let rewrite =
-            |graph: &mut EGraph| apply_plan(graph, candidate.block, candidate.left, candidate.right, &plan);
-        support::rewrite_body_graph_with_entry(body, rewrite, |entry, replacements| {
-            support::replace_route_values(entry, &replacements);
-        })
-    });
-    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
-        identities: identities,
-        ..data
-    })
+    let rebuilt = inner.try_rewrite_body(left_location.body, |body| {
+        support::try_rewrite_body_graph_with_entry(
+            body,
+            |graph| {
+                apply_plan(
+                    graph,
+                    left_location.block,
+                    left_location.index,
+                    right_location.index,
+                    &plan,
+                )
+            },
+            |entry, replacements| {
+                support::replace_route_values(entry, &replacements);
+                Ok(())
+            },
+        )
+    })?;
+    Ok(
+        rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
+            identities: identities,
+            ..data
+        }),
+    )
 }
 
 #[derive(Clone)]
@@ -160,13 +170,28 @@ pub(super) struct ScremaParts {
     pub(super) resources: Vec<SegResourceAccess>,
     pub(super) results: Vec<ResultBinding<Type<TypeName>>>,
     pub(super) result_types: Vec<Type<TypeName>>,
-    pub(super) input_nodes: Vec<ValueId>,
+    pub(super) inputs: Vec<super::FusionInput>,
 }
 
-pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> ScremaParts {
-    let effect = &graph.skeleton.blocks[block].side_effects[index];
+pub(super) fn extract_screma(
+    graph: &EGraph,
+    block: BlockId,
+    index: usize,
+) -> super::FusionResult<ScremaParts> {
+    let Some(block_contents) = graph.skeleton.blocks.get(block) else {
+        return Err(super::FusionError::InvalidCandidate(format!(
+            "fusion block {block:?} disappeared"
+        )));
+    };
+    let Some(effect) = block_contents.side_effects.get(index) else {
+        return Err(super::FusionError::InvalidCandidate(format!(
+            "fusion effect index {index} is outside block {block:?}"
+        )));
+    };
     let SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) = &effect.kind else {
-        unreachable!("horizontal fusion selected a non-Screma");
+        return Err(super::FusionError::InvalidCandidate(
+            "fusion selected a non-Screma operation".to_owned(),
+        ));
     };
     let screma::SemanticState::Segmented {
         space,
@@ -174,19 +199,34 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         resources,
     } = op.semantic_state()
     else {
-        unreachable!("horizontal fusion selected a serial Screma");
+        return Err(super::FusionError::InvalidCandidate(
+            "fusion selected a serial Screma".to_owned(),
+        ));
     };
     let operands = screma::ScremaOperands::decode(op, &effect.operands, effect.result.as_ref())
-        .expect("fusable Screma has invalid operands or results");
+        .map_err(super::FusionError::InvalidCandidate)?;
     let results = operands.result_fields();
     let result_types = results.iter().map(|result| result.ty().clone()).collect();
 
     let input_count = op.inputs.len();
-    let input_nodes = effect.operands[..input_count]
-        .iter()
-        .map(|operand| operand.value().expect("Screma inputs are values or views"))
-        .collect();
-    ScremaParts {
+    let Some(input_operands) = effect.operands.get(..input_count) else {
+        return Err(super::FusionError::InvalidCandidate(format!(
+            "Screma declares {input_count} inputs but has {} operands",
+            effect.operands.len()
+        )));
+    };
+    let input_nodes = input_operands.iter().map(|operand| operand.value()).collect::<Option<Vec<_>>>();
+    let Some(input_nodes) = input_nodes else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Screma input uses the place channel during semantic fusion".to_owned(),
+        ));
+    };
+    let Some(inputs) = FusionInput::join(&input_nodes, &op.inputs) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Screma input nodes and types have different lengths".to_owned(),
+        ));
+    };
+    Ok(ScremaParts {
         id: *id,
         op: op.clone(),
         space: space.clone(),
@@ -194,8 +234,8 @@ pub(super) fn extract_screma(graph: &EGraph, block: BlockId, index: usize) -> Sc
         resources: resources.clone(),
         results,
         result_types,
-        input_nodes,
-    }
+        inputs,
+    })
 }
 
 #[derive(Clone)]
@@ -220,7 +260,7 @@ fn build_plan(
     outer_types: &LookupMap<ValueId, Type<TypeName>>,
     left: ScremaParts,
     right: ScremaParts,
-) -> FusionPlan {
+) -> super::FusionResult<FusionPlan> {
     let mut context = fusion_screma::Context {
         program: inner,
         identities,
@@ -231,16 +271,19 @@ fn build_plan(
     let normalized = fusion_screma::fuse_horizontal(
         &mut context,
         fusion_screma::Source {
-            input_nodes: &left.input_nodes,
-            inputs: &left.op.inputs,
+            inputs: &left.inputs,
             form: &left.op.form,
         },
         fusion_screma::Source {
-            input_nodes: &right.input_nodes,
-            inputs: &right.op.inputs,
+            inputs: &right.inputs,
             form: &right.op.form,
         },
     );
+    let Some(normalized) = normalized else {
+        return Err(super::FusionError::InvalidCandidate(
+            "horizontal Screma normalization failed after candidate analysis".to_owned(),
+        ));
+    };
 
     let mut left_mapping = vec![usize::MAX; left.result_types.len()];
     let mut right_mapping = vec![usize::MAX; right.result_types.len()];
@@ -274,7 +317,7 @@ fn build_plan(
     output_slots.dedup();
     let resources = SegResourceAccess::merge(&left.resources, &right.resources);
     let op = screma::Op {
-        inputs: normalized.inputs,
+        inputs: normalized.inputs.iter().map(|input| input.ty.clone()).collect(),
         form: normalized.form,
         result_state,
         state: screma::SemanticState::Segmented {
@@ -290,9 +333,9 @@ fn build_plan(
     );
 
     let mut operands = SmallVec::new();
-    operands.extend(normalized.input_nodes);
+    operands.extend(normalized.inputs.iter().map(|input| input.node));
 
-    FusionPlan {
+    Ok(FusionPlan {
         id: left.id,
         op,
         operands,
@@ -302,7 +345,7 @@ fn build_plan(
         left_mapping,
         right_mapping,
         synthesized: normalized.synthesized,
-    }
+    })
 }
 fn apply_plan(
     graph: &mut EGraph,
@@ -310,20 +353,20 @@ fn apply_plan(
     left: usize,
     right: usize,
     plan: &FusionPlan,
-) -> Vec<(ValueId, ValueId)> {
+) -> super::FusionResult<Vec<(ValueId, ValueId)>> {
     let tuple = Type::Constructed(
         TypeName::Tuple(plan.result_types.len()),
         plan.result_types.clone(),
     );
     let result = graph_ops::alloc_by_value_effect_result(graph, tuple);
     let fused_results = result.top_level_fields();
-    let mut replacements = rebind_fields(graph, &plan.left_results, &fused_results, &plan.left_mapping);
+    let mut replacements = rebind_fields(graph, &plan.left_results, &fused_results, &plan.left_mapping)?;
     replacements.extend(rebind_fields(
         graph,
         &plan.right_results,
         &fused_results,
         &plan.right_mapping,
-    ));
+    )?);
 
     let operands = plan.operands.iter().map(|operand| graph.operand_ref(*operand)).collect();
     let block = &mut graph.skeleton.blocks[block];
@@ -337,7 +380,7 @@ fn apply_plan(
     block.side_effects[left].result = Some(result);
     block.side_effects[left].effects = effects;
     block.side_effects.remove(right);
-    replacements
+    Ok(replacements)
 }
 
 pub(super) fn rebind_fields(
@@ -345,14 +388,23 @@ pub(super) fn rebind_fields(
     old_results: &[ResultBinding<Type<TypeName>>],
     new_results: &[ResultBinding<Type<TypeName>>],
     mapping: &[usize],
-) -> Vec<(ValueId, ValueId)> {
-    assert_eq!(old_results.len(), mapping.len());
+) -> super::FusionResult<Vec<(ValueId, ValueId)>> {
+    if old_results.len() != mapping.len() {
+        return Err(super::FusionError::InvalidCandidate(
+            "fusion result binding and field mapping lengths differ".to_owned(),
+        ));
+    }
     let mut replacements = Vec::new();
     for (old, field) in old_results.iter().zip(mapping) {
+        let Some(new) = new_results.get(*field) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "fusion result field mapping is outside the rebuilt result".to_owned(),
+            ));
+        };
         replacements.extend(
-            graph_ops::rebind_result_value_references(graph, old, &new_results[*field])
-                .expect("fused Screma result fields must have the same by-value shape"),
+            graph_ops::rebind_result_value_references(graph, old, new)
+                .map_err(super::FusionError::InvalidCandidate)?,
         );
     }
-    replacements
+    Ok(replacements)
 }

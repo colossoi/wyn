@@ -34,7 +34,7 @@ fn compile_to_planned(input: &str) -> egir::parallelize::Planned {
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program).expect("to_egraph");
     let program = egir::reify_soacs(program);
-    let program = egir::optimize_semantic_operations(program);
+    let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
     egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule")

@@ -829,7 +829,7 @@ fn ssa_from_reachable(
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
     let program = egir::reify_soacs(program);
-    let program = egir::optimize_semantic_operations(program);
+    let program = egir::optimize_semantic_operations(program)?;
     let program = egir::lift_stage_uniform_values(program);
     let program = egir::plan_logical_resources(program)?;
     let program = egir::plan(program, profile)?;

@@ -8,7 +8,7 @@ fn allocate_before_residency(source: &str) -> ResidencyDraft {
     let program = tlc::infer_input_slice_bounds(program);
     let program = crate::to_egraph(program).expect("convert residency fixture to EGIR");
     let program = egir::reify_soacs(program);
-    let program = egir::optimize_semantic_operations(program);
+    let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let program = egir::lift_stage_uniform_values(program);
     super::super::allocate_semantic_resources(program).expect("allocate host resources before residency")
 }

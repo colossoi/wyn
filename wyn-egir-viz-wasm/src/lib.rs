@@ -642,7 +642,8 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
 
         let before_fusion =
             (pass == InspectPass::FuseSemanticOperations).then(|| snapshot_program(&segmented));
-        let (rewritten, changed, trace) = wyn_core::egir::fuse_semantic_operations(segmented);
+        let (rewritten, changed, trace) =
+            try_compiler!(wyn_core::egir::fuse_semantic_operations(segmented));
         segmented = rewritten;
         let relations = trace_relations(trace);
         if pass == InspectPass::FuseSemanticOperations {

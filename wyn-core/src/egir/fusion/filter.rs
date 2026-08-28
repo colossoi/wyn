@@ -14,11 +14,11 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::{capture_types, graph_and_span, support};
+use super::{capture_types, graph_and_span, support, FusionEffect};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, BodySite, RealizedOutputRoute};
+use crate::egir::ir::{splice_effect_tokens, RealizedOutputRoute};
 use crate::egir::program::{Func, OutputWriter, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -33,10 +33,8 @@ use crate::LookupMap;
 
 #[derive(Clone)]
 pub(super) struct Candidate {
-    site: BodySite,
-    block: BlockId,
-    filter: usize,
-    consumer: Option<usize>,
+    filter: FusionEffect,
+    consumer: Option<FusionEffect>,
     lengths: Vec<ValueId>,
 }
 
@@ -48,15 +46,14 @@ struct FilterParts {
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, entry)| {
+    super::bodies(inner).find_map(|(_, graph, entry)| {
         let routes = entry.map(|entry| entry.routes().cloned().collect::<Vec<_>>());
-        find_in_graph(graph, site, oracle, routes.as_deref())
+        find_in_graph(graph, oracle, routes.as_deref())
     })
 }
 
 fn find_in_graph(
     graph: &EGraph,
-    site: BodySite,
     oracle: &SemanticGraph,
     routes: Option<&[RealizedOutputRoute]>,
 ) -> Option<Candidate> {
@@ -125,10 +122,8 @@ fn find_in_graph(
                 continue;
             }
             return Some(Candidate {
-                site,
-                block: block_id,
-                filter: filter_index,
-                consumer,
+                filter: FusionEffect(*filter_id),
+                consumer: consumer.and_then(|index| FusionEffect::from_effect(&block.side_effects[index])),
                 lengths,
             });
         }
@@ -204,42 +199,63 @@ fn filter_result_escapes(
     false
 }
 
-fn filter_parts(effect: &SideEffect) -> FilterParts {
+fn filter_parts(effect: &SideEffect) -> super::FusionResult<FilterParts> {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &effect.kind else {
-        unreachable!();
+        return Err(super::FusionError::InvalidCandidate(
+            "selected Filter changed kind after candidate analysis".to_owned(),
+        ));
     };
     let input_count = op.body.inputs.len();
-    FilterParts {
+    let Some(input_operands) = effect.operands.get(..input_count) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter has fewer operands than input types".to_owned(),
+        ));
+    };
+    let input_nodes = input_operands.iter().map(|operand| operand.value()).collect::<Option<Vec<_>>>();
+    let Some(input_nodes) = input_nodes else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter input uses the place channel".to_owned(),
+        ));
+    };
+    Ok(FilterParts {
         space: op.state.space.clone(),
         body: op.body.clone(),
-        input_nodes: effect.operands[..input_count]
-            .iter()
-            .map(|operand| operand.value().expect("Filter inputs are values or views"))
-            .collect(),
-    }
+        input_nodes,
+    })
 }
 
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> super::FusionResult<Segmented> {
+    let filter_location = candidate.filter.resolve(&inner)?;
+    let consumer_location = if let Some(consumer) = candidate.consumer {
+        let (_, consumer_location) = super::resolve_pair(&inner, candidate.filter, consumer)?;
+        Some(consumer_location)
+    } else {
+        None
+    };
     let (filter_effect, consumer_effect, outer_types, span, scope) = {
-        let (graph, span, scope) = graph_and_span(&inner, candidate.site);
-        let block = &graph.skeleton.blocks[candidate.block];
+        let (graph, span, scope) = graph_and_span(&inner, filter_location.body)?;
+        let block = &graph.skeleton.blocks[filter_location.block];
         (
-            block.side_effects[candidate.filter].clone(),
-            candidate.consumer.map(|consumer| block.side_effects[consumer].clone()),
+            block.side_effects[filter_location.index].clone(),
+            consumer_location.map(|consumer| block.side_effects[consumer.index].clone()),
             graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>(),
             span,
             scope,
         )
     };
-    let filter = filter_parts(&filter_effect);
+    let filter = filter_parts(&filter_effect)?;
     let mut identities = inner.data.identities.clone();
     let count_ty = candidate.lengths.first().map(|length| outer_types[length].clone());
-    let consumer_form = consumer_effect.as_ref().map(|effect| {
+    let consumer_form = if let Some(effect) = consumer_effect.as_ref() {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-            unreachable!();
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter consumer is no longer a Screma".to_owned(),
+            ));
         };
-        &op.form
-    });
+        Some(&op.form)
+    } else {
+        None
+    };
     let (pre, pre_function) = build_masked_pre(
         &inner,
         &mut identities,
@@ -249,42 +265,61 @@ pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
         consumer_form,
         count_ty.as_ref(),
         &outer_types,
-    );
-    let (count_reduction, count_function) = count_ty
-        .as_ref()
-        .map(|ty| build_count_reduction(&mut identities, &scope, span, ty.clone()))
-        .map_or((None, None), |(reduction, function)| {
-            (Some(reduction), Some(function))
-        });
+    )?;
+    let (count_reduction, count_function) = if let Some(ty) = count_ty.as_ref() {
+        let (reduction, function) = build_count_reduction(&mut identities, &scope, span, ty.clone())?;
+        (Some(reduction), Some(function))
+    } else {
+        (None, None)
+    };
 
-    let (rebuilt, _) = if let Some(consumer_index) = candidate.consumer {
+    let (rebuilt, _) = if let Some(consumer_location) = consumer_location {
+        let Some(consumer_effect) = consumer_effect else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter consumer disappeared after candidate resolution".to_owned(),
+            ));
+        };
         rewrite_with_consumer(
             inner,
             &candidate,
+            filter_location,
+            consumer_location,
             filter_effect,
-            consumer_effect.expect("Filter reduction consumer disappeared"),
+            consumer_effect,
             filter,
-            consumer_index,
             pre,
             count_reduction,
             count_ty,
-        )
+        )?
     } else {
+        let Some(count_reduction) = count_reduction else {
+            return Err(super::FusionError::InvalidCandidate(
+                "length-only Filter has no count reduction".to_owned(),
+            ));
+        };
+        let Some(count_ty) = count_ty else {
+            return Err(super::FusionError::InvalidCandidate(
+                "length-only Filter has no count type".to_owned(),
+            ));
+        };
         rewrite_count_only(
             inner,
             &candidate,
+            filter_location,
             filter_effect,
             filter,
             pre,
-            count_reduction.expect("length-only Filter has no count reduction"),
-            count_ty.expect("length-only Filter has no count type"),
-        )
+            count_reduction,
+            count_ty,
+        )?
     };
     let synthesized = std::iter::once(pre_function).chain(count_function).collect::<Vec<_>>();
-    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
-        identities: identities,
-        ..data
-    })
+    Ok(
+        rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
+            identities: identities,
+            ..data
+        }),
+    )
 }
 
 fn build_count_reduction(
@@ -292,12 +327,25 @@ fn build_count_reduction(
     scope: &str,
     span: ast::Span,
     count_ty: Type<TypeName>,
-) -> (screma::Reduce, Func<Semantic>) {
+) -> super::FusionResult<(screma::Reduce, Func<Semantic>)> {
     let mut graph = EGraph::new();
     let params = lambda_ops::named_parameters(&[count_ty.clone(), count_ty.clone()], "count");
     let arguments = lambda_ops::function_parameters(&mut graph, &params);
-    let left = arguments[0].value().expect("count parameter is a value");
-    let right = arguments[1].value().expect("count parameter is a value");
+    let [left, right] = arguments.as_slice() else {
+        return Err(super::FusionError::InvalidCandidate(
+            "filter count lambda did not create two parameters".to_owned(),
+        ));
+    };
+    let Some(left) = left.value() else {
+        return Err(super::FusionError::InvalidCandidate(
+            "left filter count parameter is not available by value".to_owned(),
+        ));
+    };
+    let Some(right) = right.value() else {
+        return Err(super::FusionError::InvalidCandidate(
+            "right filter count parameter is not available by value".to_owned(),
+        ));
+    };
     let sum = graph.intern_pure(
         PureOp::BinOp(BinaryOperator::Add),
         smallvec![left, right],
@@ -320,14 +368,19 @@ fn build_count_reduction(
         vec![sum],
         false,
     );
-    (
+    let Some(function) = function else {
+        return Err(super::FusionError::InvalidCandidate(
+            "filter count operator unexpectedly became an identity".to_owned(),
+        ));
+    };
+    Ok((
         screma::Reduce {
             operator,
             neutral: Vec::new(),
             commutative: true,
         },
-        function.expect("filter count operator cannot be identity"),
-    )
+        function,
+    ))
 }
 #[allow(clippy::too_many_arguments)]
 fn build_masked_pre(
@@ -339,7 +392,7 @@ fn build_masked_pre(
     consumer: Option<&screma::ScremaForm>,
     count_ty: Option<&Type<TypeName>>,
     outer_types: &LookupMap<ValueId, Type<TypeName>>,
-) -> (screma::Lambda, Func<Semantic>) {
+) -> super::FusionResult<(screma::Lambda, Func<Semantic>)> {
     let mut captures = filter.body.map.captures().to_vec();
     captures.extend_from_slice(filter.body.predicate.captures());
     if let Some(consumer) = consumer {
@@ -352,7 +405,11 @@ fn build_masked_pre(
                 .map(egir::types::OperandRef::Value),
         );
     }
-    let capture_types = capture_types(outer_types, captures.iter());
+    let Some(capture_types) = capture_types(outer_types, captures.iter()) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter lambda capture is not available by value".to_owned(),
+        ));
+    };
     let input_types =
         filter.body.inputs.iter().map(egir::types::SoacInputType::element).collect::<Vec<_>>();
     let mut result_types = consumer.map(|consumer| consumer.pre.result_types.clone()).unwrap_or_default();
@@ -365,48 +422,93 @@ fn build_masked_pre(
     let args = lambda_ops::function_parameters(&mut graph, &params);
     let mut cursor = input_types.len();
     let mapped_capture_count = filter.body.map.capture_count();
-    let mapped = support::invoke_lambda(
-        &mut graph,
-        inner,
-        &filter.body.map,
-        &args[..input_types.len()],
-        &args[cursor..cursor + mapped_capture_count],
-    );
+    let Some(input_args) = args.get(..input_types.len()) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter map has fewer generated arguments than inputs".to_owned(),
+        ));
+    };
+    let Some(mapped_captures) = args.get(cursor..cursor + mapped_capture_count) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter map has fewer generated arguments than captures".to_owned(),
+        ));
+    };
+    let Some(mapped) =
+        support::invoke_lambda(&mut graph, inner, &filter.body.map, input_args, mapped_captures)
+    else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter map lambda region is absent".to_owned(),
+        ));
+    };
     let mapped = lambda_ops::result_argument_values(&mut graph, &mapped);
     cursor += mapped_capture_count;
     let predicate_capture_count = filter.body.predicate.capture_count();
     let mapped_arguments = mapped.iter().map(|value| graph.operand_ref(*value)).collect::<Vec<_>>();
-    let predicate = support::invoke_lambda(
+    let Some(predicate_captures) = args.get(cursor..cursor + predicate_capture_count) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter predicate has fewer generated arguments than captures".to_owned(),
+        ));
+    };
+    let Some(predicate) = support::invoke_lambda(
         &mut graph,
         inner,
         &filter.body.predicate,
         &mapped_arguments,
-        &args[cursor..cursor + predicate_capture_count],
-    );
+        predicate_captures,
+    ) else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter predicate lambda region is absent".to_owned(),
+        ));
+    };
     let predicate = lambda_ops::result_argument_values(&mut graph, &predicate);
     cursor += predicate_capture_count;
-    debug_assert_eq!(predicate.len(), 1);
+    let Some(&predicate) = predicate.first() else {
+        return Err(super::FusionError::InvalidCandidate(
+            "Filter predicate has no by-value result".to_owned(),
+        ));
+    };
 
     let mut selected = Vec::new();
     let mut fallback = Vec::new();
     if let Some(consumer) = consumer {
         let consumer_capture_count = consumer.pre.capture_count();
-        let consumer_args = vec![graph.operand_ref(mapped[0]); consumer.pre.parameter_types.len()];
-        let results = support::invoke_lambda(
+        let Some(&mapped) = mapped.first() else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter map has no by-value result".to_owned(),
+            ));
+        };
+        let consumer_args = vec![graph.operand_ref(mapped); consumer.pre.parameter_types.len()];
+        let Some(consumer_captures) = args.get(cursor..cursor + consumer_capture_count) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter consumer has fewer generated arguments than captures".to_owned(),
+            ));
+        };
+        let Some(results) = support::invoke_lambda(
             &mut graph,
             inner,
             &consumer.pre,
             &consumer_args,
-            &args[cursor..cursor + consumer_capture_count],
-        );
+            consumer_captures,
+        ) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter consumer lambda region is absent".to_owned(),
+            ));
+        };
         selected.extend(lambda_ops::result_argument_values(&mut graph, &results));
         cursor += consumer_capture_count;
         let neutral_count = consumer.reduction_input_count();
-        fallback.extend(
-            args[cursor..cursor + neutral_count]
-                .iter()
-                .map(|argument| argument.value().expect("reduction neutral capture is a value")),
-        );
+        let Some(neutral_arguments) = args.get(cursor..cursor + neutral_count) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter consumer has fewer generated arguments than reduction neutrals".to_owned(),
+            ));
+        };
+        let neutral_values =
+            neutral_arguments.iter().map(|argument| argument.value()).collect::<Option<Vec<_>>>();
+        let Some(neutral_values) = neutral_values else {
+            return Err(super::FusionError::InvalidCandidate(
+                "Filter reduction neutral is not available by value".to_owned(),
+            ));
+        };
+        fallback.extend(neutral_values);
         cursor += neutral_count;
     }
     if let Some(count_ty) = count_ty {
@@ -415,7 +517,7 @@ fn build_masked_pre(
     }
     debug_assert_eq!(cursor, args.len());
     let (return_block, results) =
-        conditional_results(&mut graph, predicate[0], fallback, selected, &result_types);
+        conditional_results(&mut graph, predicate, fallback, selected, &result_types);
     let (pre, function) = lambda_ops::finish_region_lambda(
         identities,
         scope,
@@ -430,7 +532,12 @@ fn build_masked_pre(
         results,
         false,
     );
-    (pre, function.expect("filter pre-lambda cannot be identity"))
+    let Some(function) = function else {
+        return Err(super::FusionError::InvalidCandidate(
+            "masked Filter pre-lambda unexpectedly became an identity".to_owned(),
+        ));
+    };
+    Ok((pre, function))
 }
 
 fn conditional_results(
@@ -476,172 +583,213 @@ struct EntryMetadataPatch {
 fn rewrite_with_consumer(
     inner: Segmented,
     candidate: &Candidate,
+    filter_location: super::ResolvedFusionEffect,
+    consumer_location: super::ResolvedFusionEffect,
     filter_effect: SideEffect,
     consumer_effect: SideEffect,
     filter: FilterParts,
-    consumer_index: usize,
     pre: screma::Lambda,
     count: Option<screma::Reduce>,
     count_ty: Option<Type<TypeName>>,
-) -> (Segmented, Vec<Func<Semantic>>) {
+) -> super::FusionResult<(Segmented, Vec<Func<Semantic>>)> {
     let synthesized = Vec::new();
-    let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(old_op))) = &consumer_effect.kind else {
-                unreachable!();
-            };
-            let old_result =
-                consumer_effect.result().cloned().expect("Filter reduction has no result binding");
-            let old_result_types = old_op
-                .form
-                .reductions
-                .iter()
-                .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
-                .collect::<Vec<_>>();
-            let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
-            let count_project = if let (Some(mut count), Some(count_ty), Some(neutral)) =
-                (count.clone(), count_ty.as_ref(), count_neutral)
-            {
-                count.neutral = vec![neutral];
-                let field = old_result_types.len() as u32;
-                let (new_result, count_value) =
-                    extend_result(graph, &old_result, &old_result_types, count_ty.clone());
-                debug_assert_eq!(field as usize, new_result.field_count() - 1);
-                Some((count, new_result, count_value))
-            } else {
-                None
-            };
-
-            let mut op = old_op.clone();
-            op.inputs = filter.body.inputs.clone();
-            op.form.pre = pre.clone();
-            if let Some((count, _, _)) = &count_project {
-                op.form.reductions.push(count.clone());
-                op.result_state.push(screma::ResultState {
-                    ownership: types::SoacOwnership::Fresh,
-                });
-            }
-            let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state_mut() else {
-                unreachable!();
-            };
-            *space = filter.space.clone();
-            let _ = resources;
-            debug_assert!(
-                op.validate().is_ok(),
-                "invalid filtered Screma: {:?}",
-                op.validate()
-            );
-
-            let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
-            let consumer_id = consumer_effect.kind.soac_id().copied().expect("consumer SOAC id");
-            let consumer_operands =
-                filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
-            let replacement_result = count_project.as_ref().map(|(_, new_result, _)| new_result.clone());
-            {
-                let consumer = &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index];
-                consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(op)));
-                consumer.operands = consumer_operands;
-                consumer.effects = fused_effects;
-                if let Some(result) = replacement_result {
-                    consumer.result = Some(result);
-                }
-            }
-            let consumer_snapshot =
-                graph.skeleton.blocks[candidate.block].side_effects[consumer_index].clone();
-            let reads = egir::semantic_graph::read_resources(graph, &consumer_snapshot);
-            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
-                &mut graph.skeleton.blocks[candidate.block].side_effects[consumer_index].kind
-            {
-                let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
-                    unreachable!();
+    let rebuilt = inner.try_rewrite_body(filter_location.body, |body| {
+        support::try_rewrite_body_graph_with_entry(
+            body,
+            |graph| {
+                let SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(old_op))) =
+                    &consumer_effect.kind
+                else {
+                    return Err(super::FusionError::InvalidCandidate(
+                        "Filter consumer changed kind after candidate analysis".to_owned(),
+                    ));
                 };
-                *resources = SegResourceAccess::merge(resources, &reads);
-            }
-            if let Some((_, _, project)) = &count_project {
-                replace_lengths(graph, &candidate.lengths, *project);
-            }
-            graph.skeleton.blocks[candidate.block].side_effects.remove(candidate.filter);
-            EntryMetadataPatch {
-                replacement: count_project.as_ref().map(|(_, _, value)| *value),
-                old_writer: filter_effect.value_result(),
-                replacement_writer: old_result.values().first().copied(),
-            }
-        };
-        support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
-            finish_entry_metadata(entry, &candidate.lengths, metadata);
-        })
-    });
-    (rebuilt, synthesized)
+                let Some(old_result) = consumer_effect.result().cloned() else {
+                    return Err(super::FusionError::InvalidCandidate(
+                        "Filter reduction has no result binding".to_owned(),
+                    ));
+                };
+                let old_result_types = old_op
+                    .form
+                    .reductions
+                    .iter()
+                    .flat_map(|reduction| reduction.operator.result_types.iter().cloned())
+                    .collect::<Vec<_>>();
+                let count_neutral = count_ty.as_ref().map(|ty| integer_literal(graph, "0", ty));
+                let count_project = if let (Some(mut count), Some(count_ty), Some(neutral)) =
+                    (count.clone(), count_ty.as_ref(), count_neutral)
+                {
+                    count.neutral = vec![neutral];
+                    let field = old_result_types.len() as u32;
+                    let (new_result, count_value) =
+                        extend_result(graph, &old_result, &old_result_types, count_ty.clone());
+                    debug_assert_eq!(field as usize, new_result.field_count() - 1);
+                    Some((count, new_result, count_value))
+                } else {
+                    None
+                };
+
+                let mut op = old_op.clone();
+                op.inputs = filter.body.inputs.clone();
+                op.form.pre = pre.clone();
+                if let Some((count, _, _)) = &count_project {
+                    op.form.reductions.push(count.clone());
+                    op.result_state.push(screma::ResultState {
+                        ownership: types::SoacOwnership::Fresh,
+                    });
+                }
+                let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state_mut()
+                else {
+                    return Err(super::FusionError::InvalidCandidate(
+                        "Filter consumer is no longer segmented".to_owned(),
+                    ));
+                };
+                *space = filter.space.clone();
+                let _ = resources;
+                debug_assert!(
+                    op.validate().is_ok(),
+                    "invalid filtered Screma: {:?}",
+                    op.validate()
+                );
+
+                let fused_effects = splice_effect_tokens(filter_effect.effects, consumer_effect.effects);
+                let consumer_operands =
+                    filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
+                let replacement_result =
+                    count_project.as_ref().map(|(_, new_result, _)| new_result.clone());
+                {
+                    let consumer = &mut graph.skeleton.blocks[consumer_location.block].side_effects
+                        [consumer_location.index];
+                    consumer.kind = SideEffectKind::Soac(SoacEffect(*consumer_id, Soac::Screma(op)));
+                    consumer.operands = consumer_operands;
+                    consumer.effects = fused_effects;
+                    if let Some(result) = replacement_result {
+                        consumer.result = Some(result);
+                    }
+                }
+                let consumer_snapshot = graph.skeleton.blocks[consumer_location.block].side_effects
+                    [consumer_location.index]
+                    .clone();
+                let reads = egir::semantic_graph::read_resources(graph, &consumer_snapshot);
+                if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut graph.skeleton.blocks
+                    [consumer_location.block]
+                    .side_effects[consumer_location.index]
+                    .kind
+                {
+                    let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+                        return Err(super::FusionError::InvalidCandidate(
+                            "fused Filter consumer is no longer segmented".to_owned(),
+                        ));
+                    };
+                    *resources = SegResourceAccess::merge(resources, &reads);
+                } else {
+                    return Err(super::FusionError::InvalidCandidate(
+                        "fused Filter consumer changed kind during rewrite".to_owned(),
+                    ));
+                }
+                if let Some((_, _, project)) = &count_project {
+                    replace_lengths(graph, &candidate.lengths, *project);
+                }
+                graph.skeleton.blocks[filter_location.block].side_effects.remove(filter_location.index);
+                Ok(EntryMetadataPatch {
+                    replacement: count_project.as_ref().map(|(_, _, value)| *value),
+                    old_writer: filter_effect.value_result(),
+                    replacement_writer: old_result.values().first().copied(),
+                })
+            },
+            |entry, metadata| {
+                finish_entry_metadata(entry, &candidate.lengths, metadata);
+                Ok(())
+            },
+        )
+    })?;
+    Ok((rebuilt, synthesized))
 }
 
 fn rewrite_count_only(
     inner: Segmented,
     candidate: &Candidate,
+    filter_location: super::ResolvedFusionEffect,
     filter_effect: SideEffect,
     filter: FilterParts,
     pre: screma::Lambda,
     mut count: screma::Reduce,
     count_ty: Type<TypeName>,
-) -> (Segmented, Vec<Func<Semantic>>) {
-    let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            let neutral = integer_literal(graph, "0", &count_ty);
-            count.neutral = vec![neutral];
-            let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
-            let count_value = graph.alloc_side_effect_result(count_ty.clone());
-            let result_binding = ResultBinding::product(tuple_ty, [graph.value_result(count_value)]);
-            replace_lengths(graph, &candidate.lengths, count_value);
-            let operands = filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
-            {
-                let effect = &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter];
-                let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
-                    unreachable!();
-                };
-                effect.kind = SideEffectKind::Soac(SoacEffect(
-                    id,
-                    Soac::Screma(screma::Op {
-                        inputs: filter.body.inputs.clone(),
-                        form: screma::ScremaForm {
-                            pre: pre.clone(),
-                            scans: vec![],
-                            reductions: vec![count.clone()],
-                            post: screma::Lambda::identity(vec![]),
-                        },
-                        result_state: vec![screma::ResultState {
-                            ownership: types::SoacOwnership::Fresh,
-                        }],
-                        state: screma::SemanticState::Segmented {
-                            space: filter.space.clone(),
-                            output_slots: vec![],
-                            resources: vec![],
-                        },
-                    }),
-                ));
-                effect.operands = operands;
-                effect.result = Some(result_binding);
-            }
-            let effect_snapshot =
-                graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].clone();
-            let reads = egir::semantic_graph::read_resources(graph, &effect_snapshot);
-            if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
-                &mut graph.skeleton.blocks[candidate.block].side_effects[candidate.filter].kind
-            {
-                let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
-                    unreachable!();
-                };
-                *resources = reads;
-            }
-            EntryMetadataPatch {
-                replacement: Some(count_value),
-                old_writer: filter_effect.value_result(),
-                replacement_writer: Some(count_value),
-            }
-        };
-        support::rewrite_body_graph_with_entry(body, rewrite, |entry, metadata| {
-            finish_entry_metadata(entry, &candidate.lengths, metadata);
-        })
-    });
-    (rebuilt, Vec::new())
+) -> super::FusionResult<(Segmented, Vec<Func<Semantic>>)> {
+    let rebuilt = inner.try_rewrite_body(filter_location.body, |body| {
+        support::try_rewrite_body_graph_with_entry(
+            body,
+            |graph| {
+                let neutral = integer_literal(graph, "0", &count_ty);
+                count.neutral = vec![neutral];
+                let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![count_ty.clone()]);
+                let count_value = graph.alloc_side_effect_result(count_ty.clone());
+                let result_binding = ResultBinding::product(tuple_ty, [graph.value_result(count_value)]);
+                replace_lengths(graph, &candidate.lengths, count_value);
+                let operands = filter.input_nodes.iter().map(|value| graph.operand_ref(*value)).collect();
+                {
+                    let effect = &mut graph.skeleton.blocks[filter_location.block].side_effects
+                        [filter_location.index];
+                    let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind else {
+                        return Err(super::FusionError::InvalidCandidate(
+                            "selected Filter changed kind during count rewrite".to_owned(),
+                        ));
+                    };
+                    effect.kind = SideEffectKind::Soac(SoacEffect(
+                        id,
+                        Soac::Screma(screma::Op {
+                            inputs: filter.body.inputs.clone(),
+                            form: screma::ScremaForm {
+                                pre: pre.clone(),
+                                scans: vec![],
+                                reductions: vec![count.clone()],
+                                post: screma::Lambda::identity(vec![]),
+                            },
+                            result_state: vec![screma::ResultState {
+                                ownership: types::SoacOwnership::Fresh,
+                            }],
+                            state: screma::SemanticState::Segmented {
+                                space: filter.space.clone(),
+                                output_slots: vec![],
+                                resources: vec![],
+                            },
+                        }),
+                    ));
+                    effect.operands = operands;
+                    effect.result = Some(result_binding);
+                }
+                let effect_snapshot = graph.skeleton.blocks[filter_location.block].side_effects
+                    [filter_location.index]
+                    .clone();
+                let reads = egir::semantic_graph::read_resources(graph, &effect_snapshot);
+                if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
+                    &mut graph.skeleton.blocks[filter_location.block].side_effects[filter_location.index]
+                        .kind
+                {
+                    let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+                        return Err(super::FusionError::InvalidCandidate(
+                            "count-only Filter rewrite is no longer segmented".to_owned(),
+                        ));
+                    };
+                    *resources = reads;
+                } else {
+                    return Err(super::FusionError::InvalidCandidate(
+                        "count-only Filter changed kind during rewrite".to_owned(),
+                    ));
+                }
+                Ok(EntryMetadataPatch {
+                    replacement: Some(count_value),
+                    old_writer: filter_effect.value_result(),
+                    replacement_writer: Some(count_value),
+                })
+            },
+            |entry, metadata| {
+                finish_entry_metadata(entry, &candidate.lengths, metadata);
+                Ok(())
+            },
+        )
+    })?;
+    Ok((rebuilt, Vec::new()))
 }
 
 fn finish_entry_metadata(

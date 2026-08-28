@@ -10,13 +10,13 @@ use crate::types;
 use polytype::Type;
 use smallvec::{smallvec, SmallVec};
 
-use super::graph_and_span;
 use super::horizontal;
 use super::screma as fusion_screma;
 use super::support;
+use super::{graph_and_span, FusionEffect};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, BodySite};
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::SemanticProgramData;
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
@@ -176,30 +176,27 @@ fn array_with_outer_size(array: &Type<TypeName>, size: &Type<TypeName>) -> Optio
 
 #[derive(Clone)]
 pub(super) struct Candidate {
-    site: BodySite,
-    block: BlockId,
-    producer: usize,
-    consumer: usize,
+    producer: FusionEffect,
+    consumer: FusionEffect,
     routes: Vec<fusion_screma::InputRoute>,
     transform: InputTransform,
     retained_producer_outputs: Vec<usize>,
 }
 
 pub(super) fn analyze(inner: &Segmented, oracle: &SemanticGraph) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, entry)| {
+    super::bodies(inner).find_map(|(_, graph, entry)| {
         let external_roots = entry
             .into_iter()
             .flat_map(|entry| entry.routes())
             .flat_map(|route| route.referenced_values())
             .collect::<Vec<_>>();
-        find_in_graph(inner, graph, site, oracle, &external_roots)
+        find_in_graph(inner, graph, oracle, &external_roots)
     })
 }
 
 fn find_in_graph(
     inner: &Segmented,
     graph: &EGraph,
-    site: BodySite,
     oracle: &SemanticGraph,
     external_roots: &[ValueId],
 ) -> Option<Candidate> {
@@ -270,11 +267,14 @@ fn find_in_graph(
                 }
 
                 let consumer_input_count = consumer_op.inputs.len();
-                let routed = consumer.operands[..consumer_input_count]
+                let Some(consumer_inputs) = consumer.operands.get(..consumer_input_count) else {
+                    continue;
+                };
+                let routed = consumer_inputs
                     .iter()
                     .enumerate()
                     .filter_map(|(input, operand)| {
-                        let operand = operand.value().expect("Screma inputs are values or views");
+                        let operand = operand.value()?;
                         InputTransform::route(graph, operand, &producer_results)
                             .map(|(field, transform)| (input, field, transform))
                     })
@@ -284,12 +284,12 @@ fn find_in_graph(
                 }
                 let routed_inputs =
                     routed.iter().map(|(input, _, _)| *input).collect::<std::collections::HashSet<_>>();
-                let has_unrouteable_input =
-                    consumer.operands[..consumer_input_count].iter().enumerate().any(|(input, operand)| {
-                        let operand = operand.value().expect("Screma inputs are values or views");
+                let has_unrouteable_input = consumer_inputs.iter().enumerate().any(|(input, operand)| {
+                    operand.value().is_some_and(|operand| {
                         !routed_inputs.contains(&input)
                             && depends_on_any_result(graph, operand, &producer_results)
-                    });
+                    })
+                });
                 if has_unrouteable_input {
                     continue;
                 }
@@ -345,8 +345,8 @@ fn find_in_graph(
                 }
                 let routed_roots = routed
                     .iter()
-                    .map(|(input, _, _)| {
-                        consumer.operands[*input].value().expect("Screma inputs are values or views")
+                    .filter_map(|(input, _, _)| {
+                        consumer_inputs.get(*input).and_then(|operand| operand.value())
                     })
                     .collect::<std::collections::HashSet<_>>();
                 let semantic_roots = consumer_op
@@ -384,10 +384,8 @@ fn find_in_graph(
                     continue;
                 }
                 return Some(Candidate {
-                    site,
-                    block: block_id,
-                    producer: producer_index,
-                    consumer: consumer_index,
+                    producer: FusionEffect(*producer_id),
+                    consumer: FusionEffect(*consumer_id),
                     routes,
                     transform,
                     retained_producer_outputs,
@@ -438,44 +436,45 @@ fn depends_on_any_result(graph: &EGraph, root: ValueId, results: &[ResultBinding
         .iter()
         .any(|result| result.values().iter().any(|result| graph_ops::pure_depends_on(graph, root, *result)))
 }
-pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
+pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> super::FusionResult<Segmented> {
+    let (producer_location, _) = super::resolve_pair(&inner, candidate.producer, candidate.consumer)?;
     let transform = candidate.transform.clone();
     let mut transformed_source = None;
-    inner = inner.rewrite_body(candidate.site, |body| {
-        support::rewrite_body_graph(body, |graph| {
-            let (input_nodes, inputs) = {
-                let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.producer];
-                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-                    unreachable!("vertical fusion selected a non-Screma producer")
-                };
-                (
-                    effect.operands[..op.inputs.len()]
-                        .iter()
-                        .map(|operand| operand.value().expect("Screma inputs are values or views"))
-                        .collect::<Vec<_>>(),
-                    op.inputs.clone(),
-                )
-            };
-            let (input_nodes, inputs): (Vec<_>, Vec<_>) = input_nodes
-                .into_iter()
-                .zip(&inputs)
-                .map(|(node, input)| {
+    inner = inner.try_rewrite_body(producer_location.body, |body| {
+        support::try_rewrite_body_graph(body, |graph| {
+            let producer =
+                horizontal::extract_screma(graph, producer_location.block, producer_location.index)?;
+            let transformed = producer
+                .inputs
+                .iter()
+                .map(|input| {
                     transform
-                        .apply(graph, node, input)
-                        .expect("analyzed producer input transform became invalid")
+                        .apply(graph, input.node, &input.ty)
+                        .map(|(node, ty)| super::FusionInput { node, ty })
                 })
-                .unzip();
-            transformed_source = Some((input_nodes, inputs));
+                .collect::<Option<Vec<_>>>();
+            let Some(transformed) = transformed else {
+                return Err(super::FusionError::InvalidCandidate(
+                    "producer input transform failed after candidate analysis".to_owned(),
+                ));
+            };
+            transformed_source = Some(transformed);
+            Ok(())
         })
-    });
-    let (producer_input_nodes, producer_inputs) =
-        transformed_source.expect("vertical fusion body was not rewritten");
+    })?;
+    let Some(producer_inputs) = transformed_source else {
+        return Err(super::FusionError::InvalidCandidate(
+            "vertical fusion did not visit its selected body".to_owned(),
+        ));
+    };
 
-    let (graph, span, scope) = graph_and_span(&inner, candidate.site);
+    let (producer_location, consumer_location) =
+        super::resolve_pair(&inner, candidate.producer, candidate.consumer)?;
+    let (graph, span, scope) = graph_and_span(&inner, producer_location.body)?;
     let outer_types =
         graph.nodes.iter().map(|(node, data)| (node, data.ty.clone())).collect::<LookupMap<_, _>>();
-    let producer = horizontal::extract_screma(graph, candidate.block, candidate.producer);
-    let consumer = horizontal::extract_screma(graph, candidate.block, candidate.consumer);
+    let producer = horizontal::extract_screma(graph, producer_location.block, producer_location.index)?;
+    let consumer = horizontal::extract_screma(graph, consumer_location.block, consumer_location.index)?;
     let mut identities = inner.data.identities.clone();
     let mut context = fusion_screma::Context {
         program: &inner,
@@ -487,19 +486,21 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     let normalized = fusion_screma::fuse_vertical(
         &mut context,
         fusion_screma::Source {
-            input_nodes: &producer_input_nodes,
             inputs: &producer_inputs,
             form: &producer.op.form,
         },
         fusion_screma::Source {
-            input_nodes: &consumer.input_nodes,
-            inputs: &consumer.op.inputs,
+            inputs: &consumer.inputs,
             form: &consumer.op.form,
         },
         &candidate.routes,
         &candidate.retained_producer_outputs,
-    )
-    .expect("analyzed SuperScrema no longer normalizes");
+    );
+    let Some(normalized) = normalized else {
+        return Err(super::FusionError::InvalidCandidate(
+            "vertical Screma normalization failed after candidate analysis".to_owned(),
+        ));
+    };
 
     let mut producer_mapping = vec![usize::MAX; producer.result_types.len()];
     let mut consumer_mapping = vec![usize::MAX; consumer.result_types.len()];
@@ -520,9 +521,24 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
                 &mut consumer_mapping,
             ),
         };
-        mapping[source_field] = fused_field;
-        result_state.push(source_state[source_field]);
-        result_types.push(source_types[source_field].clone());
+        let Some(mapped_field) = mapping.get_mut(source_field) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "vertical fusion output is outside its source result".to_owned(),
+            ));
+        };
+        let Some(state) = source_state.get(source_field) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "vertical fusion output has no result state".to_owned(),
+            ));
+        };
+        let Some(ty) = source_types.get(source_field) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "vertical fusion output has no result type".to_owned(),
+            ));
+        };
+        *mapped_field = fused_field;
+        result_state.push(*state);
+        result_types.push(ty.clone());
     }
 
     debug_assert!(consumer_mapping.iter().all(|field| *field != usize::MAX));
@@ -533,7 +549,7 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     output_slots.dedup();
     let resources = SegResourceAccess::merge(&producer.resources, &consumer.resources);
     let fused_op = screma::Op {
-        inputs: normalized.inputs,
+        inputs: normalized.inputs.iter().map(|input| input.ty.clone()).collect(),
         form: normalized.form,
         result_state,
         state: screma::SemanticState::Segmented {
@@ -549,54 +565,69 @@ pub(super) fn apply(mut inner: Segmented, candidate: Candidate) -> Segmented {
     );
 
     let mut operand_values = SmallVec::<[ValueId; 4]>::new();
-    operand_values.extend(normalized.input_nodes);
+    operand_values.extend(normalized.inputs.iter().map(|input| input.node));
     let synthesized = normalized.synthesized;
     let producer_results = producer.results;
     let consumer_results = consumer.results;
     let consumer_id = consumer.id;
-    let site = candidate.site;
-    let rebuilt = inner.rewrite_body(site, |body| {
-        let rewrite = |graph: &mut EGraph| {
-            let tuple_type = Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
-            let result = graph_ops::alloc_by_value_effect_result(graph, tuple_type);
-            let fused_results = result.top_level_fields();
-            let mut replacements = Vec::new();
-            for (old, field) in producer_results.iter().zip(&producer_mapping) {
-                if *field != usize::MAX {
-                    replacements.extend(
-                        graph_ops::rebind_result_value_references(graph, old, &fused_results[*field])
-                            .expect("retained producer result must preserve its by-value shape"),
-                    );
+    let site = producer_location.body;
+    let rebuilt = inner.try_rewrite_body(site, |body| {
+        support::try_rewrite_body_graph_with_entry(
+            body,
+            |graph| {
+                let tuple_type =
+                    Type::Constructed(TypeName::Tuple(result_types.len()), result_types.clone());
+                let result = graph_ops::alloc_by_value_effect_result(graph, tuple_type);
+                let fused_results = result.top_level_fields();
+                let mut replacements = Vec::new();
+                for (old, field) in producer_results.iter().zip(&producer_mapping) {
+                    if *field != usize::MAX {
+                        let Some(fused_result) = fused_results.get(*field) else {
+                            return Err(super::FusionError::InvalidCandidate(
+                                "retained producer result maps outside the fused result".to_owned(),
+                            ));
+                        };
+                        replacements.extend(
+                            graph_ops::rebind_result_value_references(graph, old, fused_result)
+                                .map_err(super::FusionError::InvalidCandidate)?,
+                        );
+                    }
                 }
-            }
-            replacements.extend(horizontal::rebind_fields(
-                graph,
-                &consumer_results,
-                &fused_results,
-                &consumer_mapping,
-            ));
+                replacements.extend(horizontal::rebind_fields(
+                    graph,
+                    &consumer_results,
+                    &fused_results,
+                    &consumer_mapping,
+                )?);
 
-            let operands =
-                operand_values.iter().map(|operand| graph.operand_ref(*operand)).collect::<SmallVec<_>>();
-            let block = &mut graph.skeleton.blocks[candidate.block];
-            let effects = splice_effect_tokens(
-                block.side_effects[candidate.producer].effects,
-                block.side_effects[candidate.consumer].effects,
-            );
-            let consumer = &mut block.side_effects[candidate.consumer];
-            consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(fused_op.clone())));
-            consumer.operands = operands;
-            consumer.result = Some(result);
-            consumer.effects = effects;
-            block.side_effects.remove(candidate.producer);
-            replacements
-        };
-        support::rewrite_body_graph_with_entry(body, rewrite, |entry, replacements| {
-            support::replace_route_values(entry, &replacements);
-        })
-    });
-    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
-        identities: identities,
-        ..data
-    })
+                let operands = operand_values
+                    .iter()
+                    .map(|operand| graph.operand_ref(*operand))
+                    .collect::<SmallVec<_>>();
+                let block = &mut graph.skeleton.blocks[producer_location.block];
+                let effects = splice_effect_tokens(
+                    block.side_effects[producer_location.index].effects,
+                    block.side_effects[consumer_location.index].effects,
+                );
+                let consumer_effect = &mut block.side_effects[consumer_location.index];
+                consumer_effect.kind =
+                    SideEffectKind::Soac(SoacEffect(consumer_id, Soac::Screma(fused_op.clone())));
+                consumer_effect.operands = operands;
+                consumer_effect.result = Some(result);
+                consumer_effect.effects = effects;
+                block.side_effects.remove(producer_location.index);
+                Ok(replacements)
+            },
+            |entry, replacements| {
+                support::replace_route_values(entry, &replacements);
+                Ok(())
+            },
+        )
+    })?;
+    Ok(
+        rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData {
+            identities: identities,
+            ..data
+        }),
+    )
 }

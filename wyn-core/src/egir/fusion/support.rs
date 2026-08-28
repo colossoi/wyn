@@ -21,19 +21,14 @@ pub(super) fn invoke_lambda(
     lambda: &screma::Lambda,
     arguments: &[OperandRef],
     captures: &[OperandRef],
-) -> Vec<ResultBinding<Type<TypeName>>> {
+) -> Option<Vec<ResultBinding<Type<TypeName>>>> {
     debug_assert_eq!(captures.len(), lambda.capture_count());
     let mut operands = Vec::with_capacity(arguments.len() + captures.len());
     operands.extend_from_slice(arguments);
     operands.extend_from_slice(captures);
-    let callee = if let Some(body) = lambda.seg_body() {
-        debug_assert!(program.contains_region(body.region));
-        Some(program.region(body.region).expect("fusion lambda region"))
-    } else {
-        None
-    };
+    let callee = if let Some(body) = lambda.seg_body() { Some(program.region(body.region)?) } else { None };
     let block = graph.skeleton.entry;
-    lambda_ops::emit_call(graph, block, lambda, callee, operands)
+    Some(lambda_ops::emit_call(graph, block, lambda, callee, operands))
 }
 pub(super) fn result_used_only_by_effect_pair(
     graph: &EGraph,
@@ -113,32 +108,31 @@ pub(super) fn pure_depends_on_avoiding(
     false
 }
 
-pub(super) fn rewrite_body_graph(body: FusionBody, rewrite: impl FnOnce(&mut EGraph)) -> FusionBody {
-    rewrite_body_graph_with_entry(
-        body,
-        |graph| {
-            rewrite(graph);
-        },
-        |_, ()| {},
-    )
+pub(super) fn try_rewrite_body_graph(
+    body: FusionBody,
+    rewrite: impl FnOnce(&mut EGraph) -> super::FusionResult<()>,
+) -> super::FusionResult<FusionBody> {
+    try_rewrite_body_graph_with_entry(body, rewrite, |_, ()| Ok(()))
 }
 
-pub(super) fn rewrite_body_graph_with_entry<T>(
+pub(super) fn try_rewrite_body_graph_with_entry<T>(
     body: FusionBody,
-    rewrite: impl FnOnce(&mut EGraph) -> T,
-    finish_entry: impl FnOnce(&mut Entry<Semantic>, T),
-) -> FusionBody {
+    rewrite: impl FnOnce(&mut EGraph) -> super::FusionResult<T>,
+    finish_entry: impl FnOnce(&mut Entry<Semantic>, T) -> super::FusionResult<()>,
+) -> super::FusionResult<FusionBody> {
     match body {
         Body::Entry(mut entry) => {
-            let result = rewrite(&mut entry.graph);
-            finish_entry(&mut entry, result);
-            Body::Entry(entry)
+            let result = rewrite(&mut entry.graph)?;
+            finish_entry(&mut entry, result)?;
+            Ok(Body::Entry(entry))
         }
         Body::Function(mut function) => {
-            rewrite(&mut function.graph);
-            Body::Function(function)
+            rewrite(&mut function.graph)?;
+            Ok(Body::Function(function))
         }
-        Body::Constant(_) => unreachable!("semantic fusion never targets constants"),
+        Body::Constant(_) => Err(super::FusionError::InvalidCandidate(
+            "semantic fusion cannot rewrite a constant body".to_owned(),
+        )),
     }
 }
 

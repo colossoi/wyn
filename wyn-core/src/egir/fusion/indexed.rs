@@ -9,7 +9,7 @@ use crate::egir;
 use std::collections::HashSet;
 
 use crate::egir::graph_ops;
-use crate::egir::ir::{BodySite, RealizedOutputRoute};
+use crate::egir::ir::RealizedOutputRoute;
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
 use crate::egir::types::{
@@ -20,7 +20,7 @@ use crate::flow::BlockId;
 use crate::BindingRef;
 use smallvec::smallvec;
 
-use super::support;
+use super::{support, FusionEffect};
 
 #[derive(Clone, Copy)]
 struct Demand {
@@ -31,26 +31,23 @@ struct Demand {
 
 #[derive(Clone)]
 pub(super) struct Candidate {
-    site: BodySite,
-    block: BlockId,
-    effect: usize,
+    producer: FusionEffect,
     demands: Vec<Demand>,
 }
 
 pub(super) fn analyze(inner: &Segmented) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, entry)| {
+    super::bodies(inner).find_map(|(_, graph, entry)| {
         let output_resources = entry
             .map(|entry| entry.outputs.iter().map(|output| output.resource).collect::<Vec<_>>())
             .unwrap_or_default();
         let output_routes =
             entry.map(|entry| entry.routes().cloned().collect::<Vec<_>>()).unwrap_or_default();
-        find_in_graph(graph, site, &output_resources, &output_routes)
+        find_in_graph(graph, &output_resources, &output_routes)
     })
 }
 
 fn find_in_graph(
     graph: &EGraph,
-    site: BodySite,
     output_resources: &[Option<BindingRef>],
     output_routes: &[RealizedOutputRoute],
 ) -> Option<Candidate> {
@@ -62,7 +59,7 @@ fn find_in_graph(
     .collect::<HashSet<_>>();
     for (block_id, block) in &graph.skeleton.blocks {
         for (effect_index, effect) in block.side_effects.iter().enumerate() {
-            let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+            let SideEffectKind::Soac(SoacEffect(id, Soac::Screma(op))) = &effect.kind else {
                 continue;
             };
             let screma::SemanticState::Segmented {
@@ -129,9 +126,7 @@ fn find_in_graph(
                 continue;
             }
             return Some(Candidate {
-                site,
-                block: block_id,
-                effect: effect_index,
+                producer: FusionEffect(*id),
                 demands,
             });
         }
@@ -180,70 +175,115 @@ fn used_only_through(
     true
 }
 
-pub(super) fn apply(inner: Segmented, candidate: Candidate) -> Segmented {
+pub(super) fn apply(inner: Segmented, candidate: Candidate) -> super::FusionResult<Segmented> {
+    let location = candidate.producer.resolve(&inner)?;
     let (pre, input_nodes, producer_result) = {
-        let graph = inner.body_graph(candidate.site).expect("indexed fusion body");
-        let effect = &graph.skeleton.blocks[candidate.block].side_effects[candidate.effect];
-        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-            unreachable!();
+        let Some(graph) = inner.body_graph(location.body) else {
+            return Err(super::FusionError::MissingEffect(candidate.producer.0));
         };
-        (
-            op.form.pre.clone(),
-            effect.operands[..op.inputs.len()]
-                .iter()
-                .map(|operand| operand.value().expect("Screma inputs are values or views"))
-                .collect::<Vec<_>>(),
-            effect.value_result().expect("indexed map has no by-value result"),
-        )
+        let Some(block) = graph.skeleton.blocks.get(location.block) else {
+            return Err(super::FusionError::MissingEffect(candidate.producer.0));
+        };
+        let Some(effect) = block.side_effects.get(location.index) else {
+            return Err(super::FusionError::MissingEffect(candidate.producer.0));
+        };
+        let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
+            return Err(super::FusionError::InvalidCandidate(
+                "indexed producer changed kind after candidate analysis".to_owned(),
+            ));
+        };
+        let Some(input_operands) = effect.operands.get(..op.inputs.len()) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "indexed producer has fewer operands than input types".to_owned(),
+            ));
+        };
+        let input_nodes =
+            input_operands.iter().map(|operand| operand.value()).collect::<Option<Vec<ValueId>>>();
+        let Some(input_nodes) = input_nodes else {
+            return Err(super::FusionError::InvalidCandidate(
+                "indexed producer input uses the place channel".to_owned(),
+            ));
+        };
+        let Some(producer_result) = effect.value_result() else {
+            return Err(super::FusionError::InvalidCandidate(
+                "indexed producer has no by-value result".to_owned(),
+            ));
+        };
+        (op.form.pre.clone(), input_nodes, producer_result)
     };
-    let callee =
-        pre.seg_body().map(|body| inner.region(body.region).expect("indexed fusion lambda region").clone());
+    let callee = if let Some(body) = pre.seg_body() {
+        let Some(region) = inner.region(body.region) else {
+            return Err(super::FusionError::InvalidCandidate(
+                "indexed producer lambda region is absent".to_owned(),
+            ));
+        };
+        Some(region.clone())
+    } else {
+        None
+    };
 
-    inner.rewrite_body(candidate.site, |body| {
-        let rewrite_graph = |graph: &mut EGraph| {
-            let mut replacements = Vec::with_capacity(candidate.demands.len());
-            for demand in &candidate.demands {
-                let arguments = input_nodes
-                    .iter()
-                    .zip(&pre.parameter_types)
-                    .map(|(&input, elem_ty)| {
-                        let value = graph.intern_pure(
-                            PureOp::Index,
-                            smallvec![input, demand.index_value],
-                            elem_ty.clone(),
-                            None,
-                        );
-                        graph.operand_ref(value)
-                    })
-                    .collect::<Vec<_>>();
-                let mut operands = arguments;
-                operands.extend_from_slice(pre.captures());
-                let results =
-                    lambda_ops::emit_call(graph, candidate.block, &pre, callee.as_ref(), operands);
-                let scalar = egir::graph_ops::pack_result_values(graph, &results[demand.output])
-                    .expect("indexed fusion demands a by-value lambda result");
-                graph.replace_value_references(demand.index, scalar);
-                replacements.push((demand.index, scalar));
-            }
+    inner.try_rewrite_body(location.body, |body| {
+        support::try_rewrite_body_graph_with_entry(
+            body,
+            |graph| {
+                let mut replacements = Vec::with_capacity(candidate.demands.len());
+                for demand in &candidate.demands {
+                    let arguments = input_nodes
+                        .iter()
+                        .zip(&pre.parameter_types)
+                        .map(|(&input, elem_ty)| {
+                            let value = graph.intern_pure(
+                                PureOp::Index,
+                                smallvec![input, demand.index_value],
+                                elem_ty.clone(),
+                                None,
+                            );
+                            graph.operand_ref(value)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut operands = arguments;
+                    operands.extend_from_slice(pre.captures());
+                    let results =
+                        lambda_ops::emit_call(graph, location.block, &pre, callee.as_ref(), operands);
+                    let Some(result) = results.get(demand.output) else {
+                        return Err(super::FusionError::InvalidCandidate(
+                            "indexed demand names an absent lambda result".to_owned(),
+                        ));
+                    };
+                    let Ok(scalar) = egir::graph_ops::pack_result_values(graph, result) else {
+                        return Err(super::FusionError::InvalidCandidate(
+                            "indexed demand result is not available by value".to_owned(),
+                        ));
+                    };
+                    graph.replace_value_references(demand.index, scalar);
+                    replacements.push((demand.index, scalar));
+                }
 
-            let block = &mut graph.skeleton.blocks[candidate.block];
-            let removed_effects = block.side_effects[candidate.effect].effects;
-            block.side_effects.remove(candidate.effect);
-            if let Some((input, output)) = removed_effects {
-                for effect in &mut block.side_effects[candidate.effect..] {
-                    if let Some((effect_input, _)) = &mut effect.effects {
-                        if *effect_input == output {
-                            *effect_input = input;
-                            break;
+                let Some(block) = graph.skeleton.blocks.get_mut(location.block) else {
+                    return Err(super::FusionError::MissingEffect(candidate.producer.0));
+                };
+                let Some(effect) = block.side_effects.get(location.index) else {
+                    return Err(super::FusionError::MissingEffect(candidate.producer.0));
+                };
+                let removed_effects = effect.effects;
+                block.side_effects.remove(location.index);
+                if let Some((input, output)) = removed_effects {
+                    for effect in &mut block.side_effects[location.index..] {
+                        if let Some((effect_input, _)) = &mut effect.effects {
+                            if *effect_input == output {
+                                *effect_input = input;
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            replacements
-        };
-        support::rewrite_body_graph_with_entry(body, rewrite_graph, |entry, replacements| {
-            support::replace_route_sources(entry, &replacements);
-            support::remove_value_writer(entry, producer_result);
-        })
+                Ok(replacements)
+            },
+            |entry, replacements| {
+                support::replace_route_sources(entry, &replacements);
+                support::remove_value_writer(entry, producer_result);
+                Ok(())
+            },
+        )
     })
 }

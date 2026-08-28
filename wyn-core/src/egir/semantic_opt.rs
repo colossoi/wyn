@@ -40,6 +40,7 @@ use super::soac::screma;
 use super::types::{
     EGraph, GraphResource, ResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
 };
+use crate::error::CompilerError;
 use crate::flow::BlockId;
 use crate::LookupMap;
 use std::collections::BTreeMap;
@@ -66,14 +67,16 @@ pub struct SemanticOptimizationTrace {
 
 /// Eliminate dead segmented operations and fuse legal operations to a single
 /// shared fixpoint.
-pub fn optimize_semantic_operations(program: Segmented) -> SemanticOperationsOptimized {
-    optimize_semantic_operations_with_trace(program).0
+pub fn optimize_semantic_operations(
+    program: Segmented,
+) -> std::result::Result<SemanticOperationsOptimized, CompilerError> {
+    Ok(optimize_semantic_operations_with_trace(program)?.0)
 }
 
 /// The fixpoint transition with compiler-authored rewrite provenance.
 pub fn optimize_semantic_operations_with_trace(
     program: Segmented,
-) -> (SemanticOperationsOptimized, SemanticOptimizationTrace) {
+) -> std::result::Result<(SemanticOperationsOptimized, SemanticOptimizationTrace), CompilerError> {
     let mut trace = SemanticOptimizationTrace::default();
     let mut program = program;
 
@@ -88,7 +91,7 @@ pub fn optimize_semantic_operations_with_trace(
             continue;
         }
 
-        let (rewritten, changed, step_trace) = fuse_semantic_operations(program);
+        let (rewritten, changed, step_trace) = fuse_semantic_operations(program)?;
         program = rewritten;
         trace.extend(step_trace);
         if changed {
@@ -97,7 +100,7 @@ pub fn optimize_semantic_operations_with_trace(
         break;
     }
 
-    (program.retag(), trace)
+    Ok((program.retag(), trace))
 }
 
 /// Apply one whole-program dead semantic-operation elimination step.
@@ -123,16 +126,19 @@ pub fn eliminate_dead_semantic_operations(
 /// Candidate analysis and its dependency oracle are intentionally rebuilt for
 /// every call. This keeps the public sub-pass boundary safe for inspection
 /// clients while preserving the production optimizer's legality invariant.
-pub fn fuse_semantic_operations(program: Segmented) -> (Segmented, bool, SemanticOptimizationTrace) {
+pub fn fuse_semantic_operations(
+    program: Segmented,
+) -> std::result::Result<(Segmented, bool, SemanticOptimizationTrace), CompilerError> {
     let dependencies = super::semantic_graph::dependencies(&program);
     let oracle = SemanticGraph::new(&dependencies);
     let before = semantic_operation_fingerprints(&program);
-    let (program, changed) = super::fusion::rewrite_once(program, &oracle);
+    let (program, changed) = super::fusion::rewrite_once(program, &oracle)
+        .map_err(|error| CompilerError::Internal(error.to_string()))?;
     let mut trace = SemanticOptimizationTrace::default();
     if changed {
         trace.record(before, semantic_operation_fingerprints(&program));
     }
-    (program, changed, trace)
+    Ok((program, changed, trace))
 }
 
 /// Lift values that are uniform at their execution stage, then validate the

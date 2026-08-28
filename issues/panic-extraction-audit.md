@@ -25,11 +25,11 @@ and `values[index]` operations when a cluster is changed.
 The starting tree contained 584 production panic points detected by this scan:
 466 `unwrap`/`expect` extractions and 118 explicit `panic!` calls.
 
-The completed changes remove 141 of them. The remaining 443 are:
+The completed changes remove 193 of them. The remaining 391 are:
 
 | Kind | Count |
 | --- | ---: |
-| `Option`/`Result::expect` | 239 |
+| `Option`/`Result::expect` | 187 |
 | `Option`/`Result::unwrap` | 101 |
 | `panic!` | 103 |
 
@@ -37,7 +37,7 @@ The remaining sites are concentrated by compiler layer:
 
 | Layer | Count |
 | --- | ---: |
-| EGIR | 222 |
+| EGIR | 170 |
 | other `wyn-core` code | 100 |
 | TLC | 74 |
 | type checker/type model | 23 |
@@ -46,9 +46,9 @@ The remaining sites are concentrated by compiler layer:
 | frontend | 4 |
 | other crates | 5 |
 
-The companion scan found 84 `unreachable!` calls, no `todo!` or
-`unimplemented!` calls, and 46 production assertions. The largest
-`unreachable!` clusters are EGIR fusion/expansion (25), other EGIR code (26),
+The companion scan found 68 `unreachable!` calls, no `todo!` or
+`unimplemented!` calls, and 45 production assertions. The largest
+`unreachable!` clusters are EGIR fusion/expansion (9), other EGIR code (26),
 TLC (16), SPIR-V lowering (7), and frontend/type code (9); one more is in
 `wyn-staged-ir`. Assertions are tracked separately because some guard public
 mutation APIs or process-exhaustion invariants, but assertion-based validation
@@ -90,9 +90,18 @@ of source-derived or pass-derived state should migrate with the same clusters.
   boundaries, entry metadata, and constant-hoisting state have one owner;
   symbol maps are checked secondary indexes used only for cross-definition
   references. Current-body conversion no longer rejoins parallel registries.
+- Semantic EGIR fusion: all 52 extraction sites, 16 `unreachable!` arms, and
+  one production assertion were removed. Candidates retain stable
+  `SemanticOpId` identities instead of body/block/vector coordinates and
+  resolve them at the rewrite boundary. Array inputs retain their node and
+  `SoacInputType` together in `FusionInput`, so normalization and
+  deduplication no longer rejoin parallel node/type vectors. Missing regions,
+  non-value operands, changed operation variants, malformed results, and
+  invalid field mappings now reject the candidate or propagate a structured
+  fusion error through semantic optimization.
 
-No-extraction Clippy gates now protect the completed planner, graph crate, and
-typed SPIR-V builder scopes.
+No-extraction Clippy gates now protect the completed planner, fusion, graph
+crate, and typed SPIR-V builder scopes.
 
 ## Remaining remedies
 

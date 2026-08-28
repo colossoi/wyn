@@ -12,14 +12,18 @@
 //! bucket lambda shared by ordered scatter and reducing histogram updates.
 
 use polytype::Type;
+use thiserror::Error;
 
 use crate::ast::{Span, TypeName};
 
 use crate::egir::ir::BodySite;
-use crate::egir::program::Entry;
+use crate::egir::program::{Entry, SemanticOpId};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
-use crate::egir::types::{EGraph, Semantic, ValueId};
+use crate::egir::types::{
+    EGraph, Semantic, SideEffect, SideEffectKind, SoacEffect, SoacInputType, ValueId,
+};
+use crate::flow::BlockId;
 
 use crate::LookupMap;
 
@@ -33,6 +37,101 @@ mod screma;
 mod space;
 mod support;
 mod vertical;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FusionEffect(SemanticOpId);
+
+#[derive(Clone, Debug)]
+struct FusionInput {
+    node: ValueId,
+    ty: SoacInputType,
+}
+
+impl FusionInput {
+    fn element(&self) -> Type<TypeName> {
+        self.ty.element()
+    }
+
+    fn join(nodes: &[ValueId], types: &[SoacInputType]) -> Option<Vec<Self>> {
+        if nodes.len() != types.len() {
+            return None;
+        }
+        Some(nodes.iter().copied().zip(types.iter().cloned()).map(|(node, ty)| Self { node, ty }).collect())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResolvedFusionEffect {
+    body: BodySite,
+    block: BlockId,
+    index: usize,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum FusionError {
+    #[error("semantic fusion operation {0:?} is absent from the program")]
+    MissingEffect(SemanticOpId),
+
+    #[error("semantic fusion operation {0:?} occurs more than once in the program")]
+    DuplicateEffect(SemanticOpId),
+
+    #[error("semantic fusion operations {left:?} and {right:?} are no longer in the same block")]
+    SeparatedEffects {
+        left: SemanticOpId,
+        right: SemanticOpId,
+    },
+
+    #[error("semantic fusion candidate is no longer valid: {0}")]
+    InvalidCandidate(String),
+}
+
+fn resolve_pair(
+    program: &Segmented,
+    left: FusionEffect,
+    right: FusionEffect,
+) -> FusionResult<(ResolvedFusionEffect, ResolvedFusionEffect)> {
+    let left_location = left.resolve(program)?;
+    let right_location = right.resolve(program)?;
+    if left_location.body != right_location.body || left_location.block != right_location.block {
+        return Err(FusionError::SeparatedEffects {
+            left: left.0,
+            right: right.0,
+        });
+    }
+    Ok((left_location, right_location))
+}
+
+type FusionResult<T> = std::result::Result<T, FusionError>;
+
+impl FusionEffect {
+    fn from_effect(effect: &SideEffect) -> Option<Self> {
+        let SideEffectKind::Soac(SoacEffect(id, _)) = effect.kind() else {
+            return None;
+        };
+        Some(Self(*id))
+    }
+
+    fn resolve(self, program: &Segmented) -> FusionResult<ResolvedFusionEffect> {
+        let mut found = None;
+        for (body, graph, _) in bodies(program) {
+            for (block, contents) in &graph.skeleton.blocks {
+                for (index, effect) in contents.side_effects.iter().enumerate() {
+                    if Self::from_effect(effect) != Some(self) {
+                        continue;
+                    }
+                    if found.is_some() {
+                        return Err(FusionError::DuplicateEffect(self.0));
+                    }
+                    found = Some(ResolvedFusionEffect { body, block, index });
+                }
+            }
+        }
+        let Some(found) = found else {
+            return Err(FusionError::MissingEffect(self.0));
+        };
+        Ok(found)
+    }
+}
 
 enum Rewrite {
     Indexed(indexed::Candidate),
@@ -56,7 +155,7 @@ fn analyze(program: &Segmented, oracle: &SemanticGraph) -> Option<Rewrite> {
 }
 
 /// Consume a rewrite selected by [`analyze`].
-fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
+fn apply(program: Segmented, rewrite: Rewrite) -> FusionResult<Segmented> {
     match rewrite {
         Rewrite::Indexed(candidate) => indexed::apply(program, candidate),
         Rewrite::Vertical(candidate) => vertical::apply(program, candidate),
@@ -69,10 +168,10 @@ fn apply(program: Segmented, rewrite: Rewrite) -> Segmented {
 
 /// Apply at most one fusion rewrite while keeping candidate types private to
 /// this module. The caller rebuilds the dependency oracle after a change.
-pub(super) fn rewrite_once(program: Segmented, oracle: &SemanticGraph) -> (Segmented, bool) {
+pub(super) fn rewrite_once(program: Segmented, oracle: &SemanticGraph) -> FusionResult<(Segmented, bool)> {
     match analyze(&program, oracle) {
-        Some(rewrite) => (apply(program, rewrite), true),
-        None => (program, false),
+        Some(rewrite) => Ok((apply(program, rewrite)?, true)),
+        None => Ok((program, false)),
     }
 }
 
@@ -94,32 +193,46 @@ pub(super) fn bodies(
         )
 }
 
-pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> (&EGraph, Span, String) {
-    let graph = program.body_graph(site).expect("semantic fusion body");
+pub(super) fn graph_and_span(program: &Segmented, site: BodySite) -> FusionResult<(&EGraph, Span, String)> {
+    let Some(graph) = program.body_graph(site) else {
+        return Err(FusionError::InvalidCandidate(format!(
+            "semantic fusion body {site:?} is absent"
+        )));
+    };
     let (span, scope) = match site {
         BodySite::Entry(index) => {
-            let entry = &program.entry_points[index];
+            let Some(entry) = program.entry_points.get(index) else {
+                return Err(FusionError::InvalidCandidate(format!(
+                    "semantic fusion entry {index} is absent"
+                )));
+            };
             (entry.span, entry.name.clone())
         }
         BodySite::Function(region) => {
-            let function = program.region(region).expect("fusion region");
+            let Some(function) = program.region(region) else {
+                return Err(FusionError::InvalidCandidate(format!(
+                    "semantic fusion region {region:?} is absent"
+                )));
+            };
             (function.span, function.name.clone())
         }
-        BodySite::Constant(_) => unreachable!("semantic fusion never targets constants"),
+        BodySite::Constant(_) => {
+            return Err(FusionError::InvalidCandidate(
+                "semantic fusion cannot target a constant body".to_owned(),
+            ));
+        }
     };
-    (graph, span, scope)
+    Ok((graph, span, scope))
 }
 
 pub(super) fn capture_types<'a>(
     types: &LookupMap<ValueId, Type<TypeName>>,
     captures: impl Iterator<Item = &'a super::ir::OperandRef>,
-) -> Vec<Type<TypeName>> {
+) -> Option<Vec<Type<TypeName>>> {
     captures
         .map(|capture| {
-            let value = capture
-                .value()
-                .expect("fusion cannot internalize an address-only capture before destination selection");
-            types.get(&value).expect("capture node is absent from its owning graph").clone()
+            let value = capture.value()?;
+            types.get(&value).cloned()
         })
         .collect()
 }
@@ -128,30 +241,21 @@ pub(super) fn capture_types<'a>(
 /// return an old-index to new-index map. Fusion frequently concatenates input
 /// vectors from independently built operations; retaining duplicate nodes
 /// would duplicate region parameters and obscure equal-domain provenance.
-pub(super) fn deduplicate_array_inputs(
-    nodes: Vec<ValueId>,
-    array_types: Vec<Type<TypeName>>,
-    elem_types: Vec<Type<TypeName>>,
-) -> (Vec<ValueId>, Vec<Type<TypeName>>, Vec<Type<TypeName>>, Vec<usize>) {
-    debug_assert_eq!(nodes.len(), array_types.len());
-    debug_assert_eq!(nodes.len(), elem_types.len());
-    let mut unique_nodes = Vec::new();
-    let mut unique_array_types = Vec::new();
-    let mut unique_elem_types = Vec::new();
-    let mut remap = Vec::with_capacity(nodes.len());
-    for ((node, array_ty), elem_ty) in nodes.into_iter().zip(array_types).zip(elem_types) {
-        if let Some(index) = unique_nodes.iter().position(|existing| *existing == node) {
-            debug_assert_eq!(unique_array_types[index], array_ty);
-            debug_assert_eq!(unique_elem_types[index], elem_ty);
+fn deduplicate_array_inputs(inputs: Vec<FusionInput>) -> (Vec<FusionInput>, Vec<usize>) {
+    let mut unique = Vec::<FusionInput>::new();
+    let mut remap = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if let Some(index) = unique.iter().position(|existing| existing.node == input.node) {
+            debug_assert_eq!(unique[index].ty.array, input.ty.array);
+            debug_assert_eq!(unique[index].ty.dimensions, input.ty.dimensions);
+            debug_assert_eq!(unique[index].ty.layout, input.ty.layout);
             remap.push(index);
         } else {
-            remap.push(unique_nodes.len());
-            unique_nodes.push(node);
-            unique_array_types.push(array_ty);
-            unique_elem_types.push(elem_ty);
+            remap.push(unique.len());
+            unique.push(input);
         }
     }
-    (unique_nodes, unique_array_types, unique_elem_types, remap)
+    (unique, remap)
 }
 
 #[cfg(test)]

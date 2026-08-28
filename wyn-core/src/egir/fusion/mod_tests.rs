@@ -20,7 +20,7 @@ fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
     let oracle = SemanticGraph::new(&dependencies);
     let horizontal = horizontal::analyze(&program, &oracle)
         .expect("the sibling collective and array producer should fuse horizontally");
-    let program = horizontal::apply(program, horizontal);
+    let program = horizontal::apply(program, horizontal).expect("horizontal fusion failed");
 
     let producer = program
         .entry_points
@@ -44,8 +44,8 @@ fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
                 egir::semantic_graph::summary(&program)
             )
         });
-    let program = vertical::apply(program, vertical);
-    let program = egir::optimize_semantic_operations(program);
+    let program = vertical::apply(program, vertical).expect("vertical fusion failed");
+    let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let optimized = egir::lift_stage_uniform_values(program);
     egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
 }
@@ -95,7 +95,7 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
     loop {
         let dependencies = egir::semantic_graph::dependencies(&fused);
         let oracle = SemanticGraph::new(&dependencies);
-        let (next, changed) = rewrite_once(fused, &oracle);
+        let (next, changed) = rewrite_once(fused, &oracle).expect("fusion rewrite failed");
         fused = next;
         if !changed {
             break;

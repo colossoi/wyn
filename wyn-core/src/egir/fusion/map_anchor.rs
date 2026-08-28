@@ -11,26 +11,22 @@ use std::collections::HashSet;
 use polytype::Type;
 use smallvec::SmallVec;
 
-use super::{graph_and_span, horizontal, screma as fusion_screma, support};
+use super::{graph_and_span, horizontal, screma as fusion_screma, support, FusionEffect, FusionInput};
 use crate::ast::TypeName;
 use crate::egir::graph_ops;
-use crate::egir::ir::{splice_effect_tokens, BodySite};
+use crate::egir::ir::splice_effect_tokens;
 use crate::egir::program::{Func, ProgramIdentities, SemanticProgramData};
 use crate::egir::reify::Segmented;
 use crate::egir::semantic_graph::SemanticGraph;
 use crate::egir::soac::screma;
 use crate::egir::types::{
     EGraph, ResourceAccess, SegSpace, Semantic, SideEffect, SideEffectKind, Soac, SoacEffect,
-    SoacInputType, ValueId,
 };
-use crate::flow::BlockId;
 use crate::LookupMap;
 
 pub(super) struct Candidate {
-    pub site: BodySite,
-    pub block: BlockId,
-    pub producer: usize,
-    pub consumer: usize,
+    pub producer: FusionEffect,
+    pub consumer: FusionEffect,
     pub routes: Vec<fusion_screma::InputRoute>,
 }
 
@@ -50,12 +46,11 @@ pub(super) fn analyze(
     oracle: &SemanticGraph,
     consumer_inputs: impl Fn(&SideEffect) -> Option<usize>,
 ) -> Option<Candidate> {
-    super::bodies(inner).find_map(|(site, graph, _)| find_in_graph(graph, site, oracle, &consumer_inputs))
+    super::bodies(inner).find_map(|(_, graph, _)| find_in_graph(graph, oracle, &consumer_inputs))
 }
 
 fn find_in_graph(
     graph: &EGraph,
-    site: BodySite,
     oracle: &SemanticGraph,
     consumer_inputs: &impl Fn(&SideEffect) -> Option<usize>,
 ) -> Option<Candidate> {
@@ -90,7 +85,7 @@ fn find_in_graph(
                     continue;
                 };
                 let SideEffectKind::Soac(SoacEffect(consumer_id, _)) = &consumer.kind else {
-                    unreachable!("anchored consumer recognizer accepted a non-SOAC");
+                    continue;
                 };
                 if consumer.result.is_none() || oracle.conflicts(producer_id, consumer_id) {
                     continue;
@@ -107,11 +102,14 @@ fn find_in_graph(
                     continue;
                 }
 
-                let routes = consumer.operands[..input_count]
+                let Some(input_operands) = consumer.operands.get(..input_count) else {
+                    continue;
+                };
+                let routes = input_operands
                     .iter()
                     .enumerate()
                     .filter_map(|(consumer_input, operand)| {
-                        let operand = operand.value().expect("anchored SOAC inputs are values or views");
+                        let operand = operand.value()?;
                         let field = graph_ops::projection_index(graph, operand, producer_result)?;
                         let screma::ResultId::Post(producer_post_output) =
                             producer_op.form.result_id(field)?
@@ -140,10 +138,8 @@ fn find_in_graph(
                 }
 
                 return Some(Candidate {
-                    site,
-                    block: block_id,
-                    producer: producer_index,
-                    consumer: consumer_index,
+                    producer: FusionEffect(*producer_id),
+                    consumer: FusionEffect(*consumer_id),
                     routes,
                 });
             }
@@ -155,17 +151,17 @@ fn find_in_graph(
 pub(super) fn compose(
     inner: &Segmented,
     candidate: &Candidate,
-    consumer_input_nodes: &[ValueId],
-    consumer_inputs: &[SoacInputType],
+    consumer_inputs: &[FusionInput],
     consumer_lambda: &screma::Lambda,
-) -> Option<Composition> {
-    let (graph, span, scope) = graph_and_span(inner, candidate.site);
+) -> super::FusionResult<Option<Composition>> {
+    let (producer_location, _) = super::resolve_pair(inner, candidate.producer, candidate.consumer)?;
+    let (graph, span, scope) = graph_and_span(inner, producer_location.body)?;
     let outer_types = graph
         .nodes
         .iter()
         .map(|(node, data)| (node, data.ty.clone()))
         .collect::<LookupMap<_, Type<TypeName>>>();
-    let producer = horizontal::extract_screma(graph, candidate.block, candidate.producer);
+    let producer = horizontal::extract_screma(graph, producer_location.block, producer_location.index)?;
     let mut identities = inner.data.identities.clone();
     let mut context = fusion_screma::Context {
         program: inner,
@@ -177,22 +173,23 @@ pub(super) fn compose(
     let normalized = fusion_screma::fuse_map_into_lambda(
         &mut context,
         fusion_screma::Source {
-            input_nodes: &producer.input_nodes,
-            inputs: &producer.op.inputs,
+            inputs: &producer.inputs,
             form: &producer.op.form,
         },
         fusion_screma::LambdaSource {
-            input_nodes: consumer_input_nodes,
             inputs: consumer_inputs,
             lambda: consumer_lambda,
         },
         &candidate.routes,
-    )?;
-    Some(Composition {
+    );
+    let Some(normalized) = normalized else {
+        return Ok(None);
+    };
+    Ok(Some(Composition {
         producer_space: producer.space,
         normalized,
         identities,
-    })
+    }))
 }
 
 pub(super) fn finish(
@@ -200,26 +197,34 @@ pub(super) fn finish(
     candidate: Candidate,
     consumer_id: egir::program::SemanticOpId,
     consumer_op: Soac<Semantic>,
-    input_nodes: Vec<ValueId>,
+    inputs: Vec<FusionInput>,
     synthesized: Vec<Func<Semantic>>,
     identities: ProgramIdentities,
-) -> Segmented {
-    let rebuilt = inner.rewrite_body(candidate.site, |body| {
-        let rewrite = |graph: &mut EGraph| {
+) -> super::FusionResult<Segmented> {
+    let (producer, consumer) = super::resolve_pair(&inner, candidate.producer, candidate.consumer)?;
+    let rebuilt = inner.try_rewrite_body(producer.body, |body| {
+        support::try_rewrite_body_graph(body, |graph| {
             let operands =
-                input_nodes.iter().map(|input| graph.operand_ref(*input)).collect::<SmallVec<_>>();
-            let block = &mut graph.skeleton.blocks[candidate.block];
-            let effects = splice_effect_tokens(
-                block.side_effects[candidate.producer].effects,
-                block.side_effects[candidate.consumer].effects,
-            );
-            let consumer = &mut block.side_effects[candidate.consumer];
-            consumer.kind = SideEffectKind::Soac(SoacEffect(consumer_id, consumer_op.clone()));
-            consumer.operands = operands;
-            consumer.effects = effects;
-            block.side_effects.remove(candidate.producer);
-        };
-        support::rewrite_body_graph(body, rewrite)
-    });
-    rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData { identities, ..data })
+                inputs.iter().map(|input| graph.operand_ref(input.node)).collect::<SmallVec<_>>();
+            let Some(block) = graph.skeleton.blocks.get_mut(producer.block) else {
+                return Err(super::FusionError::MissingEffect(candidate.producer.0));
+            };
+            let Some(producer_effect) = block.side_effects.get(producer.index) else {
+                return Err(super::FusionError::MissingEffect(candidate.producer.0));
+            };
+            let Some(consumer_effect) = block.side_effects.get(consumer.index) else {
+                return Err(super::FusionError::MissingEffect(candidate.consumer.0));
+            };
+            let effects = splice_effect_tokens(producer_effect.effects, consumer_effect.effects);
+            let Some(consumer_effect) = block.side_effects.get_mut(consumer.index) else {
+                return Err(super::FusionError::MissingEffect(candidate.consumer.0));
+            };
+            consumer_effect.kind = SideEffectKind::Soac(SoacEffect(consumer_id, consumer_op.clone()));
+            consumer_effect.operands = operands;
+            consumer_effect.effects = effects;
+            block.side_effects.remove(producer.index);
+            Ok(())
+        })
+    })?;
+    Ok(rebuilt.extend_functions(synthesized).map_data(|data| SemanticProgramData { identities, ..data }))
 }

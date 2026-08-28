@@ -384,7 +384,7 @@ fn compile_file(
     });
     let program = time("egir_optimize_semantic_operations", verbose, || {
         wyn_core::egir::optimize_semantic_operations(program)
-    });
+    })?;
     let program = time("egir_lift_stage_uniform_values", verbose, || {
         wyn_core::egir::lift_stage_uniform_values(program)
     });
