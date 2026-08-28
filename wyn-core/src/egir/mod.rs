@@ -10,25 +10,25 @@
 //! (acyclic, GVN'd, side-effect skeleton, scoped elaboration as
 //! extraction): <https://cfallin.org/blog/2026/04/09/aegraph/>.
 
-pub(crate) mod allocation;
-pub(crate) mod elaborate;
+pub mod allocation;
+pub mod elaborate;
 mod extract;
 mod fold;
 pub(crate) mod inlining;
 pub mod ir;
 mod loop_analysis;
-pub(crate) mod materialize;
-pub(crate) mod partial_inline;
+pub mod materialize;
+pub mod partial_inline;
 pub(crate) mod physical_call_abi;
 pub(crate) mod physical_flow;
 pub mod program;
 pub mod publish;
-pub(crate) mod resource_erasure;
+pub mod resource_erasure;
 pub mod rewrite;
 mod scoped_map;
-pub(crate) mod skel_opt;
+pub mod skel_opt;
 pub mod soac;
-pub(crate) mod soac_expand;
+pub mod soac_expand;
 pub mod types;
 
 pub mod builder;
@@ -40,8 +40,8 @@ pub mod parallelize;
 pub(crate) mod pipeline_seed;
 pub mod reify;
 pub(crate) mod semantic_graph;
-pub(crate) mod semantic_opt;
-pub(crate) mod stage_lift;
+pub mod semantic_opt;
+pub mod stage_lift;
 pub(crate) mod structured_cfg;
 // Keep the complete query surface available to later scheduling consumers;
 // lifting and residency currently use only a subset of the recorded facts.
@@ -50,7 +50,10 @@ pub(crate) mod stage_variance;
 pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
 
-pub use allocation::{plan_logical_resources, ResourcesAllocated};
+pub use allocation::{
+    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources, resolve_residency,
+    resolve_scratch_sizes, verify_allocated_resources, ResidencyDraft, ResourcesAllocated,
+};
 pub use elaborate::elaborate;
 pub use materialize::{materialize_dynamic_extracts, Materialized};
 pub use parallelize::plan;
@@ -59,8 +62,9 @@ pub use reify::reify_soacs;
 pub use resource_erasure::{erase_resources, ResourcesErased};
 pub use rewrite::rewrite;
 pub use semantic_opt::{
-    lift_stage_uniform_values, optimize_semantic_operations, optimize_semantic_operations_with_trace,
-    Optimized, SemanticOperationsOptimized, SemanticOptimizationRelation, SemanticOptimizationTrace,
+    eliminate_dead_semantic_operations, fuse_semantic_operations, lift_stage_uniform_values,
+    optimize_semantic_operations, optimize_semantic_operations_with_trace, Optimized,
+    SemanticOperationsOptimized, SemanticOptimizationRelation, SemanticOptimizationTrace,
 };
 pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
 pub use soac_expand::{expand_soacs, SoacsExpanded};

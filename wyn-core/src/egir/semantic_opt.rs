@@ -81,26 +81,58 @@ pub fn optimize_semantic_operations_with_trace(
     // between rewrites keeps the legality oracle sound — a stale DAG is the
     // top correctness risk. Dead elimination runs first to shrink the graph.
     loop {
-        let deps = super::semantic_graph::dependencies(&program);
-        let oracle = SemanticGraph::new(&deps);
-
-        if let Some(patch) = analyze_dead_seg_ops(&program) {
-            let before = semantic_operation_fingerprints(&program);
-            program = apply_dead_seg_ops(program, patch);
-            trace.record(before, semantic_operation_fingerprints(&program));
+        let (rewritten, changed, step_trace) = eliminate_dead_semantic_operations(program);
+        program = rewritten;
+        trace.extend(step_trace);
+        if changed {
             continue;
         }
-        let before = semantic_operation_fingerprints(&program);
-        let (rewritten, changed) = super::fusion::rewrite_once(program, &oracle);
+
+        let (rewritten, changed, step_trace) = fuse_semantic_operations(program);
         program = rewritten;
+        trace.extend(step_trace);
         if changed {
-            trace.record(before, semantic_operation_fingerprints(&program));
             continue;
         }
         break;
     }
 
     (program.retag(), trace)
+}
+
+/// Apply one whole-program dead semantic-operation elimination step.
+///
+/// The returned boolean reports whether the program changed. Callers driving
+/// the production fixpoint must rebuild all semantic analyses before invoking
+/// another semantic optimization sub-pass.
+pub fn eliminate_dead_semantic_operations(
+    program: Segmented,
+) -> (Segmented, bool, SemanticOptimizationTrace) {
+    let Some(patch) = analyze_dead_seg_ops(&program) else {
+        return (program, false, SemanticOptimizationTrace::default());
+    };
+    let before = semantic_operation_fingerprints(&program);
+    let program = apply_dead_seg_ops(program, patch);
+    let mut trace = SemanticOptimizationTrace::default();
+    trace.record(before, semantic_operation_fingerprints(&program));
+    (program, true, trace)
+}
+
+/// Apply at most one legal semantic fusion rewrite.
+///
+/// Candidate analysis and its dependency oracle are intentionally rebuilt for
+/// every call. This keeps the public sub-pass boundary safe for inspection
+/// clients while preserving the production optimizer's legality invariant.
+pub fn fuse_semantic_operations(program: Segmented) -> (Segmented, bool, SemanticOptimizationTrace) {
+    let dependencies = super::semantic_graph::dependencies(&program);
+    let oracle = SemanticGraph::new(&dependencies);
+    let before = semantic_operation_fingerprints(&program);
+    let (program, changed) = super::fusion::rewrite_once(program, &oracle);
+    let mut trace = SemanticOptimizationTrace::default();
+    if changed {
+        trace.record(before, semantic_operation_fingerprints(&program));
+    }
+    (program, changed, trace)
 }
 
 /// Lift values that are uniform at their execution stage, then validate the
@@ -136,6 +168,10 @@ fn semantic_operation_fingerprints(program: &Segmented) -> BTreeMap<SemanticOpId
 }
 
 impl SemanticOptimizationTrace {
+    fn extend(&mut self, mut other: Self) {
+        self.relations.append(&mut other.relations);
+    }
+
     fn record(&mut self, before: BTreeMap<SemanticOpId, String>, after: BTreeMap<SemanticOpId, String>) {
         let removed = before.keys().filter(|id| !after.contains_key(id)).copied();
         let added = after.keys().filter(|id| !before.contains_key(id)).copied();

@@ -7,6 +7,8 @@
 mod cost;
 mod residency;
 
+pub use residency::resolve_residency;
+
 use crate::ast::TypeName;
 use crate::interface;
 use crate::interface::{EntryInputKind, EntryOutputKind};
@@ -43,8 +45,8 @@ pub type ResourcesAllocated = super::program::Program<
     RewriteGlobal,
 >;
 
-pub(crate) enum ResidencyDraftTag {}
-pub(crate) type ResidencyDraft = super::program::Program<
+pub enum ResidencyDraftTag {}
+pub type ResidencyDraft = super::program::Program<
     ResidencyDraftTag,
     super::ir::ProgramFamily<
         Semantic<SemanticResourceRef>,
@@ -87,7 +89,7 @@ impl ResourcesAllocated {
 /// Establish target-independent residency and logical resources.
 pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
     let program = allocate_semantic_resources(program)?;
-    let program = residency::resolve_residency(program)?;
+    let program = resolve_residency(program)?;
     let program = resolve_scratch_sizes(program);
     let program = finalize_staged_ir(program)?;
     if cfg!(debug_assertions) {
@@ -99,7 +101,7 @@ pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, 
 /// Replace pre-allocation descriptor bindings with target-independent logical
 /// resource identities. This is intentionally the first pass allowed to own
 /// or create resources.
-fn allocate_semantic_resources(program: Optimized) -> Result<ResidencyDraft, ConvertError> {
+pub fn allocate_semantic_resources(program: Optimized) -> Result<ResidencyDraft, ConvertError> {
     let mut builder = ResourceAllocationBuilder::default();
     reserve_host_resources(&program, &mut builder)?;
     lower_host_size_policies(&program, &mut builder)?;
@@ -802,7 +804,7 @@ fn remap_entry_resources(
     })
 }
 
-pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result<(), String> {
+pub fn verify_allocated_resources(program: &ResourcesAllocated) -> Result<(), String> {
     let check_size = |size: &LogicalSize| match size {
         LogicalSize::LikeResource { resource, .. } if !program.data.core.resources.contains(*resource) => {
             Err(format!("resource size references missing source {resource:?}"))
@@ -840,7 +842,7 @@ pub(crate) fn verify_allocated_resources(program: &ResourcesAllocated) -> Result
     Ok(())
 }
 
-fn resolve_scratch_sizes(program: ResidencyDraft) -> ResidencyDraft {
+pub fn resolve_scratch_sizes(program: ResidencyDraft) -> ResidencyDraft {
     let mut resolved = Vec::new();
     for entry in &program.entry_points {
         for (_, block) in &entry.graph.skeleton.blocks {
@@ -931,7 +933,7 @@ fn resolve_scratch_sizes(program: ResidencyDraft) -> ResidencyDraft {
     Program::from_parts(functions, externs, entry_points, constants, data, global_context)
 }
 
-fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated, ConvertError> {
+pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated, ConvertError> {
     let Program {
         functions,
         externs,

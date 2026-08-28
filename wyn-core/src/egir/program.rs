@@ -1491,12 +1491,11 @@ pub struct ResidentStorage {
 
 pub type StagedProgram = StagedIr<AllocatedEntry, Type<TypeName>, ResidentStorage, StageOrigin>;
 
-pub(crate) type StagedProgramBuilder =
-    StagedIrBuilder<EntryId, Type<TypeName>, ResidentStorage, StageOrigin>;
+pub type StagedProgramBuilder = StagedIrBuilder<EntryId, Type<TypeName>, ResidentStorage, StageOrigin>;
 
-/// Private lowering state used while residency discovers stage boundaries.
+/// Intermediate lowering state used while residency discovers stage boundaries.
 #[derive(Debug)]
-pub(crate) struct ResidencyProgramData {
+pub struct ResidencyProgramData {
     pub core: ResourceProgramData,
     pub stages: StagedProgramBuilder,
     pub stage_ids: HashMap<EntryId, wyn_staged_ir::StageId>,
