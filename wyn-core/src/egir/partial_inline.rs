@@ -21,15 +21,12 @@ use crate::types;
 use crate::types::TypeExt;
 use crate::FunctionId;
 use crate::LookupMap;
-use wyn_base::IdSource;
 
 use super::inlining;
 use super::ir::Language;
 use super::loop_analysis::{LoopAnalysis, LoopInvariance};
 use super::program::Func;
-use super::types::{
-    EGraph, EffectOp, EffectToken, Physical, SideEffectKind, SideEffectSite, ValueId, ValueKind,
-};
+use super::types::{EGraph, Physical, ValueId, ValueKind};
 
 #[cfg(test)]
 #[path = "partial_inline_tests.rs"]
@@ -49,10 +46,63 @@ const MAX_INLINED_BLOCKS: usize = 32;
 const MAX_INLINES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct InliningStats {
-    calls_inlined: usize,
-    node_budget: usize,
-    block_budget: usize,
+pub struct PartialInliningReasonStats {
+    pub calls: usize,
+    pub nodes: usize,
+    pub blocks: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialInliningReason {
+    FixedComposite,
+    MixedVariance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialInliningTermination {
+    Exhausted,
+    CallLimit,
+    NodeLimit,
+    BlockLimit,
+}
+
+impl Default for PartialInliningTermination {
+    fn default() -> Self {
+        Self::Exhausted
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PartialInliningStats {
+    pub fixed_composite: PartialInliningReasonStats,
+    pub mixed_variance: PartialInliningReasonStats,
+    pub termination: PartialInliningTermination,
+}
+
+impl PartialInliningStats {
+    fn totals(self) -> PartialInliningReasonStats {
+        PartialInliningReasonStats {
+            calls: self.fixed_composite.calls + self.mixed_variance.calls,
+            nodes: self.fixed_composite.nodes + self.mixed_variance.nodes,
+            blocks: self.fixed_composite.blocks + self.mixed_variance.blocks,
+        }
+    }
+
+    fn record(&mut self, reason: PartialInliningReason, nodes: usize, blocks: usize) {
+        let stats = match reason {
+            PartialInliningReason::FixedComposite => &mut self.fixed_composite,
+            PartialInliningReason::MixedVariance => &mut self.mixed_variance,
+        };
+        stats.calls += 1;
+        stats.nodes += nodes;
+        stats.blocks += blocks;
+    }
+}
+
+/// Per-body diagnostics from the shared bounded optimization driver.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PartialInliningTrace {
+    pub bodies: Vec<(super::ir::BodySite, PartialInliningStats)>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,99 +112,83 @@ struct Candidate {
     callee: FunctionId,
     callee_nodes: usize,
     callee_blocks: usize,
+    reason: PartialInliningReason,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct EffectfulCandidate {
-    effect: SideEffectSite,
-    callee: FunctionId,
+enum CandidateSearch {
+    Found(Candidate),
+    Limited(PartialInliningTermination),
+    Exhausted,
 }
 
 /// Inline profitable mixed-variance calls in every physical body. The ordinary
 /// scoped elaborator then performs CSE and LICM on the exposed DAG.
 pub fn partially_inline_calls(
-    program: super::soac_expand::SoacsExpanded,
+    program: super::eliminate_call_places::CallsPlaceFree,
 ) -> Result<PartiallyInlined, String> {
+    partially_inline_calls_with_trace(program).map(|(program, _)| program)
+}
+
+/// Run bounded partial inlining and retain per-policy budget diagnostics for
+/// inspection clients.
+pub fn partially_inline_calls_with_trace(
+    program: super::eliminate_call_places::CallsPlaceFree,
+) -> Result<(PartiallyInlined, PartialInliningTrace), String> {
     // Snapshot callable bodies so callers can be rewritten without aliasing
     // `program.functions`. A caller-local fixpoint handles calls revealed by a
     // clone, so snapshots do not need to be refreshed after each body.
     let callees: LookupMap<FunctionId, Func<Physical>> =
         program.functions.iter().map(|function| (function.region, function.clone())).collect();
-    program
-        .try_map_graphs_with_state(|site, mut graph, _, context| {
-            inline_body(&mut graph, &callees, &mut context.effect_ids)
+    let mut trace = PartialInliningTrace::default();
+    let program = program
+        .try_map_graphs_with_state(|site, mut graph, _, _| {
+            let stats = inline_body(&mut graph, &callees)
                 .map_err(|error| format!("partial inlining in {site:?} failed: {error}"))?;
-            Ok(graph)
+            trace.bodies.push((site, stats));
+            Ok::<_, String>(graph)
         })
-        .map(|program| program.retag_physical())
+        .map(|program| program.retag_physical())?;
+    Ok((program, trace))
 }
 
 fn inline_body(
     graph: &mut EGraph<Physical>,
     callees: &LookupMap<FunctionId, Func<Physical>>,
-    effect_ids: &mut IdSource<EffectToken>,
-) -> Result<InliningStats, String> {
-    let mut stats = InliningStats::default();
-    let mut effectful_inlines = 0usize;
-    while let Some(candidate) = find_effectful_candidate(graph, callees) {
-        if effectful_inlines == 1024 {
-            return Err("effectful call inlining exceeded the acyclic call-graph bound".into());
-        }
-        let callee = &callees[&candidate.callee];
-        let cost = inlining::inline_effectful_call(graph, candidate.effect, callee, effect_ids)
-            .map_err(|error| format!("while inlining `{}`: {error}", callee.name))?;
-        effectful_inlines += 1;
-        stats.calls_inlined += 1;
-        stats.node_budget += cost.nodes;
-        stats.block_budget += cost.blocks;
-    }
-    while stats.calls_inlined < MAX_INLINES
-        && stats.node_budget < MAX_INLINED_NODES
-        && stats.block_budget < MAX_INLINED_BLOCKS
-    {
-        let remaining_nodes = MAX_INLINED_NODES - stats.node_budget;
-        let remaining_blocks = MAX_INLINED_BLOCKS - stats.block_budget;
-        let Some(candidate) = find_candidate(graph, callees, remaining_nodes, remaining_blocks) else {
+) -> Result<PartialInliningStats, String> {
+    let mut stats = PartialInliningStats::default();
+    loop {
+        let totals = stats.totals();
+        if totals.calls >= MAX_INLINES {
+            stats.termination = PartialInliningTermination::CallLimit;
             break;
+        }
+        if totals.nodes >= MAX_INLINED_NODES {
+            stats.termination = PartialInliningTermination::NodeLimit;
+            break;
+        }
+        if totals.blocks >= MAX_INLINED_BLOCKS {
+            stats.termination = PartialInliningTermination::BlockLimit;
+            break;
+        }
+        let remaining_nodes = MAX_INLINED_NODES - totals.nodes;
+        let remaining_blocks = MAX_INLINED_BLOCKS - totals.blocks;
+        let candidate = match find_candidate(graph, callees, remaining_nodes, remaining_blocks) {
+            CandidateSearch::Found(candidate) => candidate,
+            CandidateSearch::Limited(termination) => {
+                stats.termination = termination;
+                break;
+            }
+            CandidateSearch::Exhausted => {
+                stats.termination = PartialInliningTermination::Exhausted;
+                break;
+            }
         };
         let callee = &callees[&candidate.callee];
         inlining::inline_call_at_block(graph, candidate.call, candidate.block, callee)
             .map_err(|error| format!("while inlining `{}`: {error}", callee.name))?;
-        stats.calls_inlined += 1;
-        stats.node_budget += candidate.callee_nodes;
-        stats.block_budget += candidate.callee_blocks;
+        stats.record(candidate.reason, candidate.callee_nodes, candidate.callee_blocks);
     }
     Ok(stats)
-}
-
-fn find_effectful_candidate(
-    graph: &EGraph<Physical>,
-    callees: &LookupMap<FunctionId, Func<Physical>>,
-) -> Option<EffectfulCandidate> {
-    for (block, body) in &graph.skeleton.blocks {
-        for (index, effect) in body.side_effects.iter().enumerate() {
-            let SideEffectKind::Effect(EffectOp::Call { site }) = effect.kind() else {
-                continue;
-            };
-            let call = graph.call(*site);
-            if call.effects() == super::types::CallEffects::Pure
-                && call.arguments().all(|argument| argument.place().is_none())
-                && call.result().places().is_empty()
-            {
-                continue;
-            }
-            let callee_id = call.callee();
-            if !callees.contains_key(&callee_id) {
-                continue;
-            }
-            let effect = SideEffectSite { block, index };
-            return Some(EffectfulCandidate {
-                effect,
-                callee: callee_id,
-            });
-        }
-    }
-    None
 }
 
 fn find_candidate(
@@ -162,7 +196,8 @@ fn find_candidate(
     callees: &LookupMap<FunctionId, Func<Physical>>,
     remaining_nodes: usize,
     remaining_blocks: usize,
-) -> Option<Candidate> {
+) -> CandidateSearch {
+    let mut limited = None;
     // A composite fixed array is an SSA value, so leaving it behind a call
     // boundary passes the complete aggregate by value. Map kernels make this
     // especially costly: every lane calls the helper, which commonly
@@ -197,18 +232,23 @@ fn find_candidate(
             let Some(cost) = inlining::inlineable_call_cost_at_block(graph, node, block_id, callee) else {
                 continue;
             };
-            if cost.nodes <= MAX_CALLEE_NODES
-                && cost.nodes <= remaining_nodes
-                && cost.blocks <= MAX_CALLEE_BLOCKS
-                && cost.blocks <= remaining_blocks
-            {
-                return Some(Candidate {
-                    call: node,
-                    block: block_id,
-                    callee: callee_name,
-                    callee_nodes: cost.nodes,
-                    callee_blocks: cost.blocks,
-                });
+            if cost.nodes > MAX_CALLEE_NODES || cost.blocks > MAX_CALLEE_BLOCKS {
+                continue;
+            }
+            let candidate = Candidate {
+                call: node,
+                block: block_id,
+                callee: callee_name,
+                callee_nodes: cost.nodes,
+                callee_blocks: cost.blocks,
+                reason: PartialInliningReason::FixedComposite,
+            };
+            if candidate.callee_nodes > remaining_nodes {
+                limited.get_or_insert(PartialInliningTermination::NodeLimit);
+            } else if candidate.callee_blocks > remaining_blocks {
+                limited.get_or_insert(PartialInliningTermination::BlockLimit);
+            } else {
+                return CandidateSearch::Found(candidate);
             }
         }
     }
@@ -263,24 +303,28 @@ fn find_candidate(
                 else {
                     continue;
                 };
-                if cost.nodes > MAX_CALLEE_NODES
-                    || cost.nodes > remaining_nodes
-                    || cost.blocks > MAX_CALLEE_BLOCKS
-                    || cost.blocks > remaining_blocks
-                {
+                if cost.nodes > MAX_CALLEE_NODES || cost.blocks > MAX_CALLEE_BLOCKS {
                     continue;
                 }
-                return Some(Candidate {
+                let candidate = Candidate {
                     call: node,
                     block: block_id,
                     callee: callee_name,
                     callee_nodes: cost.nodes,
                     callee_blocks: cost.blocks,
-                });
+                    reason: PartialInliningReason::MixedVariance,
+                };
+                if candidate.callee_nodes > remaining_nodes {
+                    limited.get_or_insert(PartialInliningTermination::NodeLimit);
+                } else if candidate.callee_blocks > remaining_blocks {
+                    limited.get_or_insert(PartialInliningTermination::BlockLimit);
+                } else {
+                    return CandidateSearch::Found(candidate);
+                }
             }
         }
     }
-    None
+    limited.map_or(CandidateSearch::Exhausted, CandidateSearch::Limited)
 }
 
 fn is_fixed_composite_array(ty: &polytype::Type<ast::TypeName>) -> bool {

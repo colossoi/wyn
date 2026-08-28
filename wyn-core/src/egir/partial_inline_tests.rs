@@ -3,7 +3,6 @@ use crate::op;
 use crate::types;
 use crate::BindingRef;
 use crate::FunctionId;
-use wyn_base::IdSource;
 
 use crate::ast::{Span, TypeName};
 use crate::egir::types::{
@@ -47,8 +46,8 @@ fn physical_params(
 fn inline_test_body(
     graph: &mut EGraph<Physical>,
     callees: &LookupMap<FunctionId, Func<Physical>>,
-) -> Result<InliningStats, String> {
-    inline_body(graph, callees, &mut IdSource::new())
+) -> Result<PartialInliningStats, String> {
+    inline_body(graph, callees)
 }
 
 fn add_value_call(
@@ -209,7 +208,8 @@ fn inlines_a_profitable_mixed_variance_call_in_a_loop() {
 
     let stats = inline_test_body(&mut graph, &callees).unwrap();
 
-    assert_eq!(stats.calls_inlined, 1);
+    assert_eq!(stats.mixed_variance.calls, 1);
+    assert_eq!(stats.fixed_composite.calls, 0);
     assert_ne!(graph.canonical_value(call), call);
     assert!(graph.nodes.values().any(|node| matches!(
         &node.kind,
@@ -228,7 +228,8 @@ fn mixed_variance_alone_is_enough_for_the_bounded_policy() {
 
     let stats = inline_test_body(&mut graph, &callees).unwrap();
 
-    assert_eq!(stats.calls_inlined, 1);
+    assert_eq!(stats.mixed_variance.calls, 1);
+    assert_eq!(stats.fixed_composite.calls, 0);
     assert_ne!(graph.canonical_value(call), call);
 }
 
@@ -240,7 +241,7 @@ fn leaves_whole_call_licm_and_fully_varying_calls_alone() {
     for shape in [CallArgs::AllInvariant, CallArgs::AllVarying] {
         let (mut graph, call, _) = loop_caller(shape);
         let stats = inline_test_body(&mut graph, &callees).unwrap();
-        assert_eq!(stats.calls_inlined, 0);
+        assert_eq!(stats.totals().calls, 0);
         assert!(matches!(graph.nodes[call].kind, ValueKind::CallResult { .. }));
     }
 }
@@ -278,7 +279,8 @@ fn inlines_fixed_array_parameters_outside_loops() {
 
     let stats = inline_test_body(&mut caller, &callees).unwrap();
 
-    assert_eq!(stats.calls_inlined, 1);
+    assert_eq!(stats.fixed_composite.calls, 1);
+    assert_eq!(stats.mixed_variance.calls, 0);
     assert_ne!(caller.canonical_value(call), call);
 }
 
@@ -370,8 +372,9 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
 
     let stats = inline_test_body(&mut caller, &callees).unwrap();
 
-    assert_eq!(stats.calls_inlined, 1);
-    assert_eq!(stats.block_budget, 5);
+    assert_eq!(stats.fixed_composite.calls, 1);
+    assert_eq!(stats.fixed_composite.blocks, 5);
+    assert_eq!(stats.mixed_variance.calls, 0);
     assert!(matches!(caller.nodes[call].kind, ValueKind::CallResult { .. }));
     assert!(caller.skeleton.blocks.values().any(|block| {
         matches!(

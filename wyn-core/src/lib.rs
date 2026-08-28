@@ -516,6 +516,7 @@ pub fn lower_egir_to_ssa(
     program: egir::parallelize::Planned,
 ) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
     let program = egir::expand_soacs(program)?;
+    let program = egir::eliminate_internal_place_calls(program)?;
     let program = egir::partially_inline_calls(program)?;
     let program = egir::materialize_dynamic_extracts(program);
     let program = egir::rewrite(program);

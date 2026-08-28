@@ -12,6 +12,7 @@
 
 pub mod allocation;
 pub mod elaborate;
+pub(crate) mod eliminate_call_places;
 mod extract;
 mod fold;
 pub(crate) mod inlining;
@@ -55,9 +56,17 @@ pub use allocation::{
     resolve_scratch_sizes, verify_allocated_resources, ResidencyDraft, ResourcesAllocated,
 };
 pub use elaborate::elaborate;
+pub use eliminate_call_places::{
+    eliminate_internal_place_calls, eliminate_internal_place_calls_with_trace, verify_ssa_lowerable_calls,
+    CallsPlaceFree, RequiredCallInliningStats, RequiredCallInliningTrace,
+};
 pub use materialize::{materialize_dynamic_extracts, Materialized};
 pub use parallelize::plan;
-pub use partial_inline::{partially_inline_calls, PartiallyInlined};
+pub use partial_inline::{
+    partially_inline_calls, partially_inline_calls_with_trace, PartialInliningReason,
+    PartialInliningReasonStats, PartialInliningStats, PartialInliningTermination, PartialInliningTrace,
+    PartiallyInlined,
+};
 pub use reify::reify_soacs;
 pub use resource_erasure::{erase_resources, ResourcesErased};
 pub use rewrite::rewrite;
