@@ -432,28 +432,30 @@ pub fn init_compiler_from_prelude(
 // =============================================================================
 
 #[cfg(test)]
-pub(crate) fn optimize_tlc_for_test(program: tlc::stage::OwnershipValidated) -> tlc::stage::Reachable {
-    let program = optimize_tlc_for_test_thru_soac_normalization(program);
+pub(crate) fn optimize_tlc_for_test(
+    program: tlc::stage::OwnershipValidated,
+) -> error::Result<tlc::stage::Reachable> {
+    let program = optimize_tlc_for_test_thru_soac_normalization(program)?;
     let program = tlc::float_runtime_index_nested_producers(program);
     let program = tlc::defunctionalize(program);
     let program = tlc::fold_generated_lambdas(program);
     let program = tlc::apply_ownership(program);
-    tlc::filter_reachable(program)
+    Ok(tlc::filter_reachable(program))
 }
 
 #[cfg(test)]
 pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     program: tlc::stage::OwnershipValidated,
-) -> tlc::stage::SoacsAnfNormalized {
+) -> error::Result<tlc::stage::SoacsAnfNormalized> {
     let program = tlc::partial_eval(program);
     let program = tlc::normalize_soacs(program);
-    let program = tlc::monomorphize(program);
+    let program = tlc::monomorphize(program)?;
     let program = tlc::rep_specialize(program);
     let program = tlc::inline_small(program);
     let program = tlc::force_inline_soac_helpers(program);
     let program = tlc::renormalize_inlined_soa(program);
     let program = tlc::canonicalize_conditional_producers(program);
-    tlc::normalize_soacs_to_anf(program)
+    Ok(tlc::normalize_soacs_to_anf(program))
 }
 
 /// Convert fully analyzed TLC into raw semantic EGIR.
@@ -812,7 +814,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     let program = tlc::lower_from_ast(program)?;
     let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::validate_ownership(program)?;
-    Ok(optimize_tlc_for_test(program))
+    optimize_tlc_for_test(program)
 }
 
 /// Internal: run all the way through EGIR + elaborate to SSA from a

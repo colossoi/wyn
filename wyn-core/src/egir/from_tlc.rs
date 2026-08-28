@@ -268,60 +268,184 @@ fn summarize_definition_effects(
     }
 }
 
-/// Read-only state shared across every converter built during a single
-/// `run` — the top-level def index, the arity-0 name → symbol map, and
-/// the symbol table. Acts as a factory: `new_converter` snapshots the
-/// caller's current `pure_constants` set into a fresh `Converter`,
-/// keeping the per-call `clone()` inside one method.
+/// Read-only state shared across every converter built during a single run.
 struct GlobalContext<'a> {
-    top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     symbols: &'a SymbolTable,
-    pure_definitions: &'a LookupSet<SymbolId>,
-    callable_boundaries: &'a LookupMap<
-        SymbolId,
-        (
-            Parameters<BindingRef, Type<TypeName>>,
-            FunctionResult<Type<TypeName>>,
-            CallEffects,
-        ),
-    >,
 }
 
-struct ConversionArenas {
-    identities: ProgramIdentities,
-    function_ids: LookupMap<SymbolId, FunctionId>,
-    global_ids: LookupMap<SymbolId, GlobalId>,
-    entry_ids: LookupMap<SymbolId, EntryId>,
+/// Primary conversion work, kept in source order. Symbol maps below are only
+/// secondary indexes into these records; they do not own another copy of the
+/// definition's state.
+struct ConversionPlan<'program> {
+    functions: Vec<FunctionConversion<'program>>,
+    entries: Vec<EntryConversion<'program>>,
+    function_by_symbol: LookupMap<SymbolId, usize>,
+    entry_by_symbol: LookupMap<SymbolId, usize>,
 }
 
-impl ConversionArenas {
-    fn new() -> Self {
+struct FunctionConversion<'program> {
+    source: &'program TlcDef,
+    name: String,
+    function_id: FunctionId,
+    boundary: CallableBoundary,
+    /// Constant discovery adds a second identity; it does not turn the source
+    /// function into a different kind of definition.
+    constant_id: Option<GlobalId>,
+}
+
+#[derive(Clone)]
+struct CallableBoundary {
+    parameters: Parameters<BindingRef, Type<TypeName>>,
+    result: FunctionResult<Type<TypeName>>,
+    effects: CallEffects,
+}
+
+struct EntryConversion<'program> {
+    source: &'program TlcDef,
+    metadata: &'program tlc::EntryPoint<tlc::data::EntryInputBounds>,
+    name: String,
+    entry_id: EntryId,
+}
+
+impl<'program> ConversionPlan<'program> {
+    #[cfg(test)]
+    fn empty() -> Self {
         Self {
-            identities: ProgramIdentities::new(),
-            function_ids: LookupMap::new(),
-            global_ids: LookupMap::new(),
-            entry_ids: LookupMap::new(),
+            functions: Vec::new(),
+            entries: Vec::new(),
+            function_by_symbol: LookupMap::new(),
+            entry_by_symbol: LookupMap::new(),
         }
+    }
+
+    fn build(
+        program: &'program TlcProgram,
+        identities: &mut ProgramIdentities,
+        pure_definitions: &LookupSet<SymbolId>,
+    ) -> Result<Self, ConvertError> {
+        let mut plan = Self {
+            functions: Vec::new(),
+            entries: Vec::new(),
+            function_by_symbol: LookupMap::new(),
+            entry_by_symbol: LookupMap::new(),
+        };
+
+        for source in &program.defs {
+            if plan.function_by_symbol.contains_key(&source.name)
+                || plan.entry_by_symbol.contains_key(&source.name)
+            {
+                return Err(ConvertError::Internal(format!(
+                    "definition {:?} occurs twice in the conversion input",
+                    source.name
+                )));
+            }
+            let name = symbol_name(&program.symbols, source.name)?.to_owned();
+            match &source.meta {
+                DefMeta::Function | DefMeta::LiftedLambda => {
+                    let index = plan.functions.len();
+                    let function_id = identities.alloc_function(name.clone());
+                    let (parameter_types, result_type) = extract_function_signature(&source.ty);
+                    let parameters = Parameters::from_ordered(parameter_types.into_iter().enumerate().map(
+                        |(index, ty)| {
+                            callable_parameter::<BindingRef, WynLanguage>(format!("arg{index}"), ty)
+                        },
+                    ));
+                    let result = by_value_function_result::<WynLanguage>(result_type);
+                    let effects = if pure_definitions.contains(&source.name) {
+                        CallEffects::Pure
+                    } else {
+                        CallEffects::General
+                    };
+                    plan.functions.push(FunctionConversion {
+                        source,
+                        name,
+                        function_id,
+                        boundary: CallableBoundary {
+                            parameters,
+                            result,
+                            effects,
+                        },
+                        constant_id: None,
+                    });
+                    plan.function_by_symbol.insert(source.name, index);
+                }
+                DefMeta::EntryPoint(metadata) => {
+                    let index = plan.entries.len();
+                    let entry_id = identities.alloc_entry(name.clone());
+                    plan.entries.push(EntryConversion {
+                        source,
+                        metadata,
+                        name,
+                        entry_id,
+                    });
+                    plan.entry_by_symbol.insert(source.name, index);
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    fn function(&self, symbol: SymbolId) -> Result<&FunctionConversion<'program>, ConvertError> {
+        let Some(function) = self.find_function(symbol) else {
+            return Err(ConvertError::Internal(format!(
+                "definition {symbol:?} is not in the function conversion plan"
+            )));
+        };
+        Ok(function)
+    }
+
+    fn find_function(&self, symbol: SymbolId) -> Option<&FunctionConversion<'program>> {
+        self.function_by_symbol.get(&symbol).and_then(|&index| self.functions.get(index))
+    }
+
+    fn function_id(&self, symbol: SymbolId) -> Result<FunctionId, ConvertError> {
+        Ok(self.function(symbol)?.function_id)
+    }
+
+    fn entry(&self, symbol: SymbolId) -> Result<&EntryConversion<'program>, ConvertError> {
+        let Some(&index) = self.entry_by_symbol.get(&symbol) else {
+            return Err(ConvertError::Internal(format!(
+                "definition {symbol:?} is not in the entry conversion plan"
+            )));
+        };
+        let Some(entry) = self.entries.get(index) else {
+            return Err(ConvertError::Internal(format!(
+                "entry index for definition {symbol:?} is out of bounds"
+            )));
+        };
+        Ok(entry)
+    }
+
+    fn record_constant(&mut self, symbol: SymbolId, id: GlobalId) -> Result<(), ConvertError> {
+        let Some(&index) = self.function_by_symbol.get(&symbol) else {
+            return Err(ConvertError::Internal(format!(
+                "constant {symbol:?} has no function conversion record"
+            )));
+        };
+        let Some(function) = self.functions.get_mut(index) else {
+            return Err(ConvertError::Internal(format!(
+                "function index for constant {symbol:?} is out of bounds"
+            )));
+        };
+        if function.constant_id.is_some() {
+            return Err(ConvertError::Internal(format!(
+                "function {symbol:?} ({}) was hoisted as a constant twice",
+                function.name
+            )));
+        }
+        function.constant_id = Some(id);
+        Ok(())
     }
 }
 
 impl<'a> GlobalContext<'a> {
     fn new_converter<'b>(
         &self,
-        pure_constants: &LookupSet<SymbolId>,
         binding_ids: &'b mut IdSource<u32>,
         effect_ids: &'b mut IdSource<EffectToken>,
-        arenas: &'b mut ConversionArenas,
+        plan: &'b ConversionPlan<'a>,
     ) -> Converter<'a, 'b> {
-        Converter::new(
-            self.top_level,
-            self.symbols,
-            pure_constants.clone(),
-            self.callable_boundaries,
-            binding_ids,
-            effect_ids,
-            arenas,
-        )
+        Converter::new(self.symbols, binding_ids, effect_ids, plan)
     }
 }
 
@@ -342,86 +466,46 @@ pub fn convert_program(
         pipeline,
         stage_symbols,
     } = super::pipeline_seed::build(program);
-    let top_level: LookupMap<SymbolId, &TlcDef> = program.defs.iter().map(|d| (d.name, d)).collect();
     let symbols = &program.symbols;
     let pure_definitions = infer_pure_definitions(program);
-    let callable_boundaries = program
-        .defs
-        .iter()
-        .filter(|definition| matches!(definition.meta, DefMeta::Function | DefMeta::LiftedLambda))
-        .map(|definition| {
-            let (parameter_types, result_type) = extract_function_signature(&definition.ty);
-            let parameters =
-                super::types::Parameters::from_ordered(parameter_types.into_iter().enumerate().map(
-                    |(index, ty)| callable_parameter::<BindingRef, WynLanguage>(format!("arg{index}"), ty),
-                ));
-            let result = by_value_function_result::<WynLanguage>(result_type);
-            let effects = if pure_definitions.contains(&definition.name) {
-                CallEffects::Pure
-            } else {
-                CallEffects::General
-            };
-            (definition.name, (parameters, result, effects))
-        })
-        .collect::<LookupMap<_, _>>();
 
-    // Program-level arenas are borrowed by one converter at a time, then
-    // handed intact to the semantic program.
-    let mut arenas = ConversionArenas::new();
-    for def in &program.defs {
-        let name = symbol_name(symbols, def.name)?.to_owned();
-        match &def.meta {
-            DefMeta::EntryPoint(_) => {
-                let id = arenas.identities.alloc_entry(name);
-                arenas.entry_ids.insert(def.name, id);
-            }
-            DefMeta::Function | DefMeta::LiftedLambda => {
-                let id = arenas.identities.alloc_function(name);
-                arenas.function_ids.insert(def.name, id);
-            }
-        }
-    }
+    let mut identities = ProgramIdentities::new();
+    let mut plan = ConversionPlan::build(program, &mut identities, &pure_definitions)?;
     let stage_entries: Vec<Vec<EntryId>> = stage_symbols
         .into_iter()
         .map(|stages| {
             stages
                 .into_iter()
-                .map(|symbol| {
-                    *arenas.entry_ids.get(&symbol).expect("pipeline stage has no allocated entry identity")
-                })
-                .collect()
+                .map(|symbol| plan.entry(symbol).map(|entry| entry.entry_id))
+                .collect::<Result<Vec<_>, _>>()
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    let ctx = GlobalContext {
-        top_level: &top_level,
-        symbols,
-        pure_definitions: &pure_definitions,
-        callable_boundaries: &callable_boundaries,
-    };
+    let ctx = GlobalContext { symbols };
 
     // Phase 1: detect pure constants. We elaborate each arity-0 def's body
     // through the full EGIR pipeline once (using a throwaway chain) to see if
     // it collapses to a purely-constant FuncBody. Constants are hoisted to
     // program scope and referenced by `PureOp::Global`.
-    let mut pure_constant_symbols: LookupSet<SymbolId> = LookupSet::new();
     let mut constants = Vec::new();
 
-    for def in &program.defs {
-        if def.arity != 0 || !matches!(&def.meta, DefMeta::Function) {
-            continue;
-        }
-        if matches!(&def.body.kind, TermKind::Extern(_)) {
-            continue;
-        }
-        let def_name = symbols.get(def.name).expect("BUG: symbol not in table").clone();
+    let constant_candidates = plan
+        .functions
+        .iter()
+        .filter(|function| {
+            function.source.arity == 0
+                && matches!(&function.source.meta, DefMeta::Function)
+                && !matches!(&function.source.body.kind, TermKind::Extern(_))
+        })
+        .map(|function| function.source.name)
+        .collect::<Vec<_>>();
+    for symbol in constant_candidates {
+        let (def, def_name) = {
+            let function = plan.function(symbol)?;
+            (function.source, function.name.clone())
+        };
 
-        let mut converter = ctx.new_converter(
-            &pure_constant_symbols,
-            &mut binding_ids,
-            &mut effect_ids,
-            &mut arenas,
-        );
+        let mut converter = ctx.new_converter(&mut binding_ids, &mut effect_ids, &plan);
         if let Ok(result_nid) = converter.convert_term(&def.body) {
             let result_abi = by_value_function_result::<WynLanguage>(def.body.ty.clone());
             let result =
@@ -431,9 +515,8 @@ pub fn convert_program(
             let aliases = super::skel_opt::run_one_body(&mut graph);
             graph.install_aliases(aliases);
             if is_purely_constant_graph(&graph) {
-                pure_constant_symbols.insert(def.name);
-                let id = arenas.identities.alloc_global(def_name.clone());
-                arenas.global_ids.insert(def.name, id);
+                let id = identities.alloc_global(def_name.clone());
+                plan.record_constant(def.name, id)?;
                 constants.push(ConstantDef {
                     id,
                     name: def_name,
@@ -451,63 +534,43 @@ pub fn convert_program(
     let mut externs: Vec<ExternDecl<Type<TypeName>>> = Vec::new();
     let mut entry_points: Vec<RawEntry> = Vec::new();
 
-    for def in &program.defs {
-        match &def.meta {
-            DefMeta::Function | DefMeta::LiftedLambda => {
-                if pure_constant_symbols.contains(&def.name) {
-                    continue;
-                }
-                match convert_function(
-                    def,
-                    &ctx,
-                    &pure_constant_symbols,
-                    &mut binding_ids,
-                    &mut effect_ids,
-                    &mut arenas,
-                )? {
-                    ConvertedFunc::Extern(f) => externs.push(f),
-                    ConvertedFunc::Regular(fe) => functions.push(fe),
-                }
-            }
-            DefMeta::EntryPoint(entry) => {
-                let workgroup =
-                    pipeline_workgroup_size(&pipeline, &stage_entries, arenas.entry_ids[&def.name]);
-                let ep = convert_entry_point(
-                    def,
-                    &entry.declaration,
-                    &entry.data.param_bindings,
-                    &ctx,
-                    &pure_constant_symbols,
-                    workgroup,
-                    &entry.data.by_symbol,
-                    &mut binding_ids,
-                    &mut effect_ids,
-                    &mut arenas,
-                )?;
-                entry_points.push(ep);
-            }
+    for function in &plan.functions {
+        if function.constant_id.is_some() {
+            continue;
         }
+        match convert_function(function, &ctx, &mut binding_ids, &mut effect_ids, &plan)? {
+            ConvertedFunc::Extern(f) => externs.push(f),
+            ConvertedFunc::Regular(fe) => functions.push(fe),
+        }
+    }
+    for entry in &plan.entries {
+        let workgroup = pipeline_workgroup_size(&pipeline, &stage_entries, entry.entry_id);
+        entry_points.push(convert_entry_point(
+            entry,
+            &ctx,
+            workgroup,
+            &mut binding_ids,
+            &mut effect_ids,
+            &plan,
+        )?);
     }
     for function in &mut functions {
         normalize_interface_function_parameters(function);
     }
 
     debug_assert!(functions.iter().all(|function| {
-        arenas.identities.contains_function(function.region)
-            && arenas.identities.function_name(function.region) == function.name
+        identities.contains_function(function.region)
+            && identities.function_name(function.region) == function.name
     }));
     debug_assert!(externs.iter().all(|function| {
-        arenas.identities.contains_function(function.id)
-            && arenas.identities.function_name(function.id) == function.name
+        identities.contains_function(function.id) && identities.function_name(function.id) == function.name
     }));
     debug_assert!(entry_points.iter().all(|entry| {
-        arenas.identities.contains_entry(entry.id) && arenas.identities.entry_name(entry.id) == entry.name
+        identities.contains_entry(entry.id) && identities.entry_name(entry.id) == entry.name
     }));
     debug_assert!(constants.iter().all(|constant| {
-        arenas.identities.contains_global(constant.id)
-            && arenas.identities.global_name(constant.id) == constant.name
+        identities.contains_global(constant.id) && identities.global_name(constant.id) == constant.name
     }));
-    let ConversionArenas { identities, .. } = arenas;
     Ok(Program::from_parts(
         functions,
         externs,
@@ -559,16 +622,16 @@ enum ConvertedFunc {
 // ============================================================================
 
 fn convert_function<'a>(
-    def: &TlcDef,
+    function: &FunctionConversion<'a>,
     ctx: &GlobalContext<'a>,
-    pure_constants: &LookupSet<SymbolId>,
     binding_ids: &'a mut IdSource<u32>,
     effect_ids: &'a mut IdSource<EffectToken>,
-    arenas: &'a mut ConversionArenas,
+    plan: &'a ConversionPlan<'a>,
 ) -> Result<ConvertedFunc, ConvertError> {
+    let def = function.source;
     let symbols = ctx.symbols;
-    let def_name = symbol_name(symbols, def.name)?.to_string();
-    let function_id = arenas.function_ids[&def.name];
+    let def_name = function.name.clone();
+    let function_id = function.function_id;
 
     // Extern functions are bodyless declarations; SSA lowering decides how
     // to represent the imported callable.
@@ -601,7 +664,7 @@ fn convert_function<'a>(
             .collect::<Result<Vec<_>, ConvertError>>()?,
     );
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
+    let mut converter = ctx.new_converter(binding_ids, effect_ids, plan);
 
     for ((sym, _), (parameter_id, parameter)) in params.iter().zip(param_info.iter_with_ids()) {
         let operand = converter.graph.add_parameter(parameter_id, parameter.representation());
@@ -624,7 +687,7 @@ fn convert_function<'a>(
         None,
         param_info,
         result_abi,
-        if ctx.pure_definitions.contains(&def.name) { CallEffects::Pure } else { CallEffects::General },
+        function.boundary.effects,
         graph,
     )))
 }
@@ -667,22 +730,22 @@ fn tuple_field_storage_access(diet: Option<&Diet>, field: usize) -> StorageAcces
 
 #[allow(clippy::too_many_arguments)]
 fn convert_entry_point(
-    def: &TlcDef,
-    entry: &interface::EntryDecl,
-    param_bindings: &[Option<EntryParamBinding>],
+    conversion: &EntryConversion,
     ctx: &GlobalContext,
-    pure_constants: &LookupSet<SymbolId>,
     workgroup: (u32, u32, u32),
-    input_bounds: &LookupMap<SymbolId, BufferLen>,
     binding_ids: &mut IdSource<u32>,
     effect_ids: &mut IdSource<EffectToken>,
-    arenas: &mut ConversionArenas,
+    plan: &ConversionPlan,
 ) -> Result<RawEntry, ConvertError> {
     use crate::flow::ExecutionModel;
 
-    let entry_id = arenas.entry_ids[&def.name];
+    let def = conversion.source;
+    let entry = &conversion.metadata.declaration;
+    let param_bindings = &conversion.metadata.data.param_bindings;
+    let input_bounds = &conversion.metadata.data.by_symbol;
+    let entry_id = conversion.entry_id;
     let symbols = ctx.symbols;
-    let def_name = symbol_name(symbols, def.name)?;
+    let def_name = conversion.name.as_str();
     let (inner_body, params) = tlc::extract_lambda_params_ref(&def.body);
     let is_compute = entry.entry_kind == interface::EntryKind::Compute;
 
@@ -701,7 +764,7 @@ fn convert_entry_point(
             .collect::<Result<Vec<_>, ConvertError>>()?,
     );
 
-    let mut converter = ctx.new_converter(pure_constants, binding_ids, effect_ids, arenas);
+    let mut converter = ctx.new_converter(binding_ids, effect_ids, plan);
 
     // Build entry inputs alongside the symbol → ValueId bindings. A compute
     // entry param that's a tuple-of-unsized-arrays gets one storage binding
@@ -1218,23 +1281,10 @@ struct Converter<'a, 'b> {
     current_block: BlockId,
     /// TLC variable → EGraph node mapping.
     locals: LookupMap<SymbolId, ValueId>,
-    /// Top-level definitions.
-    top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
     /// Symbol table.
     symbols: &'a SymbolTable,
     /// Cache for inlined constant bodies.
     inlined_constants: LookupMap<SymbolId, ValueId>,
-    /// Identities of hoisted pure constants.
-    pure_constants: LookupSet<SymbolId>,
-    /// Canonical callable metadata built before any bodies or calls.
-    callable_boundaries: &'a LookupMap<
-        SymbolId,
-        (
-            Parameters<BindingRef, Type<TypeName>>,
-            FunctionResult<Type<TypeName>>,
-            CallEffects,
-        ),
-    >,
     /// Program-wide identity source for effect-chain endpoints.
     effect_ids: &'b mut IdSource<EffectToken>,
     /// Span of the term currently being converted. Threaded through every
@@ -1252,26 +1302,18 @@ struct Converter<'a, 'b> {
     /// Module-wide id factory for host-visible auto-storage binding numbers.
     /// Compiler resources never draw from this namespace.
     binding_ids: &'b mut IdSource<u32>,
-    /// Program-wide arenas borrowed exclusively for this conversion.
-    arenas: &'b mut ConversionArenas,
+    /// Source definitions and their allocated identities. Cross-definition
+    /// symbol references use its secondary indexes; body conversion receives
+    /// typed records directly.
+    plan: &'b ConversionPlan<'a>,
 }
 
 impl<'a, 'b> Converter<'a, 'b> {
     fn new(
-        top_level: &'a LookupMap<SymbolId, &'a TlcDef>,
         symbols: &'a SymbolTable,
-        pure_constants: LookupSet<SymbolId>,
-        callable_boundaries: &'a LookupMap<
-            SymbolId,
-            (
-                Parameters<BindingRef, Type<TypeName>>,
-                FunctionResult<Type<TypeName>>,
-                CallEffects,
-            ),
-        >,
         binding_ids: &'b mut IdSource<u32>,
         effect_ids: &'b mut IdSource<EffectToken>,
-        arenas: &'b mut ConversionArenas,
+        plan: &'b ConversionPlan<'a>,
     ) -> Self {
         let graph = EGraph::new();
         let entry = graph.skeleton.entry;
@@ -1279,21 +1321,18 @@ impl<'a, 'b> Converter<'a, 'b> {
             graph,
             current_block: entry,
             locals: LookupMap::new(),
-            top_level,
             symbols,
             inlined_constants: LookupMap::new(),
-            pure_constants,
-            callable_boundaries,
             effect_ids,
             current_span: None,
             output_sources: Vec::new(),
             binding_ids,
-            arenas,
+            plan,
         }
     }
 
-    fn function_id(&self, symbol: SymbolId) -> FunctionId {
-        self.arenas.function_ids[&symbol]
+    fn function_id(&self, symbol: SymbolId) -> Result<FunctionId, ConvertError> {
+        self.plan.function_id(symbol)
     }
 
     /// Intern a pure node, attaching the current term's span (if any).
@@ -1693,11 +1732,15 @@ impl<'a, 'b> Converter<'a, 'b> {
         if let Some(&nid) = self.inlined_constants.get(&sym) {
             return Ok(nid);
         }
-        if self.pure_constants.contains(&sym) {
-            let global = self.arenas.global_ids[&sym];
+        if let Some(global) = self.plan.find_function(sym).and_then(|function| function.constant_id) {
             return Ok(self.intern_pure(PureOp::Global(global), smallvec![], ty));
         }
-        if let Some(def) = self.top_level.get(&sym).filter(|definition| definition.arity == 0).copied() {
+        if let Some(def) = self
+            .plan
+            .find_function(sym)
+            .map(|function| function.source)
+            .filter(|definition| definition.arity == 0)
+        {
             let body = def.body.clone();
             let nid = self.convert_term(&body)?;
             self.inlined_constants.insert(sym, nid);
@@ -1823,8 +1866,8 @@ impl<'a, 'b> Converter<'a, 'b> {
         args: &[Term],
         ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
-        if let Some(def) = self.top_level.get(&symbol) {
-            if def.arity == args.len() {
+        if let Some(function) = self.plan.find_function(symbol) {
+            if function.source.arity == args.len() {
                 let operands: SmallVec<[ValueId; 4]> =
                     args.iter().map(|argument| self.convert_term(argument)).collect::<Result<_, _>>()?;
                 return self.emit_named_call(symbol, operands, ty);
@@ -1842,11 +1885,12 @@ impl<'a, 'b> Converter<'a, 'b> {
         operands: SmallVec<[ValueId; 4]>,
         _ty: Type<TypeName>,
     ) -> Result<ValueId, ConvertError> {
-        let function = self.function_id(symbol);
-        let (parameters, result, effects) =
-            self.callable_boundaries.get(&symbol).cloned().ok_or_else(|| {
-                ConvertError::Internal(format!("missing callable boundary for {symbol:?}"))
-            })?;
+        let function = self.plan.function(symbol)?;
+        let CallableBoundary {
+            parameters,
+            result,
+            effects,
+        } = function.boundary.clone();
         let arguments = operands.into_iter().map(|value| self.graph.operand_ref(value)).collect::<Vec<_>>();
         let effect_tokens =
             (!matches!(effects, CallEffects::Pure)).then(|| (self.alloc_effect(), self.alloc_effect()));
@@ -1854,7 +1898,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             .graph
             .emit_call(
                 self.current_block,
-                function,
+                function.function_id,
                 &parameters,
                 &result,
                 arguments,
@@ -2687,7 +2731,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
 
-        let map_region = self.function_id(f_symbol);
+        let map_region = self.function_id(f_symbol)?;
         let soac = Soac::Screma(screma::Op {
             inputs: input_arr_types.into_iter().map(SoacInputType::array).collect(),
             form: screma::ScremaForm {
@@ -2726,7 +2770,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let dest_view = *self.locals.get(&dest.id).ok_or_else(|| {
             ConvertError::GraphError("reduce_by_index destination is not a bound #[storage] view".into())
         })?;
-        let operator_region = self.function_id(self.lambda_fn_symbol(&op.lam)?);
+        let operator_region = self.function_id(self.lambda_fn_symbol(&op.lam)?)?;
         let operator_captures = op
             .data
             .captures
@@ -2830,7 +2874,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             lam.data.captures.iter().map(|(_, _, t)| self.convert_term(t)).collect::<Result<_, _>>()?;
 
         let operands: SmallVec<[ValueId; 4]> = input_nids.into_iter().collect();
-        let body_region = self.function_id(function);
+        let body_region = self.function_id(function)?;
         let destination_length = self.intern_pure(
             PureOp::Intrinsic {
                 id: catalog().known().length,
@@ -3079,7 +3123,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let capacity_node =
             self.intern_pure(PureOp::Int(capacity.to_string()), smallvec![], i32_type.clone());
         let race_factor = self.intern_pure(PureOp::Int("1".into()), smallvec![], i32_type);
-        let body_region = self.function_id(function);
+        let body_region = self.function_id(function)?;
         let hist_result = self.emit_soac(
             Soac::Hist(hist::Op {
                 inputs: input_arrays
@@ -3158,7 +3202,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         // reduce_op (phase 2 combiner).
         let operands: SmallVec<[ValueId; 4]> = smallvec![arr_nid];
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![result_ty.clone()]);
-        let op_region = self.function_id(operator_symbol);
+        let op_region = self.function_id(operator_symbol)?;
         Ok(self.emit_soac(
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType::array(arr_ty)],
@@ -3224,7 +3268,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         };
         let tuple_ty = Type::Constructed(TypeName::Tuple(1), vec![project_ty.clone()]);
         let scan_elem_ty = soac_element_type(&project_ty);
-        let op_region = self.function_id(operator_symbol);
+        let op_region = self.function_id(operator_symbol)?;
         let soac = Soac::Screma(screma::Op {
             inputs: vec![SoacInputType::array(arr_ty)],
             form: screma::ScremaForm {
@@ -3268,7 +3312,7 @@ impl<'a, 'b> Converter<'a, 'b> {
 
         let output_elem_ty = elem_ty.clone();
         let pred_body = SegBody {
-            region: self.function_id(predicate_symbol),
+            region: self.function_id(predicate_symbol)?,
             captures: capture_nids.into_iter().map(|value| self.graph.operand_ref(value)).collect(),
         };
 

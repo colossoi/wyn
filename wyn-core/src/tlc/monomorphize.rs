@@ -19,6 +19,7 @@ use super::{
     TermKind, TermRewriter, TypeSubstitution, VarRef,
 };
 use crate::ast::TypeName;
+use crate::error::CompilerError;
 use crate::types::{TypeExt, TypeScheme};
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
@@ -36,7 +37,7 @@ pub type Monomorphized = super::Program<MonomorphizedTag, Monomorphic, super::co
 
 /// Specialize intrinsic calls, then consume the polymorphic definition graph
 /// into its reachable monomorphic graph.
-pub fn monomorphize(mut program: SoaNormalized) -> Monomorphized {
+pub fn monomorphize(mut program: SoaNormalized) -> std::result::Result<Monomorphized, CompilerError> {
     super::specialize::specialize_intrinsics(&mut program);
 
     let Program {
@@ -46,25 +47,53 @@ pub fn monomorphize(mut program: SoaNormalized) -> Monomorphized {
         global_context,
         state: _,
     } = program;
-    let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids).monomorphize();
+    let defs = Monomorphizer::new(&mut symbols, defs, &mut term_ids).monomorphize()?;
     let program = Program::from_parts(defs, symbols, term_ids, global_context);
     program.assert_flat_apps();
-    program
+    Ok(program)
 }
 
 struct Monomorphizer<'symbols, 'ids> {
     symbols: &'symbols mut SymbolTable,
-    /// Original definitions retained as specialization templates.
-    definitions: LookupMap<SymbolId, Def<Polymorphic>>,
-    /// Small pass-local signature index. Keeping this separate lets ordinary
-    /// monomorphic definitions move into the result without cloning their
-    /// trees merely to answer later reference queries.
-    definition_info: LookupMap<SymbolId, DefinitionInfo>,
+    /// Definition metadata and the tree it validates live under one key.
+    ///
+    /// A work item can no longer find the signature while independently
+    /// failing to find (or consume) its specialization template.
+    definitions: LookupMap<SymbolId, DefinitionRecord>,
     mono_functions: Vec<Def<Monomorphic>>,
     specializations: LookupMap<(SymbolId, SpecKey), SymbolId>,
     worklist: VecDeque<WorkItem>,
     processed: LookupSet<(SymbolId, SpecKey)>,
     term_ids: &'ids mut TermIdSource,
+}
+
+struct DefinitionRecord {
+    info: DefinitionInfo,
+    /// `Some` until an ordinary monomorphic definition is moved into the
+    /// output. Polymorphic definitions retain this tree and clone it for each
+    /// specialization.
+    template: Option<Def<Polymorphic>>,
+}
+
+impl DefinitionRecord {
+    fn new(definition: Def<Polymorphic>) -> Self {
+        let info = DefinitionInfo {
+            scheme: definition.data.scheme.clone(),
+            ty: definition.ty.clone(),
+        };
+        Self {
+            info,
+            template: Some(definition),
+        }
+    }
+
+    fn materialize(&mut self, retain_template: bool) -> Option<Def<Polymorphic>> {
+        if retain_template {
+            self.template.clone()
+        } else {
+            self.template.take()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -162,7 +191,6 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         term_ids: &'ids mut TermIdSource,
     ) -> Self {
         let mut definitions = LookupMap::new();
-        let mut definition_info = LookupMap::new();
         let mut worklist = VecDeque::new();
 
         for def in defs {
@@ -174,20 +202,12 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
                     output_sym: symbol,
                 });
             }
-            definition_info.insert(
-                symbol,
-                DefinitionInfo {
-                    scheme: def.data.scheme.clone(),
-                    ty: def.ty.clone(),
-                },
-            );
-            definitions.insert(symbol, def);
+            definitions.insert(symbol, DefinitionRecord::new(def));
         }
 
         Self {
             symbols,
             definitions,
-            definition_info,
             mono_functions: Vec::new(),
             specializations: LookupMap::new(),
             worklist,
@@ -196,35 +216,37 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         }
     }
 
-    fn monomorphize(mut self) -> Vec<Def<Monomorphic>> {
+    fn monomorphize(mut self) -> std::result::Result<Vec<Def<Monomorphic>>, CompilerError> {
         while let Some(work_item) = self.worklist.pop_front() {
             let key = (work_item.original_sym, work_item.spec_key.clone());
             if !self.processed.insert(key) {
                 continue;
             }
 
-            let def = self.materialize_work_item(&work_item);
+            let def = self.materialize_work_item(&work_item)?;
             let def = self.process_def(def);
             self.mono_functions.push(def);
         }
-        self.mono_functions
+        Ok(self.mono_functions)
     }
 
-    fn materialize_work_item(&mut self, work_item: &WorkItem) -> Def<Polymorphic> {
-        let info = self
-            .definition_info
-            .get(&work_item.original_sym)
-            .expect("BUG: monomorphization work item has no definition info");
-        let must_keep_template = work_item.spec_key.needs_specialization() || info.may_need_as_template();
-        let mut def = if must_keep_template {
-            self.definitions
-                .get(&work_item.original_sym)
-                .expect("BUG: specialization template is missing")
-                .clone()
-        } else {
-            self.definitions
-                .remove(&work_item.original_sym)
-                .expect("BUG: monomorphic work item was already consumed")
+    fn materialize_work_item(
+        &mut self,
+        work_item: &WorkItem,
+    ) -> std::result::Result<Def<Polymorphic>, CompilerError> {
+        let Some(definition) = self.definitions.get_mut(&work_item.original_sym) else {
+            return Err(CompilerError::Internal(format!(
+                "monomorphization work item refers to missing definition {:?}",
+                work_item.original_sym
+            )));
+        };
+        let retain_template =
+            work_item.spec_key.needs_specialization() || definition.info.may_need_as_template();
+        let Some(mut def) = definition.materialize(retain_template) else {
+            return Err(CompilerError::Internal(format!(
+                "monomorphic definition {:?} was queued after its body was consumed",
+                work_item.original_sym
+            )));
         };
 
         if work_item.spec_key.needs_specialization() {
@@ -233,7 +255,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
             def.ty = apply_type_substitution(&def.ty, &subst);
             def.body.rewrite_types(self.term_ids, &mut |ty| apply_type_substitution(ty, &subst));
         }
-        def
+        Ok(def)
     }
 
     fn process_def(&mut self, def: Def<Polymorphic>) -> Def<Monomorphic> {
@@ -282,7 +304,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         symbol: SymbolId,
         concrete_type: &Type<TypeName>,
     ) -> Option<SymbolId> {
-        let info = self.definition_info.get(&symbol)?.clone();
+        let info = self.definitions.get(&symbol)?.info.clone();
         let Some(subst) = self.infer_var_substitution(&info, concrete_type) else {
             self.ensure_in_worklist(symbol);
             return None;
@@ -389,7 +411,7 @@ impl TermRewriter<Empty, Empty> for Monomorphizer<'_, '_> {
             return RewriteDecision::Unchanged;
         };
         let symbol = *symbol;
-        let Some(info) = self.definition_info.get(&symbol).cloned() else {
+        let Some(info) = self.definitions.get(&symbol).map(|definition| definition.info.clone()) else {
             return RewriteDecision::Unchanged;
         };
 

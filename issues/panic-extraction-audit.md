@@ -25,11 +25,11 @@ and `values[index]` operations when a cluster is changed.
 The starting tree contained 584 production panic points detected by this scan:
 466 `unwrap`/`expect` extractions and 118 explicit `panic!` calls.
 
-The completed changes remove 136 of them. The remaining 448 are:
+The completed changes remove 141 of them. The remaining 443 are:
 
 | Kind | Count |
 | --- | ---: |
-| `Option`/`Result::expect` | 244 |
+| `Option`/`Result::expect` | 239 |
 | `Option`/`Result::unwrap` | 101 |
 | `panic!` | 103 |
 
@@ -37,9 +37,9 @@ The remaining sites are concentrated by compiler layer:
 
 | Layer | Count |
 | --- | ---: |
-| EGIR | 224 |
+| EGIR | 222 |
 | other `wyn-core` code | 100 |
-| TLC | 77 |
+| TLC | 74 |
 | type checker/type model | 23 |
 | SPIR-V lowering | 10 |
 | SSA | 5 |
@@ -82,6 +82,14 @@ of source-derived or pass-derived state should migrate with the same clusters.
 - SPIR-V type lowering is fallible. Malformed or unresolved types now produce
   contextual compiler errors, and storage/interface/body consumers propagate
   them instead of panicking.
+- TLC monomorphization now stores a definition's signature facts and its
+  consumable specialization template in one `DefinitionRecord`. Missing or
+  multiply consumed work records propagate through `CompilerError`.
+- TLC-to-EGIR conversion now builds ordered `FunctionConversion` and
+  `EntryConversion` records. Source definitions, names, identities, callable
+  boundaries, entry metadata, and constant-hoisting state have one owner;
+  symbol maps are checked secondary indexes used only for cross-definition
+  references. Current-body conversion no longer rejoins parallel registries.
 
 No-extraction Clippy gates now protect the completed planner, graph crate, and
 typed SPIR-V builder scopes.
@@ -92,11 +100,11 @@ The remaining calls should not receive one mechanical treatment.
 
 ### 1. Co-locate IDs with the data that makes them valid
 
-Repeated symbol/function/node lookups dominate `tlc/from_ast.rs`,
-`egir/from_tlc.rs`, `egir/elaborate.rs`, and several fusion/reification files.
+Repeated symbol/function/node lookups still dominate `tlc/from_ast.rs`,
+`egir/elaborate.rs`, and several fusion/reification files.
 The high-value changes are:
 
-- make `SymbolTable` the only allocator of `SymbolId`;
+- preserve `SymbolTable` as the only allocator of `SymbolId`;
 - return arena-backed handles or aggregate records where an ID is always used
   with metadata from a parallel map;
 - move per-call/per-result facts into records keyed once, instead of several
@@ -134,8 +142,8 @@ which would silently alias IDs.
 
 ## Next slices
 
-1. Make `SymbolTable` own symbol allocation, then remove the associated TLC and
-   TLC-to-EGIR lookup assertions.
+1. Extend the definition-record approach to the remaining `tlc/from_ast.rs`
+   symbol/definition joins.
 2. Introduce aggregate call/result boundary records in EGIR elaboration and
    reification.
 3. Split phase-scoped TLC variants, starting with array expressions.

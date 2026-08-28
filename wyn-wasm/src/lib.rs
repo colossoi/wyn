@@ -256,6 +256,7 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::IoError(err) => format!("IO error: {}", err),
         CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
         CompilerError::TypeHole(msg) => format!("Type hole: {}", msg),
+        CompilerError::Internal(msg) => format!("Internal compiler error: {msg}"),
     }
 }
 
@@ -626,7 +627,10 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
     let tlc_tree = tlc_tree::program_to_tree(&program);
 
     let program = wyn_core::tlc::normalize_soacs(program);
-    let program = wyn_core::tlc::monomorphize(program);
+    let program = match wyn_core::tlc::monomorphize(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(e),
+    };
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::inline_small(program);
     let program = wyn_core::tlc::force_inline_soac_helpers(program);

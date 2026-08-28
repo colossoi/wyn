@@ -38,6 +38,9 @@ pub enum CompilerError {
 
     #[error("SPIR-V builder error: {0}")]
     SpirvBuilderError(#[from] wspirv::dr::Error),
+
+    #[error("Internal compiler error: {0}")]
+    Internal(String),
 }
 
 impl CompilerError {
@@ -52,7 +55,7 @@ impl CompilerError {
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
             Self::TypeHole(_) => None,
-            Self::IoError(_) | Self::SpirvBuilderError(_) => None,
+            Self::IoError(_) | Self::SpirvBuilderError(_) | Self::Internal(_) => None,
         }
     }
 }

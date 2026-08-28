@@ -23,7 +23,7 @@ fn front_end(src: &str) -> tlc::stage::OwnershipValidated {
 
 /// Run the front-end + the canonical TLC pipeline to `tlc::stage::Reachable`.
 pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
-    optimize_tlc_for_test(front_end(src))
+    optimize_tlc_for_test(front_end(src)).expect("TLC optimization")
 }
 
 // Stage-boundary helpers for source-normalization pass tests. Each
@@ -34,11 +34,11 @@ pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
 /// Through source-level SOAC ANF normalization, immediately before nested
 /// runtime-index producers are floated.
 pub(crate) fn compile_thru_expose_producers(src: &str) -> tlc::stage::SoacsAnfNormalized {
-    optimize_tlc_for_test_thru_soac_normalization(front_end(src))
+    optimize_tlc_for_test_thru_soac_normalization(front_end(src)).expect("TLC optimization")
 }
 
 /// Compatibility name for tests whose subject starts at the same SOAC ANF
 /// boundary and then runs runtime-index producer exposure directly.
 pub(crate) fn compile_thru_static_index(src: &str) -> tlc::stage::SoacsAnfNormalized {
-    optimize_tlc_for_test_thru_soac_normalization(front_end(src))
+    optimize_tlc_for_test_thru_soac_normalization(front_end(src)).expect("TLC optimization")
 }

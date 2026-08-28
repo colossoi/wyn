@@ -2,13 +2,12 @@
 
 use crate::op;
 use crate::types;
-use std::collections::{HashMap, HashSet};
 use wyn_base::IdSource;
 
 use polytype::Type;
 use smallvec::smallvec;
 
-use super::{ConversionArenas, Converter};
+use super::{ConversionPlan, Converter};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::types::{PureOp, ValueId, ValueKind};
@@ -16,22 +15,11 @@ use crate::ssa::types::ConstantValue;
 use crate::SymbolTable;
 
 fn with_converter<T>(test: impl FnOnce(&mut Converter<'_, '_>) -> T) -> T {
-    let top_level = HashMap::new();
     let symbols = SymbolTable::new();
-    let pure_constants = HashSet::new();
-    let callable_boundaries = HashMap::new();
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
-    let mut arenas = ConversionArenas::new();
-    let mut converter = Converter::new(
-        &top_level,
-        &symbols,
-        pure_constants,
-        &callable_boundaries,
-        &mut binding_ids,
-        &mut effect_ids,
-        &mut arenas,
-    );
+    let plan = ConversionPlan::empty();
+    let mut converter = Converter::new(&symbols, &mut binding_ids, &mut effect_ids, &plan);
     test(&mut converter)
 }
 

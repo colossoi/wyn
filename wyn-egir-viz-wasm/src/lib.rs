@@ -544,6 +544,7 @@ fn format_compiler_error(error: &CompilerError) -> String {
         CompilerError::IoError(error) => format!("I/O error: {error}"),
         CompilerError::SpirvBuilderError(message) => format!("SPIR-V builder error: {message}"),
         CompilerError::TypeHole(message) => format!("Type hole: {message}"),
+        CompilerError::Internal(message) => format!("Internal compiler error: {message}"),
     }
 }
 
@@ -587,7 +588,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     let program = try_compiler!(wyn_core::tlc::validate_ownership(program));
     let program = wyn_core::tlc::partial_eval(program);
     let program = wyn_core::tlc::normalize_soacs(program);
-    let program = wyn_core::tlc::monomorphize(program);
+    let program = try_compiler!(wyn_core::tlc::monomorphize(program));
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::inline_small(program);
     let program = wyn_core::tlc::force_inline_soac_helpers(program);

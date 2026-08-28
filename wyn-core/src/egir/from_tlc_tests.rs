@@ -2,7 +2,7 @@
 // Tests
 // ============================================================================
 
-use super::{convert_program, ConversionArenas, Converter};
+use super::{convert_program, ConversionPlan, Converter};
 use crate::ast;
 use crate::ast::TypeName;
 use crate::builtins;
@@ -24,7 +24,6 @@ use crate::LoweringProfile;
 use crate::SymbolTable;
 use crate::{BindingRef, SymbolId};
 use polytype::Type;
-use std::collections::{HashMap, HashSet};
 use wyn_base::IdSource;
 
 /// Compile a source string through the full TLC pipeline, then convert
@@ -88,9 +87,6 @@ fn convert_simple_def(
     params: Vec<(SymbolId, Type<TypeName>)>,
 ) -> FuncBody {
     let symbols = SymbolTable::new();
-    let top_level = HashMap::new();
-    let pure_constants = HashSet::new();
-    let callable_boundaries = HashMap::new();
 
     let ret_ty = body.ty.clone();
     let param_info = params
@@ -101,16 +97,8 @@ fn convert_simple_def(
 
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
-    let mut arenas = ConversionArenas::new();
-    let mut converter = Converter::new(
-        &top_level,
-        &symbols,
-        pure_constants,
-        &callable_boundaries,
-        &mut binding_ids,
-        &mut effect_ids,
-        &mut arenas,
-    );
+    let plan = ConversionPlan::empty();
+    let mut converter = Converter::new(&symbols, &mut binding_ids, &mut effect_ids, &plan);
     for ((sym, ty), parameter) in params.iter().zip(param_info.ids()) {
         let nid = converter.graph.add_test_value_parameter(parameter, ty.clone());
         converter.locals.insert(*sym, nid);
@@ -162,22 +150,10 @@ fn test_add_roundtrip() {
         },
     );
 
-    let top_level = HashMap::new();
-    let pure_constants = HashSet::new();
-    let callable_boundaries = HashMap::new();
-
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
-    let mut arenas = ConversionArenas::new();
-    let mut converter = Converter::new(
-        &top_level,
-        &symbols,
-        pure_constants,
-        &callable_boundaries,
-        &mut binding_ids,
-        &mut effect_ids,
-        &mut arenas,
-    );
+    let plan = ConversionPlan::empty();
+    let mut converter = Converter::new(&symbols, &mut binding_ids, &mut effect_ids, &plan);
     let params = [
         callable_parameter::<BindingRef, WynLanguage>("a".into(), i32_ty()),
         callable_parameter::<BindingRef, WynLanguage>("b".into(), i32_ty()),
@@ -253,22 +229,10 @@ fn test_gvn_via_let() {
         },
     );
 
-    let top_level = HashMap::new();
-    let pure_constants = HashSet::new();
-    let callable_boundaries = HashMap::new();
-
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
-    let mut arenas = ConversionArenas::new();
-    let mut converter = Converter::new(
-        &top_level,
-        &symbols,
-        pure_constants,
-        &callable_boundaries,
-        &mut binding_ids,
-        &mut effect_ids,
-        &mut arenas,
-    );
+    let plan = ConversionPlan::empty();
+    let mut converter = Converter::new(&symbols, &mut binding_ids, &mut effect_ids, &plan);
     let result = converter.convert_term(&outer_let).expect("conversion failed");
     converter.set_return(Some(converter.graph.value_result(result)));
 
@@ -376,22 +340,10 @@ fn test_if_else_roundtrip() {
         },
     );
 
-    let top_level = HashMap::new();
-    let pure_constants = HashSet::new();
-    let callable_boundaries = HashMap::new();
-
     let mut binding_ids = IdSource::<u32>::new();
     let mut effect_ids = IdSource::new();
-    let mut arenas = ConversionArenas::new();
-    let mut converter = Converter::new(
-        &top_level,
-        &symbols,
-        pure_constants,
-        &callable_boundaries,
-        &mut binding_ids,
-        &mut effect_ids,
-        &mut arenas,
-    );
+    let plan = ConversionPlan::empty();
+    let mut converter = Converter::new(&symbols, &mut binding_ids, &mut effect_ids, &plan);
     let params = Parameters::from_ordered([callable_parameter::<BindingRef, WynLanguage>(
         "c".into(),
         Type::Constructed(TypeName::Bool, vec![]),

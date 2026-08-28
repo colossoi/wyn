@@ -25,7 +25,7 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     let program = wyn_core::tlc::validate_ownership(program).expect("validate_ownership");
     let program = wyn_core::tlc::partial_eval(program);
     let program = wyn_core::tlc::normalize_soacs(program);
-    let program = wyn_core::tlc::monomorphize(program);
+    let program = wyn_core::tlc::monomorphize(program).expect("monomorphize");
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::inline_small(program);
     let program = wyn_core::tlc::force_inline_soac_helpers(program);

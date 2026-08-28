@@ -335,7 +335,7 @@ fn compile_file(
     });
     let program = time("tlc_monomorphize", verbose, || {
         wyn_core::tlc::monomorphize(program)
-    });
+    })?;
     let program = time("tlc_rep_specialize", verbose, || {
         wyn_core::tlc::rep_specialize(program)
     });
