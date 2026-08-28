@@ -552,3 +552,23 @@ fn semantic_and_allocation_subpasses_are_individually_inspectable() {
         assert!(result.after.is_some(), "{} has no after snapshot", pass.id());
     }
 }
+
+#[test]
+fn physical_planning_subpasses_are_individually_inspectable() {
+    let source = r#"entry planned_sum(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, xs)"#;
+    let passes = [
+        InspectPass::BindMappedOutputDestinations,
+        InspectPass::AnalyzeKernelRecipes,
+        InspectPass::AllocateRecipeScratch,
+        InspectPass::BuildKernelSchedule,
+        InspectPass::FinalizeKernelSchedule,
+    ];
+
+    for pass in passes {
+        let result = inspect_pass_impl(source, pass);
+        assert!(result.success, "{} failed: {:?}", pass.id(), result.error);
+        assert!(result.before.is_some(), "{} has no before snapshot", pass.id());
+        assert!(result.after.is_some(), "{} has no after snapshot", pass.id());
+    }
+}

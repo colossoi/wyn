@@ -57,10 +57,34 @@ export const passDefinitions = {
     example: `entry verified_sum(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, xs)`,
   },
-  "egir::plan": {
+  "egir::bind_mapped_output_destinations": {
     before: "Verified staged IR",
+    after: "Mapped output destinations bound",
+    example: `entry mapped_output(xs: [4]i32) [4]i32 =
+  map(|x: i32| x + 1, xs)`,
+  },
+  "egir::analyze_kernel_recipes": {
+    before: "Mapped output destinations bound",
+    after: "Kernel recipes analyzed",
+    example: `entry analyzed_sum(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, xs)`,
+  },
+  "egir::allocate_recipe_scratch": {
+    before: "Kernel recipes analyzed",
+    after: "Recipe scratch allocated",
+    example: `entry scratch_sum(xs: []i32) i32 =
+  reduce(|a: i32, b: i32| a + b, 0, xs)`,
+  },
+  "egir::build_kernel_schedule": {
+    before: "Recipe scratch allocated",
+    after: "Kernel schedule built",
+    example: `entry scheduled_scan(xs: []i32) []i32 =
+  scan(|a: i32, b: i32| a + b, 0, xs)`,
+  },
+  "egir::finalize_kernel_schedule": {
+    before: "Kernel schedule built",
     after: "Planned physical EGIR",
-    example: `entry sum(xs: []i32) i32 =
+    example: `entry finalized_sum(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, xs)`,
   },
   "egir::expand_soacs": {

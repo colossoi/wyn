@@ -33,6 +33,11 @@ enum InspectPass {
     ResolveScratchSizes,
     FinalizeStagedIr,
     VerifyAllocatedResources,
+    BindMappedOutputDestinations,
+    AnalyzeKernelRecipes,
+    AllocateRecipeScratch,
+    BuildKernelSchedule,
+    FinalizeKernelSchedule,
     ExpandSoacs,
     EliminateInternalPlaceCalls,
     PartiallyInlineCalls,
@@ -55,6 +60,11 @@ impl InspectPass {
     const RESOLVE_SCRATCH_SIZES: &'static str = "egir::resolve_scratch_sizes";
     const FINALIZE_STAGED_IR: &'static str = "egir::finalize_staged_ir";
     const VERIFY_ALLOCATED_RESOURCES: &'static str = "egir::verify_allocated_resources";
+    const BIND_MAPPED_OUTPUT_DESTINATIONS: &'static str = "egir::bind_mapped_output_destinations";
+    const ANALYZE_KERNEL_RECIPES: &'static str = "egir::analyze_kernel_recipes";
+    const ALLOCATE_RECIPE_SCRATCH: &'static str = "egir::allocate_recipe_scratch";
+    const BUILD_KERNEL_SCHEDULE: &'static str = "egir::build_kernel_schedule";
+    const FINALIZE_KERNEL_SCHEDULE: &'static str = "egir::finalize_kernel_schedule";
     const EXPAND_SOACS: &'static str = "egir::expand_soacs";
     const ELIMINATE_INTERNAL_PLACE_CALLS: &'static str = "egir::eliminate_internal_place_calls";
     const PARTIALLY_INLINE_CALLS: &'static str = "egir::partially_inline_calls";
@@ -77,6 +87,11 @@ impl InspectPass {
             Self::RESOLVE_SCRATCH_SIZES => Some(Self::ResolveScratchSizes),
             Self::FINALIZE_STAGED_IR => Some(Self::FinalizeStagedIr),
             Self::VERIFY_ALLOCATED_RESOURCES => Some(Self::VerifyAllocatedResources),
+            Self::BIND_MAPPED_OUTPUT_DESTINATIONS => Some(Self::BindMappedOutputDestinations),
+            Self::ANALYZE_KERNEL_RECIPES => Some(Self::AnalyzeKernelRecipes),
+            Self::ALLOCATE_RECIPE_SCRATCH => Some(Self::AllocateRecipeScratch),
+            Self::BUILD_KERNEL_SCHEDULE => Some(Self::BuildKernelSchedule),
+            Self::FINALIZE_KERNEL_SCHEDULE => Some(Self::FinalizeKernelSchedule),
             Self::EXPAND_SOACS => Some(Self::ExpandSoacs),
             Self::ELIMINATE_INTERNAL_PLACE_CALLS => Some(Self::EliminateInternalPlaceCalls),
             Self::PARTIALLY_INLINE_CALLS => Some(Self::PartiallyInlineCalls),
@@ -102,6 +117,11 @@ impl InspectPass {
             Self::ResolveScratchSizes => Self::RESOLVE_SCRATCH_SIZES,
             Self::FinalizeStagedIr => Self::FINALIZE_STAGED_IR,
             Self::VerifyAllocatedResources => Self::VERIFY_ALLOCATED_RESOURCES,
+            Self::BindMappedOutputDestinations => Self::BIND_MAPPED_OUTPUT_DESTINATIONS,
+            Self::AnalyzeKernelRecipes => Self::ANALYZE_KERNEL_RECIPES,
+            Self::AllocateRecipeScratch => Self::ALLOCATE_RECIPE_SCRATCH,
+            Self::BuildKernelSchedule => Self::BUILD_KERNEL_SCHEDULE,
+            Self::FinalizeKernelSchedule => Self::FINALIZE_KERNEL_SCHEDULE,
             Self::ExpandSoacs => Self::EXPAND_SOACS,
             Self::EliminateInternalPlaceCalls => Self::ELIMINATE_INTERNAL_PLACE_CALLS,
             Self::PartiallyInlineCalls => Self::PARTIALLY_INLINE_CALLS,
@@ -745,27 +765,114 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
             snapshot_allocated_program(&allocated),
         );
     }
-    let before_planning =
+    let aggregate_planning_before =
         (pass == InspectPass::PlanPhysicalKernels).then(|| snapshot_allocated_program(&allocated));
-    let planned = match wyn_core::egir::plan(allocated, LoweringProfile::PORTABLE) {
+    let before_destination_binding =
+        (pass == InspectPass::BindMappedOutputDestinations).then(|| snapshot_allocated_program(&allocated));
+    let destinations_bound = match wyn_core::egir::bind_mapped_output_destinations(allocated) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
                 pass.id(),
-                format!("EGIR physical-kernel planning error: {error:?}"),
+                format!("EGIR output-destination binding error: {error:?}"),
                 None,
             )
         }
     };
-    if pass == InspectPass::PlanPhysicalKernels {
-        return InspectResult {
-            success: true,
-            pass: pass.id().to_string(),
-            before: before_planning,
-            after: Some(snapshot_physical_program(&planned)),
-            relations: Vec::new(),
-            error: None,
+    if pass == InspectPass::BindMappedOutputDestinations {
+        return successful_inspection(
+            pass,
+            before_destination_binding,
+            snapshot_allocated_program(destinations_bound.program()),
+        );
+    }
+
+    let before_recipe_analysis = (pass == InspectPass::AnalyzeKernelRecipes)
+        .then(|| snapshot_allocated_program(destinations_bound.program()));
+    let recipes_analyzed =
+        match wyn_core::egir::analyze_kernel_recipes(destinations_bound, LoweringProfile::PORTABLE) {
+            Ok(program) => program,
+            Err(error) => {
+                return InspectResult::error(
+                    pass.id(),
+                    format!("EGIR kernel-recipe analysis error: {error:?}"),
+                    None,
+                )
+            }
         };
+    if pass == InspectPass::AnalyzeKernelRecipes {
+        return successful_inspection(
+            pass,
+            before_recipe_analysis,
+            snapshot_allocated_program(recipes_analyzed.program()),
+        );
+    }
+
+    let before_recipe_scratch = (pass == InspectPass::AllocateRecipeScratch)
+        .then(|| snapshot_allocated_program(recipes_analyzed.program()));
+    let recipe_scratch = match wyn_core::egir::allocate_recipe_scratch(recipes_analyzed) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR recipe-scratch allocation error: {error:?}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::AllocateRecipeScratch {
+        return successful_inspection(
+            pass,
+            before_recipe_scratch,
+            snapshot_allocated_program(recipe_scratch.program()),
+        );
+    }
+
+    let before_schedule = (pass == InspectPass::BuildKernelSchedule)
+        .then(|| snapshot_allocated_program(recipe_scratch.program()));
+    let schedule = match wyn_core::egir::build_kernel_schedule(recipe_scratch) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR kernel-schedule construction error: {error:?}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::BuildKernelSchedule {
+        return successful_inspection(
+            pass,
+            before_schedule,
+            snapshot_allocated_program(schedule.program()),
+        );
+    }
+
+    let before_schedule_finalization = (pass == InspectPass::FinalizeKernelSchedule)
+        .then(|| snapshot_allocated_program(schedule.program()));
+    let planned = match wyn_core::egir::finalize_kernel_schedule(schedule) {
+        Ok(program) => program,
+        Err(error) => {
+            return InspectResult::error(
+                pass.id(),
+                format!("EGIR kernel-schedule finalization error: {error:?}"),
+                None,
+            )
+        }
+    };
+    if pass == InspectPass::FinalizeKernelSchedule {
+        return successful_inspection(
+            pass,
+            before_schedule_finalization,
+            snapshot_physical_program(&planned),
+        );
+    }
+    if pass == InspectPass::PlanPhysicalKernels {
+        return successful_inspection(
+            pass,
+            aggregate_planning_before,
+            snapshot_physical_program(&planned),
+        );
     }
 
     let before_expansion = (pass == InspectPass::ExpandSoacs).then(|| snapshot_physical_program(&planned));
