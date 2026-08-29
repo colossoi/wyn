@@ -772,7 +772,16 @@ impl<'a> Elaborator<'a> {
         let mut operand_placements = SmallVec::<[SkelBlockId; 4]>::new();
         operand_placements.push(root_placed);
         operand_placements.extend(index_values.iter().filter_map(|(_, block)| *block));
-        let placed = self.choose_placement(&operand_placements);
+        // A PlaceView is an address into mutable local storage.  Its identity
+        // may be loop-invariant, but its contents are not: stores in the loop
+        // can change the value observed by this load.  Keep such reads at the
+        // point where they are demanded instead of applying pure-expression
+        // LICM based only on the place and index operands.
+        let placed = if root_place.is_some() {
+            self.current_skel_block.expect("current block unset")
+        } else {
+            self.choose_placement(&operand_placements)
+        };
         let out_bid = self.block_map[&placed];
 
         let mut place = root_place;

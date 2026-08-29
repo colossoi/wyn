@@ -3487,6 +3487,43 @@ entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
     .expect("all unified invocation fields lower through SPIR-V");
     assert_naga_accepts_spirv(&lowered.spirv);
 }
+
+/// Explicit derivatives require uniform fragment control flow. A source
+/// branch controlled by an invocation-varying value must therefore be
+/// diagnosed rather than lowered to an `OpFwidth` with undefined results.
+#[test]
+#[ignore = "derivative uniformity analysis is not implemented yet"]
+fn nonuniform_fragment_derivative_is_rejected() {
+    let error = match compile_thru_spirv(
+        r#"
+open f32
+
+def divergent_color(fragment: fragment_invocation<f32>) vec4f32 =
+  let x = fragment.position.x in
+  let width = if x > 0.5 then fwidth(x) else 0.0 in
+  @[width, 0.0, 0.0, 1.0]
+
+entry divergent_fwidth(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex|
+      let x = if vertex.vertex_index == 1u32 then 3.0 else -1.0 in
+      let y = if vertex.vertex_index == 2u32 then 3.0 else -1.0 in
+      vertex_output(@[x, y, 0.0, 1.0], 0.0)) in
+  shade(target, covered, divergent_color)
+"#,
+    ) {
+        Ok(_) => panic!("an invocation-varying derivative call must be rejected"),
+        Err(error) => error,
+    };
+
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("derivative") && diagnostic.contains("uniform"),
+        "unexpected diagnostic: {diagnostic}",
+    );
+}
+
 #[test]
 fn unified_graphics_captures_use_compiler_assigned_interfaces() {
     let lowered = compile_thru_spirv(
@@ -8482,6 +8519,47 @@ entry main(x: []f32) [4]f32 = f(x[0])
     compile_to_spirv(source).expect(
         "loop carrying `map(..., iota(N))` should compile; currently fails with \
          ArrayWith cache miss because the back-edge array is Virtual variant",
+    );
+}
+
+/// Indexing a materialized array produced inside a loop is a memory read from
+/// a mutable local place.  It must not be treated as an invariant pure
+/// expression and hoisted into the loop preheader, before the inner loop has
+/// populated the array.
+#[test]
+fn loop_local_materialized_array_load_stays_after_initialization() {
+    use crate::ssa::types::InstKind;
+
+    let ssa = compile_to_ssa(
+        r#"
+entry nested_array_load(seed: f32) f32 =
+  let (_, total) =
+    loop (j, total) = (0, 0.0) while j < 2 do
+      let (_, values) =
+        loop (i, values) = (0, [0.0, 0.0, 0.0]) while i < 3 do
+          (i + 1, values with [i] = seed + f32.i32(i))
+      in (j + 1, total + values[0])
+  in total
+"#,
+    );
+
+    let entry = ssa
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "nested_array_load")
+        .expect("missing nested_array_load entry point");
+    let preheader = entry.body.entry_block();
+    let preheader_loads = entry.body.inner.blocks[preheader]
+        .insts
+        .iter()
+        .copied()
+        .filter(|inst| matches!(entry.body.inner.insts[*inst].data, InstKind::Load { .. }))
+        .collect::<Vec<_>>();
+
+    assert!(
+        preheader_loads.is_empty(),
+        "loads from the inner loop's materialized array were hoisted before its initialization: \
+         {preheader_loads:?}",
     );
 }
 
