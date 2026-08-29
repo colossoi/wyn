@@ -52,8 +52,8 @@ pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
 
 pub use allocation::{
-    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources, resolve_residency,
-    ResidencyDraft, ResourcesAllocated,
+    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources,
+    plan_logical_resources_with_policy, resolve_residency, ResidencyDraft, ResourcesAllocated,
 };
 pub use elaborate::elaborate;
 pub use eliminate_call_places::{
@@ -75,9 +75,10 @@ pub use reify::reify_soacs;
 pub use resource_erasure::{erase_resources, ResourcesErased};
 pub use rewrite::rewrite;
 pub use semantic_opt::{
-    eliminate_dead_semantic_operations, fuse_semantic_operations, lift_stage_uniform_values,
-    optimize_semantic_operations, optimize_semantic_operations_with_trace, Optimized,
-    SemanticOperationsOptimized, SemanticOptimizationRelation, SemanticOptimizationTrace,
+    apply_pipeline_topology_policy, eliminate_dead_semantic_operations, fuse_semantic_operations,
+    lift_stage_uniform_values, optimize_semantic_operations, optimize_semantic_operations_with_trace,
+    preserve_authored_stage_boundaries, Optimized, SemanticOperationsOptimized,
+    SemanticOptimizationRelation, SemanticOptimizationTrace,
 };
 pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
 pub use soac_expand::{expand_soacs, SoacsExpanded};

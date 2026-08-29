@@ -15,6 +15,7 @@ use crate::parser::Parser;
 use crate::resolve_imports;
 use crate::scope;
 use crate::scope::ScopeStack;
+use crate::CompilerOptions;
 use crate::StableMap;
 use crate::{bail_module, err_module, err_parse};
 use crate::{LookupMap, LookupSet};
@@ -115,6 +116,7 @@ pub struct PreElaboratedPrelude {
 /// Manages lazy loading of module files
 #[derive(Debug)]
 pub struct ModuleManager {
+    options: CompilerOptions,
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
@@ -157,6 +159,7 @@ impl ModuleManager {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         ModuleManager {
+            options: CompilerOptions::default(),
             module_type_registry: LookupMap::new(),
             elaborated_modules: StableMap::new(),
             functor_modules: LookupMap::new(),
@@ -210,7 +213,14 @@ impl ModuleManager {
     /// Note: Caller must use a NodeCounter that was advanced during prelude creation
     /// (see get_prelude_cache in lib.rs which caches both prelude and node_counter)
     pub fn from_prelude(prelude: PreElaboratedPrelude) -> Self {
+        Self::from_prelude_with_options(prelude, CompilerOptions::default())
+    }
+
+    /// Create a ModuleManager from a cached prelude with explicit language
+    /// features for subsequent user-source parsing and resolution.
+    pub fn from_prelude_with_options(prelude: PreElaboratedPrelude, options: CompilerOptions) -> Self {
         ModuleManager {
+            options,
             module_type_registry: prelude.module_type_registry,
             elaborated_modules: prelude.elaborated_modules,
             functor_modules: LookupMap::new(), // Prelude doesn't have functors
@@ -219,6 +229,10 @@ impl ModuleManager {
             prelude_functions: prelude.prelude_functions,
             user_module_names: LookupSet::new(),
         }
+    }
+
+    pub fn options(&self) -> CompilerOptions {
+        self.options
     }
 
     /// Check if a name is a known module
@@ -244,7 +258,7 @@ impl ModuleManager {
     pub fn load_str(&mut self, source: &str, node_counter: &mut NodeCounter) -> Result<()> {
         // Parse the source
         let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
-        let mut parser = Parser::new(tokens, node_counter);
+        let mut parser = Parser::with_graphics(tokens, node_counter, self.options.graphics);
         let declarations = parser.parse()?;
 
         // Register module types first

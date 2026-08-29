@@ -80,7 +80,7 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 echo Profiling compile of every testfile (output -^> %OUTDIR%)...
 REM `-v` prints `[i/n] path` before each file so a mid-batch compile
 REM failure is immediately attributable to the file that triggered it.
-samply record -- "%BINARY%" compile -v !FILES! -o "%OUTDIR%"
+samply record -- "%BINARY%" compile --graphics -v !FILES! -o "%OUTDIR%"
 
 set EXITCODE=%errorlevel%
 popd

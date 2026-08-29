@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{CodegenTarget, LoweringProfile, SchedulePolicy};
+use wyn_core::{CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -66,11 +66,14 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
 
-        /// Disable multi-stage SOAC parallelization. Compute SOACs emit
-        /// as a single sequential loop instead of chunk/combine phases;
-        /// graphical-entry SOACs are not lifted to pre-pass kernels.
+        /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
-        single_stage: bool,
+        graphics: bool,
+
+        /// Emit WGSL without compiler-created prepasses, entry points, or
+        /// host-visible resources. Requires --target wgsl.
+        #[arg(long)]
+        direct_wgsl: bool,
 
         /// Enable software emulation of unsigned 64-bit integers in WGSL.
         /// This option is invalid for the SPIR-V target.
@@ -97,6 +100,10 @@ enum Commands {
         /// Input source file
         #[arg(value_name = "FILE")]
         input: PathBuf,
+
+        /// Enable the unified graphics pipeline vocabulary.
+        #[arg(long)]
+        graphics: bool,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -132,10 +139,13 @@ struct FrontendFile {
 fn type_check_frontend_file(
     input: &Path,
     reject_holes: bool,
+    graphics: bool,
     verbose: bool,
 ) -> Result<FrontendFile, DriverError> {
     let source = fs::read_to_string(input)?;
-    let (node_counter, module_manager) = time("frontend", verbose, wyn_core::init_compiler)?;
+    let (node_counter, module_manager) = time("frontend", verbose, || {
+        wyn_core::init_compiler_with_options(CompilerOptions { graphics })
+    })?;
     let program = time("parse", verbose, || {
         wyn_core::parser::parse(&source, node_counter, module_manager)
     })?;
@@ -229,7 +239,8 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             target,
             output_tlc,
             output_mir,
-            single_stage,
+            graphics,
+            direct_wgsl,
             wgsl_emulate_u64,
             fill_holes,
             verbose,
@@ -237,6 +248,11 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
                 return Err(DriverError::InvalidOption(
                     "--wgsl-emulate-u64 requires --target wgsl".to_string(),
+                ));
+            }
+            if direct_wgsl && !matches!(target, Target::Wgsl) {
+                return Err(DriverError::InvalidOption(
+                    "--direct-wgsl requires --target wgsl".to_string(),
                 ));
             }
             // Output handling:
@@ -276,15 +292,20 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                     target,
                     output_tlc.clone(),
                     output_mir.clone(),
-                    single_stage,
+                    graphics,
+                    direct_wgsl,
                     wgsl_emulate_u64,
                     fill_holes,
                     verbose,
                 )?;
             }
         }
-        Commands::Check { input, verbose } => {
-            check_file(input, verbose)?;
+        Commands::Check {
+            input,
+            graphics,
+            verbose,
+        } => {
+            check_file(input, graphics, verbose)?;
         }
     }
 
@@ -297,7 +318,8 @@ fn compile_file(
     target: Target,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
-    single_stage: bool,
+    graphics: bool,
+    direct_wgsl: bool,
     wgsl_emulate_u64: bool,
     fill_holes: bool,
     verbose: bool,
@@ -309,7 +331,7 @@ fn compile_file(
     // Wall-clock start for the always-printed timing summary below.
     let compile_start = Instant::now();
 
-    let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, verbose)?;
+    let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
 
     let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program))?;
 
@@ -385,19 +407,27 @@ fn compile_file(
     let program = time("egir_optimize_semantic_operations", verbose, || {
         wyn_core::egir::optimize_semantic_operations(program)
     })?;
-    let program = time("egir_lift_stage_uniform_values", verbose, || {
-        wyn_core::egir::lift_stage_uniform_values(program)
+    let profile = if direct_wgsl {
+        LoweringProfile::with_topology(
+            CodegenTarget::Wgsl,
+            SchedulePolicy::Serial,
+            PipelineTopologyPolicy::AuthoredOnly,
+        )
+    } else {
+        LoweringProfile::new(
+            match target {
+                Target::Spirv => CodegenTarget::Spirv,
+                Target::Wgsl => CodegenTarget::Wgsl,
+            },
+            SchedulePolicy::Parallel,
+        )
+    };
+    let program = time("egir_apply_pipeline_topology_policy", verbose, || {
+        wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology)
     });
     let program = time("egir_plan_logical_resources", verbose, || {
-        wyn_core::egir::plan_logical_resources(program)
+        wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)
     })?;
-    let profile = LoweringProfile::new(
-        match target {
-            Target::Spirv => CodegenTarget::Spirv,
-            Target::Wgsl => CodegenTarget::Wgsl,
-        },
-        if single_stage { SchedulePolicy::Serial } else { SchedulePolicy::Parallel },
-    );
     let program = time("egir_plan", verbose, || wyn_core::egir::plan(program, profile))?;
     let ssa = time("egir_lower_to_ssa", verbose, || {
         wyn_core::lower_egir_to_ssa(program)
@@ -486,12 +516,12 @@ fn compile_file(
     Ok(())
 }
 
-fn check_file(input: PathBuf, verbose: bool) -> Result<(), DriverError> {
+fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
     if verbose {
         info!("Checking {}...", input.display());
     }
 
-    let FrontendFile { program } = type_check_frontend_file(&input, true, verbose)?;
+    let FrontendFile { program } = type_check_frontend_file(&input, true, graphics, verbose)?;
     let program = wyn_core::tlc::lower_from_ast(program)?;
     let program = wyn_core::tlc::pin_entry_buffers(program)?;
     wyn_core::tlc::validate_ownership(program)?;

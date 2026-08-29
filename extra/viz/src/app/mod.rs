@@ -221,6 +221,7 @@ struct PipelineComputeStage {
 struct PipelineState {
     compute_stages: Vec<PipelineComputeStage>,
     render_pipeline: RenderPipeline,
+    depth_enabled: bool,
     /// Render-side bind groups indexed by (parity, descriptor-set
     /// number). See `PipelineComputeStage.bind_groups_by_set` for the
     /// parity convention.
@@ -1145,7 +1146,7 @@ impl State {
                 topology: spec.topology,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu_depth_state(spec.fragment_state)),
+            depth_stencil: wgpu_depth_state(spec.fragment_state),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -1178,6 +1179,7 @@ impl State {
         let state = PipelineState {
             compute_stages,
             render_pipeline,
+            depth_enabled: spec.fragment_state.depth_test != wyn_pipeline_descriptor::DepthTest::Disabled,
             render_bind_groups_by_set: g_bgs,
             draw: spec.draw.clone(),
             indirect_buffer,
@@ -1570,10 +1572,14 @@ fn collect_graphics_bindings(desc: &PipelineDescriptor) -> Vec<wyn_pipeline_desc
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wgpu_depth_state(state: wyn_pipeline_descriptor::FragmentState) -> wgpu::DepthStencilState {
+fn wgpu_depth_state(state: wyn_pipeline_descriptor::FragmentState) -> Option<wgpu::DepthStencilState> {
     use wyn_pipeline_descriptor::DepthTest;
+    if state.depth_test == DepthTest::Disabled {
+        return None;
+    }
     let depth_compare = match state.depth_test {
-        DepthTest::Disabled | DepthTest::Always => wgpu::CompareFunction::Always,
+        DepthTest::Disabled => unreachable!("disabled depth was handled above"),
+        DepthTest::Always => wgpu::CompareFunction::Always,
         DepthTest::Never => wgpu::CompareFunction::Never,
         DepthTest::Less => wgpu::CompareFunction::Less,
         DepthTest::LessEqual => wgpu::CompareFunction::LessEqual,
@@ -1581,13 +1587,13 @@ fn wgpu_depth_state(state: wyn_pipeline_descriptor::FragmentState) -> wgpu::Dept
         DepthTest::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
         DepthTest::Greater => wgpu::CompareFunction::Greater,
     };
-    wgpu::DepthStencilState {
+    Some(wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
-        depth_write_enabled: state.depth_write && state.depth_test != DepthTest::Disabled,
+        depth_write_enabled: state.depth_write,
         depth_compare,
         stencil: Default::default(),
         bias: Default::default(),
-    }
+    })
 }
 
 fn wgpu_blend_state(mode: wyn_pipeline_descriptor::BlendMode) -> wgpu::BlendState {
@@ -1727,26 +1733,29 @@ fn render_pipeline(
         cpass.dispatch_workgroups(x, y, z);
     }
 
-    // Render the single graphics pipeline.
+    // Render the single graphics pipeline. Depth is absent unless the
+    // descriptor explicitly enables a depth test; an enabled depth buffer is
+    // cleared to the far plane at the start of every frame.
+    let depth_stencil_attachment = state.depth_enabled.then_some(wgpu::RenderPassDepthStencilAttachment {
+        view: depth_view,
+        depth_ops: Some(Operations {
+            load: LoadOp::Clear(1.0),
+            store: StoreOp::Store,
+        }),
+        stencil_ops: None,
+    });
     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("pipeline.render_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view,
             resolve_target: None,
             ops: Operations {
-                load: LoadOp::Load,
+                load: LoadOp::Clear(Color::BLACK),
                 store: StoreOp::Store,
             },
             depth_slice: None,
         })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: depth_view,
-            depth_ops: Some(Operations {
-                load: LoadOp::Load,
-                store: StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
+        depth_stencil_attachment,
         ..Default::default()
     });
     rpass.set_pipeline(&state.render_pipeline);

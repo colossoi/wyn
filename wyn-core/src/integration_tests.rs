@@ -10,8 +10,9 @@ use crate::ast;
 use crate::ast_type_holes;
 use crate::builtins;
 use crate::compile_thru_frontend;
+use crate::compile_thru_frontend_with_options;
 use crate::compile_thru_spirv;
-use crate::compile_thru_spirv_single_stage;
+use crate::compile_thru_spirv_serial;
 use crate::compile_thru_ssa;
 use crate::compile_thru_tlc;
 use crate::egir;
@@ -32,11 +33,147 @@ use crate::tlc::extract_lambda_params;
 use crate::tlc::VarRef;
 use crate::to_egraph;
 use crate::CodegenTarget;
+use crate::CompilerOptions;
 use crate::Lowered;
 use crate::LoweringProfile;
+use crate::PipelineTopologyPolicy;
 use crate::ResourceAccess;
 use crate::SchedulePolicy;
 use crate::SymbolTable;
+
+#[test]
+fn graphics_vocabulary_is_absent_without_opt_in() {
+    let error = compile_thru_frontend_with_options(
+        "entry main() i32 = direct_draw(3u32, 1u32)",
+        CompilerOptions::default(),
+    )
+    .expect_err("graphics builtin must not resolve without opt-in");
+    assert!(
+        error.to_string().contains("Undefined variable 'direct_draw'"),
+        "unexpected diagnostic: {error}"
+    );
+}
+
+#[test]
+fn disabled_graphics_names_can_be_defined_by_user_code() {
+    compile_thru_frontend_with_options(
+        r#"
+type render_target = i32
+def direct_draw(x: render_target) render_target = x
+entry main() render_target = direct_draw(7)
+"#,
+        CompilerOptions::default(),
+    )
+    .expect("disabled graphics spellings should remain ordinary user names");
+}
+
+#[test]
+fn graphics_builtin_identity_can_still_be_shadowed_when_enabled() {
+    compile_thru_frontend_with_options(
+        r#"
+def direct_draw(x: i32) i32 = x
+entry main() i32 = direct_draw(7)
+"#,
+        CompilerOptions { graphics: true },
+    )
+    .expect("a user definition should shadow the enabled graphics builtin");
+}
+
+fn plan_direct_wgsl(source: &str) -> Result<egir::parallelize::Planned, Box<dyn std::error::Error>> {
+    let program = compile_thru_tlc(source)?;
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program)?;
+    let program = egir::reify_soacs(program);
+    let program = egir::optimize_semantic_operations(program)?;
+    let topology = PipelineTopologyPolicy::AuthoredOnly;
+    let program = egir::apply_pipeline_topology_policy(program, topology);
+    let program = egir::plan_logical_resources_with_policy(program, topology)?;
+    Ok(egir::plan(
+        program,
+        LoweringProfile::with_topology(CodegenTarget::Wgsl, SchedulePolicy::Serial, topology),
+    )?)
+}
+
+fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(test)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
+#[test]
+fn direct_wgsl_emits_only_the_requested_graphics_stages() {
+    run_with_large_stack(|| {
+        let planned = plan_direct_wgsl(include_str!("../../testfiles/unified_triangle.wyn"))
+            .expect("direct graphics plan");
+        let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
+        assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
+        assert!(
+            ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
+            "direct graphics output must not contain compute prepasses"
+        );
+        assert!(
+            ssa.global_context
+                .pipeline
+                .pipelines
+                .iter()
+                .all(|pipeline| { matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)) }),
+            "direct graphics output must publish only the requested graphics pipeline"
+        );
+        let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
+        assert_eq!(wgsl.matches("@vertex").count(), 1);
+        assert_eq!(wgsl.matches("@fragment").count(), 1);
+        assert!(!wgsl.contains("@compute"));
+    });
+}
+
+#[test]
+fn direct_wgsl_keeps_fragment_local_reduce_in_the_authored_stage() {
+    run_with_large_stack(|| {
+        let planned = plan_direct_wgsl(include_str!("../../testfiles/playground/ripples.wyn"))
+            .expect("fragment-local reduction should remain serial in direct WGSL");
+        let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
+        assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
+        assert!(
+            ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
+            "direct graphics output must not contain a reduction prepass"
+        );
+        let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
+        assert_eq!(wgsl.matches("@vertex").count(), 1);
+        assert_eq!(wgsl.matches("@fragment").count(), 1);
+        assert!(!wgsl.contains("@compute"));
+    });
+}
+
+#[test]
+fn direct_wgsl_rejects_a_cross_stage_materialization() {
+    run_with_large_stack(|| {
+        let error = plan_direct_wgsl(
+            r#"
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(
+    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    else @[-1.0, 3.0, 0.0, 1.0],
+    @[0.0, 0.0])
+
+entry frame(xs: []f32,
+            screen: render_target<vec4f32>) render_target<vec4f32> =
+  let mapped = map(|x: f32| x + 1.0, xs) in
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster,
+    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0])
+"#,
+        )
+        .expect_err("cross-stage array materialization must be rejected");
+        assert!(
+            error.to_string().contains("authored-only"),
+            "unexpected direct-output diagnostic: {error}"
+        );
+    });
+}
 
 /// Run source through the pipeline up to SSA.
 fn compile_to_ssa(input: &str) -> ssa::stage::Elaborated {
@@ -1321,11 +1458,11 @@ entry collision_shape_2d_bound(
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Serial),
     );
     let Err(error) = serial else {
-        panic!("single-stage bucket scatter must report its required pipeline")
+        panic!("serial bucket scatter must report its required pipeline")
     };
     assert!(
         error.to_string().contains("requires its init/insert/finish pipeline"),
-        "unexpected single-stage diagnostic: {error}"
+        "unexpected serial-scheduling diagnostic: {error}"
     );
 }
 
@@ -1962,7 +2099,7 @@ entry add_sum(xs: []i32) []i32 =
     .expect("plan sequential reduction");
     assert!(
         !kinds(single.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
-        "single-stage planning must not reserve parallel partial buffers"
+        "serial planning must not reserve parallel partial buffers"
     );
 
     let fallback = compile_to_semantic_egir(
@@ -3016,7 +3153,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 }
 
 #[test]
-fn single_stage_is_a_terminal_schedule_policy() {
+fn serial_is_a_terminal_schedule_policy() {
     let source = r#"
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
@@ -7880,9 +8017,9 @@ fn compile_to_spirv(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>>
 }
 
 /// Single-stage equivalent of `compile_to_spirv` — disables
-/// `parallelize_soacs`, matching the CLI's `--single-stage` mode.
-fn compile_to_spirv_single_stage(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
-    Ok(compile_thru_spirv_single_stage(input)?.spirv)
+/// `parallelize_soacs`, exercising the internal serial schedule policy.
+fn compile_to_spirv_serial(input: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    Ok(compile_thru_spirv_serial(input)?.spirv)
 }
 
 /// Compile module-bearing source through SSA using the shared frontend.
@@ -9732,7 +9869,7 @@ entry e(xs: [8]vec4f32) vec2f32 = sum2(xs)
 
 /// True iff the pipeline for `entry` is a multi-stage compute (the two-phase
 /// shape of a parallelized scalar reduction: chunk + combine). This
-/// distinguishes masked fused reduction from a serial single-stage
+/// distinguishes masked fused reduction from a serial schedule
 /// filter→reduce.
 fn is_two_phase_compute(pipeline: &pipeline_descriptor::PipelineDescriptor, entry: &str) -> bool {
     use crate::pipeline_descriptor::Pipeline;
@@ -9980,7 +10117,7 @@ entry e(i: i32) i32 =
 
 /// Invariant, end to end: a SOAC helper called *per element* inside a `map`
 /// lambda must NOT be hoisted and parallelized — the inner reduce stays a
-/// serial per-thread loop. The entry parallelizes as a single-stage
+/// serial per-thread loop. The entry parallelizes as one scheduled stage
 /// lane-indexed map, not a multi-phase reduce pipeline.
 #[test]
 fn per_element_helper_soac_stays_serial() {
@@ -10259,20 +10396,20 @@ entry gen(xs: []i32) ([]i32, []i32) =
     .expect("one scan result can be published through two explicit destinations");
 }
 
-/// Under `--single-stage` mode, a vec4-emitting map that gathers from a
+/// Under serial scheduling, a vec4-emitting map that gathers from a
 /// derived (map/scan-produced) array must still produce well-formed
 /// SPIR-V. The materialization resource and consumer output must remain
 /// distinct even when target scheduling selects serial recipes.
 #[test]
-fn single_stage_vec4_map_gather_from_derived_array_repro() {
-    let spirv = compile_to_spirv_single_stage(
+fn serial_vec4_map_gather_from_derived_array_repro() {
+    let spirv = compile_to_spirv_serial(
         "\
 entry gen(xs: []i32) []vec4f32 =
   let cs = map(|x: i32| x * 2, xs) in
   map(|i: i32| @[f32.i32(cs[i]), 0.0, 0.0, 1.0], iota(8))
 ",
     )
-    .expect("single-stage vec4-map gathering derived array compiles");
+    .expect("serial vec4-map gathering derived array compiles");
     assert_spirv_storage_access_chain_pointee_types_match(&spirv);
 }
 

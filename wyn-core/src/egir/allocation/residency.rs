@@ -15,6 +15,7 @@ use wyn_base::IdSource;
 
 use polytype::Type;
 
+use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::graph_projector::{
     GraphProjection, GraphProjector, ProjectedValueRecipe, ValueRecipeSource,
@@ -38,6 +39,7 @@ use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::StorageRole;
 use crate::pipeline_descriptor::{DispatchSize, Pipeline, StorageTextureSize};
 use crate::types::TypeExt;
+use crate::PipelineTopologyPolicy;
 use wyn_staged_ir::{FlowId, StageId};
 
 #[cfg(test)]
@@ -177,11 +179,27 @@ struct InputReplacement {
     resource: ResourceId,
 }
 
-pub fn resolve_residency(mut program: ResidencyDraft) -> Result<ResidencyDraft, String> {
+pub fn resolve_residency(program: ResidencyDraft) -> Result<ResidencyDraft, String> {
+    resolve_residency_with_policy(program, PipelineTopologyPolicy::AllowGenerated).map_err(|error| {
+        match error {
+            ConvertError::Internal(message) => message,
+            error => error.to_string(),
+        }
+    })
+}
+
+pub(super) fn resolve_residency_with_policy(
+    mut program: ResidencyDraft,
+    topology: PipelineTopologyPolicy,
+) -> Result<ResidencyDraft, ConvertError> {
     loop {
         // Required operation-result handoffs are a normalization phase, not a
         // failed attempt whose fallback is speculative prelude extraction.
-        program = normalize_operation_result_residency(program)?;
+        program = normalize_operation_result_residency(program, topology)?;
+
+        if topology == PipelineTopologyPolicy::AuthoredOnly {
+            break;
+        }
 
         // Prelude extraction is a separate, cost-driven phase. Its rewrite
         // changes the graph, so restart required-residency normalization
@@ -200,12 +218,16 @@ pub fn resolve_residency(mut program: ResidencyDraft) -> Result<ResidencyDraft, 
             plan.insertion_site,
             plan.recipe,
             plan.outputs,
-        )?;
+        )
+        .map_err(ConvertError::Internal)?;
     }
     Ok(program)
 }
 
-fn normalize_operation_result_residency(mut program: ResidencyDraft) -> Result<ResidencyDraft, String> {
+fn normalize_operation_result_residency(
+    mut program: ResidencyDraft,
+    topology: PipelineTopologyPolicy,
+) -> Result<ResidencyDraft, ConvertError> {
     loop {
         // Every rewrite can change both operation dependencies and which
         // runtime-composite arrays need storage, so neither analysis may be
@@ -213,21 +235,32 @@ fn normalize_operation_result_residency(mut program: ResidencyDraft) -> Result<R
         let dependencies = super::super::semantic_graph::dependencies(&program);
         let array_residency_demands = super::super::semantic_graph::array_residency_demands(&program);
 
-        let plan =
-            if let Some(plan) = plan_operation_result(&program, &dependencies, &array_residency_demands)? {
-                plan
-            } else if let Some(plan) = plan_scalar_result_handoff(&program, &dependencies)? {
-                plan
-            } else {
-                return Ok(program);
-            };
+        let plan = if let Some(plan) =
+            plan_operation_result(&program, &dependencies, &array_residency_demands)
+                .map_err(ConvertError::Internal)?
+        {
+            plan
+        } else if let Some(plan) =
+            plan_scalar_result_handoff(&program, &dependencies).map_err(ConvertError::Internal)?
+        {
+            plan
+        } else {
+            return Ok(program);
+        };
+        if topology == PipelineTopologyPolicy::AuthoredOnly {
+            return Err(ConvertError::PipelineTopology(
+                "authored-only lowering cannot represent an operation result that requires a compiler-created stage or handoff resource"
+                    .into(),
+            ));
+        }
         program = match plan {
             OperationMaterializationPlan::FixedOperation {
                 entry,
                 kind,
                 operation,
                 outputs,
-            } => materialize_operation_result(program, entry, kind, operation, outputs)?,
+            } => materialize_operation_result(program, entry, kind, operation, outputs)
+                .map_err(ConvertError::Internal)?,
             OperationMaterializationPlan::RuntimeArray {
                 entry,
                 operation,
@@ -238,7 +271,8 @@ fn normalize_operation_result_residency(mut program: ResidencyDraft) -> Result<R
                 size,
             } => materialize_runtime_array_result(
                 program, entry, operation, backing, length, elem_ty, result_ty, size,
-            )?,
+            )
+            .map_err(ConvertError::Internal)?,
         };
     }
 }

@@ -156,6 +156,32 @@ pub fn lift_stage_uniform_values(program: SemanticOperationsOptimized) -> Optimi
     program.retag()
 }
 
+/// Cross the semantic optimization boundary without hoisting values into
+/// compiler-created stages. Direct WGSL uses this path to preserve authored
+/// graphics-stage boundaries.
+pub fn preserve_authored_stage_boundaries(program: SemanticOperationsOptimized) -> Optimized {
+    let program: Segmented = program.retag();
+    if cfg!(debug_assertions) {
+        if let Err(error) = super::semantic_graph::verify(&program) {
+            panic!("semantic optimization produced invalid EGIR: {error}");
+        }
+    }
+    program.retag()
+}
+
+/// Apply the requested pipeline-topology policy at the semantic stage
+/// boundary. This keeps the choice between profitable stage lifting and exact
+/// authored topology independent of any backend or command-line spelling.
+pub fn apply_pipeline_topology_policy(
+    program: SemanticOperationsOptimized,
+    topology: crate::PipelineTopologyPolicy,
+) -> Optimized {
+    match topology {
+        crate::PipelineTopologyPolicy::AllowGenerated => lift_stage_uniform_values(program),
+        crate::PipelineTopologyPolicy::AuthoredOnly => preserve_authored_stage_boundaries(program),
+    }
+}
+
 fn semantic_operation_fingerprints(program: &Segmented) -> BTreeMap<SemanticOpId, String> {
     program
         .entry_points

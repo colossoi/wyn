@@ -6,7 +6,10 @@ use super::*;
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
 fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
-    let (node_counter, module_manager) = wyn_core::init_compiler().expect("compiler initialization failed");
+    let (node_counter, module_manager) = wyn_core::init_compiler_with_options(
+        wyn_core::CompilerOptions { graphics: true },
+    )
+    .expect("compiler initialization failed");
     let program = wyn_core::parser::parse(source, node_counter, module_manager).expect("parse failed");
     let program = wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
         .expect("resolve_imports failed");
@@ -67,30 +70,43 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
 /// writes.
 #[test]
 fn interface_surfaces_materialization_storage_bindings() {
-    let src = r#"
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32)
-  #[builtin(position)] vec4f32 =
-  @[-1.0, -1.0, 0.0, 1.0]
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(interface_surfaces_materialization_storage_bindings_impl)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
 
-#[fragment]
-entry fragment_main(
-  #[uniform(set=1, binding=0)] iTime: f32,
-  #[builtin(position)] fragCoord: vec4f32
-) #[target(screen)] vec4f32 =
+fn interface_surfaces_materialization_storage_bindings_impl() {
+    let src = r#"
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(
+    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    else @[-1.0, 3.0, 0.0, 1.0],
+    @[0.0, 0.0])
+
+def fragment_main(iTime: f32,
+                  fragment: fragment_invocation<vec2f32>) vec4f32 =
   let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
   let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
   @[breath, 0.0, 0.0, 1.0]
+
+entry image(iTime: f32,
+            screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, |fragment| fragment_main(iTime, fragment))
 "#;
     let program = compile_to_ssa(src);
     let iface = program_interface(&program);
 
-    // The `#[uniform(set=1, binding=0)]` fragment param `iTime` (used inside
-    // the lifted reduce) must surface in `interface.uniforms` for the driver
-    // to bind the uniform buffer — on whichever entry ends up carrying it.
+    // The root scalar `iTime` (used inside the lifted reduce) must surface in
+    // `interface.uniforms` for the driver to bind the uniform buffer — on
+    // whichever entry ends up carrying it.
     assert!(
-        iface.uniforms.iter().any(|u| u.set == 1 && u.binding == 0),
-        "uniform iTime (set=1, binding=0) missing from interface.uniforms; got {:?}",
+        iface.uniforms.iter().any(|u| u.name == "iTime"),
+        "uniform iTime missing from interface.uniforms; got {:?}",
         iface.uniforms.iter().map(|u| (u.set, u.binding, u.name.clone())).collect::<Vec<_>>()
     );
 

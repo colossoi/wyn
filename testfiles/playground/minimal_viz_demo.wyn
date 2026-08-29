@@ -1,0 +1,18 @@
+-- Minimal direct-WGSL graphics demo for viz.
+
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  let p =
+    if vertex.vertex_index == 0u32 then @[-1.0, -1.0]
+    else if vertex.vertex_index == 1u32 then @[3.0, -1.0]
+    else @[-1.0, 3.0] in
+  vertex_output(@[p.x, p.y, 0.0, 1.0], p)
+
+def fragment_main(fragment: fragment_invocation<vec2f32>) vec4f32 =
+  let uv = fragment.value * 0.5 + 0.5 in
+  @[uv.x, uv.y, 0.25, 1.0]
+
+entry demo(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    vertex_main) in
+  shade(screen, raster, fragment_main)

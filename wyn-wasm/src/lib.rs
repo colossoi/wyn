@@ -4,7 +4,9 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{CodegenTarget, LoweringProfile, SchedulePolicy};
+use wyn_core::{
+    CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy,
+};
 
 /// Cached prelude and starting node counter
 /// Creating the prelude parses all prelude files, which is expensive.
@@ -21,7 +23,7 @@ thread_local! {
 /// Get the compiler version string
 #[wasm_bindgen]
 pub fn version() -> String {
-    "004".to_string()
+    "005".to_string()
 }
 
 // =============================================================================
@@ -207,13 +209,14 @@ pub fn init_compiler() -> bool {
 }
 
 /// Build a fresh `(NodeCounter, ModuleManager)` pair from the cached prelude.
-fn create_compiler_init() -> Option<(NodeCounter, ModuleManager)> {
+fn create_compiler_init(options: CompilerOptions) -> Option<(NodeCounter, ModuleManager)> {
     PRELUDE_CACHE.with(|cache| {
         let cache_ref = cache.borrow();
         let cached = cache_ref.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude(
+        Some(wyn_core::init_compiler_from_prelude_with_options(
             cached.prelude.clone(),
             cached.start_node_counter.clone(),
+            options,
         ))
     })
 }
@@ -256,6 +259,7 @@ fn format_error(e: &CompilerError) -> String {
         CompilerError::IoError(err) => format!("IO error: {}", err),
         CompilerError::SpirvBuilderError(msg) => format!("SPIR-V builder error: {}", msg),
         CompilerError::TypeHole(msg) => format!("Type hole: {}", msg),
+        CompilerError::FormattingError(err) => format!("Formatting error: {err}"),
         CompilerError::Internal(msg) => format!("Internal compiler error: {msg}"),
     }
 }
@@ -562,17 +566,25 @@ impl CompileResultWgsl {
 /// pipeline-visualization UI.
 #[wasm_bindgen]
 pub fn compile_to_wgsl(source: &str) -> JsValue {
+    compile_to_wgsl_with_options(source, true, false)
+}
+
+/// Compile with explicit source-language and direct-output policy. The
+/// playground should pass `(true, true)` so its graphical vocabulary is
+/// enabled while hidden prepasses/resources remain forbidden.
+#[wasm_bindgen]
+pub fn compile_to_wgsl_with_options(source: &str, graphics: bool, direct_wgsl: bool) -> JsValue {
     console_error_panic_hook::set_once();
     init_compiler();
-    let result = compile_to_wgsl_impl(source);
+    let result = compile_to_wgsl_impl(source, graphics, direct_wgsl);
     serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
         let err = CompileResultWgsl::err_msg(format!("Serialization error: {}", e));
         serde_wasm_bindgen::to_value(&err).unwrap()
     })
 }
 
-fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
-    let (node_counter, module_manager) = match create_compiler_init() {
+fn compile_to_wgsl_impl(source: &str, graphics: bool, direct_wgsl: bool) -> CompileResultWgsl {
+    let (node_counter, module_manager) = match create_compiler_init(CompilerOptions { graphics }) {
         Some(f) => f,
         None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
     };
@@ -647,19 +659,28 @@ fn compile_to_wgsl_impl(source: &str) -> CompileResultWgsl {
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let profile = LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel);
+    let profile = if direct_wgsl {
+        LoweringProfile::with_topology(
+            CodegenTarget::Wgsl,
+            SchedulePolicy::Serial,
+            PipelineTopologyPolicy::AuthoredOnly,
+        )
+    } else {
+        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel)
+    };
     let lower = || -> Result<_, wyn_core::egir::from_tlc::ConvertError> {
         let program = wyn_core::egir::reify_soacs(program);
         let program = wyn_core::egir::optimize_semantic_operations(program)
             .map_err(|error| wyn_core::egir::from_tlc::ConvertError::Internal(error.to_string()))?;
-        let program = wyn_core::egir::lift_stage_uniform_values(program);
-        let program = wyn_core::egir::plan_logical_resources(program)?;
+        let program = wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology);
+        let program =
+            wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
         let program = wyn_core::egir::plan(program, profile)?;
         wyn_core::lower_egir_to_ssa(program)
     };
     let ssa = match lower() {
         Ok(s) => s,
-        Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {:?}", e)),
+        Err(e) => return CompileResultWgsl::err_msg(format!("SSA lowering error: {e}")),
     };
     let mir = wyn_core::ssa::print::format_program(&ssa);
     let interface = program_interface(&ssa);
@@ -684,43 +705,31 @@ mod lib_tests;
 /// Get a simple example program to start with
 #[wasm_bindgen]
 pub fn get_example_program() -> String {
-    r#"-- Wyn Shader Example
--- This compiles to WGSL for WebGPU
+    r#"-- Shadertoy-style Wyn example: one graphical operation that
+-- rasterizes a full-screen triangle and shades the covered pixels.
 
-------------------------------------------------------------
--- Uniforms
-------------------------------------------------------------
-
-------------------------------------------------------------
--- Vertex shader: full-screen triangle
-------------------------------------------------------------
 def verts: [3]vec4f32 =
   [@[-1.0, -1.0, 0.0, 1.0],
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vertex_id: i32)  #[builtin(position)] vec4f32 =
-  verts[vertex_id]
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-------------------------------------------------------------
--- Fragment shader
-------------------------------------------------------------
-#[fragment]
-entry fragment_main(
-  #[uniform(set=1, binding=0)] iResolution: vec3f32,
-  #[uniform(set=1, binding=1)] iTime: f32,
-  #[builtin(position)] fragCoord: vec4f32) #[target(screen)] vec4f32 =
-  -- Flip Y for Vulkan
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = @[coord.x / iResolution.x, coord.y / iResolution.y] in
-
-  -- Colorful animated gradient
+def fragment_main(iResolution: vec3f32, iTime: f32,
+                  fragment: fragment_invocation<vec2f32>) vec4f32 =
+  let uv = fragment.position.xy / iResolution.xy in
   let phase = iTime in
   let r = 0.5 + 0.5 * f32.cos(phase + uv.x * 3.0 + 0.0) in
   let g = 0.5 + 0.5 * f32.cos(phase + uv.y * 3.0 + 2.0) in
   let b = 0.5 + 0.5 * f32.cos(phase + (uv.x + uv.y) * 1.5 + 4.0) in
   @[r, g, b, 1.0]
+
+entry image(iResolution: vec3f32, iTime: f32,
+            screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, |fragment|
+    fragment_main(iResolution, iTime, fragment))
 "#
     .to_string()
 }

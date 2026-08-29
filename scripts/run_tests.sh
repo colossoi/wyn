@@ -48,9 +48,9 @@ $WYN compile lib/testfiles/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
 
 # Compile-only (the demo needs a window, a GPU, and an input image; see
 # the header of gtao_demo.wyn for the interactive run command).
-$WYN compile lib/testfiles/gtao_demo.wyn -o /tmp/gtao_demo.spv
+$WYN compile lib/testfiles/gtao_demo.wyn --graphics -o /tmp/gtao_demo.spv
 spirv-val /tmp/gtao_demo.spv
-$WYN compile lib/testfiles/gtao_demo.wyn -t wgsl -o /tmp/gtao_demo.wgsl
+$WYN compile lib/testfiles/gtao_demo.wyn --graphics -t wgsl -o /tmp/gtao_demo.wgsl
 
 echo "compile + validate: OK"
 

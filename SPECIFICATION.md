@@ -2220,6 +2220,30 @@ Name resolution otherwise follows the ordinary rules: if a program shadows one
 of these names, a call to the shadowing declaration is an ordinary call and
 does not introduce a stage.
 
+### Compiler Feature Selection
+
+The unified graphics vocabulary is enabled explicitly with `--graphics`.
+Without that option, the invocation operations and pipeline types in this
+section are absent from the predeclared environment. Their spellings are not
+reserved: a program may define its own `direct_draw`, `shade`, `raster`,
+`render_target`, or any other graphics name, and an unbound use produces the
+ordinary undefined-name diagnostic.
+
+`--direct-wgsl` is an independent, WGSL-only output policy. It preserves the
+vertex and fragment stages requested by the source invocation operations and
+does not lift stage-uniform work into compute prepasses. Array operations that
+can lower as serial loops inside an authored graphical stage remain valid.
+Compilation fails when correct lowering would require a compiler-created
+entry point, a compute prepass for a graphical operation, or compiler-owned
+intermediate storage. The playground configuration is therefore:
+
+```text
+wyn compile image.wyn --target wgsl --graphics --direct-wgsl
+```
+
+There are no `#[vertex]` or `#[fragment]` entry forms. Stage identity comes
+only from the resolved invocation operation receiving a callback.
+
 ### Entry Interfaces
 
 The syntax of an entry is:

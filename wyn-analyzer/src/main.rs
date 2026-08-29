@@ -47,7 +47,11 @@ fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
 
 fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
     let (prelude, node_counter) = get_prelude();
-    wyn_core::init_compiler_from_prelude(prelude.clone(), node_counter)
+    wyn_core::init_compiler_from_prelude_with_options(
+        prelude.clone(),
+        node_counter,
+        wyn_core::CompilerOptions { graphics: true },
+    )
 }
 
 /// Cached document state after successful type checking

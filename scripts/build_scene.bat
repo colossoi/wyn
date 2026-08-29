@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0\.."
 
 echo Compiling scene.wyn...
-cargo run --release --bin wyn -- compile testfiles\playground\acko_masthead\scene.wyn -o testfiles\playground\acko_masthead\scene.spv
+cargo run --release --bin wyn -- compile testfiles\playground\acko_masthead\scene.wyn --graphics -o testfiles\playground\acko_masthead\scene.spv
 if errorlevel 1 goto :fail
 
 echo Validating...

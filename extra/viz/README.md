@@ -1,6 +1,6 @@
 # viz
 
-GPU shader runner for Wyn-compiled SPIR-V modules.
+GPU shader runner for Wyn-compiled SPIR-V and WGSL modules.
 
 ## Commands
 
@@ -23,10 +23,15 @@ the texture binding named `NAME`. The shader side is a plain entry
 parameter — no `resource` declaration:
 
 ```wyn
-#[fragment]
-entry fragment_main(#[texture(set=0, binding=0)] input_image: texture2d,
-                    #[sampler(set=0, binding=1)] samp: sampler, ...) ... =
-  texture_sample(input_image, samp, uv, 0.0)
+def fragment_main(fragment: fragment_invocation<vec2f32>,
+                  input_image: texture2d, samp: sampler) vec4f32 =
+  texture_sample(input_image, samp, fragment.value, 0.0)
+
+entry image(input_image: texture2d, samp: sampler,
+            screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster,
+    |fragment| fragment_main(fragment, input_image, samp))
 ```
 
 ```

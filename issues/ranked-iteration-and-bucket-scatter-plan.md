@@ -202,7 +202,7 @@ Relevant code:
 - Counts and overflow are routed directly to output resources.
 - Scalar outputs now publish their fixed byte length, so overflow is described
   as a four-byte output rather than `length: null`.
-- `--single-stage` reports that bucket scatter requires its pipeline instead
+- direct WGSL reports that bucket scatter requires its pipeline instead
   of reaching a backend panic.
 
 Relevant code:

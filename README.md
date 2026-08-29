@@ -578,19 +578,19 @@ sub-passes don't pattern-match on args indices directly.
 
 ## Example Program
 
-```
--- Render a full-screen triangle.
+```wyn
+-- Render a full-screen triangle through one explicit graphics operation.
 
-#[vertex]
-entry vertex_main(#[builtin(vertex_index)] vid: i32) #[builtin(position)] vec4f32 =
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[ 3.0, -1.0, 0.0, 1.0],
                @[-1.0,  3.0, 0.0, 1.0]] in
-  verts[vid]
+  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-#[fragment]
-entry fragment_main(#[builtin(position)] pos: vec4f32) #[target(screen)] vec4f32 =
-  @[0.529, 0.808, 0.922, 1.0]  -- Sky blue
+entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster,
+    |fragment| @[0.529, 0.808, 0.922, 1.0])  -- Sky blue
 ```
 
 ## Usage
@@ -602,19 +602,30 @@ cargo run --bin wyn -- compile input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl
 
+# Compile a graphics program to direct, playground-ready WGSL
+cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --graphics --direct-wgsl
+
 # Opt in to backend-local u64 emulation for WGSL
 cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
 
-# Type check without generating code
-cargo run --bin wyn -- check input.wyn
+# Type check without generating code (`--graphics` is required for graphics vocabulary)
+cargo run --bin wyn -- check input.wyn --graphics
 
 # Output intermediate representations
 cargo run --bin wyn -- compile input.wyn --output-init-ssa out.ssa   # Initial SSA
 cargo run --bin wyn -- compile input.wyn --output-annotated out.ann  # Annotated source
 
-# Visualize a SPIR-V shader
-cd extra/viz && cargo run -- vf ../../shader.spv --vertex vertex_main --fragment fragment_main
+# Run a compiler-published SPIR-V or WGSL pipeline
+cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
+
+Graphics vocabulary is opt-in. Without `--graphics`, names such as
+`direct_draw`, `rasterize_triangles`, `shade`, `vertex_invocation`, and
+`render_target` are ordinary, unreserved identifiers: user code may define
+them, and otherwise receives the normal undefined-name diagnostic.
+`--direct-wgsl` is a separate WGSL-only output policy. It preserves authored
+graphics stages and rejects programs that would require compiler-created
+prepass entry points or intermediate storage.
 
 ## Building and Testing
 
@@ -643,16 +654,16 @@ Use `cargo test --workspace` for the full Rust suite. All SPIR-V testfiles in `t
 def add(x: i32, y: i32) i32 = x + y
 def first(xs: []i32) i32 = xs[0]
 
--- Shader entry points (one entry-point keyword per stage)
-#[vertex]
-entry vs_main(#[builtin(vertex_index)] id: i32) #[builtin(position)] vec4f32 = ...
-
-#[fragment]
-entry fs_main(#[varying(0)] color: vec3f32) #[target(screen)] vec4f32 = ...
-
-#[compute]
-entry sum_array(#[size_hint(1024)] data: []f32) f32 =
+-- Compute entry point
+entry sum_array(data: []f32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0, data)
+
+-- Graphics uses an orchestration entry plus ordinary callbacks.
+def vs_main(vertex: vertex_invocation) vertex<vec3f32> = ...
+def fs_main(fragment: fragment_invocation<vec3f32>) vec4f32 = ...
+entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vs_main) in
+  shade(screen, raster, fs_main)
 
 -- Lambdas
 |x: i32| x + 1

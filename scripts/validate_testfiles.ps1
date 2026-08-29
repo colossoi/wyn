@@ -173,12 +173,12 @@ try {
         if ($Wgsl) {
             Write-Host -NoNewline "Compiling $($file.FullName) -> WGSL... "
             $compile = Invoke-NativeCaptured $wynBinary @(
-                'compile', $file.FullName, '-t', 'wgsl', '-o', $outputPath
+                'compile', $file.FullName, '--graphics', '-t', 'wgsl', '-o', $outputPath
             )
         } else {
             Write-Host -NoNewline "Compiling $($file.FullName)... "
             $compile = Invoke-NativeCaptured $wynBinary @(
-                'compile', $file.FullName, '-o', $outputPath
+                'compile', $file.FullName, '--graphics', '-o', $outputPath
             )
         }
 

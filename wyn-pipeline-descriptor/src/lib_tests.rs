@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn default_fragment_state_does_not_enable_depth_implicitly() {
+    let state = FragmentState::default();
+    assert_eq!(state.depth_test, DepthTest::Disabled);
+    assert!(!state.depth_write);
+}
+
+#[test]
 fn vertex_format_byte_size() {
     assert_eq!(VertexFormat::Float32.byte_size(), 4);
     assert_eq!(VertexFormat::Sint32.byte_size(), 4);

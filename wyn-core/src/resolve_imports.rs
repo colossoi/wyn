@@ -41,9 +41,10 @@ pub type ImportsResolved =
 /// second encounter.
 pub fn resolve_imports(program: parser::Parsed, base_dir: &Path) -> Result<ImportsResolved> {
     let mut visited: LookupSet<PathBuf> = LookupSet::new();
+    let graphics = program.global_context.options().graphics;
     program.try_rebuild(|declarations, global_context, node_ids| {
         Ok((
-            expand(declarations, base_dir, node_ids, &mut visited)?,
+            expand(declarations, base_dir, node_ids, &mut visited, graphics)?,
             global_context,
         ))
     })
@@ -54,6 +55,7 @@ fn expand(
     base_dir: &Path,
     node_counter: &mut ast::NodeCounter,
     visited: &mut LookupSet<PathBuf>,
+    graphics: bool,
 ) -> Result<Vec<ast::Declaration<ImportsResolvedFamily>>> {
     let mut out = Vec::with_capacity(decls.len());
     for decl in decls {
@@ -126,10 +128,16 @@ fn expand(
         let source = std::fs::read_to_string(&canonical)
             .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
         let tokens = lexer::tokenize(&source).map_err(|e| err_parse!("{}", e))?;
-        let mut p = parser::Parser::new(tokens, node_counter);
+        let mut p = parser::Parser::with_graphics(tokens, node_counter, graphics);
         let imported_declarations = p.parse()?;
         let imported_dir = canonical.parent().unwrap_or(base_dir);
-        let resolved = expand(imported_declarations, imported_dir, node_counter, visited)?;
+        let resolved = expand(
+            imported_declarations,
+            imported_dir,
+            node_counter,
+            visited,
+            graphics,
+        )?;
         out.extend(resolved);
     }
     Ok(out)

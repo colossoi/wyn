@@ -38,8 +38,9 @@ pub fn parse(
     module_manager: module_manager::ModuleManager,
 ) -> Result<Parsed> {
     let tokens = lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
+    let graphics = module_manager.options().graphics;
     let declarations = {
-        let mut parser = Parser::new(tokens, &mut node_ids);
+        let mut parser = Parser::with_graphics(tokens, &mut node_ids, graphics);
         parser.parse()?
     };
     Ok(Program {
@@ -92,14 +93,24 @@ pub struct Parser<'a> {
     tokens: Vec<LocatedToken>,
     current: usize,
     node_counter: &'a mut NodeCounter,
+    graphics: bool,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
+        Self::with_graphics(tokens, node_counter, true)
+    }
+
+    pub fn with_graphics(
+        tokens: Vec<LocatedToken>,
+        node_counter: &'a mut NodeCounter,
+        graphics: bool,
+    ) -> Self {
         Parser {
             tokens,
             current: 0,
             node_counter,
+            graphics,
         }
     }
 
@@ -1197,13 +1208,13 @@ impl<'a> Parser<'a> {
                     // capture and monomorphization.
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
-                    "raster" => TypeName::Raster,
-                    "vertex_invocation" => TypeName::VertexInvocation,
-                    "vertex" => TypeName::Vertex,
-                    "fragment_invocation" => TypeName::FragmentInvocation,
-                    "fragment_output" => TypeName::FragmentOutput,
-                    "draw" => TypeName::Draw,
-                    "render_target" => TypeName::RenderTarget,
+                    "raster" if self.graphics => TypeName::Raster,
+                    "vertex_invocation" if self.graphics => TypeName::VertexInvocation,
+                    "vertex" if self.graphics => TypeName::Vertex,
+                    "fragment_invocation" if self.graphics => TypeName::FragmentInvocation,
+                    "fragment_output" if self.graphics => TypeName::FragmentOutput,
+                    "draw" if self.graphics => TypeName::Draw,
+                    "render_target" if self.graphics => TypeName::RenderTarget,
                     "storage_image" => {
                         return Ok((
                             Type::Constructed(

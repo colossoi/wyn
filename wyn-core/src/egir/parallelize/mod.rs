@@ -94,7 +94,7 @@ use super::types::{
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-use crate::{LoweringProfile, SchedulePolicy};
+use crate::{LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
 
 type Semantic = SemanticFamily<SemanticResourceRef>;
 type EGraph = FamilyGraph<Semantic>;
@@ -241,6 +241,10 @@ pub fn analyze_kernel_recipes(
     input: OutputDestinationsBound,
     profile: LoweringProfile,
 ) -> Result<KernelRecipesAnalyzed, ConvertError> {
+    if profile.topology == PipelineTopologyPolicy::AuthoredOnly {
+        validate_authored_only_input(&input.program)?;
+        debug_assert_authored_only_input(&input.program);
+    }
     if profile.schedule == SchedulePolicy::Serial {
         verify_serial_policy(&input.program)?;
     }
@@ -299,6 +303,10 @@ pub fn build_kernel_schedule(input: RecipeScratchAllocated) -> Result<KernelSche
         SchedulePolicy::Serial => builder.build_serial_schedule(),
     }?;
     let (schedule, generated_callables, identities) = built.into_plan();
+    if profile.topology == PipelineTopologyPolicy::AuthoredOnly {
+        schedule
+            .debug_assert_authored_only(program.data.stages.stages().count(), generated_callables.len());
+    }
     let program = install_generated_callables(program, generated_callables, identities);
     Ok(KernelScheduleBuilt {
         program,
@@ -339,11 +347,54 @@ fn verify_serial_policy(program: &ResourcesAllocated) -> ParallelizeResult<()> {
     });
     if has_bucket_scatter {
         return Err(ParallelizeError::Invalid(
-            "bucket_scatter requires its init/insert/finish pipeline and cannot be compiled with --single-stage"
+            "bucket_scatter requires its init/insert/finish pipeline and cannot be compiled with serial scheduling"
                 .into(),
         ));
     }
     Ok(())
+}
+
+fn validate_authored_only_input(program: &ResourcesAllocated) -> Result<(), ConvertError> {
+    let has_graphics = program
+        .data
+        .core
+        .pipeline
+        .pipelines
+        .iter()
+        .any(|pipeline| matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)));
+    let has_compute = program
+        .data
+        .core
+        .pipeline
+        .pipelines
+        .iter()
+        .any(|pipeline| matches!(pipeline, pipeline_descriptor::Pipeline::Compute(_)));
+    if has_graphics && has_compute {
+        return Err(ConvertError::PipelineTopology(
+            "authored-only lowering cannot combine compute and graphics stages in one operation".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn debug_assert_authored_only_input(program: &ResourcesAllocated) {
+    debug_assert!(
+        !program
+            .data
+            .stages
+            .stages()
+            .any(|(_, stage)| matches!(stage.origin(), StageOrigin::Generated { .. })),
+        "authored-only residency unexpectedly produced a generated stage"
+    );
+    debug_assert!(
+        !program
+            .data
+            .core
+            .resources
+            .iter()
+            .any(|resource| matches!(resource.origin(), super::program::ResourceOrigin::Compiler { .. })),
+        "authored-only residency unexpectedly produced a compiler-owned resource"
+    );
 }
 
 fn install_generated_callables(

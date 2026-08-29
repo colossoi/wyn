@@ -85,7 +85,7 @@ for f in testfiles/*.wyn testfiles/playground/*.wyn; do
         out_path="${OUT_DIR}/${base}.wgsl"
         printf "Compiling %s → WGSL... " "$f"
 
-        if ! compile_err=$("$WYN_BIN" compile "$f" -t wgsl -o "$out_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" compile "$f" --graphics -t wgsl -o "$out_path" 2>&1); then
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))
@@ -114,7 +114,7 @@ for f in testfiles/*.wyn testfiles/playground/*.wyn; do
         spv_path="${OUT_DIR}/${base}.spv"
         printf "Compiling %s... " "$f"
 
-        if ! compile_err=$("$WYN_BIN" compile "$f" -o "$spv_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" compile "$f" --graphics -o "$spv_path" 2>&1); then
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))

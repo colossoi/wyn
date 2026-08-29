@@ -1,8 +1,8 @@
 //! Vertex-buffer support for the interactive `vf` mode.
 //!
 //! Mirrors the storage-buffer path in `uniforms.rs`: read the SPIR-V's
-//! JSON sidecar, find every `vertex_inputs[i]` (a Wyn `#[location(n)]`
-//! `#[vertex]` entry parameter), load `<dir>/<name>.bin` from the
+//! JSON sidecar, find every `vertex_inputs[i]` (a vertex-stage interface
+//! input), load `<dir>/<name>.bin` from the
 //! `--storage-dir` argument as a `VERTEX`-usage buffer, and return the
 //! info the render pipeline needs to wire each one up.
 //!

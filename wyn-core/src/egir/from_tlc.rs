@@ -138,6 +138,9 @@ pub enum ConvertError {
     /// elements, silently dropping the tail. A user error, not internal.
     #[error("{0}")]
     InvalidDispatch(String),
+    /// The requested pipeline-topology policy cannot represent the program.
+    #[error("pipeline topology: {0}")]
+    PipelineTopology(String),
     /// Two declared descriptor resources claim the same `(set, binding)` with
     /// incompatible descriptor classes or layout-relevant properties.
     #[error("{0}")]

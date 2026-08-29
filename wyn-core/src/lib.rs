@@ -410,9 +410,26 @@ pub use polytype::Context as PolytypeContext;
 /// stay unique. The module manager comes pre-loaded with the parsed
 /// prelude.
 pub fn init_compiler() -> Result<(NodeCounter, module_manager::ModuleManager)> {
+    init_compiler_with_options(CompilerOptions::default())
+}
+
+/// Source-language features enabled for one compilation.
+///
+/// Graphics vocabulary is opt-in. When disabled, graphics-specific type
+/// and value spellings are not reserved and resolve exactly like any other
+/// user-defined or undefined identifier.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompilerOptions {
+    pub graphics: bool,
+}
+
+/// Build a fresh compiler with an explicit source-language feature set.
+pub fn init_compiler_with_options(
+    options: CompilerOptions,
+) -> Result<(NodeCounter, module_manager::ModuleManager)> {
     let mut node_counter = NodeCounter::new();
     let prelude = module_manager::ModuleManager::create_prelude(&mut node_counter)?;
-    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+    let module_manager = module_manager::ModuleManager::from_prelude_with_options(prelude, options);
     Ok((node_counter, module_manager))
 }
 
@@ -423,7 +440,16 @@ pub fn init_compiler_from_prelude(
     prelude: module_manager::PreElaboratedPrelude,
     node_counter: NodeCounter,
 ) -> (NodeCounter, module_manager::ModuleManager) {
-    let module_manager = module_manager::ModuleManager::from_prelude(prelude);
+    init_compiler_from_prelude_with_options(prelude, node_counter, CompilerOptions::default())
+}
+
+/// Build a compiler from a cached prelude with explicit language features.
+pub fn init_compiler_from_prelude_with_options(
+    prelude: module_manager::PreElaboratedPrelude,
+    node_counter: NodeCounter,
+    options: CompilerOptions,
+) -> (NodeCounter, module_manager::ModuleManager) {
+    let module_manager = module_manager::ModuleManager::from_prelude_with_options(prelude, options);
     (node_counter, module_manager)
 }
 
@@ -487,7 +513,7 @@ pub enum CodegenTarget {
 }
 
 /// Whether semantic segmented operations may expand into multiple host
-/// dispatches.  Single-stage mode still constructs semantic SegOps; only the
+/// dispatches. Serial scheduling still constructs semantic SegOps; only the
 /// terminal scheduling decision changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulePolicy {
@@ -495,21 +521,47 @@ pub enum SchedulePolicy {
     Parallel,
 }
 
+/// Whether lowering may introduce pipeline structure beyond the stages and
+/// resources authored by the source program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelineTopologyPolicy {
+    AllowGenerated,
+    AuthoredOnly,
+}
+
 /// Target and scheduling policy for the semantic-EGIR-to-SSA boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoweringProfile {
     pub target: CodegenTarget,
     pub schedule: SchedulePolicy,
+    pub topology: PipelineTopologyPolicy,
 }
 
 impl LoweringProfile {
     pub const PORTABLE: Self = Self {
         target: CodegenTarget::Portable,
         schedule: SchedulePolicy::Parallel,
+        topology: PipelineTopologyPolicy::AllowGenerated,
     };
 
     pub const fn new(target: CodegenTarget, schedule: SchedulePolicy) -> Self {
-        Self { target, schedule }
+        Self {
+            target,
+            schedule,
+            topology: PipelineTopologyPolicy::AllowGenerated,
+        }
+    }
+
+    pub const fn with_topology(
+        target: CodegenTarget,
+        schedule: SchedulePolicy,
+        topology: PipelineTopologyPolicy,
+    ) -> Self {
+        Self {
+            target,
+            schedule,
+            topology,
+        }
     }
 }
 
@@ -762,7 +814,10 @@ fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCo
 pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
     let (prelude, node_counter) = get_prelude_cache();
     (
-        module_manager::ModuleManager::from_prelude(prelude.clone()),
+        module_manager::ModuleManager::from_prelude_with_options(
+            prelude.clone(),
+            CompilerOptions { graphics: true },
+        ),
         node_counter,
     )
 }
@@ -771,7 +826,11 @@ pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
 #[cfg(test)]
 pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
     let (prelude, node_counter) = get_prelude_cache();
-    init_compiler_from_prelude(prelude.clone(), node_counter)
+    init_compiler_from_prelude_with_options(
+        prelude.clone(),
+        node_counter,
+        CompilerOptions { graphics: true },
+    )
 }
 
 // =============================================================================
@@ -793,7 +852,17 @@ pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
 /// Run AST passes through type checking. Uses the cached prelude.
 #[cfg(test)]
 pub fn compile_thru_frontend(source: &str) -> error::Result<types::run::TypeChecked> {
-    let (node_ids, module_manager) = cached_compiler_init();
+    compile_thru_frontend_with_options(source, CompilerOptions { graphics: true })
+}
+
+#[cfg(test)]
+pub fn compile_thru_frontend_with_options(
+    source: &str,
+    options: CompilerOptions,
+) -> error::Result<types::run::TypeChecked> {
+    let (prelude, node_ids) = get_prelude_cache();
+    let (node_ids, module_manager) =
+        init_compiler_from_prelude_with_options(prelude.clone(), node_ids, options);
     let program = parser::parse(source, node_ids, module_manager)?;
     let program = resolve_imports::resolve_imports(program, std::path::Path::new("."))?;
     let program = elaborate_modules::elaborate_modules(program)?;
@@ -819,7 +888,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
 
 /// Internal: run all the way through EGIR + elaborate to SSA from a
 /// pre-built `tlc::stage::Reachable`. Both `compile_thru_ssa` and
-/// `compile_thru_spirv_single_stage` build the SSA the same way; only
+/// `compile_thru_spirv_serial` build the SSA the same way; only
 /// the downstream scheduling profile differs.
 #[cfg(test)]
 fn ssa_from_reachable(
@@ -856,12 +925,9 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
     )?)?)
 }
 
-/// Single-stage equivalent of `compile_thru_spirv`: matches the CLI's
-/// `--single-stage` terminal scheduling policy.
+/// Serial-scheduling equivalent of `compile_thru_spirv` for scheduler tests.
 #[cfg(test)]
-pub fn compile_thru_spirv_single_stage(
-    source: &str,
-) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
+pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(lower_ssa_to_spirv(ssa_from_reachable(
         compile_thru_tlc(source)?,
         LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Serial),

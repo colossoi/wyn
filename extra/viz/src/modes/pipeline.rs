@@ -467,7 +467,7 @@ fn run_compute(
     let total_pc_size = pc_bytes.len() as u32;
 
     // Stage-0's dispatch sizes any `SameAsDispatch` output bindings —
-    // the single-stage case carries the only-stage's dispatch, the
+    // the one-stage case carries the only stage's dispatch, while the
     // multi-stage case carries phase 1's, which is the size primary
     // outputs are tied to in current reduce/scan/scheduler layouts.
     let dispatch_hint = mp.stages.first().map(|s| &s.dispatch_size);

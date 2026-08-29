@@ -586,8 +586,8 @@ pub struct FragmentState {
 impl Default for FragmentState {
     fn default() -> Self {
         Self {
-            depth_test: DepthTest::Less,
-            depth_write: true,
+            depth_test: DepthTest::Disabled,
+            depth_write: false,
             blend: BlendMode::Replace,
             color_write: true,
         }

@@ -519,9 +519,10 @@ fn compiler_init() -> Option<(NodeCounter, ModuleManager)> {
     PRELUDE_CACHE.with(|cache| {
         let cache = cache.borrow();
         let cached = cache.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude(
+        Some(wyn_core::init_compiler_from_prelude_with_options(
             cached.prelude.clone(),
             cached.start_node_counter.clone(),
+            wyn_core::CompilerOptions { graphics: true },
         ))
     })
 }
@@ -544,6 +545,7 @@ fn format_compiler_error(error: &CompilerError) -> String {
         CompilerError::IoError(error) => format!("I/O error: {error}"),
         CompilerError::SpirvBuilderError(message) => format!("SPIR-V builder error: {message}"),
         CompilerError::TypeHole(message) => format!("Type hole: {message}"),
+        CompilerError::FormattingError(error) => format!("Formatting error: {error}"),
         CompilerError::Internal(message) => format!("Internal compiler error: {message}"),
     }
 }
@@ -2389,7 +2391,7 @@ fn effect_display<P: SnapshotPhase>(
                     values: graph
                         .call(*site)
                         .arguments()
-                        .map(|argument| graph_reference(group, *argument))
+                        .map(|argument| graph_reference(group, argument))
                         .collect(),
                 }],
                 _ if !effect.operands().is_empty() => vec![GraphOperandGroup {
@@ -2595,7 +2597,7 @@ fn graph_results(
         .into_iter()
         .flat_map(|result| result.destination_leaves_with_paths())
         .filter_map(|(path, leaf)| {
-            let (ty, destination) = leaf.single_destination()?;
+            let (ty, destination) = leaf.parts();
             let (destination, references) = match destination {
                 ResultDestination::ReturnValue(value) => {
                     ("return_value", vec![value_reference(group, *value)])

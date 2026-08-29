@@ -45,9 +45,9 @@ spirv-val "%TEMP%\gtao_smoke.spv" || exit /b 1
 
 rem Compile-only (the demo needs a window, a GPU, and an input image; see
 rem the header of gtao_demo.wyn for the interactive run command).
-"%WYN%" compile lib\testfiles\gtao_demo.wyn -o "%TEMP%\gtao_demo.spv" || exit /b 1
+"%WYN%" compile lib\testfiles\gtao_demo.wyn --graphics -o "%TEMP%\gtao_demo.spv" || exit /b 1
 spirv-val "%TEMP%\gtao_demo.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\gtao_demo.wyn -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
+"%WYN%" compile lib\testfiles\gtao_demo.wyn --graphics -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
 
 echo compile + validate: OK
 

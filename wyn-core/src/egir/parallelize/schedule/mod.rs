@@ -65,6 +65,22 @@ struct SourceEntryPlan {
 }
 
 impl KernelPlan {
+    pub(in crate::egir::parallelize) fn debug_assert_authored_only(
+        &self,
+        authored_stage_count: usize,
+        generated_callable_count: usize,
+    ) {
+        debug_assert_eq!(
+            generated_callable_count, 0,
+            "authored-only scheduling unexpectedly produced a callable"
+        );
+        debug_assert_eq!(
+            self.phases.len(),
+            authored_stage_count,
+            "authored-only scheduling unexpectedly changed the stage count"
+        );
+    }
+
     pub(in crate::egir) fn into_physical_entries(self) -> Vec<PlannedEntry<Scheduled>> {
         let order = self.ordered_phase_ids();
         let mut phases = self.phases.into_iter().map(Some).collect::<Vec<_>>();

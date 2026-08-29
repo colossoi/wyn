@@ -35,6 +35,38 @@ pub fn by_id(id: BuiltinId) -> &'static BuiltinDef {
     catalog().get(id)
 }
 
+/// Whether a catalog entry belongs to the opt-in unified graphics
+/// vocabulary. Feature gating is based on catalog identity after lookup;
+/// downstream passes never infer special behavior from source spelling.
+pub fn is_graphics_builtin(id: BuiltinId) -> bool {
+    matches!(
+        by_id(id).raw.surface_name,
+        "direct_draw"
+            | "direct_draw_from"
+            | "indexed_draw"
+            | "indexed_draw_from"
+            | "indirect_draw"
+            | "indirect_draws"
+            | "indexed_indirect_draw"
+            | "indexed_indirect_draws"
+            | "vertex_output"
+            | "rasterize_triangles"
+            | "rasterize_triangle_strip"
+            | "rasterize_lines"
+            | "rasterize_line_strip"
+            | "rasterize_points"
+            | "rasterize_triangles_with"
+            | "rasterize_triangle_strip_with"
+            | "rasterize_lines_with"
+            | "rasterize_line_strip_with"
+            | "rasterize_points_with"
+            | "shade"
+            | "shade_with"
+            | "target_load"
+            | "target_sample"
+    )
+}
+
 /// Arity of the catalog-defined builtin or intrinsic with this name,
 /// counted from its first overload's scheme. Returns `None` if the
 /// name isn't in the catalog (most operators with empty

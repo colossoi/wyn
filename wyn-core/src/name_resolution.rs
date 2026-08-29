@@ -464,11 +464,15 @@ pub fn build_name_resolution(
     module_manager: &ModuleManager,
     catalog: &BuiltinCatalog,
 ) -> NameResolution {
+    let catalog = EnabledBuiltinCatalog {
+        catalog,
+        graphics: module_manager.options().graphics,
+    };
     let mut nr = NameResolution::new();
     let mut top_level: ScopeStack<()> = ScopeStack::new();
     collect_top_level_names(&program.declarations, &mut top_level);
 
-    walk_decls(&program.declarations, &top_level, catalog, &mut nr);
+    walk_decls(&program.declarations, &top_level, &catalog, &mut nr);
 
     // Collect which elaborated modules were declared in the user
     // `Program` (as opposed to prelude / system modules). User-
@@ -509,7 +513,7 @@ pub fn build_name_resolution(
                 for p in &d.params {
                     collect_pattern_bindings(p, &mut scope);
                 }
-                walk_resolution(&d.body, catalog, &mut scope, &mut nr);
+                walk_resolution(&d.body, &catalog, &mut scope, &mut nr);
                 scope.pop_scope();
             }
         }
@@ -531,12 +535,25 @@ pub fn build_name_resolution(
         for p in &d.params {
             collect_pattern_bindings(p, &mut scope);
         }
-        walk_resolution(&d.body, catalog, &mut scope, &mut nr);
+        walk_resolution(&d.body, &catalog, &mut scope, &mut nr);
         scope.pop_scope();
     }
 
     assign_symbol_identities(program, module_manager, &mut nr);
     nr
+}
+
+struct EnabledBuiltinCatalog<'a> {
+    catalog: &'a BuiltinCatalog,
+    graphics: bool,
+}
+
+impl EnabledBuiltinCatalog<'_> {
+    fn lookup_by_surface_name(&self, name: &str) -> Option<&crate::builtins::BuiltinDef> {
+        self.catalog
+            .lookup_by_surface_name(name)
+            .filter(|def| self.graphics || !crate::builtins::is_graphics_builtin(def.id))
+    }
 }
 
 fn intern_definition(nr: &mut NameResolution, name: String) -> SymbolId {
@@ -850,7 +867,7 @@ fn assign_expr_symbols<T>(
 fn walk_decls(
     decls: &[Declaration<resolve_opens::OpensResolvedFamily>],
     outer_scope: &ScopeStack<()>,
-    catalog: &BuiltinCatalog,
+    catalog: &EnabledBuiltinCatalog<'_>,
     nr: &mut NameResolution,
 ) {
     // Build a sibling scope that includes the names of all decls at this
@@ -905,7 +922,7 @@ fn collect_top_level_names(
 /// `ExprKind::Identifier` whose surface name is not lexically shadowed.
 fn walk_resolution<T>(
     expr: &Expression<T>,
-    catalog: &BuiltinCatalog,
+    catalog: &EnabledBuiltinCatalog<'_>,
     scope: &mut ScopeStack<()>,
     nr: &mut NameResolution,
 ) where

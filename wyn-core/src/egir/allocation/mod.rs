@@ -15,6 +15,7 @@ use crate::interface::{EntryInputKind, EntryOutputKind};
 use crate::pipeline_descriptor::BufferLen;
 use crate::types::TypeExt;
 use crate::BindingRef;
+use crate::PipelineTopologyPolicy;
 use polytype::Type;
 use std::collections::HashMap;
 
@@ -87,8 +88,15 @@ impl ResourcesAllocated {
 
 /// Establish target-independent residency and logical resources.
 pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
+    plan_logical_resources_with_policy(program, PipelineTopologyPolicy::AllowGenerated)
+}
+
+pub fn plan_logical_resources_with_policy(
+    program: Optimized,
+    topology: PipelineTopologyPolicy,
+) -> Result<ResourcesAllocated, ConvertError> {
     let program = allocate_semantic_resources(program)?;
-    let program = resolve_residency(program)?;
+    let program = residency::resolve_residency_with_policy(program, topology)?;
     finalize_staged_ir(program)
 }
 
