@@ -1,5 +1,7 @@
 //! AST checkpoint after source `???` expressions have been handled.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use crate::ast;
 use crate::err_type_hole;
 use crate::error;
@@ -27,8 +29,6 @@ pub type HolesResolved = ast::Program<
 >;
 
 pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<HolesResolved> {
-    use std::fmt::Write;
-
     let holes: Vec<_> = program
         .global_context
         .warnings
@@ -40,13 +40,12 @@ pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<Hole
     if !holes.is_empty() {
         let mut message = String::from("type hole(s) in program:\n");
         for (ty, span) in holes {
-            let _ = writeln!(
-                &mut message,
-                "  at {}:{} — inferred `{}`",
+            message.push_str(&format!(
+                "  at {}:{} — inferred `{}`\n",
                 span.start_line,
                 span.start_col,
                 types::format_type(ty),
-            );
+            ));
         }
         return Err(err_type_hole!("{}", message.trim_end()));
     }

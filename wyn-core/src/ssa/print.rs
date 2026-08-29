@@ -1,5 +1,7 @@
 //! Pretty-printer for SSA programs.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use crate::ast::TypeName;
 use crate::builtins;
 use crate::flow::ExecutionModel;
@@ -7,7 +9,7 @@ use crate::op;
 use crate::ssa;
 use crate::ssa::types::Program;
 use polytype::Type;
-use std::fmt::Write;
+use std::fmt;
 
 use super::types::*;
 
@@ -86,45 +88,56 @@ fn fmt_block(b: BlockId) -> String {
 }
 
 pub fn format_program<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> String {
-    let mut out = String::new();
-
-    for func in &program.functions {
-        format_function(&mut out, &func.name, &func.body);
-        out.push('\n');
-    }
-
-    for ep in &program.entry_points {
-        let model_str = match &ep.execution_model {
-            ExecutionModel::Vertex => "vertex",
-            ExecutionModel::Fragment => "fragment",
-            ExecutionModel::Compute { .. } => "compute",
-        };
-        let local_size_suffix = match &ep.execution_model {
-            ExecutionModel::Compute { local_size } => {
-                format!(
-                    " local_size({}, {}, {})",
-                    local_size.0, local_size.1, local_size.2
-                )
-            }
-            _ => String::new(),
-        };
-        let _ = write!(out, "entry {model_str}{local_size_suffix} ");
-        format_function(&mut out, &ep.name, &ep.body);
-        out.push('\n');
-    }
-
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
-
-    out
+    format!("{}", ProgramDisplay(program))
 }
 
-fn format_function(out: &mut String, name: &str, body: &FuncBody) {
+struct ProgramDisplay<'a, Tag, GlobalContext>(&'a Program<Tag, GlobalContext>);
+
+impl<Tag, GlobalContext> fmt::Display for ProgramDisplay<'_, Tag, GlobalContext> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let program = self.0;
+        let mut needs_separator = false;
+
+        for function in &program.functions {
+            if needs_separator {
+                writeln!(out)?;
+            }
+            format_function(out, &function.name, &function.body)?;
+            needs_separator = true;
+        }
+
+        for entry in &program.entry_points {
+            if needs_separator {
+                writeln!(out)?;
+            }
+            let model = match &entry.execution_model {
+                ExecutionModel::Vertex => "vertex",
+                ExecutionModel::Fragment => "fragment",
+                ExecutionModel::Compute { .. } => "compute",
+            };
+            let local_size = match &entry.execution_model {
+                ExecutionModel::Compute { local_size } => {
+                    format!(
+                        " local_size({}, {}, {})",
+                        local_size.0, local_size.1, local_size.2
+                    )
+                }
+                _ => String::new(),
+            };
+            write!(out, "entry {model}{local_size} ")?;
+            format_function(out, &entry.name, &entry.body)?;
+            needs_separator = true;
+        }
+
+        Ok(())
+    }
+}
+
+fn format_function(out: &mut fmt::Formatter<'_>, name: &str, body: &FuncBody) -> fmt::Result {
     let params: Vec<String> =
         body.params().map(|(val, ty, _name)| format!("{}: {}", fmt_val(val), format_type(ty))).collect();
     let ret = format_type(&body.return_ty);
-    let _ = writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "));
+    writeln!(out, "func @{name}({}) -> {ret} {{", params.join(", "))?;
 
     for (bid, block) in &body.inner.blocks {
         // Skip dead blocks
@@ -134,14 +147,14 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
 
         // Block header
         if block.params.is_empty() {
-            let _ = writeln!(out, "  {}:", fmt_block(bid));
+            writeln!(out, "  {}:", fmt_block(bid))?;
         } else {
             let params: Vec<String> = block
                 .params
                 .iter()
                 .map(|&p| format!("{}: {}", fmt_val(p), format_type(body.inner.value_type(p))))
                 .collect();
-            let _ = writeln!(out, "  {}({}):", fmt_block(bid), params.join(", "));
+            writeln!(out, "  {}({}):", fmt_block(bid), params.join(", "))?;
         }
 
         // Control header as comment
@@ -151,15 +164,15 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
                     merge,
                     continue_block,
                 } => {
-                    let _ = writeln!(
+                    writeln!(
                         out,
                         "    # loop merge={} continue={}",
                         fmt_block(*merge),
                         fmt_block(*continue_block)
-                    );
+                    )?;
                 }
                 ControlHeader::Selection { merge } => {
-                    let _ = writeln!(out, "    # selection merge={}", fmt_block(*merge));
+                    writeln!(out, "    # selection merge={}", fmt_block(*merge))?;
                 }
             }
         }
@@ -167,130 +180,128 @@ fn format_function(out: &mut String, name: &str, body: &FuncBody) {
         // Instructions
         for &inst_id in &block.insts {
             let inst = body.get_inst(inst_id);
-            let _ = write!(out, "    ");
+            write!(out, "    ")?;
             if let Some(result) = inst.result {
-                let _ = write!(out, "{} = ", fmt_val(result));
+                write!(out, "{} = ", fmt_val(result))?;
             }
-            format_inst_kind(out, &inst.data);
-            out.push('\n');
+            format_inst_kind(out, &inst.data)?;
+            writeln!(out)?;
         }
 
         // Terminator
-        let _ = write!(out, "    ");
-        format_terminator(out, &block.term);
-        out.push('\n');
-
-        out.push('\n');
+        write!(out, "    ")?;
+        format_terminator(out, &block.term)?;
+        writeln!(out)?;
+        writeln!(out)?;
     }
 
-    out.push('}');
-    out.push('\n');
+    writeln!(out, "}}")
 }
 
-fn format_inst_kind(out: &mut String, kind: &InstKind) {
+fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Result {
     use crate::op::{OpTag, PureViewSource};
     match kind {
         InstKind::Op { tag, operands } => match tag {
             op::OpTag::ResourceLen(resource) => {
-                let _ = write!(out, "resource_len({},{})", resource.set, resource.binding);
+                write!(out, "resource_len({},{})", resource.set, resource.binding)?;
             }
             OpTag::Int(s) => {
-                let _ = write!(out, "int {s}");
+                write!(out, "int {s}")?;
             }
             OpTag::Uint(s) => {
-                let _ = write!(out, "uint {s}");
+                write!(out, "uint {s}")?;
             }
             OpTag::Float(s) => {
-                let _ = write!(out, "float {s}");
+                write!(out, "float {s}")?;
             }
             OpTag::Bool(b) => {
-                let _ = write!(out, "bool {b}");
+                write!(out, "bool {b}")?;
             }
             OpTag::Unit => {
-                let _ = write!(out, "unit");
+                write!(out, "unit")?;
             }
             OpTag::BinOp(op) => {
-                let _ = write!(
+                write!(
                     out,
                     "binop {op} {}, {}",
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
             }
             OpTag::UnaryOp(op) => {
-                let _ = write!(out, "unaryop {op} {}", format_ref(&operands[0]));
+                write!(out, "unaryop {op} {}", format_ref(&operands[0]))?;
             }
             OpTag::Tuple(_) => {
-                let _ = write!(out, "tuple ({})", format_refs(operands));
+                write!(out, "tuple ({})", format_refs(operands))?;
             }
             OpTag::ArrayLit(_) => {
-                let _ = write!(out, "array [{}]", format_refs(operands));
+                write!(out, "array [{}]", format_refs(operands))?;
             }
             OpTag::ArrayRange { has_step } => {
-                let _ = write!(
+                write!(
                     out,
                     "range {}..{}",
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
                 if *has_step {
-                    let _ = write!(out, " step {}", format_ref(&operands[2]));
+                    write!(out, " step {}", format_ref(&operands[2]))?;
                 }
             }
             OpTag::Vector(_) => {
-                let _ = write!(out, "vector @[{}]", format_refs(operands));
+                write!(out, "vector @[{}]", format_refs(operands))?;
             }
             OpTag::Matrix { rows, cols } => {
-                let _ = write!(out, "matrix @[");
+                write!(out, "matrix @[")?;
                 for r in 0..*rows {
                     if r > 0 {
-                        let _ = write!(out, ", ");
+                        write!(out, ", ")?;
                     }
                     let row = &operands[r * cols..(r + 1) * cols];
-                    let _ = write!(out, "[{}]", format_refs(row));
+                    write!(out, "[{}]", format_refs(row))?;
                 }
-                let _ = write!(out, "]");
+                write!(out, "]")?;
             }
             OpTag::Project { index } => {
-                let _ = write!(out, "project {}.{index}", format_ref(&operands[0]));
+                write!(out, "project {}.{index}", format_ref(&operands[0]))?;
             }
             OpTag::Index => {
-                let _ = write!(
+                write!(
                     out,
                     "index {}[{}]",
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
             }
             OpTag::Call(function) => {
-                let _ = write!(out, "call @{function}({})", format_refs(operands));
+                write!(out, "call @{function}({})", format_refs(operands))?;
             }
             OpTag::Global(global) => {
-                let _ = write!(out, "global @{global}");
+                write!(out, "global @{global}")?;
             }
 
             OpTag::Intrinsic { id, overload_idx } => {
                 let name = builtins::by_id(*id).dispatch_name();
-                let _ = write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands));
+                write!(out, "intrinsic @{name}#{overload_idx}({})", format_refs(operands))?;
             }
             OpTag::StorageImageLoad(binding) => {
-                let _ = write!(
+                write!(
                     out,
                     "storage_image_load @({}, {})({})",
                     binding.set,
                     binding.binding,
                     format_ref(&operands[0])
-                );
+                )?;
             }
             OpTag::StorageImageStore(binding) => {
-                let _ = write!(
+                write!(
                     out,
                     "storage_image_write @({}, {})({}, {})",
                     binding.set,
                     binding.binding,
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
             }
             OpTag::StorageView(src) => {
                 let src_str = match src {
@@ -302,75 +313,76 @@ fn format_inst_kind(out: &mut String, kind: &InstKind) {
                         format!("workgroup({id}, {count})")
                     }
                 };
-                let _ = write!(
+                write!(
                     out,
                     "storage_view {src_str} {} {}",
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
             }
             OpTag::StorageViewLen => {
-                let _ = write!(out, "storage_view_len {}", format_ref(&operands[0]));
+                write!(out, "storage_view_len {}", format_ref(&operands[0]))?;
             }
             OpTag::Materialize => {
-                let _ = write!(out, "materialize {}", format_ref(&operands[0]));
+                write!(out, "materialize {}", format_ref(&operands[0]))?;
             }
             OpTag::DynamicExtract => {
-                let _ = write!(
+                write!(
                     out,
                     "dynamic_extract {}[{}]",
                     format_ref(&operands[0]),
                     format_ref(&operands[1])
-                );
+                )?;
             }
         },
         InstKind::Alloca { elem_ty, result } => {
-            let _ = write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result));
+            write!(out, "alloca {} -> {}", format_type(elem_ty), fmt_place(*result))?;
         }
         InstKind::Load { place } => {
-            let _ = write!(out, "load {}", fmt_place(*place));
+            write!(out, "load {}", fmt_place(*place))?;
         }
         InstKind::Store { place, value } => {
-            let _ = write!(out, "store {}, {}", fmt_place(*place), format_ref(value));
+            write!(out, "store {}, {}", fmt_place(*place), format_ref(value))?;
         }
         InstKind::Atomic { place, op, values } => {
             let values = values.iter().map(format_ref).collect::<Vec<_>>().join(", ");
-            let _ = write!(out, "atomic {:?} {}, {}", op, fmt_place(*place), values);
+            write!(out, "atomic {:?} {}, {}", op, fmt_place(*place), values)?;
         }
         InstKind::ViewIndex { view, index, result } => {
-            let _ = write!(
+            write!(
                 out,
                 "view_index {}[{}] -> {}",
                 format_ref(view),
                 format_ref(index),
                 fmt_place(*result)
-            );
+            )?;
         }
         InstKind::PlaceIndex { place, index, result } => {
-            let _ = write!(
+            write!(
                 out,
                 "place_index {}[{}] -> {}",
                 fmt_place(*place),
                 format_ref(index),
                 fmt_place(*result)
-            );
+            )?;
         }
         InstKind::OutputSlot { index, result } => {
-            let _ = write!(out, "output_slot {index} -> {}", fmt_place(*result));
+            write!(out, "output_slot {index} -> {}", fmt_place(*result))?;
         }
         InstKind::ControlBarrier => {
-            let _ = write!(out, "control_barrier");
+            write!(out, "control_barrier")?;
         }
     }
+    Ok(())
 }
 
-fn format_terminator(out: &mut String, term: &Terminator) {
+fn format_terminator(out: &mut fmt::Formatter<'_>, term: &Terminator) -> fmt::Result {
     match term {
         Terminator::Branch { target, args } => {
             if args.is_empty() {
-                let _ = write!(out, "br {}", fmt_block(*target));
+                write!(out, "br {}", fmt_block(*target))?;
             } else {
-                let _ = write!(out, "br {}({})", fmt_block(*target), format_refs(args));
+                write!(out, "br {}({})", fmt_block(*target), format_refs(args))?;
             }
         }
         Terminator::CondBranch {
@@ -384,22 +396,23 @@ fn format_terminator(out: &mut String, term: &Terminator) {
                 if then_args.is_empty() { String::new() } else { format!("({})", format_refs(then_args)) };
             let else_args_str =
                 if else_args.is_empty() { String::new() } else { format!("({})", format_refs(else_args)) };
-            let _ = write!(
+            write!(
                 out,
                 "br_if {} then {}{then_args_str} else {}{else_args_str}",
                 format_ref(cond),
                 fmt_block(*then_target),
                 fmt_block(*else_target),
-            );
+            )?;
         }
         Terminator::Return(Some(val)) => {
-            let _ = write!(out, "return {}", format_ref(val));
+            write!(out, "return {}", format_ref(val))?;
         }
         Terminator::Return(None) => {
-            let _ = write!(out, "return ()");
+            write!(out, "return ()")?;
         }
         Terminator::Unreachable => {
-            let _ = write!(out, "unreachable");
+            write!(out, "unreachable")?;
         }
     }
+    Ok(())
 }

@@ -1,3 +1,5 @@
+#![deny(clippy::let_underscore_must_use)]
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,11 +16,20 @@ use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
+/// Verbose diagnostics are auxiliary to the language-server protocol. If
+/// stderr closes, stop attempting them rather than terminating the server.
+fn write_verbose(arguments: std::fmt::Arguments<'_>) {
+    if !VERBOSE.load(Ordering::Relaxed) {
+        return;
+    }
+    if writeln!(std::io::stderr().lock(), "{arguments}").is_err() {
+        VERBOSE.store(false, Ordering::Relaxed);
+    }
+}
+
 macro_rules! verbose {
     ($($arg:tt)*) => {
-        if VERBOSE.load(Ordering::Relaxed) {
-            let _ = writeln!(std::io::stderr(), $($arg)*);
-        }
+        write_verbose(format_args!($($arg)*));
     };
 }
 
@@ -1584,7 +1595,7 @@ fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
 async fn main() {
     if std::env::args().any(|a| a == "--verbose" || a == "-v") {
         VERBOSE.store(true, Ordering::Relaxed);
-        let _ = writeln!(std::io::stderr(), "[wyn-analyzer] verbose mode enabled");
+        verbose!("[wyn-analyzer] verbose mode enabled");
     }
 
     // Pre-initialize the prelude cache before starting the server

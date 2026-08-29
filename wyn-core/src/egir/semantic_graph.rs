@@ -8,6 +8,8 @@
 //! well-formedness check for the semantic boundary ([`verify`]), and the
 //! human-readable dump of it ([`summary`]).
 
+#![deny(clippy::let_underscore_must_use)]
+
 use std::collections::{HashMap, HashSet};
 
 use crate::types::TypeExt;
@@ -390,36 +392,31 @@ pub(crate) fn write_graph_summary<R>(output: &mut String, scope: &str, graph: &E
 where
     R: GraphResource + Copy + Ord,
 {
-    use std::fmt::Write;
-
     for (_, block) in &graph.skeleton.blocks {
         for effect in &block.side_effects {
             match &effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                    let _ = writeln!(
-                        output,
-                        "{scope}: Screma state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}",
+                    output.push_str(&format!(
+                        "{scope}: Screma state={:?} inputs={:?} pre={:?} scans={:?} reductions={:?} post={:?}\n",
                         op.semantic_state(),
                         op.inputs,
                         op.form.pre,
                         op.form.scans,
                         op.form.reductions,
                         op.form.post,
-                    );
+                    ));
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => {
-                    let _ = writeln!(
-                        output,
-                        "{scope}: Filter state={:?} inputs={:?} map={:?} predicate={:?}",
+                    output.push_str(&format!(
+                        "{scope}: Filter state={:?} inputs={:?} map={:?} predicate={:?}\n",
                         op.state, op.body.inputs, op.body.map, op.body.predicate
-                    );
+                    ));
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-                    let _ = writeln!(
-                        output,
-                        "{scope}: Hist state={:?} inputs={:?} bucket={:?} operations={:?}",
+                    output.push_str(&format!(
+                        "{scope}: Hist state={:?} inputs={:?} bucket={:?} operations={:?}\n",
                         op.state, op.inputs, op.form.bucket, op.form.operations
-                    );
+                    ));
                 }
                 SideEffectKind::Effect(_) => {}
             }

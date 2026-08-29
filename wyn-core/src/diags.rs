@@ -3,6 +3,8 @@
 //! Provides less verbose formatters for AST and TLC nodes that output
 //! something close to Wyn syntax.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use crate::ast;
 use crate::ast::*;
 use crate::builtins;
@@ -11,7 +13,6 @@ use crate::parser::{Parsed, ParsedFamily};
 use crate::tlc::VarRef;
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
-use std::fmt::Write;
 
 /// Pretty-print a polytype Type to a human-readable string.
 ///
@@ -263,11 +264,13 @@ impl AstFormatter {
 
     fn write_line(&mut self, content: &str) {
         let indent = "  ".repeat(self.indent);
-        let _ = writeln!(self.output, "{}{}", indent, content);
+        self.output.push_str(&indent);
+        self.output.push_str(content);
+        self.output.push('\n');
     }
 
     fn newline(&mut self) {
-        let _ = writeln!(self.output);
+        self.output.push('\n');
     }
 
     fn write_declaration(&mut self, decl: &Declaration<ParsedFamily>) {
@@ -398,7 +401,7 @@ impl AstFormatter {
 
     fn write_expression(&mut self, expr: &Expression) {
         if self.show_node_ids {
-            let _ = write!(self.output, "/* #{} */ ", expr.h.id.0);
+            self.output.push_str(&format!("/* #{} */ ", expr.h.id.0));
         }
         match &expr.kind {
             ExprKind::IntLiteral(n) => {

@@ -36,6 +36,9 @@ pub enum CompilerError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("Internal compiler error while formatting generated text")]
+    FormattingError(#[from] std::fmt::Error),
+
     #[error("SPIR-V builder error: {0}")]
     SpirvBuilderError(#[from] wspirv::dr::Error),
 
@@ -55,7 +58,10 @@ impl CompilerError {
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
             Self::TypeHole(_) => None,
-            Self::IoError(_) | Self::SpirvBuilderError(_) | Self::Internal(_) => None,
+            Self::IoError(_)
+            | Self::FormattingError(_)
+            | Self::SpirvBuilderError(_)
+            | Self::Internal(_) => None,
         }
     }
 }

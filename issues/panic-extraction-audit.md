@@ -25,12 +25,12 @@ and `values[index]` operations when a cluster is changed.
 The starting tree contained 584 production panic points detected by this scan:
 466 `unwrap`/`expect` extractions and 118 explicit `panic!` calls.
 
-The completed changes remove 215 of them. The remaining 369 are:
+The completed changes remove 298 of them. The remaining 286 are:
 
 | Kind | Count |
 | --- | ---: |
 | `Option`/`Result::expect` | 168 |
-| `Option`/`Result::unwrap` | 98 |
+| `Option`/`Result::unwrap` | 15 |
 | `panic!` | 103 |
 
 The remaining sites are concentrated by compiler layer:
@@ -38,7 +38,7 @@ The remaining sites are concentrated by compiler layer:
 | Layer | Count |
 | --- | ---: |
 | EGIR | 148 |
-| other `wyn-core` code | 100 |
+| other `wyn-core` code | 17 |
 | TLC | 74 |
 | type checker/type model | 23 |
 | SPIR-V lowering | 10 |
@@ -62,9 +62,13 @@ of source-derived or pass-derived state should migrate with the same clusters.
   lambdas and their callable bodies are stored together rather than in two
   vectors joined by a truncating `zip`. Reduction inputs are validated and
   retained together rather than validated and looked up again.
-- WGSL text lowering: three non-formatting extraction sites were removed.
-  Invalid identifiers, missing instruction results, and missing push-constant
-  ABI slots are diagnostics. Formatting writes are intentionally deferred.
+- WGSL text lowering: all 86 extraction sites were removed. Invalid
+  identifiers, missing instruction results, and missing push-constant ABI
+  slots are diagnostics. The 83 formatting writes now propagate `fmt::Error`
+  through the existing compiler-result boundary. Pure diagnostic and SSA
+  string printers use `Display` or direct string appends rather than discarding
+  formatting results. Analyzer stderr logging has an explicit best-effort
+  policy that disables verbose output if stderr closes.
 - Typed SPIR-V builder: 9 builder-state assertions now return `dr::Error`.
 - Generic graph algorithms: 4 coupled-map lookups now use entry-oriented
   mutation; dominator intersection no longer extracts a presumed first item.
@@ -109,7 +113,8 @@ of source-derived or pass-derived state should migrate with the same clusters.
   state assumptions are a separate cluster.
 
 No-extraction Clippy gates now protect the completed planner, fusion, physical
-call/flow/inlining/verification, graph crate, and typed SPIR-V builder scopes.
+call/flow/inlining/verification, WGSL text lowering, graph crate, and typed
+SPIR-V builder scopes.
 
 ## Remaining remedies
 
@@ -166,7 +171,3 @@ which would silently alias IDs.
 3. Split phase-scoped TLC variants, starting with array expressions.
 4. Enable the no-extraction Clippy gate for each migrated module, and finally
    for `wyn-core` as a whole.
-5. Design a WGSL emission sink that makes writes to an in-memory `String`
-   structurally infallible at call sites. Avoid both per-line `unwrap()` and
-   propagating `fmt::Error` through every lowering routine; migrate the
-   formatting cluster only after that abstraction exists.
