@@ -30,7 +30,7 @@ use smallvec::SmallVec;
 
 use super::extract;
 use super::ir::{
-    CallSiteId, FuncParam, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding, ResultDestination,
+    CallSiteId, OperandType, PlaceId as EgirPlaceId, PlaceOp, ResultBinding, ResultDestination,
 };
 use super::loop_analysis::LoopAnalysis;
 use super::program::PlannedGlobal;
@@ -251,31 +251,25 @@ pub fn elaborate_graph(
         current_skel_block: None,
     };
 
-    // Map function params: ValueId → (ValueId, skel entry block).
+    // Map function parameters and parameter places from the same ordered ABI
+    // records used to create the SSA boundary.
     let skel_entry = graph.skeleton.entry;
-    for i in 0..elab.builder.num_params() {
-        let vid = elab.builder.get_param(i);
-        let parameter_id = params.id_at_abi_position(i).expect("SSA parameter position exists");
+    for (position, (parameter_id, parameter)) in params.iter_with_ids().enumerate() {
+        let vid = elab.builder.get_param(position);
         for (nid, node) in &graph.nodes {
             if matches!(&node.kind, ValueKind::FuncParam { parameter } if *parameter == parameter_id) {
                 let resolved = elab.resolve(nid);
                 elab.elaborated.insert(resolved, (vid, skel_entry));
             }
         }
-    }
-
-    for (place, definition) in graph.places() {
-        let PlaceOp::Parameter { parameter } = definition.op() else {
-            continue;
-        };
-        let position =
-            params.abi_position(*parameter).expect("parameter place belongs to the elaborated boundary");
-        let ssa_place = elab.builder.new_parameter_place(position, definition.ty().pointee.clone());
-        elab.elaborated_places.insert(place, (ssa_place, skel_entry));
-        debug_assert!(matches!(
-            params.get(*parameter).map(FuncParam::representation),
-            Some(OperandType::Place(_))
-        ));
+        for (place, definition) in graph.places() {
+            if !matches!(definition.op(), PlaceOp::Parameter { parameter } if *parameter == parameter_id) {
+                continue;
+            }
+            let ssa_place = elab.builder.new_parameter_place(position, definition.ty().pointee.clone());
+            elab.elaborated_places.insert(place, (ssa_place, skel_entry));
+            debug_assert!(matches!(parameter.representation(), OperandType::Place(_)));
+        }
     }
 
     // Pre-create all output blocks to match the skeleton.
@@ -986,7 +980,7 @@ impl<'a> Elaborator<'a> {
                     .filter_map(|(site, call)| {
                         call.arguments()
                             .any(|argument| argument.value().is_some_and(|value| reached.contains(&value)))
-                            .then_some((site, call.callee(), call.arguments()))
+                            .then(|| (site, call.callee(), call.arguments().collect::<Vec<_>>()))
                     })
                     .collect::<Vec<_>>();
                 let effect_places = effect_users

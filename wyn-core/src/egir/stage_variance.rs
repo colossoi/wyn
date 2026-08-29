@@ -505,7 +505,7 @@ fn call_result_dependence<P: Family>(
 ) -> StageDependence {
     let site = graph.call(call);
     let arguments = site.arguments().fold(StageDependence::constant(), |dependence, argument| {
-        dependence.join(&operand_dependence(graph, *argument, values))
+        dependence.join(&operand_dependence(graph, argument, values))
     });
     if matches!(site.effects(), CallEffects::Pure) {
         return arguments;

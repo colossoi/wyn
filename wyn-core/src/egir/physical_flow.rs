@@ -6,6 +6,8 @@
 //! module keep the logical tree and that physical binding together so callers
 //! cannot lose their correspondence while constructing predecessor edges.
 
+#![deny(clippy::expect_used, clippy::panic, clippy::unreachable, clippy::unwrap_used)]
+
 use crate::ast::TypeName;
 use crate::flow::BlockId;
 use crate::types::TypeExt;
@@ -17,7 +19,7 @@ use wyn_base::IdSource;
 use super::graph_ops::{
     bind_physical_result_value, detached_alloca, emit_result_to_place, pack_result_references,
 };
-use super::ir::Language;
+use super::ir::{Language, ResultLeaf};
 use super::program::{PhysicalResourceTable, SemanticResourceRef};
 use super::types::{
     EGraph, EffectOp, EffectToken, FlowValueId, FunctionResult, GraphPhaseRemap, Physical,
@@ -50,7 +52,7 @@ pub(crate) struct PhysicalMerge {
 /// Validated scalar arguments and place transfers for one physical edge.
 struct PhysicalEdgePlan {
     arguments: Vec<FlowValueId>,
-    transfers: Vec<(ResultBinding<Type<TypeName>>, PlaceId)>,
+    transfers: Vec<(ResultLeaf<Type<TypeName>, ValueId, PlaceId>, PlaceId)>,
 }
 
 impl PhysicalFlowBinding {
@@ -167,12 +169,8 @@ impl PhysicalMerge {
                 ));
             }
             for (target, source) in targets.iter().zip(sources) {
-                let (target_ty, destination) = target
-                    .single_destination()
-                    .ok_or_else(|| "physical merge target leaf has no destination".to_owned())?;
-                let (source_ty, source_destination) = source
-                    .single_destination()
-                    .ok_or_else(|| "physical merge source leaf has no destination".to_owned())?;
+                let (target_ty, destination) = target.parts();
+                let (source_ty, source_destination) = source.parts();
                 if target_ty != source_ty {
                     return Err(format!(
                         "physical merge {:?} leaf expected type {target_ty:?}, received {source_ty:?}",
@@ -241,7 +239,7 @@ impl PhysicalEdgePlan {
     ) -> Result<(BlockId, Vec<FlowValueId>), String> {
         let mut tail = predecessor;
         for (source, place) in self.transfers {
-            tail = emit_result_to_place(graph, tail, &source, place, effect_ids, None)?;
+            tail = emit_result_to_place(graph, tail, &source.into_tree(), place, effect_ids, None)?;
         }
         Ok((tail, self.arguments))
     }
@@ -267,9 +265,7 @@ fn build_binding(
     for (index, leaf) in logical_leaves.iter().enumerate() {
         if type_contains_materialized_flow(leaf.ty()) {
             let place = if let Some(reused) = reused.get(index) {
-                let (_, destination) = reused
-                    .single_destination()
-                    .ok_or_else(|| "reused physical merge leaf has no destination".to_owned())?;
+                let (_, destination) = reused.parts();
                 match destination {
                     ResultDestination::Place(PlaceDestination::Fixed(place)) => *place,
                     ResultDestination::Place(PlaceDestination::Bounded { .. })

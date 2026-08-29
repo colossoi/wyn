@@ -13,6 +13,7 @@ use super::{capture_types, deduplicate_array_inputs, FusionInput};
 use crate::ast::{Span, TypeName};
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::inlining;
+use crate::egir::ir::CallArgument;
 use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::reify::Segmented;
 use crate::egir::soac::{lambda as lambda_ops, screma};
@@ -1016,7 +1017,7 @@ impl ProjectionBuilder<'_> {
         &mut self,
         caller: &Func<Semantic>,
         callee: &FunctionId,
-        call_arguments: &StableMap<ParameterId, OperandRef>,
+        call_arguments: &[CallArgument],
         result: usize,
         caller_arguments: &StableMap<ParameterId, ProjectedValue>,
         caller_memo: &mut LookupMap<ValueId, ProjectedValue>,
@@ -1031,7 +1032,7 @@ impl ProjectionBuilder<'_> {
             .params()
             .ids()
             .map(|parameter| {
-                let argument = call_arguments.get(&parameter)?;
+                let argument = call_arguments.iter().find(|argument| argument.parameter() == parameter)?;
                 Some((
                     parameter,
                     self.value(caller, argument.value()?, caller_arguments, caller_memo)?,

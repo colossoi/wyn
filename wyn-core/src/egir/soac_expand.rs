@@ -176,16 +176,14 @@ fn result_is_addressable(graph: &EGraph<Physical>, result: &ResultBinding<Type<T
         == result
             .destination_leaves()
             .iter()
-            .filter(|leaf| {
-                leaf.single_destination().is_some_and(|(_, destination)| match destination {
-                    ResultDestination::Place(_) => true,
-                    ResultDestination::ReturnValue(value) => {
-                        matches!(
-                            graph.operand_ref(graph.canonical_value(*value)),
-                            OperandRef::View(_)
-                        )
-                    }
-                })
+            .filter(|leaf| match leaf.destination() {
+                ResultDestination::Place(_) => true,
+                ResultDestination::ReturnValue(value) => {
+                    matches!(
+                        graph.operand_ref(graph.canonical_value(*value)),
+                        OperandRef::View(_)
+                    )
+                }
             })
             .count()
 }

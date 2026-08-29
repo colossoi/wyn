@@ -57,8 +57,7 @@ fn mapped_call_mode(
         let destination_leaves = destination.destination_leaves();
         let direct = result_leaves.len() == destination_leaves.len()
             && result_leaves.iter().zip(&destination_leaves).all(|(result_leaf, destination_leaf)| {
-                destination_leaf.single_destination().and_then(|(array_ty, _)| types::array_elem(array_ty))
-                    == Some(result_leaf.ty())
+                types::array_elem(destination_leaf.ty()) == Some(result_leaf.ty())
             });
         if direct {
             continue;

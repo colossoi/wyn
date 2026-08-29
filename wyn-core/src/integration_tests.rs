@@ -12917,7 +12917,7 @@ entry run(xs: [4]i32, n: i32) [2]i32 =
         .find(|call| call.callee() == countdown.region)
         .expect("recursive call remains in countdown");
     assert_eq!(
-        recursive.argument_bindings().keys().copied().collect::<Vec<_>>(),
+        recursive.argument_bindings().iter().map(|argument| argument.parameter()).collect::<Vec<_>>(),
         countdown.params().ids().collect::<Vec<_>>()
     );
     assert_eq!(

@@ -1,3 +1,5 @@
+#![deny(clippy::expect_used, clippy::panic, clippy::unreachable, clippy::unwrap_used)]
+
 use crate::ast::TypeName;
 use crate::flow;
 use crate::types;
@@ -118,11 +120,16 @@ enum CallResultRouting {
     Existing(ResultBinding<Type<TypeName>>),
 }
 
-type BoundCall = (
-    Vec<OperandRef>,
-    Option<ResultBinding<Type<TypeName>>>,
-    Vec<SideEffect<Physical>>,
-);
+struct BoundCall {
+    arguments: Box<[super::ir::CallArgument]>,
+    result: BoundCallResult,
+    prelude: Vec<SideEffect<Physical>>,
+}
+
+enum BoundCallResult {
+    Fresh,
+    Preserved(ResultBinding<Type<TypeName>>),
+}
 
 pub(crate) fn emit_call(
     graph: &mut EGraph<Physical>,
@@ -150,7 +157,11 @@ pub(crate) fn emit_call(
         }
         None => CallResultRouting::Allocate,
     };
-    let (arguments, result, prelude) = bind_call_boundary(
+    let BoundCall {
+        arguments,
+        result,
+        prelude,
+    } = bind_call_boundary(
         graph,
         callee.region,
         callee.params(),
@@ -159,7 +170,12 @@ pub(crate) fn emit_call(
         routing,
         effect_ids,
     )?;
-    debug_assert!(result.is_none());
+    let BoundCallResult::Fresh = result else {
+        return Err(format!(
+            "new call to {:?} unexpectedly preserved an existing result",
+            callee.region
+        ));
+    };
     graph.skeleton.blocks[block].side_effects.extend(prelude);
     graph
         .emit_call(
@@ -167,7 +183,7 @@ pub(crate) fn emit_call(
             callee.region,
             callee.params(),
             callee.result(),
-            arguments,
+            arguments.iter().map(|argument| argument.operand()),
             callee.effects(),
             None,
             None,
@@ -230,13 +246,15 @@ fn bind_call_boundary(
     let mut return_values = LookupMap::new();
     let mut destination_arguments = LookupMap::new();
     for (route, source) in routed_leaves {
-        let (ty, destination) = route.single_destination().expect("physical result leaf has one route");
+        let (ty, destination) = route.parts();
         let parameter = match destination {
             ResultDestination::ReturnValue(slot) => {
                 if preserve_existing_result {
-                    let value = source.as_ref().and_then(ResultBinding::single_value).ok_or_else(|| {
-                        format!("call to {callee:?} routes a scalar result through a place")
-                    })?;
+                    let Some(value) = source.as_ref().and_then(|source| source.single_value()) else {
+                        return Err(format!(
+                            "call to {callee:?} routes a scalar result through a place"
+                        ));
+                    };
                     return_values.insert(*slot, value);
                 }
                 continue;
@@ -256,9 +274,7 @@ fn bind_call_boundary(
                 place
             }
             (CallResultRouting::Mapped { lane, .. }, Some(source)) => {
-                let (array_ty, destination) = source
-                    .single_destination()
-                    .ok_or_else(|| "mapped result leaf has no destination".to_owned())?;
+                let (array_ty, destination) = source.parts();
                 let element_ty = types::array_elem(array_ty)
                     .ok_or_else(|| "mapped result destination is not an array".to_owned())?;
                 if element_ty != ty {
@@ -279,8 +295,7 @@ fn bind_call_boundary(
                 }
             }
             (CallResultRouting::Existing(_), Some(source)) => {
-                let (_, destination) =
-                    source.single_destination().expect("existing result leaf has one route");
+                let (_, destination) = source.parts();
                 match destination {
                     ResultDestination::Place(PlaceDestination::Fixed(place)) => *place,
                     ResultDestination::Place(PlaceDestination::Bounded { storage, .. }) => *storage,
@@ -301,7 +316,11 @@ fn bind_call_boundary(
                     }
                 }
             }
-            _ => unreachable!("result routing supplies the required source shape"),
+            _ => {
+                return Err(format!(
+                    "call to {callee:?} has an inconsistent result-routing source"
+                ));
+            }
         };
         destination_arguments.insert(parameter, place);
         let position = parameters
@@ -314,16 +333,47 @@ fn bind_call_boundary(
         .into_iter()
         .enumerate()
         .map(|(index, argument)| {
-            argument.ok_or_else(|| format!("call to {callee:?} has no argument for parameter {index}"))
+            let Some(argument) = argument else {
+                return Err(format!(
+                    "call to {callee:?} has no argument for parameter {index}"
+                ));
+            };
+            let Some(parameter) = parameters.id_at_abi_position(index) else {
+                return Err(format!(
+                    "call to {callee:?} has no parameter at ABI position {index}"
+                ));
+            };
+            Ok(super::ir::CallArgument::new(parameter, argument))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let result = preserve_existing_result.then(|| {
-        function_result.bind(
-            |slot, _| return_values[&slot],
-            |parameter| destination_arguments[&parameter],
-        )
-    });
-    Ok((arguments, result, prelude))
+        .collect::<Result<Vec<_>, String>>()?
+        .into_boxed_slice();
+    let result = if preserve_existing_result {
+        BoundCallResult::Preserved(function_result.try_bind(
+            |slot, _| {
+                let Some(value) = return_values.get(&slot).copied() else {
+                    return Err(format!(
+                        "call to {callee:?} has no value for return slot {slot:?}"
+                    ));
+                };
+                Ok(value)
+            },
+            |parameter| {
+                let Some(place) = destination_arguments.get(&parameter).copied() else {
+                    return Err(format!(
+                        "call to {callee:?} has no place for destination parameter {parameter:?}"
+                    ));
+                };
+                Ok(place)
+            },
+        )?)
+    } else {
+        BoundCallResult::Fresh
+    };
+    Ok(BoundCall {
+        arguments,
+        result,
+        prelude,
+    })
 }
 
 fn physicalize_function_parameters(
@@ -391,21 +441,39 @@ fn physicalize_function_parameters(
             .copied()
             .zip(&leaves)
             .map(|(parameter_id, leaf)| {
-                let parameter = function.params.get(parameter_id).unwrap();
+                let Some(parameter) = function.params.get(parameter_id) else {
+                    return Err(format!(
+                        "function `{}` lost physical parameter {parameter_id:?}",
+                        function.name
+                    ));
+                };
                 let operand = function.graph.add_parameter(parameter_id, parameter.representation());
-                match operand {
+                Ok(match operand {
                     OperandRef::Value(value) => value,
                     OperandRef::View(view) => view.value(),
                     OperandRef::Place(place) => {
                         function.graph.add_place_view(place, leaf.ty().clone(), None).value()
                     }
-                }
+                })
             })
-            .collect::<Vec<_>>();
-        let binding = abi.bind(
-            |slot, _| values[slot.index()],
-            |_| unreachable!("parameter products bind place leaves through view values"),
-        );
+            .collect::<Result<Vec<_>, String>>()?;
+        let binding = abi.try_bind(
+            |slot, _| {
+                let Some(value) = values.get(slot.index()).copied() else {
+                    return Err(format!(
+                        "function `{}` has no value for physical parameter result {slot:?}",
+                        function.name
+                    ));
+                };
+                Ok(value)
+            },
+            |parameter| {
+                Err(format!(
+                    "function `{}` parameter product unexpectedly uses destination {parameter:?}",
+                    function.name
+                ))
+            },
+        )?;
         for source in sources {
             super::graph_ops::rebind_result_projection_references(&mut function.graph, source, &binding)?;
         }
@@ -489,15 +557,20 @@ fn physicalize_function_results(
 
     let mut parameter_places = LookupMap::new();
     for parameter in destination_parameters {
-        let representation = params
-            .get(parameter)
-            .expect("destination parameter belongs to the function boundary")
-            .representation();
-        let place = function
-            .graph
-            .add_parameter(parameter, representation)
-            .place()
-            .expect("destination parameter has a place representation");
+        let Some(declaration) = params.get(parameter) else {
+            return Err(format!(
+                "function `{}` result names missing destination parameter {parameter:?}",
+                function.name
+            ));
+        };
+        let OperandRef::Place(place) =
+            function.graph.add_parameter(parameter, declaration.representation())
+        else {
+            return Err(format!(
+                "function `{}` result destination parameter {parameter:?} is not a place",
+                function.name
+            ));
+        };
         parameter_places.insert(parameter, place);
     }
 
@@ -514,7 +587,10 @@ fn physicalize_function_results(
     for block in returning_blocks {
         let SkeletonTerminator::Return(Some(binding)) = function.graph.skeleton.blocks[block].term.clone()
         else {
-            unreachable!()
+            return Err(format!(
+                "function `{}` returning block {block:?} lost its return binding",
+                function.name
+            ));
         };
         let old_leaves = binding.destination_leaves();
         let new_leaves = result.destination_leaves();
@@ -537,18 +613,23 @@ fn physicalize_function_results(
                     route.ty()
                 ));
             }
-            match route.single_destination() {
-                Some((_, ResultDestination::ReturnValue(slot))) => {
-                    let value = source.single_value().ok_or_else(|| {
-                        format!(
+            match route.destination() {
+                ResultDestination::ReturnValue(slot) => {
+                    let Some(value) = source.single_value() else {
+                        return Err(format!(
                             "function `{}` routes a scalar result through a place",
                             function.name
-                        )
-                    })?;
+                        ));
+                    };
                     return_values.insert(*slot, value);
                 }
-                Some((_, ResultDestination::Place(PlaceDestination::Fixed(parameter)))) => {
-                    let destination = parameter_places[parameter];
+                ResultDestination::Place(PlaceDestination::Fixed(parameter)) => {
+                    let Some(destination) = parameter_places.get(parameter).copied() else {
+                        return Err(format!(
+                            "function `{}` has no place for result parameter {parameter:?}",
+                            function.name
+                        ));
+                    };
                     let source_place = source.places().first().copied();
                     if let Some(source_place) = source_place.filter(|source| {
                         matches!(function.graph.place(*source).op(), PlaceOp::AllocaResult)
@@ -559,23 +640,41 @@ fn physicalize_function_results(
                         tail = emit_result_to_place(
                             &mut function.graph,
                             tail,
-                            source,
+                            &source.clone().into_tree(),
                             destination,
                             effect_ids,
                             Some(function.span),
                         )?;
                     }
                 }
-                Some((_, ResultDestination::Place(PlaceDestination::Bounded { .. }))) => {
-                    unreachable!("bounded callable results require an explicit length route")
+                ResultDestination::Place(PlaceDestination::Bounded { .. }) => {
+                    return Err(format!(
+                        "function `{}` has a bounded result without an explicit length route",
+                        function.name
+                    ));
                 }
-                None => unreachable!("a result leaf has one destination"),
             }
         }
-        let physical_return = result.bind(
-            |slot, _| return_values[&slot],
-            |parameter| parameter_places[&parameter],
-        );
+        let physical_return = result.try_bind(
+            |slot, _| {
+                let Some(value) = return_values.get(&slot).copied() else {
+                    return Err(format!(
+                        "function `{}` has no value for return slot {slot:?}",
+                        function.name
+                    ));
+                };
+                Ok(value)
+            },
+            |parameter| {
+                let Some(place) = parameter_places.get(&parameter).copied() else {
+                    return Err(format!(
+                        "function `{}` has no place for destination parameter {parameter:?}",
+                        function.name
+                    ));
+                };
+                Ok(place)
+            },
+        )?;
         function.graph.skeleton.blocks[tail].term = SkeletonTerminator::Return(Some(physical_return));
     }
     for (_, block) in &mut function.graph.skeleton.blocks {
@@ -634,25 +733,31 @@ fn resolve_call(
         .side_effect_index()
         .call_site(site)
         .ok_or_else(|| format!("call {site:?} has no explicit skeleton site"))?;
-    let (arguments, result, prelude) = bind_call_boundary(
+    let BoundCall {
+        arguments,
+        result,
+        prelude,
+    } = bind_call_boundary(
         graph,
         old.callee(),
         &boundary.0,
         &boundary.1,
-        old.arguments().copied(),
+        old.arguments(),
         CallResultRouting::Existing(old.result().clone()),
         effect_ids,
     )?;
     if !prelude.is_empty() {
         graph.skeleton.blocks[anchor.block].side_effects.splice(anchor.index..anchor.index, prelude);
     }
-    let result = result.expect("existing call preserves its logical result bindings");
+    let BoundCallResult::Preserved(result) = result else {
+        return Err(format!(
+            "existing call {site:?} did not preserve its result bindings"
+        ));
+    };
     let mut return_values = StableMap::new();
     for (route, binding) in boundary.1.destination_leaves().into_iter().zip(result.destination_leaves()) {
-        if let (
-            Some((_, ResultDestination::ReturnValue(slot))),
-            Some((_, ResultDestination::ReturnValue(value))),
-        ) = (route.single_destination(), binding.single_destination())
+        if let (ResultDestination::ReturnValue(slot), ResultDestination::ReturnValue(value)) =
+            (route.destination(), binding.destination())
         {
             return_values.insert(*slot, *value);
         }
@@ -661,7 +766,7 @@ fn resolve_call(
         site,
         &boundary.0,
         &boundary.1,
-        arguments,
+        arguments.iter().map(|argument| argument.operand()),
         &return_values,
         boundary.2,
     )?;

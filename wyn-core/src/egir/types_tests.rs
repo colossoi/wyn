@@ -348,7 +348,7 @@ fn call_arguments_are_bound_by_parameter_identity_in_abi_order() {
     assert_eq!(call.argument(parameter_ids[0]), Some(OperandRef::Value(first)));
     assert_eq!(call.argument(parameter_ids[1]), Some(OperandRef::Value(second)));
     assert_eq!(
-        call.argument_bindings().keys().copied().collect::<Vec<_>>(),
+        call.argument_bindings().iter().map(|argument| argument.parameter()).collect::<Vec<_>>(),
         parameter_ids
     );
 }

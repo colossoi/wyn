@@ -1,3 +1,5 @@
+#![deny(clippy::expect_used, clippy::panic, clippy::unreachable, clippy::unwrap_used)]
+
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -136,8 +138,8 @@ fn function_boundary(function: &Func<Physical>) -> Result<(), String> {
             ));
         }
         for ((expected_path, expected), (actual_path, actual)) in expected.into_iter().zip(actual) {
-            let (expected_ty, expected_destination) = expected.single_destination().unwrap();
-            let (actual_ty, actual_destination) = actual.single_destination().unwrap();
+            let (expected_ty, expected_destination) = expected.parts();
+            let (actual_ty, actual_destination) = actual.parts();
             let valid = expected_path == actual_path
                 && expected_ty == actual_ty
                 && match (expected_destination, actual_destination) {

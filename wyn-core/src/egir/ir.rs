@@ -170,16 +170,21 @@ pub struct ResultTree<Ty, R, P> {
     root: ResultNode<Ty, R, P>,
 }
 
+/// One indivisible result together with the route that carries it across a
+/// callable boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResultLeaf<Ty, R, P> {
+    ty: Ty,
+    destination: ResultDestination<R, P>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ResultNode<Ty, R, P> {
     Product {
         ty: Ty,
         fields: Box<[ResultNode<Ty, R, P>]>,
     },
-    Destination {
-        ty: Ty,
-        destination: ResultDestination<R, P>,
-    },
+    Leaf(ResultLeaf<Ty, R, P>),
 }
 
 fn result_node_contains_return_value<Ty>(node: &ResultNode<Ty, ValueId, PlaceId>, value: ValueId) -> bool {
@@ -187,14 +192,14 @@ fn result_node_contains_return_value<Ty>(node: &ResultNode<Ty, ValueId, PlaceId>
         ResultNode::Product { fields, .. } => {
             fields.iter().any(|field| result_node_contains_return_value(field, value))
         }
-        ResultNode::Destination {
+        ResultNode::Leaf(ResultLeaf {
             destination: ResultDestination::ReturnValue(candidate),
             ..
-        } => *candidate == value,
-        ResultNode::Destination {
+        }) => *candidate == value,
+        ResultNode::Leaf(ResultLeaf {
             destination: ResultDestination::Place(_),
             ..
-        } => false,
+        }) => false,
     }
 }
 
@@ -216,12 +221,36 @@ pub struct FuncParam<R, Ty> {
     representation: OperandType<R, Ty>,
 }
 
-/// Arena-owned parameter declarations plus their explicit ABI order.
+/// One parameter's stable identity and declaration at its ABI position.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AbiParameter<R, Ty> {
+    id: ParameterId,
+    declaration: FuncParam<R, Ty>,
+}
+
+/// Arena-owned parameter identities and their ordered ABI records.
 #[derive(Clone, Debug)]
 pub struct Parameters<R, Ty> {
     identities: SlotMap<ParameterId, ()>,
-    declarations: StableMap<ParameterId, FuncParam<R, Ty>>,
-    abi_order: Vec<ParameterId>,
+    abi: Vec<AbiParameter<R, Ty>>,
+}
+
+/// One validated argument paired with the parameter identity and operand
+/// channel it satisfies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CallArgument {
+    Value {
+        parameter: ParameterId,
+        value: ValueId,
+    },
+    View {
+        parameter: ParameterId,
+        view: ViewId,
+    },
+    Place {
+        parameter: ParameterId,
+        place: PlaceId,
+    },
 }
 
 /// One fully applied call. Arguments align exactly with the callee's physical
@@ -230,7 +259,7 @@ pub struct Parameters<R, Ty> {
 #[derive(Clone, Debug)]
 pub struct CallSite<Ty> {
     callee: FunctionId,
-    arguments: StableMap<ParameterId, OperandRef>,
+    arguments: Box<[CallArgument]>,
     result: ResultBinding<Ty>,
     effects: CallEffects,
 }
@@ -324,6 +353,83 @@ impl OperandRef {
     }
 }
 
+impl CallArgument {
+    pub const fn new(parameter: ParameterId, operand: OperandRef) -> Self {
+        match operand {
+            OperandRef::Value(value) => Self::Value { parameter, value },
+            OperandRef::View(view) => Self::View { parameter, view },
+            OperandRef::Place(place) => Self::Place { parameter, place },
+        }
+    }
+
+    pub const fn parameter(self) -> ParameterId {
+        match self {
+            Self::Value { parameter, .. }
+            | Self::View { parameter, .. }
+            | Self::Place { parameter, .. } => parameter,
+        }
+    }
+
+    pub const fn operand(self) -> OperandRef {
+        match self {
+            Self::Value { value, .. } => OperandRef::Value(value),
+            Self::View { view, .. } => OperandRef::View(view),
+            Self::Place { place, .. } => OperandRef::Place(place),
+        }
+    }
+
+    pub const fn value(self) -> Option<ValueId> {
+        self.operand().value()
+    }
+
+    pub const fn place(self) -> Option<PlaceId> {
+        self.operand().place()
+    }
+
+    pub fn replace_operand(&mut self, operand: OperandRef) {
+        *self = Self::new(self.parameter(), operand);
+    }
+}
+
+impl<Ty, R, P> ResultLeaf<Ty, R, P> {
+    pub fn ty(&self) -> &Ty {
+        &self.ty
+    }
+
+    pub fn destination(&self) -> &ResultDestination<R, P> {
+        &self.destination
+    }
+
+    pub fn parts(&self) -> (&Ty, &ResultDestination<R, P>) {
+        (&self.ty, &self.destination)
+    }
+
+    pub fn into_tree(self) -> ResultTree<Ty, R, P> {
+        ResultTree {
+            root: ResultNode::Leaf(self),
+        }
+    }
+}
+
+impl<Ty> ResultLeaf<Ty, ValueId, PlaceId> {
+    pub fn single_value(&self) -> Option<ValueId> {
+        match self.destination {
+            ResultDestination::ReturnValue(value) => Some(value),
+            ResultDestination::Place(_) => None,
+        }
+    }
+
+    pub fn places(&self) -> Vec<PlaceId> {
+        match self.destination {
+            ResultDestination::ReturnValue(_) => Vec::new(),
+            ResultDestination::Place(PlaceDestination::Fixed(place)) => vec![place],
+            ResultDestination::Place(PlaceDestination::Bounded { storage, length }) => {
+                vec![storage, length]
+            }
+        }
+    }
+}
+
 impl<R, Ty> OperandType<R, Ty> {
     pub fn ty(&self) -> &Ty {
         match self {
@@ -390,7 +496,7 @@ impl<R, Ty> OperandType<R, Ty> {
 impl<Ty, R, P> ResultTree<Ty, R, P> {
     pub fn destination(ty: Ty, destination: ResultDestination<R, P>) -> Self {
         Self {
-            root: ResultNode::Destination { ty, destination },
+            root: ResultNode::Leaf(ResultLeaf { ty, destination }),
         }
     }
 
@@ -405,14 +511,15 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
 
     pub fn ty(&self) -> &Ty {
         match &self.root {
-            ResultNode::Product { ty, .. } | ResultNode::Destination { ty, .. } => ty,
+            ResultNode::Product { ty, .. } => ty,
+            ResultNode::Leaf(leaf) => leaf.ty(),
         }
     }
 
     pub fn field_count(&self) -> usize {
         match &self.root {
             ResultNode::Product { fields, .. } => fields.len(),
-            ResultNode::Destination { .. } => 1,
+            ResultNode::Leaf(_) => 1,
         }
     }
 
@@ -428,8 +535,8 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
     {
         match &self.root {
             ResultNode::Product { fields, .. } => fields.get(index).cloned().map(|root| Self { root }),
-            ResultNode::Destination { .. } if index == 0 => Some(self.clone()),
-            ResultNode::Destination { .. } => None,
+            ResultNode::Leaf(_) if index == 0 => Some(self.clone()),
+            ResultNode::Leaf(_) => None,
         }
     }
 
@@ -454,14 +561,14 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
             ResultNode::Product { fields, .. } => {
                 fields.iter().position(|candidate| candidate == &field.root)
             }
-            ResultNode::Destination { .. } => (self == field).then_some(0),
+            ResultNode::Leaf(_) => (self == field).then_some(0),
         }
     }
 
     /// Borrow-independent views of the physical destination leaves, in ABI
     /// order. Product structure is retained by `top_level_fields`; this view
     /// is for consumers that operate once per physical result channel.
-    pub fn destination_leaves(&self) -> Vec<Self>
+    pub fn destination_leaves(&self) -> Vec<ResultLeaf<Ty, R, P>>
     where
         Ty: Clone,
         R: Clone,
@@ -471,7 +578,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
     }
 
     /// Physical destination leaves paired with their logical product path.
-    pub fn destination_leaves_with_paths(&self) -> Vec<(Box<[usize]>, Self)>
+    pub fn destination_leaves_with_paths(&self) -> Vec<(Box<[usize]>, ResultLeaf<Ty, R, P>)>
     where
         Ty: Clone,
         R: Clone,
@@ -480,7 +587,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         fn walk<Ty: Clone, R: Clone, P: Clone>(
             node: &ResultNode<Ty, R, P>,
             path: &mut Vec<usize>,
-            leaves: &mut Vec<(Box<[usize]>, ResultTree<Ty, R, P>)>,
+            leaves: &mut Vec<(Box<[usize]>, ResultLeaf<Ty, R, P>)>,
         ) {
             match node {
                 ResultNode::Product { fields, .. } => {
@@ -490,9 +597,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                         path.pop();
                     }
                 }
-                ResultNode::Destination { .. } => {
-                    leaves.push((path.clone().into_boxed_slice(), ResultTree { root: node.clone() }))
-                }
+                ResultNode::Leaf(leaf) => leaves.push((path.clone().into_boxed_slice(), leaf.clone())),
             }
         }
 
@@ -509,7 +614,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
 
     pub fn single_destination(&self) -> Option<(&Ty, &ResultDestination<R, P>)> {
         match &self.root {
-            ResultNode::Destination { ty, destination } => Some((ty, destination)),
+            ResultNode::Leaf(leaf) => Some((leaf.ty(), leaf.destination())),
             ResultNode::Product { .. } => None,
         }
     }
@@ -525,7 +630,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                         walk(field, visit);
                     }
                 }
-                ResultNode::Destination { ty, destination } => visit(ty, destination),
+                ResultNode::Leaf(leaf) => visit(&leaf.ty, &leaf.destination),
             }
         }
 
@@ -546,7 +651,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                         walk(field, visit);
                     }
                 }
-                ResultNode::Destination { ty, destination } => visit(ty, destination),
+                ResultNode::Leaf(leaf) => visit(&mut leaf.ty, &mut leaf.destination),
             }
         }
 
@@ -562,7 +667,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                         walk(field, visit);
                     }
                 }
-                ResultNode::Destination { ty, .. } => visit(ty),
+                ResultNode::Leaf(leaf) => visit(&mut leaf.ty),
             }
         }
 
@@ -585,10 +690,10 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                     ty: ty.clone(),
                     fields: fields.iter().map(|field| walk(field, map)).collect(),
                 },
-                ResultNode::Destination { ty, destination } => ResultNode::Destination {
-                    ty: ty.clone(),
-                    destination: map(ty, destination),
-                },
+                ResultNode::Leaf(leaf) => ResultNode::Leaf(ResultLeaf {
+                    ty: leaf.ty.clone(),
+                    destination: map(&leaf.ty, &leaf.destination),
+                }),
             }
         }
 
@@ -619,7 +724,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                 },
-                ResultNode::Destination { ty, destination } => ResultNode::Destination {
+                ResultNode::Leaf(ResultLeaf { ty, destination }) => ResultNode::Leaf(ResultLeaf {
                     ty: map_ty(ty)?,
                     destination: match destination {
                         ResultDestination::ReturnValue(value) => {
@@ -635,7 +740,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                             })
                         }
                     },
-                },
+                }),
             })
         }
 
@@ -679,7 +784,7 @@ impl<Ty> ResultBinding<Ty> {
             ResultNode::Product { fields, .. } => {
                 fields.iter().position(|field| result_node_contains_return_value(field, value))
             }
-            ResultNode::Destination { .. } => self.contains_value(value).then_some(0),
+            ResultNode::Leaf(_) => self.contains_value(value).then_some(0),
         }
     }
 
@@ -718,11 +823,11 @@ impl<Ty> ResultBinding<Ty> {
                         walk(field, old, new);
                     }
                 }
-                ResultNode::Destination {
+                ResultNode::Leaf(ResultLeaf {
                     destination: ResultDestination::ReturnValue(value),
                     ..
-                } if *value == old => *value = new,
-                ResultNode::Destination { .. } => {}
+                }) if *value == old => *value = new,
+                ResultNode::Leaf(_) => {}
             }
         }
 
@@ -737,10 +842,10 @@ impl<Ty> ResultBinding<Ty> {
                         walk(field, old, place);
                     }
                 }
-                ResultNode::Destination { destination, .. } => {
-                    if let ResultDestination::ReturnValue(value) = destination {
+                ResultNode::Leaf(leaf) => {
+                    if let ResultDestination::ReturnValue(value) = &mut leaf.destination {
                         if *value == old {
-                            *destination = ResultDestination::Place(PlaceDestination::Fixed(place));
+                            leaf.destination = ResultDestination::Place(PlaceDestination::Fixed(place));
                         }
                     }
                 }
@@ -796,50 +901,68 @@ impl<Ty> FunctionResult<Ty> {
 }
 
 impl<Ty: Clone> FunctionResult<Ty> {
+    pub fn try_bind<E>(
+        &self,
+        mut bind_return: impl FnMut(ReturnSlotId, &Ty) -> Result<ValueId, E>,
+        mut bind_place: impl FnMut(ParameterId) -> Result<PlaceId, E>,
+    ) -> Result<ResultBinding<Ty>, E> {
+        fn walk<Ty: Clone, E>(
+            node: &ResultNode<Ty, ReturnSlotId, ParameterId>,
+            bind_return: &mut impl FnMut(ReturnSlotId, &Ty) -> Result<ValueId, E>,
+            bind_place: &mut impl FnMut(ParameterId) -> Result<PlaceId, E>,
+        ) -> Result<ResultNode<Ty, ValueId, PlaceId>, E> {
+            Ok(match node {
+                ResultNode::Product { ty, fields } => ResultNode::Product {
+                    ty: ty.clone(),
+                    fields: fields
+                        .iter()
+                        .map(|field| walk(field, bind_return, bind_place))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice(),
+                },
+                ResultNode::Leaf(ResultLeaf {
+                    ty,
+                    destination: ResultDestination::ReturnValue(slot),
+                }) => ResultNode::Leaf(ResultLeaf {
+                    ty: ty.clone(),
+                    destination: ResultDestination::ReturnValue(bind_return(*slot, ty)?),
+                }),
+                ResultNode::Leaf(ResultLeaf {
+                    ty,
+                    destination: ResultDestination::Place(PlaceDestination::Fixed(parameter)),
+                }) => ResultNode::Leaf(ResultLeaf {
+                    ty: ty.clone(),
+                    destination: ResultDestination::Place(PlaceDestination::Fixed(bind_place(*parameter)?)),
+                }),
+                ResultNode::Leaf(ResultLeaf {
+                    ty,
+                    destination: ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
+                }) => ResultNode::Leaf(ResultLeaf {
+                    ty: ty.clone(),
+                    destination: ResultDestination::Place(PlaceDestination::Bounded {
+                        storage: bind_place(*storage)?,
+                        length: bind_place(*length)?,
+                    }),
+                }),
+            })
+        }
+
+        Ok(ResultTree {
+            root: walk(&self.root, &mut bind_return, &mut bind_place)?,
+        })
+    }
+
     pub fn bind(
         &self,
         mut bind_return: impl FnMut(ReturnSlotId, &Ty) -> ValueId,
         mut bind_place: impl FnMut(ParameterId) -> PlaceId,
     ) -> ResultBinding<Ty> {
-        fn walk<Ty: Clone>(
-            node: &ResultNode<Ty, ReturnSlotId, ParameterId>,
-            bind_return: &mut impl FnMut(ReturnSlotId, &Ty) -> ValueId,
-            bind_place: &mut impl FnMut(ParameterId) -> PlaceId,
-        ) -> ResultNode<Ty, ValueId, PlaceId> {
-            match node {
-                ResultNode::Product { ty, fields } => ResultNode::Product {
-                    ty: ty.clone(),
-                    fields: fields.iter().map(|field| walk(field, bind_return, bind_place)).collect(),
-                },
-                ResultNode::Destination {
-                    ty,
-                    destination: ResultDestination::ReturnValue(slot),
-                } => ResultNode::Destination {
-                    ty: ty.clone(),
-                    destination: ResultDestination::ReturnValue(bind_return(*slot, ty)),
-                },
-                ResultNode::Destination {
-                    ty,
-                    destination: ResultDestination::Place(PlaceDestination::Fixed(parameter)),
-                } => ResultNode::Destination {
-                    ty: ty.clone(),
-                    destination: ResultDestination::Place(PlaceDestination::Fixed(bind_place(*parameter))),
-                },
-                ResultNode::Destination {
-                    ty,
-                    destination: ResultDestination::Place(PlaceDestination::Bounded { storage, length }),
-                } => ResultNode::Destination {
-                    ty: ty.clone(),
-                    destination: ResultDestination::Place(PlaceDestination::Bounded {
-                        storage: bind_place(*storage),
-                        length: bind_place(*length),
-                    }),
-                },
-            }
-        }
-
-        ResultTree {
-            root: walk(&self.root, &mut bind_return, &mut bind_place),
+        match self.try_bind(
+            |slot, ty| Ok::<_, std::convert::Infallible>(bind_return(slot, ty)),
+            |parameter| Ok::<_, std::convert::Infallible>(bind_place(parameter)),
+        ) {
+            Ok(binding) => binding,
+            Err(never) => match never {},
         }
     }
 }
@@ -906,12 +1029,25 @@ impl<R, Ty> FuncParam<R, Ty> {
     }
 }
 
+impl<R, Ty> AbiParameter<R, Ty> {
+    pub const fn id(&self) -> ParameterId {
+        self.id
+    }
+
+    pub fn declaration(&self) -> &FuncParam<R, Ty> {
+        &self.declaration
+    }
+
+    pub fn declaration_mut(&mut self) -> &mut FuncParam<R, Ty> {
+        &mut self.declaration
+    }
+}
+
 impl<R, Ty> Parameters<R, Ty> {
     pub fn new() -> Self {
         Self {
             identities: SlotMap::with_key(),
-            declarations: StableMap::new(),
-            abi_order: Vec::new(),
+            abi: Vec::new(),
         }
     }
 
@@ -925,96 +1061,80 @@ impl<R, Ty> Parameters<R, Ty> {
 
     pub fn push(&mut self, parameter: FuncParam<R, Ty>) -> ParameterId {
         let id = self.identities.insert(());
-        self.declarations.insert(id, parameter);
-        self.abi_order.push(id);
+        self.abi.push(AbiParameter {
+            id,
+            declaration: parameter,
+        });
         id
     }
 
     pub fn get(&self, id: ParameterId) -> Option<&FuncParam<R, Ty>> {
-        self.declarations.get(&id)
+        self.abi.iter().find(|parameter| parameter.id == id).map(|parameter| &parameter.declaration)
     }
 
     pub fn get_mut(&mut self, id: ParameterId) -> Option<&mut FuncParam<R, Ty>> {
-        self.declarations.get_mut(&id)
+        self.abi.iter_mut().find(|parameter| parameter.id == id).map(|parameter| &mut parameter.declaration)
     }
 
     pub fn remove(&mut self, id: ParameterId) -> Option<FuncParam<R, Ty>> {
-        self.abi_order.retain(|candidate| *candidate != id);
+        let position = self.abi.iter().position(|parameter| parameter.id == id)?;
         self.identities.remove(id)?;
-        self.declarations.shift_remove(&id)
+        Some(self.abi.remove(position).declaration)
     }
 
     pub fn len(&self) -> usize {
-        self.abi_order.len()
+        self.abi.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.abi_order.is_empty()
+        self.abi.is_empty()
     }
 
     pub fn ids(&self) -> impl ExactSizeIterator<Item = ParameterId> + '_ {
-        self.abi_order.iter().copied()
+        self.abi.iter().map(AbiParameter::id)
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &FuncParam<R, Ty>> + '_ {
-        self.abi_order.iter().map(|id| self.declarations.get(id).expect("ABI order names a declaration"))
+        self.abi.iter().map(AbiParameter::declaration)
     }
 
     pub fn iter_with_ids(&self) -> impl ExactSizeIterator<Item = (ParameterId, &FuncParam<R, Ty>)> + '_ {
-        self.abi_order.iter().map(|id| {
-            (
-                *id,
-                self.declarations.get(id).expect("ABI order names a declaration"),
-            )
-        })
+        self.abi.iter().map(|parameter| (parameter.id(), parameter.declaration()))
     }
 
     pub(crate) fn id_at_abi_position(&self, position: usize) -> Option<ParameterId> {
-        self.abi_order.get(position).copied()
+        self.abi.get(position).map(AbiParameter::id)
     }
 
     pub(crate) fn abi_position(&self, id: ParameterId) -> Option<usize> {
-        self.abi_order.iter().position(|candidate| *candidate == id)
+        self.abi.iter().position(|parameter| parameter.id == id)
     }
 
     pub(crate) fn retain_abi_positions(&mut self, retain: &[bool]) {
-        let removed = self
-            .abi_order
-            .iter()
-            .copied()
-            .zip(retain)
-            .filter_map(|(id, retain)| (!*retain).then_some(id))
-            .collect::<Vec<_>>();
-        for id in removed {
-            self.remove(id);
+        for position in (0..self.abi.len()).rev() {
+            let Some(retain) = retain.get(position) else {
+                continue;
+            };
+            if !retain {
+                let parameter = self.abi.remove(position);
+                self.identities.remove(parameter.id);
+            }
         }
     }
 
-    pub(crate) fn into_ordered(mut self) -> Vec<(ParameterId, FuncParam<R, Ty>)> {
-        let order = std::mem::take(&mut self.abi_order);
-        order
-            .into_iter()
-            .map(|id| {
-                (
-                    id,
-                    self.declarations.shift_remove(&id).expect("ABI order names a declaration"),
-                )
-            })
-            .collect()
+    pub(crate) fn into_ordered(self) -> Vec<(ParameterId, FuncParam<R, Ty>)> {
+        self.abi.into_iter().map(|parameter| (parameter.id, parameter.declaration)).collect()
     }
 
     /// Remove every declaration while retaining this arena's allocation
     /// history. Parameters allocated afterwards receive fresh generational
     /// identities even when the slot map reuses storage.
     pub(crate) fn drain_ordered(&mut self) -> Vec<(ParameterId, FuncParam<R, Ty>)> {
-        let order = std::mem::take(&mut self.abi_order);
-        order
+        std::mem::take(&mut self.abi)
             .into_iter()
-            .map(|id| {
-                self.identities.remove(id).expect("ABI order names a live parameter identity");
-                let declaration =
-                    self.declarations.shift_remove(&id).expect("ABI order names a declaration");
-                (id, declaration)
+            .map(|parameter| {
+                self.identities.remove(parameter.id);
+                (parameter.id, parameter.declaration)
             })
             .collect()
     }
@@ -1024,14 +1144,16 @@ impl<R, Ty> Parameters<R, Ty> {
         map_resource: &mut impl FnMut(R) -> Result<S, E>,
         map_ty: &mut impl FnMut(Ty) -> Result<U, E>,
     ) -> Result<Parameters<S, U>, E> {
-        let mut declarations = StableMap::with_capacity(self.declarations.len());
-        for (id, parameter) in self.declarations {
-            declarations.insert(id, parameter.try_map(map_resource, map_ty)?);
+        let mut abi = Vec::with_capacity(self.abi.len());
+        for parameter in self.abi {
+            abi.push(AbiParameter {
+                id: parameter.id,
+                declaration: parameter.declaration.try_map(map_resource, map_ty)?,
+            });
         }
         Ok(Parameters {
             identities: self.identities,
-            declarations,
-            abi_order: self.abi_order,
+            abi,
         })
     }
 
@@ -1096,7 +1218,7 @@ pub fn callable_parameter<R, Lang: Language>(name: String, ty: Lang::Ty) -> Func
 impl<Ty> CallSite<Ty> {
     fn new(
         callee: FunctionId,
-        arguments: StableMap<ParameterId, OperandRef>,
+        arguments: Box<[CallArgument]>,
         result: ResultBinding<Ty>,
         effects: CallEffects,
     ) -> Self {
@@ -1112,20 +1234,23 @@ impl<Ty> CallSite<Ty> {
         self.callee
     }
 
-    pub fn arguments(&self) -> indexmap::map::Values<'_, ParameterId, OperandRef> {
-        self.arguments.values()
+    pub fn arguments(&self) -> impl ExactSizeIterator<Item = OperandRef> + '_ {
+        self.arguments.iter().map(|argument| argument.operand())
     }
 
     pub fn argument(&self, parameter: ParameterId) -> Option<OperandRef> {
-        self.arguments.get(&parameter).copied()
+        self.arguments
+            .iter()
+            .find(|argument| argument.parameter() == parameter)
+            .map(|argument| argument.operand())
     }
 
-    pub(crate) fn argument_bindings(&self) -> &StableMap<ParameterId, OperandRef> {
+    pub(crate) fn argument_bindings(&self) -> &[CallArgument] {
         &self.arguments
     }
 
-    pub(crate) fn arguments_mut(&mut self) -> indexmap::map::ValuesMut<'_, ParameterId, OperandRef> {
-        self.arguments.values_mut()
+    pub(crate) fn arguments_mut(&mut self) -> std::slice::IterMut<'_, CallArgument> {
+        self.arguments.iter_mut()
     }
 
     pub fn result(&self) -> &ResultBinding<Ty> {
@@ -1143,19 +1268,24 @@ impl<Ty> CallSite<Ty> {
     ) -> Result<Self, E> {
         let arguments = self
             .arguments
+            .into_vec()
             .into_iter()
-            .map(|(parameter, argument)| match argument {
-                OperandRef::Value(value) => {
-                    map_value(value).map(|value| (parameter, OperandRef::Value(value)))
+            .map(|argument| match argument {
+                CallArgument::Value { parameter, value } => {
+                    map_value(value).map(|value| CallArgument::Value { parameter, value })
                 }
-                OperandRef::View(view) => {
-                    map_value(view.value()).map(|value| (parameter, OperandRef::View(ViewId(value))))
+                CallArgument::View { parameter, view } => {
+                    map_value(view.value()).map(|value| CallArgument::View {
+                        parameter,
+                        view: ViewId(value),
+                    })
                 }
-                OperandRef::Place(place) => {
-                    map_place(place).map(|place| (parameter, OperandRef::Place(place)))
+                CallArgument::Place { parameter, place } => {
+                    map_place(place).map(|place| CallArgument::Place { parameter, place })
                 }
             })
-            .collect::<Result<StableMap<_, _>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_boxed_slice();
         let result = self.result.try_map(&mut |ty| Ok(ty), &mut map_value, &mut map_place)?;
         Ok(Self {
             callee: self.callee,
@@ -1175,10 +1305,12 @@ impl<Ty> CallSite<Ty> {
             ));
         }
         self.arguments = std::mem::take(&mut self.arguments)
+            .into_vec()
             .into_iter()
             .zip(retain)
-            .filter_map(|((parameter, argument), retain)| (*retain).then_some((parameter, argument)))
-            .collect();
+            .filter_map(|(argument, retain)| (*retain).then_some(argument))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Ok(())
     }
 }
@@ -1221,10 +1353,10 @@ pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<
         } else {
             let slot = ReturnSlotId::new(*next_slot);
             *next_slot += 1;
-            ResultNode::Destination {
+            ResultNode::Leaf(ResultLeaf {
                 ty,
                 destination: ResultDestination::ReturnValue(slot),
-            }
+            })
         }
     }
 
@@ -1270,7 +1402,7 @@ pub fn destination_passing_function_result<R, Lang: Language>(
             *next_slot += 1;
             ResultDestination::ReturnValue(slot)
         };
-        ResultNode::Destination { ty, destination }
+        ResultNode::Leaf(ResultLeaf { ty, destination })
     }
 
     let mut next_slot = 0;
@@ -2531,7 +2663,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
     pub fn call_value_dependencies(&self, id: CallSiteId) -> Vec<ValueId> {
         let mut values = Vec::new();
         for argument in self.call(id).arguments() {
-            match *argument {
+            match argument {
                 OperandRef::Value(value) => values.push(value),
                 OperandRef::View(view) => values.push(view.value()),
                 OperandRef::Place(place) => values.extend(self.place_value_dependencies(place)),
@@ -2671,7 +2803,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         };
         for (_, call) in &mut self.calls {
             for argument in call.arguments_mut() {
-                canonicalize(argument);
+                let mut operand = argument.operand();
+                canonicalize(&mut operand);
+                argument.replace_operand(operand);
             }
         }
         for (_, block) in &mut self.skeleton.blocks {
@@ -2728,25 +2862,36 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         let arguments = self.bind_call_arguments(callee, parameters, arguments)?;
         self.validate_call_destinations(callee, parameters, function_result)?;
         let nodes = &mut self.nodes;
-        let mut result = None;
-        let site = self.calls.insert_with_key(|site| {
-            let binding = function_result.bind(
+        let site = self.calls.try_insert_with_key(|site| {
+            let binding = function_result.try_bind(
                 |slot, ty| {
-                    nodes.insert(Value {
+                    Ok::<_, String>(nodes.insert(Value {
                         kind: ValueKind::CallResult { call: site, slot },
                         ty: ty.clone(),
                         span,
                         alias: None,
                         result_origins: Vec::new(),
-                    })
+                    }))
                 },
                 |parameter| {
-                    arguments[&parameter].place().expect("destination parameter requires a place argument")
+                    let Some(place) = arguments
+                        .iter()
+                        .find(|argument| argument.parameter() == parameter)
+                        .and_then(|argument| argument.place())
+                    else {
+                        return Err(format!(
+                            "call to {callee:?} destination parameter {parameter:?} has no place argument"
+                        ));
+                    };
+                    Ok(place)
                 },
-            );
-            result = Some(binding.clone());
-            CallSite::new(callee, arguments.clone(), binding, effects)
-        });
+            )?;
+            Ok::<_, String>(CallSite::new(callee, arguments.clone(), binding, effects))
+        })?;
+        let Some(call) = self.calls.get(site) else {
+            return Err(format!("call to {callee:?} disappeared during construction"));
+        };
+        let binding = call.result.clone();
         self.skeleton.blocks[block].side_effects.push(SideEffect::new(
             SideEffectKind::Effect(EffectOp::Call { site }),
             smallvec::smallvec![],
@@ -2754,10 +2899,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             effect_tokens,
             span,
         ));
-        Ok((
-            site,
-            result.expect("call result is constructed with its call site"),
-        ))
+        Ok((site, binding))
     }
 
     fn bind_call_arguments(
@@ -2765,7 +2907,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         callee: FunctionId,
         parameters: &Parameters<P::Resource, Lang::Ty>,
         arguments: impl IntoIterator<Item = OperandRef>,
-    ) -> Result<StableMap<ParameterId, OperandRef>, String> {
+    ) -> Result<Box<[CallArgument]>, String> {
         let ordered_arguments =
             arguments.into_iter().map(|argument| self.canonical_operand(argument)).collect::<Vec<_>>();
         if ordered_arguments.len() != parameters.len() {
@@ -2800,7 +2942,11 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                 ));
             }
         }
-        Ok(parameters.ids().zip(ordered_arguments).collect())
+        Ok(parameters
+            .ids()
+            .zip(ordered_arguments)
+            .map(|(parameter, argument)| CallArgument::new(parameter, argument))
+            .collect())
     }
 
     fn validate_call_destinations(
@@ -2887,24 +3033,51 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             }
         }
 
-        let result = function_result.bind(
-            |slot, _| return_values[&slot],
-            |parameter| {
-                arguments[&parameter].place().expect("validated destination parameter uses a place")
+        let result = function_result.try_bind(
+            |slot, _| {
+                let Some(value) = return_values.get(&slot).copied() else {
+                    return Err(format!(
+                        "call to {callee:?} has no preserved value for return slot {slot:?}"
+                    ));
+                };
+                Ok(value)
             },
-        );
+            |parameter| {
+                let Some(place) = arguments
+                    .iter()
+                    .find(|argument| argument.parameter() == parameter)
+                    .and_then(|argument| argument.place())
+                else {
+                    return Err(format!(
+                        "call to {callee:?} destination parameter {parameter:?} has no place argument"
+                    ));
+                };
+                Ok(place)
+            },
+        )?;
         for (slot, value) in return_values {
+            let Some(node) = self.nodes.get_mut(*value) else {
+                return Err(format!(
+                    "call to {callee:?} preserves missing return value {value:?}"
+                ));
+            };
             let ValueKind::CallResult {
                 call,
                 slot: current_slot,
-            } = &mut self.nodes[*value].kind
+            } = &mut node.kind
             else {
-                unreachable!("return ownership validated above")
+                return Err(format!(
+                    "call to {callee:?} return slot {slot:?} is not owned by call {site:?}"
+                ));
             };
             debug_assert_eq!(*call, site);
             *current_slot = *slot;
         }
-        let call = self.calls.get_mut(site).expect("call remains live while its boundary is rebound");
+        let Some(call) = self.calls.get_mut(site) else {
+            return Err(format!(
+                "call {site:?} disappeared while its boundary was rebound"
+            ));
+        };
         call.arguments = arguments;
         call.result = result;
         call.effects = effects;
@@ -2922,8 +3095,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         effects: CallEffects,
     ) -> Result<(), String> {
         let call = self.calls.get(site).ok_or_else(|| format!("missing call {site:?}"))?;
-        let expected_arguments =
-            self.bind_call_arguments(call.callee, parameters, call.arguments().copied())?;
+        let expected_arguments = self.bind_call_arguments(call.callee, parameters, call.arguments())?;
         self.validate_call_destinations(call.callee, parameters, function_result)?;
         if call.arguments != expected_arguments {
             return Err(format!("call {site:?} uses stale callee parameter identities"));
@@ -2938,9 +3110,8 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             return Err(format!("call {site:?} result arity disagrees with its callee"));
         }
         for ((expected_path, expected), (actual_path, actual)) in expected.into_iter().zip(actual) {
-            let (expected_ty, expected_destination) =
-                expected.single_destination().expect("physical result leaf");
-            let (actual_ty, actual_destination) = actual.single_destination().expect("call result leaf");
+            let (expected_ty, expected_destination) = expected.parts();
+            let (actual_ty, actual_destination) = actual.parts();
             if expected_path != actual_path || expected_ty != actual_ty {
                 return Err(format!("call {site:?} result tree disagrees with its callee"));
             }
@@ -2986,15 +3157,15 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         arguments: StableMap<ParameterId, OperandRef>,
         mut source_result: impl FnMut(ValueId) -> (ReturnSlotId, Lang::Ty, Option<Span>),
         mut map_place: impl FnMut(PlaceId) -> PlaceId,
-    ) -> (CallSiteId, ResultBinding<Lang::Ty>, Vec<(ValueId, ValueId)>) {
+    ) -> Result<(CallSiteId, ResultBinding<Lang::Ty>, Vec<(ValueId, ValueId)>), String> {
         let arguments = arguments
             .into_iter()
-            .map(|(parameter, argument)| (parameter, self.canonical_operand(argument)))
-            .collect::<StableMap<_, _>>();
-        let nodes = &mut self.nodes;
-        let mut result = None;
+            .map(|(parameter, argument)| CallArgument::new(parameter, self.canonical_operand(argument)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let mut value_map = Vec::new();
-        let site = self.calls.insert_with_key(|site| {
+        let nodes = &mut self.nodes;
+        let site = self.calls.try_insert_with_key(|site| {
             let binding = source.result.clone().map(
                 |ty| ty,
                 |source_value| {
@@ -3011,14 +3182,17 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
                 },
                 &mut map_place,
             );
-            result = Some(binding.clone());
-            CallSite::new(source.callee, arguments.clone(), binding, source.effects)
-        });
-        (
-            site,
-            result.expect("projected call result is constructed with its call site"),
-            value_map,
-        )
+            Ok::<_, String>(CallSite::new(
+                source.callee,
+                arguments.clone(),
+                binding,
+                source.effects,
+            ))
+        })?;
+        let Some(call) = self.calls.get(site) else {
+            return Err(format!("projected call {site:?} disappeared during construction"));
+        };
+        Ok((site, call.result.clone(), value_map))
     }
 
     pub fn add_place_length(&mut self, place: PlaceId, ty: Lang::Ty, span: Option<Span>) -> ValueId {
@@ -3432,7 +3606,7 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         for (_, call) in &mut self.calls {
             for argument in call.arguments_mut() {
                 if argument.value() == Some(old) {
-                    *argument = replacement_operand;
+                    argument.replace_operand(replacement_operand);
                 }
             }
             call.result.replace_value(old, new);
@@ -3474,9 +3648,9 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
             }
         }
         for (_, call) in &mut self.calls {
-            for argument in call.arguments.values_mut() {
-                if *argument == OperandRef::Place(old) {
-                    *argument = OperandRef::Place(new);
+            for argument in call.arguments_mut() {
+                if argument.place() == Some(old) {
+                    argument.replace_operand(OperandRef::Place(new));
                 }
             }
             call.result.replace_place(old, new);

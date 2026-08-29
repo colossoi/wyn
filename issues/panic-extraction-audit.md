@@ -25,19 +25,19 @@ and `values[index]` operations when a cluster is changed.
 The starting tree contained 584 production panic points detected by this scan:
 466 `unwrap`/`expect` extractions and 118 explicit `panic!` calls.
 
-The completed changes remove 193 of them. The remaining 391 are:
+The completed changes remove 215 of them. The remaining 369 are:
 
 | Kind | Count |
 | --- | ---: |
-| `Option`/`Result::expect` | 187 |
-| `Option`/`Result::unwrap` | 101 |
+| `Option`/`Result::expect` | 168 |
+| `Option`/`Result::unwrap` | 98 |
 | `panic!` | 103 |
 
 The remaining sites are concentrated by compiler layer:
 
 | Layer | Count |
 | --- | ---: |
-| EGIR | 170 |
+| EGIR | 148 |
 | other `wyn-core` code | 100 |
 | TLC | 74 |
 | type checker/type model | 23 |
@@ -46,9 +46,9 @@ The remaining sites are concentrated by compiler layer:
 | frontend | 4 |
 | other crates | 5 |
 
-The companion scan found 68 `unreachable!` calls, no `todo!` or
+The companion scan found 60 `unreachable!` calls, no `todo!` or
 `unimplemented!` calls, and 45 production assertions. The largest
-`unreachable!` clusters are EGIR fusion/expansion (9), other EGIR code (26),
+`unreachable!` clusters are EGIR fusion/expansion (9), other EGIR code (18),
 TLC (16), SPIR-V lowering (7), and frontend/type code (9); one more is in
 `wyn-staged-ir`. Assertions are tracked separately because some guard public
 mutation APIs or process-exhaustion invariants, but assertion-based validation
@@ -99,9 +99,17 @@ of source-derived or pass-derived state should migrate with the same clusters.
   non-value operands, changed operation variants, malformed results, and
   invalid field mappings now reject the candidate or propagate a structured
   fusion error through semantic optimization.
+- EGIR call and result boundaries: 22 extraction sites and 8 `unreachable!`
+  arms were removed. Ordered `AbiParameter` records replace parameter
+  declaration/order SoA, `ResultLeaf` exposes indivisible result routes
+  directly, and channel-specific `CallArgument` records retain parameter
+  identity with each operand. Physical binding distinguishes fresh and
+  preserved results explicitly; missing parameters, channels, routes, and
+  preserved values now return contextual errors. The remaining elaborator
+  state assumptions are a separate cluster.
 
-No-extraction Clippy gates now protect the completed planner, fusion, graph
-crate, and typed SPIR-V builder scopes.
+No-extraction Clippy gates now protect the completed planner, fusion, physical
+call/flow/inlining/verification, graph crate, and typed SPIR-V builder scopes.
 
 ## Remaining remedies
 
@@ -153,8 +161,8 @@ which would silently alias IDs.
 
 1. Extend the definition-record approach to the remaining `tlc/from_ast.rs`
    symbol/definition joins.
-2. Introduce aggregate call/result boundary records in EGIR elaboration and
-   reification.
+2. Make the remaining EGIR elaborator state explicit, starting with value-only
+   calls, current-block state, and nonempty view-index spines.
 3. Split phase-scoped TLC variants, starting with array expressions.
 4. Enable the no-extraction Clippy gate for each migrated module, and finally
    for `wyn-core` as a whole.

@@ -4,6 +4,8 @@
 //! call operands for function parameters, and replacing the call. It contains
 //! no profitability or placement policy; callers decide which calls to inline.
 
+#![deny(clippy::expect_used, clippy::panic, clippy::unreachable, clippy::unwrap_used)]
+
 use crate::ast;
 use std::collections::VecDeque;
 use wyn_base::IdSource;
@@ -258,12 +260,8 @@ fn validate_cloned_return<Ty: PartialEq + Clone>(
     }
     for (returned, boundary) in returned.destination_leaves().into_iter().zip(boundary.destination_leaves())
     {
-        let Some((returned_ty, returned)) = returned.single_destination() else {
-            unreachable!()
-        };
-        let Some((boundary_ty, boundary)) = boundary.single_destination() else {
-            unreachable!()
-        };
+        let (returned_ty, returned) = returned.parts();
+        let (boundary_ty, boundary) = boundary.parts();
         let matches = returned_ty == boundary_ty
             && match (returned, boundary) {
                 (ResultDestination::ReturnValue(_), ResultDestination::ReturnValue(_)) => true,
@@ -421,20 +419,15 @@ fn complete_body_summary<P: Family>(
         .result()
         .destination_leaves()
         .into_iter()
-        .filter(|leaf| {
-            matches!(
-                leaf.single_destination(),
-                Some((_, ResultDestination::ReturnValue(_)))
-            )
-        })
+        .filter(|leaf| matches!(leaf.destination(), ResultDestination::ReturnValue(_)))
         .count();
     let expected_places = function
         .result()
         .destination_leaves()
         .into_iter()
-        .map(|leaf| match leaf.single_destination() {
-            Some((_, ResultDestination::Place(PlaceDestination::Fixed(_)))) => 1,
-            Some((_, ResultDestination::Place(PlaceDestination::Bounded { .. }))) => 2,
+        .map(|leaf| match leaf.destination() {
+            ResultDestination::Place(PlaceDestination::Fixed(_)) => 1,
+            ResultDestination::Place(PlaceDestination::Bounded { .. }) => 2,
             _ => 0,
         })
         .sum::<usize>();
@@ -555,7 +548,7 @@ fn inline_structured_call_before_terminator<P: Family>(
         .iter()
         .position(|result| *result == call)
         .ok_or_else(|| "structured inlining trigger is absent from its call boundary".to_string())?;
-    let operands = call_site.argument_bindings().clone();
+    let operands = call_site.argument_bindings().to_vec();
 
     let mut block_map = LookupMap::new();
     for source in &summary.blocks {
@@ -570,13 +563,16 @@ fn inline_structured_call_before_terminator<P: Family>(
     let mut memo = LookupMap::new();
     for (source, definition) in &callee.graph.nodes {
         if let ValueKind::FuncParam { parameter } = definition.kind {
-            let replacement =
-                operands.get(&parameter).and_then(|operand| operand.value()).ok_or_else(|| {
-                    format!(
+            let Some(replacement) = operands
+                .iter()
+                .find(|argument| argument.parameter() == parameter)
+                .and_then(|argument| argument.value())
+            else {
+                return Err(format!(
                     "inline_structured_call_before_terminator: `{}` parameter {parameter:?} is not a value argument",
                     callee.name,
-                )
-                })?;
+                ));
+            };
             memo.insert(source, replacement);
         }
     }
@@ -764,7 +760,7 @@ fn clone_callee_results<P: Family>(
             )
         })?
         .values();
-    let arguments = caller.call(site).argument_bindings().clone();
+    let arguments = caller.call(site).argument_bindings().to_vec();
     let mut memo = LookupMap::new();
     let reachable = wyn_graph::reachable_from_ordered(
         roots.iter().copied(),
@@ -774,13 +770,16 @@ fn clone_callee_results<P: Family>(
     for node in reachable {
         let definition = &callee.graph.nodes[node].kind;
         if let ValueKind::FuncParam { parameter } = definition {
-            let replacement =
-                arguments.get(parameter).and_then(|argument| argument.value()).ok_or_else(|| {
-                    format!(
-                        "inline_pure_call: `{}` parameter {parameter:?} is not a value argument",
-                        callee.name,
-                    )
-                })?;
+            let Some(replacement) = arguments
+                .iter()
+                .find(|argument| argument.parameter() == *parameter)
+                .and_then(|argument| argument.value())
+            else {
+                return Err(format!(
+                    "inline_pure_call: `{}` parameter {parameter:?} is not a value argument",
+                    callee.name,
+                ));
+            };
             memo.insert(node, replacement);
         }
     }

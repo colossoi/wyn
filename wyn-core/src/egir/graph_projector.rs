@@ -676,7 +676,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         }
         let call = self.source.call(source).clone();
         for argument in call.arguments() {
-            match *argument {
+            match argument {
                 OperandRef::Value(value) => {
                     self.prepare_value(value, shell)?;
                 }
@@ -696,14 +696,15 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         let arguments = call
             .argument_bindings()
             .iter()
-            .map(|(&parameter, &argument)| {
+            .map(|argument| {
                 argument
+                    .operand()
                     .try_map(
                         |value| Ok::<_, String>(shell.nodes[&value]),
                         |view| view.try_remap(|value| Ok::<_, String>(shell.nodes[&value])),
                         |place| Ok::<_, String>(shell.places[&place]),
                     )
-                    .map(|argument| (parameter, argument))
+                    .map(|operand| (argument.parameter(), operand))
             })
             .collect::<Result<StableMap<_, _>, _>>()?;
         let places = &shell.places;
@@ -726,7 +727,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 (*slot, node.ty().clone(), node.span())
             },
             |place| places[&place],
-        );
+        )?;
         shell.calls.insert(source, target);
         shell.nodes.extend(values);
         Ok(target)

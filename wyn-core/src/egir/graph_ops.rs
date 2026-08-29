@@ -32,13 +32,13 @@ use crate::ssa::types::ConstantValue;
 use crate::types::TypeExt;
 use crate::BindingRef;
 
-use super::ir::{Family, Language, PlaceOp, ResultTree, Value};
+use super::ir::{CallArgument, Family, Language, PlaceOp, ResultTree, Value};
 use super::types::{
-    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType,
-    ParameterId, Physical, PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp,
-    PureViewSource, Raw, ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess,
-    Semantic, SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId,
-    ValueKind, ViewId, WynLanguage, WynSoacPhase,
+    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType, Physical,
+    PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw,
+    ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect,
+    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, ViewId,
+    WynLanguage, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -851,9 +851,7 @@ fn result_leaf_values<P: Family>(
         .destination_leaves()
         .into_iter()
         .map(|leaf| {
-            let (ty, destination) = leaf
-                .single_destination()
-                .ok_or_else(|| "result leaf has no physical destination".to_owned())?;
+            let (ty, destination) = leaf.parts();
             Ok(match destination {
                 ResultDestination::ReturnValue(value) => graph.canonical_value(*value),
                 ResultDestination::Place(PlaceDestination::Fixed(place))
@@ -2549,10 +2547,10 @@ fn clone_value_subgraph_inner<P: Family>(
             let arguments = source_call
                 .argument_bindings()
                 .iter()
-                .map(|(parameter, argument)| match *argument {
+                .map(|argument| match argument.operand() {
                     OperandRef::Value(value) => {
                         clone_value_subgraph_inner(src, dst, value, memo, constants, allow_unions, pure)
-                            .map(|value| (*parameter, OperandRef::Value(value)))
+                            .map(|value| (argument.parameter(), OperandRef::Value(value)))
                     }
                     OperandRef::View(view) => clone_value_subgraph_inner(
                         src,
@@ -2563,7 +2561,7 @@ fn clone_value_subgraph_inner<P: Family>(
                         allow_unions,
                         pure,
                     )
-                    .map(|value| (*parameter, OperandRef::View(dst.view_id(value)))),
+                    .map(|value| (argument.parameter(), OperandRef::View(dst.view_id(value)))),
                     OperandRef::Place(_) => {
                         Err("clone call requires explicit place-argument substitutions".into())
                     }
@@ -2580,7 +2578,7 @@ fn clone_value_subgraph_inner<P: Family>(
                     (*slot, source.ty().clone(), source.span())
                 },
                 |_| unreachable!("place-backed call was rejected before cloning"),
-            );
+            )?;
             for (source, target) in mappings {
                 memo.insert(source, target);
             }
@@ -2633,7 +2631,7 @@ pub(crate) struct ClonedBody {
 pub(crate) fn clone_body_substituting<P: Family>(
     source: &EGraph<P>,
     target: &mut EGraph<P>,
-    arguments: &StableMap<ParameterId, OperandRef>,
+    arguments: &[CallArgument],
     place_bindings: &[(PlaceId, PlaceId)],
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<ClonedBody, String> {
@@ -2740,7 +2738,7 @@ pub(crate) fn clone_body_substituting<P: Family>(
 struct BodyCloner<'a, P: Family> {
     source: &'a EGraph<P>,
     target: &'a mut EGraph<P>,
-    arguments: &'a StableMap<ParameterId, OperandRef>,
+    arguments: &'a [CallArgument],
     values: LookupMap<ValueId, ValueId>,
     places: LookupMap<PlaceId, PlaceId>,
     bound_places: HashSet<PlaceId>,
@@ -2768,9 +2766,17 @@ impl<P: Family> BodyCloner<'_, P> {
             .ok_or_else(|| format!("body clone references missing value {source:?}"))?;
         let target = match &definition.kind {
             ValueKind::FuncParam { parameter } => {
-                self.arguments.get(parameter).and_then(|argument| argument.value()).ok_or_else(|| {
-                    format!("body clone parameter {parameter:?} requires a value or view argument",)
-                })?
+                let Some(value) = self
+                    .arguments
+                    .iter()
+                    .find(|argument| argument.parameter() == *parameter)
+                    .and_then(|argument| argument.value())
+                else {
+                    return Err(format!(
+                        "body clone parameter {parameter:?} requires a value or view argument",
+                    ));
+                };
+                value
             }
             ValueKind::BlockParam { .. } => *self
                 .values
@@ -2823,9 +2829,17 @@ impl<P: Family> BodyCloner<'_, P> {
             .ok_or_else(|| format!("body clone references missing place {source:?}"))?;
         let target = match definition.op() {
             PlaceOp::Parameter { parameter } => {
-                self.arguments.get(parameter).and_then(|argument| argument.place()).ok_or_else(|| {
-                    format!("body clone parameter {parameter:?} requires a place argument",)
-                })?
+                let Some(place) = self
+                    .arguments
+                    .iter()
+                    .find(|argument| argument.parameter() == *parameter)
+                    .and_then(|argument| argument.place())
+                else {
+                    return Err(format!(
+                        "body clone parameter {parameter:?} requires a place argument",
+                    ));
+                };
+                place
             }
             PlaceOp::View { view } => {
                 let view = self.clone_value(view.value())?;
@@ -2894,8 +2908,8 @@ impl<P: Family> BodyCloner<'_, P> {
         let arguments = call
             .argument_bindings()
             .iter()
-            .map(|(parameter, argument)| {
-                self.clone_operand(*argument).map(|argument| (*parameter, argument))
+            .map(|argument| {
+                self.clone_operand(argument.operand()).map(|operand| (argument.parameter(), operand))
             })
             .collect::<Result<StableMap<_, _>, _>>()?;
         for place in call.result().places() {
@@ -2913,7 +2927,7 @@ impl<P: Family> BodyCloner<'_, P> {
                 (*slot, definition.ty().clone(), definition.span())
             },
             |place| places[&place],
-        );
+        )?;
         self.calls.insert(source, target);
         self.values.extend(values);
         Ok(target)
