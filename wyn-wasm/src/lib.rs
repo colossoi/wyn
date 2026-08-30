@@ -716,7 +716,16 @@ def verts: [3]vec4f32 =
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-def fragment_main(iResolution: vec3f32, iTime: f32,
+def fragment_main(iResolution: vec3f32,
+                  iTime: f32,
+                  iTimeDelta: f32,
+                  iFrameRate: f32,
+                  iFrame: i32,
+                  iChannelTime: [4]f32,
+                  iChannelResolution: [4]vec3f32,
+                  iMouse: vec4f32,
+                  iDate: vec4f32,
+                  iSampleRate: f32,
                   fragment: fragment_invocation<vec2f32>) vec4f32 =
   let uv = fragment.position.xy / iResolution.xy in
   let phase = iTime in
@@ -725,11 +734,22 @@ def fragment_main(iResolution: vec3f32, iTime: f32,
   let b = 0.5 + 0.5 * f32.cos(phase + (uv.x + uv.y) * 1.5 + 4.0) in
   @[r, g, b, 1.0]
 
-entry image(iResolution: vec3f32, iTime: f32,
+entry image(iResolution: vec3f32,
+            iTime: f32,
+            iTimeDelta: f32,
+            iFrameRate: f32,
+            iFrame: i32,
+            iChannelTime: [4]f32,
+            iChannelResolution: [4]vec3f32,
+            iMouse: vec4f32,
+            iDate: vec4f32,
+            iSampleRate: f32,
             screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   shade(screen, raster, |fragment|
-    fragment_main(iResolution, iTime, fragment))
+    fragment_main(iResolution, iTime, iTimeDelta, iFrameRate, iFrame,
+                  iChannelTime, iChannelResolution, iMouse, iDate,
+                  iSampleRate, fragment))
 "#
     .to_string()
 }

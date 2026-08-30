@@ -55,6 +55,64 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     wyn_core::lower_egir_to_ssa(program).expect("planned EGIR lowering failed")
 }
 
+#[test]
+fn shadertoy_example_compiles_with_standard_image_inputs() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            assert!(init_compiler(), "compiler initialization failed");
+            let result = compile_to_wgsl_impl(&get_example_program(), true, true);
+            assert!(result.success, "default example failed: {:?}", result.error.map(|e| e.message));
+            assert!(result.wgsl.is_some(), "default example emitted no WGSL");
+
+            let used_inputs = get_example_program().replace(
+                "let phase = iTime in",
+                "let phase = iTime + iTimeDelta + iFrameRate + f32.i32(iFrame) +\n\
+                 iChannelTime[0] + iChannelResolution[0].x + iMouse.x +\n\
+                 iDate.x + iSampleRate in",
+            );
+            let result = compile_to_wgsl_impl(&used_inputs, true, true);
+            assert!(
+                result.success,
+                "referenced Shadertoy inputs failed: {:?}",
+                result.error.map(|e| e.message)
+            );
+            let interface = result.interface.expect("referenced inputs emitted no interface");
+            for name in [
+                "iResolution",
+                "iTime",
+                "iTimeDelta",
+                "iFrameRate",
+                "iFrame",
+                "iMouse",
+                "iDate",
+                "iSampleRate",
+            ] {
+                assert!(
+                    interface.uniforms.iter().any(|uniform| uniform.name == name),
+                    "referenced input {name} was not published as a uniform"
+                );
+            }
+            for name in ["iChannelTime", "iChannelResolution"] {
+                assert!(
+                    interface.entries.iter().flat_map(|entry| &entry.inputs).any(|input| {
+                        input.name == name && input.decoration.starts_with("storage(")
+                    }),
+                    "referenced array input {name} was not published as an entry storage input; got {:?}",
+                    interface
+                        .entries
+                        .iter()
+                        .flat_map(|entry| &entry.inputs)
+                        .map(|input| (&input.name, &input.decoration))
+                        .collect::<Vec<_>>()
+                );
+            }
+        })
+        .expect("spawn test thread")
+        .join()
+        .expect("default Shadertoy example failed to compile");
+}
+
 /// A fragment shader whose body contains a fragment-invariant reduce
 /// gets an EGIR scalar materialization scheduled as a compute pre-pass. EGIR
 /// lowers that into two compute entries (`phase1_chunks` +
