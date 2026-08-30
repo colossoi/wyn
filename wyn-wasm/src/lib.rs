@@ -281,9 +281,9 @@ pub struct ProgramInterface {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EntryInterface {
     pub name: String,
-    /// WGSL-mangled entry-point name — this is what WebGPU's
+    /// WGSL entry-point name — this is what WebGPU's
     /// `entryPoint:` in `createRenderPipeline` / `createComputePipeline`
-    /// needs, since the WGSL backend mangles all user identifiers.
+    /// needs. Entry points are emitted verbatim by the WGSL backend.
     pub wgsl_name: String,
     /// One of "vertex" / "fragment" / "compute".
     pub kind: String,
@@ -412,7 +412,7 @@ fn program_interface<Tag, GlobalContext>(
                 e.outputs.iter().enumerate().map(|(i, o)| entry_binding_from_output(i, o)).collect();
             EntryInterface {
                 name: e.name.clone(),
-                wgsl_name: wyn_core::wgsl::ssa_lowering::wgsl_mangle(&e.name),
+                wgsl_name: e.name.clone(),
                 kind,
                 workgroup_size,
                 inputs,

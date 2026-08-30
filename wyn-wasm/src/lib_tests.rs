@@ -101,6 +101,19 @@ entry image(iTime: f32,
     let program = compile_to_ssa(src);
     let iface = program_interface(&program);
 
+    // The WGSL backend emits entry-point names verbatim. In particular,
+    // compiler-generated stage names contain underscores and must not be
+    // passed through the ordinary identifier mangler a second time.
+    assert!(
+        iface.entries.iter().all(|entry| entry.wgsl_name == entry.name),
+        "interface entry names diverged from emitted WGSL names: {:?}",
+        iface
+            .entries
+            .iter()
+            .map(|entry| (&entry.name, &entry.wgsl_name))
+            .collect::<Vec<_>>()
+    );
+
     // The root scalar `iTime` (used inside the lifted reduce) must surface in
     // `interface.uniforms` for the driver to bind the uniform buffer — on
     // whichever entry ends up carrying it.
