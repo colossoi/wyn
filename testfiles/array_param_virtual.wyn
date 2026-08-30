@@ -1,0 +1,5 @@
+-- Minimal test: regular function indexes a virtual (range) array parameter
+def third(arr: []i32) i32 = arr[2]
+
+entry virtual_array_parameter() i32 =
+    third(0..<10)
