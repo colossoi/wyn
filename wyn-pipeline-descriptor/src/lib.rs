@@ -18,11 +18,28 @@ use serde::{Deserialize, Serialize};
 pub struct PipelineDescriptor {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
+    /// Storage bindings that implement authored entry results. This preserves
+    /// source-level result identity independently of generated binding names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_results: Vec<SourceResultBinding>,
     /// Descriptor-derived pass/resource DAG. The compiler rebuilds this after
     /// binding publication so host runtimes can drive scheduling and allocation
     /// from data dependencies instead of hand-authored pass lists.
     #[serde(default, skip_serializing_if = "FrameGraph::is_empty")]
     pub frame_graph: FrameGraph,
+}
+
+/// The descriptor binding that stores one top-level result of an authored
+/// entry. `result` is the zero-based source result slot (a non-tuple return is
+/// slot 0); `pipeline_index` locates the binding table containing `(set,
+/// binding)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceResultBinding {
+    pub entry: String,
+    pub result: usize,
+    pub pipeline_index: usize,
+    pub set: u32,
+    pub binding: u32,
 }
 
 impl PipelineDescriptor {
@@ -795,9 +812,8 @@ pub enum Binding {
     /// `backing`, when present, names the `StorageTexture` binding whose
     /// allocation this is a sampled *view* of — a `resource`'s `sampled`
     /// view aliasing its `storage_write` allocation. The runtime binds this
-    /// slot to that allocation's sampled view (current frame); a previous
-    /// view of the same allocation is additionally listed in `feedback`.
-    /// `None` is a host-provided / external texture.
+    /// slot to that allocation's sampled view. `None` is a host-provided /
+    /// external texture.
     Texture {
         set: u32,
         binding: u32,

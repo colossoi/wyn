@@ -34,16 +34,8 @@ dispatch sizes, storage-texture formats, etc.
 ```bash
 (cd extra/viz && cargo build --release)
 ./extra/viz/target/release/viz pipeline \
-  testfiles/playground/mountains.spv \
-  --feedback buffer_a:prev_a=out_a
+  testfiles/playground/mountains.spv
 ```
-
-`--feedback ENTRY:READ=WRITE` tells the host that the `prev_a` texture
-binding on the `buffer_a` compute pipeline reads the previous frame's
-value of the `out_a` storage_image binding. The host allocates two
-physical wgpu textures for the pair and swaps which one is "current"
-each frame. Without this flag Buffer A reads zeroes every frame and
-your painting never persists.
 
 `pipeline` mode auto-detects interactive vs headless from the
 descriptor — `mountains.json` has a graphics pipeline, so a window

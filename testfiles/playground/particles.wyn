@@ -11,22 +11,15 @@
 -- draws into a starting position + velocity. Later frames consume the
 -- previous position buffer supplied by viz's feedback pair.
 --
--- Run (cmd.exe; same incantation works in bash with `^` → `\`):
+-- Run (the explicit config path is needed because this example writes the
+-- compiled shader to a different directory than its sidecar):
 --
 --   wyn compile testfiles\playground\particles.wyn ^
 --     -o C:\Users\<you>\AppData\Local\Temp\p.spv
 --   extra\viz\target\release\viz.exe pipeline ^
 --     C:\Users\<you>\AppData\Local\Temp\p.spv ^
---     --feedback sim:prev_pos=sim_output ^
---     --framebuffer fb ^
+--     --config testfiles\playground\particles.viz.json ^
 --     --size 512x512
---
--- `--framebuffer fb` is shorthand for `--storage-bytes fb:W*H*16
--- --buffer-init fb:0`: viz sizes it from `--size` × the default
--- `vec4f32` format and zero-initializes at startup. Used because
--- `sim` reads `fb`'s length via `length(fb)` rather than slicing
--- it, so the compiler doesn't publish a fixed length and the host
--- has to compute one.
 
 import "../../lib/rng"
 

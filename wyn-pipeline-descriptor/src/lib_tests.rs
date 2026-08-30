@@ -226,6 +226,7 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                 fragment_outputs: vec![],
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -295,6 +296,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
                 default_total_threads: None,
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -356,6 +358,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> PipelineDescriptor {
 
     let mut descriptor = PipelineDescriptor {
         pipelines,
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
     descriptor.rebuild_frame_graph();
@@ -440,6 +443,7 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
                 default_total_threads: None,
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
     descriptor.rebuild_frame_graph();
@@ -499,6 +503,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
                 default_total_threads: None,
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -532,4 +537,24 @@ fn vertex_attribute_serde_round_trip() {
     assert_eq!(back.slot, 1);
     assert_eq!(back.name, "color");
     assert_eq!(back.format, VertexFormat::Float32x3);
+}
+
+#[test]
+fn source_result_binding_serde_round_trip() {
+    let descriptor = PipelineDescriptor {
+        pipelines: Vec::new(),
+        source_results: vec![SourceResultBinding {
+            entry: "pulse".to_string(),
+            result: 0,
+            pipeline_index: 2,
+            set: 0,
+            binding: 7,
+        }],
+        frame_graph: FrameGraph::default(),
+    };
+    let json = serde_json::to_string(&descriptor).unwrap();
+    assert!(json.contains("\"entry\":\"pulse\""));
+    assert!(json.contains("\"result\":0"));
+    let back: PipelineDescriptor = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.source_results, descriptor.source_results);
 }

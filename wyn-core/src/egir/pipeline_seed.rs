@@ -107,6 +107,7 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
     PipelineSeed {
         pipeline: PipelineDescriptor {
             pipelines,
+            source_results: Vec::new(),
             frame_graph: Default::default(),
         },
         stage_symbols,

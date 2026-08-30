@@ -11104,6 +11104,21 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
     let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
+    let output_slot = cp.bindings.iter().find_map(|binding| match binding {
+        pipeline_descriptor::Binding::StorageBuffer {
+            set, binding, name, ..
+        } if name == "tick_output" => Some((*set, *binding)),
+        _ => None,
+    });
+    let source_result = lowered.pipeline.source_results.as_slice();
+    assert_eq!(source_result.len(), 1);
+    assert_eq!(source_result[0].entry, "tick");
+    assert_eq!(source_result[0].result, 0);
+    assert_eq!(source_result[0].pipeline_index, 0);
+    assert_eq!(
+        Some((source_result[0].set, source_result[0].binding)),
+        output_slot
+    );
     // Output's size variable matches `prev`'s — the length-inference
     // rule emits `LikeInput` rather than `SameAsDispatch`.
     let output_len = cp.bindings.iter().find_map(|b| match b {

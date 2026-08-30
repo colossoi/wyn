@@ -22,21 +22,28 @@ def main [
         let name = ($f.name | path parse | get stem)
         let src = $f.name
         let spv = ($out_dir | path join $"($name).spv")
+        let viz_config = ($src | path dirname | path join $"($name).viz.json")
 
         print $"=== ($name) ==="
 
-        print $"$ ($wyn) compile ($src) --graphics -o ($spv)"
-        let compile = (do { ^$wyn compile $src --graphics -o $spv } | complete)
+        # Ordinary visual examples preserve their authored graphics pipeline.
+        # Feedback examples need scheduled compute + graphics lowering, which
+        # direct mode intentionally rejects.
+        let direct_args = if ($viz_config | path exists) { [] } else { ["--direct"] }
+        let compile_args = ["compile", $src, "--graphics", ...$direct_args, "-o", $spv]
+        print $"$ ($wyn) ($compile_args | str join ' ')"
+        let compile = (do { ^$wyn ...$compile_args } | complete)
         if $compile.exit_code != 0 {
             print $compile.stderr
             {name: $name, stage: "compile", ok: false}
         } else {
+            let config_args = if ($viz_config | path exists) { ["--config", $viz_config] } else { [] }
             let run = if $wait {
-                print $"$ ($viz) pipeline ($spv)"
-                do { ^$viz pipeline $spv } | complete
+                print $"$ ($viz) pipeline ($spv) ($config_args | str join ' ')"
+                do { ^$viz pipeline $spv ...$config_args } | complete
             } else {
-                print $"$ ($viz) pipeline ($spv) --max-frames=15"
-                do { ^$viz pipeline $spv --max-frames=15 } | complete
+                print $"$ ($viz) pipeline ($spv) ($config_args | str join ' ') --max-frames=15"
+                do { ^$viz pipeline $spv ...$config_args --max-frames=15 } | complete
             }
             {name: $name, stage: (if $run.exit_code == 0 { "ok" } else { "run" }), ok: ($run.exit_code == 0)}
         }

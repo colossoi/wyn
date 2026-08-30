@@ -12,6 +12,7 @@ use wgpu::{CommandEncoderDescriptor, PipelineLayoutDescriptor};
 use winit::event_loop::EventLoop;
 
 use crate::app::{App, InteractivePipelineSpec};
+use crate::config::{FeedbackInitial, FeedbackSpec};
 use crate::gpu::{
     build_bind_groups, build_parameter_block_bytes, build_push_constant_bytes, create_binding_buffers,
     create_headless_device, readback_buffer, resolve_dispatch_size_with_parameters, ComputeExecutor,
@@ -204,6 +205,135 @@ fn resolve_buffer_inits(
     Ok(out)
 }
 
+/// Resolve source-level sidecar selectors to physical descriptor slots. The
+/// authored input name comes from the compute binding table; the result slot
+/// comes from `PipelineDescriptor::source_results`, so generated `_output`
+/// names never enter the configuration contract.
+fn resolve_feedback_specs(
+    desc: &PipelineDescriptor,
+    specs: &[FeedbackSpec],
+) -> Result<Vec<crate::gpu::FeedbackPair>> {
+    use wyn_pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+
+    let mut resolved = Vec::with_capacity(specs.len());
+    let mut writes = std::collections::HashSet::new();
+    for spec in specs {
+        let matches = desc
+            .source_results
+            .iter()
+            .filter(|result| result.entry == spec.entry && result.result == spec.result)
+            .collect::<Vec<_>>();
+        let result = match matches.as_slice() {
+            [result] => *result,
+            [] => {
+                let available = desc
+                    .source_results
+                    .iter()
+                    .map(|result| format!("{}[{}]", result.entry, result.result))
+                    .collect::<Vec<_>>();
+                return Err(anyhow!(
+                    "feedback '{}:{} <- result {}' cannot find that source result in the descriptor; \
+                     available storage results: {}. Recompile the shader with the current wyn compiler",
+                    spec.entry,
+                    spec.input,
+                    spec.result,
+                    if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+                ));
+            }
+            _ => {
+                return Err(anyhow!(
+                    "descriptor publishes source result '{}[{}]' more than once",
+                    spec.entry,
+                    spec.result
+                ));
+            }
+        };
+
+        let pipeline = desc.pipelines.get(result.pipeline_index).ok_or_else(|| {
+            anyhow!(
+                "source result '{}[{}]' references missing pipeline {}",
+                spec.entry,
+                spec.result,
+                result.pipeline_index
+            )
+        })?;
+        let Pipeline::Compute(compute) = pipeline else {
+            return Err(anyhow!(
+                "feedback source result '{}[{}]' is not produced by a compute pipeline",
+                spec.entry,
+                spec.result
+            ));
+        };
+
+        let read = compute
+            .bindings
+            .iter()
+            .find_map(|binding| match binding {
+                Binding::StorageBuffer {
+                    set,
+                    binding,
+                    name,
+                    access: Access::ReadOnly | Access::ReadWrite,
+                    ..
+                } if name == &spec.input => Some((*set, *binding)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "feedback '{}:{}' cannot find a readable storage-buffer input named '{}'",
+                    spec.entry,
+                    spec.input,
+                    spec.input
+                )
+            })?;
+
+        let write = compute
+            .bindings
+            .iter()
+            .find_map(|binding| match binding {
+                Binding::StorageBuffer {
+                    set,
+                    binding,
+                    usage: BufferUsage::Output,
+                    access: Access::WriteOnly | Access::ReadWrite,
+                    ..
+                } if (*set, *binding) == (result.set, result.binding) => Some((*set, *binding)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "source result '{}[{}]' does not resolve to a writable output buffer",
+                    spec.entry,
+                    spec.result
+                )
+            })?;
+
+        if !writes.insert(write) {
+            return Err(anyhow!(
+                "source result '{}[{}]' is configured as feedback more than once",
+                spec.entry,
+                spec.result
+            ));
+        }
+        let initial = match &spec.initial {
+            FeedbackInitial::Zero => crate::gpu::FeedbackInit::Zero,
+            FeedbackInitial::Rng => crate::gpu::FeedbackInit::Rng,
+            FeedbackInitial::File { path } => crate::gpu::FeedbackInit::Bytes(
+                fs::read(path)
+                    .with_context(|| format!("failed to read feedback initial file: {}", path.display()))?,
+            ),
+        };
+        resolved.push(crate::gpu::FeedbackPair {
+            read_set: read.0,
+            read_binding: read.1,
+            write_set: write.0,
+            write_binding: write.1,
+            initial,
+        });
+    }
+    Ok(resolved)
+}
+
 pub async fn run_pipeline(
     spv_path: PathBuf,
     pipeline_path: PathBuf,
@@ -211,7 +341,7 @@ pub async fn run_pipeline(
     outputs: HashMap<String, PathBuf>,
     push_constants: &[PushConstantSpec],
     dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
-    feedback_specs: &[(String, String, String)],
+    feedback_specs: &[FeedbackSpec],
     interactive_opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
@@ -232,7 +362,7 @@ pub async fn run_pipeline(
         if !inputs.is_empty() {
             eprintln!(
                 "[viz pipeline] --input is ignored in interactive mode \
-                 (descriptor has a graphics pipeline; inputs come from --feedback / \
+                 (descriptor has a graphics pipeline; inputs come from sidecar feedback / \
                  --buffer-init / --storage-dir)"
             );
         }
@@ -256,7 +386,7 @@ pub async fn run_pipeline(
     }
     if !feedback_specs.is_empty() {
         eprintln!(
-            "[viz pipeline] --feedback is ignored in headless mode \
+            "[viz pipeline] sidecar feedback is ignored in headless mode \
              (no frames, no previous-state notion)"
         );
     }
@@ -304,12 +434,13 @@ fn run_pipeline_interactive(
     spv_path: PathBuf,
     desc: PipelineDescriptor,
     dispatch_overrides: HashMap<String, (u32, u32, u32)>,
-    feedback_specs: Vec<(String, String, String)>,
+    feedback_specs: Vec<FeedbackSpec>,
     outputs: HashMap<String, PathBuf>,
     parameter_values: Vec<PushConstantSpec>,
     opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
+    let feedback_pairs = resolve_feedback_specs(&desc, &feedback_specs)?;
     let graphics = desc
         .pipelines
         .iter()
@@ -394,7 +525,7 @@ fn run_pipeline_interactive(
         vertex_entry,
         fragment_entry,
         dispatch_overrides,
-        feedback_specs,
+        feedback_pairs,
         max_frames: opts.max_frames,
         verbose,
         validate: opts.validate,
@@ -606,4 +737,94 @@ fn output_results(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wyn_pipeline_descriptor::{
+        Access, BufferLen, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, FrameGraph, Pipeline,
+        SourceResultBinding, StageBindingUses,
+    };
+
+    fn feedback_descriptor() -> PipelineDescriptor {
+        PipelineDescriptor {
+            pipelines: vec![Pipeline::Compute(ComputePipeline {
+                bindings: vec![
+                    Binding::StorageBuffer {
+                        set: 0,
+                        binding: 0,
+                        access: Access::ReadOnly,
+                        usage: BufferUsage::Input,
+                        name: "previous".to_string(),
+                        resource: None,
+                        length: Some(BufferLen::Fixed { bytes: 16 }),
+                        members: Vec::new(),
+                    },
+                    Binding::StorageBuffer {
+                        set: 0,
+                        binding: 3,
+                        access: Access::WriteOnly,
+                        usage: BufferUsage::Output,
+                        name: "compiler_generated_output_name".to_string(),
+                        resource: None,
+                        length: Some(BufferLen::Fixed { bytes: 16 }),
+                        members: Vec::new(),
+                    },
+                ],
+                stages: vec![ComputeStage {
+                    entry_point: "pulse".to_string(),
+                    owner: "pulse".to_string(),
+                    workgroup_size: (64, 1, 1),
+                    dispatch_size: DispatchSize::Fixed {
+                        x: 1,
+                        y: 1,
+                        z: 1,
+                        explicit: false,
+                    },
+                    uses: StageBindingUses {
+                        reads: vec![0],
+                        writes: vec![1],
+                    },
+                }],
+                default_total_threads: None,
+            })],
+            source_results: vec![SourceResultBinding {
+                entry: "pulse".to_string(),
+                result: 0,
+                pipeline_index: 0,
+                set: 0,
+                binding: 3,
+            }],
+            frame_graph: FrameGraph::default(),
+        }
+    }
+
+    #[test]
+    fn feedback_resolution_uses_source_result_not_generated_output_name() {
+        let specs = vec![FeedbackSpec {
+            entry: "pulse".to_string(),
+            input: "previous".to_string(),
+            result: 0,
+            initial: FeedbackInitial::Zero,
+        }];
+        let resolved = resolve_feedback_specs(&feedback_descriptor(), &specs).expect("resolve feedback");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!((resolved[0].read_set, resolved[0].read_binding), (0, 0));
+        assert_eq!((resolved[0].write_set, resolved[0].write_binding), (0, 3));
+    }
+
+    #[test]
+    fn feedback_resolution_rejects_descriptors_without_source_results() {
+        let mut descriptor = feedback_descriptor();
+        descriptor.source_results.clear();
+        let specs = vec![FeedbackSpec {
+            entry: "pulse".to_string(),
+            input: "previous".to_string(),
+            result: 0,
+            initial: FeedbackInitial::Zero,
+        }];
+        let error = resolve_feedback_specs(&descriptor, &specs).unwrap_err();
+        assert!(error.to_string().contains("Recompile the shader"));
+    }
 }

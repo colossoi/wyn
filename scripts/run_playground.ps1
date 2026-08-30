@@ -92,13 +92,21 @@ try {
     $results = foreach ($file in $files) {
         $name = $file.BaseName
         $spv = Join-Path $outputDirectory "$name.spv"
+        $vizConfig = Join-Path $file.DirectoryName "$name.viz.json"
 
         Write-Host ''
         Write-Host "=== $name ==="
-        Write-Host "$wynBinary compile $($file.FullName) --graphics -o $spv"
-        $compile = Invoke-NativeCaptured $wynBinary @(
-            'compile', $file.FullName, '--graphics', '-o', $spv
-        )
+        $compileArguments = @('compile', $file.FullName, '--graphics')
+        # Ordinary visual examples should preserve their authored graphics
+        # pipeline. Feedback examples need the compiler's scheduled compute +
+        # graphics lowering, which direct mode intentionally rejects.
+        if (-not (Test-Path -LiteralPath $vizConfig -PathType Leaf)) {
+            $compileArguments += '--direct'
+        }
+        $compileArguments += @('-o', $spv)
+
+        Write-Host "$wynBinary $($compileArguments -join ' ')"
+        $compile = Invoke-NativeCaptured $wynBinary $compileArguments
 
         if ($compile.ExitCode -ne 0) {
             $compile.Output | ForEach-Object { Write-Host $_ }
@@ -107,6 +115,9 @@ try {
         }
 
         $vizArguments = @('pipeline', $spv)
+        if (Test-Path -LiteralPath $vizConfig -PathType Leaf) {
+            $vizArguments += @('--config', $vizConfig)
+        }
         if (-not $Wait) {
             $vizArguments += '--max-frames=15'
         }
