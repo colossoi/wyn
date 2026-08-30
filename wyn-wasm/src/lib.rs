@@ -573,17 +573,17 @@ pub fn compile_to_wgsl(source: &str) -> JsValue {
 /// playground should pass `(true, true)` so its graphical vocabulary is
 /// enabled while hidden prepasses/resources remain forbidden.
 #[wasm_bindgen]
-pub fn compile_to_wgsl_with_options(source: &str, graphics: bool, direct_wgsl: bool) -> JsValue {
+pub fn compile_to_wgsl_with_options(source: &str, graphics: bool, direct: bool) -> JsValue {
     console_error_panic_hook::set_once();
     init_compiler();
-    let result = compile_to_wgsl_impl(source, graphics, direct_wgsl);
+    let result = compile_to_wgsl_impl(source, graphics, direct);
     serde_wasm_bindgen::to_value(&result).unwrap_or_else(|e| {
         let err = CompileResultWgsl::err_msg(format!("Serialization error: {}", e));
         serde_wasm_bindgen::to_value(&err).unwrap()
     })
 }
 
-fn compile_to_wgsl_impl(source: &str, graphics: bool, direct_wgsl: bool) -> CompileResultWgsl {
+fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileResultWgsl {
     let (node_counter, module_manager) = match create_compiler_init(CompilerOptions { graphics }) {
         Some(f) => f,
         None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
@@ -659,7 +659,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct_wgsl: bool) -> Comp
         Ok(s) => s,
         Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
     };
-    let profile = if direct_wgsl {
+    let profile = if direct {
         LoweringProfile::with_topology(
             CodegenTarget::Wgsl,
             SchedulePolicy::Serial,

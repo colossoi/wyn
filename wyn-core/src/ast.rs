@@ -10,7 +10,7 @@ pub(crate) mod rebuild;
 
 // Re-export type system types from the types module
 use crate::builtins::BuiltinId;
-use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDecl, FeedbackPair};
+use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDecl};
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
 use crate::SymbolId;
 use wyn_base::IdSource;
@@ -687,7 +687,6 @@ impl<A> EntrySyntax<A> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedEntry {
     pub syntax: EntrySyntax<interface::ResolvedAttribute>,
-    pub feedback: Vec<FeedbackPair>,
 }
 
 /// Entry data immediately after semantic name resolution.

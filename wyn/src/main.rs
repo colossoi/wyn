@@ -70,10 +70,10 @@ enum Commands {
         #[arg(long)]
         graphics: bool,
 
-        /// Emit WGSL without compiler-created prepasses, entry points, or
-        /// host-visible resources. Requires --target wgsl.
+        /// Emit the authored pipeline directly, without compiler-created
+        /// prepasses, entry points, or host-visible resources.
         #[arg(long)]
-        direct_wgsl: bool,
+        direct: bool,
 
         /// Enable software emulation of unsigned 64-bit integers in WGSL.
         /// This option is invalid for the SPIR-V target.
@@ -240,7 +240,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             graphics,
-            direct_wgsl,
+            direct,
             wgsl_emulate_u64,
             fill_holes,
             verbose,
@@ -248,11 +248,6 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
                 return Err(DriverError::InvalidOption(
                     "--wgsl-emulate-u64 requires --target wgsl".to_string(),
-                ));
-            }
-            if direct_wgsl && !matches!(target, Target::Wgsl) {
-                return Err(DriverError::InvalidOption(
-                    "--direct-wgsl requires --target wgsl".to_string(),
                 ));
             }
             // Output handling:
@@ -293,7 +288,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
                     output_tlc.clone(),
                     output_mir.clone(),
                     graphics,
-                    direct_wgsl,
+                    direct,
                     wgsl_emulate_u64,
                     fill_holes,
                     verbose,
@@ -319,7 +314,7 @@ fn compile_file(
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     graphics: bool,
-    direct_wgsl: bool,
+    direct: bool,
     wgsl_emulate_u64: bool,
     fill_holes: bool,
     verbose: bool,
@@ -407,9 +402,12 @@ fn compile_file(
     let program = time("egir_optimize_semantic_operations", verbose, || {
         wyn_core::egir::optimize_semantic_operations(program)
     })?;
-    let profile = if direct_wgsl {
+    let profile = if direct {
         LoweringProfile::with_topology(
-            CodegenTarget::Wgsl,
+            match target {
+                Target::Spirv => CodegenTarget::Spirv,
+                Target::Wgsl => CodegenTarget::Wgsl,
+            },
             SchedulePolicy::Serial,
             PipelineTopologyPolicy::AuthoredOnly,
         )

@@ -166,7 +166,6 @@ impl<'a> Transformer<'a> {
                     type_params: entry.type_params.clone(),
                     params: entry.params.iter().map(Self::lower_entry_param).collect(),
                     outputs: entry.data.source.source.syntax.outputs.clone(),
-                    feedback: entry.data.source.source.feedback.clone(),
                     param_diets: entry.data.source.source.syntax.param_diets.clone(),
                     return_diet: entry.data.source.source.syntax.return_diet.clone(),
                 }),

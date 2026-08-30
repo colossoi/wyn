@@ -79,7 +79,10 @@ entry main() i32 = direct_draw(7)
     .expect("a user definition should shadow the enabled graphics builtin");
 }
 
-fn plan_direct_wgsl(source: &str) -> Result<egir::parallelize::Planned, Box<dyn std::error::Error>> {
+fn plan_direct(
+    source: &str,
+    target: CodegenTarget,
+) -> Result<egir::parallelize::Planned, Box<dyn std::error::Error>> {
     let program = compile_thru_tlc(source)?;
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
@@ -90,7 +93,7 @@ fn plan_direct_wgsl(source: &str) -> Result<egir::parallelize::Planned, Box<dyn 
     let program = egir::plan_logical_resources_with_policy(program, topology)?;
     Ok(egir::plan(
         program,
-        LoweringProfile::with_topology(CodegenTarget::Wgsl, SchedulePolicy::Serial, topology),
+        LoweringProfile::with_topology(target, SchedulePolicy::Serial, topology),
     )?)
 }
 
@@ -104,36 +107,50 @@ fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
-fn direct_wgsl_emits_only_the_requested_graphics_stages() {
+fn direct_backends_emit_only_the_requested_graphics_stages() {
     run_with_large_stack(|| {
-        let planned = plan_direct_wgsl(include_str!("../../testfiles/unified_triangle.wyn"))
-            .expect("direct graphics plan");
-        let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
-        assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
-        assert!(
-            ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
-            "direct graphics output must not contain compute prepasses"
-        );
-        assert!(
-            ssa.global_context
-                .pipeline
-                .pipelines
-                .iter()
-                .all(|pipeline| { matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)) }),
-            "direct graphics output must publish only the requested graphics pipeline"
-        );
-        let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
-        assert_eq!(wgsl.matches("@vertex").count(), 1);
-        assert_eq!(wgsl.matches("@fragment").count(), 1);
-        assert!(!wgsl.contains("@compute"));
+        let source = include_str!("../../testfiles/unified_triangle.wyn");
+        for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
+            let planned = plan_direct(source, target).expect("direct graphics plan");
+            let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
+            assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
+            assert!(
+                ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
+                "direct graphics output must not contain compute prepasses"
+            );
+            assert!(
+                ssa.global_context
+                    .pipeline
+                    .pipelines
+                    .iter()
+                    .all(|pipeline| { matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)) }),
+                "direct graphics output must publish only the requested graphics pipeline"
+            );
+            match target {
+                CodegenTarget::Spirv => {
+                    let lowered = lower_ssa_to_spirv(ssa).expect("direct SPIR-V lowering");
+                    assert_naga_accepts_spirv(&lowered.spirv);
+                }
+                CodegenTarget::Wgsl => {
+                    let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
+                    assert_eq!(wgsl.matches("@vertex").count(), 1);
+                    assert_eq!(wgsl.matches("@fragment").count(), 1);
+                    assert!(!wgsl.contains("@compute"));
+                }
+                CodegenTarget::Portable => unreachable!("test selects concrete backends"),
+            }
+        }
     });
 }
 
 #[test]
-fn direct_wgsl_keeps_fragment_local_reduce_in_the_authored_stage() {
+fn direct_output_keeps_fragment_local_reduce_in_the_authored_stage() {
     run_with_large_stack(|| {
-        let planned = plan_direct_wgsl(include_str!("../../testfiles/playground/ripples.wyn"))
-            .expect("fragment-local reduction should remain serial in direct WGSL");
+        let planned = plan_direct(
+            include_str!("../../testfiles/playground/ripples.wyn"),
+            CodegenTarget::Wgsl,
+        )
+        .expect("fragment-local reduction should remain serial in direct WGSL");
         let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
         assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
         assert!(
@@ -148,9 +165,9 @@ fn direct_wgsl_keeps_fragment_local_reduce_in_the_authored_stage() {
 }
 
 #[test]
-fn direct_wgsl_rejects_a_cross_stage_materialization() {
+fn direct_output_rejects_a_cross_stage_materialization() {
     run_with_large_stack(|| {
-        let error = plan_direct_wgsl(
+        let error = plan_direct(
             r#"
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(
@@ -166,6 +183,7 @@ entry frame(xs: []f32,
   shade(screen, raster,
     |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0])
 "#,
+            CodegenTarget::Wgsl,
         )
         .expect_err("cross-stage array materialization must be rejected");
         assert!(

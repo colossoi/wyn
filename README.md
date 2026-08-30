@@ -602,8 +602,9 @@ cargo run --bin wyn -- compile input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl
 
-# Compile a graphics program to direct, playground-ready WGSL
-cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --graphics --direct-wgsl
+# Compile a graphics program directly, without compiler-created prepasses
+cargo run --bin wyn -- compile input.wyn -o output.spv --graphics --direct
+cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --graphics --direct
 
 # Opt in to backend-local u64 emulation for WGSL
 cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
@@ -623,9 +624,9 @@ Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, `vertex_invocation`, and
 `render_target` are ordinary, unreserved identifiers: user code may define
 them, and otherwise receives the normal undefined-name diagnostic.
-`--direct-wgsl` is a separate WGSL-only output policy. It preserves authored
-graphics stages and rejects programs that would require compiler-created
-prepass entry points or intermediate storage.
+`--direct` is a backend-neutral output policy. It preserves authored graphics
+stages and rejects programs that would require compiler-created prepass entry
+points or intermediate storage.
 
 ## Building and Testing
 
