@@ -4,9 +4,9 @@
 -- License: MIT. Phacelle Noise and the Erosion Filter (Buffer B) are
 -- (c) 2025 Rune Skovbo Johansen under MPL-2.0.
 --
--- The root receives the two source textures, sampler, frame values, and
--- render target directly. The fragment callback captures those values and
--- performs the image computation in one pass.
+-- This playground version evaluates a procedural island height field and
+-- detail noise directly in the fragment stage, so it is self-contained and
+-- needs no Shadertoy buffer textures from the host.
 open f32
 
 ------------------------------------------------------------
@@ -466,13 +466,7 @@ def Heightmap(p: vec2f32, n: vec3f32, erosion_enabled: bool) vec4f32 =
     @[n.x, 0.5, 1.0, 0.5]
 
 ------------------------------------------------------------
--- Compute entry: Buffer A
---
--- Reads the previous-frame heightmap via `prev_a` (host-wired ping-pong)
--- and either resets it (frame < 2 or Backspace toggled) or accumulates
--- mouse-painted brush deltas into it.
---
--- Output channels: (height, slope.x, slope.y, unused).
+-- Cursor helper retained from the original interactive Buffer A pass.
 ------------------------------------------------------------
 
 -- World-space cursor position derived from the mouse ray hitting the
@@ -484,15 +478,36 @@ def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
 -- Image / fragment helpers
 ------------------------------------------------------------
 
--- Single channel sample of Buffer B (height + raw slope, no packed data).
--- pre-multiplies UV by 1.0 (we use SameAsWindow sizing — no BUFFER_SIZE cap).
-def sample_b_full(tex_b: texture2d, samp: sampler, uv: vec2f32) vec4f32 =
-  texture_sample(tex_b, samp, uv, 0.0)
+-- Self-contained replacement for the original Buffer B height texture.
+-- The radial envelope makes an island; three derivative-noise octaves keep
+-- the terrain recognizably mountainous without requiring a host asset.
+def sample_b_full(uv: vec2f32) vec4f32 =
+  let centered = uv - v2(0.5) in
+  let p = centered * 4.0 in
+  let n0 = noised(p) in
+  let n1 = noised(p * 2.03 + v2(7.1)) in
+  let n2 = noised(p * 4.11 + v2(19.7)) in
+  let radial = clamp01(1.0 - magnitude(centered) * 2.0) in
+  let island = radial * radial * (3.0 - 2.0 * radial) in
+  let relief = 0.24 + n0.x * 0.055 + n1.x * 0.027 + n2.x * 0.013 in
+  let height = 0.34 + island * relief in
+  let erosion = clamp01(0.5 + n1.x * 0.2) in
+  let ridges = clamp01(0.65 + n0.x * 0.35) in
+  let trees = clamp01((height - WATER_HEIGHT) * 7.0 + n2.x * 0.35) in
+  @[height, erosion, ridges, trees]
+
+-- Self-contained replacement for Buffer C's breakup/noise texture.
+def sample_detail(uv: vec2f32) vec4f32 =
+  let a = noised(uv * 61.0 + v2(3.7)).x in
+  let b = noised(uv * 97.0 + v2(11.3)).x in
+  let c = noised(uv * 43.0 + v2(23.9)).x in
+  @[clamp01(0.5 + a * 0.5),
+    clamp01(0.5 + b * 0.5),
+    clamp01(0.5 + c * 0.5), 1.0]
 
 -- Computes the surface normal at uv by finite differences.
-def map_full(tex_b: texture2d, samp: sampler,
-             iResolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
-  let m = sample_b_full(tex_b, samp, uv) in
+def map_full(iResolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
+  let m = sample_b_full(uv) in
   let height = m.x in
   let erosion = m.y * 2.0 - 1.0 in
   let ridgemap = m.z in
@@ -501,8 +516,8 @@ def map_full(tex_b: texture2d, samp: sampler,
   let pixel_y = 1.0 / iResolution.y in
   let uv1 = @[uv.x + pixel_x, uv.y] in
   let uv2 = @[uv.x, uv.y + pixel_y] in
-  let h1 = sample_b_full(tex_b, samp, uv1).x in
-  let h2 = sample_b_full(tex_b, samp, uv2).x in
+  let h1 = sample_b_full(uv1).x in
+  let h2 = sample_b_full(uv2).x in
   let v1 = @[pixel_x, 0.0, h1 - height] in
   let v2 = @[0.0, pixel_y, h2 - height] in
   let normal = normalize(cross(v1, v2)).xzy in
@@ -512,16 +527,15 @@ def map_full(tex_b: texture2d, samp: sampler,
 def GetUV(p: vec3f32) vec2f32 =
   vec.clamp(@[p.x + 0.5, p.z + 0.5], @[0.001, 0.001], @[0.999, 0.999])
 
-def mapHeight(tex_b: texture2d, samp: sampler, uv: vec2f32) f32 =
-  sample_b_full(tex_b, samp, uv).x
+def mapHeight(uv: vec2f32) f32 =
+  sample_b_full(uv).x
 
 ------------------------------------------------------------
 -- Ray-march the terrain
 -- Returns (t, normal, material, s_t).
 ------------------------------------------------------------
 
-def march(ro: vec3f32, rd: vec3f32,
-          tex_b: texture2d, samp: sampler) (f32, vec3f32, i32, f32) =
+def march(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, f32) =
   let (box, boxNormal) = boxIntersection(ro, rd, BOX_SIZE) in
   let tStart = max(0.0, box.x) + 1e-2 in
   let tEnd = box.y - 1e-2 in
@@ -537,7 +551,7 @@ def march(ro: vec3f32, rd: vec3f32,
        = (0, tStart, stepScale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
        while i < samples && !done do
       let pos = ro + rd * t in
-      let h = mapHeight(tex_b, samp, GetUV(pos)) in
+      let h = mapHeight(GetUV(pos)) in
       let altitude = pos.y - h in
       let s_t_new = max(0.0, min(s_t, altitude / t)) in
       if altitude < 0.0 then
@@ -625,8 +639,7 @@ def AtmosphereShade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
 -- Fragment entry: composite the rendered image
 ------------------------------------------------------------
 
-def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
-                  samp: sampler, iResolution: vec3f32, iTime: f32,
+def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
                   iMouse: vec4f32) vec4f32 =
   -- Flip Y for Vulkan NDC -> Shadertoy convention.
   let fragCoord = @[pos_in.x, iResolution.y - pos_in.y] in
@@ -645,7 +658,7 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
 
   let fogColor = 1.0 - vec.exp(SkyColor(rd, sun) * (0.0 - 2.0)) in
 
-  let (t, normal0, material, _) = march(ro, rd, tex_b, samp) in
+  let (t, normal0, material, _) = march(ro, rd) in
 
   let color_shaded =
     if t < 0.0 then
@@ -657,12 +670,12 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       let pos = ro + rd * t in
       let uv_map = GetUV(pos) in
       let (h_terrain, normal_terrain, erosion, ridgemap, trees) =
-        map_full(tex_b, samp, iResolution, uv_map) in
+        map_full(iResolution, uv_map) in
       let drainage = clamp01((1.0 - clamp01(ridgemap / DRAINAGE_WIDTH)) * 1.5) in
       let diff_h = pos.y - h_terrain in
 
       -- Detail texture sample
-      let breakupTex = texture_sample(tex_c, samp, uv_map, 0.0) in
+      let breakupTex = sample_detail(uv_map) in
       let breakup = breakupTex.x in
 
       let f0 = v3(0.04) in
@@ -731,7 +744,7 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       let shadow =
         if material != M_STRATA then
           let ro_shadow = pos + @[0.0, 1.0, 0.0] * @[1e-4, 1e-4, 1e-4] in
-          let (_, _, _, s_t) = march(ro_shadow, sun, tex_b, samp) in
+          let (_, _, _, s_t) = march(ro_shadow, sun) in
           1.0 - exp((0.0 - s_t) * 20.0)
         else 1.0 in
 
@@ -747,7 +760,7 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       let bounce = diffuseColor * SUN_COLOR * (bounce_dot * Fd_Lambert / pi) in
 
       -- Reflection: trace a secondary ray, fall back to sky.
-      let (_, _, _, r_t) = march(pos, r, tex_b, samp) in
+      let (_, _, _, r_t) = march(pos, r) in
       let refl_color = SkyColor(r, sun) * 4.0 * (1.0 - exp((0.0 - r_t) * 10.0 * sq(smoothness))) in
       let fres = F_Schlick_v(f0, dot(neg_rd, normal_base)) in
       let reflection = refl_color * fres in
@@ -767,7 +780,6 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
   @[gamma.x + dither, gamma.y + dither, gamma.z + dither, 1.0]
 
 entry mountains(
-    tex_b: texture2d, tex_c: texture2d, samp: sampler,
     iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
@@ -775,5 +787,4 @@ entry mountains(
     vertex_main) in
   shade(screen, covered,
     |fragment|
-      fragment_main(fragment.position, tex_b, tex_c, samp,
-                    iResolution, iTime, iMouse))
+      fragment_main(fragment.position, iResolution, iTime, iMouse))

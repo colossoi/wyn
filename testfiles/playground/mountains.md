@@ -9,8 +9,7 @@ Shadertoy. Reference GLSL lives under `extra/mountains-src/`
 
 - The `wyn` compiler (`cargo build --release -p wyn`).
 - The `viz` runtime (`cd extra/viz && cargo build --release`).
-- A GPU with Vulkan / DX12 + the `rgba16float` storage-texture format
-  (everything since ~2017 in practice).
+- A GPU with Vulkan or DX12 support.
 
 `spirv-val` is optional; if it's on `$PATH` you can sanity-check the
 SPIR-V before launching the renderer.
@@ -22,6 +21,7 @@ From the repo root:
 ```bash
 cargo build --release -p wyn
 ./target/release/wyn compile testfiles/playground/mountains.wyn \
+  --graphics --direct \
   -o testfiles/playground/mountains.spv
 ```
 
@@ -43,38 +43,33 @@ opens.
 
 ### Default behaviour
 
-- Camera spins slowly (`TIME_CAM_SPIN = 1/60`) — fixed sun direction.
-- Buffer A initializes a soft central dome on the first two frames;
-  thereafter it copies its previous output forward.
-- Mouse drag accumulates brush deltas into the heightmap. Shift +
-  drag inverts the brush (digs valleys).
-- The erosion filter (Buffer B) is currently bypassed — the rendered
-  surface is the raw painted heightmap. See "Known limitations"
-  below.
+- Camera spins slowly (`TIME_CAM_SPIN = 1/60`) with a fixed sun direction.
+- A radial island envelope and three octaves of derivative noise produce the
+  height field directly in the fragment shader.
+- Additional procedural noise supplies breakup detail for terrain and water.
+- The example is self-contained: it needs no host textures or feedback state.
 
 ### Controls
 
 | Input        | Effect                                                |
 | ------------ | ----------------------------------------------------- |
-| Left drag    | Paint the heightmap up                                |
-| Shift + drag | Paint the heightmap down (invert brush)               |
-| Backspace    | Reset to the initial dome (held-down detection)       |
-| Mouse move   | No camera effect by default — camera is auto-spinning |
+| Mouse move   | Moves the retained brush-radius cursor                |
+| Mouse button | Shows the cursor rings over the terrain               |
 
 ### What you should see
 
-A small island in the middle of a calm sea, lit by a fixed sun from
-the upper-left, with a slowly rotating camera. Painting builds up
-ridges that persist across frames. Without the erosion filter on
-they look smooth — that's expected for now.
+A small procedural island in the middle of a calm sea, lit by a fixed sun
+from the upper-left, with a slowly rotating camera.
 
 ## Known limitations (v1)
 
-- **Erosion bypassed**: the full `ErosionFilter` (Buffer B) compiles
-  and runs but its output is currently discarded — `Heightmap()`
-  returns the raw input unchanged. The Shadertoy original toggles
-  this with the Enter key; we'll wire up that keyboard read once the
-  Buffer B keyboard binding lands.
+- **No editable feedback terrain**: the original Shadertoy uses several
+  cross-frame buffer passes for mouse painting and erosion. This playground
+  version evaluates a static procedural terrain so direct compilation remains
+  a single authored graphics pipeline.
+- **Erosion helpers retained but not integrated**: the ported erosion routines
+  remain in the source for reference, but the direct height sampler uses the
+  cheaper three-octave field.
 - **No iFrameRate uniform**: paint accumulation assumes ~60 fps. At
   very different frame rates the brush strength per stroke will look
   off; cosmetic only.
@@ -93,6 +88,5 @@ they look smooth — that's expected for now.
 | `testfiles/playground/mountains.md`      | This file.                        |
 | `extra/mountains-src/{common,buffer_a,buffer_b,buffer_c,image}.glsl` | Reference GLSL extracted from the Shadertoy JSON. Gitignored. |
 
-The Wyn file declares the resource layout up top in a comment block;
-read that first if you're tracing where a particular sampler /
-uniform / storage texture flows.
+The Wyn file is self-contained and publishes only its Shadertoy-style uniforms
+and render target.
