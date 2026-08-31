@@ -79,7 +79,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
     let entry = AllocatedEntry::new_with_resources(
         "compute".into(),
         EntryId::from_index(0),
-        Span::dummy(),
+        Span::generated(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },

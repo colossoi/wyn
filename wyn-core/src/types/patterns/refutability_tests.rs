@@ -6,7 +6,7 @@ use crate::lexer;
 use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> ast::Span {
-    ast::Span::dummy()
+    ast::Span::generated()
 }
 
 fn pat(kind: ast::PatternKind, id: u32) -> ast::Pattern {

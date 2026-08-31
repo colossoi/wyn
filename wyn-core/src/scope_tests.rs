@@ -88,7 +88,7 @@ mod pattern_bound_names {
         Pattern {
             h: Header {
                 id: NodeId::new(0),
-                span: Span::new(0, 0, 0, 0),
+                span: Span::generated(),
             },
             kind,
         }

@@ -24,7 +24,7 @@ fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
     }
 }
 fn make_span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn make_program(

@@ -33,7 +33,7 @@ fn dummy_body(program: &mut Defunctionalized) -> Term<ExplicitClosurePayload, Ex
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
-        span: ast::Span::dummy(),
+        span: ast::Span::generated(),
         kind: TermKind::IntLit("0".into()),
     }
 }

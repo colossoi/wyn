@@ -107,7 +107,7 @@ fn count_lets(term: &Term) -> usize {
 }
 
 fn span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn i32_ty() -> Type<TypeName> {

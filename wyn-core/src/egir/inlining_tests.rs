@@ -76,7 +76,7 @@ fn inline_pure_call_clones_the_callee_dag_with_parameter_substitution() {
     let callee = Func::<Semantic>::new(
         region,
         "mixed".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(ty.clone()),
@@ -129,7 +129,7 @@ fn inline_pure_call_folds_projection_of_substituted_aggregate() {
     let callee = Func::<Semantic>::new(
         region,
         "select_right".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(ty.clone()),
@@ -169,7 +169,7 @@ fn inline_pure_call_replaces_every_leaf_of_a_product_result() {
     let callee = Func::<Semantic>::new(
         region,
         "make_pair".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         result_abi,
@@ -245,7 +245,7 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let callee = Func::<Semantic>::new(
         region,
         "choose_offset".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(ty.clone()),

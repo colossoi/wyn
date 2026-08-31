@@ -4,9 +4,7 @@ use wasm_bindgen::prelude::*;
 use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
 use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{
-    CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy,
-};
+use wyn_core::{CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
 
 /// Cached prelude and starting node counter
 /// Creating the prelude parses all prelude files, which is expensive.
@@ -237,12 +235,28 @@ pub struct ErrorInfo {
     pub location: Option<ErrorLocation>,
 }
 
-fn error_location(e: &CompilerError) -> Option<ErrorLocation> {
-    e.span().map(|s| ErrorLocation {
-        start_line: s.start_line,
-        start_col: s.start_col,
-        end_line: s.end_line,
-        end_col: s.end_col,
+fn source_position(source: &str, offset: u32) -> Option<(usize, usize)> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let current_line = prefix.rsplit_once('\n').map_or(prefix, |(_, current_line)| current_line);
+    Some((line, current_line.chars().count() + 1))
+}
+
+fn error_location(source: &str, e: &CompilerError) -> Option<ErrorLocation> {
+    let span = e.span()?;
+    span.module()?;
+    let range = span.range();
+    let (start_line, start_col) = source_position(source, range.start())?;
+    let (end_line, end_col) = source_position(source, range.end())?;
+    Some(ErrorLocation {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
     })
 }
 
@@ -533,7 +547,7 @@ pub struct CompileResultWgsl {
 }
 
 impl CompileResultWgsl {
-    fn err(e: CompilerError) -> Self {
+    fn err(source: &str, e: CompilerError) -> Self {
         CompileResultWgsl {
             success: false,
             wgsl: None,
@@ -542,7 +556,7 @@ impl CompileResultWgsl {
             tlc: None,
             error: Some(ErrorInfo {
                 message: format_error(&e),
-                location: error_location(&e),
+                location: error_location(source, &e),
             }),
         }
     }
@@ -593,47 +607,47 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
     let program = match wyn_core::parser::parse(source, node_counter, module_manager) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new(".")) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::elaborate_modules::elaborate_modules(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::name_resolution::resolve_names(program);
     let program = match wyn_core::resolve_resources::resolve_resources(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::ast_const_fold::fold_constants(program);
     let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
     let program = match wyn_core::resolve_opens::resolve_opens(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::types::run::type_check(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::ast_type_holes::reject_type_holes(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
 
     let program = match wyn_core::tlc::lower_from_ast(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::tlc::pin_entry_buffers(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::tlc::validate_ownership(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::partial_eval(program);
     let tlc_tree = tlc_tree::program_to_tree(&program);
@@ -641,7 +655,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = match wyn_core::tlc::monomorphize(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::inline_small(program);
@@ -673,8 +687,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         let program = wyn_core::egir::optimize_semantic_operations(program)
             .map_err(|error| wyn_core::egir::from_tlc::ConvertError::Internal(error.to_string()))?;
         let program = wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology);
-        let program =
-            wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
+        let program = wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
         let program = wyn_core::egir::plan(program, profile)?;
         wyn_core::lower_egir_to_ssa(program)
     };
@@ -694,7 +707,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
             tlc: Some(tlc_tree),
             error: None,
         },
-        Err(e) => CompileResultWgsl::err(e),
+        Err(e) => CompileResultWgsl::err(source, e),
     }
 }
 

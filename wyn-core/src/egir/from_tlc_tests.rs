@@ -57,7 +57,7 @@ fn mk_term(
     Term {
         id: ids.next_id(),
         ty,
-        span: Span::dummy(),
+        span: Span::generated(),
         kind,
     }
 }

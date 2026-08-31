@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::ast::{self, ImportsResolvedFrontend, ParsedFrontend};
 use crate::error::Result;
 use crate::{err_module, err_parse, lexer, parser};
+use wyn_module_graph::ModuleId;
 
 pub type ImportsResolvedFamily = ast::AstFamily<
     ast::SourceTree,
@@ -127,8 +128,9 @@ fn expand(
 
         let source = std::fs::read_to_string(&canonical)
             .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
-        let tokens = lexer::tokenize(&source).map_err(|e| err_parse!("{}", e))?;
-        let mut p = parser::Parser::with_graphics(tokens, node_counter, graphics);
+        let module = ModuleId::from(0);
+        let tokens = lexer::tokenize(module, &source).map_err(|e| err_parse!("{}", e))?;
+        let mut p = parser::Parser::with_graphics(module, tokens, node_counter, graphics);
         let imported_declarations = p.parse()?;
         let imported_dir = canonical.parent().unwrap_or(base_dir);
         let resolved = expand(

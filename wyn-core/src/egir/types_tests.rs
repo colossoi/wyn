@@ -223,7 +223,7 @@ fn entry_and_program_accept_non_wyn_resource_metadata() {
     let entry = super::super::ir::Entry::<TestPhase, u16, (), TestLanguage>::new_with_resources(
         "custom".to_string(),
         EntryId::from_index(0),
-        ast::Span::new(0, 0, 0, 0),
+        ast::Span::generated(),
         flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
@@ -270,7 +270,7 @@ fn retaining_entry_parameter_indices_compacts_interface_and_nodes() {
     let mut entry = super::super::ir::Entry::<TestPhase, (), (), TestLanguage>::new_with_resources(
         "compact".to_string(),
         EntryId::from_index(0),
-        ast::Span::dummy(),
+        ast::Span::generated(),
         flow::ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
@@ -418,7 +418,7 @@ fn removing_func_param_clears_its_metadata() {
         "number".to_string(),
     )]);
     let mut graph = super::super::ir::EGraph::<TestPhase, TestLanguage>::new();
-    let span = ast::Span::new(1, 2, 3, 4);
+    let span = ast::Span::generated();
     let param = graph.add_test_value_parameter(params.ids().next().unwrap(), "number".to_string());
     graph.nodes[param].span = Some(span);
 

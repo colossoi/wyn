@@ -10,6 +10,7 @@ use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
 use log::trace;
 use std::sync::OnceLock;
+use wyn_module_graph::{ModuleId, TextRange};
 
 mod module;
 mod pattern;
@@ -37,10 +38,11 @@ pub fn parse(
     mut node_ids: NodeCounter,
     module_manager: module_manager::ModuleManager,
 ) -> Result<Parsed> {
-    let tokens = lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
+    let module = ModuleId::from(0);
+    let tokens = lexer::tokenize(module, source).map_err(|error| err_parse!("{}", error))?;
     let graphics = module_manager.options().graphics;
     let declarations = {
-        let mut parser = Parser::with_graphics(tokens, &mut node_ids, graphics);
+        let mut parser = Parser::with_graphics(module, tokens, &mut node_ids, graphics);
         parser.parse()?
     };
     Ok(Program {
@@ -90,6 +92,7 @@ fn suffix_to_type(suffix: &str) -> Type {
 }
 
 pub struct Parser<'a> {
+    module: ModuleId,
     tokens: Vec<LocatedToken>,
     current: usize,
     node_counter: &'a mut NodeCounter,
@@ -97,16 +100,21 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[cfg(test)]
     pub fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
-        Self::with_graphics(tokens, node_counter, true)
+        let module =
+            tokens.first().and_then(|token| token.span.module()).unwrap_or_else(|| ModuleId::from(0));
+        Self::with_graphics(module, tokens, node_counter, true)
     }
 
     pub fn with_graphics(
+        module: ModuleId,
         tokens: Vec<LocatedToken>,
         node_counter: &'a mut NodeCounter,
         graphics: bool,
     ) -> Self {
         Parser {
+            module,
             tokens,
             current: 0,
             node_counter,
@@ -125,12 +133,11 @@ impl<'a> Parser<'a> {
         }
         match self.tokens.last() {
             Some(last) => Span::new(
-                last.span.end_line,
-                last.span.end_col,
-                last.span.end_line,
-                last.span.end_col,
+                self.module,
+                TextRange::new(last.span.range().end(), last.span.range().end())
+                    .unwrap_or_else(|error| panic!("invalid end-of-file span: {error}")),
             ),
-            None => Span::new(0, 0, 0, 0),
+            None => self.start_of_file_span(),
         }
     }
 
@@ -142,8 +149,15 @@ impl<'a> Parser<'a> {
             // so this index is always in-bounds.
             self.tokens[self.current - 1].span
         } else {
-            Span::new(0, 0, 0, 0)
+            self.start_of_file_span()
         }
+    }
+
+    fn start_of_file_span(&self) -> Span {
+        Span::new(
+            self.module,
+            TextRange::new(0, 0).unwrap_or_else(|error| panic!("invalid start-of-file span: {error}")),
+        )
     }
 
     pub fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {

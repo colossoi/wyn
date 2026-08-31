@@ -96,7 +96,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
     let entry = Entry::<Semantic>::new_with_resources(
         "vertex".into(),
         EntryId::from_index(0),
-        Span::dummy(),
+        Span::generated(),
         ExecutionModel::Vertex,
         inputs,
         vec![],
@@ -331,7 +331,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
     let region = Func::<Semantic>::new(
         region_id,
         "map_body".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         region_params,
         by_value_function_result::<WynLanguage>(ty.clone()),

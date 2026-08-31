@@ -1515,6 +1515,7 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "wyn-core",
+ "wyn-module-graph",
 ]
 
 [[package]]
@@ -1544,6 +1545,7 @@ dependencies = [
  "thiserror 1.0.69",
  "wyn-base",
  "wyn-graph",
+ "wyn-module-graph",
  "wyn-pipeline-descriptor",
  "wyn-spirv",
  "wyn-staged-ir",

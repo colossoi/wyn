@@ -25,7 +25,7 @@ fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
 }
 
 fn span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn unit_ty() -> Type<TypeName> {

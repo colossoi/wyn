@@ -4,7 +4,7 @@ use super::*;
 
 // Helper to extract just the tokens from LocatedToken for testing
 fn tokens_only(input: &str) -> Vec<Token> {
-    tokenize(input).unwrap().into_iter().map(|lt| lt.token).collect()
+    tokenize(ModuleId::from(0), input).unwrap().into_iter().map(|lt| lt.token).collect()
 }
 
 #[test]

@@ -19,6 +19,7 @@ use crate::CompilerOptions;
 use crate::StableMap;
 use crate::{bail_module, err_module, err_parse};
 use crate::{LookupMap, LookupSet};
+use wyn_module_graph::ModuleId;
 
 /// A first-order type abbreviation together with the parameters that its
 /// definition abstracts. Keeping the binder metadata in the module manager
@@ -257,8 +258,9 @@ impl ModuleManager {
     /// Load and elaborate modules from a source string
     pub fn load_str(&mut self, source: &str, node_counter: &mut NodeCounter) -> Result<()> {
         // Parse the source
-        let tokens = lexer::tokenize(source).map_err(|e| err_parse!("{}", e))?;
-        let mut parser = Parser::with_graphics(tokens, node_counter, self.options.graphics);
+        let module = ModuleId::from(0);
+        let tokens = lexer::tokenize(module, source).map_err(|e| err_parse!("{}", e))?;
+        let mut parser = Parser::with_graphics(module, tokens, node_counter, self.options.graphics);
         let declarations = parser.parse()?;
 
         // Register module types first

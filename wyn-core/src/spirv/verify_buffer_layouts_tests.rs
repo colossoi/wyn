@@ -66,7 +66,7 @@ fn entry(name: &str) -> EntryPoint {
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),
-        span: ast::Span::dummy(),
+        span: ast::Span::generated(),
     }
 }
 

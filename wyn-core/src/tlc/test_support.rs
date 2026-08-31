@@ -26,7 +26,7 @@ impl TestBuilder {
     }
 
     pub(crate) fn span(&self) -> Span {
-        Span::dummy()
+        Span::generated()
     }
 
     pub(crate) fn finish(self) -> (SymbolTable, TermIdSource) {

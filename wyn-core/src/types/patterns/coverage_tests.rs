@@ -11,7 +11,7 @@ use crate::lexer;
 use crate::types::{sum, tuple, Type, TypeName};
 
 fn dummy_span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn i32_ty() -> Type {

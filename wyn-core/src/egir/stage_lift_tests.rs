@@ -43,7 +43,7 @@ fn semantic_function(
     Func::<Semantic>::new(
         id,
         name.into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         by_value_function_result::<WynLanguage>(ty),
@@ -392,7 +392,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
     let entry = Entry::<Semantic>::new_with_resources(
         "compute".into(),
         entry_id,
-        Span::dummy(),
+        Span::generated(),
         ExecutionModel::Compute {
             local_size: (64, 1, 1),
         },

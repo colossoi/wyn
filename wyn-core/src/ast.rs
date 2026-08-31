@@ -14,6 +14,7 @@ use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDec
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
 use crate::SymbolId;
 use wyn_base::IdSource;
+pub use wyn_module_graph::Span;
 
 /// Qualified name representing a path through modules to a name
 /// E.g., M.N.x is represented as QualName { qualifiers: ["M", "N"], name: "x" }
@@ -50,106 +51,6 @@ impl QualName {
     /// Check if this is an unqualified name
     pub fn is_unqualified(&self) -> bool {
         self.qualifiers.is_empty()
-    }
-}
-
-/// Source location span tracking (line, column) start and end positions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Span {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
-}
-
-impl Span {
-    pub fn new(start_line: usize, start_col: usize, end_line: usize, end_col: usize) -> Self {
-        Span {
-            start_line,
-            start_col,
-            end_line,
-            end_col,
-        }
-    }
-
-    /// Create a dummy/generated span (all zeros) for test code
-    #[cfg(test)]
-    pub fn dummy() -> Self {
-        Span {
-            start_line: 0,
-            start_col: 0,
-            end_line: 0,
-            end_col: 0,
-        }
-    }
-
-    /// Check if this is a generated/dummy span (all zeros)
-    pub fn is_generated(&self) -> bool {
-        self.start_line == 0 && self.start_col == 0 && self.end_line == 0 && self.end_col == 0
-    }
-
-    /// Merge two spans to create a span covering both
-    pub fn merge(&self, other: &Span) -> Span {
-        let (start_line, start_col) = if self.start_line < other.start_line
-            || (self.start_line == other.start_line && self.start_col <= other.start_col)
-        {
-            (self.start_line, self.start_col)
-        } else {
-            (other.start_line, other.start_col)
-        };
-
-        let (end_line, end_col) = if self.end_line > other.end_line
-            || (self.end_line == other.end_line && self.end_col >= other.end_col)
-        {
-            (self.end_line, self.end_col)
-        } else {
-            (other.end_line, other.end_col)
-        };
-
-        Span {
-            start_line,
-            start_col,
-            end_line,
-            end_col,
-        }
-    }
-
-    /// Check if this span contains a position (1-based line/col)
-    pub fn contains(&self, line: usize, col: usize) -> bool {
-        if line < self.start_line || line > self.end_line {
-            return false;
-        }
-        if line == self.start_line && col < self.start_col {
-            return false;
-        }
-        if line == self.end_line && col > self.end_col {
-            return false;
-        }
-        true
-    }
-
-    /// Calculate the "size" of a span for comparison (smaller = more specific)
-    pub fn size(&self) -> usize {
-        if self.end_line == self.start_line {
-            self.end_col.saturating_sub(self.start_col)
-        } else {
-            // Rough estimate: 100 chars per line
-            (self.end_line - self.start_line) * 100 + self.end_col
-        }
-    }
-}
-
-impl std::fmt::Display for Span {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.start_line == self.end_line {
-            write!(f, "{}:{}..{}", self.start_line, self.start_col, self.end_col)
-        } else {
-            write!(
-                f,
-                "{}:{}..{}:{}",
-                self.start_line, self.start_col, self.end_line, self.end_col
-            )
-        }
     }
 }
 
@@ -199,7 +100,7 @@ pub trait NodeCounterTestExt {
 #[cfg(test)]
 impl NodeCounterTestExt for NodeCounter {
     fn mk_node_dummy<T>(&mut self, kind: T) -> Node<T> {
-        self.mk_node(kind, Span::dummy())
+        self.mk_node(kind, Span::generated())
     }
 }
 

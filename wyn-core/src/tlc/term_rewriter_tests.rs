@@ -9,7 +9,7 @@ fn unit_term(term_ids: &mut TermIdSource, kind: TestTermKind) -> TestTerm {
     TestTerm {
         id: term_ids.next_id(),
         ty: Type::Constructed(TypeName::Unit, Vec::new()),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind,
     }
 }

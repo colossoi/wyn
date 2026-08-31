@@ -16,7 +16,7 @@ fn unit(id: u32) -> Expression {
     Node {
         h: Header {
             id: NodeId(id),
-            span: Span::dummy(),
+            span: Span::generated(),
         },
         kind: ExprKind::Unit,
     }
@@ -46,7 +46,7 @@ fn program_rebuild_preserves_the_shared_node_allocator() {
 
 #[test]
 fn declaration_rebuild_carries_signature_fields() {
-    let span = Span::dummy();
+    let span = Span::generated();
     let definition = Decl::<u8, SourceTree> {
         data: 7,
         name: "f".to_owned(),

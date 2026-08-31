@@ -31,7 +31,7 @@ fn term(
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind,
     }
 }

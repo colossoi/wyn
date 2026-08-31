@@ -136,20 +136,18 @@ thread_local! {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceSpan {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
-impl From<Span> for SourceSpan {
-    fn from(span: Span) -> Self {
-        Self {
-            start_line: span.start_line,
-            start_col: span.start_col,
-            end_line: span.end_line,
-            end_col: span.end_col,
-        }
+impl SourceSpan {
+    fn from_span(span: Span) -> Option<Self> {
+        span.module()?;
+        let range = span.range();
+        Some(Self {
+            start: range.start(),
+            end: range.end(),
+        })
     }
 }
 
@@ -449,7 +447,7 @@ pub struct InspectResult {
 }
 
 impl InspectResult {
-    fn error(pass: impl Into<String>, message: impl Into<String>, span: Option<Span>) -> Self {
+    fn error(pass: impl Into<String>, message: impl Into<String>, span: Option<SourceSpan>) -> Self {
         Self {
             success: false,
             pass: pass.into(),
@@ -458,7 +456,7 @@ impl InspectResult {
             relations: Vec::new(),
             error: Some(VizError {
                 message: message.into(),
-                span: span.map(Into::into),
+                span,
             }),
         }
     }
@@ -528,7 +526,7 @@ fn compiler_init() -> Option<(NodeCounter, ModuleManager)> {
 }
 
 fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
-    let span = error.span();
+    let span = error.span().and_then(SourceSpan::from_span);
     InspectResult::error(pass.id(), format_compiler_error(&error), span)
 }
 
@@ -2034,7 +2032,7 @@ fn snapshot_graph<P: SnapshotPhase>(
                 wyn_core::diags::format_type(value.ty())
             ),
             ty: Some(wyn_core::diags::format_type(value.ty())),
-            span: value.span().map(Into::into),
+            span: value.span().and_then(SourceSpan::from_span),
             operation: None,
         });
         for dependency in graph.value_dependencies(value_id) {
@@ -2061,7 +2059,7 @@ fn snapshot_graph<P: SnapshotPhase>(
             representation: matches!(place.op(), PlaceOp::Parameter { .. }).then(|| "place".to_string()),
             detail: format!("{:#?}\n\ntype: {:#?}", place.op(), place.ty()),
             ty: Some(wyn_core::diags::format_type(&place.ty().pointee)),
-            span: place.span().map(Into::into),
+            span: place.span().and_then(SourceSpan::from_span),
             operation: Some(operation),
         });
     }
@@ -2096,7 +2094,7 @@ fn snapshot_graph<P: SnapshotPhase>(
                 representation: None,
                 detail: display.detail,
                 ty: None,
-                span: effect.span().map(Into::into),
+                span: effect.span().and_then(SourceSpan::from_span),
                 operation: display.operation,
             });
             push_edge(snapshot, block_node.clone(), effect_id.clone(), "block");

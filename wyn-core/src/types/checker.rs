@@ -810,7 +810,7 @@ impl<'a> TypeChecker<'a> {
             let mut cycle_path = visited.to_vec();
             cycle_path.push(key.to_string());
             Some(err_type_at!(
-                Span::new(0, 0, 0, 0),
+                Span::generated(),
                 "type alias cycle detected: {}",
                 cycle_path.join(" -> ")
             ))

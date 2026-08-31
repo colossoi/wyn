@@ -1562,7 +1562,7 @@ fn append_target_captures(
             params.push((symbol, texture_ty.clone()));
             declarations.push(interface::EntryParamDecl {
                 name: name.clone(),
-                span: Span::new(0, 0, 0, 0),
+                span: Span::generated(),
                 ty: texture_ty,
                 attributes: vec![Attribute::Texture {
                     set: egir::from_tlc::AUTO_STORAGE_SET,
@@ -1615,7 +1615,7 @@ fn append_external_param(
     params.push((new_symbol, external_ty.clone()));
     declarations.push(interface::EntryParamDecl {
         name: name.to_string(),
-        span: Span::new(0, 0, 0, 0),
+        span: Span::generated(),
         ty: external_ty.clone(),
         attributes: external_binding_attribute(&external_ty, binding).into_iter().collect(),
     });
@@ -2692,7 +2692,7 @@ fn stage_def(
 fn root_entry_span(root: &Def<UnpinnedPolymorphic>) -> Span {
     match &root.meta {
         DefMeta::EntryPoint(entry) => entry.declaration.name_span,
-        _ => Span::new(0, 0, 0, 0),
+        _ => Span::generated(),
     }
 }
 

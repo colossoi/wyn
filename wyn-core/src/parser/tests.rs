@@ -6,11 +6,16 @@ use crate::ast::NodeCounter;
 use crate::error::CompilerError;
 use crate::interface;
 use crate::lexer;
-use crate::lexer::tokenize;
+use crate::lexer::tokenize as tokenize_module;
 use crate::module_manager;
 use crate::op;
 use crate::parser;
 use crate::types;
+use wyn_module_graph::ModuleId;
+
+fn tokenize(input: &str) -> std::result::Result<Vec<crate::lexer::LocatedToken>, String> {
+    tokenize_module(ModuleId::from(0), input)
+}
 
 /// Helper function that expects parsing to fail with a specific error.
 /// If parsing succeeds when it shouldn't, outputs the parsed AST.
@@ -1439,7 +1444,7 @@ fn test_parse_type_bind_simple() {
 
 #[test]
 fn test_parse_type_bind_uppercase_name_rejected() {
-    let tokens = lexer::tokenize("type Point = (i32, i32)").expect("tokenize");
+    let tokens = lexer::tokenize(ModuleId::from(0), "type Point = (i32, i32)").expect("tokenize");
     let mut nc = ast::NodeCounter::new();
     let mut parser = parser::Parser::new(tokens, &mut nc);
     let err = parser.parse().expect_err("uppercase alias names must not parse");
@@ -1903,7 +1908,6 @@ fn test_function_call_tuple_syntax() {
 
 #[test]
 fn test_span_tracking() {
-    // Test that spans are correctly tracked for a multi-line program
     let source = r#"def sum: i32 =
   let x = 10 + 20
   in x * 2
@@ -1915,36 +1919,26 @@ def main: i32 =
     let mut nc = NodeCounter::new();
     let mut parser = Parser::new(tokens, &mut nc);
     let program = parser.parse().expect("Failed to parse");
+    let span_text = |span: Span| {
+        let range = span.range();
+        &source[range.start() as usize..range.end() as usize]
+    };
 
     assert_eq!(program.len(), 2);
 
-    // Check first declaration (sum function) - spans line 1-3
     if let Declaration::Decl(sum_decl) = &program[0] {
         assert_eq!(sum_decl.name, "sum");
-        // The declaration should span from line 1 to line 3
-        assert!(
-            sum_decl.body.h.span.start_line >= 1 && sum_decl.body.h.span.end_line <= 3,
-            "sum body span should be lines 1-3, got {}..{}",
-            sum_decl.body.h.span.start_line,
-            sum_decl.body.h.span.end_line
-        );
+        assert_eq!(span_text(sum_decl.body.h.span), "let x = 10 + 20\n  in x * 2");
 
-        // Check that the let-in expression has the right span
         if let ExprKind::LetIn(let_in) = &sum_decl.body.kind {
-            // The let-in should start at "let" on line 2
-            assert_eq!(
-                let_in.value.h.span.start_line, 2,
-                "let value should start on line 2"
-            );
+            assert_eq!(span_text(let_in.value.h.span), "10 + 20");
 
-            // The binary op (a + b) should be on line 2
             if let ExprKind::BinaryOp(_, left, right) = &let_in.value.kind {
-                assert_eq!(left.h.span.start_line, 2, "left operand should be on line 2");
-                assert_eq!(right.h.span.start_line, 2, "right operand should be on line 2");
+                assert_eq!(span_text(left.h.span), "10");
+                assert_eq!(span_text(right.h.span), "20");
             }
 
-            // The body (x * 2) should be on line 3
-            assert_eq!(let_in.body.h.span.start_line, 3, "let body should be on line 3");
+            assert_eq!(span_text(let_in.body.h.span), "x * 2");
         } else {
             panic!("Expected LetIn expression, got {:?}", sum_decl.body.kind);
         }
@@ -1952,17 +1946,12 @@ def main: i32 =
         panic!("Expected Decl, got {:?}", program[0]);
     }
 
-    // Check second declaration (main constant) - should be on line 5-6
     if let Declaration::Decl(main_decl) = &program[1] {
         assert_eq!(main_decl.name, "main");
 
-        // The reference to sum should be on line 6 (now just an identifier, not a call)
         if let ExprKind::Identifier(ast::Identifier { name, .. }) = &main_decl.body.kind {
             assert_eq!(name, "sum");
-            assert_eq!(
-                main_decl.body.h.span.start_line, 6,
-                "identifier should be on line 6"
-            );
+            assert_eq!(span_text(main_decl.body.h.span), "sum");
         } else {
             panic!("Expected Identifier, got {:?}", main_decl.body.kind);
         }
@@ -2363,7 +2352,7 @@ fn test_parse_record_literal_single_field() {
 #[test]
 fn test_parse_record_literal_rejects_colon_field_separator() {
     let input = "def test = {x: 42}";
-    let tokens = lexer::tokenize(input).expect("tokenize");
+    let tokens = lexer::tokenize(ModuleId::from(0), input).expect("tokenize");
     let mut nc = ast::NodeCounter::new();
     let mut parser = parser::Parser::new(tokens, &mut nc);
     let err = parser.parse().expect_err("`:` field separator must not parse");
@@ -3079,7 +3068,7 @@ fn test_apostrophe_prefix_type_variable_does_not_tokenize() {
     // The Futhark `'a` syntax is not Wyn syntax — uppercase identifiers
     // are the sole type-variable form. A leading apostrophe in source
     // should fail to tokenize.
-    let result = lexer::tokenize("def f<'a>(x: 'a) 'a = x");
+    let result = lexer::tokenize(ModuleId::from(0), "def f<'a>(x: 'a) 'a = x");
     assert!(
         result.is_err(),
         "apostrophe-prefixed type variable should not tokenize, got: {result:?}"

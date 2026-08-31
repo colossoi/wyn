@@ -1217,7 +1217,7 @@ pub fn atom_var_term<C: Payload, S: Payload>(
     ty: Type<TypeName>,
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    Term::fresh(term_ids, ty, Span::new(0, 0, 0, 0), TermKind::Var(vr))
+    Term::fresh(term_ids, ty, Span::generated(), TermKind::Var(vr))
 }
 
 pub(crate) fn synthetic_atom_var_term<C: Payload, S: Payload>(
@@ -1227,7 +1227,7 @@ pub(crate) fn synthetic_atom_var_term<C: Payload, S: Payload>(
     Term {
         id: TermId::SYNTHETIC,
         ty,
-        span: Span::new(0, 0, 0, 0),
+        span: Span::generated(),
         kind: TermKind::Var(vr),
     }
 }

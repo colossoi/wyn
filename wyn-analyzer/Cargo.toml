@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 wyn-core = { path = "../wyn-core" }
+wyn-module-graph = { path = "../wyn-module-graph" }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

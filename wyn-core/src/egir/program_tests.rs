@@ -24,7 +24,7 @@ fn empty_func(id: FunctionId, name: &str) -> Func {
     Func::<Semantic>::new(
         id,
         name.to_string(),
-        Span::dummy(),
+        Span::generated(),
         None,
         Parameters::new(),
         by_value_function_result::<WynLanguage>(unit_ty()),
@@ -37,7 +37,7 @@ fn empty_entry(id: EntryId, name: &str) -> Entry {
     Entry::<Semantic>::new_with_resources(
         name.to_string(),
         id,
-        Span::dummy(),
+        Span::generated(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },

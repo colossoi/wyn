@@ -6,7 +6,7 @@ use crate::op::{BinaryOperator, UnaryOperator};
 fn test_header() -> Header {
     Header {
         id: NodeId(0),
-        span: Span::new(0, 0, 0, 0),
+        span: Span::generated(),
     }
 }
 
