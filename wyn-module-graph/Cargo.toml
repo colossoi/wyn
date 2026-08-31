@@ -1,0 +1,11 @@
+[package]
+name = "wyn-module-graph"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Syntax-independent package and source-module graph for Wyn"
+
+[dependencies]
+thiserror.workspace = true
+wyn-base = { path = "../wyn-base" }

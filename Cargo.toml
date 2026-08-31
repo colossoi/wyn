@@ -7,6 +7,7 @@ members = [
     "wyn-pipeline-descriptor",
     "wyn-spirv",
     "wyn-graph",
+    "wyn-module-graph",
     "wyn-staged-ir",
 ]
 resolver = "2"

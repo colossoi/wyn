@@ -1557,6 +1557,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyn-module-graph"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "wyn-base",
+]
+
+[[package]]
 name = "wyn-pipeline-descriptor"
 version = "0.1.0"
 dependencies = [
