@@ -355,24 +355,52 @@ fn verify_serial_policy(program: &ResourcesAllocated) -> ParallelizeResult<()> {
 }
 
 fn validate_authored_only_input(program: &ResourcesAllocated) -> Result<(), ConvertError> {
-    let has_graphics = program
+    if program
         .data
-        .core
-        .pipeline
-        .pipelines
-        .iter()
-        .any(|pipeline| matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)));
-    let has_compute = program
-        .data
-        .core
-        .pipeline
-        .pipelines
-        .iter()
-        .any(|pipeline| matches!(pipeline, pipeline_descriptor::Pipeline::Compute(_)));
-    if has_graphics && has_compute {
+        .stages
+        .stages()
+        .any(|(_, stage)| matches!(stage.origin(), StageOrigin::Generated { .. }))
+    {
         return Err(ConvertError::PipelineTopology(
-            "authored-only lowering cannot combine compute and graphics stages in one operation".into(),
+            "authored-only lowering cannot schedule a compiler-generated stage".into(),
         ));
+    }
+
+    if program
+        .data
+        .core
+        .resources
+        .iter()
+        .any(|resource| matches!(resource.origin(), super::program::ResourceOrigin::Compiler { .. }))
+    {
+        return Err(ConvertError::PipelineTopology(
+            "authored-only lowering cannot schedule a compiler-owned resource".into(),
+        ));
+    }
+
+    let authored_bindings = program
+        .data
+        .stages
+        .stages()
+        .flat_map(|(_, stage)| {
+            stage
+                .body()
+                .inputs
+                .iter()
+                .filter_map(|input| input.resource)
+                .chain(stage.body().outputs.iter().filter_map(|output| output.resource))
+        })
+        .map(|resource| resource.0)
+        .collect::<HashSet<_>>();
+    if let Some(resource) = program.data.stages.flows().find_map(|(_, flow)| {
+        [Some(flow.storage().data), flow.storage().length]
+            .into_iter()
+            .flatten()
+            .find(|resource| !authored_bindings.contains(resource))
+    }) {
+        return Err(ConvertError::PipelineTopology(format!(
+            "authored-only lowering cannot carry cross-stage resource {resource:?} without an authored input or result binding"
+        )));
     }
     Ok(())
 }

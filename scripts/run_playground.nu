@@ -8,10 +8,15 @@ def main [
     --wait # Keep each Viz window open until it is closed.
 ] {
     cd ($env.FILE_PWD | path join "..")
+    $env.RUST_MIN_STACK = ($env.RUST_MIN_STACK? | default "67108864")
 
     print "Building wyn + viz in release..."
     ^cargo build --release --package wyn --bin wyn
-    ^cargo build --release --manifest-path extra/viz/Cargo.toml
+    if $nu.os-info.name == "windows" {
+        ^cargo rustc --release --manifest-path extra/viz/Cargo.toml --bin viz -- -C $"link-arg=/STACK:($env.RUST_MIN_STACK)"
+    } else {
+        ^cargo build --release --manifest-path extra/viz/Cargo.toml
+    }
 
     let wyn = if $nu.os-info.name == "windows" { "target/release/wyn.exe" } else { "target/release/wyn" }
     let viz = if $nu.os-info.name == "windows" { "extra/viz/target/release/viz.exe" } else { "extra/viz/target/release/viz" }
@@ -26,11 +31,7 @@ def main [
 
         print $"=== ($name) ==="
 
-        # Ordinary visual examples preserve their authored graphics pipeline.
-        # Feedback examples need scheduled compute + graphics lowering, which
-        # direct mode intentionally rejects.
-        let direct_args = if ($viz_config | path exists) { [] } else { ["--direct"] }
-        let compile_args = ["compile", $src, "--graphics", ...$direct_args, "-o", $spv]
+        let compile_args = ["compile", $src, "--graphics", "--direct", "-o", $spv]
         print $"$ ($wyn) ($compile_args | str join ' ')"
         let compile = (do { ^$wyn ...$compile_args } | complete)
         if $compile.exit_code != 0 {

@@ -164,11 +164,103 @@ fn direct_output_keeps_fragment_local_reduce_in_the_authored_stage() {
     });
 }
 
+fn assert_direct_computed_result_descriptor(descriptor: &pipeline_descriptor::PipelineDescriptor) {
+    use pipeline_descriptor::{Binding, BufferUsage, FramePassKind, Pipeline, ShaderStage};
+
+    assert_eq!(
+        descriptor.pipelines.len(),
+        2,
+        "one compute and one graphics pipeline"
+    );
+    let Pipeline::Compute(compute) = &descriptor.pipelines[0] else {
+        panic!("the authored result producer must be the first pipeline")
+    };
+    assert_eq!(
+        compute.stages.len(),
+        1,
+        "the authored compute pipeline has one stage"
+    );
+    assert_eq!(compute.stages[0].entry_point, "frame");
+    assert!(
+        !compute.stages[0].entry_point.contains("prepass_scalar"),
+        "direct lowering must not publish a scalar prepass"
+    );
+
+    let result = descriptor
+        .source_results
+        .iter()
+        .find(|result| result.entry == "frame" && result.result == 0)
+        .expect("computed array keeps its authored result binding");
+    assert_eq!(result.pipeline_index, 0);
+    let result_binding = compute
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { set, binding, .. }
+                if (*set, *binding) == (result.set, result.binding))
+        })
+        .expect("compute pipeline publishes the authored result binding");
+    assert!(
+        compute.stages[0].writes.contains(&result_binding),
+        "compute stage writes the authored result binding"
+    );
+
+    let Pipeline::Graphics(graphics) = &descriptor.pipelines[1] else {
+        panic!("the authored graphics pipeline must follow the compute pipeline")
+    };
+    let graphics_binding = graphics
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { set, binding, .. }
+                if (*set, *binding) == (result.set, result.binding))
+        })
+        .expect("graphics pipeline reads the authored result binding");
+    let fragment = graphics
+        .stages
+        .iter()
+        .find(|stage| matches!(stage.stage, ShaderStage::Fragment))
+        .expect("fragment stage");
+    assert!(fragment.reads.contains(&graphics_binding));
+
+    assert!(descriptor.pipelines.iter().all(|pipeline| {
+        let bindings = match pipeline {
+            Pipeline::Compute(pipeline) => &pipeline.bindings,
+            Pipeline::Graphics(pipeline) => &pipeline.bindings,
+        };
+        bindings.iter().all(|binding| {
+            !matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+    }));
+
+    let compute_pass = descriptor
+        .frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.pipeline_index == 0 && pass.kind == FramePassKind::Compute)
+        .expect("compute pass");
+    let fragment_pass = descriptor
+        .frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.pipeline_index == 1 && pass.kind == FramePassKind::Fragment)
+        .expect("fragment pass");
+    assert!(
+        descriptor.frame_graph.passes[fragment_pass].depends_on.contains(&compute_pass),
+        "fragment pass must depend on the authored compute result"
+    );
+}
+
 #[test]
-fn direct_output_rejects_a_cross_stage_materialization() {
+fn direct_output_shares_an_authored_computed_result_with_fragment_shading() {
     run_with_large_stack(|| {
-        let error = plan_direct(
-            r#"
+        let source = r#"
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(
     if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
@@ -177,19 +269,32 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
     @[0.0, 0.0])
 
 entry frame(xs: []f32,
-            screen: render_target<vec4f32>) render_target<vec4f32> =
+            screen: render_target<vec4f32>)
+    ([]f32, render_target<vec4f32>) =
   let mapped = map(|x: f32| x + 1.0, xs) in
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
-  shade(screen, raster,
-    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0])
-"#,
-            CodegenTarget::Wgsl,
+  let screen1 = shade(screen, raster,
+    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0]) in
+  (mapped, screen1)
+"#;
+
+        let spirv = lower_ssa_to_spirv(
+            lower_egir_to_ssa(plan_direct(source, CodegenTarget::Spirv).expect("direct SPIR-V plan"))
+                .expect("direct SPIR-V SSA"),
         )
-        .expect_err("cross-stage array materialization must be rejected");
-        assert!(
-            error.to_string().contains("authored-only"),
-            "unexpected direct-output diagnostic: {error}"
-        );
+        .expect("direct SPIR-V lowering");
+        assert_naga_accepts_spirv(&spirv.spirv);
+        assert_direct_computed_result_descriptor(&spirv.pipeline);
+
+        let wgsl = lower_ssa_to_wgsl_with_pipeline(
+            lower_egir_to_ssa(plan_direct(source, CodegenTarget::Wgsl).expect("direct WGSL plan"))
+                .expect("direct WGSL SSA"),
+        )
+        .expect("direct WGSL lowering");
+        assert_eq!(wgsl.wgsl.matches("@compute").count(), 1);
+        assert_eq!(wgsl.wgsl.matches("@vertex").count(), 1);
+        assert_eq!(wgsl.wgsl.matches("@fragment").count(), 1);
+        assert_direct_computed_result_descriptor(&wgsl.pipeline);
     });
 }
 
