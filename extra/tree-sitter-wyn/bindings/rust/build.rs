@@ -1,8 +1,19 @@
 fn main() {
-    let src_dir = std::path::Path::new("src");
+    let manifest_dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"),
+    );
+    // Published crates place the generated parser under `src/`; a checkout of
+    // this repository keeps it at the Tree-sitter package root.
+    let packaged_src = manifest_dir.join("src");
+    let repository_src = manifest_dir.join("../../src");
+    let src_dir = if packaged_src.join("parser.c").exists() {
+        packaged_src
+    } else {
+        repository_src
+    };
 
     let mut c_config = cc::Build::new();
-    c_config.std("c11").include(src_dir);
+    c_config.std("c11").include(&src_dir);
 
     #[cfg(target_env = "msvc")]
     c_config.flag("-utf-8");

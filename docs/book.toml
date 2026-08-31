@@ -25,3 +25,7 @@ boost-hierarchy = 1
 boost-paragraph = 1
 expand = true
 heading-split-level = 3
+
+[preprocessor.wyn-highlight]
+command = "cargo run --quiet --manifest-path ../extra/mdbook-wyn-highlight/Cargo.toml --"
+renderers = ["html"]
