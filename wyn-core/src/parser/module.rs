@@ -244,9 +244,7 @@ impl Parser<'_> {
 
             Some(Token::Import) => {
                 // import "path"
-                self.advance();
-                let path = self.expect_string_literal()?;
-                ModuleExpression::Import(path)
+                ModuleExpression::Import(self.parse_source_import()?)
             }
 
             Some(Token::Identifier(_)) => {

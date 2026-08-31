@@ -11,7 +11,7 @@ use crate::module_manager;
 use crate::op;
 use crate::parser;
 use crate::types;
-use wyn_module_graph::ModuleId;
+use wyn_module_graph::{ImportSiteId, ModuleId};
 
 fn tokenize(input: &str) -> std::result::Result<Vec<crate::lexer::LocatedToken>, String> {
     tokenize_module(ModuleId::from(0), input)
@@ -1460,11 +1460,50 @@ fn test_parse_import() {
     let program = parse_ok("import \"path/to/module\"");
     assert_eq!(program.declarations.len(), 1);
 
-    let path = match &program.declarations[0] {
+    let import = match &program.declarations[0] {
         Declaration::Frontend(ParsedFrontend::Import(p)) => p,
         _ => panic!("Expected Import declaration"),
     };
-    assert_eq!(path, "path/to/module");
+    assert_eq!(import.path, "path/to/module");
+    assert_eq!(import.site, ImportSiteId::from(0));
+}
+
+#[test]
+fn import_sites_are_file_local_and_follow_source_order() {
+    let source = concat!(
+        "import \"first\"\n",
+        "module Nested = { import \"second\" }\n",
+        "module Bound = import \"third\"\n",
+    );
+    let program = parse_ok(source);
+
+    let first = match &program.declarations[0] {
+        Declaration::Frontend(ParsedFrontend::Import(import)) => import,
+        declaration => panic!("expected top-level import, got {declaration:?}"),
+    };
+    let second = match &program.declarations[1] {
+        Declaration::Frontend(ParsedFrontend::Module(ModuleDecl::Module {
+            body: ModuleExpression::Struct(declarations),
+            ..
+        })) => match &declarations[0] {
+            NestedDeclaration::Import(import) => import,
+            declaration => panic!("expected nested import, got {declaration:?}"),
+        },
+        declaration => panic!("expected struct module, got {declaration:?}"),
+    };
+    let third = match &program.declarations[2] {
+        Declaration::Frontend(ParsedFrontend::Module(ModuleDecl::Module {
+            body: ModuleExpression::Import(import),
+            ..
+        })) => import,
+        declaration => panic!("expected imported module, got {declaration:?}"),
+    };
+
+    for (index, import) in [first, second, third].into_iter().enumerate() {
+        assert_eq!(import.site, ImportSiteId::from(index as u32));
+        let range = import.span.range();
+        assert!(source[range.start() as usize..range.end() as usize].starts_with("import"));
+    }
 }
 
 #[test]

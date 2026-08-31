@@ -10,7 +10,8 @@ use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
 use log::trace;
 use std::sync::OnceLock;
-use wyn_module_graph::{ModuleId, TextRange};
+use wyn_base::IdSource;
+use wyn_module_graph::{ImportSiteId, ModuleId, TextRange};
 
 mod module;
 mod pattern;
@@ -96,6 +97,7 @@ pub struct Parser<'a> {
     tokens: Vec<LocatedToken>,
     current: usize,
     node_counter: &'a mut NodeCounter,
+    import_sites: IdSource<ImportSiteId>,
     graphics: bool,
 }
 
@@ -118,6 +120,7 @@ impl<'a> Parser<'a> {
             tokens,
             current: 0,
             node_counter,
+            import_sites: IdSource::new(),
             graphics,
         }
     }
@@ -215,9 +218,8 @@ impl<'a> Parser<'a> {
                 Ok(Declaration::Frontend(ParsedFrontend::Open(mod_exp)))
             }
             Some(Token::Import) => {
-                self.advance();
-                let path = self.expect_string_literal()?;
-                Ok(Declaration::Frontend(ParsedFrontend::Import(path)))
+                let import = self.parse_source_import()?;
+                Ok(Declaration::Frontend(ParsedFrontend::Import(import)))
             }
             Some(Token::Extern) => self.parse_extern_decl(attributes),
             Some(Token::Resource) => Err(err_parse_at!(
@@ -243,7 +245,7 @@ impl<'a> Parser<'a> {
                 ParsedFrontend::Module(decl) => NestedDeclaration::Module(decl),
                 ParsedFrontend::ModuleTypeBind(decl) => NestedDeclaration::ModuleTypeBind(decl),
                 ParsedFrontend::Open(expression) => NestedDeclaration::Open(expression),
-                ParsedFrontend::Import(path) => NestedDeclaration::Import(path),
+                ParsedFrontend::Import(import) => NestedDeclaration::Import(import),
                 ParsedFrontend::Resource(decl) => NestedDeclaration::Resource(decl),
             },
         })
@@ -258,6 +260,18 @@ impl<'a> Parser<'a> {
             }
             _ => Err(err_parse!("Expected string literal")),
         }
+    }
+
+    fn parse_source_import(&mut self) -> Result<SourceImport> {
+        let start = self.current_span();
+        self.expect(Token::Import)?;
+        let path = self.expect_string_literal()?;
+        let span = start.merge(&self.previous_span());
+        Ok(SourceImport {
+            site: self.import_sites.next_id(),
+            path,
+            span,
+        })
     }
 
     fn parse_decl(

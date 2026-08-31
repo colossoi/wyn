@@ -106,18 +106,18 @@ fn expand(
                     )));
                     continue;
                 }
-                ParsedFrontend::Import(path) => path,
+                ParsedFrontend::Import(import) => import,
             },
         };
 
-        let mut joined = base_dir.join(&rel_path);
+        let mut joined = base_dir.join(&rel_path.path);
         if joined.extension().is_none() {
             joined.set_extension("wyn");
         }
         let canonical = joined.canonicalize().map_err(|e| {
             err_module!(
                 "import: cannot resolve `{}` (looked for `{}`): {}",
-                rel_path,
+                rel_path.path,
                 joined.display(),
                 e
             )

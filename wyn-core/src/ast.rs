@@ -746,6 +746,18 @@ pub struct ModuleTypeBind {
     pub definition: ModuleTypeExpression,
 }
 
+/// A physical source import before its target has been resolved.
+///
+/// Its identity is local to the containing source file. The parser keeps the
+/// source spelling so the module-graph frontend can interpret package and
+/// relative paths without teaching the parser those rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceImport {
+    pub(crate) site: wyn_module_graph::ImportSiteId,
+    pub(crate) path: String,
+    pub(crate) span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModuleExpression<D = NestedDeclaration> {
     Name(String),                                               // qualname
@@ -757,7 +769,7 @@ pub enum ModuleExpression<D = NestedDeclaration> {
     ), // \ (params) [: sig] -> body
     Application(Box<ModuleExpression<D>>, Box<ModuleExpression<D>>), // mod_exp mod_exp
     Struct(Vec<D>),                                             // { dec* }
-    Import(String),                                             // import "path"
+    Import(SourceImport),                                       // import "path"
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -793,7 +805,7 @@ pub enum NestedDeclaration {
     Module(ModuleDecl),
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression),
-    Import(String),
+    Import(SourceImport),
     Resource(interface::ResourceDecl),
 }
 
@@ -805,7 +817,7 @@ pub enum ParsedFrontend<D> {
     Module(ModuleDecl<D>),
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression<D>),
-    Import(String),
+    Import(SourceImport),
     Resource(interface::ResourceDecl),
 }
 

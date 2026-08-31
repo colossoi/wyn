@@ -311,8 +311,8 @@ impl AstFormatter {
             Declaration::Frontend(ParsedFrontend::Open(_)) => {
                 self.write_line("open ...");
             }
-            Declaration::Frontend(ParsedFrontend::Import(path)) => {
-                self.write_line(&format!("import \"{}\"", path));
+            Declaration::Frontend(ParsedFrontend::Import(import)) => {
+                self.write_line(&format!("import \"{}\"", import.path));
             }
             Declaration::Extern(e) => {
                 self.write_line(&format!(

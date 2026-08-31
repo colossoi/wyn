@@ -84,7 +84,7 @@ impl ModuleFrontend for TestFrontend {
                     )
                     .ok_or_else(|| TestFrontendError::InvalidImport(text.to_owned()))?;
                 let target = parse_test_import(text)?;
-                report_import(ImportSiteId::new(next_site), target, text_range(start, end));
+                report_import(ImportSiteId::from(next_site), target, text_range(start, end));
                 next_site += 1;
             }
             offset += line.len();
@@ -320,10 +320,10 @@ fn dependency_aliases_are_resolved_in_the_importing_package() {
         .unwrap_or_else(|error| panic!("load graph: {error}"));
 
     let root_target = graph
-        .import_target(graph.root(), ImportSiteId::new(0))
+        .import_target(graph.root(), ImportSiteId::from(0))
         .unwrap_or_else(|| panic!("missing root import"));
     let leaf_target = graph
-        .import_target(root_target, ImportSiteId::new(0))
+        .import_target(root_target, ImportSiteId::from(0))
         .unwrap_or_else(|| panic!("missing middle import"));
     assert_eq!(graph.package_of(root_target), Some(middle));
     assert_eq!(graph.package_of(leaf_target), Some(leaf));
@@ -390,7 +390,7 @@ fn undeclared_dependency_reports_its_alias_and_source_span() {
         panic!("expected unknown dependency error");
     };
     assert_eq!(*from, ModuleId::from(0));
-    assert_eq!(*site, ImportSiteId::new(0));
+    assert_eq!(*site, ImportSiteId::from(0));
     assert_eq!(alias.as_str(), "missing");
     assert_eq!(span.range(), text_range(0, 11));
     assert_eq!(failure.snippet(*span), Ok("dep:missing"));
