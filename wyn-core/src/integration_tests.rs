@@ -6568,6 +6568,7 @@ fn inst_signature_multiset<Tag, GlobalContext>(
                     OpTag::Project { .. } => "Project".to_string(),
                     OpTag::Index => "Index".to_string(),
                     OpTag::Materialize => "Materialize".to_string(),
+                    OpTag::AddressableConstant(_) => "AddressableConstant".to_string(),
                     OpTag::DynamicExtract => "DynamicExtract".to_string(),
                     OpTag::StorageView(_) => "StorageView".to_string(),
                     OpTag::ResourceLen(_) => "ResourceLen".to_string(),

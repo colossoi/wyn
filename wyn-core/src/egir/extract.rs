@@ -110,6 +110,7 @@ fn op_cost<R>(op: &PureOp<R>) -> u32 {
         | PureOp::Bool(_)
         | PureOp::Unit
         | PureOp::Global(_)
+        | PureOp::AddressableConstant(_)
         | PureOp::Project { .. } => 0,
 
         // Single-instruction operations:

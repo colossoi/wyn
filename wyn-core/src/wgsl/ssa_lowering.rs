@@ -711,13 +711,6 @@ struct LowerCtx<'a> {
     /// this in preference to the synthesized `_wgsl_gid`, since WGSL
     /// rejects duplicate `@builtin` declarations on the same entry.
     wgsl_gid_alias: Option<String>,
-    /// Compile-time-constant arrays promoted to module-scope `var<private>`
-    /// globals so a runtime index addresses one shared materialization
-    /// instead of a per-occurrence `var<function>` (the WGSL analog of the
-    /// SPIR-V `Private`-global hoist). Keyed by the initializer expression,
-    /// which is already value-deduped, so equal arrays collapse to one
-    /// global. Value is `(global_name, wgsl_type)`.
-    private_const_globals: LookupMap<String, (String, String)>,
     int64_mode: WgslInt64Mode,
     u64_emulation: U64Emulation,
 }
@@ -781,7 +774,6 @@ impl<'a> LowerCtx<'a> {
             output_struct_counter: 0,
             pc_blocks: LookupMap::new(),
             wgsl_gid_alias: None,
-            private_const_globals: LookupMap::new(),
             int64_mode: options.int64_mode,
             u64_emulation: U64Emulation::default(),
         }
@@ -805,6 +797,80 @@ impl<'a> LowerCtx<'a> {
 
     fn indent_str(&self) -> String {
         "    ".repeat(self.indent)
+    }
+
+    fn addressable_constant_expr(
+        &mut self,
+        value: &ssa::types::AddressableConstantValue,
+    ) -> Result<String> {
+        use ssa::types::{AddressableConstantKind, ConstantValue};
+        match &value.kind {
+            AddressableConstantKind::Scalar(ConstantValue::I32(value)) => Ok(format!("{value}i")),
+            AddressableConstantKind::Scalar(ConstantValue::U32(value)) => Ok(format!("{value}u")),
+            AddressableConstantKind::Scalar(ConstantValue::F32(bits)) => {
+                let value = f32::from_bits(*bits);
+                if !value.is_finite() {
+                    return Err(err_wgsl!("WGSL does not support NaN/Infinity constants: {value}"));
+                }
+                let text = value.to_string();
+                Ok(
+                    if text.contains('.') || text.contains('e') || text.contains('E') {
+                        format!("{text}f")
+                    } else {
+                        format!("{text}.0f")
+                    },
+                )
+            }
+            AddressableConstantKind::Scalar(ConstantValue::Bool(value))
+            | AddressableConstantKind::Bool(value) => Ok(value.to_string()),
+            AddressableConstantKind::Signed(literal) => {
+                if self.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&value.ty) {
+                    int64_emulation::lower_literal(literal).map_err(|message| err_wgsl!("{message}"))
+                } else {
+                    Ok(format!("{literal}i"))
+                }
+            }
+            AddressableConstantKind::Unsigned(literal) => {
+                if self.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&value.ty) {
+                    int64_emulation::lower_literal(literal).map_err(|message| err_wgsl!("{message}"))
+                } else {
+                    Ok(format!("{literal}u"))
+                }
+            }
+            AddressableConstantKind::Float(value) => Ok(
+                if value.contains('.') || value.contains('e') || value.contains('E') {
+                    format!("{value}f")
+                } else {
+                    format!("{value}.0f")
+                },
+            ),
+            AddressableConstantKind::Composite(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.addressable_constant_expr(element))
+                    .collect::<Result<Vec<_>>>()?;
+                self.addressable_composite_expr(&value.ty, &elements)
+            }
+        }
+    }
+
+    fn addressable_composite_expr(
+        &mut self,
+        ty: &PolyType<TypeName>,
+        elements: &[String],
+    ) -> Result<String> {
+        let Some(components) = egir::types::as_soa_tuple(ty) else {
+            let wgsl_ty = self.type_emitter.type_to_wgsl(ty)?;
+            return Ok(format!("{}({})", wgsl_ty, elements.join(", ")));
+        };
+        let mut fields = Vec::with_capacity(components.len());
+        for (field, component_ty) in components.iter().enumerate() {
+            let projected =
+                elements.iter().map(|element| format!("({element}).f{field}")).collect::<Vec<_>>();
+            fields.push(self.addressable_composite_expr(component_ty, &projected)?);
+        }
+        let wgsl_ty = self.type_emitter.type_to_wgsl(ty)?;
+        Ok(format!("{}({})", wgsl_ty, fields.join(", ")))
     }
 
     fn mangle_tracked(&mut self, name: &str) -> Result<String> {
@@ -863,6 +929,9 @@ impl<'a> LowerCtx<'a> {
                     self.type_emitter.type_to_wgsl(&input.ty)?;
                 }
             }
+        }
+        for constant in &self.program.addressable_constants {
+            self.type_emitter.type_to_wgsl(&constant.value.ty)?;
         }
 
         let mut output = String::new();
@@ -933,9 +1002,10 @@ impl<'a> LowerCtx<'a> {
         // per-occurrence `var<function>`. Populated while lowering bodies
         // above; emitted here, after the struct declarations its types may
         // reference. Sorted by name for deterministic output.
-        let mut const_globals: Vec<_> = self.private_const_globals.iter().collect();
-        const_globals.sort_by_key(|(_, (name, _))| name.clone());
-        for (init, (name, ty)) in const_globals {
+        for constant in &self.program.addressable_constants {
+            let name = format!("_const_global_{}", constant.id.0);
+            let ty = self.type_emitter.type_to_wgsl(&constant.value.ty)?;
+            let init = self.addressable_constant_expr(&constant.value)?;
             writeln!(output, "var<private> {}: {} = {};", name, ty, init)?;
             writeln!(output)?;
         }
@@ -1716,6 +1786,8 @@ fn is_scalar_literal(inst: &WynInstNode) -> bool {
 struct BodyLowerCtx<'a, 'b> {
     ctx: &'a mut LowerCtx<'b>,
     body: &'a FuncBody,
+    /// Derived def-use information used to inline cheap single-use values.
+    uses: ssa::ValueUses,
     /// Emitted WGSL expression (or var name) per ValueId, tagged with
     /// its value category (rvalue-safe alias vs. lvalue place).
     value_map: LookupMap<ValueId, ValueBinding>,
@@ -1775,6 +1847,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         Self {
             ctx,
             body,
+            uses: ssa::ValueUses::analyze(body),
             value_map: LookupMap::new(),
             declared: LookupSet::new(),
             addressable: LookupSet::new(),
@@ -1818,6 +1891,29 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         self.value_map.insert(result, ValueBinding::Alias(var));
         Ok(())
     }
+
+    /// Substitute cheap pure single-use expressions. The emitted-text limit
+    /// naturally inserts a binding into long chains, avoiding both expression
+    /// blow-up and recursive cost analysis on very large shaders.
+    fn should_inline(&self, value: ValueId, inst: &WynInstNode, expr: &str) -> bool {
+        const MAX_INLINE_TEXT: usize = 192;
+        self.uses.is_used_once(value)
+            && expr.len() <= MAX_INLINE_TEXT
+            && matches!(
+                inst.data,
+                InstKind::Op {
+                    tag: op::OpTag::BinOp(_)
+                        | op::OpTag::UnaryOp(_)
+                        | op::OpTag::Tuple(_)
+                        | op::OpTag::Vector(_)
+                        | op::OpTag::Matrix { .. }
+                        | op::OpTag::ArrayLit(_)
+                        | op::OpTag::Project { .. }
+                        | op::OpTag::Intrinsic { .. },
+                    ..
+                }
+            )
+    }
     /// Resolve a ValueRef to a compile-time integer, if possible. Returns
     /// None for runtime values. Used by storage-intrinsic dispatch where
     /// `set` and `binding` must be compile-time constants.
@@ -1844,105 +1940,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 None
             }
             _ => None,
-        }
-    }
-
-    /// True iff `v` is a compile-time constant: a numeric/bool literal, or a
-    /// composite (array / vector / tuple / matrix) whose elements are all
-    /// recursively constant. Such a value can be promoted to a module-scope
-    /// `var<private>` whose initializer is a WGSL const-expression.
-    fn is_const_value(&self, v: ValueRef) -> bool {
-        use crate::op::OpTag;
-        let id = match v {
-            ValueRef::Const(_) => return true,
-            ValueRef::Ssa(id) => id,
-        };
-        let Some(val) = self.body.inner.values.get(id) else {
-            return false;
-        };
-        let inst_id = match val.def {
-            ssa::framework::ValueDef::Inst { inst } => inst,
-            _ => return false,
-        };
-        let Some(inst) = self.body.inner.insts.get(inst_id) else {
-            return false;
-        };
-        match &inst.data {
-            InstKind::Op { tag, operands } => match tag {
-                op::OpTag::ResourceLen(_) => {
-                    panic!("logical resource length reached WGSL lowering")
-                }
-                OpTag::Int(_) | OpTag::Uint(_) | OpTag::Float(_) | OpTag::Bool(_) | OpTag::Unit => true,
-                OpTag::Tuple(_) | OpTag::Vector(_) | OpTag::ArrayLit(_) | OpTag::Matrix { .. } => {
-                    operands.iter().all(|o| self.is_const_value(*o))
-                }
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
-    /// Emit a constant value as a fully-inlined WGSL const-expression
-    /// (literals + `vecN<T>(…)` / `array<T,N>(…)` / struct constructors),
-    /// independent of the per-occurrence `var` bindings the body otherwise
-    /// uses. Required for a module-scope `var<private>` initializer, which
-    /// must be a const-expression and can't name function-local bindings.
-    /// Caller guarantees `is_const_value(v)`.
-    fn const_expr_of(&mut self, v: ValueRef) -> Result<String> {
-        use crate::op::OpTag;
-        let id = match v {
-            ValueRef::Const(c) => return self.format_constant(&c),
-            ValueRef::Ssa(id) => id,
-        };
-        let result_ty = self.body.get_value_type(id).clone();
-        let val = self
-            .body
-            .inner
-            .values
-            .get(id)
-            .ok_or_else(|| err_wgsl_at!(self.blame_span(), "const hoist: value not found"))?;
-        let inst_id = match val.def {
-            ssa::framework::ValueDef::Inst { inst } => inst,
-            _ => {
-                return Err(err_wgsl_at!(
-                    self.blame_span(),
-                    "const hoist: value has no instruction"
-                ))
-            }
-        };
-        let (tag, operands) = match self.body.inner.insts.get(inst_id).map(|i| &i.data) {
-            Some(InstKind::Op { tag, operands }) => (tag.clone(), operands.clone()),
-            _ => return Err(err_wgsl_at!(self.blame_span(), "const hoist: not an Op")),
-        };
-        match &tag {
-            OpTag::Int(s) | OpTag::Uint(s) => {
-                if self.ctx.int64_mode == WgslInt64Mode::EmulateU64 && int64_emulation::is_u64(&result_ty) {
-                    int64_emulation::lower_literal(s)
-                        .map_err(|message| err_wgsl_at!(self.blame_span(), "{message}"))
-                } else if matches!(result_ty, PolyType::Constructed(TypeName::UInt(32), _)) {
-                    Ok(format!("{}u", s))
-                } else {
-                    Ok(format!("{}i", s))
-                }
-            }
-            OpTag::Float(s) => {
-                if s.contains('.') || s.contains('e') || s.contains('E') {
-                    Ok(format!("{}f", s))
-                } else {
-                    Ok(format!("{}.0f", s))
-                }
-            }
-            OpTag::Bool(b) => Ok((if *b { "true" } else { "false" }).to_string()),
-            OpTag::ArrayLit(_) => {
-                let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
-                self.array_literal_expr(&result_ty, &parts?)
-            }
-            OpTag::Vector(_) | OpTag::Tuple(_) => {
-                let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(&result_ty)?;
-                let parts: Result<Vec<_>> = operands.iter().map(|o| self.const_expr_of(*o)).collect();
-                Ok(format!("{}({})", wgsl_ty, parts?.join(", ")))
-            }
-            _ => Err(err_wgsl_at!(self.blame_span(), "const hoist: unsupported op")),
         }
     }
 
@@ -2518,10 +2515,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         // DynamicExtract can subscript it with `x[i]`.
                         // Function parameters and previously declared local
                         // `var`s are already addressable, so alias them rather
-                        // than copying an entire fixed array. A *constant*
-                        // array is still hoisted once to a shared module-scope
-                        // `var<private>`. Only a non-addressable expression
-                        // needs a fresh function-local `var`.
+                        // than copying an entire fixed array. Constant cases
+                        // have already become `AddressableConstant` during
+                        // target preparation.
                         InstKind::Op {
                             tag: op::OpTag::Materialize,
                             operands,
@@ -2531,59 +2527,32 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             })?;
                             let ty =
                                 self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result_id))?;
-                            if self.is_const_value(operands[0]) {
-                                // Promote to a deduped module-scope `var<private>`
-                                // and alias the result to it; the runtime index then
-                                // addresses one shared materialization. `var<private>`
-                                // (a reference) is dynamically indexable, unlike a
-                                // `const` value. The initializer is the fully-inlined
-                                // const-expression, which also serves as the value-
-                                // based dedup key (equal arrays → one global).
-                                let init = self.const_expr_of(operands[0])?;
-                                let existing =
-                                    self.ctx.private_const_globals.get(&init).map(|(name, _)| name.clone());
-                                let name = match existing {
-                                    Some(name) => name,
-                                    None => {
-                                        let name = format!(
-                                            "_const_global_{}",
-                                            self.ctx.private_const_globals.len()
-                                        );
-                                        self.ctx
-                                            .private_const_globals
-                                            .insert(init.clone(), (name.clone(), ty));
-                                        name
-                                    }
-                                };
-                                self.value_map.insert(result_id, ValueBinding::Alias(name));
+                            let addressable_alias = match operands[0] {
+                                ValueRef::Ssa(value_id) => self
+                                    .value_map
+                                    .get(&value_id)
+                                    .map(ValueBinding::expr)
+                                    .filter(|name| self.addressable.contains(*name))
+                                    .map(str::to_owned),
+                                ValueRef::Const(_) => None,
+                            };
+                            if let Some(alias) = addressable_alias {
+                                self.value_map.insert(result_id, ValueBinding::Alias(alias));
                             } else {
-                                let addressable_alias = match operands[0] {
-                                    ValueRef::Ssa(value_id) => self
-                                        .value_map
-                                        .get(&value_id)
-                                        .map(ValueBinding::expr)
-                                        .filter(|name| self.addressable.contains(*name))
-                                        .map(str::to_owned),
-                                    ValueRef::Const(_) => None,
-                                };
-                                if let Some(alias) = addressable_alias {
-                                    self.value_map.insert(result_id, ValueBinding::Alias(alias));
-                                } else {
-                                    let var = wgsl_var(result_id);
-                                    let val = self.get_value(operands[0])?;
-                                    writeln!(
-                                        output,
-                                        "{}var {}: {} = {};",
-                                        self.ctx.indent_str(),
-                                        var,
-                                        ty,
-                                        val
-                                    )?;
-                                    self.declared.insert(var.clone());
-                                    self.addressable.insert(var.clone());
-                                    self.writable.insert(var.clone());
-                                    self.value_map.insert(result_id, ValueBinding::Alias(var));
-                                }
+                                let var = wgsl_var(result_id);
+                                let val = self.get_value(operands[0])?;
+                                writeln!(
+                                    output,
+                                    "{}var {}: {} = {};",
+                                    self.ctx.indent_str(),
+                                    var,
+                                    ty,
+                                    val
+                                )?;
+                                self.declared.insert(var.clone());
+                                self.addressable.insert(var.clone());
+                                self.writable.insert(var.clone());
+                                self.value_map.insert(result_id, ValueBinding::Alias(var));
                             }
                             continue;
                         }
@@ -2600,10 +2569,19 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                         if matches!(
                             inst.data,
                             InstKind::Op {
-                                tag: op::OpTag::StorageView(_),
+                                tag: op::OpTag::StorageView(_) | op::OpTag::AddressableConstant(_),
                                 ..
                             }
                         ) {
+                            if matches!(
+                                inst.data,
+                                InstKind::Op {
+                                    tag: op::OpTag::AddressableConstant(_),
+                                    ..
+                                }
+                            ) {
+                                self.addressable.insert(expr.clone());
+                            }
                             self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
@@ -2635,7 +2613,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                             self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
-                        if is_scalar_literal(inst) {
+                        if is_scalar_literal(inst) || self.should_inline(result, inst, &expr) {
                             self.value_map.insert(result, ValueBinding::Alias(expr));
                             continue;
                         }
@@ -3340,6 +3318,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     self.blame_span(),
                     "internal: Materialize should be handled in emit_nodes"
                 )),
+
+                op::OpTag::AddressableConstant(id) => Ok(format!("_const_global_{}", id.0)),
 
                 op::OpTag::DynamicExtract => {
                     let base = operands[0];

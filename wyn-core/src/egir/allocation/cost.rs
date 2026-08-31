@@ -189,6 +189,7 @@ fn operation_cost(
         | OpTag::Bool(_)
         | OpTag::Unit
         | OpTag::Global(_)
+        | OpTag::AddressableConstant(_)
         | OpTag::Project { .. }
         | OpTag::ResourceLen(_)
         | OpTag::StorageViewLen => Some(0),

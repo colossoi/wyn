@@ -707,8 +707,9 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("@fragment"));
     assert!(wgsl.contains("@location(0)"));
     assert!(
-        wgsl.lines().any(|line| line.trim_start().starts_with("let v")),
-        "ordinary immutable SSA results should use let bindings:\n{wgsl}"
+        wgsl.contains("_out0 = vec4<f32>(0.6f, 0.7f, 0.8f, 1.0f);")
+            && !wgsl.lines().any(|line| line.trim_start().starts_with("let v")),
+        "cheap single-use expressions should be substituted into their use:\n{wgsl}"
     );
 }
 #[test]
@@ -849,6 +850,11 @@ fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
     assert!(
         wgsl.contains("_const_global_0["),
         "the runtime index must address the global:\n{wgsl}"
+    );
+    assert_eq!(
+        wgsl.matches("array<i32, 4>(").count(),
+        1,
+        "the hoisted initializer must not also be emitted as a dead function-local array:\n{wgsl}"
     );
 }
 

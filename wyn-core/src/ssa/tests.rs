@@ -5,6 +5,7 @@ use crate::compile_thru_spirv;
 use crate::op;
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{InstKind, Terminator, ValueId, ValueRef};
+use crate::ssa::{eliminate_dead_pure_instructions, UseSite, ValueUses};
 use polytype::Type;
 
 #[test]
@@ -34,6 +35,66 @@ fn test_func_body_params() {
     assert_ne!(body.param(0).unwrap().0, body.param(1).unwrap().0);
     assert_eq!(body.num_blocks(), 1);
     assert_eq!(body.num_insts(), 1);
+}
+
+#[test]
+fn value_uses_counts_instruction_and_terminator_operands() {
+    let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
+    let mut builder = FuncBuilder::new(vec![(i32_ty(), "x".to_string())], i32_ty());
+    let x = builder.get_param(0);
+    let sum = builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::BinOp(op::BinaryOperator::Add),
+                operands: vec![x.into(), x.into()],
+            },
+            i32_ty(),
+        )
+        .unwrap();
+    builder.terminate(Terminator::Return(Some(sum.into()))).unwrap();
+    let body = builder.finish().unwrap();
+
+    let uses = ValueUses::analyze(&body);
+    assert_eq!(uses.count(x), 2);
+    assert_eq!(uses.count(sum), 1);
+    assert!(matches!(uses.users(sum), [UseSite::Terminator]));
+}
+
+#[test]
+fn dead_pure_elimination_removes_an_entire_unused_expression_tree() {
+    let i32_ty = || Type::Constructed(TypeName::Int(32), vec![]);
+    let mut builder = FuncBuilder::new(vec![(i32_ty(), "x".to_string())], i32_ty());
+    let x = builder.get_param(0);
+    let dead_sum = builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::BinOp(op::BinaryOperator::Add),
+                operands: vec![
+                    x.into(),
+                    ValueRef::Const(crate::ssa::types::ConstantValue::I32(1)),
+                ],
+            },
+            i32_ty(),
+        )
+        .unwrap();
+    let _dead_product = builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::BinOp(op::BinaryOperator::Multiply),
+                operands: vec![
+                    dead_sum.into(),
+                    ValueRef::Const(crate::ssa::types::ConstantValue::I32(2)),
+                ],
+            },
+            i32_ty(),
+        )
+        .unwrap();
+    builder.terminate(Terminator::Return(Some(x.into()))).unwrap();
+    let mut body = builder.finish().unwrap();
+
+    eliminate_dead_pure_instructions(&mut body);
+    assert_eq!(body.num_insts(), 0);
+    assert_eq!(ValueUses::analyze(&body).count(x), 1);
 }
 
 /// `InstKind::remap` rewrites `ValueId` operands but must leave `PlaceId`s

@@ -29,7 +29,7 @@
 
 use crate::ast::{Span, TypeName};
 use crate::interface::{self, StorageAccess};
-use crate::op::OpTag;
+use crate::op::{AddressableConstantId, OpTag};
 use crate::ssa;
 use crate::BindingRef;
 use crate::EntryId;
@@ -54,6 +54,29 @@ pub enum ConstantValue {
     U32(u32),
     F32(u32), // stored as bits for Eq/Hash
     Bool(bool),
+}
+
+/// Backend-neutral constant-expression tree promoted out of a function body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressableConstantValue {
+    pub ty: Type<TypeName>,
+    pub kind: AddressableConstantKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddressableConstantKind {
+    Scalar(ConstantValue),
+    Signed(String),
+    Unsigned(String),
+    Float(String),
+    Bool(bool),
+    Composite(Vec<AddressableConstantValue>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressableConstant {
+    pub id: AddressableConstantId,
+    pub value: AddressableConstantValue,
 }
 
 impl ConstantValue {
@@ -558,6 +581,9 @@ pub struct Program<Tag, GlobalContext> {
     /// Program-level constant definitions (zero-arg defs with purely constant bodies).
     /// Emitted once at module scope; functions reference them via `InstKind::Global`.
     pub constants: Vec<Constant>,
+    /// Constant values promoted to module-level addressable storage by an
+    /// optional target preparation pass.
+    pub addressable_constants: Vec<AddressableConstant>,
     /// Program-wide pipeline and planning data.
     pub global_context: GlobalContext,
     state: std::marker::PhantomData<fn() -> Tag>,
@@ -574,6 +600,7 @@ impl<Tag, GlobalContext> Program<Tag, GlobalContext> {
             functions,
             entry_points,
             constants,
+            addressable_constants: Vec::new(),
             global_context,
             state: std::marker::PhantomData,
         }
@@ -582,12 +609,14 @@ impl<Tag, GlobalContext> Program<Tag, GlobalContext> {
     /// Change only the top-level proof state while preserving the SSA tree and
     /// its program-wide context.
     pub(crate) fn retag<NewTag>(self) -> Program<NewTag, GlobalContext> {
-        Program::from_parts(
+        let mut result = Program::from_parts(
             self.functions,
             self.entry_points,
             self.constants,
             self.global_context,
-        )
+        );
+        result.addressable_constants = self.addressable_constants;
+        result
     }
 }
 
@@ -600,7 +629,10 @@ impl Program<stage::BareTag, ()> {
         self,
         global_context: GlobalContext,
     ) -> Program<Tag, GlobalContext> {
-        Program::from_parts(self.functions, self.entry_points, self.constants, global_context)
+        let mut result =
+            Program::from_parts(self.functions, self.entry_points, self.constants, global_context);
+        result.addressable_constants = self.addressable_constants;
+        result
     }
 }
 

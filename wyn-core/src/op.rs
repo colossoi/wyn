@@ -29,6 +29,10 @@ use crate::builtins;
 use crate::BindingRef;
 use crate::GlobalId;
 
+/// Index into the SSA program's table of promoted addressable constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AddressableConstantId(pub u32);
+
 /// Structurally resolved binary operator.
 ///
 /// The parser may temporarily carry an operator token as text, but TLC and all
@@ -190,6 +194,8 @@ pub enum OpTag<R, C> {
     },
     Index,
     Materialize,
+    /// Operand-free reference to a module-level, addressable constant value.
+    AddressableConstant(AddressableConstantId),
     DynamicExtract,
     Call(C),
     Intrinsic {
@@ -275,6 +281,7 @@ impl<R, C> OpTag<R, C> {
             OpTag::Project { index } => OpTag::Project { index },
             OpTag::Index => OpTag::Index,
             OpTag::Materialize => OpTag::Materialize,
+            OpTag::AddressableConstant(value) => OpTag::AddressableConstant(value),
             OpTag::DynamicExtract => OpTag::DynamicExtract,
             OpTag::Call(value) => OpTag::Call(value),
             OpTag::Intrinsic { id, overload_idx } => OpTag::Intrinsic { id, overload_idx },
@@ -304,6 +311,7 @@ impl<R, C> OpTag<R, C> {
             OpTag::Project { index } => OpTag::Project { index },
             OpTag::Index => OpTag::Index,
             OpTag::Materialize => OpTag::Materialize,
+            OpTag::AddressableConstant(value) => OpTag::AddressableConstant(value),
             OpTag::DynamicExtract => OpTag::DynamicExtract,
             OpTag::Call(value) => OpTag::Call(map(value)?),
             OpTag::Intrinsic { id, overload_idx } => OpTag::Intrinsic { id, overload_idx },

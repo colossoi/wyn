@@ -326,6 +326,9 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
             OpTag::Materialize => {
                 write!(out, "materialize {}", format_ref(&operands[0]))?;
             }
+            OpTag::AddressableConstant(id) => {
+                write!(out, "addressable_constant {}", id.0)?;
+            }
             OpTag::DynamicExtract => {
                 write!(
                     out,

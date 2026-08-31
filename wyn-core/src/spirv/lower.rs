@@ -574,6 +574,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
 
+                op::OpTag::AddressableConstant(_) => {
+                    return Err(err_spirv_at!(
+                        self.blame_span(),
+                        "addressable constants were enabled for a non-WGSL backend"
+                    ));
+                }
+
                 op::OpTag::DynamicExtract => {
                     let base = operands[0];
                     let index = operands[1];

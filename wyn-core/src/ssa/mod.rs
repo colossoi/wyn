@@ -16,6 +16,7 @@
 //! - `layout`: Type byte-size helpers for SPIR-V memory operations.
 //! - `print`: Debug formatter for SSA bodies.
 
+pub mod addressable_constants;
 pub mod builder;
 pub mod framework;
 pub mod layout;
@@ -23,23 +24,39 @@ pub mod print;
 pub mod reachability;
 pub(crate) mod storage_function_variants;
 pub mod types;
+pub mod uses;
 
 use crate::egir;
 use crate::err_spirv;
 use crate::error;
 use crate::spirv;
 use crate::CodegenTarget;
+pub use addressable_constants::promote_addressable_constants;
 pub use reachability::filter_reachable;
 pub use types::{context, stage, Program};
+pub use uses::{eliminate_dead_pure_instructions, UseSite, ValueUses};
+
+fn eliminate_dead_values(program: &mut stage::Reachable) {
+    for function in &mut program.functions {
+        eliminate_dead_pure_instructions(&mut function.body);
+    }
+    for entry in &mut program.entry_points {
+        eliminate_dead_pure_instructions(&mut entry.body);
+    }
+    for constant in &mut program.constants {
+        eliminate_dead_pure_instructions(&mut constant.body);
+    }
+}
 
 /// Validate reachable SSA for SPIR-V and record that proof in its
 /// top-level type.
-pub fn prepare_spirv(program: stage::Reachable) -> error::Result<stage::SpirvReady> {
+pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::SpirvReady> {
     if program.global_context.profile.target == CodegenTarget::Wgsl {
         return Err(err_spirv!(
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
     }
+    eliminate_dead_values(&mut program);
     egir::verify_no_abstract::verify_no_abstract_types(&program)?;
     spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
@@ -47,12 +64,14 @@ pub fn prepare_spirv(program: stage::Reachable) -> error::Result<stage::SpirvRea
 
 /// Validate reachable SSA for WGSL and record that proof in its
 /// top-level type.
-pub fn prepare_wgsl(program: stage::Reachable) -> error::Result<stage::WgslReady> {
+pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslReady> {
     if program.global_context.profile.target == CodegenTarget::Spirv {
         return Err(err_spirv!(
             "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
         ));
     }
+    promote_addressable_constants(&mut program);
+    eliminate_dead_values(&mut program);
     egir::verify_no_abstract::verify_no_abstract_types(&program)?;
     Ok(program.retag())
 }
