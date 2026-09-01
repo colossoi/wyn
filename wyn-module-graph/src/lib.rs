@@ -17,7 +17,7 @@ mod source;
 pub use error::{BuildError, BuildFailure};
 pub use graph::{
     load_modules, BuildResult, ImportEdge, ImportTarget, ImportTraceFrame, LoadedModule, ModuleFrontend,
-    ModuleGraph, SourceProvider,
+    ModuleGraph, SourceGraph, SourceProvider,
 };
 pub use ids::{ImportSiteId, ModuleId, PackageId};
 pub use local_sources::{LocalSourceError, LocalSources};

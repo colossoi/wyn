@@ -1,9 +1,10 @@
 use std::convert::Infallible;
 
-use super::super::{
-    Decl, ExprKind, Expression, Header, Node, NodeCounter, NodeId, ParsedFamily, Program, SourceTree, Span,
-};
+use super::super::{Decl, ExprKind, Expression, Header, Node, NodeId, Program, SourceTree, Span};
+use crate::resolve_imports::{self, ImportsResolvedFamily};
+use crate::test_pipeline;
 use crate::types::Diet;
+use crate::{Compiler, CompilerOptions};
 
 #[derive(Debug)]
 enum Before {}
@@ -23,24 +24,23 @@ fn unit(id: u32) -> Expression {
 
 #[test]
 fn program_rebuild_preserves_the_shared_node_allocator() {
-    let mut node_ids = NodeCounter::new();
-    assert_eq!(node_ids.next_id(), NodeId(0));
-    let program = Program::<Before, ParsedFamily, usize> {
-        declarations: Vec::new(),
-        node_ids,
-        global_context: 42,
-        state: std::marker::PhantomData,
-    };
+    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
+    let modules = test_pipeline::load_test_modules("", compiler);
+    let root = modules.graph.root();
+    let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
+    let program = program.map_global_context::<Before, _>(|_| 42usize);
+    let next_node_id = program.node_ids.peek_id();
 
-    let rebuilt: Program<After, ParsedFamily, String> = program
+    let rebuilt: Program<After, ImportsResolvedFamily, String> = program
         .try_rebuild(|declarations, global_context, node_ids| {
-            assert_eq!(node_ids.next_id(), NodeId(1));
+            assert_eq!(node_ids.next_id(), next_node_id);
             Ok::<_, Infallible>((declarations, global_context.to_string()))
         })
         .unwrap();
 
     assert_eq!(rebuilt.global_context, "42");
-    assert_eq!(rebuilt.node_ids.peek_id(), NodeId(2));
+    assert_eq!(rebuilt.node_ids.peek_id(), NodeId(next_node_id.0 + 1));
+    assert_eq!(rebuilt.source_graph().source(root), Some(""));
 }
 
 #[test]

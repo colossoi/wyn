@@ -7,11 +7,15 @@ use crate::error::CompilerError;
 use crate::interface;
 use crate::lexer;
 use crate::lexer::tokenize as tokenize_module;
-use crate::module_manager;
 use crate::op;
 use crate::parser;
 use crate::types;
 use wyn_module_graph::{ImportSiteId, ModuleId};
+
+#[derive(Debug)]
+struct Parsed {
+    declarations: Vec<Declaration<ParsedFamily>>,
+}
 
 fn tokenize(input: &str) -> std::result::Result<Vec<crate::lexer::LocatedToken>, String> {
     tokenize_module(ModuleId::from(0), input)
@@ -53,12 +57,7 @@ fn parse_ok(input: &str) -> Parsed {
         println!("Tokens were: {:#?}", tokens_clone);
         panic!("parse failed: {:?}", e);
     });
-    Program {
-        declarations,
-        node_ids: nc,
-        global_context: module_manager::ModuleManager::new_empty(),
-        state: std::marker::PhantomData,
-    }
+    Parsed { declarations }
 }
 
 /// Parse input and return the single Decl, panicking if not exactly one or not a Decl

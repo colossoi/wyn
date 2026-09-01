@@ -356,11 +356,17 @@ pub struct Program<Tag, F: Family, GlobalContext> {
     pub declarations: Vec<Declaration<F>>,
     /// The sole allocator for nodes added while this AST is rebuilt.
     pub(crate) node_ids: NodeCounter,
+    pub(crate) source_graph: wyn_module_graph::SourceGraph,
     pub global_context: GlobalContext,
     pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
 impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
+    /// Physical source, package, and import provenance for this compilation.
+    pub const fn source_graph(&self) -> &wyn_module_graph::SourceGraph {
+        &self.source_graph
+    }
+
     /// Change only the program's nominal state while retaining its exact tree
     /// representation and global context.
     pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
@@ -376,6 +382,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Program {
             declarations: self.declarations,
             node_ids: self.node_ids,
+            source_graph: self.source_graph,
             global_context: map(self.global_context),
             state: std::marker::PhantomData,
         }
@@ -400,6 +407,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         let Program {
             declarations,
             mut node_ids,
+            source_graph,
             global_context,
             state: _,
         } = self;
@@ -407,6 +415,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Ok(Program {
             declarations,
             node_ids,
+            source_graph,
             global_context,
             state: std::marker::PhantomData,
         })

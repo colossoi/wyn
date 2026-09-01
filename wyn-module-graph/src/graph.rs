@@ -102,6 +102,9 @@ pub struct ModuleGraph<T> {
     sources: SourceMap,
 }
 
+/// Physical source and import topology with frontend syntax discarded.
+pub type SourceGraph = ModuleGraph<()>;
+
 impl<T> ModuleGraph<T> {
     pub const fn plan(&self) -> &PackagePlan {
         &self.plan
@@ -141,6 +144,39 @@ impl<T> ModuleGraph<T> {
 
     pub fn snippet(&self, span: Span) -> Result<&str, SpanError> {
         self.sources.snippet(span)
+    }
+
+    /// Discard frontend syntax while retaining package, module, import, and
+    /// source provenance.
+    pub fn erase_syntax(self) -> SourceGraph {
+        let Self {
+            plan,
+            root,
+            modules,
+            dependency_order,
+            sources,
+        } = self;
+        let mut source_modules = IdArena::new();
+        for (module_id, module) in modules {
+            let LoadedModule {
+                key,
+                syntax: _,
+                imports,
+            } = module;
+            let copied_id = source_modules.alloc(LoadedModule {
+                key,
+                syntax: (),
+                imports,
+            });
+            debug_assert_eq!(copied_id, module_id);
+        }
+        SourceGraph {
+            plan,
+            root,
+            modules: source_modules,
+            dependency_order,
+            sources,
+        }
     }
 }
 

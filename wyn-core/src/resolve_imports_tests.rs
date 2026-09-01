@@ -38,6 +38,11 @@ fn module_binding_import_becomes_loaded_module_body() {
 
     let program = resolve_imports(modules).expect("imports should resolve");
 
+    assert_eq!(
+        program.source_graph().source(program.source_graph().root()),
+        Some("module Dependency = import \"dependency\"")
+    );
+
     assert!(matches!(
         &program.declarations[..],
         [Declaration::Frontend(ImportsResolvedFrontend::Module(ModuleDecl::Module {

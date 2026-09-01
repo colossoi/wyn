@@ -34,11 +34,14 @@ pub fn resolve_imports(modules: ParsedModules) -> Result<ImportsResolved> {
         node_ids,
         semantic_modules,
     } = modules;
-    let mut resolver = ImportResolver::new(&graph);
-    let declarations = resolver.resolve_top_level(graph.root())?;
+    let declarations = {
+        let mut resolver = ImportResolver::new(&graph);
+        resolver.resolve_top_level(graph.root())?
+    };
     Ok(Program {
         declarations,
         node_ids,
+        source_graph: graph.erase_syntax(),
         global_context: semantic_modules,
         state: std::marker::PhantomData,
     })

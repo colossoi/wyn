@@ -248,6 +248,27 @@ fn diamond_import_loads_shared_source_once_in_dependency_order() {
 }
 
 #[test]
+fn syntax_erasure_preserves_source_and_resolved_imports() {
+    let (plan, package) = one_package_plan();
+    let mut provider = MemoryProvider::default();
+    provider.insert(package, "src/main.wyn", "local:dependency\n");
+    provider.insert(package, "src/dependency.wyn", "");
+
+    let graph = load_modules(plan, &mut provider, &mut TestFrontend)
+        .unwrap_or_else(|error| panic!("load graph: {error}"));
+    let root = graph.root();
+    let target = graph
+        .import_target(root, ImportSiteId::from(0))
+        .unwrap_or_else(|| panic!("missing resolved import"));
+    let graph = graph.erase_syntax();
+
+    assert_eq!(graph.source(root), Some("local:dependency\n"));
+    assert_eq!(graph.source(target), Some(""));
+    assert_eq!(graph.import_target(root, ImportSiteId::from(0)), Some(target));
+    assert_eq!(graph.package_of(target), Some(package));
+}
+
+#[test]
 fn same_relative_path_in_distinct_packages_has_distinct_module_identity() {
     let mut builder = PackagePlanBuilder::new();
     let root = builder

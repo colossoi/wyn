@@ -17,13 +17,6 @@ mod pattern;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-enum ParsedTag {}
-
-#[cfg(test)]
-type Parsed = Program<ParsedTag, ParsedFamily, crate::module_manager::ModuleManager>;
-
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedFile {
     pub(crate) declarations: Vec<Declaration<ParsedFamily>>,
