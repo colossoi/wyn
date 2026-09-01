@@ -611,8 +611,8 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Resolve type aliases in a type with optional module context.
-    /// - Qualified names (containing '.') are looked up as-is
-    /// - Unqualified names are qualified with current_module if provided
+    /// - Names are searched from the current semantic-module namespace outward
+    /// - The source spelling is then checked as an absolute name
     /// - Recursively resolves nested aliases
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Result<Type> {
         let mut visited = Vec::new();
@@ -633,14 +633,12 @@ impl<'a> TypeChecker<'a> {
                     .collect::<Result<_>>()?;
 
                 let mut keys = Vec::new();
-                if name.contains('.') {
-                    keys.push(name.clone());
-                } else {
-                    if let Some(module) = current_module {
-                        keys.push(format!("{}.{}", module, name));
-                    }
-                    keys.push(name.clone());
+                let mut namespace = current_module;
+                while let Some(current) = namespace {
+                    keys.push(format!("{}.{}", current, name));
+                    namespace = current.rsplit_once('.').map(|(parent, _)| parent);
                 }
+                keys.push(name.clone());
 
                 for key in keys {
                     if let Some(alias) = self.module_manager.resolve_type_alias_definition(&key) {

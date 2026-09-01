@@ -278,23 +278,33 @@ impl ModuleManager {
         md: &ast::ModuleDecl,
         node_counter: &mut NodeCounter,
     ) -> Result<()> {
+        self.elaborate_module_decl_in(None, md, node_counter)
+    }
+
+    fn elaborate_module_decl_in(
+        &mut self,
+        parent: Option<&str>,
+        md: &ast::ModuleDecl,
+        node_counter: &mut NodeCounter,
+    ) -> Result<()> {
         match md {
             ast::ModuleDecl::Functor { name, params, body } => {
-                if self.elaborated_modules.contains_key(name) {
-                    bail_module!("Module '{}' is already defined", name);
+                let qualified_name = qualify_module_name(parent, name);
+                if self.elaborated_modules.contains_key(&qualified_name) {
+                    bail_module!("Module '{}' is already defined", qualified_name);
                 }
-                if self.functor_modules.contains_key(name) {
-                    bail_module!("Functor '{}' is already defined", name);
+                if self.functor_modules.contains_key(&qualified_name) {
+                    bail_module!("Functor '{}' is already defined", qualified_name);
                 }
 
                 let functor = FunctorModule {
-                    name: name.clone(),
+                    name: qualified_name.clone(),
                     params: params.clone(),
                     signature: None,
                     body: body.clone(),
                 };
-                self.functor_modules.insert(name.clone(), functor);
-                self.known_modules.insert(name.clone());
+                self.functor_modules.insert(qualified_name.clone(), functor);
+                self.known_modules.insert(qualified_name);
                 Ok(())
             }
             ast::ModuleDecl::Module {
@@ -302,12 +312,18 @@ impl ModuleManager {
                 signature,
                 body,
             } => {
-                if self.elaborated_modules.contains_key(name) {
-                    bail_module!("Module '{}' is already defined", name);
+                let qualified_name = qualify_module_name(parent, name);
+                if self.elaborated_modules.contains_key(&qualified_name) {
+                    bail_module!("Module '{}' is already defined", qualified_name);
                 }
-                if self.functor_modules.contains_key(name) {
-                    bail_module!("Module '{}' is already defined as a functor", name);
+                if self.functor_modules.contains_key(&qualified_name) {
+                    bail_module!("Module '{}' is already defined as a functor", qualified_name);
                 }
+
+                // Register the namespace before elaborating its body so its
+                // declarations may refer to qualified members of the same
+                // module and to nested modules declared later in the body.
+                self.known_modules.insert(qualified_name.clone());
 
                 // Extract type substitutions from the signature
                 let substitutions = if let Some(sig) = signature {
@@ -327,7 +343,7 @@ impl ModuleManager {
                 // Elaborate the module body
                 let body_items = self.elaborate_module_body(
                     body,
-                    name,
+                    &qualified_name,
                     &substitutions,
                     &LookupMap::new(),
                     node_counter,
@@ -348,20 +364,19 @@ impl ModuleManager {
                 }
 
                 let elaborated = ElaboratedModule {
-                    name: name.clone(),
+                    name: qualified_name.clone(),
                     items,
                 };
 
                 // Register type aliases from this module
                 for item in &elaborated.items {
                     if let ElaboratedItem::TypeAlias(type_name, alias) = item {
-                        let qualified_name = format!("{}.{}", name, type_name);
-                        self.type_aliases.insert(qualified_name, alias.clone());
+                        let qualified_type_name = format!("{}.{}", qualified_name, type_name);
+                        self.type_aliases.insert(qualified_type_name, alias.clone());
                     }
                 }
 
-                self.elaborated_modules.insert(name.clone(), elaborated);
-                self.known_modules.insert(name.clone());
+                self.elaborated_modules.insert(qualified_name, elaborated);
                 Ok(())
             }
         }
@@ -756,7 +771,7 @@ impl ModuleManager {
     /// Applies type substitutions to declaration signatures
     /// `param_bindings` maps parameter names to their resolved module's elaborated items
     fn elaborate_module_body(
-        &self,
+        &mut self,
         module_expr: &ModuleExpression,
         module_name: &str,
         substitutions: &LookupMap<String, Type>,
@@ -765,6 +780,26 @@ impl ModuleManager {
     ) -> Result<Vec<ElaboratedItem>> {
         match module_expr {
             ModuleExpression::Struct(declarations) => {
+                // Module namespaces are independent of value declaration
+                // order. Register every nested name before elaborating any
+                // body, then elaborate the nested modules before values.
+                let user_module = self.user_module_names.contains(module_name);
+                for declaration in declarations {
+                    if let NestedDeclaration::Module(declaration) = declaration {
+                        let nested_name = module_declaration_name(declaration);
+                        let qualified_name = qualify_module_name(Some(module_name), nested_name);
+                        self.known_modules.insert(qualified_name.clone());
+                        if user_module {
+                            self.user_module_names.insert(qualified_name);
+                        }
+                    }
+                }
+                for declaration in declarations {
+                    if let NestedDeclaration::Module(declaration) = declaration {
+                        self.elaborate_module_decl_in(Some(module_name), declaration, node_counter)?;
+                    }
+                }
+
                 // First pass: collect all function names in this module (for intra-module resolution)
                 let mut module_functions: LookupSet<String> = LookupSet::new();
                 for decl in declarations {
@@ -853,17 +888,7 @@ impl ModuleManager {
                                 },
                             ));
                         }
-                        NestedDeclaration::Module(declaration) => {
-                            let nested_name = match declaration {
-                                ast::ModuleDecl::Module { name, .. }
-                                | ast::ModuleDecl::Functor { name, .. } => name,
-                            };
-                            return Err(err_module!(
-                                "module '{}' contains nested semantic module '{}'; combine source files with import declarations and expose definitions directly",
-                                module_name,
-                                nested_name
-                            ));
-                        }
+                        NestedDeclaration::Module(_) => {}
                         NestedDeclaration::ModuleTypeBind(declaration) => {
                             return Err(err_module!(
                                 "module '{}' contains nested module type '{}'; module types must be declared at file scope",
@@ -910,7 +935,10 @@ impl ModuleManager {
                 // Look up an existing elaborated module by name
                 if let Some(param_module) = param_bindings.get(name) {
                     Ok(clone_items_fresh_ids(&param_module.items, node_counter))
-                } else if let Some(elaborated) = self.elaborated_modules.get(name) {
+                } else if let Some(elaborated) = self
+                    .resolve_module_name(module_name, name)
+                    .and_then(|name| self.elaborated_modules.get(&name))
+                {
                     Ok(clone_items_fresh_ids(&elaborated.items, node_counter))
                 } else {
                     Err(err_module!("Unknown module: '{}'", name))
@@ -931,15 +959,27 @@ impl ModuleManager {
                 };
 
                 // Look up the functor
-                let functor = self.functor_modules.get(functor_name).ok_or_else(|| {
-                    err_module!("'{}' is not a parameterized module (functor)", functor_name)
-                })?;
+                let resolved_functor_name =
+                    self.resolve_functor_name(module_name, functor_name).ok_or_else(|| {
+                        err_module!("'{}' is not a parameterized module (functor)", functor_name)
+                    })?;
+                let functor =
+                    self.functor_modules.get(&resolved_functor_name).cloned().ok_or_else(|| {
+                        err_module!("'{}' is not a parameterized module (functor)", functor_name)
+                    })?;
 
                 // Look up the argument module
-                let arg_module = self
-                    .elaborated_modules
-                    .get(arg_name)
-                    .ok_or_else(|| err_module!("Unknown module argument: '{}'", arg_name))?;
+                let arg_module = if let Some(param_module) = param_bindings.get(arg_name) {
+                    param_module.clone()
+                } else {
+                    let resolved_arg_name = self
+                        .resolve_module_name(module_name, arg_name)
+                        .ok_or_else(|| err_module!("Unknown module argument: '{}'", arg_name))?;
+                    self.elaborated_modules
+                        .get(&resolved_arg_name)
+                        .cloned()
+                        .ok_or_else(|| err_module!("Unknown module argument: '{}'", arg_name))?
+                };
 
                 // Create parameter binding: param_name -> arg_module
                 if functor.params.len() != 1 {
@@ -969,7 +1009,7 @@ impl ModuleManager {
                 }
 
                 // From global type_aliases (for types registered at module level)
-                let arg_prefix = format!("{}.", arg_name);
+                let arg_prefix = format!("{}.", arg_module.name);
                 for (qualified_name, alias) in &self.type_aliases {
                     if alias.type_params.is_empty() {
                         if let Some(type_name) = qualified_name.strip_prefix(&arg_prefix) {
@@ -988,12 +1028,12 @@ impl ModuleManager {
                     node_counter,
                 )
             }
-            ModuleExpression::Ascription(_, _) => {
-                Err(err_module!("module-expression ascription cannot be elaborated as a module body"))
-            }
-            ModuleExpression::Lambda(_, _, _) => {
-                Err(err_module!("anonymous functors cannot be elaborated as module bodies"))
-            }
+            ModuleExpression::Ascription(_, _) => Err(err_module!(
+                "module-expression ascription cannot be elaborated as a module body"
+            )),
+            ModuleExpression::Lambda(_, _, _) => Err(err_module!(
+                "anonymous functors cannot be elaborated as module bodies"
+            )),
             ModuleExpression::Import(import) => Err(err_module_at!(
                 import.span,
                 "source import reached semantic elaboration without a resolved module edge"
@@ -1117,6 +1157,47 @@ impl ModuleManager {
         };
         name_resolution::rewrite_expr(expr, &ctx, scope)
     }
+
+    fn resolve_module_name(&self, current_module: &str, name: &str) -> Option<String> {
+        resolve_visible_name(current_module, name, |candidate| {
+            self.known_modules.contains(candidate)
+        })
+    }
+
+    fn resolve_functor_name(&self, current_module: &str, name: &str) -> Option<String> {
+        resolve_visible_name(current_module, name, |candidate| {
+            self.functor_modules.contains_key(candidate)
+        })
+    }
+}
+
+fn module_declaration_name(declaration: &ast::ModuleDecl) -> &str {
+    match declaration {
+        ast::ModuleDecl::Module { name, .. } | ast::ModuleDecl::Functor { name, .. } => name,
+    }
+}
+
+fn qualify_module_name(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(parent) => format!("{parent}.{name}"),
+        None => name.to_string(),
+    }
+}
+
+fn resolve_visible_name(
+    current_module: &str,
+    name: &str,
+    mut contains: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    let mut namespace = Some(current_module);
+    while let Some(current) = namespace {
+        let candidate = format!("{current}.{name}");
+        if contains(&candidate) {
+            return Some(candidate);
+        }
+        namespace = current.rsplit_once('.').map(|(parent, _)| parent);
+    }
+    contains(name).then(|| name.to_string())
 }
 
 /// Resolve context used during module elaboration: rewrites intra-module
@@ -1148,26 +1229,44 @@ impl<'a> name_resolution::ResolveContext for ModuleElaborationResolver<'a> {
         field: &str,
         _scope: &ScopeStack<()>,
     ) -> Option<ast::ExprKind> {
-        if !obj_quals.is_empty() {
-            return None;
-        }
         // Parameter-module reference: `n.add` where `n` is a functor param
         // bound to an elaborated module.
-        if let Some(param_module) = self.param_bindings.get(obj_name) {
-            return Some(ast::ExprKind::Identifier(Identifier {
-                qualifiers: vec![param_module.name.clone()],
-                name: field.to_string(),
-            }));
+        if obj_quals.is_empty() {
+            if let Some(param_module) = self.param_bindings.get(obj_name) {
+                return Some(ast::ExprKind::Identifier(Identifier {
+                    qualifiers: module_name_components(&param_module.name),
+                    name: field.to_string(),
+                }));
+            }
         }
-        // Known-module reference: `f32.sin`.
-        if self.known_modules.contains(obj_name) {
+        let referenced_name = identifier_name(obj_quals, obj_name);
+        let module_name = if obj_quals.is_empty() {
+            resolve_visible_name(self.module_name, &referenced_name, |candidate| {
+                self.known_modules.contains(candidate)
+            })
+        } else {
+            self.known_modules.contains(&referenced_name).then_some(referenced_name)
+        };
+        if let Some(module_name) = module_name {
             return Some(ast::ExprKind::Identifier(Identifier {
-                qualifiers: vec![obj_name.to_string()],
+                qualifiers: module_name_components(&module_name),
                 name: field.to_string(),
             }));
         }
         None
     }
+}
+
+fn identifier_name(qualifiers: &[String], name: &str) -> String {
+    if qualifiers.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", qualifiers.join("."), name)
+    }
+}
+
+fn module_name_components(name: &str) -> Vec<String> {
+    name.split('.').map(str::to_string).collect()
 }
 
 /// Spec §"Lifted Types": a plain `type X = T` may not have a function

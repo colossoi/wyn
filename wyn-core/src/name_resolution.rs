@@ -67,8 +67,9 @@ pub trait ResolveContext {
     /// name.
     fn resolve_identifier(&self, _quals: &mut Vec<String>, _name: &mut String, _scope: &ScopeStack<()>) {}
 
-    /// Called for each `ExprKind::FieldAccess(obj, field)` where `obj` is
-    /// a plain `Identifier(obj_quals, obj_name)`. Return `Some(ExprKind)`
+    /// Called for each `ExprKind::FieldAccess(obj, field)` when `obj` is an
+    /// `Identifier`. For a chained access, it may be called again after the
+    /// inner access has been resolved to an `Identifier`. Return `Some(ExprKind)`
     /// to replace the entire FieldAccess expression (typical case:
     /// `mod.name` collapses to `Identifier([mod], name)`); return `None`
     /// to leave the FieldAccess alone — the walker will then recurse into
@@ -96,15 +97,27 @@ pub fn walk_expr<C: ResolveContext>(
             context.resolve_identifier(&mut identifier.qualifiers, &mut identifier.name, scope);
         }
         ExprKind::FieldAccess(object, field) => {
-            let replacement = if let ExprKind::Identifier(identifier) = &object.kind {
+            let object_was_identifier = matches!(object.kind, ExprKind::Identifier(_));
+            let mut replacement = if let ExprKind::Identifier(identifier) = &object.kind {
                 context.resolve_field_access(&identifier.qualifiers, &identifier.name, field, scope)
             } else {
                 None
             };
+            if replacement.is_none() {
+                walk_expr(object, context, scope)?;
+                if !object_was_identifier {
+                    if let ExprKind::Identifier(identifier) = &object.kind {
+                        replacement = context.resolve_field_access(
+                            &identifier.qualifiers,
+                            &identifier.name,
+                            field,
+                            scope,
+                        );
+                    }
+                }
+            }
             if let Some(kind) = replacement {
                 expression.kind = kind;
-            } else {
-                walk_expr(object, context, scope)?;
             }
         }
         ExprKind::Application(function, arguments) => {
@@ -259,9 +272,14 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
         field: &str,
         _scope: &ScopeStack<()>,
     ) -> Option<ExprKind> {
-        if obj_quals.is_empty() && self.known_modules.contains(obj_name) {
+        let module_name = if obj_quals.is_empty() {
+            obj_name.to_string()
+        } else {
+            format!("{}.{}", obj_quals.join("."), obj_name)
+        };
+        if self.known_modules.contains(&module_name) {
             Some(ExprKind::Identifier(ast::Identifier {
-                qualifiers: vec![obj_name.to_string()],
+                qualifiers: module_name.split('.').map(str::to_string).collect(),
                 name: field.to_string(),
             }))
         } else {

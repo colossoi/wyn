@@ -1189,12 +1189,9 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_lowercase) => {
                 let type_name = name.clone();
                 self.advance();
+                let qualified = self.finish_qualified_identifier(type_name)?;
 
-                // Check for qualified type name (module.typename)
-                if self.check(&Token::Dot) {
-                    self.advance(); // consume '.'
-                    let inner_name = self.expect_identifier()?;
-                    let qualified = format!("{}.{}", type_name, inner_name);
+                if qualified.contains('.') {
                     return Ok((
                         Type::Constructed(TypeName::Named(qualified), vec![]),
                         Diet::Leaf(false),
@@ -1202,7 +1199,7 @@ impl<'a> Parser<'a> {
                 }
 
                 // Check if this is a builtin primitive type
-                let type_name_variant = match type_name.as_str() {
+                let type_name_variant = match qualified.as_str() {
                     // Floating point types
                     "f16" => TypeName::Float(16),
                     "f32" => TypeName::Float(32),
@@ -1241,7 +1238,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     // User-defined type alias or unrecognized type
-                    _ => TypeName::Named(type_name),
+                    _ => TypeName::Named(qualified),
                 };
                 Ok((Type::Constructed(type_name_variant, vec![]), Diet::Leaf(false)))
             }
@@ -1294,12 +1291,9 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_uppercase) => {
                 let name = name.clone();
                 self.advance();
+                let qualified = self.finish_qualified_identifier(name)?;
 
-                // Check for qualified type (e.g., R.t for functor param module member)
-                if self.check(&Token::Dot) {
-                    self.advance();
-                    let member = self.expect_identifier()?;
-                    let qualified = format!("{}.{}", name, member);
+                if qualified.contains('.') {
                     return Ok((
                         Type::Constructed(TypeName::Named(qualified), vec![]),
                         Diet::Leaf(false),
@@ -1310,7 +1304,7 @@ impl<'a> Parser<'a> {
                 // (e.g. `T`, `UV`). Sum types use `#name` constructors and
                 // dispatch via the Token::Constructor arm below.
                 Ok((
-                    Type::Constructed(TypeName::UserVar(name), vec![]),
+                    Type::Constructed(TypeName::UserVar(qualified), vec![]),
                     Diet::Leaf(false),
                 ))
             }
@@ -2601,6 +2595,20 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) => Ok(name.clone()),
             _ => Err(err_parse_at!(span, "Expected identifier")),
         }
+    }
+
+    fn expect_qualified_identifier(&mut self) -> Result<String> {
+        let name = self.expect_identifier()?;
+        self.finish_qualified_identifier(name)
+    }
+
+    fn finish_qualified_identifier(&mut self, mut name: String) -> Result<String> {
+        while self.check(&Token::Dot) {
+            self.advance();
+            name.push('.');
+            name.push_str(&self.expect_identifier()?);
+        }
+        Ok(name)
     }
 
     /// Like `expect_identifier`, but also accepts integer literals for tuple

@@ -1701,6 +1701,30 @@ fn test_parse_nested_qualified_name() {
 }
 
 #[test]
+fn test_parse_nested_qualified_type_name() {
+    let declaration = single_decl("def identity(value: A.Util.value) A.Util.value = value");
+
+    assert!(matches!(
+        declaration.ty,
+        Some(Type::Constructed(TypeName::Named(name), arguments))
+            if name == "A.Util.value" && arguments.is_empty()
+    ));
+}
+
+#[test]
+fn test_parse_nested_qualified_module_expression() {
+    let program = parse_ok("module Copy = A.Util");
+
+    assert!(matches!(
+        &program.declarations[..],
+        [Declaration::Frontend(ParsedFrontend::Module(ModuleDecl::Module {
+            body: ModuleExpression::Name(name),
+            ..
+        }))] if name == "A.Util"
+    ));
+}
+
+#[test]
 fn test_parse_record_type_empty() {
     // Test empty record type {}
     let decl = single_decl("let x: {} = ???");

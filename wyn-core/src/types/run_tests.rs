@@ -113,3 +113,152 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
     assert_eq!(package_of("Dependency.increment"), Some(dependency_package));
     assert_eq!(package_of("compute_main"), Some(root_package));
 }
+
+#[test]
+fn dependency_local_aliases_have_independent_semantic_namespaces() {
+    let fingerprint = SourceFingerprint::new("transitive-alias-test").expect("valid fingerprint");
+    let root_path = ModulePath::new("main.wyn").expect("valid root path");
+    let library_path = ModulePath::new("lib.wyn").expect("valid library path");
+    let mut builder = PackagePlanBuilder::new();
+    let root_package = builder
+        .add_package(
+            PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
+            root_path.clone(),
+        )
+        .expect("root package should be unique");
+    let package_a = builder
+        .add_package(
+            PackageIdentity::new("test/a", "v1.0.0", fingerprint.clone()).expect("valid package identity"),
+            library_path.clone(),
+        )
+        .expect("package should be unique");
+    let package_b = builder
+        .add_package(
+            PackageIdentity::new("test/b", "v1.0.0", fingerprint.clone()).expect("valid package identity"),
+            library_path.clone(),
+        )
+        .expect("package should be unique");
+    let utility_a = builder
+        .add_package(
+            PackageIdentity::new("test/utility-a", "v1.0.0", fingerprint.clone())
+                .expect("valid package identity"),
+            library_path.clone(),
+        )
+        .expect("package should be unique");
+    let utility_b = builder
+        .add_package(
+            PackageIdentity::new("test/utility-b", "v1.0.0", fingerprint).expect("valid package identity"),
+            library_path.clone(),
+        )
+        .expect("package should be unique");
+    builder
+        .add_dependency(
+            root_package,
+            DependencyAlias::new("a").expect("valid dependency alias"),
+            package_a,
+        )
+        .expect("dependency should be unique");
+    builder
+        .add_dependency(
+            root_package,
+            DependencyAlias::new("b").expect("valid dependency alias"),
+            package_b,
+        )
+        .expect("dependency should be unique");
+    builder
+        .add_dependency(
+            package_a,
+            DependencyAlias::new("util").expect("valid dependency alias"),
+            utility_a,
+        )
+        .expect("dependency should be unique");
+    builder
+        .add_dependency(
+            package_b,
+            DependencyAlias::new("util").expect("valid dependency alias"),
+            utility_b,
+        )
+        .expect("dependency should be unique");
+
+    let root = ModuleKey::new(root_package, root_path);
+    let source_a = ModuleKey::new(package_a, library_path.clone());
+    let source_b = ModuleKey::new(package_b, library_path.clone());
+    let source_utility_a = ModuleKey::new(utility_a, library_path.clone());
+    let source_utility_b = ModuleKey::new(utility_b, library_path);
+    builder.set_root(root.clone()).expect("root module should belong to the plan");
+    let plan = builder.build().expect("package plan should be complete");
+
+    let mut sources = LocalSources::new();
+    sources
+        .add_override(
+            root,
+            concat!(
+                "module A = import \"pkg:a\"\n",
+                "module B = import \"pkg:b\"\n",
+                "entry compute_main(value: i32) i32 = A.compute(value) + B.compute(value)\n",
+            ),
+        )
+        .expect("root override should be unique");
+    sources
+        .add_override(
+            source_a,
+            concat!(
+                "module Util = import \"pkg:util\"\n",
+                "def compute(value: Util.value) Util.value = Util.adjust(value)\n",
+            ),
+        )
+        .expect("package override should be unique");
+    sources
+        .add_override(
+            source_b,
+            concat!(
+                "module Util = import \"pkg:util\"\n",
+                "def compute(value: Util.value) Util.value = Util.adjust(value)\n",
+            ),
+        )
+        .expect("package override should be unique");
+    sources
+        .add_override(
+            source_utility_a,
+            concat!(
+                "type value = i32\n",
+                "def adjust(value: value) value = value + 1\n",
+            ),
+        )
+        .expect("package override should be unique");
+    sources
+        .add_override(
+            source_utility_b,
+            concat!(
+                "type value = i32\n",
+                "def adjust(value: value) value = value * 2\n",
+            ),
+        )
+        .expect("package override should be unique");
+
+    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
+    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
+    let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
+    let program = name_resolution::resolve_names(program);
+    let program = resolve_resources::resolve_resources(program).expect("resources should resolve");
+    let program = ast_const_fold::fold_constants(program);
+    let program = resolve_placeholders::resolve_type_placeholders(program);
+    let program = resolve_opens::resolve_opens(program).expect("opens should resolve");
+    let typed = type_check(program).expect("program should type check");
+
+    let package_of = |namespace: &str, name: &str| {
+        typed
+            .global_context
+            .support_definitions
+            .iter()
+            .find(|support| {
+                support.namespace.as_deref() == Some(namespace) && support.definition.name == name
+            })
+            .and_then(|support| support.definition.data.source.package)
+    };
+    assert_eq!(package_of("A.Util", "adjust"), Some(utility_a));
+    assert_eq!(package_of("B.Util", "adjust"), Some(utility_b));
+    assert_eq!(package_of("A", "compute"), Some(package_a));
+    assert_eq!(package_of("B", "compute"), Some(package_b));
+}

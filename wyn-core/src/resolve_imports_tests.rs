@@ -53,7 +53,7 @@ fn module_binding_import_becomes_loaded_module_body() {
 }
 
 #[test]
-fn imported_nested_semantic_module_is_rejected_explicitly() {
+fn imported_nested_semantic_module_is_preserved() {
     let (plan, root, dependency) = local_plan();
     let mut sources = LocalSources::new();
     sources
@@ -66,8 +66,14 @@ fn imported_nested_semantic_module_is_rejected_explicitly() {
     let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
     let program = resolve_imports(modules).expect("imports should resolve");
 
-    let error = crate::elaborate_modules::elaborate_modules(program)
-        .expect_err("nested semantic module should be rejected");
+    let program = crate::elaborate_modules::elaborate_modules(program)
+        .expect("nested semantic module should elaborate");
 
-    assert!(error.to_string().contains("module 'Dependency' contains nested semantic module 'Nested'"));
+    let nested = program
+        .global_context
+        .get_elaborated_module("Dependency.Nested")
+        .expect("nested module should have a qualified semantic namespace");
+    assert!(nested.items.iter().any(
+        |item| matches!(item, crate::module_manager::ElaboratedItem::Decl(declaration) if declaration.name == "value")
+    ));
 }
