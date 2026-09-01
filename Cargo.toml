@@ -8,6 +8,7 @@ members = [
     "wyn-spirv",
     "wyn-graph",
     "wyn-module-graph",
+    "wyn-package-manager",
     "wyn-staged-ir",
 ]
 resolver = "2"

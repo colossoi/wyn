@@ -1,0 +1,13 @@
+[package]
+name = "wyn-package-manager"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+semver = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+thiserror.workspace = true
+toml = "0.8"
+wyn-module-graph = { path = "../wyn-module-graph" }
