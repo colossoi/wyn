@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    CodegenTarget, Compiler, CompilerOptions, LoweringProfile, ParsedModules, PipelineTopologyPolicy,
-    SchedulePolicy,
+    CodegenTarget, Compiler, CompilerOptions, FrontendFailure, LoweringProfile, ParsedModules,
+    PipelineTopologyPolicy, SchedulePolicy,
 };
 use wyn_module_graph::{
     BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
@@ -575,6 +575,25 @@ impl CompileResultWgsl {
         }
     }
 
+    fn frontend_err(source: &str, failure: FrontendFailure) -> Self {
+        let location = failure
+            .error()
+            .span()
+            .filter(|span| span.module() == Some(failure.source_graph().root()))
+            .and_then(|_| error_location(source, failure.error()));
+        Self {
+            success: false,
+            wgsl: None,
+            interface: None,
+            mir: None,
+            tlc: None,
+            error: Some(ErrorInfo {
+                message: failure.to_string(),
+                location,
+            }),
+        }
+    }
+
     fn source_modules_err(source: &str, error: SourceModulesError) -> Self {
         match error {
             SourceModulesError::Compiler(error) => Self::err(source, error),
@@ -631,7 +650,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     // Frontend → TLC → semantic EGIR → target-aware SSA lowering → WGSL.
     let program = match modules.type_check() {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
+        Err(failure) => return CompileResultWgsl::frontend_err(source, failure),
     };
     let program = match wyn_core::ast_type_holes::reject_type_holes(program) {
         Ok(p) => p,

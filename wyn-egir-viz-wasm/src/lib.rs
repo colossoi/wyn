@@ -16,7 +16,8 @@ use wyn_core::egir::types::{
 };
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    BindingRef, Compiler, CompilerOptions, FunctionId, LoweringProfile, ParsedModules, ResourceAccess,
+    BindingRef, Compiler, CompilerOptions, FrontendFailure, FunctionId, LoweringProfile, ParsedModules,
+    ResourceAccess,
 };
 use wyn_module_graph::{
     BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
@@ -535,6 +536,11 @@ fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
     InspectResult::error(pass.id(), format_compiler_error(&error), span)
 }
 
+fn frontend_error(pass: InspectPass, failure: FrontendFailure) -> InspectResult {
+    let span = failure.error().span().and_then(SourceSpan::from_span);
+    InspectResult::error(pass.id(), failure.to_string(), span)
+}
+
 fn source_modules_error(pass: InspectPass, error: SourceModulesError) -> InspectResult {
     match error {
         SourceModulesError::Compiler(error) => compiler_error(pass, error),
@@ -590,7 +596,10 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let program = try_compiler!(modules.type_check());
+    let program = match modules.type_check() {
+        Ok(program) => program,
+        Err(failure) => return frontend_error(pass, failure),
+    };
     let program = try_compiler!(wyn_core::ast_type_holes::reject_type_holes(program));
     let program = try_compiler!(wyn_core::tlc::lower_from_ast(program));
     let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));

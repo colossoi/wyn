@@ -206,3 +206,34 @@ fn wgsl_output_is_independent_of_source_directory() {
         "generated WGSL should not depend on the source cache directory",
     );
 }
+
+#[test]
+fn check_reports_semantic_error_in_imported_source() {
+    let package = LocalPackage::new();
+    let root = package.write("main.wyn", "module Dependency = import \"library/dependency\"\n");
+    package.write("library/dependency.wyn", "def broken: i32 = true\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(root)
+        .output()
+        .expect("Wyn compiler should run");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "dependency type error should fail checking"
+    );
+    assert!(
+        error.contains("library/dependency.wyn:1:") && error.contains("Type error:"),
+        "unexpected dependency diagnostic:\n{error}"
+    );
+    assert!(
+        !error.contains("ModuleId("),
+        "diagnostic leaked an internal module ID:\n{error}"
+    );
+    assert!(
+        !error.contains(&package.directory.to_string_lossy().to_string()),
+        "diagnostic leaked the temporary package root:\n{error}"
+    );
+}

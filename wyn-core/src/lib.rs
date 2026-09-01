@@ -25,6 +25,7 @@ pub mod scope;
 pub mod ssa;
 pub mod types;
 
+pub use error::FrontendFailure;
 pub use frontend::{Compiler, ParsedModules};
 
 pub mod lowering_common;
@@ -765,7 +766,7 @@ pub fn compile_thru_frontend_with_options(
 ) -> error::Result<types::run::TypeChecked> {
     let compiler = Compiler::new(options)?;
     let modules = test_pipeline::load_test_modules(source, compiler);
-    modules.type_check()
+    modules.type_check().map_err(error::FrontendFailure::into_error)
 }
 
 /// Run the canonical TLC optimization pipeline (no physical scheduling or

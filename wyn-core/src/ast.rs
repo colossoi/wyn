@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::interface;
 use crate::lexer;
 use crate::name_resolution;
@@ -357,15 +359,15 @@ pub struct Program<Tag, F: Family, GlobalContext> {
     pub declarations: Vec<Declaration<F>>,
     /// The sole allocator for nodes added while this AST is rebuilt.
     pub(crate) node_ids: NodeCounter,
-    pub(crate) source_graph: wyn_module_graph::SourceGraph,
+    pub(crate) source_graph: Arc<wyn_module_graph::SourceGraph>,
     pub global_context: GlobalContext,
     pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
 impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
     /// Physical source, package, and import provenance for this compilation.
-    pub const fn source_graph(&self) -> &wyn_module_graph::SourceGraph {
-        &self.source_graph
+    pub fn source_graph(&self) -> &wyn_module_graph::SourceGraph {
+        self.source_graph.as_ref()
     }
 
     /// Change only the program's nominal state while retaining its exact tree

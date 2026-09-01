@@ -128,6 +128,9 @@ enum DriverError {
     #[error("Source module error: {0}")]
     SourceModule(#[from] BuildFailure<wyn_core::error::CompilerError, LocalSourceError>),
 
+    #[error("{0}")]
+    Frontend(#[from] wyn_core::FrontendFailure),
+
     #[error("Local source error: {0}")]
     LocalSource(#[from] LocalSourceError),
 
@@ -204,11 +207,11 @@ fn type_check_package_plan(
     let program = time("type_check", verbose, || modules.type_check())?;
 
     for warning in &program.global_context.warnings {
-        eprintln!(
-            "{}: warning: {}",
-            warning.span(),
-            warning.message(&wyn_core::types::format_type)
-        );
+        let message = warning.message(&wyn_core::types::format_type);
+        match program.source_graph().display_location(*warning.span()) {
+            Ok(location) => eprintln!("{location}: warning: {message}"),
+            Err(_) => eprintln!("warning: {message}"),
+        }
     }
     let program = if reject_holes {
         wyn_core::ast_type_holes::reject_type_holes(program)?

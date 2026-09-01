@@ -1,7 +1,7 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::ast::{NodeCounter, SourceImport};
-use crate::error::{CompilerError, Result};
+use crate::error::{CompilerError, FrontendFailure, Result};
 use crate::module_manager::{ModuleManager, PreElaboratedPrelude};
 use crate::parser::{self, ParsedFile};
 use crate::{
@@ -33,15 +33,22 @@ pub struct ParsedModules {
 
 impl ParsedModules {
     /// Run the complete semantic frontend through type checking.
-    pub fn type_check(self) -> Result<types::run::TypeChecked> {
+    ///
+    /// Failures retain the source graph so callers can render package-aware
+    /// locations without consulting the filesystem.
+    pub fn type_check(self) -> std::result::Result<types::run::TypeChecked, FrontendFailure> {
         let program = resolve_imports::resolve_imports(self)?;
-        let program = elaborate_modules::elaborate_modules(program)?;
-        let program = name_resolution::resolve_names(program);
-        let program = resolve_resources::resolve_resources(program)?;
-        let program = ast_const_fold::fold_constants(program);
-        let program = resolve_placeholders::resolve_type_placeholders(program);
-        let program = resolve_opens::resolve_opens(program)?;
-        types::run::type_check(program)
+        let source_graph = Arc::clone(&program.source_graph);
+        let result = (|| {
+            let program = elaborate_modules::elaborate_modules(program)?;
+            let program = name_resolution::resolve_names(program);
+            let program = resolve_resources::resolve_resources(program)?;
+            let program = ast_const_fold::fold_constants(program);
+            let program = resolve_placeholders::resolve_type_placeholders(program);
+            let program = resolve_opens::resolve_opens(program)?;
+            types::run::type_check(program)
+        })();
+        result.map_err(|error| FrontendFailure::new(error, source_graph))
     }
 }
 

@@ -1,11 +1,13 @@
 //! Resolution of parsed source imports through a closed source-module graph.
 
+use std::sync::Arc;
+
 use crate::ast::{
     AstFamily, Declaration, DefinitionSyntax, EntryDecl, EntrySyntax, ExternSyntax,
     ImportsResolvedFrontend, ModuleDecl, ModuleExpression, NestedDeclaration, ParsedFrontend, Program,
     SourceImport, SourceTree,
 };
-use crate::error::{CompilerError, Result};
+use crate::error::{CompilerError, FrontendFailure, Result};
 use crate::frontend::ParsedModules;
 use crate::interface::Attribute;
 use crate::module_manager::ModuleManager;
@@ -29,7 +31,7 @@ pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, Mo
 
 /// Resolve physical imports and combine the loaded source modules into one
 /// whole-program AST.
-pub fn resolve_imports(modules: ParsedModules) -> Result<ImportsResolved> {
+pub fn resolve_imports(modules: ParsedModules) -> std::result::Result<ImportsResolved, FrontendFailure> {
     let ParsedModules {
         graph,
         node_ids,
@@ -37,12 +39,15 @@ pub fn resolve_imports(modules: ParsedModules) -> Result<ImportsResolved> {
     } = modules;
     let declarations = {
         let mut resolver = ImportResolver::new(&graph);
-        resolver.resolve_top_level(graph.root())?
+        resolver.resolve_top_level(graph.root())
     };
+    let source_graph = Arc::new(graph.erase_syntax());
+    let declarations =
+        declarations.map_err(|error| FrontendFailure::new(error, Arc::clone(&source_graph)))?;
     Ok(Program {
         declarations,
         node_ids,
-        source_graph: graph.erase_syntax(),
+        source_graph,
         global_context: semantic_modules,
         state: std::marker::PhantomData,
     })

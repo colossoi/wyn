@@ -534,9 +534,11 @@ impl Backend {
                 };
                 (diagnostics, Some(state))
             }
-            Err(e) => {
-                let range = e
+            Err(failure) => {
+                let range = failure
+                    .error()
                     .span()
+                    .filter(|span| span.module() == Some(failure.source_graph().root()))
                     .and_then(|span| span_to_range(text, span))
                     .unwrap_or_else(default_diagnostic_range);
 
@@ -546,7 +548,7 @@ impl Backend {
                     code: None,
                     code_description: None,
                     source: Some("wyn-analyzer".to_string()),
-                    message: e.to_string(),
+                    message: failure.to_string(),
                     related_information: None,
                     tags: None,
                     data: None,

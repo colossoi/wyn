@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use wyn_base::IdArena;
@@ -142,6 +143,19 @@ impl<T> ModuleGraph<T> {
         self.sources.location(span)
     }
 
+    /// Format a source span using package-relative identity and a one-based
+    /// line and column. Dependency modules include their package and version.
+    pub fn display_location(&self, span: Span) -> Result<impl fmt::Display + '_, SpanError> {
+        let module = span.module().ok_or(SpanError::GeneratedSpan)?;
+        let loaded = self.module(module).ok_or(SpanError::UnknownModule { module })?;
+        let location = self.location(span)?;
+        Ok(DisplaySourceLocation {
+            plan: &self.plan,
+            module: loaded.key(),
+            location,
+        })
+    }
+
     pub fn snippet(&self, span: Span) -> Result<&str, SpanError> {
         self.sources.snippet(span)
     }
@@ -177,6 +191,34 @@ impl<T> ModuleGraph<T> {
             dependency_order,
             sources,
         }
+    }
+}
+
+struct DisplaySourceLocation<'a> {
+    plan: &'a PackagePlan,
+    module: &'a ModuleKey,
+    location: SourceLocation,
+}
+
+impl fmt::Display for DisplaySourceLocation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.module.package() != self.plan.root().package() {
+            if let Some(package) = self.plan.package(self.module.package()) {
+                write!(
+                    formatter,
+                    "{}@{}:",
+                    package.identity().canonical_name(),
+                    package.identity().version()
+                )?;
+            }
+        }
+        write!(
+            formatter,
+            "{}:{}:{}",
+            self.module.path(),
+            self.location.line,
+            self.location.column
+        )
     }
 }
 

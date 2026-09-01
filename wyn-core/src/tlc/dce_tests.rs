@@ -36,6 +36,21 @@ fn called_extern_remains_reachable() {
 }
 
 #[test]
+fn every_root_entry_remains_and_unreachable_definitions_do_not() {
+    let program = compile_thru_tlc(concat!(
+        "def used(value: i32) i32 = value + 1\n",
+        "def unused(value: i32) i32 = value - 1\n",
+        "entry first(value: i32) i32 = used(value)\n",
+        "entry second(value: i32) i32 = value\n",
+    ))
+    .expect("program should compile through reachability");
+
+    assert!(has_definition(&program, "first"));
+    assert!(has_definition(&program, "second"));
+    assert!(!has_definition(&program, "unused"));
+}
+
+#[test]
 fn unused_dependency_contributes_no_reachable_definitions() {
     let fingerprint = SourceFingerprint::new("dce-package-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
