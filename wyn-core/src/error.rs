@@ -72,17 +72,21 @@ impl CompilerError {
     }
 }
 
-/// A semantic-frontend error together with the source graph needed to render
-/// its span without relying on filesystem paths or session-local IDs.
+/// A compiler error together with the source graph needed to render its span
+/// without relying on filesystem paths or session-local IDs.
 #[derive(Debug)]
-pub struct FrontendFailure {
+pub struct CompilationFailure {
     error: CompilerError,
     source_graph: Arc<SourceGraph>,
 }
 
-impl FrontendFailure {
-    pub(crate) const fn new(error: CompilerError, source_graph: Arc<SourceGraph>) -> Self {
-        Self { error, source_graph }
+impl CompilationFailure {
+    /// Attach source provenance to an error from any compiler phase.
+    pub fn new(error: CompilerError, source_graph: impl Into<Arc<SourceGraph>>) -> Self {
+        Self {
+            error,
+            source_graph: source_graph.into(),
+        }
     }
 
     /// The structured compiler error that stopped the frontend.
@@ -101,7 +105,7 @@ impl FrontendFailure {
     }
 }
 
-impl fmt::Display for FrontendFailure {
+impl fmt::Display for CompilationFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(span) = self.error.span() {
             if let Ok(location) = self.source_graph.display_location(span) {
@@ -112,7 +116,7 @@ impl fmt::Display for FrontendFailure {
     }
 }
 
-impl StdError for FrontendFailure {
+impl StdError for CompilationFailure {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         Some(&self.error)
     }

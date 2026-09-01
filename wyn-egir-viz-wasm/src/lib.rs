@@ -16,7 +16,7 @@ use wyn_core::egir::types::{
 };
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    BindingRef, Compiler, CompilerOptions, FrontendFailure, FunctionId, LoweringProfile, ParsedModules,
+    BindingRef, CompilationFailure, Compiler, CompilerOptions, FunctionId, LoweringProfile, ParsedModules,
     ResourceAccess,
 };
 use wyn_module_graph::{
@@ -536,7 +536,7 @@ fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
     InspectResult::error(pass.id(), format_compiler_error(&error), span)
 }
 
-fn frontend_error(pass: InspectPass, failure: FrontendFailure) -> InspectResult {
+fn frontend_error(pass: InspectPass, failure: CompilationFailure) -> InspectResult {
     let span = failure.error().span().and_then(SourceSpan::from_span);
     InspectResult::error(pass.id(), failure.to_string(), span)
 }

@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::ast::{NodeCounter, SourceImport};
-use crate::error::{CompilerError, FrontendFailure, Result};
+use crate::error::{CompilationFailure, CompilerError, Result};
 use crate::parser::{self, ParsedFile};
 use crate::semantic_modules::{PreElaboratedPrelude, SemanticModules};
 use crate::{
@@ -36,7 +36,7 @@ impl ParsedModules {
     ///
     /// Failures retain the source graph so callers can render package-aware
     /// locations without consulting the filesystem.
-    pub fn type_check(self) -> std::result::Result<types::run::TypeChecked, FrontendFailure> {
+    pub fn type_check(self) -> std::result::Result<types::run::TypeChecked, CompilationFailure> {
         let program = resolve_imports::resolve_imports(self)?;
         let source_graph = Arc::clone(&program.source_graph);
         let result = (|| {
@@ -48,7 +48,7 @@ impl ParsedModules {
             let program = resolve_opens::resolve_opens(program)?;
             types::run::type_check(program)
         })();
-        result.map_err(|error| FrontendFailure::new(error, source_graph))
+        result.map_err(|error| CompilationFailure::new(error, source_graph))
     }
 }
 

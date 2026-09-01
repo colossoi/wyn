@@ -269,3 +269,46 @@ fn check_reports_type_hole_in_imported_source() {
         "diagnostic leaked the temporary package root:\n{error}"
     );
 }
+
+#[test]
+fn compile_reports_backend_error_in_imported_source() {
+    let package = LocalPackage::new();
+    let root = package.write(
+        "main.wyn",
+        concat!(
+            "module Dependency = import \"library/dependency\"\n",
+            "entry compute_main(value: u32) u32 = Dependency.multiply(value)\n",
+        ),
+    );
+    package.write(
+        "library/dependency.wyn",
+        "def multiply(value: u32) u32 = u32.u64(u64.u32(value) * 2u64)\n",
+    );
+    let output_path = package.directory.join("output.wgsl");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("compile")
+        .arg(root)
+        .args(["--target", "wgsl", "--wgsl-emulate-u64", "--output"])
+        .arg(output_path)
+        .output()
+        .expect("Wyn compiler should run");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "unsupported WGSL source should fail lowering"
+    );
+    assert!(
+        error.contains("library/dependency.wyn:1:") && error.contains("u64 operator '*'"),
+        "unexpected backend diagnostic:\n{error}"
+    );
+    assert!(
+        !error.contains("ModuleId("),
+        "diagnostic leaked an internal module ID:\n{error}"
+    );
+    assert!(
+        !error.contains(&package.directory.to_string_lossy().to_string()),
+        "diagnostic leaked the temporary package root:\n{error}"
+    );
+}

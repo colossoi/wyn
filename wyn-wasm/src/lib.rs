@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    CodegenTarget, Compiler, CompilerOptions, FrontendFailure, LoweringProfile, ParsedModules,
+    CodegenTarget, CompilationFailure, Compiler, CompilerOptions, LoweringProfile, ParsedModules,
     PipelineTopologyPolicy, SchedulePolicy,
 };
 use wyn_module_graph::{
@@ -575,7 +575,7 @@ impl CompileResultWgsl {
         }
     }
 
-    fn frontend_err(source: &str, failure: FrontendFailure) -> Self {
+    fn frontend_err(source: &str, failure: CompilationFailure) -> Self {
         let location = failure
             .error()
             .span()

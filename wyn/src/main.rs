@@ -7,11 +7,12 @@ use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::{
-    CodegenTarget, Compiler, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy,
+    CodegenTarget, CompilationFailure, Compiler, CompilerOptions, LoweringProfile, PipelineTopologyPolicy,
+    SchedulePolicy,
 };
 use wyn_module_graph::{
     BuildFailure, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint,
+    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint, SourceGraph,
 };
 
 /// Target output format
@@ -129,7 +130,7 @@ enum DriverError {
     SourceModule(#[from] BuildFailure<wyn_core::error::CompilerError, LocalSourceError>),
 
     #[error("{0}")]
-    Frontend(#[from] wyn_core::FrontendFailure),
+    Compilation(#[from] CompilationFailure),
 
     #[error("Local source error: {0}")]
     LocalSource(#[from] LocalSourceError),
@@ -154,6 +155,13 @@ enum DriverError {
 
     #[error("invalid command-line option: {0}")]
     InvalidOption(String),
+}
+
+fn retain_source<T>(
+    result: wyn_core::error::Result<T>,
+    source_graph: &SourceGraph,
+) -> Result<T, DriverError> {
+    result.map_err(|error| CompilationFailure::new(error, source_graph.clone()).into())
 }
 
 fn direct_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
@@ -250,6 +258,10 @@ fn main() -> ExitCode {
                 Some(span) if !span.is_generated() => eprintln!("{span}: {e}"),
                 _ => eprintln!("{e}"),
             }
+            ExitCode::from(1)
+        }
+        Err(DriverError::Compilation(failure)) => {
+            eprintln!("{failure}");
             ExitCode::from(1)
         }
         Err(e) => {
@@ -355,8 +367,12 @@ fn compile_file(
     let compile_start = Instant::now();
 
     let program = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
+    let source_graph = program.source_graph().clone();
 
-    let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program))?;
+    let program = retain_source(
+        time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program)),
+        &source_graph,
+    )?;
 
     // Output TLC if requested (before optimization)
     if let Some(ref tlc_path) = output_tlc {
@@ -366,21 +382,30 @@ fn compile_file(
         }
     }
 
-    let program = time("pin_entry_buffers", verbose, || {
-        wyn_core::tlc::pin_entry_buffers(program)
-    })?;
-    let program = time("validate_ownership", verbose, || {
-        wyn_core::tlc::validate_ownership(program)
-    })?;
+    let program = retain_source(
+        time("pin_entry_buffers", verbose, || {
+            wyn_core::tlc::pin_entry_buffers(program)
+        }),
+        &source_graph,
+    )?;
+    let program = retain_source(
+        time("validate_ownership", verbose, || {
+            wyn_core::tlc::validate_ownership(program)
+        }),
+        &source_graph,
+    )?;
     let program = time("tlc_partial_eval", verbose, || {
         wyn_core::tlc::partial_eval(program)
     });
     let program = time("normalize_soacs", verbose, || {
         wyn_core::tlc::normalize_soacs(program)
     });
-    let program = time("tlc_monomorphize", verbose, || {
-        wyn_core::tlc::monomorphize(program)
-    })?;
+    let program = retain_source(
+        time("tlc_monomorphize", verbose, || {
+            wyn_core::tlc::monomorphize(program)
+        }),
+        &source_graph,
+    )?;
     let program = time("tlc_rep_specialize", verbose, || {
         wyn_core::tlc::rep_specialize(program)
     });
@@ -427,9 +452,12 @@ fn compile_file(
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)
     });
-    let program = time("egir_optimize_semantic_operations", verbose, || {
-        wyn_core::egir::optimize_semantic_operations(program)
-    })?;
+    let program = retain_source(
+        time("egir_optimize_semantic_operations", verbose, || {
+            wyn_core::egir::optimize_semantic_operations(program)
+        }),
+        &source_graph,
+    )?;
     let profile = if direct {
         LoweringProfile::with_topology(
             match target {
@@ -481,7 +509,10 @@ fn compile_file(
 
     let pipeline = match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered))?;
+            let lowered = retain_source(
+                time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered)),
+                &source_graph,
+            )?;
 
             // Write SPIR-V binary
             let mut file = fs::File::create(&output_path)?;
@@ -503,9 +534,12 @@ fn compile_file(
             } else {
                 wyn_core::wgsl::WgslOptions::default()
             };
-            let lowered = time("wgsl_lower", verbose, || {
-                wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
-            })?;
+            let lowered = retain_source(
+                time("wgsl_lower", verbose, || {
+                    wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
+                }),
+                &source_graph,
+            )?;
 
             fs::write(&output_path, &lowered.wgsl)?;
 
@@ -548,9 +582,10 @@ fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), Drive
     }
 
     let program = type_check_frontend_file(&input, true, graphics, verbose)?;
-    let program = wyn_core::tlc::lower_from_ast(program)?;
-    let program = wyn_core::tlc::pin_entry_buffers(program)?;
-    wyn_core::tlc::validate_ownership(program)?;
+    let source_graph = program.source_graph().clone();
+    let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
+    let program = retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;
+    retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

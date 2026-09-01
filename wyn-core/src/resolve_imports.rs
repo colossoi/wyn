@@ -7,7 +7,7 @@ use crate::ast::{
     ImportsResolvedFrontend, ModuleDecl, ModuleExpression, NestedDeclaration, ParsedFrontend, Program,
     SourceImport, SourceTree,
 };
-use crate::error::{CompilerError, FrontendFailure, Result};
+use crate::error::{CompilationFailure, CompilerError, Result};
 use crate::frontend::ParsedModules;
 use crate::interface::Attribute;
 use crate::parser::ParsedFile;
@@ -31,7 +31,7 @@ pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, Se
 
 /// Resolve physical imports and combine the loaded source modules into one
 /// whole-program AST.
-pub fn resolve_imports(modules: ParsedModules) -> std::result::Result<ImportsResolved, FrontendFailure> {
+pub fn resolve_imports(modules: ParsedModules) -> std::result::Result<ImportsResolved, CompilationFailure> {
     let ParsedModules {
         graph,
         node_ids,
@@ -43,7 +43,7 @@ pub fn resolve_imports(modules: ParsedModules) -> std::result::Result<ImportsRes
     };
     let source_graph = Arc::new(graph.erase_syntax());
     let declarations =
-        declarations.map_err(|error| FrontendFailure::new(error, Arc::clone(&source_graph)))?;
+        declarations.map_err(|error| CompilationFailure::new(error, Arc::clone(&source_graph)))?;
     Ok(Program {
         declarations,
         node_ids,
