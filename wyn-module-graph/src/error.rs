@@ -72,13 +72,128 @@ impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
     pub fn snippet(&self, span: Span) -> Result<&str, SpanError> {
         self.context.sources.snippet(span)
     }
+
+    fn fmt_module(&self, formatter: &mut fmt::Formatter<'_>, key: &ModuleKey) -> fmt::Result {
+        let root_package = self.context.plan.root().package();
+        if key.package() == root_package {
+            return write!(formatter, "{}", key.path());
+        }
+
+        let Some(package) = self.context.plan.package(key.package()) else {
+            return write!(formatter, "{}", key.path());
+        };
+        write!(
+            formatter,
+            "{}@{}:{}",
+            package.identity().canonical_name(),
+            package.identity().version(),
+            key.path()
+        )
+    }
+
+    fn fmt_module_id(&self, formatter: &mut fmt::Formatter<'_>, module: ModuleId) -> fmt::Result {
+        let Some(key) = self.module_key(module) else {
+            return formatter.write_str("unknown source module");
+        };
+        self.fmt_module(formatter, key)
+    }
+
+    fn fmt_span(&self, formatter: &mut fmt::Formatter<'_>, span: Span) -> fmt::Result {
+        let Some(module) = span.module() else {
+            return formatter.write_str("generated syntax");
+        };
+        self.fmt_module_id(formatter, module)?;
+        if let Ok(location) = self.location(span) {
+            write!(formatter, ":{}:{}", location.line, location.column)?;
+        }
+        Ok(())
+    }
+
+    fn fmt_trace(&self, formatter: &mut fmt::Formatter<'_>, trace: &[ImportTraceFrame]) -> fmt::Result {
+        for frame in trace {
+            formatter.write_str("\n  imported from ")?;
+            self.fmt_span(formatter, frame.span)?;
+        }
+        Ok(())
+    }
 }
 
 impl<FrontendError: fmt::Display, ProviderError: fmt::Display> fmt::Display
     for BuildFailure<FrontendError, ProviderError>
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.error, formatter)
+        match &self.error {
+            BuildError::Load {
+                module,
+                trace,
+                source,
+                ..
+            } => {
+                formatter.write_str("failed to load ")?;
+                self.fmt_module(formatter, module)?;
+                write!(formatter, ": {source}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::SourceText {
+                module,
+                trace,
+                source,
+                ..
+            } => {
+                formatter.write_str("failed to store ")?;
+                self.fmt_module(formatter, module)?;
+                write!(formatter, ": {source}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::Parse {
+                module,
+                trace,
+                source,
+            } => {
+                formatter.write_str("failed to parse ")?;
+                self.fmt_module_id(formatter, *module)?;
+                write!(formatter, ": {source}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::UnknownDependency {
+                alias, span, trace, ..
+            } => {
+                self.fmt_span(formatter, *span)?;
+                write!(formatter, ": unknown package dependency alias `{alias}`")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::InvalidPath {
+                span, trace, source, ..
+            } => {
+                self.fmt_span(formatter, *span)?;
+                write!(formatter, ": invalid import path: {source}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::InvalidImportSpan {
+                span, trace, source, ..
+            } => {
+                self.fmt_span(formatter, *span)?;
+                write!(formatter, ": invalid import source range: {source}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::DuplicateImportSite {
+                site, span, trace, ..
+            } => {
+                self.fmt_span(formatter, *span)?;
+                write!(formatter, ": duplicate import site {site:?}")?;
+                self.fmt_trace(formatter, trace)
+            }
+            BuildError::Cycle { edges } => {
+                formatter.write_str("source import cycle")?;
+                for edge in edges {
+                    formatter.write_str("\n  ")?;
+                    self.fmt_span(formatter, edge.span)?;
+                    formatter.write_str(" imports ")?;
+                    self.fmt_module(formatter, &edge.requested)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -97,13 +212,11 @@ where
 pub enum BuildError<FrontendError, ProviderError> {
     Load {
         module: ModuleKey,
-        requested_at: Option<Span>,
         trace: Box<[ImportTraceFrame]>,
         source: ProviderError,
     },
     SourceText {
         module: ModuleKey,
-        requested_at: Option<Span>,
         trace: Box<[ImportTraceFrame]>,
         source: SourceTextError,
     },
@@ -113,25 +226,25 @@ pub enum BuildError<FrontendError, ProviderError> {
         source: FrontendError,
     },
     UnknownDependency {
-        from: ModuleId,
-        site: ImportSiteId,
         alias: DependencyAlias,
         span: Span,
+        trace: Box<[ImportTraceFrame]>,
     },
     InvalidPath {
-        from: ModuleId,
-        site: ImportSiteId,
         span: Span,
+        trace: Box<[ImportTraceFrame]>,
         source: PathError,
     },
     InvalidImportSpan {
-        from: ModuleId,
         site: ImportSiteId,
+        span: Span,
+        trace: Box<[ImportTraceFrame]>,
         source: SpanError,
     },
     DuplicateImportSite {
-        from: ModuleId,
         site: ImportSiteId,
+        span: Span,
+        trace: Box<[ImportTraceFrame]>,
     },
     Cycle {
         edges: Box<[ImportTraceFrame]>,
@@ -183,3 +296,7 @@ where
         }
     }
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod error_tests;

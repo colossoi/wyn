@@ -183,7 +183,6 @@ impl<T> ModuleGraph<T> {
 /// One edge in an import provenance or cycle trace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportTraceFrame {
-    pub from: ModuleId,
     pub span: Span,
     pub requested: ModuleKey,
 }
@@ -281,18 +280,14 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
         self.by_key.insert(key.clone(), module);
         self.active.push(ActiveFrame { module, incoming });
 
-        let requested_at =
-            self.active.last().and_then(|frame| frame.incoming.as_ref()).map(|edge| edge.span);
         let trace = self.import_trace();
         let text = self.sources.load(&key).map_err(|source| BuildError::Load {
             module: key.clone(),
-            requested_at,
             trace: trace.clone().into_boxed_slice(),
             source,
         })?;
         self.source_map.insert(module, text).map_err(|source| BuildError::SourceText {
             module: key.clone(),
-            requested_at,
             trace: trace.clone().into_boxed_slice(),
             source,
         })?;
@@ -317,20 +312,21 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
         for request in requests {
             if !sites.insert(request.site) {
                 return Err(BuildError::DuplicateImportSite {
-                    from: module,
                     site: request.site,
+                    span: Span::new(module, request.range),
+                    trace: self.import_trace().into_boxed_slice(),
                 });
             }
 
             let span = Span::new(module, request.range);
             self.source_map.snippet(span).map_err(|source| BuildError::InvalidImportSpan {
-                from: module,
                 site: request.site,
+                span,
+                trace: self.import_trace().into_boxed_slice(),
                 source,
             })?;
-            let target_key = self.resolve_target(module, &key, &request, span)?;
+            let target_key = self.resolve_target(&key, &request, span)?;
             let frame = ImportTraceFrame {
-                from: module,
                 span,
                 requested: target_key.clone(),
             };
@@ -351,7 +347,6 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
 
     fn resolve_target(
         &self,
-        from: ModuleId,
         from_key: &ModuleKey,
         request: &ImportRequest,
         span: Span,
@@ -359,38 +354,35 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
         match &request.target {
             ImportTarget::Local(relative) => {
                 let path = from_key.path().resolve(relative).map_err(|source| BuildError::InvalidPath {
-                    from,
-                    site: request.site,
                     span,
+                    trace: self.import_trace().into_boxed_slice(),
                     source,
                 })?;
                 Ok(ModuleKey::new(from_key.package(), path))
             }
             ImportTarget::Dependency { alias, module } => {
-                let package = self
-                    .plan
-                    .package(from_key.package())
-                    .and_then(|package| package.dependency(alias))
-                    .ok_or_else(|| BuildError::UnknownDependency {
-                        from,
-                        site: request.site,
+                let Some(package) =
+                    self.plan.package(from_key.package()).and_then(|package| package.dependency(alias))
+                else {
+                    return Err(BuildError::UnknownDependency {
                         alias: alias.clone(),
                         span,
-                    })?;
-                let target_package =
-                    self.plan.package(package).ok_or_else(|| BuildError::UnknownDependency {
-                        from,
-                        site: request.site,
+                        trace: self.import_trace().into_boxed_slice(),
+                    });
+                };
+                let Some(target_package) = self.plan.package(package) else {
+                    return Err(BuildError::UnknownDependency {
                         alias: alias.clone(),
                         span,
-                    })?;
+                        trace: self.import_trace().into_boxed_slice(),
+                    });
+                };
                 let path = match module {
                     Some(relative) => {
                         target_package.library_root().resolve(relative).map_err(|source| {
                             BuildError::InvalidPath {
-                                from,
-                                site: request.site,
                                 span,
+                                trace: self.import_trace().into_boxed_slice(),
                                 source,
                             }
                         })?

@@ -119,3 +119,90 @@ fn check_rejects_entry_in_imported_source() {
         "unexpected imported-entry diagnostic:\n{error}"
     );
 }
+
+#[test]
+fn check_reports_undeclared_package_alias_at_import() {
+    let package = LocalPackage::new();
+    let root = package.write("main.wyn", "import \"pkg:missing\"\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(root)
+        .output()
+        .expect("Wyn compiler should run");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "undeclared package alias should be rejected"
+    );
+    assert!(
+        error.contains("main.wyn:1:1: unknown package dependency alias `missing`"),
+        "unexpected package-alias diagnostic:\n{error}"
+    );
+    assert!(
+        !error.contains("ModuleId("),
+        "diagnostic leaked an internal module ID:\n{error}"
+    );
+    assert!(
+        !error.contains(&package.directory.to_string_lossy().to_string()),
+        "diagnostic leaked the temporary package root:\n{error}"
+    );
+}
+
+#[test]
+fn check_rejects_import_outside_package_root() {
+    let package = LocalPackage::new();
+    let root = package.write("main.wyn", "import \"../outside\"\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(root)
+        .output()
+        .expect("Wyn compiler should run");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "escaping import should be rejected");
+    assert!(
+        error.contains("main.wyn:1:1: invalid import path: module path escapes its package root"),
+        "unexpected escaping-import diagnostic:\n{error}"
+    );
+}
+
+#[test]
+fn wgsl_output_is_independent_of_source_directory() {
+    let first = LocalPackage::new();
+    let second = LocalPackage::new();
+    let source = concat!(
+        "module Dependency = import \"library/dependency\"\n",
+        "entry compute(value: i32) i32 = Dependency.identity(value)\n",
+    );
+    let dependency = "def identity<T>(value: T) T = value\n";
+    let first_root = first.write("main.wyn", source);
+    let second_root = second.write("main.wyn", source);
+    first.write("library/dependency.wyn", dependency);
+    second.write("library/dependency.wyn", dependency);
+    let first_output = first.directory.join("output.wgsl");
+    let second_output = second.directory.join("output.wgsl");
+
+    for (root, output) in [(&first_root, &first_output), (&second_root, &second_output)] {
+        let result = Command::new(env!("CARGO_BIN_EXE_wyn"))
+            .arg("compile")
+            .arg(root)
+            .args(["--target", "wgsl", "--output"])
+            .arg(output)
+            .output()
+            .expect("Wyn compiler should run");
+        assert!(
+            result.status.success(),
+            "local module compilation failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    assert_eq!(
+        fs::read(first_output).expect("first WGSL output should exist"),
+        fs::read(second_output).expect("second WGSL output should exist"),
+        "generated WGSL should not depend on the source cache directory",
+    );
+}

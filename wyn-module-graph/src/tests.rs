@@ -379,7 +379,6 @@ fn load_failure_retains_the_complete_import_chain() {
     let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
     let BuildError::Load {
         module,
-        requested_at,
         trace,
         source: TestProviderError::Missing,
     } = failure.error()
@@ -387,11 +386,10 @@ fn load_failure_retains_the_complete_import_chain() {
         panic!("expected load error");
     };
     assert_eq!(module.path().as_str(), "src/missing.wyn");
-    assert!(requested_at.is_some());
     assert_eq!(trace.len(), 2);
     assert_eq!(trace[0].requested.path().as_str(), "src/a.wyn");
     assert_eq!(trace[1].requested.path().as_str(), "src/missing.wyn");
-    assert_eq!(failure.snippet(requested_at.unwrap()), Ok("local:missing"));
+    assert_eq!(failure.snippet(trace[1].span), Ok("local:missing"));
 }
 
 #[test]
@@ -401,17 +399,9 @@ fn undeclared_dependency_reports_its_alias_and_source_span() {
     provider.insert(package, "src/main.wyn", "dep:missing\n");
 
     let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
-    let BuildError::UnknownDependency {
-        from,
-        site,
-        alias,
-        span,
-    } = failure.error()
-    else {
+    let BuildError::UnknownDependency { alias, span, .. } = failure.error() else {
         panic!("expected unknown dependency error");
     };
-    assert_eq!(*from, ModuleId::from(0));
-    assert_eq!(*site, ImportSiteId::from(0));
     assert_eq!(alias.as_str(), "missing");
     assert_eq!(span.range(), text_range(0, 11));
     assert_eq!(failure.snippet(*span), Ok("dep:missing"));

@@ -42,12 +42,13 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
             root,
             concat!(
                 "module Dependency = import \"pkg:dependency\"\n",
-                "entry compute_main(value: i32) i32 = Dependency.increment(value)\n",
+                "type root_value = i32\n",
+                "entry compute_main(value: root_value) root_value = Dependency.identity(value)\n",
             ),
         )
         .expect("root override should be unique");
     sources
-        .add_override(dependency, "def increment(value: i32) i32 = value + 1")
+        .add_override(dependency, "def identity<T>(value: T) T = value")
         .expect("dependency override should be unique");
 
     let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
@@ -77,7 +78,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
         .support_definitions
         .iter()
         .find(|support| {
-            support.namespace.as_deref() == Some("Dependency") && support.definition.name == "increment"
+            support.namespace.as_deref() == Some("Dependency") && support.definition.name == "identity"
         })
         .expect("dependency definition should be retained for TLC lowering");
     assert_eq!(
@@ -95,7 +96,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
             .find(|definition| symbol_name_or_bug(&lowered.symbols, definition.name) == name)
             .and_then(|definition| definition.package)
     };
-    assert_eq!(package_of("Dependency.increment"), Some(dependency_package));
+    assert_eq!(package_of("Dependency.identity"), Some(dependency_package));
     assert_eq!(package_of("compute_main"), Some(root_package));
 
     let pinned = tlc::pin_entry_buffers(lowered).expect("entry buffers should pin");
@@ -103,15 +104,20 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
     let partial = tlc::partial_eval(ownership);
     let normalized = tlc::normalize_soacs(partial);
     let monomorphic = tlc::monomorphize(normalized).expect("TLC should monomorphize");
-    let package_of = |name: &str| {
-        monomorphic
-            .defs
-            .iter()
-            .find(|definition| symbol_name_or_bug(&monomorphic.symbols, definition.name) == name)
-            .and_then(|definition| definition.package)
-    };
-    assert_eq!(package_of("Dependency.increment"), Some(dependency_package));
-    assert_eq!(package_of("compute_main"), Some(root_package));
+    let dependency_specialization = monomorphic
+        .defs
+        .iter()
+        .find(|definition| {
+            symbol_name_or_bug(&monomorphic.symbols, definition.name).starts_with("Dependency.identity$")
+        })
+        .expect("dependency generic should be specialized for the root call");
+    assert_eq!(dependency_specialization.package, Some(dependency_package));
+    let root_entry = monomorphic
+        .defs
+        .iter()
+        .find(|definition| symbol_name_or_bug(&monomorphic.symbols, definition.name) == "compute_main")
+        .expect("root entry should remain after monomorphization");
+    assert_eq!(root_entry.package, Some(root_package));
 }
 
 #[test]

@@ -18,7 +18,7 @@ pub enum LocalSourceError {
     DuplicateOverride {
         module: ModuleKey,
     },
-    #[error("failed to resolve local package root `{}`: {source}", root.display())]
+    #[error("failed to resolve local package root: {source}")]
     PackageRoot {
         root: PathBuf,
         #[source]
@@ -28,20 +28,20 @@ pub enum LocalSourceError {
     MissingPackageRoot {
         module: ModuleKey,
     },
-    #[error("failed to resolve source module `{}`: {source}", path.display())]
+    #[error("failed to resolve source module: {source}")]
     ResolveModule {
         module: ModuleKey,
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("source module `{}` resolves outside local package root `{}`", path.display(), root.display())]
+    #[error("source module resolves outside its local package root")]
     EscapesPackageRoot {
         module: ModuleKey,
         path: PathBuf,
         root: PathBuf,
     },
-    #[error("failed to read source module `{}`: {source}", path.display())]
+    #[error("failed to read source module: {source}")]
     ReadModule {
         module: ModuleKey,
         path: PathBuf,
