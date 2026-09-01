@@ -178,15 +178,6 @@
 
 open f32
 
--- Vertex shader: full-screen triangle
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
-
 -- Constants (using vector literals)
 def red: vec3f32 = @[1.0, 0.0, 0.0]
 def green: vec3f32 = @[0.0, 1.0, 0.0]
@@ -308,27 +299,29 @@ def edge_indexes: [12]vec2i32 =
 
 -- Main per-fragment function
 -- Inputs:
---   iResolution : [w, h]
---   iTime       : time in seconds
---   fragCoord   : pixel coordinate [x, y]
+--   resolution : [w, h, _]
+--   time       : time in seconds
+--   frag_coord : pixel coordinate [x, y]
 -- Output: vec4f32 color
-def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
-  let weight = 3.0 / iResolution.x in
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let weight = 3.0 / resolution.x in
 
   -- Normalized, centered UV with aspect correction
-  let uv0 : vec2f32 = @[(fragCoord.x / iResolution.x), (fragCoord.y / iResolution.y)] in
+  let uv0 : vec2f32 = @[(frag_coord.x / resolution.x), (frag_coord.y / resolution.y)] in
   let uv1 : vec2f32 = uv0 * 2.0 - 1.0 in
-  let uv  : vec2f32 = @[(uv1.x * (iResolution.x/iResolution.y)), uv1.y] in
+  let uv  : vec2f32 = @[(uv1.x * (resolution.x/resolution.y)), uv1.y] in
 
   let line_width = 0.4 in
-  let time = iTime * 0.31415 in
+  let animation_time = time * 0.31415 in
 
   let base_col = mix3v(@[0.19, 0.13, 0.10], @[1.0, 1.0, 1.0],
                          (0.5 * ((magnitude(uv) * 0.5) ** 2.0))) in
   let cam = translation(@[0.0, 0.0, 10.0]) in
 
   -- #define LINEAR_ROTATION
-  let rot = rotation_euler(@[time, (time*0.86), (time*0.473)]) in
+  let rot = rotation_euler(@[animation_time, (animation_time*0.86), (animation_time*0.473)]) in
 
   -- Precompute rot * cam (loop invariant)
   -- Using row-vector convention (v * M), same as GLSL/DirectX
@@ -352,7 +345,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
 
       let i_sum = sum_edges(verts1, weight, uv, line_width, edge_indexes) in
 
-      let shade = fragment(verts1[0], iTime) in
+      let shade = fragment(verts1[0], time) in
       let intensity = min(i_sum, 1.0) in
       let shade_scaled = shade * intensity in
       let acc' = acc + shade_scaled in
@@ -368,7 +361,7 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
       let v4  : vec4f32 = @[0.0, 0.0, 0.0, 1.0] * mat in
       let zinv = 1.0 / v4.z in
       let vert : vec3f32 = @[(v4.x*zinv), (v4.y*zinv), zinv] in
-      let sh  = fragment(vert, iTime) in
+      let sh  = fragment(vert, time) in
       let cov = circle(weight, uv, vert.xy, -vert.z, line_width) in
       let sh_scaled = sh * cov in
       let acc' = acc + sh_scaled in
@@ -376,18 +369,3 @@ def main_image(iResolution:vec2f32, iTime:f32, fragCoord:vec2f32) vec4f32 =
   let (dummy2, c_final) = c_final_result in
 
   @[c_final.x, c_final.y, c_final.z, 1.0]
-
-def fragment_main(iResolution: vec3f32, iTime: f32, pos: vec4f32) vec4f32 =
-  let width = iResolution.x in
-  let height = iResolution.y in
-  let time = iTime in
-  main_image(@[width, height], time, pos.xy)
-
-entry da_rasterizer(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

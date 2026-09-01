@@ -3,13 +3,6 @@
 -- License: MIT (see original GLSL below)
 
 -- Vertex shader: full-screen triangle
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 -- Helper functions that are not yet builtins
 
@@ -402,7 +395,14 @@ def setCamera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
 -- Fragment Shader (Main Entry Point)
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord:vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   let mo = @[iMouse.x / iResolution.x, iMouse.y / iResolution.y] in
   let time = 32.0 + iTime * 1.5 in
 
@@ -1115,12 +1115,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord:v
 --     
 --     fragColor = vec4( tot, 1.0 );
 -- }
-
-entry primitives(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

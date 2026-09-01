@@ -118,19 +118,19 @@ def intersect(ro: vec3f32, rd: vec3f32, pixel_size: f32, iTime: f32) vec3f32 =
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   -- Flip Y for Vulkan.
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let q  = @[coord.x / iResolution.x, coord.y / iResolution.y] in
@@ -404,12 +404,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 --     col*=0.5+0.5*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y),0.7);  // vigneting
 --  	fragColor = vec4(col.xyz, smoothstep(0.55, .76, 1.-res.x/5.)); 
 --  }
-
-entry mandelbulb(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

@@ -15,13 +15,6 @@ def PI2: f32 = PI * 2.0
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- 2D rotation matrix.
@@ -89,7 +82,14 @@ def sceneMap(p: vec3f32, iTime: f32) f32 =
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
   let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
   -- Screen-space UV ([-1,1] range, aspect-corrected)
@@ -200,12 +200,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 --     vec3 col = vec3(acc * 0.01, acc * 0.011 + acc2*0.002, acc * 0.012+ acc2*0.005);
 --     fragColor = vec4(col, 1.0 - t * 0.03);
 -- }
-
-entry phantom_star(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

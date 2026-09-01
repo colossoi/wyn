@@ -96,6 +96,8 @@ $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID
 $executableSuffix = if ($isWindowsHost) { '.exe' } else { '' }
 $wynBinary = Join-Path $workspace "target/$profile/wyn$executableSuffix"
 $vizBinary = Join-Path $workspace "extra/viz/target/$profile/viz$executableSuffix"
+$playgroundDirectory = Join-Path $workspace 'testfiles/playground'
+$playgroundHeader = Join-Path $workspace 'scripts/playground_image_header.wyn'
 
 $exitCode = 0
 Push-Location $workspace
@@ -170,16 +172,33 @@ try {
         $extension = if ($Wgsl) { 'wgsl' } else { 'spv' }
         $outputPath = Join-Path $outputDirectory "$base.$extension"
 
+        $compileSource = $file.FullName
+        $preparedSource = $null
+        $isPlaygroundSource = $file.DirectoryName -eq $playgroundDirectory
+        $hasExplicitEntry = [IO.File]::ReadLines($file.FullName) |
+            Where-Object { $_ -match '^entry ' } |
+            Select-Object -First 1
+        if ($isPlaygroundSource -and -not $hasExplicitEntry) {
+            $preparedSource = Join-Path $playgroundDirectory ".validate-$base-$([guid]::NewGuid()).wyn"
+            $source = [IO.File]::ReadAllText($playgroundHeader) +
+                [Environment]::NewLine + [IO.File]::ReadAllText($file.FullName)
+            [IO.File]::WriteAllText($preparedSource, $source, [Text.UTF8Encoding]::new($false))
+            $compileSource = $preparedSource
+        }
+
         if ($Wgsl) {
             Write-Host -NoNewline "Compiling $($file.FullName) -> WGSL... "
             $compile = Invoke-NativeCaptured $wynBinary @(
-                'compile', $file.FullName, '--graphics', '-t', 'wgsl', '-o', $outputPath
+                'compile', $compileSource, '--graphics', '-t', 'wgsl', '-o', $outputPath
             )
         } else {
             Write-Host -NoNewline "Compiling $($file.FullName)... "
             $compile = Invoke-NativeCaptured $wynBinary @(
-                'compile', $file.FullName, '--graphics', '-o', $outputPath
+                'compile', $compileSource, '--graphics', '-o', $outputPath
             )
+        }
+        if ($null -ne $preparedSource) {
+            Remove-Item -LiteralPath $preparedSource -Force -ErrorAction SilentlyContinue
         }
 
         if ($compile.ExitCode -ne 0) {

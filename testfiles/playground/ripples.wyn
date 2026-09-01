@@ -35,19 +35,19 @@ def palette(t: f32) vec3f32 =
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Fragment shader: interference of three orbiting wave centers,
 -- brightness modulated by a fragment-invariant reduce (hoisted).
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   -- Fragment-invariant reduce: sums 512 cosines of time-shifted phases.
   -- Let-bind the map producer so fuse_maps sees it as a separate
   -- producer/consumer and fuses reduce-of-map into a Redomap — which
@@ -77,12 +77,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 
   let color = palette(w * 0.12 + envelope) in
   @[color.x * envelope, color.y * envelope, color.z * envelope, 1.0]
-
-entry ripples(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

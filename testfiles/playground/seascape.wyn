@@ -29,13 +29,6 @@ def octave_m: mat2f32 = @[[1.6, -1.2], [1.2, 1.6]]
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Math helpers
@@ -210,7 +203,14 @@ def getPixel(coord: vec2f32, time: f32, iResolution: vec3f32, iTime: f32) vec3f3
 ------------------------------------------------------------
 
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   -- Flip Y coordinate for Vulkan
   let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
   let time = iTime * 0.3 + iMouse.x * 0.01 in
@@ -427,12 +427,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: 
 --     // post
 -- 	fragColor = vec4(pow(color,vec3(0.65)), 1.0);
 -- }
-
-entry seascape(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

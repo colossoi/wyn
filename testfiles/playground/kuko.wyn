@@ -10,13 +10,6 @@ def FAR: f32 = 55.0
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Two by two rotation matrix constructor
@@ -117,7 +110,14 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let iResolution = resolution in
+  let iTime = time in
+  let iMouse = mouse in
+  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = fragCoord in
   let res = iResolution.xy in
   let uv = @[frag.x, res.y - frag.y] in
 
@@ -298,12 +298,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag: vec4f
 --     // Tone mapping to compress the high dynamic range glow.
 --     O = tanh(O * O / 1e7);
 -- }
-
-entry kuko(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))
