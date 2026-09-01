@@ -68,3 +68,29 @@ fn check_loads_transitive_local_modules() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn check_reports_nested_semantic_module_in_imported_source() {
+    let package = LocalPackage::new();
+    let root = package.write("main.wyn", "module dependency = import \"library/dependency\"\n");
+    package.write(
+        "library/dependency.wyn",
+        "module nested = { def value: i32 = 42 }\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(root)
+        .output()
+        .expect("Wyn compiler should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "nested semantic module should fail checking"
+    );
+    assert!(
+        stderr.contains("module 'dependency' contains nested semantic module 'nested'"),
+        "unexpected diagnostic:\n{stderr}"
+    );
+}

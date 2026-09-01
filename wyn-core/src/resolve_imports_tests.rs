@@ -51,3 +51,23 @@ fn module_binding_import_becomes_loaded_module_body() {
         }))] if matches!(&declarations[..], [NestedDeclaration::Decl(declaration)] if declaration.name == "value")
     ));
 }
+
+#[test]
+fn imported_nested_semantic_module_is_rejected_explicitly() {
+    let (plan, root, dependency) = local_plan();
+    let mut sources = LocalSources::new();
+    sources
+        .add_override(root, "module Dependency = import \"dependency\"")
+        .expect("root override should be unique");
+    sources
+        .add_override(dependency, "module Nested = { def value: i32 = 42 }")
+        .expect("dependency override should be unique");
+    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
+    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let program = resolve_imports(modules).expect("imports should resolve");
+
+    let error = crate::elaborate_modules::elaborate_modules(program)
+        .expect_err("nested semantic module should be rejected");
+
+    assert!(error.to_string().contains("module 'Dependency' contains nested semantic module 'Nested'"));
+}

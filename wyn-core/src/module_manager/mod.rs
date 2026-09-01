@@ -17,7 +17,7 @@ use crate::scope;
 use crate::scope::ScopeStack;
 use crate::CompilerOptions;
 use crate::StableMap;
-use crate::{bail_module, err_module, err_parse};
+use crate::{bail_module, err_module, err_module_at, err_parse};
 use crate::{LookupMap, LookupSet};
 use wyn_module_graph::ModuleId;
 
@@ -775,7 +775,14 @@ impl ModuleManager {
                         NestedDeclaration::Sig(sig_decl) => {
                             module_functions.insert(sig_decl.name.clone());
                         }
-                        _ => {}
+                        NestedDeclaration::Entry(_)
+                        | NestedDeclaration::Extern(_)
+                        | NestedDeclaration::TypeBind(_)
+                        | NestedDeclaration::Module(_)
+                        | NestedDeclaration::ModuleTypeBind(_)
+                        | NestedDeclaration::Open(_)
+                        | NestedDeclaration::Import(_)
+                        | NestedDeclaration::Resource(_) => {}
                     }
                 }
 
@@ -833,6 +840,7 @@ impl ModuleManager {
                             items.extend(opened_items);
                         }
                         NestedDeclaration::TypeBind(type_bind) => {
+                            enforce_lifting_rule(type_bind)?;
                             // Handle type aliases, including those referencing parameters
                             // e.g., `type t = n.t` where n is a parameter
                             let substituted_ty =
@@ -845,8 +853,53 @@ impl ModuleManager {
                                 },
                             ));
                         }
-                        _ => {
-                            // Skip other declaration types (ModuleTypeBind, etc.)
+                        NestedDeclaration::Module(declaration) => {
+                            let nested_name = match declaration {
+                                ast::ModuleDecl::Module { name, .. }
+                                | ast::ModuleDecl::Functor { name, .. } => name,
+                            };
+                            return Err(err_module!(
+                                "module '{}' contains nested semantic module '{}'; combine source files with import declarations and expose definitions directly",
+                                module_name,
+                                nested_name
+                            ));
+                        }
+                        NestedDeclaration::ModuleTypeBind(declaration) => {
+                            return Err(err_module!(
+                                "module '{}' contains nested module type '{}'; module types must be declared at file scope",
+                                module_name,
+                                declaration.name
+                            ));
+                        }
+                        NestedDeclaration::Entry(declaration) => {
+                            return Err(err_module_at!(
+                                declaration.name_span,
+                                "entry '{}' is inside module '{}'; entries must be declared at program root",
+                                declaration.name,
+                                module_name
+                            ));
+                        }
+                        NestedDeclaration::Extern(declaration) => {
+                            return Err(err_module_at!(
+                                declaration.data.span,
+                                "extern '{}' is inside module '{}'; externs must be declared at file scope",
+                                declaration.name,
+                                module_name
+                            ));
+                        }
+                        NestedDeclaration::Resource(declaration) => {
+                            return Err(err_module_at!(
+                                declaration.span,
+                                "resource '{}' is inside module '{}'; resources must be declared at program root",
+                                declaration.name,
+                                module_name
+                            ));
+                        }
+                        NestedDeclaration::Import(import) => {
+                            return Err(err_module_at!(
+                                import.span,
+                                "source import reached semantic elaboration without a resolved module edge"
+                            ));
                         }
                     }
                 }
@@ -935,10 +988,16 @@ impl ModuleManager {
                     node_counter,
                 )
             }
-            _ => {
-                // For now, only handle struct, name, and application module expressions
-                Err(err_module!("Unsupported module expression type"))
+            ModuleExpression::Ascription(_, _) => {
+                Err(err_module!("module-expression ascription cannot be elaborated as a module body"))
             }
+            ModuleExpression::Lambda(_, _, _) => {
+                Err(err_module!("anonymous functors cannot be elaborated as module bodies"))
+            }
+            ModuleExpression::Import(import) => Err(err_module_at!(
+                import.span,
+                "source import reached semantic elaboration without a resolved module edge"
+            )),
         }
     }
 
