@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use wyn_core::ast::{NodeCounter, Span};
+use wyn_core::ast::Span;
 use wyn_core::egir::ir::{OperandRef, OperandType, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
     CompilerResourceKind, LogicalResource, LogicalResourceArena, LogicalSize, NoStorageDeclaration,
@@ -16,8 +15,13 @@ use wyn_core::egir::types::{
     SegExtent, SegResourceAccess, SegSpace, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase,
 };
 use wyn_core::error::CompilerError;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{BindingRef, FunctionId, LoweringProfile, ResourceAccess};
+use wyn_core::{
+    BindingRef, Compiler, CompilerOptions, FunctionId, LoweringProfile, ParsedModules, ResourceAccess,
+};
+use wyn_module_graph::{
+    BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
+    PackagePlan, PackagePlanBuilder, SourceFingerprint,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectPass {
@@ -125,13 +129,38 @@ impl InspectPass {
     }
 }
 
-struct PreludeCache {
-    prelude: PreElaboratedPrelude,
-    start_node_counter: NodeCounter,
+#[derive(Debug)]
+enum SourceModulesError {
+    Compiler(CompilerError),
+    Setup(String),
+    Build(BuildFailure<CompilerError, LocalSourceError>),
 }
 
-thread_local! {
-    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = const { RefCell::new(None) };
+fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), String> {
+    let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
+    let fingerprint =
+        SourceFingerprint::new("egir-viz-source").map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0", fingerprint)
+        .map_err(|error| error.to_string())?;
+    let mut builder = PackagePlanBuilder::new();
+    let package = builder
+        .add_package(identity, root_path.clone())
+        .map_err(|error| error.to_string())?;
+    let root = ModuleKey::new(package, root_path);
+    builder.set_root(root.clone()).map_err(|error| error.to_string())?;
+    let plan = builder.build().map_err(|error| error.to_string())?;
+    let mut sources = LocalSources::new();
+    sources.add_override(root, source).map_err(|error| error.to_string())?;
+    Ok((plan, sources))
+}
+
+fn load_source_modules(source: &str) -> Result<ParsedModules, SourceModulesError> {
+    let compiler = Compiler::new(CompilerOptions { graphics: true })
+        .map_err(SourceModulesError::Compiler)?;
+    let (plan, mut sources) = single_source_plan(source).map_err(SourceModulesError::Setup)?;
+    compiler
+        .load_modules(plan, &mut sources)
+        .map_err(SourceModulesError::Build)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -465,25 +494,13 @@ impl InspectResult {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-    PRELUDE_CACHE.with(|cache| {
-        if cache.borrow().is_some() {
-            return true;
+    match Compiler::new(CompilerOptions { graphics: true }) {
+        Ok(_) => true,
+        Err(error) => {
+            web_sys::console::error_1(&format!("failed to initialize Wyn compiler: {error}").into());
+            false
         }
-        let mut node_counter = NodeCounter::new();
-        match ModuleManager::create_prelude(&mut node_counter) {
-            Ok(prelude) => {
-                *cache.borrow_mut() = Some(PreludeCache {
-                    prelude,
-                    start_node_counter: node_counter,
-                });
-                true
-            }
-            Err(error) => {
-                web_sys::console::error_1(&format!("failed to initialize Wyn prelude: {error:?}").into());
-                false
-            }
-        }
-    })
+    }
 }
 
 #[wasm_bindgen]
@@ -513,21 +530,23 @@ pub fn inspect_pass(source: &str, pass: &str) -> JsValue {
     })
 }
 
-fn compiler_init() -> Option<(NodeCounter, ModuleManager)> {
-    PRELUDE_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        let cached = cache.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude_with_options(
-            cached.prelude.clone(),
-            cached.start_node_counter.clone(),
-            wyn_core::CompilerOptions { graphics: true },
-        ))
-    })
-}
-
 fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
     let span = error.span().and_then(SourceSpan::from_span);
     InspectResult::error(pass.id(), format_compiler_error(&error), span)
+}
+
+fn source_modules_error(pass: InspectPass, error: SourceModulesError) -> InspectResult {
+    match error {
+        SourceModulesError::Compiler(error) => compiler_error(pass, error),
+        SourceModulesError::Setup(message) => InspectResult::error(pass.id(), message, None),
+        SourceModulesError::Build(failure) => {
+            let span = match failure.error() {
+                BuildError::Parse { source, .. } => source.span().and_then(SourceSpan::from_span),
+                _ => None,
+            };
+            InspectResult::error(pass.id(), failure.to_string(), span)
+        }
+    }
 }
 
 fn format_compiler_error(error: &CompilerError) -> String {
@@ -557,8 +576,9 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     if !init_compiler() {
         return InspectResult::error(pass.id(), "failed to initialize the Wyn compiler", None);
     }
-    let Some((node_counter, module_manager)) = compiler_init() else {
-        return InspectResult::error(pass.id(), "compiler cache is unavailable", None);
+    let modules = match load_source_modules(source) {
+        Ok(modules) => modules,
+        Err(error) => return source_modules_error(pass, error),
     };
 
     macro_rules! try_compiler {
@@ -570,11 +590,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let program = try_compiler!(wyn_core::parser::parse(source, node_counter, module_manager));
-    let program = try_compiler!(wyn_core::resolve_imports::resolve_imports(
-        program,
-        std::path::Path::new(".")
-    ));
+    let program = try_compiler!(wyn_core::resolve_imports::resolve_imports(modules));
     let program = try_compiler!(wyn_core::elaborate_modules::elaborate_modules(program));
     let program = wyn_core::name_resolution::resolve_names(program);
     let program = try_compiler!(wyn_core::resolve_resources::resolve_resources(program));

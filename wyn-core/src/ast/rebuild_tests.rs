@@ -1,9 +1,8 @@
 use std::convert::Infallible;
 
 use super::super::{
-    Decl, ExprKind, Expression, Header, Node, NodeCounter, NodeId, Program, SourceTree, Span,
+    Decl, ExprKind, Expression, Header, Node, NodeCounter, NodeId, ParsedFamily, Program, SourceTree, Span,
 };
-use crate::parser::ParsedFamily;
 use crate::types::Diet;
 
 #[derive(Debug)]

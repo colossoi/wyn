@@ -1,27 +1,55 @@
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
-use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
-
-/// Cached prelude and starting node counter
-/// Creating the prelude parses all prelude files, which is expensive.
-/// We cache this and create fresh FrontEnds from it for each compilation.
-struct PreludeCache {
-    prelude: PreElaboratedPrelude,
-    start_node_counter: NodeCounter,
-}
-
-thread_local! {
-    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = RefCell::new(None);
-}
+use wyn_core::{
+    CodegenTarget, Compiler, CompilerOptions, LoweringProfile, ParsedModules, PipelineTopologyPolicy,
+    SchedulePolicy,
+};
+use wyn_module_graph::{
+    BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
+    PackagePlan, PackagePlanBuilder, SourceFingerprint,
+};
 
 /// Get the compiler version string
 #[wasm_bindgen]
 pub fn version() -> String {
     "005".to_string()
+}
+
+fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), String> {
+    let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
+    let fingerprint =
+        SourceFingerprint::new("wasm-source").map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("wasm/root", "v0.0.0", fingerprint)
+        .map_err(|error| error.to_string())?;
+    let mut builder = PackagePlanBuilder::new();
+    let package = builder
+        .add_package(identity, root_path.clone())
+        .map_err(|error| error.to_string())?;
+    let root = ModuleKey::new(package, root_path);
+    builder.set_root(root.clone()).map_err(|error| error.to_string())?;
+    let plan = builder.build().map_err(|error| error.to_string())?;
+    let mut sources = LocalSources::new();
+    sources.add_override(root, source).map_err(|error| error.to_string())?;
+    Ok((plan, sources))
+}
+
+fn load_source_modules(
+    source: &str,
+    options: CompilerOptions,
+) -> Result<ParsedModules, SourceModulesError> {
+    let compiler = Compiler::new(options).map_err(SourceModulesError::Compiler)?;
+    let (plan, mut sources) = single_source_plan(source).map_err(SourceModulesError::Setup)?;
+    compiler
+        .load_modules(plan, &mut sources)
+        .map_err(SourceModulesError::Build)
+}
+
+#[derive(Debug)]
+enum SourceModulesError {
+    Compiler(CompilerError),
+    Setup(String),
+    Build(BuildFailure<CompilerError, LocalSourceError>),
 }
 
 // =============================================================================
@@ -183,40 +211,13 @@ mod tlc_tree {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-
-    PRELUDE_CACHE.with(|cache| {
-        if cache.borrow().is_some() {
-            return true; // Already initialized
+    match Compiler::new(CompilerOptions::default()) {
+        Ok(_) => true,
+        Err(error) => {
+            web_sys::console::error_1(&format!("Failed to initialize compiler: {error}").into());
+            false
         }
-
-        let mut node_counter = NodeCounter::new();
-        match ModuleManager::create_prelude(&mut node_counter) {
-            Ok(prelude) => {
-                *cache.borrow_mut() = Some(PreludeCache {
-                    prelude,
-                    start_node_counter: node_counter,
-                });
-                true
-            }
-            Err(e) => {
-                web_sys::console::error_1(&format!("Failed to initialize prelude: {:?}", e).into());
-                false
-            }
-        }
-    })
-}
-
-/// Build a fresh `(NodeCounter, ModuleManager)` pair from the cached prelude.
-fn create_compiler_init(options: CompilerOptions) -> Option<(NodeCounter, ModuleManager)> {
-    PRELUDE_CACHE.with(|cache| {
-        let cache_ref = cache.borrow();
-        let cached = cache_ref.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude_with_options(
-            cached.prelude.clone(),
-            cached.start_node_counter.clone(),
-            options,
-        ))
-    })
+    }
 }
 
 /// Source location for an error
@@ -573,6 +574,30 @@ impl CompileResultWgsl {
             }),
         }
     }
+
+    fn source_modules_err(source: &str, error: SourceModulesError) -> Self {
+        match error {
+            SourceModulesError::Compiler(error) => Self::err(source, error),
+            SourceModulesError::Setup(message) => Self::err_msg(message),
+            SourceModulesError::Build(failure) => {
+                let location = match failure.error() {
+                    BuildError::Parse { source: error, .. } => error_location(source, error),
+                    _ => None,
+                };
+                Self {
+                    success: false,
+                    wgsl: None,
+                    interface: None,
+                    mir: None,
+                    tlc: None,
+                    error: Some(ErrorInfo {
+                        message: failure.to_string(),
+                        location,
+                    }),
+                }
+            }
+        }
+    }
 }
 
 /// Compile Wyn source to WGSL + emit the program interface (entries,
@@ -598,18 +623,14 @@ pub fn compile_to_wgsl_with_options(source: &str, graphics: bool, direct: bool) 
 }
 
 fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileResultWgsl {
-    let (node_counter, module_manager) = match create_compiler_init(CompilerOptions { graphics }) {
-        Some(f) => f,
-        None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
+    let modules = match load_source_modules(source, CompilerOptions { graphics }) {
+        Ok(modules) => modules,
+        Err(error) => return CompileResultWgsl::source_modules_err(source, error),
     };
 
-    // Frontend pipeline: parse → elaborate → resolve → fold → type-check →
+    // Frontend pipeline: load → elaborate → resolve → fold → type-check →
     // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
-    let program = match wyn_core::parser::parse(source, node_counter, module_manager) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
-    let program = match wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new(".")) {
+    let program = match wyn_core::resolve_imports::resolve_imports(modules) {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(source, e),
     };

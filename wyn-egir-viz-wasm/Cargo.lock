@@ -511,6 +511,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "wyn-core",
+ "wyn-module-graph",
 ]
 
 [[package]]

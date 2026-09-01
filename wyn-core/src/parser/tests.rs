@@ -1499,11 +1499,14 @@ fn import_sites_are_file_local_and_follow_source_order() {
         declaration => panic!("expected imported module, got {declaration:?}"),
     };
 
-    for (index, import) in [first, second, third].into_iter().enumerate() {
+    let assert_site = |index, import: &SourceImport| {
         assert_eq!(import.site, ImportSiteId::from(index as u32));
         let range = import.span.range();
         assert!(source[range.start() as usize..range.end() as usize].starts_with("import"));
-    }
+    };
+    assert_site(0, &first);
+    assert_site(1, second);
+    assert_site(2, third);
 }
 
 #[test]

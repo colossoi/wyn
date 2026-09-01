@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
+use wyn_core::{
+    CodegenTarget, Compiler, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy,
+};
+use wyn_module_graph::{
+    BuildFailure, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
+    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint,
+};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -119,6 +125,21 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
+    #[error("Source module error: {0}")]
+    SourceModule(#[from] BuildFailure<wyn_core::error::CompilerError, LocalSourceError>),
+
+    #[error("Local source error: {0}")]
+    LocalSource(#[from] LocalSourceError),
+
+    #[error("Package identity error: {0}")]
+    PackageIdentity(#[from] IdentityError),
+
+    #[error("Module path error: {0}")]
+    ModulePath(#[from] PathError),
+
+    #[error("Package plan error: {0}")]
+    PackagePlan(#[from] PlanError),
+
     #[error("Pipeline descriptor serialization error: {0}")]
     DescriptorSerialization(#[from] serde_json::Error),
 
@@ -136,25 +157,48 @@ struct FrontendFile {
     program: wyn_core::ast_type_holes::HolesResolved,
 }
 
+fn direct_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
+    let input = input.canonicalize()?;
+    let Some(root) = input.parent() else {
+        return Err(DriverError::InvalidOption(format!(
+            "input file `{}` has no parent directory",
+            input.display()
+        )));
+    };
+    let Some(root_file) = input.file_name().and_then(|name| name.to_str()) else {
+        return Err(DriverError::InvalidOption(format!(
+            "input file `{}` is not a UTF-8 path",
+            input.display()
+        )));
+    };
+
+    let root_file = ModulePath::new(root_file)?;
+    let fingerprint = SourceFingerprint::new("direct-local-source")?;
+    let identity = PackageIdentity::new("direct/root", "v0.0.0", fingerprint)?;
+    let mut builder = PackagePlanBuilder::new();
+    let package = builder.add_package(identity, root_file.clone())?;
+    builder.set_root(ModuleKey::new(package, root_file))?;
+    let plan = builder.build()?;
+    let mut sources = LocalSources::new();
+    sources.add_package_root(package, root)?;
+    Ok((plan, sources))
+}
+
 fn type_check_frontend_file(
     input: &Path,
     reject_holes: bool,
     graphics: bool,
     verbose: bool,
 ) -> Result<FrontendFile, DriverError> {
-    let source = fs::read_to_string(input)?;
-    let (node_counter, module_manager) = time("frontend", verbose, || {
-        wyn_core::init_compiler_with_options(CompilerOptions { graphics })
+    let (plan, mut sources) = direct_source_plan(input)?;
+    let compiler = time("frontend", verbose, || {
+        Compiler::new(CompilerOptions { graphics })
     })?;
-    let program = time("parse", verbose, || {
-        wyn_core::parser::parse(&source, node_counter, module_manager)
+    let modules = time("load_modules", verbose, || {
+        compiler.load_modules(plan, &mut sources)
     })?;
-    // Resolve `import "..."` against the entry file's directory so
-    // user code can split across files. Imports are looked up
-    // relative to the file containing the import statement.
-    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
     let program = time("resolve_imports", verbose, || {
-        wyn_core::resolve_imports::resolve_imports(program, &base_dir)
+        wyn_core::resolve_imports::resolve_imports(modules)
     })?;
     let program = time("elaborate_modules", verbose, || {
         wyn_core::elaborate_modules::elaborate_modules(program)

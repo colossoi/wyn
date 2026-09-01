@@ -3,14 +3,14 @@
 use crate::ast;
 use crate::ast::{
     Decl, Declaration, Identifier, ImportsResolvedFrontend, ModuleExpression, ModuleTypeExpression,
-    NestedDeclaration, NodeCounter, ParsedFrontend, Pattern, Spec, Type, TypeBind, TypeLifting, TypeName,
+    NestedDeclaration, NodeCounter, ParsedFamily, ParsedFrontend, Pattern, Spec, Type, TypeBind,
+    TypeLifting, TypeName,
 };
 use crate::ast_renumber;
 use crate::err_type;
 use crate::error::Result;
 use crate::lexer;
 use crate::name_resolution;
-use crate::parser;
 use crate::parser::Parser;
 use crate::resolve_imports;
 use crate::scope;
@@ -403,7 +403,7 @@ impl ModuleManager {
     /// Elaborate all module bindings and collect top-level declarations (for prelude files)
     fn elaborate_all_modules(
         &mut self,
-        declarations: &[Declaration<parser::ParsedFamily>],
+        declarations: &[Declaration<ParsedFamily>],
         node_counter: &mut NodeCounter,
     ) -> Result<()> {
         for decl in declarations {
@@ -436,10 +436,7 @@ impl ModuleManager {
     }
 
     /// Register all module type definitions from a parsed program
-    fn register_parsed_module_types(
-        &mut self,
-        declarations: &[Declaration<parser::ParsedFamily>],
-    ) -> Result<()> {
+    fn register_parsed_module_types(&mut self, declarations: &[Declaration<ParsedFamily>]) -> Result<()> {
         for decl in declarations {
             if let Declaration::Frontend(ParsedFrontend::ModuleTypeBind(mtb)) = decl {
                 if self.module_type_registry.contains_key(&mtb.name) {

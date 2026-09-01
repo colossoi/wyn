@@ -9,6 +9,7 @@
 mod error;
 mod graph;
 mod ids;
+mod local_sources;
 mod path;
 mod plan;
 mod source;
@@ -19,6 +20,7 @@ pub use graph::{
     ModuleGraph, SourceProvider,
 };
 pub use ids::{ImportSiteId, ModuleId, PackageId};
+pub use local_sources::{LocalSourceError, LocalSources};
 pub use path::{ModulePath, PathError, RelativeModulePath};
 pub use plan::{
     AliasError, Dependency, DependencyAlias, IdentityError, ModuleKey, Package, PackageIdentity,

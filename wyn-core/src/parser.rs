@@ -3,7 +3,6 @@ use crate::error::Result;
 use crate::interface::{Attribute, EntryKind, EntryOutputDecl};
 use crate::lexer;
 use crate::lexer::{LocatedToken, Token};
-use crate::module_manager;
 use crate::op;
 use crate::types;
 use crate::LookupMap;
@@ -18,39 +17,31 @@ mod pattern;
 #[cfg(test)]
 mod tests;
 
-pub type ParsedFamily = AstFamily<
-    SourceTree,
-    DefinitionSyntax,
-    EntrySyntax,
-    Attribute,
-    ExternSyntax,
-    ParsedFrontend<NestedDeclaration>,
->;
-
-/// AST produced directly by parsing.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
-pub enum ParsedTag {}
-pub type Parsed = Program<ParsedTag, ParsedFamily, module_manager::ModuleManager>;
+enum ParsedTag {}
 
-/// Parse source into the first phase-typed AST while transferring ownership of
-/// the sole node allocator and module state into the resulting program.
-pub fn parse(
+#[cfg(test)]
+type Parsed = Program<ParsedTag, ParsedFamily, crate::module_manager::ModuleManager>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedFile {
+    pub(crate) declarations: Vec<Declaration<ParsedFamily>>,
+    pub(crate) imports: Vec<SourceImport>,
+}
+
+pub(crate) fn parse_file(
+    module: ModuleId,
     source: &str,
-    mut node_ids: NodeCounter,
-    module_manager: module_manager::ModuleManager,
-) -> Result<Parsed> {
-    let module = ModuleId::from(0);
+    node_ids: &mut NodeCounter,
+    graphics: bool,
+) -> Result<ParsedFile> {
     let tokens = lexer::tokenize(module, source).map_err(|error| err_parse!("{}", error))?;
-    let graphics = module_manager.options().graphics;
-    let declarations = {
-        let mut parser = Parser::with_graphics(module, tokens, &mut node_ids, graphics);
-        parser.parse()?
-    };
-    Ok(Program {
+    let mut parser = Parser::with_graphics(module, tokens, node_ids, graphics);
+    let declarations = parser.parse()?;
+    Ok(ParsedFile {
         declarations,
-        node_ids,
-        global_context: module_manager,
-        state: std::marker::PhantomData,
+        imports: parser.imports,
     })
 }
 
@@ -92,24 +83,25 @@ fn suffix_to_type(suffix: &str) -> Type {
     Type::Constructed(type_name, vec![])
 }
 
-pub struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     module: ModuleId,
     tokens: Vec<LocatedToken>,
     current: usize,
     node_counter: &'a mut NodeCounter,
     import_sites: IdSource<ImportSiteId>,
+    imports: Vec<SourceImport>,
     graphics: bool,
 }
 
 impl<'a> Parser<'a> {
     #[cfg(test)]
-    pub fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
+    pub(crate) fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
         let module =
             tokens.first().and_then(|token| token.span.module()).unwrap_or_else(|| ModuleId::from(0));
         Self::with_graphics(module, tokens, node_counter, true)
     }
 
-    pub fn with_graphics(
+    pub(crate) fn with_graphics(
         module: ModuleId,
         tokens: Vec<LocatedToken>,
         node_counter: &'a mut NodeCounter,
@@ -121,6 +113,7 @@ impl<'a> Parser<'a> {
             current: 0,
             node_counter,
             import_sites: IdSource::new(),
+            imports: Vec::new(),
             graphics,
         }
     }
@@ -163,7 +156,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {
+    pub(crate) fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {
         let mut declarations = Vec::new();
 
         while !self.is_at_end() {
@@ -267,11 +260,13 @@ impl<'a> Parser<'a> {
         self.expect(Token::Import)?;
         let path = self.expect_string_literal()?;
         let span = start.merge(&self.previous_span());
-        Ok(SourceImport {
+        let import = SourceImport {
             site: self.import_sites.next_id(),
             path,
             span,
-        })
+        };
+        self.imports.push(import.clone());
+        Ok(import)
     }
 
     fn parse_decl(

@@ -1504,6 +1504,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "wyn-core",
+ "wyn-module-graph",
 ]
 
 [[package]]

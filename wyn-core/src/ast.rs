@@ -2,7 +2,6 @@ use crate::interface;
 use crate::lexer;
 use crate::name_resolution;
 use crate::op;
-use crate::parser;
 use crate::types;
 use crate::SymbolTable;
 pub use spirv;
@@ -73,6 +72,16 @@ impl From<u32> for NodeId {
 
 /// Counter for generating unique node IDs across compilation phases
 pub type NodeCounter = IdSource<NodeId>;
+
+/// Source AST family produced by the Wyn parser.
+pub type ParsedFamily = AstFamily<
+    SourceTree,
+    DefinitionSyntax,
+    EntrySyntax,
+    Attribute,
+    ExternSyntax,
+    ParsedFrontend<NestedDeclaration>,
+>;
 
 /// Extension trait for NodeCounter to provide AST node creation helpers
 pub trait NodeCounterExt {
@@ -405,7 +414,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Declaration<F: Family = parser::ParsedFamily> {
+pub enum Declaration<F: Family = ParsedFamily> {
     Decl(Decl<F::DefinitionData, F::Tree>),
     Entry(EntryDecl<F::EntryData, F::Tree, F::EntryParameterAttribute>),
     Extern(ExternDecl<F::ExternData>),

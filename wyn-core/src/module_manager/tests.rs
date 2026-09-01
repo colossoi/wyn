@@ -4,7 +4,6 @@ use crate::ast_const_fold;
 use crate::builtins;
 use crate::elaborate_modules;
 use crate::name_resolution;
-use crate::parser;
 use crate::resolve_imports;
 use crate::resolve_opens;
 use crate::resolve_placeholders;
@@ -17,8 +16,12 @@ use polytype::TypeScheme;
 
 /// Create a ModuleManager with the given source elaborated (no prelude)
 fn module_manager_with(src: &str) -> ModuleManager {
-    let program = parser::parse(src, NodeCounter::new(), ModuleManager::new_empty()).unwrap();
-    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    let compiler = crate::Compiler {
+        node_ids: NodeCounter::new(),
+        semantic_modules: ModuleManager::new_empty(),
+    };
+    let modules = crate::test_pipeline::load_test_modules(src, compiler);
+    let program = resolve_imports::resolve_imports(modules).unwrap();
     elaborate_modules::elaborate_modules(program).unwrap().global_context
 }
 
@@ -59,8 +62,12 @@ fn test_query_f32_sin_from_math_prelude() {
 
     // Resolve placeholders in modules to build spec_schemes
     // (No program to resolve, just pass an empty one)
-    let program = parser::parse("", node_counter, manager).unwrap();
-    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).unwrap();
+    let compiler = crate::Compiler {
+        node_ids: node_counter,
+        semantic_modules: manager,
+    };
+    let modules = crate::test_pipeline::load_test_modules("", compiler);
+    let program = resolve_imports::resolve_imports(modules).unwrap();
     let program = elaborate_modules::elaborate_modules(program).unwrap();
     let program = name_resolution::resolve_names(program);
     let program = resolve_resources::resolve_resources(program).unwrap();

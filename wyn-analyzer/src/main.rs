@@ -2,20 +2,26 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::ast::{self, BindingName, NodeCounter, Span};
+use wyn_core::ast::{self, BindingName, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
-use wyn_module_graph::ModuleId;
+use wyn_core::{Compiler, CompilerOptions, ParsedModules};
+use wyn_module_graph::{
+    LocalSources, ModuleId, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder, SourceFingerprint,
+};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Stable package-relative identity for an editor buffer without a file path.
+const VIRTUAL_ROOT_MODULE: &str = "editor-buffer.wyn";
 
 /// Verbose diagnostics are auxiliary to the language-server protocol. If
 /// stderr closes, stop attempting them rather than terminating the server.
@@ -34,31 +40,53 @@ macro_rules! verbose {
     };
 }
 
-/// Cached prelude data AND the node counter state after parsing it
-static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
-
-fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
-    let (prelude, counter) = PRELUDE_CACHE.get_or_init(|| {
-        let mut nc = NodeCounter::new();
-        let prelude = ModuleManager::create_prelude(&mut nc).expect("Failed to create prelude cache");
-        (prelude, nc)
-    });
-    (prelude, counter.clone())
-}
-
-fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
-    let (prelude, node_counter) = get_prelude();
-    wyn_core::init_compiler_from_prelude_with_options(
-        prelude.clone(),
-        node_counter,
-        wyn_core::CompilerOptions { graphics: true },
-    )
-}
-
 /// Cached document state after successful type checking
 struct DocumentState {
     ast: wyn_core::types::run::TypeChecked,
     text: String,
+}
+
+fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Result<ParsedModules, String> {
+    let (root_file, root_directory) = match file_path {
+        Some(file_path) => {
+            let Some(root_file) = file_path.file_name().and_then(|name| name.to_str()) else {
+                return Err(format!(
+                    "document path `{}` has no UTF-8 file name",
+                    file_path.display()
+                ));
+            };
+            let Some(root_directory) = file_path.parent() else {
+                return Err(format!(
+                    "document path `{}` has no parent directory",
+                    file_path.display()
+                ));
+            };
+            let root_directory = root_directory.canonicalize().map_err(|error| {
+                format!(
+                    "failed to resolve document directory `{}`: {error}",
+                    root_directory.display()
+                )
+            })?;
+            (root_file, Some(root_directory))
+        }
+        None => (VIRTUAL_ROOT_MODULE, None),
+    };
+    let root_path = ModulePath::new(root_file).map_err(|error| error.to_string())?;
+    let fingerprint = SourceFingerprint::new("analyzer-document").map_err(|error| error.to_string())?;
+    let identity =
+        PackageIdentity::new("analyzer/root", "v0.0.0", fingerprint).map_err(|error| error.to_string())?;
+    let mut builder = PackagePlanBuilder::new();
+    let package = builder.add_package(identity, root_path.clone()).map_err(|error| error.to_string())?;
+    let root = ModuleKey::new(package, root_path);
+    builder.set_root(root.clone()).map_err(|error| error.to_string())?;
+    let plan = builder.build().map_err(|error| error.to_string())?;
+    let mut sources = LocalSources::new();
+    if let Some(root_directory) = root_directory {
+        sources.add_package_root(package, root_directory).map_err(|error| error.to_string())?;
+    }
+    sources.add_override(root, text).map_err(|error| error.to_string())?;
+    let compiler = Compiler::new(CompilerOptions { graphics: true }).map_err(|error| error.to_string())?;
+    compiler.load_modules(plan, &mut sources).map_err(|error| error.to_string())
 }
 
 fn position_to_offset(text: &str, position: Position) -> Option<u32> {
@@ -290,18 +318,26 @@ impl LanguageServer for Backend {
             }
         }
 
-        // Default: prelude function completions
-        let (prelude, _) = get_prelude();
-        let items: Vec<CompletionItem> = prelude
-            .prelude_functions
-            .iter()
-            .map(|(name, _decl)| CompletionItem {
-                label: name.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("prelude function".to_string()),
-                ..Default::default()
+        // Default: prelude function completions from the checked document.
+        let docs = self.documents.read().ok();
+        let doc = docs.as_ref().and_then(|documents| documents.get(uri));
+        let items = doc
+            .map(|document| {
+                document
+                    .ast
+                    .global_context
+                    .support_definitions
+                    .iter()
+                    .filter(|definition| definition.namespace.is_none())
+                    .map(|definition| CompletionItem {
+                        label: definition.definition.name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some("prelude function".to_string()),
+                        ..Default::default()
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -417,20 +453,6 @@ impl LanguageServer for Backend {
                         active_parameter: Some(arg_index as u32),
                     }));
                 }
-
-                let (prelude, _) = get_prelude();
-                if prelude.prelude_functions.contains_key(&func_name) {
-                    return Ok(Some(SignatureHelp {
-                        signatures: vec![SignatureInformation {
-                            label: format!("{} (prelude function)", func_name),
-                            documentation: None,
-                            parameters: None,
-                            active_parameter: Some(arg_index as u32),
-                        }],
-                        active_signature: Some(0),
-                        active_parameter: Some(arg_index as u32),
-                    }));
-                }
             }
         }
 
@@ -469,7 +491,7 @@ impl LanguageServer for Backend {
 
 impl Backend {
     async fn on_change(&self, doc: TextDocumentItem) {
-        let (diagnostics, state) = self.check_document(&doc.text);
+        let (diagnostics, state) = self.check_document(&doc.uri, &doc.text);
         verbose!("{}", format_check_result(&doc.uri, &diagnostics, state.is_some()));
 
         if let Some(state) = state {
@@ -481,14 +503,28 @@ impl Backend {
         self.client.publish_diagnostics(doc.uri, diagnostics, Some(doc.version)).await;
     }
 
-    fn check_document(&self, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
+    fn check_document(&self, uri: &Url, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
         let mut diagnostics = Vec::new();
+        let file_path = uri.to_file_path().ok();
 
-        let (node_counter, module_manager) = init_compiler_cached();
-        let result = wyn_core::parser::parse(text, node_counter, module_manager)
-            .and_then(|program| {
-                wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
-            })
+        let modules = match load_source_graph(file_path.as_deref(), text) {
+            Ok(modules) => modules,
+            Err(message) => {
+                diagnostics.push(Diagnostic {
+                    range: default_diagnostic_range(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("wyn-analyzer".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return (diagnostics, None);
+            }
+        };
+        let result = wyn_core::resolve_imports::resolve_imports(modules)
             .and_then(wyn_core::elaborate_modules::elaborate_modules)
             .map(wyn_core::name_resolution::resolve_names)
             .and_then(wyn_core::resolve_resources::resolve_resources)
@@ -533,13 +569,22 @@ fn definition_scheme<'a>(
     program: &'a wyn_core::types::run::TypeChecked,
     name: &str,
 ) -> Option<&'a TypeScheme> {
-    program.declarations.iter().find_map(|declaration| match declaration {
-        ast::Declaration::Decl(definition) if definition.name == name => Some(&definition.data.scheme),
-        ast::Declaration::Entry(entry) if entry.name == name => Some(&entry.data.scheme),
-        ast::Declaration::Extern(external) if external.name == name => Some(&external.data.scheme),
-        ast::Declaration::Decl(_) | ast::Declaration::Entry(_) | ast::Declaration::Extern(_) => None,
-        ast::Declaration::Frontend(never) => match *never {},
-    })
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            ast::Declaration::Decl(definition) if definition.name == name => Some(&definition.data.scheme),
+            ast::Declaration::Entry(entry) if entry.name == name => Some(&entry.data.scheme),
+            ast::Declaration::Extern(external) if external.name == name => Some(&external.data.scheme),
+            ast::Declaration::Decl(_) | ast::Declaration::Entry(_) | ast::Declaration::Extern(_) => None,
+            ast::Declaration::Frontend(never) => match *never {},
+        })
+        .or_else(|| {
+            program.global_context.support_definitions.iter().find_map(|definition| {
+                (definition.namespace.is_none() && definition.definition.name == name)
+                    .then_some(&definition.definition.data.scheme)
+            })
+        })
 }
 
 /// Find the smallest AST node containing the given position
@@ -1635,9 +1680,11 @@ async fn main() {
         verbose!("[wyn-analyzer] verbose mode enabled");
     }
 
-    // Pre-initialize the prelude cache before starting the server
-    // so any errors are caught early
-    let _ = get_prelude();
+    // Pre-initialize the compiler's prelude cache before serving requests.
+    if let Err(error) = Compiler::new(CompilerOptions { graphics: true }) {
+        eprintln!("failed to initialize Wyn compiler: {error}");
+        return;
+    }
     verbose!("[wyn-analyzer] prelude cached");
 
     let stdin = tokio::io::stdin();

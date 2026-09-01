@@ -1,146 +1,270 @@
-//! Recursive expansion of `Declaration::Import` nodes against the filesystem.
-//!
-//! Each imported file's declarations replace the import node in-place;
-//! transitive imports inside the loaded file are resolved relative to that
-//! file's directory. A canonical-path dedup set prevents infinite loops on
-//! cyclic imports and dedupes diamond imports.
+//! Resolution of parsed source imports through a closed source-module graph.
 
-use crate::interface;
-use crate::module_manager;
-use crate::LookupSet;
-use std::path::{Path, PathBuf};
+use crate::ast::{
+    AstFamily, Declaration, DefinitionSyntax, EntrySyntax, ExternSyntax, ImportsResolvedFrontend,
+    ModuleDecl, ModuleExpression, NestedDeclaration, ParsedFrontend, Program, SourceImport, SourceTree,
+};
+use crate::error::{CompilerError, Result};
+use crate::frontend::ParsedModules;
+use crate::interface::Attribute;
+use crate::module_manager::ModuleManager;
+use crate::parser::ParsedFile;
+use crate::{err_module_at, LookupSet};
+use wyn_module_graph::{ModuleGraph, ModuleId};
 
-use crate::ast::{self, ImportsResolvedFrontend, ParsedFrontend};
-use crate::error::Result;
-use crate::{err_module, err_parse, lexer, parser};
-use wyn_module_graph::ModuleId;
-
-pub type ImportsResolvedFamily = ast::AstFamily<
-    ast::SourceTree,
-    ast::DefinitionSyntax,
-    ast::EntrySyntax,
-    interface::Attribute,
-    ast::ExternSyntax,
-    ast::ImportsResolvedFrontend<ast::NestedDeclaration>,
+pub type ImportsResolvedFamily = AstFamily<
+    SourceTree,
+    DefinitionSyntax,
+    EntrySyntax,
+    Attribute,
+    ExternSyntax,
+    ImportsResolvedFrontend<NestedDeclaration>,
 >;
 
-/// AST after every top-level file import has been expanded.
+/// AST after every physical source import has been replaced with loaded syntax.
 #[derive(Debug, Clone, Copy)]
 pub enum ImportsResolvedTag {}
-pub type ImportsResolved =
-    ast::Program<ImportsResolvedTag, ImportsResolvedFamily, module_manager::ModuleManager>;
+pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, ModuleManager>;
 
-/// Recursively expand every `Declaration::Import(path)` in `decls` by parsing
-/// the referenced file (relative to `base_dir`), resolving its own imports
-/// (relative to its own directory), and inlining the resolved declarations.
-///
-/// Path resolution: `import "foo"` looks for `<base_dir>/foo.wyn`. The `.wyn`
-/// extension is appended automatically when missing.
-///
-/// Cycle / re-import safety: each canonical path is loaded at most once per
-/// compilation. Diamond imports work; cycles are silently broken at the
-/// second encounter.
-pub fn resolve_imports(program: parser::Parsed, base_dir: &Path) -> Result<ImportsResolved> {
-    let mut visited: LookupSet<PathBuf> = LookupSet::new();
-    let graphics = program.global_context.options().graphics;
-    program.try_rebuild(|declarations, global_context, node_ids| {
-        Ok((
-            expand(declarations, base_dir, node_ids, &mut visited, graphics)?,
-            global_context,
-        ))
+/// Resolve physical imports and combine the loaded source modules into one
+/// whole-program AST.
+pub fn resolve_imports(modules: ParsedModules) -> Result<ImportsResolved> {
+    let ParsedModules {
+        graph,
+        node_ids,
+        semantic_modules,
+    } = modules;
+    let mut resolver = ImportResolver::new(&graph);
+    let declarations = resolver.resolve_top_level(graph.root())?;
+    Ok(Program {
+        declarations,
+        node_ids,
+        global_context: semantic_modules,
+        state: std::marker::PhantomData,
     })
 }
 
-fn expand(
-    decls: Vec<ast::Declaration<parser::ParsedFamily>>,
-    base_dir: &Path,
-    node_counter: &mut ast::NodeCounter,
-    visited: &mut LookupSet<PathBuf>,
-    graphics: bool,
-) -> Result<Vec<ast::Declaration<ImportsResolvedFamily>>> {
-    let mut out = Vec::with_capacity(decls.len());
-    for decl in decls {
-        let rel_path = match decl {
-            ast::Declaration::Decl(decl) => {
-                out.push(ast::Declaration::Decl(decl));
-                continue;
-            }
-            ast::Declaration::Entry(entry) => {
-                out.push(ast::Declaration::Entry(entry));
-                continue;
-            }
-            ast::Declaration::Extern(ext) => {
-                out.push(ast::Declaration::Extern(ext));
-                continue;
-            }
-            ast::Declaration::Frontend(frontend) => match frontend {
-                ParsedFrontend::Sig(sig) => {
-                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Sig(sig)));
-                    continue;
-                }
-                ParsedFrontend::TypeBind(bind) => {
-                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::TypeBind(
-                        bind,
-                    )));
-                    continue;
-                }
-                ParsedFrontend::Module(module) => {
-                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Module(
-                        module,
-                    )));
-                    continue;
-                }
-                ParsedFrontend::ModuleTypeBind(bind) => {
-                    out.push(ast::Declaration::Frontend(
-                        ImportsResolvedFrontend::ModuleTypeBind(bind),
-                    ));
-                    continue;
-                }
-                ParsedFrontend::Open(open) => {
-                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Open(open)));
-                    continue;
-                }
-                ParsedFrontend::Resource(resource) => {
-                    out.push(ast::Declaration::Frontend(ImportsResolvedFrontend::Resource(
-                        resource,
-                    )));
-                    continue;
-                }
-                ParsedFrontend::Import(import) => import,
-            },
-        };
-
-        let mut joined = base_dir.join(&rel_path.path);
-        if joined.extension().is_none() {
-            joined.set_extension("wyn");
-        }
-        let canonical = joined.canonicalize().map_err(|e| {
-            err_module!(
-                "import: cannot resolve `{}` (looked for `{}`): {}",
-                rel_path.path,
-                joined.display(),
-                e
-            )
-        })?;
-        if !visited.insert(canonical.clone()) {
-            continue;
-        }
-
-        let source = std::fs::read_to_string(&canonical)
-            .map_err(|e| err_module!("import: failed to read `{}`: {}", canonical.display(), e))?;
-        let module = ModuleId::from(0);
-        let tokens = lexer::tokenize(module, &source).map_err(|e| err_parse!("{}", e))?;
-        let mut p = parser::Parser::with_graphics(module, tokens, node_counter, graphics);
-        let imported_declarations = p.parse()?;
-        let imported_dir = canonical.parent().unwrap_or(base_dir);
-        let resolved = expand(
-            imported_declarations,
-            imported_dir,
-            node_counter,
-            visited,
-            graphics,
-        )?;
-        out.extend(resolved);
-    }
-    Ok(out)
+struct ImportResolver<'a> {
+    graph: &'a ModuleGraph<ParsedFile>,
+    injected_modules: LookupSet<ModuleId>,
 }
+
+impl<'a> ImportResolver<'a> {
+    fn new(graph: &'a ModuleGraph<ParsedFile>) -> Self {
+        Self {
+            graph,
+            injected_modules: LookupSet::new(),
+        }
+    }
+
+    fn resolve_top_level(&mut self, module: ModuleId) -> Result<Vec<Declaration<ImportsResolvedFamily>>> {
+        if !self.injected_modules.insert(module) {
+            return Ok(Vec::new());
+        }
+
+        let declarations = self.parsed_file(module)?.declarations.clone();
+        let mut resolved = Vec::with_capacity(declarations.len());
+        for declaration in declarations {
+            match declaration {
+                Declaration::Decl(declaration) => {
+                    resolved.push(Declaration::Decl(declaration));
+                }
+                Declaration::Entry(declaration) => {
+                    resolved.push(Declaration::Entry(declaration));
+                }
+                Declaration::Extern(declaration) => {
+                    resolved.push(Declaration::Extern(declaration));
+                }
+                Declaration::Frontend(frontend) => match frontend {
+                    ParsedFrontend::Sig(declaration) => {
+                        resolved.push(Declaration::Frontend(ImportsResolvedFrontend::Sig(declaration)))
+                    }
+                    ParsedFrontend::TypeBind(declaration) => resolved.push(Declaration::Frontend(
+                        ImportsResolvedFrontend::TypeBind(declaration),
+                    )),
+                    ParsedFrontend::Module(declaration) => {
+                        let declaration = self.resolve_module_declaration(module, declaration)?;
+                        resolved.push(Declaration::Frontend(ImportsResolvedFrontend::Module(
+                            declaration,
+                        )));
+                    }
+                    ParsedFrontend::ModuleTypeBind(declaration) => resolved.push(Declaration::Frontend(
+                        ImportsResolvedFrontend::ModuleTypeBind(declaration),
+                    )),
+                    ParsedFrontend::Open(expression) => {
+                        let expression = self.resolve_module_expression(module, expression)?;
+                        resolved.push(Declaration::Frontend(ImportsResolvedFrontend::Open(expression)));
+                    }
+                    ParsedFrontend::Import(import) => {
+                        let target = self.import_target(module, &import)?;
+                        resolved.extend(self.resolve_top_level(target)?);
+                    }
+                    ParsedFrontend::Resource(declaration) => resolved.push(Declaration::Frontend(
+                        ImportsResolvedFrontend::Resource(declaration),
+                    )),
+                },
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_module_declaration(&self, module: ModuleId, declaration: ModuleDecl) -> Result<ModuleDecl> {
+        Ok(match declaration {
+            ModuleDecl::Module {
+                name,
+                signature,
+                body,
+            } => ModuleDecl::Module {
+                name,
+                signature,
+                body: self.resolve_module_expression(module, body)?,
+            },
+            ModuleDecl::Functor { name, params, body } => ModuleDecl::Functor {
+                name,
+                params,
+                body: self.resolve_module_expression(module, body)?,
+            },
+        })
+    }
+
+    fn resolve_module_expression(
+        &self,
+        module: ModuleId,
+        expression: ModuleExpression,
+    ) -> Result<ModuleExpression> {
+        Ok(match expression {
+            ModuleExpression::Name(name) => ModuleExpression::Name(name),
+            ModuleExpression::Ascription(expression, signature) => ModuleExpression::Ascription(
+                Box::new(self.resolve_module_expression(module, *expression)?),
+                signature,
+            ),
+            ModuleExpression::Lambda(parameters, signature, body) => ModuleExpression::Lambda(
+                parameters,
+                signature,
+                Box::new(self.resolve_module_expression(module, *body)?),
+            ),
+            ModuleExpression::Application(function, argument) => ModuleExpression::Application(
+                Box::new(self.resolve_module_expression(module, *function)?),
+                Box::new(self.resolve_module_expression(module, *argument)?),
+            ),
+            ModuleExpression::Struct(declarations) => {
+                ModuleExpression::Struct(self.resolve_nested_declarations(module, declarations)?)
+            }
+            ModuleExpression::Import(import) => {
+                let target = self.import_target(module, &import)?;
+                ModuleExpression::Struct(self.resolve_source_as_nested(target)?)
+            }
+        })
+    }
+
+    fn resolve_nested_declarations(
+        &self,
+        module: ModuleId,
+        declarations: Vec<NestedDeclaration>,
+    ) -> Result<Vec<NestedDeclaration>> {
+        let mut resolved = Vec::with_capacity(declarations.len());
+        for declaration in declarations {
+            match declaration {
+                NestedDeclaration::Module(declaration) => resolved.push(NestedDeclaration::Module(
+                    self.resolve_module_declaration(module, declaration)?,
+                )),
+                NestedDeclaration::Open(expression) => resolved.push(NestedDeclaration::Open(
+                    self.resolve_module_expression(module, expression)?,
+                )),
+                NestedDeclaration::Import(import) => {
+                    let target = self.import_target(module, &import)?;
+                    resolved.extend(self.resolve_source_as_nested(target)?);
+                }
+                NestedDeclaration::Decl(declaration) => {
+                    resolved.push(NestedDeclaration::Decl(declaration));
+                }
+                NestedDeclaration::Entry(declaration) => {
+                    resolved.push(NestedDeclaration::Entry(declaration));
+                }
+                NestedDeclaration::Sig(declaration) => {
+                    resolved.push(NestedDeclaration::Sig(declaration));
+                }
+                NestedDeclaration::Extern(declaration) => {
+                    resolved.push(NestedDeclaration::Extern(declaration));
+                }
+                NestedDeclaration::TypeBind(declaration) => {
+                    resolved.push(NestedDeclaration::TypeBind(declaration));
+                }
+                NestedDeclaration::ModuleTypeBind(declaration) => {
+                    resolved.push(NestedDeclaration::ModuleTypeBind(declaration));
+                }
+                NestedDeclaration::Resource(declaration) => {
+                    resolved.push(NestedDeclaration::Resource(declaration));
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_source_as_nested(&self, module: ModuleId) -> Result<Vec<NestedDeclaration>> {
+        let declarations = self.parsed_file(module)?.declarations.clone();
+        let mut resolved = Vec::with_capacity(declarations.len());
+        for declaration in declarations {
+            match declaration {
+                Declaration::Decl(declaration) => {
+                    resolved.push(NestedDeclaration::Decl(declaration));
+                }
+                Declaration::Entry(declaration) => {
+                    resolved.push(NestedDeclaration::Entry(declaration));
+                }
+                Declaration::Extern(declaration) => {
+                    resolved.push(NestedDeclaration::Extern(declaration));
+                }
+                Declaration::Frontend(frontend) => match frontend {
+                    ParsedFrontend::Sig(declaration) => {
+                        resolved.push(NestedDeclaration::Sig(declaration));
+                    }
+                    ParsedFrontend::TypeBind(declaration) => {
+                        resolved.push(NestedDeclaration::TypeBind(declaration));
+                    }
+                    ParsedFrontend::Module(declaration) => resolved.push(NestedDeclaration::Module(
+                        self.resolve_module_declaration(module, declaration)?,
+                    )),
+                    ParsedFrontend::ModuleTypeBind(declaration) => {
+                        resolved.push(NestedDeclaration::ModuleTypeBind(declaration));
+                    }
+                    ParsedFrontend::Open(expression) => resolved.push(NestedDeclaration::Open(
+                        self.resolve_module_expression(module, expression)?,
+                    )),
+                    ParsedFrontend::Import(import) => {
+                        let target = self.import_target(module, &import)?;
+                        resolved.extend(self.resolve_source_as_nested(target)?);
+                    }
+                    ParsedFrontend::Resource(declaration) => {
+                        resolved.push(NestedDeclaration::Resource(declaration));
+                    }
+                },
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn parsed_file(&self, module: ModuleId) -> Result<&ParsedFile> {
+        let Some(loaded) = self.graph.module(module) else {
+            return Err(CompilerError::Internal(format!(
+                "source-module graph lost {module:?} during import resolution"
+            )));
+        };
+        Ok(loaded.syntax())
+    }
+
+    fn import_target(&self, module: ModuleId, import: &SourceImport) -> Result<ModuleId> {
+        let Some(target) = self.graph.import_target(module, import.site) else {
+            return Err(err_module_at!(
+                import.span,
+                "source-module graph has no target for import site {:?}",
+                import.site
+            ));
+        };
+        Ok(target)
+    }
+}
+
+#[cfg(test)]
+#[path = "resolve_imports_tests.rs"]
+mod resolve_imports_tests;

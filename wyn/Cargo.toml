@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 wyn-core = { path = "../wyn-core" }
+wyn-module-graph = { path = "../wyn-module-graph" }
 clap.workspace = true
 serde_json = "1.0"
 thiserror.workspace = true

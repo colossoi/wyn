@@ -6,13 +6,10 @@ use super::*;
 /// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
 /// the interface shape without going through JSON serialization.
 fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
-    let (node_counter, module_manager) = wyn_core::init_compiler_with_options(
-        wyn_core::CompilerOptions { graphics: true },
-    )
-    .expect("compiler initialization failed");
-    let program = wyn_core::parser::parse(source, node_counter, module_manager).expect("parse failed");
-    let program = wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
-        .expect("resolve_imports failed");
+    let modules = load_source_modules(source, wyn_core::CompilerOptions { graphics: true })
+        .expect("source modules should load");
+    let program =
+        wyn_core::resolve_imports::resolve_imports(modules).expect("resolve_imports failed");
     let program =
         wyn_core::elaborate_modules::elaborate_modules(program).expect("elaborate_modules failed");
     let program = wyn_core::name_resolution::resolve_names(program);

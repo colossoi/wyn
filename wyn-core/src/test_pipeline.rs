@@ -6,9 +6,29 @@
 
 use crate::ast_type_holes;
 use crate::compile_thru_frontend;
+use crate::frontend::ParsedModules;
 use crate::optimize_tlc_for_test;
 use crate::optimize_tlc_for_test_thru_soac_normalization;
 use crate::tlc;
+use crate::Compiler;
+use wyn_module_graph::{
+    LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder, SourceFingerprint,
+};
+
+pub(crate) fn load_test_modules(source: &str, compiler: Compiler) -> ParsedModules {
+    let fingerprint = SourceFingerprint::new("wyn-core-test-source").expect("valid fingerprint");
+    let identity =
+        PackageIdentity::new("test/root", "v0.0.0", fingerprint).expect("valid package identity");
+    let root_path = ModulePath::new("main.wyn").expect("valid root module path");
+    let mut builder = PackagePlanBuilder::new();
+    let package = builder.add_package(identity, root_path.clone()).expect("test package should be unique");
+    let root = ModuleKey::new(package, root_path);
+    builder.set_root(root.clone()).expect("test package should contain its root");
+    let plan = builder.build().expect("test plan should be complete");
+    let mut sources = LocalSources::new();
+    sources.add_override(root, source).expect("test source override should be unique");
+    compiler.load_modules(plan, &mut sources).expect("test source graph should load")
+}
 
 /// Front-end (parse → resolve → type-check → to_tlc → pin_entry_buffers →
 /// validate_ownership) shared by every `compile_*` helper, so they differ only

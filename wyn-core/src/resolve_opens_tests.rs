@@ -9,18 +9,16 @@ use crate::ast::{self, Declaration, ExprKind, Expression};
 use crate::elaborate_modules;
 use crate::module_manager;
 use crate::name_resolution;
-use crate::parser;
 use crate::resolve_imports;
 use crate::resolve_resources;
 
 fn parse(src: &str) -> resolve_resources::ResourcesResolved {
-    let program = parser::parse(
-        src,
-        ast::NodeCounter::new(),
-        module_manager::ModuleManager::new_empty(),
-    )
-    .expect("parse");
-    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).expect("imports");
+    let compiler = crate::Compiler {
+        node_ids: ast::NodeCounter::new(),
+        semantic_modules: module_manager::ModuleManager::new_empty(),
+    };
+    let modules = crate::test_pipeline::load_test_modules(src, compiler);
+    let program = resolve_imports::resolve_imports(modules).expect("imports");
     let program = elaborate_modules::elaborate_modules(program).expect("modules");
     let program = name_resolution::resolve_names(program);
     resolve_resources::resolve_resources(program).expect("resources")

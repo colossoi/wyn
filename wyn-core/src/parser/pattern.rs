@@ -9,36 +9,6 @@ use crate::{bail_parse, bail_parse_at, err_parse};
 use log::trace;
 
 impl Parser<'_> {
-    /// Parse a pattern in function parameter position.
-    /// In this context, type annotations must be inside parentheses: (x : i32)
-    /// This avoids ambiguity with function return types.
-    pub fn parse_function_parameter(&mut self) -> Result<Pattern> {
-        trace!("parse_function_parameter: next token = {:?}", self.peek());
-        let start_span = self.current_span();
-
-        // Parse optional attributes
-        let attributes = self.parse_attributes()?;
-        if attributes.has_view() {
-            bail_parse_at!(
-                self.current_span(),
-                "#[view(...)] is only valid on entry-point parameters"
-            );
-        }
-
-        let pattern = if !attributes.is_empty() {
-            // #[attr] pat
-            let inner = self.parse_pattern_without_attributes()?;
-            let span = start_span.merge(&inner.h.span);
-            self.node_counter.mk_node(PatternKind::Attributed(attributes, Box::new(inner)), span)
-        } else {
-            self.parse_pattern_without_attributes()?
-        };
-
-        // In function parameter context, don't allow bare `: type` syntax
-        // Type annotations must be inside parentheses: (x : i32)
-        Ok(pattern)
-    }
-
     /// Parse a pattern according to the grammar:
     /// ```text
     /// pat ::= name
