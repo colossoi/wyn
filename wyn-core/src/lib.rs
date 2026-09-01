@@ -1,30 +1,32 @@
 pub mod ast;
+mod ast_const_fold;
 pub mod ast_renumber;
 pub mod ast_type_holes;
 pub mod binding_layout;
 pub mod builtins;
 pub mod diags;
-pub mod elaborate_modules;
+mod elaborate_modules;
 pub mod error;
 pub mod flow;
 mod frontend;
 pub mod interface;
 pub mod lexer;
 pub mod module_manager;
-pub mod name_resolution;
+mod name_resolution;
 pub mod op;
 mod parser;
 pub mod pattern;
+mod resolve_imports;
+mod resolve_opens;
+mod resolve_placeholders;
+mod resolve_resources;
 mod scalar_eval;
 pub mod scope;
 pub mod ssa;
 pub mod types;
 
-// Re-export type_checker from its new location for backwards compatibility
 pub use frontend::{Compiler, ParsedModules};
-pub use types::checker as type_checker;
 
-pub mod ast_const_fold;
 pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
@@ -35,10 +37,6 @@ pub use egir::program::ResourceId;
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
 pub use wyn_pipeline_descriptor as pipeline_descriptor;
-pub mod resolve_imports;
-pub mod resolve_opens;
-pub mod resolve_placeholders;
-pub mod resolve_resources;
 pub mod spirv;
 pub mod structured;
 pub mod wgsl;
@@ -350,16 +348,7 @@ pub use polytype::Context as PolytypeContext;
 //
 //   let compiler = Compiler::new(options)?;
 //   let modules = compiler.load_modules(plan, sources)?;
-//
-// FrontEnd (AST) stages:
-//     let program = resolve_imports::resolve_imports(modules)?;
-//     let program = elaborate_modules::elaborate_modules(program)?;
-//     let program = name_resolution::resolve_names(program);
-//     let program = resolve_resources::resolve_resources(program)?;
-//     let program = ast_const_fold::fold_constants(program);
-//     let program = resolve_placeholders::resolve_type_placeholders(program, ...);
-//     let program = resolve_opens::resolve_opens(program, ...)?;
-//     let program = types::run::type_check(program, ...)?;
+//   let program = modules.type_check()?;
 //     let program = ast_type_holes::reject_type_holes(program)?;
 //
 // TLC stages (typed AST → semantic input):
@@ -776,14 +765,7 @@ pub fn compile_thru_frontend_with_options(
 ) -> error::Result<types::run::TypeChecked> {
     let compiler = Compiler::new(options)?;
     let modules = test_pipeline::load_test_modules(source, compiler);
-    let program = resolve_imports::resolve_imports(modules)?;
-    let program = elaborate_modules::elaborate_modules(program)?;
-    let program = name_resolution::resolve_names(program);
-    let program = resolve_resources::resolve_resources(program)?;
-    let program = ast_const_fold::fold_constants(program);
-    let program = resolve_placeholders::resolve_type_placeholders(program);
-    let program = resolve_opens::resolve_opens(program)?;
-    types::run::type_check(program)
+    modules.type_check()
 }
 
 /// Run the canonical TLC optimization pipeline (no physical scheduling or

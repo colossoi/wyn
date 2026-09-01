@@ -1,8 +1,9 @@
 //! Resolution of parsed source imports through a closed source-module graph.
 
 use crate::ast::{
-    AstFamily, Declaration, DefinitionSyntax, EntrySyntax, ExternSyntax, ImportsResolvedFrontend,
-    ModuleDecl, ModuleExpression, NestedDeclaration, ParsedFrontend, Program, SourceImport, SourceTree,
+    AstFamily, Declaration, DefinitionSyntax, EntryDecl, EntrySyntax, ExternSyntax,
+    ImportsResolvedFrontend, ModuleDecl, ModuleExpression, NestedDeclaration, ParsedFrontend, Program,
+    SourceImport, SourceTree,
 };
 use crate::error::{CompilerError, Result};
 use crate::frontend::ParsedModules;
@@ -73,6 +74,7 @@ impl<'a> ImportResolver<'a> {
                     resolved.push(Declaration::Decl(declaration));
                 }
                 Declaration::Entry(declaration) => {
+                    self.require_root_entry(module, &declaration)?;
                     resolved.push(Declaration::Entry(declaration));
                 }
                 Declaration::Extern(declaration) => {
@@ -182,7 +184,11 @@ impl<'a> ImportResolver<'a> {
                     resolved.push(NestedDeclaration::Decl(declaration));
                 }
                 NestedDeclaration::Entry(declaration) => {
-                    resolved.push(NestedDeclaration::Entry(declaration));
+                    return Err(err_module_at!(
+                        declaration.name_span,
+                        "entry `{}` is not declared directly in the root source module",
+                        declaration.name
+                    ));
                 }
                 NestedDeclaration::Sig(declaration) => {
                     resolved.push(NestedDeclaration::Sig(declaration));
@@ -213,6 +219,7 @@ impl<'a> ImportResolver<'a> {
                     resolved.push(NestedDeclaration::Decl(declaration));
                 }
                 Declaration::Entry(declaration) => {
+                    self.require_root_entry(module, &declaration)?;
                     resolved.push(NestedDeclaration::Entry(declaration));
                 }
                 Declaration::Extern(declaration) => {
@@ -265,6 +272,17 @@ impl<'a> ImportResolver<'a> {
             ));
         };
         Ok(target)
+    }
+
+    fn require_root_entry(&self, module: ModuleId, entry: &EntryDecl) -> Result<()> {
+        if module == self.graph.root() {
+            return Ok(());
+        }
+        Err(err_module_at!(
+            entry.name_span,
+            "entry `{}` is not declared directly in the root source module",
+            entry.name
+        ))
     }
 }
 

@@ -628,28 +628,8 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Err(error) => return CompileResultWgsl::source_modules_err(source, error),
     };
 
-    // Frontend pipeline: load → elaborate → resolve → fold → type-check →
-    // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
-    let program = match wyn_core::resolve_imports::resolve_imports(modules) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
-    let program = match wyn_core::elaborate_modules::elaborate_modules(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
-    let program = wyn_core::name_resolution::resolve_names(program);
-    let program = match wyn_core::resolve_resources::resolve_resources(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
-    let program = wyn_core::ast_const_fold::fold_constants(program);
-    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
-    let program = match wyn_core::resolve_opens::resolve_opens(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
-    let program = match wyn_core::types::run::type_check(program) {
+    // Frontend → TLC → semantic EGIR → target-aware SSA lowering → WGSL.
+    let program = match modules.type_check() {
         Ok(p) => p,
         Err(e) => return CompileResultWgsl::err(source, e),
     };

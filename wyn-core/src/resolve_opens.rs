@@ -505,24 +505,7 @@ fn resolve_program_with_index(
 }
 
 /// Rewrite identifiers in a single expression as if it were inside
-/// `module_name`'s body — i.e. with an implicit `open <module_name>`
-/// so a sibling reference like `log` (inside `f32`'s body) qualifies
-/// to `f32.log`. Used for prelude module decl bodies, which never go
-/// through `resolve_program` (they're stored as elaborated decls in
-/// the module manager, not in the user `Program`). Callers that
-/// resolve many such bodies should hoist `build_index` and call
-/// `run_in_module_with_index` instead.
-pub fn run_in_module(
-    expr: &mut ast::Expression,
-    module_name: &str,
-    spec_schemes: &LookupMap<String, TypeScheme<TypeName>>,
-    catalog: &BuiltinCatalog,
-) -> Result<()> {
-    let index = build_index(spec_schemes, catalog);
-    run_in_module_with_index(expr, module_name, &index)
-}
-
-/// Like `run_in_module` but reuses a pre-built index.
+/// `module_name`'s body, reusing a pre-built index.
 pub fn run_in_module_with_index(
     expr: &mut ast::Expression,
     module_name: &str,

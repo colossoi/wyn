@@ -4,7 +4,10 @@ use crate::ast::{NodeCounter, SourceImport};
 use crate::error::{CompilerError, Result};
 use crate::module_manager::{ModuleManager, PreElaboratedPrelude};
 use crate::parser::{self, ParsedFile};
-use crate::{err_parse_at, CompilerOptions};
+use crate::{
+    ast_const_fold, elaborate_modules, err_parse_at, name_resolution, resolve_imports, resolve_opens,
+    resolve_placeholders, resolve_resources, types, CompilerOptions,
+};
 use wyn_module_graph::{
     BuildFailure, DependencyAlias, ImportSiteId, ImportTarget, ModuleFrontend, ModuleGraph, ModuleId,
     PackagePlan, RelativeModulePath, SourceProvider, TextRange,
@@ -26,6 +29,20 @@ pub struct ParsedModules {
     pub(crate) graph: ModuleGraph<ParsedFile>,
     pub(crate) node_ids: NodeCounter,
     pub(crate) semantic_modules: ModuleManager,
+}
+
+impl ParsedModules {
+    /// Run the complete semantic frontend through type checking.
+    pub fn type_check(self) -> Result<types::run::TypeChecked> {
+        let program = resolve_imports::resolve_imports(self)?;
+        let program = elaborate_modules::elaborate_modules(program)?;
+        let program = name_resolution::resolve_names(program);
+        let program = resolve_resources::resolve_resources(program)?;
+        let program = ast_const_fold::fold_constants(program);
+        let program = resolve_placeholders::resolve_type_placeholders(program);
+        let program = resolve_opens::resolve_opens(program)?;
+        types::run::type_check(program)
+    }
 }
 
 impl Compiler {

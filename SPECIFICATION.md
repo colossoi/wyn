@@ -540,15 +540,11 @@ this.
   file's exports without re-exporting them.
 
 > **DISCREPANCY:** The current compiler does not implement the
-> `local` modifier (no `local` keyword in the lexer) and does not
-> apply local-open semantics to plain `import "foo"` —
-> `resolve_imports::run` literally inlines the imported file's
-> top-level decls into the importer, which re-exports them. See the
-> ignored tests `local_open_parses_per_spec` and
-> `bare_import_does_not_reexport_per_spec` in
-> `wyn-core/src/integration_tests.rs` for the intended behavior and
-> implementation options. Remove this callout when both tests pass
-> without `#[ignore]`.
+> `local` modifier or apply local-open semantics to plain
+> `import "foo"`. This visibility work is deferred for the first package
+> manager, which treats every declaration as non-local. The intended behavior
+> remains part of the language and is covered by ignored tests in
+> `wyn-core/src/resolve_imports_tests.rs`.
 
 - **`#[attr] dec`** attaches an attribute to the declaration it
   precedes (see Attributes).
@@ -653,6 +649,13 @@ declaration. Array operators express ordinary data-parallel computation;
 vertex and fragment processing are introduced inside the entry expression
 by the special forms specified under Unified Pipeline Entries and Stage
 Invocation.
+
+A compilation has one root source module. Every `entry` declared directly in
+that module is exposed to the host and seeds whole-program reachability. An
+imported source module may not declare an `entry`; reusable operations in a
+library are declared with `def`, and the root wraps them in its own `entry`
+declarations. The compiler emits all root entries together, so selecting the
+root module also selects the complete host interface.
 
 Entry declarations differ from `def` declarations in three ways:
 
@@ -1882,6 +1885,23 @@ Returns a module that contains the given definitions. The resulting module defin
 #### import "foo"
 Returns a module that contains the definitions of the file "foo" relative to the current file.
 
+### Package Interfaces
+
+Every source file is a module. A package designates one file as its library
+root, and the non-local names exported by that root module constitute the
+package's public interface. Other files do not independently contribute names
+to the package interface; the root exposes them with a module binding or an
+explicit `open import`.
+
+`local` is module visibility, including when the enclosing module is a package
+root. Wyn has no separate package-private visibility category. Module type
+ascription may further restrict the names exposed by a module.
+
+> **DISCREPANCY:** Package provenance and library roots are represented by the
+> compiler, but package-interface visibility is deferred. Until `local` and
+> file-module export sets are implemented, the compiler treats every source
+> declaration as non-local.
+
 ### Module Type Expressions
 
 ```ebnf
@@ -1932,7 +1952,9 @@ You can refer to external files in a Wyn file like this:
 import "file"
 ```
 
-The above will include all non-local top-level definitions from `file.fut` is and make them available in the current file (but will not export them). The `.fut` extension is implied.
+The import makes all non-local top-level definitions from `file.wyn` available
+in the current module without exporting them from that module. The `.wyn`
+extension is implied.
 
 You can also include files from subdirectories:
 
@@ -1940,7 +1962,20 @@ You can also include files from subdirectories:
 import "path/to/a/file"
 ```
 
-The above will include the file `path/to/a/file.fut` relative to the including file.
+The path is resolved relative to the importing file and remains confined to its
+package source root.
+
+A dependency is addressed through the alias assigned by the importing
+package's resolved package plan:
+
+```wyn
+import "pkg:math"
+module Geometry = import "pkg:geometry/shapes"
+```
+
+`pkg:math` denotes that dependency's library root. A suffix such as `shapes`
+is resolved relative to the dependency's library root. Package aliases are
+local to the importing package.
 
 Qualified imports are also possible, where a module is created for the file:
 
@@ -1960,26 +1995,13 @@ To re-export names from another file in the current module, use:
 open import "file"
 ```
 
-> **DISCREPANCY:** The current compiler does not implement any of the
-> three forms above as specified.
->
-> - Plain `import "file"` is handled by `resolve_imports::run` as a
->   literal inline of the imported file's top-level decls into the
->   importer's declaration list. This matches the spec's
->   `open import "file"` (re-export) form, not the intended
->   `local open import "file"` (use without re-export) form.
-> - `module M = import "file"` parses but errors at elaboration
->   ("Unsupported module expression type") — `module_manager`'s
->   `elaborate_module_body` has no case for
->   `ModuleExpression::Import`.
-> - `open import "file"` parses but reaches the same elaboration
->   gap.
->
-> See the ignored tests `bare_import_does_not_reexport_per_spec` and
-> `qualified_module_import_per_spec` in
-> `wyn-core/src/integration_tests.rs` for the intended behavior and
-> implementation options. Remove this callout when both tests pass
-> without `#[ignore]`.
+> **DISCREPANCY:** The current compiler does not implement the
+> plain-import visibility rule above. Physical imports, package aliases,
+> qualified `module M = import "file"`, and `open import "file"` are resolved
+> through the source-module graph. Plain imports still expand the imported
+> declarations into the importer and therefore behave like re-exports. The
+> eventual implementation must retain the imported file's semantic module
+> boundary and apply the specified implicit `local open`.
 
 ---
 

@@ -96,3 +96,26 @@ fn check_accepts_nested_semantic_module_in_imported_source() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn check_rejects_entry_in_imported_source() {
+    let package = LocalPackage::new();
+    let root = package.write("main.wyn", "import \"library/dependency\"\n");
+    package.write(
+        "library/dependency.wyn",
+        "entry imported(value: i32) i32 = value\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(root)
+        .output()
+        .expect("Wyn compiler should run");
+    let error = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "imported entry should be rejected");
+    assert!(
+        error.contains("entry `imported` is not declared directly in the root source module"),
+        "unexpected imported-entry diagnostic:\n{error}"
+    );
+}

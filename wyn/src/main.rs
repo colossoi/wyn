@@ -201,30 +201,7 @@ fn type_check_package_plan(
         Compiler::new(CompilerOptions { graphics })
     })?;
     let modules = time("load_modules", verbose, || compiler.load_modules(plan, sources))?;
-    let program = time("resolve_imports", verbose, || {
-        wyn_core::resolve_imports::resolve_imports(modules)
-    })?;
-    let program = time("elaborate_modules", verbose, || {
-        wyn_core::elaborate_modules::elaborate_modules(program)
-    })?;
-    let program = time("resolve_names", verbose, || {
-        wyn_core::name_resolution::resolve_names(program)
-    });
-    let program = time("resolve_resources", verbose, || {
-        wyn_core::resolve_resources::resolve_resources(program)
-    })?;
-    let program = time("fold_ast_constants", verbose, || {
-        wyn_core::ast_const_fold::fold_constants(program)
-    });
-    let program = time("resolve_type_placeholders", verbose, || {
-        wyn_core::resolve_placeholders::resolve_type_placeholders(program)
-    });
-    let program = time("resolve_opens", verbose, || {
-        wyn_core::resolve_opens::resolve_opens(program)
-    })?;
-    let program = time("type_check", verbose, || {
-        wyn_core::types::run::type_check(program)
-    })?;
+    let program = time("type_check", verbose, || modules.type_check())?;
 
     for warning in &program.global_context.warnings {
         eprintln!(

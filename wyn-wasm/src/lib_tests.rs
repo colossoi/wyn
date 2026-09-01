@@ -8,17 +8,7 @@ use super::*;
 fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     let modules = load_source_modules(source, wyn_core::CompilerOptions { graphics: true })
         .expect("source modules should load");
-    let program =
-        wyn_core::resolve_imports::resolve_imports(modules).expect("resolve_imports failed");
-    let program =
-        wyn_core::elaborate_modules::elaborate_modules(program).expect("elaborate_modules failed");
-    let program = wyn_core::name_resolution::resolve_names(program);
-    let program =
-        wyn_core::resolve_resources::resolve_resources(program).expect("resolve_resources failed");
-    let program = wyn_core::ast_const_fold::fold_constants(program);
-    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
-    let program = wyn_core::resolve_opens::resolve_opens(program).expect("resolve_opens failed");
-    let program = wyn_core::types::run::type_check(program).expect("type_check failed");
+    let program = modules.type_check().expect("type_check failed");
     let program = wyn_core::ast_type_holes::reject_type_holes(program).expect("type holes");
     let program = wyn_core::tlc::lower_from_ast(program).expect("lower_from_ast");
     let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");

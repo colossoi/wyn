@@ -22,7 +22,6 @@ use crate::elaborate_modules;
 use crate::error;
 use crate::module_manager;
 use crate::resolve_opens;
-use crate::resolve_placeholders;
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::{SymbolId, SymbolTable};
@@ -403,16 +402,6 @@ pub enum ResolvedValueRef {
     /// frontend resolved one — never when a same-named user `def`
     /// shadows it.
     Soac(SoacKind),
-}
-
-/// Program-wide context after all value binders and references have stable
-/// identities. `source` retains module/resource/type environments; `symbols`
-/// is the sole allocator and diagnostic-name table for source-level bindings.
-#[derive(Debug)]
-pub struct BindingsResolvedGlobal {
-    pub source: resolve_placeholders::PlaceholdersResolvedGlobal,
-    pub symbols: SymbolTable,
-    pub support_definitions: Vec<ast::SupportDefinition<ast::NameResolvedDefinition, ast::ResolvedTree>>,
 }
 
 /// Side table populated by `build_name_resolution`. Maps Identifier

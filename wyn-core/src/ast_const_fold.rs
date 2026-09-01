@@ -228,6 +228,7 @@ impl AstConstFolder {
 
     /// Recursively fold constants in an expression.
     /// Modifies the expression in place.
+    #[cfg(test)]
     pub fn fold_expr(&mut self, expr: &mut Expression) {
         self.fold_expr_scoped(expr, &[]);
     }

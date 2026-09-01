@@ -524,14 +524,7 @@ impl Backend {
                 return (diagnostics, None);
             }
         };
-        let result = wyn_core::resolve_imports::resolve_imports(modules)
-            .and_then(wyn_core::elaborate_modules::elaborate_modules)
-            .map(wyn_core::name_resolution::resolve_names)
-            .and_then(wyn_core::resolve_resources::resolve_resources)
-            .map(wyn_core::ast_const_fold::fold_constants)
-            .map(wyn_core::resolve_placeholders::resolve_type_placeholders)
-            .and_then(wyn_core::resolve_opens::resolve_opens)
-            .and_then(wyn_core::types::run::type_check);
+        let result = modules.type_check();
 
         match result {
             Ok(type_checked) => {

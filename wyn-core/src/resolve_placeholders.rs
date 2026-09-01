@@ -79,16 +79,8 @@ impl PlaceholderResolver {
         }
     }
 
-    /// Create a resolver with an existing Context (e.g., from prelude parsing).
-    pub fn with_context(context: Context<TypeName>) -> Self {
-        Self {
-            context,
-            type_param_bindings: LookupMap::new(),
-            spec_schemes: LookupMap::new(),
-        }
-    }
-
     /// Consume the resolver and return the Context for use in type checking.
+    #[cfg(test)]
     pub fn into_context(self) -> Context<TypeName> {
         self.context
     }
@@ -96,11 +88,6 @@ impl PlaceholderResolver {
     /// Consume the resolver and return both the Context and spec schemes.
     pub fn into_parts(self) -> (Context<TypeName>, LookupMap<String, TypeScheme<TypeName>>) {
         (self.context, self.spec_schemes)
-    }
-
-    /// Get the pre-built spec schemes (for module functions like f32.sin).
-    pub fn spec_schemes(&self) -> &LookupMap<String, TypeScheme<TypeName>> {
-        &self.spec_schemes
     }
 
     /// Resolve all placeholders in a program and its dependencies.

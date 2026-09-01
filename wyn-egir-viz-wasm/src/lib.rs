@@ -590,14 +590,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let program = try_compiler!(wyn_core::resolve_imports::resolve_imports(modules));
-    let program = try_compiler!(wyn_core::elaborate_modules::elaborate_modules(program));
-    let program = wyn_core::name_resolution::resolve_names(program);
-    let program = try_compiler!(wyn_core::resolve_resources::resolve_resources(program));
-    let program = wyn_core::ast_const_fold::fold_constants(program);
-    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
-    let program = try_compiler!(wyn_core::resolve_opens::resolve_opens(program));
-    let program = try_compiler!(wyn_core::types::run::type_check(program));
+    let program = try_compiler!(modules.type_check());
     let program = try_compiler!(wyn_core::ast_type_holes::reject_type_holes(program));
     let program = try_compiler!(wyn_core::tlc::lower_from_ast(program));
     let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));

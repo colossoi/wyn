@@ -1,6 +1,6 @@
 use crate::ast::{Type, TypeName, TypeScheme};
-use crate::type_checker::TypeVarGenerator;
 use crate::types;
+use crate::types::checker::TypeVarGenerator;
 
 /// A scheme builder is a function that produces a fresh `TypeScheme` —
 /// fresh type variables drawn from the supplied generator. Schemes can't
