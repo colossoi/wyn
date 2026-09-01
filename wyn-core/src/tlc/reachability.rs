@@ -7,7 +7,7 @@
 use super::context::BackendGlobal;
 use super::ownership::OwnershipApplied;
 
-/// TLC containing only definitions reachable from an entry point or extern.
+/// TLC containing only definitions reachable from an entry point.
 #[derive(Debug, Clone, Copy)]
 pub enum ReachableTag {}
 pub type Reachable = super::Program<ReachableTag, super::defunctionalize::ClosureConverted, BackendGlobal>;

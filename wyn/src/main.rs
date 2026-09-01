@@ -153,10 +153,6 @@ enum DriverError {
     InvalidOption(String),
 }
 
-struct FrontendFile {
-    program: wyn_core::ast_type_holes::HolesResolved,
-}
-
 fn direct_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
     let input = input.canonicalize()?;
     let Some(root) = input.parent() else {
@@ -189,14 +185,22 @@ fn type_check_frontend_file(
     reject_holes: bool,
     graphics: bool,
     verbose: bool,
-) -> Result<FrontendFile, DriverError> {
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let (plan, mut sources) = direct_source_plan(input)?;
+    type_check_package_plan(plan, &mut sources, reject_holes, graphics, verbose)
+}
+
+fn type_check_package_plan(
+    plan: PackagePlan,
+    sources: &mut LocalSources,
+    reject_holes: bool,
+    graphics: bool,
+    verbose: bool,
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let compiler = time("frontend", verbose, || {
         Compiler::new(CompilerOptions { graphics })
     })?;
-    let modules = time("load_modules", verbose, || {
-        compiler.load_modules(plan, &mut sources)
-    })?;
+    let modules = time("load_modules", verbose, || compiler.load_modules(plan, sources))?;
     let program = time("resolve_imports", verbose, || {
         wyn_core::resolve_imports::resolve_imports(modules)
     })?;
@@ -235,7 +239,7 @@ fn type_check_frontend_file(
         wyn_core::ast_type_holes::fill_type_holes(program)?
     };
 
-    Ok(FrontendFile { program })
+    Ok(program)
 }
 
 fn main() -> ExitCode {
@@ -370,7 +374,7 @@ fn compile_file(
     // Wall-clock start for the always-printed timing summary below.
     let compile_start = Instant::now();
 
-    let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
+    let program = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
 
     let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program))?;
 
@@ -563,7 +567,7 @@ fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), Drive
         info!("Checking {}...", input.display());
     }
 
-    let FrontendFile { program } = type_check_frontend_file(&input, true, graphics, verbose)?;
+    let program = type_check_frontend_file(&input, true, graphics, verbose)?;
     let program = wyn_core::tlc::lower_from_ast(program)?;
     let program = wyn_core::tlc::pin_entry_buffers(program)?;
     wyn_core::tlc::validate_ownership(program)?;
