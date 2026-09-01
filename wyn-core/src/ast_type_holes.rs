@@ -40,7 +40,15 @@ pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<Hole
     if !holes.is_empty() {
         let mut message = String::from("type hole(s) in program:\n");
         for (ty, span) in holes {
-            message.push_str(&format!("  at {span} — inferred `{}`\n", types::format_type(ty),));
+            let location = program
+                .source_graph()
+                .display_location(*span)
+                .map(|location| location.to_string())
+                .unwrap_or_else(|_| "generated source".to_string());
+            message.push_str(&format!(
+                "  at {location} — inferred `{}`\n",
+                types::format_type(ty),
+            ));
         }
         return Err(err_type_hole!("{}", message.trim_end()));
     }
