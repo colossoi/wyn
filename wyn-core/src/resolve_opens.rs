@@ -32,9 +32,9 @@ use crate::err_module;
 use crate::err_module_at;
 use crate::error::Result;
 use crate::interface;
-use crate::module_manager;
 use crate::resolve_placeholders;
 use crate::resolve_resources;
+use crate::semantic_modules;
 use crate::{LookupMap, LookupSet};
 use polytype::TypeScheme;
 
@@ -60,9 +60,9 @@ pub type OpensResolved =
 
 pub fn resolve_opens(mut program: resolve_placeholders::TypePlaceholdersResolved) -> Result<OpensResolved> {
     let mut index = build_index(&program.global_context.spec_schemes, builtins::catalog());
-    for (module_name, elaborated) in program.global_context.module_manager.get_elaborated_modules() {
+    for (module_name, elaborated) in program.global_context.semantic_modules.get_elaborated_modules() {
         for item in &elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(declaration) = item {
+            if let semantic_modules::ElaboratedItem::Decl(declaration) = item {
                 index.add_member(module_name, &declaration.name);
             }
         }
@@ -70,10 +70,10 @@ pub fn resolve_opens(mut program: resolve_placeholders::TypePlaceholdersResolved
     resolve_program_with_index(&mut program.declarations, &index)?;
 
     let module_names: Vec<String> =
-        program.global_context.module_manager.elaborated_modules_mut().keys().cloned().collect();
+        program.global_context.semantic_modules.elaborated_modules_mut().keys().cloned().collect();
     for module_name in module_names {
         let Some(elaborated) =
-            program.global_context.module_manager.elaborated_modules_mut().get_mut(&module_name)
+            program.global_context.semantic_modules.elaborated_modules_mut().get_mut(&module_name)
         else {
             return Err(err_module!(
                 "module '{}' disappeared during open resolution",
@@ -81,7 +81,7 @@ pub fn resolve_opens(mut program: resolve_placeholders::TypePlaceholdersResolved
             ));
         };
         for item in &mut elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(declaration) = item {
+            if let semantic_modules::ElaboratedItem::Decl(declaration) = item {
                 run_in_module_with_index(&mut declaration.body, &module_name, &index)?;
             }
         }

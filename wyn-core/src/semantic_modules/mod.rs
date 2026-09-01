@@ -1,4 +1,4 @@
-//! Module manager for lazy loading and caching module definitions
+//! Semantic module elaboration and compiler-wide module definitions.
 
 use crate::ast;
 use crate::ast::{
@@ -22,7 +22,7 @@ use crate::{LookupMap, LookupSet};
 use wyn_module_graph::ModuleId;
 
 /// A first-order type abbreviation together with the parameters that its
-/// definition abstracts. Keeping the binder metadata in the module manager
+/// definition abstracts. Keeping the binder metadata with the semantic modules
 /// lets applications be checked and substituted at each use site.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAliasDefinition {
@@ -114,9 +114,9 @@ pub struct PreElaboratedPrelude {
     pub prelude_functions: StableMap<String, Decl>,
 }
 
-/// Manages lazy loading of module files
+/// Owns elaborated modules, module types, functors, aliases, and prelude declarations.
 #[derive(Debug)]
-pub struct ModuleManager {
+pub struct SemanticModules {
     options: CompilerOptions,
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: LookupMap<String, ModuleTypeExpression>,
@@ -142,8 +142,8 @@ pub struct ModuleManager {
     pub user_module_names: LookupSet<String>,
 }
 
-impl ModuleManager {
-    /// Create a new module manager with fully type-checked prelude
+impl SemanticModules {
+    /// Create a semantic environment with the standard prelude.
     pub fn new(node_counter: &mut NodeCounter) -> Self {
         match Self::create_prelude(node_counter) {
             Ok(prelude) => Self::from_prelude(prelude),
@@ -154,12 +154,12 @@ impl ModuleManager {
         }
     }
 
-    /// Create an empty module manager without loading prelude
+    /// Create an empty semantic environment without the prelude.
     /// Public for testing; production code should use `new()` or `from_prelude()`
     pub fn new_empty() -> Self {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
-        ModuleManager {
+        SemanticModules {
             options: CompilerOptions::default(),
             module_type_registry: LookupMap::new(),
             elaborated_modules: StableMap::new(),
@@ -210,17 +210,17 @@ impl ModuleManager {
         })
     }
 
-    /// Create a ModuleManager using a pre-elaborated prelude (avoids re-parsing)
+    /// Create semantic module state using a pre-elaborated prelude.
     /// Note: Caller must use a NodeCounter that was advanced during prelude creation
     /// (see get_prelude_cache in lib.rs which caches both prelude and node_counter)
     pub fn from_prelude(prelude: PreElaboratedPrelude) -> Self {
         Self::from_prelude_with_options(prelude, CompilerOptions::default())
     }
 
-    /// Create a ModuleManager from a cached prelude with explicit language
+    /// Create semantic module state from a cached prelude with explicit language
     /// features for subsequent user-source parsing and resolution.
     pub fn from_prelude_with_options(prelude: PreElaboratedPrelude, options: CompilerOptions) -> Self {
-        ModuleManager {
+        SemanticModules {
             options,
             module_type_registry: prelude.module_type_registry,
             elaborated_modules: prelude.elaborated_modules,

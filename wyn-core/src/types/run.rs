@@ -9,11 +9,11 @@ use crate::builtins;
 use crate::err_type_at;
 use crate::error::Result;
 use crate::interface;
-use crate::module_manager;
 use crate::name_resolution;
 use crate::name_resolution::ResolvedValueRef;
 use crate::resolve_opens;
 use crate::resolve_placeholders;
+use crate::semantic_modules;
 use crate::types::checker::{TypeChecker, TypeWarning};
 use crate::LookupMap;
 
@@ -36,17 +36,21 @@ pub type TypeChecked =
 pub fn type_check(program: resolve_opens::OpensResolved) -> Result<TypeChecked> {
     let name_resolution = name_resolution::build_name_resolution(
         &program,
-        &program.global_context.module_manager,
+        &program.global_context.semantic_modules,
         builtins::catalog(),
     );
     let checked = program.try_rebuild(|declarations, global_context, _| {
         let resolve_placeholders::PlaceholdersResolvedGlobal {
-            module_manager,
+            semantic_modules,
             context,
             spec_schemes,
         } = global_context;
-        let mut checker =
-            TypeChecker::with_context_and_schemes(&module_manager, context, spec_schemes, name_resolution);
+        let mut checker = TypeChecker::with_context_and_schemes(
+            &semantic_modules,
+            context,
+            spec_schemes,
+            name_resolution,
+        );
         checker.load_builtins()?;
         let type_table = checker.check_program(&declarations)?;
         let schemes = checker.get_function_schemes();
@@ -57,7 +61,7 @@ pub fn type_check(program: resolve_opens::OpensResolved) -> Result<TypeChecked> 
 
         materialize(
             declarations,
-            module_manager,
+            semantic_modules,
             type_table,
             schemes,
             warnings,
@@ -71,7 +75,7 @@ pub fn type_check(program: resolve_opens::OpensResolved) -> Result<TypeChecked> 
 
 fn materialize(
     declarations: Vec<Declaration<resolve_opens::OpensResolvedFamily>>,
-    module_manager: module_manager::ModuleManager,
+    semantic_modules: semantic_modules::SemanticModules,
     mut type_table: LookupMap<ast::NodeId, ast::TypeScheme>,
     schemes: LookupMap<String, ast::TypeScheme>,
     warnings: Vec<TypeWarning>,
@@ -82,7 +86,7 @@ fn materialize(
     ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>,
 )> {
     let mut support_definitions = Vec::new();
-    for (module_name, definition) in module_manager.get_all_module_declarations() {
+    for (module_name, definition) in semantic_modules.get_all_module_declarations() {
         support_definitions.push(ast::SupportDefinition {
             namespace: Some(module_name.to_string()),
             definition: materialize_definition(
@@ -94,7 +98,7 @@ fn materialize(
             )?,
         });
     }
-    for definition in module_manager.get_prelude_function_declarations() {
+    for definition in semantic_modules.get_prelude_function_declarations() {
         support_definitions.push(ast::SupportDefinition {
             namespace: None,
             definition: materialize_definition(

@@ -2,8 +2,8 @@ use std::sync::{Arc, OnceLock};
 
 use crate::ast::{NodeCounter, SourceImport};
 use crate::error::{CompilerError, FrontendFailure, Result};
-use crate::module_manager::{ModuleManager, PreElaboratedPrelude};
 use crate::parser::{self, ParsedFile};
+use crate::semantic_modules::{PreElaboratedPrelude, SemanticModules};
 use crate::{
     ast_const_fold, elaborate_modules, err_parse_at, name_resolution, resolve_imports, resolve_opens,
     resolve_placeholders, resolve_resources, types, CompilerOptions,
@@ -18,7 +18,7 @@ static COMPILER_PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = O
 /// State owned by one compilation before its source-module graph is loaded.
 pub struct Compiler {
     pub(crate) node_ids: NodeCounter,
-    pub(crate) semantic_modules: ModuleManager,
+    pub(crate) semantic_modules: SemanticModules,
 }
 
 /// Parsed source modules together with the compiler state that produced them.
@@ -28,7 +28,7 @@ pub struct Compiler {
 pub struct ParsedModules {
     pub(crate) graph: ModuleGraph<ParsedFile>,
     pub(crate) node_ids: NodeCounter,
-    pub(crate) semantic_modules: ModuleManager,
+    pub(crate) semantic_modules: SemanticModules,
 }
 
 impl ParsedModules {
@@ -58,7 +58,7 @@ impl Compiler {
         let (prelude, node_ids) = compiler_prelude()?;
         Ok(Self {
             node_ids,
-            semantic_modules: ModuleManager::from_prelude_with_options(prelude, options),
+            semantic_modules: SemanticModules::from_prelude_with_options(prelude, options),
         })
     }
 
@@ -88,7 +88,7 @@ fn compiler_prelude() -> Result<(PreElaboratedPrelude, NodeCounter)> {
     }
 
     let mut node_ids = NodeCounter::new();
-    let prelude = ModuleManager::create_prelude(&mut node_ids)?;
+    let prelude = SemanticModules::create_prelude(&mut node_ids)?;
     let (prelude, node_ids) = COMPILER_PRELUDE_CACHE.get_or_init(|| (prelude, node_ids));
     Ok((prelude.clone(), node_ids.clone()))
 }

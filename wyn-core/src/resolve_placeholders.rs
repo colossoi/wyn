@@ -17,8 +17,8 @@
 use crate::ast::{self, Declaration, Expression, Pattern, PatternKind, Program, TypeParam};
 use crate::ast_const_fold;
 use crate::interface;
-use crate::module_manager;
 use crate::resolve_resources;
+use crate::semantic_modules;
 use crate::types::TypeName;
 use crate::LookupMap;
 use crate::StableMap;
@@ -32,7 +32,7 @@ mod tests;
 /// fresh variables. It is program-wide rather than owned by one AST node.
 #[derive(Debug)]
 pub struct PlaceholdersResolvedGlobal {
-    pub module_manager: module_manager::ModuleManager,
+    pub semantic_modules: semantic_modules::SemanticModules,
     pub context: Context<TypeName>,
     pub spec_schemes: LookupMap<String, TypeScheme<TypeName>>,
 }
@@ -51,8 +51,8 @@ pub fn resolve_type_placeholders(mut program: ast_const_fold::ConstantsFolded) -
     let mut resolver = PlaceholderResolver::new();
     resolver.resolve(&mut program.global_context, &mut program.declarations);
     let (context, spec_schemes) = resolver.into_parts();
-    program.map_global_context(|module_manager| PlaceholdersResolvedGlobal {
-        module_manager,
+    program.map_global_context(|semantic_modules| PlaceholdersResolvedGlobal {
+        semantic_modules,
         context,
         spec_schemes,
     })
@@ -94,11 +94,11 @@ impl PlaceholderResolver {
     /// This is the main entry point - it handles prelude, modules, and the program.
     pub fn resolve(
         &mut self,
-        module_manager: &mut module_manager::ModuleManager,
+        semantic_modules: &mut semantic_modules::SemanticModules,
         declarations: &mut [Declaration<resolve_resources::ResourcesResolvedFamily>],
     ) {
-        self.resolve_prelude(module_manager.prelude_functions_mut());
-        self.resolve_elaborated_modules(module_manager.elaborated_modules_mut());
+        self.resolve_prelude(semantic_modules.prelude_functions_mut());
+        self.resolve_elaborated_modules(semantic_modules.elaborated_modules_mut());
         self.resolve_program(declarations);
     }
 
@@ -123,7 +123,7 @@ impl PlaceholderResolver {
     /// Also builds TypeSchemes for Spec::Sig items and stores them in spec_schemes.
     fn resolve_elaborated_modules(
         &mut self,
-        modules: &mut StableMap<String, module_manager::ElaboratedModule>,
+        modules: &mut StableMap<String, semantic_modules::ElaboratedModule>,
     ) {
         for (module_name, module) in modules.iter_mut() {
             for item in &mut module.items {
@@ -132,8 +132,8 @@ impl PlaceholderResolver {
         }
     }
 
-    fn resolve_elaborated_item(&mut self, module_name: &str, item: &mut module_manager::ElaboratedItem) {
-        use crate::module_manager::ElaboratedItem;
+    fn resolve_elaborated_item(&mut self, module_name: &str, item: &mut semantic_modules::ElaboratedItem) {
+        use crate::semantic_modules::ElaboratedItem;
         match item {
             ElaboratedItem::Spec(spec) => self.resolve_spec_and_build_scheme(module_name, spec),
             ElaboratedItem::Decl(decl) => self.resolve_decl(decl),

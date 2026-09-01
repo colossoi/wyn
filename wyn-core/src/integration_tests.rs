@@ -357,7 +357,7 @@ fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
 
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
-/// `module_manager` covers both `type_check` and `to_tlc`.
+/// Semantic module coverage spans both `type_check` and `to_tlc`.
 fn compile_to_semantic_egir(input: &str) -> egir::ResourcesAllocated {
     let program = egir::optimize_semantic_operations(compile_to_segmented_egir(input))
         .expect("semantic EGIR optimization failed");

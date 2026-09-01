@@ -1,6 +1,6 @@
 //! Deep-clone an AST subtree with freshly allocated `NodeId`s.
 //!
-//! Used by `module_manager` after a functor instantiation: each
+//! Used by semantic module elaboration after a functor instantiation: each
 //! instantiation needs its own NodeId space so downstream NodeId-keyed
 //! side tables (e.g. `NameResolution`) don't see collisions between
 //! instantiations of the same source body.

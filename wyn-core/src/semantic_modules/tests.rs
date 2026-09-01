@@ -1,4 +1,4 @@
-use super::{ElaboratedItem, ModuleManager};
+use super::{ElaboratedItem, SemanticModules};
 use crate::ast::{ModuleTypeExpression, NodeCounter, Spec, TypeName};
 use crate::ast_const_fold;
 use crate::builtins;
@@ -14,11 +14,11 @@ use std::collections::HashMap;
 
 use polytype::TypeScheme;
 
-/// Create a ModuleManager with the given source elaborated (no prelude)
-fn module_manager_with(src: &str) -> ModuleManager {
+/// Create semantic module state with the given source elaborated (no prelude).
+fn semantic_modules_with(src: &str) -> SemanticModules {
     let compiler = crate::Compiler {
         node_ids: NodeCounter::new(),
-        semantic_modules: ModuleManager::new_empty(),
+        semantic_modules: SemanticModules::new_empty(),
     };
     let modules = crate::test_pipeline::load_test_modules(src, compiler);
     let program = resolve_imports::resolve_imports(modules).unwrap();
@@ -52,7 +52,7 @@ fn get_monotype(scheme: &TypeScheme<TypeName>) -> &Type<TypeName> {
 #[test]
 fn test_query_f32_sin_from_math_prelude() {
     let mut node_counter = NodeCounter::new();
-    let manager = ModuleManager::new(&mut node_counter);
+    let manager = SemanticModules::new(&mut node_counter);
 
     // Prelude files are automatically loaded on creation
     println!(
@@ -76,11 +76,11 @@ fn test_query_f32_sin_from_math_prelude() {
     let program = resolve_opens::resolve_opens(program).unwrap();
     let nr = name_resolution::build_name_resolution(
         &program,
-        &program.global_context.module_manager,
+        &program.global_context.semantic_modules,
         builtins::catalog(),
     );
     let resolve_placeholders::PlaceholdersResolvedGlobal {
-        module_manager: manager,
+        semantic_modules: manager,
         context,
         spec_schemes,
     } = program.global_context;
@@ -116,7 +116,7 @@ fn test_query_f32_sin_from_math_prelude() {
 
 #[test]
 fn elaborate_module_type_with_include() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module type numeric = {
     type t
@@ -141,7 +141,7 @@ module type float_like = {
 
 #[test]
 fn elaborate_module_with_signature_and_with() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module type numeric = {
     type t
@@ -173,7 +173,7 @@ module f32_num : (numeric with t = f32) = {
 
 #[test]
 fn elaborate_functor_application() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module type numeric = {
     type t
@@ -212,7 +212,7 @@ module add_f32 = add_stuff(my_f32_num)
 
 #[test]
 fn resolve_names_qualifies_intra_module_functions() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module foo = {
     def helper(x: i32) i32 = x + 1
@@ -243,7 +243,7 @@ module foo = {
 
 #[test]
 fn resolve_names_respects_local_shadowing() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module foo = {
     def bar(x: i32) i32 = x
@@ -279,7 +279,7 @@ module foo = {
 
 #[test]
 fn functor_param_module_references_resolved() {
-    let mm = module_manager_with(
+    let mm = semantic_modules_with(
         r#"
 module type numeric = {
     type t
@@ -333,7 +333,7 @@ module i32_sum = sum_module(my_i32)
 /// into `M`'s signature and check that its `f` sig sees `i32 -> i32`.
 #[test]
 fn test_substitute_into_nested_module_signature() {
-    let mm = ModuleManager::new_empty();
+    let mm = SemanticModules::new_empty();
 
     // Named type `t` — the thing we substitute away.
     let t_ty = Type::Constructed(TypeName::Named("t".into()), vec![]);
@@ -402,7 +402,7 @@ fn test_substitute_into_nested_module_signature() {
 // ---------------------------------------------------------------------------
 
 fn module_body_str(src: &str, module_name: &str, fn_name: &str) -> String {
-    let mm = module_manager_with(src);
+    let mm = semantic_modules_with(src);
     let m = mm.get_elaborated_module(module_name).expect("module should exist");
     let decl = m
         .items

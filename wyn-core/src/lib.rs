@@ -11,7 +11,6 @@ pub mod flow;
 mod frontend;
 pub mod interface;
 pub mod lexer;
-pub mod module_manager;
 mod name_resolution;
 pub mod op;
 mod parser;
@@ -22,6 +21,7 @@ mod resolve_placeholders;
 mod resolve_resources;
 mod scalar_eval;
 pub mod scope;
+pub mod semantic_modules;
 pub mod ssa;
 pub mod types;
 

@@ -6,13 +6,13 @@ use crate::builtins::{by_id, BuiltinId};
 use crate::error::{CompilerError, Result};
 use crate::interface;
 use crate::interface::{AttrExt, Attribute};
-use crate::module_manager;
-use crate::module_manager::ModuleManager;
 use crate::name_resolution;
 use crate::name_resolution::NameResolution;
 use crate::op;
 use crate::resolve_opens;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
+use crate::semantic_modules;
+use crate::semantic_modules::SemanticModules;
 use crate::ssa;
 use crate::types;
 use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
@@ -151,8 +151,8 @@ impl LookupContext {
 /// [`LookupContext`].
 ///
 /// Each map is `StableMap` to preserve insertion order across runs —
-/// same reason `module_manager.elaborated_modules` / `prelude_functions`
-/// are `StableMap` (`module_manager/mod.rs:55-67`): deterministic
+/// same reason `semantic_modules.elaborated_modules` / `prelude_functions`
+/// are `StableMap` (`semantic_modules/mod.rs`): deterministic
 /// type-check order, stable diagnostic output, stable golden
 /// downstream. Lookups don't care; iteration does.
 #[derive(Debug, Default, Clone)]
@@ -184,11 +184,11 @@ pub struct TypeChecker<'a> {
     pub(super) current_context: LookupContext,
     pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: LookupMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
-    module_manager: &'a ModuleManager,     // Lazy module loading
+    semantic_modules: &'a SemanticModules,
     pub(super) type_table: LookupMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
-    warnings: Vec<TypeWarning>,            // Collected warnings
-    type_holes: Vec<(NodeId, Span)>,       // Track type hole locations for warning emission
-    arity_map: LookupMap<String, usize>,   // function name -> required arity (number of params)
+    warnings: Vec<TypeWarning>,                           // Collected warnings
+    type_holes: Vec<(NodeId, Span)>,                      // Track type hole locations for warning emission
+    arity_map: LookupMap<String, usize>, // function name -> required arity (number of params)
     /// Names of top-level functions that consume an argument — a consuming
     /// function may not be passed as a value, so a call passing one is
     /// rejected.
@@ -641,7 +641,7 @@ impl<'a> TypeChecker<'a> {
                 keys.push(name.clone());
 
                 for key in keys {
-                    if let Some(alias) = self.module_manager.resolve_type_alias_definition(&key) {
+                    if let Some(alias) = self.semantic_modules.resolve_type_alias_definition(&key) {
                         if let Some(cycle_err) = Self::check_alias_cycle(visited, &key) {
                             return Err(cycle_err);
                         }
@@ -697,7 +697,7 @@ impl<'a> TypeChecker<'a> {
 
     fn apply_type_alias(
         name: &str,
-        alias: &module_manager::TypeAliasDefinition,
+        alias: &semantic_modules::TypeAliasDefinition,
         args: &[Type],
     ) -> Result<Type> {
         if alias.type_params.len() != args.len() {
@@ -1084,25 +1084,25 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Create a new TypeChecker with a reference to a ModuleManager.
-    pub fn new(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
+    /// Create a new type checker with access to semantic module state.
+    pub fn new(semantic_modules: &'a SemanticModules, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(semantic_modules, LookupMap::new(), name_resolution)
     }
 
     /// Create a TypeChecker with an empty type table (for building prelude).
-    pub fn new_empty(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
+    pub fn new_empty(semantic_modules: &'a SemanticModules, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(semantic_modules, LookupMap::new(), name_resolution)
     }
 
     /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
     pub fn with_context_and_schemes(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         context: Context<TypeName>,
         spec_schemes: LookupMap<String, TypeScheme>,
         name_resolution: NameResolution,
     ) -> Self {
         Self::with_context_and_type_table(
-            module_manager,
+            semantic_modules,
             context,
             LookupMap::new(),
             spec_schemes,
@@ -1112,12 +1112,12 @@ impl<'a> TypeChecker<'a> {
 
     /// Create a TypeChecker with a given initial type table
     fn with_type_table(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         type_table: LookupMap<NodeId, TypeScheme>,
         name_resolution: NameResolution,
     ) -> Self {
         Self::with_context_and_type_table(
-            module_manager,
+            semantic_modules,
             Context::default(),
             type_table,
             LookupMap::new(),
@@ -1127,7 +1127,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Create a TypeChecker with both an existing Context and type table.
     fn with_context_and_type_table(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         context: Context<TypeName>,
         type_table: LookupMap<NodeId, TypeScheme>,
         spec_schemes: LookupMap<String, TypeScheme>,
@@ -1148,7 +1148,7 @@ impl<'a> TypeChecker<'a> {
             current_context: LookupContext::UserFile,
             context,
             record_field_map: LookupMap::new(),
-            module_manager,
+            semantic_modules,
             type_table,
             warnings: Vec::new(),
             type_holes: Vec::new(),
@@ -1799,7 +1799,7 @@ impl<'a> TypeChecker<'a> {
         // Register vector field mappings
         self.register_vector_fields();
 
-        // Note: Prelude files are automatically loaded when ModuleManager is created
+        // Prelude declarations are present when semantic module state is created.
 
         Ok(())
     }
@@ -2243,7 +2243,7 @@ impl<'a> TypeChecker<'a> {
     pub fn check_module_functions(&mut self) -> Result<()> {
         // Collect all module declarations that need flattening (includes constants like f32.pi)
         let module_functions: Vec<(String, ast::Decl)> = self
-            .module_manager
+            .semantic_modules
             .get_all_module_declarations()
             .into_iter()
             .map(|(module_name, decl)| (module_name.to_string(), decl.clone()))
@@ -2267,7 +2267,7 @@ impl<'a> TypeChecker<'a> {
     pub fn check_prelude_functions(&mut self) -> Result<()> {
         // Collect all prelude function declarations to avoid borrowing issues
         let prelude_functions: Vec<ast::Decl> =
-            self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
+            self.semantic_modules.get_prelude_function_declarations().into_iter().cloned().collect();
 
         let saved_context = self.current_context.clone();
         self.current_context = LookupContext::Prelude;
@@ -3617,7 +3617,7 @@ impl<'a> TypeChecker<'a> {
         callee_node_id: NodeId,
     ) -> Option<CalleeCandidates> {
         // Scalar dispatch.
-        if self.module_manager.is_known_module(name) {
+        if self.semantic_modules.is_known_module(name) {
             let catalog = builtins::catalog();
             let entries = catalog.lookup_by_surface_prefix(name);
             let mut candidates: Vec<Candidate> = Vec::with_capacity(entries.len());

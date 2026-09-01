@@ -7,15 +7,15 @@
 use super::*;
 use crate::ast::{self, Declaration, ExprKind, Expression};
 use crate::elaborate_modules;
-use crate::module_manager;
 use crate::name_resolution;
 use crate::resolve_imports;
 use crate::resolve_resources;
+use crate::semantic_modules;
 
 fn parse(src: &str) -> resolve_resources::ResourcesResolved {
     let compiler = crate::Compiler {
         node_ids: ast::NodeCounter::new(),
-        semantic_modules: module_manager::ModuleManager::new_empty(),
+        semantic_modules: semantic_modules::SemanticModules::new_empty(),
     };
     let modules = crate::test_pipeline::load_test_modules(src, compiler);
     let program = resolve_imports::resolve_imports(modules).expect("imports");

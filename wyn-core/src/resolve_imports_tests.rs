@@ -1,5 +1,5 @@
 use super::*;
-use crate::module_manager::ElaboratedItem;
+use crate::semantic_modules::ElaboratedItem;
 use crate::{elaborate_modules, Compiler, CompilerOptions};
 use wyn_module_graph::{
     LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlan, PackagePlanBuilder,
@@ -119,7 +119,7 @@ fn imported_nested_semantic_module_is_preserved() {
         .get_elaborated_module("Dependency.Nested")
         .expect("nested module should have a qualified semantic namespace");
     assert!(nested.items.iter().any(
-        |item| matches!(item, crate::module_manager::ElaboratedItem::Decl(declaration) if declaration.name == "value")
+        |item| matches!(item, crate::semantic_modules::ElaboratedItem::Decl(declaration) if declaration.name == "value")
     ));
 }
 

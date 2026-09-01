@@ -10,8 +10,8 @@ use crate::ast::{
 use crate::error::{CompilerError, FrontendFailure, Result};
 use crate::frontend::ParsedModules;
 use crate::interface::Attribute;
-use crate::module_manager::ModuleManager;
 use crate::parser::ParsedFile;
+use crate::semantic_modules::SemanticModules;
 use crate::{err_module_at, LookupSet};
 use wyn_module_graph::{ModuleGraph, ModuleId};
 
@@ -27,7 +27,7 @@ pub type ImportsResolvedFamily = AstFamily<
 /// AST after every physical source import has been replaced with loaded syntax.
 #[derive(Debug, Clone, Copy)]
 pub enum ImportsResolvedTag {}
-pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, ModuleManager>;
+pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, SemanticModules>;
 
 /// Resolve physical imports and combine the loaded source modules into one
 /// whole-program AST.
