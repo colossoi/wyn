@@ -13,6 +13,7 @@ use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDec
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
 use crate::SymbolId;
 use wyn_base::IdSource;
+use wyn_module_graph::PackageId;
 pub use wyn_module_graph::Span;
 
 /// Qualified name representing a path through modules to a name
@@ -442,6 +443,9 @@ pub struct DefinitionSyntax {
 pub struct NameResolvedDefinition {
     pub syntax: DefinitionSyntax,
     pub symbol: SymbolId,
+    /// Package containing the source declaration. Compiler-provided support
+    /// definitions have no source package.
+    pub package: Option<PackageId>,
 }
 
 /// Typed definition data. Identity is inherited from name resolution rather
@@ -547,6 +551,8 @@ pub struct TypedExtern {
 pub struct NameResolvedExtern {
     pub syntax: ExternSyntax,
     pub symbol: SymbolId,
+    /// Package containing the source declaration.
+    pub package: Option<PackageId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -613,6 +619,8 @@ pub struct ResolvedEntry {
 pub struct NameResolvedEntry {
     pub source: ResolvedEntry,
     pub symbol: SymbolId,
+    /// Package containing the source declaration.
+    pub package: Option<PackageId>,
 }
 
 /// Typed entry metadata, including the entry's inferred function scheme and

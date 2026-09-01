@@ -330,6 +330,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
         vec![Def {
             data: (),
             name: main,
+            package: None,
             ty: unit_ty(),
             body: scatter,
             meta: DefMeta::Function,

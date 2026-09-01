@@ -108,6 +108,7 @@ fn def_with_simple_body_passes_verifier() {
     program.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,
@@ -147,6 +148,7 @@ fn unlifted_lambda_in_body_fails_verifier() {
     program.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,
@@ -212,6 +214,7 @@ fn param_spine_lambdas_are_skipped() {
     program.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,
@@ -250,6 +253,7 @@ fn unlifted_scatter_envelope_fails_verifier() {
     program.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: unit_ty(),
         body: scatter,
         meta: DefMeta::Function,
@@ -350,6 +354,7 @@ fn reduce_with_operator(
     program.defs.push(Def {
         data: (),
         name: g,
+        package: None,
         ty: op_ty.clone(),
         body: g_body,
         meta: DefMeta::Function,
@@ -407,6 +412,7 @@ fn reduce_with_operator(
     program.defs.push(Def {
         data: (),
         name: main,
+        package: None,
         ty: main_ty.clone(),
         body: main_body,
         meta: DefMeta::Function,

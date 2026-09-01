@@ -31,6 +31,7 @@ use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
 use crate::module_manager::ModuleManager;
 use crate::scope::{for_each_pattern_name, ScopeStack};
+use wyn_module_graph::PackageId;
 
 /// AST after module-qualified value names have been resolved.
 #[derive(Debug, Clone, Copy)]
@@ -412,7 +413,13 @@ pub struct NameResolution {
     pub bindings: LookupMap<(NodeId, String), SymbolId>,
     /// Definition-node identity, kept separate from lexical name lookup so a
     /// shadowed prelude definition never shares a `SymbolId` with user code.
-    pub declarations: LookupMap<(String, ast::Span), SymbolId>,
+    declarations: LookupMap<(String, ast::Span), ResolvedDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedDeclaration {
+    pub(crate) symbol: SymbolId,
+    pub(crate) package: Option<PackageId>,
 }
 
 impl NameResolution {
@@ -427,6 +434,10 @@ impl NameResolution {
     }
     pub fn get(&self, id: NodeId) -> Option<&ResolvedValueRef> {
         self.values.get(&id)
+    }
+
+    pub(crate) fn take_declaration(&mut self, name: &str, span: ast::Span) -> Option<ResolvedDeclaration> {
+        self.declarations.remove(&(name.to_owned(), span))
     }
 
     /// Record the type checker's choice of overload index for a Builtin
@@ -565,10 +576,19 @@ fn intern_definition(nr: &mut NameResolution, name: String) -> SymbolId {
     symbol
 }
 
-fn alloc_declaration(nr: &mut NameResolution, name: String, span: ast::Span) -> SymbolId {
+fn alloc_declaration(
+    nr: &mut NameResolution,
+    name: String,
+    span: ast::Span,
+    package: Option<PackageId>,
+) -> SymbolId {
     let symbol = nr.symbols.alloc(name.clone());
-    nr.declarations.insert((name, span), symbol);
+    nr.declarations.insert((name, span), ResolvedDeclaration { symbol, package });
     symbol
+}
+
+fn source_package(program: &resolve_opens::OpensResolved, span: ast::Span) -> Option<PackageId> {
+    span.module().and_then(|module| program.source_graph().package_of(module))
 }
 
 fn bind_symbol_pattern<T, A>(
@@ -625,26 +645,34 @@ fn assign_symbol_identities(
 ) {
     for (module, definition) in module_manager.get_all_module_declarations() {
         let name = format!("{}.{}", module, definition.name);
-        let symbol = alloc_declaration(nr, name.clone(), definition.name_span);
+        let package = if module_manager.user_module_names.contains(module) {
+            source_package(program, definition.name_span)
+        } else {
+            None
+        };
+        let symbol = alloc_declaration(nr, name.clone(), definition.name_span, package);
         nr.definitions.entry(name).or_insert(symbol);
     }
     let prelude = module_manager.get_prelude_function_declarations();
     for definition in &prelude {
-        let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+        let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span, None);
         nr.definitions.entry(definition.name.clone()).or_insert(symbol);
     }
     for declaration in &program.declarations {
         match declaration {
             Declaration::Decl(definition) => {
-                let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+                let package = source_package(program, definition.name_span);
+                let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span, package);
                 nr.definitions.insert(definition.name.clone(), symbol);
             }
             Declaration::Entry(entry) => {
-                let symbol = alloc_declaration(nr, entry.name.clone(), entry.name_span);
+                let package = source_package(program, entry.name_span);
+                let symbol = alloc_declaration(nr, entry.name.clone(), entry.name_span, package);
                 nr.definitions.insert(entry.name.clone(), symbol);
             }
             Declaration::Extern(external) => {
-                let symbol = alloc_declaration(nr, external.name.clone(), external.data.span);
+                let package = source_package(program, external.data.span);
+                let symbol = alloc_declaration(nr, external.name.clone(), external.data.span, package);
                 nr.definitions.insert(external.name.clone(), symbol);
             }
             Declaration::Frontend(_) => {}

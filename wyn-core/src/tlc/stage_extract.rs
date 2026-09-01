@@ -2665,6 +2665,7 @@ fn stage_def(
             scheme: Some(TypeScheme::Monotype(function_ty.clone())),
         },
         name: symbol,
+        package: root.package,
         ty: function_ty,
         body: lambda,
         meta: DefMeta::EntryPoint(EntryPoint {

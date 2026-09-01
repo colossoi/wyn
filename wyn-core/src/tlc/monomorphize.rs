@@ -262,6 +262,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         let Def {
             data: _,
             name,
+            package,
             ty,
             body,
             meta,
@@ -272,6 +273,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         Def {
             data: (),
             name,
+            package,
             ty,
             body: body.rewrite(self),
             meta,

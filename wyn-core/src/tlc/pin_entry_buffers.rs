@@ -86,6 +86,7 @@ fn pin_definition(
     let Def {
         data,
         name,
+        package,
         mut ty,
         mut body,
         meta,
@@ -130,6 +131,7 @@ fn pin_definition(
     Ok(Def {
         data,
         name,
+        package,
         ty,
         body,
         meta,

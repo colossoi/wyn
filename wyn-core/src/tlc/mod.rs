@@ -40,6 +40,7 @@ use crate::types::SoacOwnership;
 use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::num::NonZeroU32;
+use wyn_module_graph::PackageId;
 
 pub(crate) use from_ast::{PendingBinding, Transformer};
 
@@ -1039,6 +1040,10 @@ pub struct EntryPoint<E: Clone + std::fmt::Debug> {
 pub struct Def<F: Family> {
     pub data: F::DefinitionData,
     pub name: SymbolId,
+    /// Source package whose declaration produced this definition.
+    /// Derived compiler definitions inherit their source declaration's package;
+    /// definitions without source-package lineage have no package.
+    pub package: Option<PackageId>,
     pub ty: Type<TypeName>,
     pub body: Term<F::ClosureData, F::SoacBodyData>,
     pub meta: DefMeta<F::EntryData>,

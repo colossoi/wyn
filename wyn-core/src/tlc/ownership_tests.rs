@@ -180,6 +180,7 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, SymbolId, Symbo
     let def = Def {
         data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
+        package: None,
         ty: lambda_term.ty.clone(),
         body: lambda_term,
         meta: DefMeta::Function,
@@ -1742,6 +1743,7 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     let f_def = Def {
         data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
+        package: None,
         ty: f_ty,
         body: lambda_term,
         meta: DefMeta::Function,
@@ -1873,6 +1875,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let consume_def = Def {
         data: (),
         name: consume_sym,
+        package: None,
         ty: consume_ty.clone(),
         body: consume_lam_term,
         meta: DefMeta::Function,
@@ -2019,6 +2022,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let main_def = Def {
         data: (),
         name: main_sym,
+        package: None,
         ty: i32_ty.clone(),
         body: outer_let,
         meta: DefMeta::Function,
@@ -2197,6 +2201,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let main_def = Def {
         data: (),
         name: main_sym,
+        package: None,
         ty: i32_ty.clone(),
         body: outer_let,
         meta: DefMeta::Function,

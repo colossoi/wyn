@@ -356,15 +356,18 @@ struct ClosureConverter {
     callable_symbols: LookupSet<SymbolId>,
     callable_bindings: LookupMap<SymbolId, Term<ExplicitClosurePayload, ExplicitCapturesPayload>>,
     lifted_defs: Vec<Def<ClosureConverted>>,
+    current_package: Option<wyn_module_graph::PackageId>,
     lambda_counter: u32,
     term_ids: TermIdSource,
 }
 
 impl ClosureConverter {
     fn convert_def(&mut self, def: Def<tlc::family::Monomorphic>) -> Def<ClosureConverted> {
+        self.current_package = def.package;
         Def {
             data: def.data,
             name: def.name,
+            package: def.package,
             ty: def.ty,
             body: self.convert_def_body(def.body),
             meta: def.meta,
@@ -651,6 +654,7 @@ impl ClosureConverter {
         self.lifted_defs.push(Def {
             data: (),
             name: lifted_symbol,
+            package: self.current_package,
             ty: body.ty.clone(),
             body,
             meta: DefMeta::LiftedLambda,
@@ -862,6 +866,7 @@ pub(super) fn convert_closures(program: tlc::stage::RuntimeIndexProducersFloated
         callable_symbols,
         callable_bindings: LookupMap::new(),
         lifted_defs: Vec::new(),
+        current_package: None,
         lambda_counter: 0,
         term_ids,
     };

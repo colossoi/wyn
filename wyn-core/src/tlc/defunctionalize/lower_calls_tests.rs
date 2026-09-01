@@ -58,6 +58,7 @@ fn direct_call_passes() {
     p.defs.push(Def {
         data: (),
         name: f,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,
@@ -78,6 +79,7 @@ fn arity_mismatch_fails() {
     p.defs.push(Def {
         data: (),
         name: g,
+        package: None,
         ty: unit_ty(),
         body: g_body,
         meta: DefMeta::Function,
@@ -98,6 +100,7 @@ fn arity_mismatch_fails() {
     p.defs.push(Def {
         data: (),
         name: f,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,
@@ -143,6 +146,7 @@ fn nested_app_in_func_position_fails() {
     p.defs.push(Def {
         data: (),
         name: f,
+        package: None,
         ty: unit_ty(),
         body,
         meta: DefMeta::Function,

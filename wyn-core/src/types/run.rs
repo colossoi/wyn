@@ -1,5 +1,9 @@
 //! Top-level type-checking entry point.
 
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod run_tests;
+
 use crate::ast::{self, Declaration};
 use crate::builtins;
 use crate::err_type_at;
@@ -157,20 +161,21 @@ fn materialize_definition(
             scheme_name
         )
     })?;
-    let symbol = name_resolution
-        .declarations
-        .remove(&(scheme_name.to_owned(), definition.name_span))
-        .ok_or_else(|| {
-            err_type_at!(
-                definition.name_span,
-                "name resolution did not assign an identity to '{}'",
-                scheme_name
-            )
-        })?;
+    let Some(identity) = name_resolution.take_declaration(scheme_name, definition.name_span) else {
+        return Err(err_type_at!(
+            definition.name_span,
+            "name resolution did not assign an identity to '{}'",
+            scheme_name
+        ));
+    };
     definition.try_rebuild(
         |syntax, _, _| {
             Ok(ast::TypedDefinition {
-                source: ast::NameResolvedDefinition { syntax, symbol },
+                source: ast::NameResolvedDefinition {
+                    syntax,
+                    symbol: identity.symbol,
+                    package: identity.package,
+                },
                 scheme,
             })
         },
@@ -199,18 +204,21 @@ fn materialize_entry(
             entry.name
         )
     })?;
-    let symbol =
-        name_resolution.declarations.remove(&(entry.name.clone(), entry.name_span)).ok_or_else(|| {
-            err_type_at!(
-                entry.name_span,
-                "name resolution did not assign an identity to entry '{}'",
-                entry.name
-            )
-        })?;
+    let Some(identity) = name_resolution.take_declaration(&entry.name, entry.name_span) else {
+        return Err(err_type_at!(
+            entry.name_span,
+            "name resolution did not assign an identity to entry '{}'",
+            entry.name
+        ));
+    };
     entry.try_rebuild(
         |source, _, _| {
             Ok(ast::TypedEntry {
-                source: ast::NameResolvedEntry { source, symbol },
+                source: ast::NameResolvedEntry {
+                    source,
+                    symbol: identity.symbol,
+                    package: identity.package,
+                },
                 scheme,
             })
         },
@@ -238,19 +246,20 @@ fn materialize_external(
             external.name
         )
     })?;
-    let symbol = name_resolution
-        .declarations
-        .remove(&(external.name.clone(), external.data.span))
-        .ok_or_else(|| {
-            err_type_at!(
-                external.data.span,
-                "name resolution did not assign an identity to extern '{}'",
-                external.name
-            )
-        })?;
+    let Some(identity) = name_resolution.take_declaration(&external.name, external.data.span) else {
+        return Err(err_type_at!(
+            external.data.span,
+            "name resolution did not assign an identity to extern '{}'",
+            external.name
+        ));
+    };
     external.try_map_data(|syntax, _| {
         Ok(ast::TypedExtern {
-            source: ast::NameResolvedExtern { syntax, symbol },
+            source: ast::NameResolvedExtern {
+                syntax,
+                symbol: identity.symbol,
+                package: identity.package,
+            },
             scheme,
         })
     })

@@ -272,6 +272,7 @@ impl RepSpecializer<'_> {
             specialized_params,
             mut inner_body,
             body_span,
+            package,
             arity,
             param_diets,
             return_diet,
@@ -286,6 +287,7 @@ impl RepSpecializer<'_> {
                 specialized_params,
                 inner_body,
                 template.body.span,
+                template.package,
                 template.arity,
                 template.param_diets.clone(),
                 template.return_diet.clone(),
@@ -314,6 +316,7 @@ impl RepSpecializer<'_> {
         self.new_defs.push(Def {
             data: (),
             name: symbol,
+            package,
             ty: body.ty.clone(),
             body,
             meta: DefMeta::Function,
