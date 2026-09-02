@@ -121,6 +121,30 @@ fn playground_da_rasterizer_preserves_aliased_output_producers() {
 }
 
 #[test]
+fn playground_nested_fragment_loops_preserve_side_effect_producers() {
+    run_with_large_stack(|| {
+        let source = include_str!("../../testfiles/regressions/playground_nested_fragment_loops.wyn");
+        let ssa = lower_semantic_egir(
+            compile_to_semantic_egir(source),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+        );
+        lower_ssa_to_wgsl(ssa).expect("nested fragment loops lower to WGSL");
+    });
+}
+
+#[test]
+fn playground_nested_loop_helper_binds_all_wgsl_values() {
+    run_with_large_stack(|| {
+        let source = include_str!("../../testfiles/regressions/playground_nested_loop_helper.wyn");
+        let ssa = lower_semantic_egir(
+            compile_to_semantic_egir(source),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+        );
+        lower_ssa_to_wgsl(ssa).expect("nested loop helper binds every referenced WGSL value");
+    });
+}
+
+#[test]
 fn direct_backends_emit_only_the_requested_graphics_stages() {
     run_with_large_stack(|| {
         let source = include_str!("../../testfiles/unified_triangle.wyn");

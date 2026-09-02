@@ -1,0 +1,24 @@
+def vertices: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(vertices[i32(vertex.vertex_index)], @[0.0, 0.0])
+
+def xs: [2]vec2f32 = [@[1.0, 2.0], @[3.0, 4.0]]
+
+def sum(ys: [2]vec2f32) f32 =
+  let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
+    (i + 1, acc + ys[i].x)
+  in acc
+
+def main_image(fragment: fragment_invocation<vec2f32>) vec4f32 =
+  let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
+    let ys = map(|v: vec2f32| v * 2.0, xs) in
+    (i + 1, acc + sum(ys))
+  in @[acc, acc, acc, 1.0]
+
+entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, main_image)
