@@ -295,15 +295,15 @@ def get_camera(time: f32, mouse: vec4f32, resolution: vec2f32) (vec3f32, vec3f32
 ------------------------------------------------------------
 
 -- Trace a single sample at given sub-pixel offset
-def trace_sample(frag_coord: vec4f32, offset_x: f32, offset_y: f32, i_resolution: vec3f32, i_time: f32, i_mouse: vec4f32, difficulty: i32) vec3f32 =
-  let coord = @[frag_coord.x + offset_x, i_resolution.y - frag_coord.y + offset_y] in
+def trace_sample(frag_coord: vec2f32, offset_x: f32, offset_y: f32, resolution: vec3f32, time: f32, mouse: vec4f32, difficulty: i32) vec3f32 =
+  let coord = @[frag_coord.x + offset_x, resolution.y - frag_coord.y + offset_y] in
 
-  let uv = @[(coord.x / i_resolution.x) * 2.0 - 1.0,
-             (coord.y / i_resolution.y) * 2.0 - 1.0] in
-  let aspect = i_resolution.x / i_resolution.y in
+  let uv = @[(coord.x / resolution.x) * 2.0 - 1.0,
+             (coord.y / resolution.y) * 2.0 - 1.0] in
+  let aspect = resolution.x / resolution.y in
   let uv2 = @[uv.x * aspect, uv.y] in
 
-  let (cam_pos, forward, right, up) = get_camera(i_time, i_mouse, i_resolution.xy) in
+  let (cam_pos, forward, right, up) = get_camera(time, mouse, resolution.xy) in
 
   let fov = 1.5 in
   let rd = normalize(@[forward.x + uv2.x * right.x / fov + uv2.y * up.x / fov,
@@ -316,11 +316,6 @@ def trace_sample(frag_coord: vec4f32, offset_x: f32, offset_y: f32, i_resolution
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let i_resolution = resolution in
-  let i_time = time in
-  let i_mouse = mouse in
-  let frag_coord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = frag_coord in
-  let color = trace_sample(frag_coord, 0.0, 0.0, i_resolution, i_time, i_mouse, MAX_REFLECTION_BOUNCES) in
+  let color = trace_sample(frag_coord, 0.0, 0.0, resolution, time, mouse, MAX_REFLECTION_BOUNCES) in
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]
