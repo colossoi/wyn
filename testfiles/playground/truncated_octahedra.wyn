@@ -28,7 +28,7 @@ def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
 
 -- Nearest BCC centre. BCC = 2Z³ ∪ (2Z³ + (1,1,1)); the nearest centre is the
 -- nearer of the nearest point in each cubic sublattice.
-def cellCenter(p: vec3f32) vec3f32 =
+def cell_center(p: vec3f32) vec3f32 =
   let one = @[1.0, 1.0, 1.0] in
   let a = vround(p * 0.5) * 2.0 in
   let b = vround((p - one) * 0.5) * 2.0 + one in
@@ -40,7 +40,7 @@ def kept(c: vec3f32) bool = max(max(abs(c.x), abs(c.y)), abs(c.z)) <= BOUND
 
 -- Clip the ray (origin offset `o`, dir `rd`) by one slab |n·x| ≤ d, narrowing
 -- the running entry interval (tin, entry-normal nrm) and exit tout.
-def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
+def clip_slab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
   (f32, vec3f32, f32) =
   let denom = dot(n, rd) in
   let no = dot(n, o) in
@@ -60,15 +60,15 @@ def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, 
 -- Exact ray / truncated-octahedron (centre c) intersection: 3 axis slabs of
 -- half-width `rc` (square faces) ∩ 4 diagonal slabs of half-width `roo` (hex
 -- faces). Returns (t_enter, t_exit, enter_normal). A hit is t_enter ≤ t_exit.
-def rayCell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
+def ray_cell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
   let o = ro - c in
-  let (t1, n1, x1) = clipSlab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
-  let (t2, n2, x2) = clipSlab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
-  let (t3, n3, x3) = clipSlab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
-  let (t4, n4, x4) = clipSlab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
-  let (t5, n5, x5) = clipSlab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
-  let (t6, n6, x6) = clipSlab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
-  let (t7, n7, x7) = clipSlab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
+  let (t1, n1, x1) = clip_slab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
+  let (t2, n2, x2) = clip_slab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
+  let (t3, n3, x3) = clip_slab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
+  let (t4, n4, x4) = clip_slab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
+  let (t5, n5, x5) = clip_slab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
+  let (t6, n6, x6) = clip_slab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
+  let (t7, n7, x7) = clip_slab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
   (t7, x7, n7)
 
 -- The solid (gap-shrunk) cell radii and the full Voronoi-cell radii.
@@ -78,14 +78,14 @@ def RO_SOLID: f32 = 1.5 * (1.0 - GAP)
 -- Traverse the lattice: at each step, find the cell whose Voronoi region we're
 -- in, test its solid cell, and (on miss) advance past the region exit to the
 -- next cell. Returns (hit, t, normal, centre).
-def traceScene(ro: vec3f32, rd: vec3f32, tstart: f32, tmax: f32) (bool, f32, vec3f32, vec3f32) =
+def trace_scene(ro: vec3f32, rd: vec3f32, tstart: f32, tmax: f32) (bool, f32, vec3f32, vec3f32) =
   let (_, _, hit, ht, hn, hc) =
     loop (i, t, hit, ht, hn, hc) =
       (0, tstart, false, 0.0, @[0.0, 1.0, 0.0], @[0.0, 0.0, 0.0])
     while i < 48 && !hit && t < tmax do
-      let c = cellCenter(ro + rd * (t + 0.001)) in
-      let (_, vout, _) = rayCell(ro, rd, c, 1.0, 1.5) in
-      let (sin0, sout, sn) = rayCell(ro, rd, c, RC_SOLID, RO_SOLID) in
+      let c = cell_center(ro + rd * (t + 0.001)) in
+      let (_, vout, _) = ray_cell(ro, rd, c, 1.0, 1.5) in
+      let (sin0, sout, sn) = ray_cell(ro, rd, c, RC_SOLID, RO_SOLID) in
       if (sin0 <= sout) && (sin0 > t - 0.001) && (sin0 < tmax) && kept(c) then
         (i + 1, sin0, true, sin0, sn, c)
       else
@@ -98,9 +98,9 @@ def traceScene(ro: vec3f32, rd: vec3f32, tstart: f32, tmax: f32) (bool, f32, vec
 def shadowed(ro: vec3f32, rd: vec3f32, tmax: f32) bool =
   let (_, _, blk) =
     loop (i, t, blk) = (0, 0.02, false) while i < 40 && !blk && t < tmax do
-      let c = cellCenter(ro + rd * (t + 0.001)) in
-      let (_, vout, _) = rayCell(ro, rd, c, 1.0, 1.5) in
-      let (sin0, sout, _) = rayCell(ro, rd, c, RC_SOLID, RO_SOLID) in
+      let c = cell_center(ro + rd * (t + 0.001)) in
+      let (_, vout, _) = ray_cell(ro, rd, c, 1.0, 1.5) in
+      let (sin0, sout, _) = ray_cell(ro, rd, c, RC_SOLID, RO_SOLID) in
       if (sin0 <= sout) && (sin0 > 0.02) && (sin0 < tmax) && kept(c) then (i + 1, t, true)
       else (i + 1, max(vout, t) + 0.002, false)
   in
@@ -109,7 +109,7 @@ def shadowed(ro: vec3f32, rd: vec3f32, tmax: f32) bool =
 -- Soft shadow: average a cone of occlusion rays (centre + an 8-ray ring) so
 -- the shadow edge gets a wide, smooth penumbra. `r` ≈ cone half-angle (rad);
 -- larger = softer. The penumbra widens with occluder distance, as it should.
-def softShadow(o: vec3f32, rd: vec3f32, tmax: f32, r: f32) f32 =
+def soft_shadow(o: vec3f32, rd: vec3f32, tmax: f32, r: f32) f32 =
   let a = normalize(cross(rd, @[0.07, 1.0, 0.13])) in
   let b = cross(a, rd) in
   let u = a * r in
@@ -143,18 +143,13 @@ def hash3(p: vec3f32) vec3f32 =
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let p = (2.0 * fc - iResolution.xy) / iResolution.y in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
+  let p = (2.0 * fc - resolution.xy) / resolution.y in
 
   -- Turntable orbit: constant-radius circle around the figure centre
   -- (origin), fixed height, so it rotates in place. Narrow FOV (focal 2.2)
   -- for an almost-orthographic, zoomed-out framing.
-  let an = 0.2 * iTime in
+  let an = 0.2 * time in
   let ro = @[CAM_DIST * sin(an), CAM_HEIGHT, CAM_DIST * cos(an)] in
   let ta = @[0.0, 0.0, 0.0] in
   let ww = normalize(ta - ro) in
@@ -163,13 +158,13 @@ def main_image(
   let rd = normalize(p.x * uu + p.y * vv + CAM_FOCAL * ww) in
 
   -- Bound the whole block with one big box (reuse rayCell as a pure cube).
-  let (btin, btout, _) = rayCell(ro, rd, @[0.0, 0.0, 0.0], BOUND + 2.0, BIG) in
+  let (btin, btout, _) = ray_cell(ro, rd, @[0.0, 0.0, 0.0], BOUND + 2.0, BIG) in
 
   let bg = @[0.97, 0.975, 0.99] in
   let col =
     if btin > btout || btout < 0.0 then bg
     else
-      let (hit, t, nor, c) = traceScene(ro, rd, max(btin, 0.0), btout) in
+      let (hit, t, nor, c) = trace_scene(ro, rd, max(btin, 0.0), btout) in
       if hit then
         let pos = ro + rd * t in
         let h = hash3(c) in
@@ -178,8 +173,8 @@ def main_image(
         -- square-face axes or the (1,1,1) hex-face diagonals), each soft-shadowed.
         let lig1 = normalize(@[0.62, 0.71, 0.34]) in
         let lig2 = normalize(@[0.0 - 0.55, 0.52, 0.0 - 0.66]) in
-        let s1 = softShadow(pos + nor * 0.01, lig1, 18.0, 0.18) in
-        let s2 = softShadow(pos + nor * 0.01, lig2, 18.0, 0.18) in
+        let s1 = soft_shadow(pos + nor * 0.01, lig1, 18.0, 0.18) in
+        let s2 = soft_shadow(pos + nor * 0.01, lig2, 18.0, 0.18) in
         let d1 = max(dot(nor, lig1), 0.0) * s1 in
         let d2 = max(dot(nor, lig2), 0.0) * s2 in
         let sky = 0.5 + 0.5 * nor.y in
