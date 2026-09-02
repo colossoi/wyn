@@ -1,8 +1,8 @@
 -- Same-frame value-flow smoke test. The root computes the next array value,
 -- captures it in the fragment callback, and returns both the array and target.
 -- A host may feed the returned array back as the next frame's input.
-def tick(prev: []u32, iFrame: u32) []u32 =
-  map(|i: i32| prev[i] + 1u32, 0i32..<i32.u32(iFrame))
+def tick(prev: []u32, frame: u32) []u32 =
+  map(|i: i32| prev[i] + 1u32, 0i32..<i32.u32(frame))
 
 -- Minimal graphics pair so viz takes the runnable (windowed) path
 -- where .viz.json feedback is honoured. The fragment shader is a constant
@@ -15,10 +15,10 @@ def frag_main(_pos: vec4f32) vec4f32 =
 
 entry feedback_buffer_smoke(
     prev: []u32,
-    iFrame: u32,
+    frame: u32,
     screen: render_target<vec4f32>)
     ([]u32, render_target<vec4f32>) =
-  let next = tick(prev, iFrame) in
+  let next = tick(prev, frame) in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
