@@ -132,9 +132,9 @@ def select_variant(keyboard: []u32) i32 =
 
 def tick(prev: []vec4f32,
          keyboard: []u32,
-         iTime: f32,
-         iFrame: u32) []vec4f32 =
-  if iTime < 0.1 then
+         time: f32,
+         frame: u32) []vec4f32 =
+  if time < 0.1 then
     -- Stagger initial ages so particles don't all respawn in lockstep.
     map(|i: i32|
           let s = spawn(i, 11u32) in
@@ -143,7 +143,7 @@ def tick(prev: []vec4f32,
   else
     let variant = select_variant(keyboard) in
     let ps = prev[0..N] in
-    map(|i: i32| step_particle(ps[i], i, iFrame, variant, iTime), 0i32 ..< N)
+    map(|i: i32| step_particle(ps[i], i, frame, variant, time), 0i32 ..< N)
 
 ------------------------------------------------------------
 -- rasterize: scatter one tinted texel per particle into the persistent
@@ -169,9 +169,9 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   let y = if vid == 0i32 then -1.0 else if vid == 1i32 then -1.0 else 3.0 in
   vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
 
-def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
-  let x = clampi(i32.f32(fragCoord.x)) in
-  let y = clampi(i32.f32(fragCoord.y)) in
+def main_image(positions: []vec4f32, frag_coord: vec4f32) vec4f32 =
+  let x = clampi(i32.f32(frag_coord.x)) in
+  let y = clampi(i32.f32(frag_coord.y)) in
   let colors = map(
     |p: vec4f32|
       if clampi(i32.f32(p.x)) == x && clampi(i32.f32(p.y)) == y
@@ -184,11 +184,11 @@ def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
 entry perlin_fields(
     prev: []vec4f32,
     keyboard: []u32,
-    iTime: f32,
-    iFrame: u32,
+    time: f32,
+    frame: u32,
     screen: render_target<vec4f32>)
     ([]vec4f32, render_target<vec4f32>) =
-  let next = tick(prev, keyboard, iTime, iFrame) in
+  let next = tick(prev, keyboard, time, frame) in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
