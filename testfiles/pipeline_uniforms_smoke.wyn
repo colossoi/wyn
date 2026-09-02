@@ -7,15 +7,15 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
                @[-1.0, 3.0, 0.0, 1.0]] in
   vertex_output(verts[vid], @[0.0, 0.0])
 
-def fragment_main(pos: vec4f32, iTime: f32) vec4f32 =
+def fragment_main(pos: vec4f32, time: f32) vec4f32 =
   let red = pos.x / 1024.0 in
-  @[red, 0.5 + 0.5 * f32.sin(iTime), 0.0, 1.0]
+  @[red, 0.5 + 0.5 * f32.sin(time), 0.0, 1.0]
 
 entry pipeline_uniforms_smoke(
-    iTime: f32,
+    time: f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(fragment.position, iTime))
+    |fragment| fragment_main(fragment.position, time))
