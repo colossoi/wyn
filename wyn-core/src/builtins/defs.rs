@@ -992,8 +992,8 @@ fn generate_per_type_ops() -> Vec<BuiltinDefRaw> {
         defs.push(per_type_op(ty, "ldexp", "ldexp", L(GlslExt(53))));
         // Screen-space derivatives — fragment-stage only. Lower to
         // SPIR-V's core `OpDPdx` / `OpDPdy` / `OpFwidth` instructions.
-        defs.push(per_type_op(ty, "dFdx", "dFdx", L(DPdx)));
-        defs.push(per_type_op(ty, "dFdy", "dFdy", L(DPdy)));
+        defs.push(per_type_op(ty, "d_fdx", "d_fdx", L(DPdx)));
+        defs.push(per_type_op(ty, "d_fdy", "d_fdy", L(DPdy)));
         defs.push(per_type_op(ty, "fwidth", "fwidth", L(Fwidth)));
     }
 
