@@ -2229,7 +2229,7 @@ reserved: a program may define its own `direct_draw`, `shade`, `raster`,
 `render_target`, or any other graphics name, and an unbound use produces the
 ordinary undefined-name diagnostic.
 
-`--direct-wgsl` is an independent, WGSL-only output policy. It preserves the
+`--direct` is an independent, backend-neutral output policy. It preserves the
 vertex and fragment stages requested by the source invocation operations and
 does not lift stage-uniform work into compute prepasses. Array operations that
 can lower as serial loops inside an authored graphical stage remain valid.
@@ -2238,7 +2238,8 @@ entry point, a compute prepass for a graphical operation, or compiler-owned
 intermediate storage. The playground configuration is therefore:
 
 ```text
-wyn compile image.wyn --target wgsl --graphics --direct-wgsl
+wyn compile image.wyn --graphics --direct
+wyn compile image.wyn --target wgsl --graphics --direct
 ```
 
 There are no `#[vertex]` or `#[fragment]` entry forms. Stage identity comes

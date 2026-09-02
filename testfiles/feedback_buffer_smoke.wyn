@@ -5,7 +5,7 @@ def tick(prev: []u32, iFrame: u32) []u32 =
   map(|i: i32| prev[i] + 1u32, 0i32..<i32.u32(iFrame))
 
 -- Minimal graphics pair so viz takes the runnable (windowed) path
--- where --feedback is honoured. The fragment shader is a constant
+-- where .viz.json feedback is honoured. The fragment shader is a constant
 -- colour — it doesn't actually display the buffer.
 def vertex_main(_vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 0.0])

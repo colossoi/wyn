@@ -15,18 +15,18 @@ open f32
 -- Constants
 ------------------------------------------------------------
 def epsilon: f32 = 0.001
-def maxDist: f32 = 100.0
-def numSpheres: i32 = 12
+def max_dist: f32 = 100.0
+def num_spheres: i32 = 12
 
 def MAX_REFLECTION_BOUNCES: i32 = 3
 
-def lightDir: vec3f32 =
+def light_dir: vec3f32 =
   @[0.5773502691896258, 0.5773502691896258, -0.5773502691896258]
 
 ------------------------------------------------------------
 -- Sphere Data
 ------------------------------------------------------------
-def sphereCenters: [12]vec3f32 = [
+def sphere_centers: [12]vec3f32 = [
   @[-1.5, 0.5, 0.0],
   @[0.0, 0.75, 0.0],
   @[1.5, 0.5, 0.0],
@@ -41,10 +41,10 @@ def sphereCenters: [12]vec3f32 = [
   @[0.0, 0.35, -1.0]
 ]
 
-def sphereRadii: [12]f32 =
+def sphere_radii: [12]f32 =
   [0.5, 0.75, 0.5, 0.35, 0.45, 0.3, 0.6, 0.25, 0.4, 0.5, 0.3, 0.35]
 
-def sphereAlbedos: [12]vec3f32 = [
+def sphere_albedos: [12]vec3f32 = [
   @[0.9, 0.2, 0.2],
   @[0.2, 0.9, 0.3],
   @[0.2, 0.3, 0.9],
@@ -59,13 +59,13 @@ def sphereAlbedos: [12]vec3f32 = [
   @[0.95, 0.95, 0.95]
 ]
 
-def sphereMetallic: [12]f32 =
+def sphere_metallic: [12]f32 =
   [0.8, 0.6, 0.9, 1.0, 0.7, 0.5, 0.75, 0.85, 0.7, 0.6, 0.8, 0.5]
 
-def sphereRoughness: [12]f32 =
+def sphere_roughness: [12]f32 =
   [0.2, 0.3, 0.1, 0.15, 0.25, 0.35, 0.2, 0.15, 0.25, 0.2, 0.15, 0.1]
 
-def sphereReflectivity: [12]f32 =
+def sphere_reflectivity: [12]f32 =
   [0.8, 0.6, 0.9, 0.9, 0.75, 0.65, 0.8, 0.85, 0.7, 0.6, 0.75, 0.8]
 
 ------------------------------------------------------------
@@ -86,26 +86,26 @@ module materials = {
 
 def epsilon: f32 = 0.001
 
-def pbrFresnelSchlick(cosTheta: f32, f0: vec3f32) vec3f32 =
-  let oneMinusCos = 1.0 - cosTheta
-  let pow5 = oneMinusCos ** 5 in
+def pbr_fresnel_schlick(cos_theta: f32, f0: vec3f32) vec3f32 =
+  let one_minus_cos = 1.0 - cos_theta
+  let pow5 = one_minus_cos ** 5 in
   f0 + (1.0 - f0) * pow5
 
-def pbrDistributionGGX(nDotH: f32, roughness: f32) f32 =
+def pbr_distribution_ggx(n_dot_h: f32, roughness: f32) f32 =
   let a = roughness * roughness
   let a2 = a * a
-  let nDotH2 = nDotH * nDotH
-  let denom = nDotH2 * (a2 - 1.0) + 1.0 in
+  let n_dot_h2 = n_dot_h * n_dot_h
+  let denom = n_dot_h2 * (a2 - 1.0) + 1.0 in
   a2 / (f32.pi * denom * denom + epsilon)
 
-def pbrGeometrySchlickGGX(nDotV: f32, roughness: f32) f32 =
+def pbr_geometry_schlick_ggx(n_dot_v: f32, roughness: f32) f32 =
   let r = roughness + 1.0
   let k = r * r / 8.0 in
-  nDotV / (nDotV * (1.0 - k) + k + epsilon)
+  n_dot_v / (n_dot_v * (1.0 - k) + k + epsilon)
 
-def pbrGeometrySmith(nDotV: f32, nDotL: f32, roughness: f32) f32 =
-  pbrGeometrySchlickGGX(nDotV, roughness) *
-  pbrGeometrySchlickGGX(nDotL, roughness)
+def pbr_geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) f32 =
+  pbr_geometry_schlick_ggx(n_dot_v, roughness) *
+  pbr_geometry_schlick_ggx(n_dot_l, roughness)
 
 def brdf(
   n: vec3f32,
@@ -116,31 +116,31 @@ def brdf(
   roughness: f32
 ) vec3f32 =
   let h = normalize(v + l)
-  let nDotV = max(dot(n, v), 0.0)
-  let nDotL = max(dot(n, l), 0.0)
-  let nDotH = max(dot(n, h), 0.0)
-  let hDotV = max(dot(h, v), 0.0)
+  let n_dot_v = max(dot(n, v), 0.0)
+  let n_dot_l = max(dot(n, l), 0.0)
+  let n_dot_h = max(dot(n, h), 0.0)
+  let h_dot_v = max(dot(h, v), 0.0)
 
   let f0 = mix(@[0.04, 0.04, 0.04], albedo, metallic)
 
-  let d = pbrDistributionGGX(nDotH, roughness)
-  let g = pbrGeometrySmith(nDotV, nDotL, roughness)
-  let fr = pbrFresnelSchlick(hDotV, f0)
+  let d = pbr_distribution_ggx(n_dot_h, roughness)
+  let g = pbr_geometry_smith(n_dot_v, n_dot_l, roughness)
+  let fr = pbr_fresnel_schlick(h_dot_v, f0)
 
-  let specDenom = 4.0 * nDotV * nDotL + epsilon
-  let specular = d * g * fr / specDenom
+  let spec_denom = 4.0 * n_dot_v * n_dot_l + epsilon
+  let specular = d * g * fr / spec_denom
 
   let kD = (1.0 - fr) * (1.0 - metallic)
   let diffuse = kD * albedo / f32.pi in
 
-  (diffuse + specular) * nDotL
+  (diffuse + specular) * n_dot_l
 
 }
 
 ------------------------------------------------------------
 -- Ray Intersection Functions
 ------------------------------------------------------------
-def intersectSphere(
+def intersect_sphere(
   ro: vec3f32,
   rd: vec3f32,
   center: vec3f32,
@@ -152,14 +152,14 @@ def intersectSphere(
   let discriminant = b * b - c in
   if discriminant < 0.0 then 0.0 - 1.0
   else
-    let sqrtD = sqrt(discriminant)
-    let t1 = 0.0 - b - sqrtD
-    let t2 = 0.0 - b + sqrtD in
+    let sqrt_d = sqrt(discriminant)
+    let t1 = 0.0 - b - sqrt_d
+    let t2 = 0.0 - b + sqrt_d in
     if t1 > epsilon then t1
     else if t2 > epsilon then t2
     else 0.0 - 1.0
 
-def intersectPlane(ro: vec3f32, rd: vec3f32) f32 =
+def intersect_plane(ro: vec3f32, rd: vec3f32) f32 =
   if abs(rd.y) < epsilon then 0.0 - 1.0
   else
     let t = (0.0 - ro.y) / rd.y in
@@ -168,92 +168,92 @@ def intersectPlane(ro: vec3f32, rd: vec3f32) f32 =
 ------------------------------------------------------------
 -- Scene Intersection
 ------------------------------------------------------------
-def intersectAllSpheres(ro: vec3f32, rd: vec3f32) [12](f32, i32, vec3f32) =
+def intersect_all_spheres(ro: vec3f32, rd: vec3f32) [12](f32, i32, vec3f32) =
   map(|(center, radius, idx): (vec3f32, f32, i32)|
-        let t = intersectSphere(ro, rd, center, radius) in
+        let t = intersect_sphere(ro, rd, center, radius) in
         if t > 0.0 then
-          let hitP = ro + rd * t
-          let n = normalize(hitP - center) in
+          let hit_p = ro + rd * t
+          let n = normalize(hit_p - center) in
           (t, idx + 2, n)
         else
-          (maxDist, 0, @[0.0, 1.0, 0.0]),
-      zip3(sphereCenters, sphereRadii, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))
+          (max_dist, 0, @[0.0, 1.0, 0.0]),
+      zip3(sphere_centers, sphere_radii, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))
 
-def findClosestHit(hits: [12](f32, i32, vec3f32)) (f32, i32, vec3f32) =
+def find_closest_hit(hits: [12](f32, i32, vec3f32)) (f32, i32, vec3f32) =
   reduce(|(t1, m1, n1): (f32, i32, vec3f32),
           (t2, m2, n2): (f32, i32, vec3f32)|
            if t1 < t2 then (t1, m1, n1) else (t2, m2, n2),
-         (maxDist, 0, @[0.0, 1.0, 0.0]),
+         (max_dist, 0, @[0.0, 1.0, 0.0]),
          hits)
 
-def intersectScene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
-  let tPlane = intersectPlane(ro, rd)
-  let groundHit =
+def intersect_scene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
+  let tPlane = intersect_plane(ro, rd)
+  let ground_hit =
     if tPlane > 0.0 then
       (tPlane, 1, @[0.0, 1.0, 0.0])
     else
-      (maxDist, 0, @[0.0, 1.0, 0.0])
+      (max_dist, 0, @[0.0, 1.0, 0.0])
 
 
-  let sphereHits = intersectAllSpheres(ro, rd)
-  let closestSphere = findClosestHit(sphereHits)
+  let sphere_hits = intersect_all_spheres(ro, rd)
+  let closest_sphere = find_closest_hit(sphere_hits)
 
-  let (tGround, mGround, nGround) = groundHit
-  let (tSphere, mSphere, nSphere) = closestSphere in
+  let (tGround, mGround, nGround) = ground_hit
+  let (tSphere, mSphere, nSphere) = closest_sphere in
 
-  if tGround < tSphere then groundHit else closestSphere
+  if tGround < tSphere then ground_hit else closest_sphere
 
 ------------------------------------------------------------
 -- Ben Golus-style Pristine Floor Grid
 ------------------------------------------------------------
-def minViewCos: f32 = 0.15
+def min_view_cos: f32 = 0.15
 
 def saturate(x: f32) f32 =
   clamp(x, 0.0, 1.0)
 
-def pristineGridAxis(uv: f32, uvDeriv: f32, lineWidth: f32) f32 =
-  let safeWidth = clamp(lineWidth, 0.0, 1.0)
-  let invertLine = safeWidth > 0.5
-  let targetWidth =
-    if invertLine then 1.0 - safeWidth else safeWidth
+def pristine_grid_axis(uv: f32, uv_deriv: f32, line_width: f32) f32 =
+  let safe_width = clamp(line_width, 0.0, 1.0)
+  let invert_line = safe_width > 0.5
+  let target_width =
+    if invert_line then 1.0 - safe_width else safe_width
 
 
-  let drawWidth = min(max(targetWidth, uvDeriv), 0.5)
-  let lineAA = uvDeriv * 1.5
+  let draw_width = min(max(target_width, uv_deriv), 0.5)
+  let line_aa = uv_deriv * 1.5
 
-  let triangleUV = abs(fract(uv) * 2.0 - 1.0)
-  let gridUV =
-    if invertLine then triangleUV else 1.0 - triangleUV
+  let triangle_uv = abs(fract(uv) * 2.0 - 1.0)
+  let grid_uv =
+    if invert_line then triangle_uv else 1.0 - triangle_uv
 
 
   let line =
-    smoothstep(drawWidth + lineAA, drawWidth - lineAA, gridUV)
+    smoothstep(draw_width + line_aa, draw_width - line_aa, grid_uv)
 
 
-  let coverageLine =
-    line * saturate(targetWidth / max(drawWidth, epsilon))
+  let coverage_line =
+    line * saturate(target_width / max(draw_width, epsilon))
 
 
-  let resolvedLine =
-    mix(coverageLine, targetWidth, saturate(uvDeriv * 2.0 - 1.0))
+  let resolved_line =
+    mix(coverage_line, target_width, saturate(uv_deriv * 2.0 - 1.0))
   in
 
-  if invertLine then 1.0 - resolvedLine else resolvedLine
+  if invert_line then 1.0 - resolved_line else resolved_line
 
-def pristineGridFromDeriv(
+def pristine_grid_from_deriv(
   uv: vec2f32,
-  lineWidth: vec2f32,
-  uvDeriv: vec2f32
+  line_width: vec2f32,
+  uv_deriv: vec2f32
 ) f32 =
-  let gridX = pristineGridAxis(uv.x, uvDeriv.x, lineWidth.x)
-  let gridY = pristineGridAxis(uv.y, uvDeriv.y, lineWidth.y) in
+  let grid_x = pristine_grid_axis(uv.x, uv_deriv.x, line_width.x)
+  let grid_y = pristine_grid_axis(uv.y, uv_deriv.y, line_width.y) in
 
   -- Premultiplied-style line overlap.
-  gridX * (1.0 - gridY) + gridY
+  grid_x * (1.0 - grid_y) + grid_y
 
-def floorGrid(iResolution: vec3f32, hitPoint: vec3f32, rayDir: vec3f32, rayDist: f32) vec3f32 =
-  let gridScale = 2.0
-  let uv = @[hitPoint.x * gridScale, hitPoint.z * gridScale] in
+def floor_grid(iResolution: vec3f32, hit_point: vec3f32, ray_dir: vec3f32, ray_dist: f32) vec3f32 =
+  let grid_scale = 2.0
+  let uv = @[hit_point.x * grid_scale, hit_point.z * grid_scale] in
 
   -- Raytraced approximation of ddx/ddy.
   -- Real fragment shaders would use:
@@ -263,186 +263,186 @@ def floorGrid(iResolution: vec3f32, hitPoint: vec3f32, rayDir: vec3f32, rayDist:
   -- Here, estimate the UV footprint from ray distance, screen height,
   -- FOV, and grazing angle against the floor.
   let fov = 1.5
-  let pixelWorld = rayDist * 2.0 / (fov * iResolution.y)
-  let grazing = 1.0 / max(abs(rayDir.y), minViewCos)
-  let pixelUV = max(pixelWorld * grazing * gridScale, 0.0001)
-  let uvDeriv = @[pixelUV, pixelUV]
+  let pixel_world = ray_dist * 2.0 / (fov * iResolution.y)
+  let grazing = 1.0 / max(abs(ray_dir.y), min_view_cos)
+  let pixel_uv = max(pixel_world * grazing * grid_scale, 0.0001)
+  let uv_deriv = @[pixel_uv, pixel_uv]
 
-  let minorGrid =
-    pristineGridFromDeriv(uv, @[0.035, 0.035], uvDeriv)
-
-
-  let majorGrid =
-    pristineGridFromDeriv(uv * 0.1, @[0.025, 0.025], uvDeriv * 0.1)
+  let minor_grid =
+    pristine_grid_from_deriv(uv, @[0.035, 0.035], uv_deriv)
 
 
-  let axisWidth = max(pixelWorld * grazing, 0.025)
-  let axisX =
-    1.0 - smoothstep(axisWidth, axisWidth * 2.0, abs(hitPoint.z))
+  let major_grid =
+    pristine_grid_from_deriv(uv * 0.1, @[0.025, 0.025], uv_deriv * 0.1)
 
-  let axisZ =
-    1.0 - smoothstep(axisWidth, axisWidth * 2.0, abs(hitPoint.x))
 
-  let axisGrid = max(axisX, axisZ)
+  let axis_width = max(pixel_world * grazing, 0.025)
+  let axis_x =
+    1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit_point.z))
 
-  let baseColor = @[0.055, 0.058, 0.065]
-  let minorColor = @[0.38, 0.40, 0.44]
-  let majorColor = @[0.72, 0.74, 0.78]
-  let axisColor = @[0.95, 0.88, 0.55]
+  let axis_z =
+    1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit_point.x))
 
-  let withMinor = mix(baseColor, minorColor, minorGrid)
-  let withMajor = mix(withMinor, majorColor, majorGrid) in
-  mix(withMajor, axisColor, axisGrid)
+  let axis_grid = max(axis_x, axis_z)
+
+  let base_color = @[0.055, 0.058, 0.065]
+  let minor_color = @[0.38, 0.40, 0.44]
+  let major_color = @[0.72, 0.74, 0.78]
+  let axis_color = @[0.95, 0.88, 0.55]
+
+  let with_minor = mix(base_color, minor_color, minor_grid)
+  let with_major = mix(with_minor, major_color, major_grid) in
+  mix(with_major, axis_color, axis_grid)
 
 ------------------------------------------------------------
 -- Materials
 ------------------------------------------------------------
-def getMaterial(
+def get_material(
   iResolution: vec3f32,
-  matId: i32,
-  hitPoint: vec3f32,
-  rayDir: vec3f32,
-  rayDist: f32
+  mat_id: i32,
+  hit_point: vec3f32,
+  ray_dir: vec3f32,
+  ray_dist: f32
 ) (vec3f32, f32, f32, f32) =
-  if matId == 1 then
-    let albedo = floorGrid(iResolution, hitPoint, rayDir, rayDist) in
+  if mat_id == 1 then
+    let albedo = floor_grid(iResolution, hit_point, ray_dir, ray_dist) in
     (albedo, 0.0, 0.35, 0.65)
-  else if matId >= 2 then
-    let idx = matId - 2 in
-    (sphereAlbedos[idx],
-     sphereMetallic[idx],
-     sphereRoughness[idx],
-     sphereReflectivity[idx])
+  else if mat_id >= 2 then
+    let idx = mat_id - 2 in
+    (sphere_albedos[idx],
+     sphere_metallic[idx],
+     sphere_roughness[idx],
+     sphere_reflectivity[idx])
   else
     (@[0.0, 0.0, 0.0], 0.0, 1.0, 0.0)
 
 ------------------------------------------------------------
 -- Sky
 ------------------------------------------------------------
-def getSkyColor(rd: vec3f32) vec3f32 =
+def get_sky_color(rd: vec3f32) vec3f32 =
   let t = 0.5 * (rd.y + 1.0) in
   mix(@[1.0, 1.0, 1.0], @[0.5, 0.7, 1.0], t)
 
 ------------------------------------------------------------
 -- Shadow Check
 ------------------------------------------------------------
-def inShadow(hitPoint: vec3f32, lightDir: vec3f32) f32 =
-  let shadowRo = hitPoint + lightDir * epsilon * 10.0
-  let (t, matId, unusedN) = intersectScene(shadowRo, lightDir) in
-  if matId > 0 then 0.3 else 1.0
+def in_shadow(hit_point: vec3f32, light_dir: vec3f32) f32 =
+  let shadow_ro = hit_point + light_dir * epsilon * 10.0
+  let (t, mat_id, unused_n) = intersect_scene(shadow_ro, light_dir) in
+  if mat_id > 0 then 0.3 else 1.0
 
 ------------------------------------------------------------
 -- Shading
 ------------------------------------------------------------
 def shade_surface(
-  hitPoint: vec3f32,
+  hit_point: vec3f32,
   normal: vec3f32,
-  viewDir: vec3f32,
+  view_dir: vec3f32,
   albedo: vec3f32,
   metallic: f32,
   roughness: f32
 ) vec3f32 =
-  let brdfResult =
-    materials.brdf(normal, viewDir, lightDir, albedo, metallic, roughness)
+  let brdf_result =
+    materials.brdf(normal, view_dir, light_dir, albedo, metallic, roughness)
 
-  let shadow = inShadow(hitPoint, lightDir)
-  let lightColor = @[2.0, 1.9, 1.8]
+  let shadow = in_shadow(hit_point, light_dir)
+  let light_color = @[2.0, 1.9, 1.8]
   let ambient = albedo * 0.1 in
-  ambient + brdfResult * lightColor * shadow
+  ambient + brdf_result * light_color * shadow
 
 ------------------------------------------------------------
 -- Main Trace Function
 ------------------------------------------------------------
-def trace(iResolution: vec3f32, ro: vec3f32, rd: vec3f32, maxBounces: i32) vec3f32 =
-  let traceResult =
-    loop (color, rayO, rayD, tint, bounce) =
+def trace(iResolution: vec3f32, ro: vec3f32, rd: vec3f32, max_bounces: i32) vec3f32 =
+  let trace_result =
+    loop (color, ray_o, ray_d, tint, bounce) =
       (@[0.0, 0.0, 0.0], ro, rd, @[1.0, 1.0, 1.0], 0)
-    while bounce <= maxBounces do
+    while bounce <= max_bounces do
 
-      let (t, matId, normal) = intersectScene(rayO, rayD) in
+      let (t, mat_id, normal) = intersect_scene(ray_o, ray_d) in
 
-      if matId == 0 then
-        let skyCol = getSkyColor(rayD)
-        let tintedSky = skyCol * tint
-        let newColor = color + tintedSky in
-        (newColor, rayO, rayD, tint, maxBounces + 1)
+      if mat_id == 0 then
+        let sky_col = get_sky_color(ray_d)
+        let tinted_sky = sky_col * tint
+        let new_color = color + tinted_sky in
+        (new_color, ray_o, ray_d, tint, max_bounces + 1)
       else
-        let hitPoint = rayO + rayD * t
-        let viewDir = -rayD
+        let hit_point = ray_o + ray_d * t
+        let view_dir = -ray_d
 
         let (albedo, metallic, roughness, reflectivity) =
-          getMaterial(iResolution, matId, hitPoint, rayD, t)
+          get_material(iResolution, mat_id, hit_point, ray_d, t)
 
 
-        let surfaceColor =
-          shade_surface(hitPoint, normal, viewDir, albedo, metallic, roughness)
+        let surface_color =
+          shade_surface(hit_point, normal, view_dir, albedo, metallic, roughness)
 
 
         let contribution = 1.0 - reflectivity
-        let tintedSurface = surfaceColor * tint * contribution
-        let newColor = color + tintedSurface
+        let tinted_surface = surface_color * tint * contribution
+        let new_color = color + tinted_surface
 
-        let newTint = tint * albedo * reflectivity
-        let reflDir = reflect(rayD, normal)
-        let newRayO = hitPoint + normal * epsilon * 10.0 in
+        let new_tint = tint * albedo * reflectivity
+        let refl_dir = reflect(ray_d, normal)
+        let new_ray_o = hit_point + normal * epsilon * 10.0 in
 
-        (newColor, newRayO, reflDir, newTint, bounce + 1)
+        (new_color, new_ray_o, refl_dir, new_tint, bounce + 1)
   in
-  traceResult.0
+  trace_result.0
 
 ------------------------------------------------------------
 -- Camera
 ------------------------------------------------------------
-def getCamera(
+def get_camera(
   time: f32,
   mouse: vec4f32,
   resolution: vec2f32
 ) (vec3f32, vec3f32, vec3f32, vec3f32) =
-  let mouseAngleX =
+  let mouse_angle_x =
     if mouse.z > 0.0 then
       (mouse.x / resolution.x - 0.5) * pi * 2.0
     else
       0.0
 
 
-  let mouseAngleY =
+  let mouse_angle_y =
     if mouse.z > 0.0 then
       (mouse.y / resolution.y - 0.5) * pi * 0.5
     else
       0.0
 
 
-  let baseAngle = time * 0.3
-  let angle = baseAngle + mouseAngleX
-  let camDist = 5.0
-  let camHeight = 2.0 + mouseAngleY * 2.0
+  let base_angle = time * 0.3
+  let angle = base_angle + mouse_angle_x
+  let cam_dist = 5.0
+  let cam_height = 2.0 + mouse_angle_y * 2.0
 
-  let camPos =
-    @[sin(angle) * camDist, camHeight, cos(angle) * camDist]
+  let cam_pos =
+    @[sin(angle) * cam_dist, cam_height, cos(angle) * cam_dist]
 
 
   let target = @[0.0, 0.5, 0.0]
-  let forward = normalize(target - camPos)
-  let worldUp = @[0.0, 1.0, 0.0]
-  let right = normalize(cross(forward, worldUp))
+  let forward = normalize(target - cam_pos)
+  let world_up = @[0.0, 1.0, 0.0]
+  let right = normalize(cross(forward, world_up))
   let up = cross(right, forward) in
 
-  (camPos, forward, right, up)
+  (cam_pos, forward, right, up)
 
 ------------------------------------------------------------
 -- Fragment Shader
 ------------------------------------------------------------
-def traceSample(
+def trace_sample(
   iResolution: vec3f32,
   iTime: f32,
   iMouse: vec4f32,
   difficulty: i32,
-  fragCoord: vec4f32,
-  offsetX: f32,
-  offsetY: f32
+  frag_coord: vec4f32,
+  offset_x: f32,
+  offset_y: f32
 ) vec3f32 =
   let coord =
-    @[fragCoord.x + offsetX, iResolution.y - fragCoord.y + offsetY]
+    @[frag_coord.x + offset_x, iResolution.y - frag_coord.y + offset_y]
 
 
   let uv =
@@ -453,8 +453,8 @@ def traceSample(
   let aspect = iResolution.x / iResolution.y
   let uv2 = @[uv.x * aspect, uv.y]
 
-  let (camPos, forward, right, up) =
-    getCamera(iTime, iMouse, iResolution.xy)
+  let (cam_pos, forward, right, up) =
+    get_camera(iTime, iMouse, iResolution.xy)
 
 
   let fov = 1.5
@@ -467,11 +467,11 @@ def traceSample(
     ])
 
 
-  let maxBounces = difficulty in
-  trace(iResolution, camPos, rd, maxBounces)
+  let max_bounces = difficulty in
+  trace(iResolution, cam_pos, rd, max_bounces)
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: vec4f32) vec4f32 =
-  let color = traceSample(iResolution, iTime, iMouse, MAX_REFLECTION_BOUNCES, fragCoord, 0.0, 0.0)
+def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag_coord: vec4f32) vec4f32 =
+  let color = trace_sample(iResolution, iTime, iMouse, MAX_REFLECTION_BOUNCES, frag_coord, 0.0, 0.0)
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]
 

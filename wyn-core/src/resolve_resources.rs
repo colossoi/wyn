@@ -2,25 +2,20 @@
 //! declarations.
 //!
 //! Runs after name resolution and before type checking. For each view it
-//! derives the backing resource's `(set, binding)` (current frame, and — for a
-//! `history` resource — the previous frame) and rewrites the `View` attribute
-//! into the concrete `StorageImage` / `Texture` binding attribute. A `previous`
-//! view also records a `FeedbackPair` on its entry, which flows to the pipeline
-//! descriptor so the runtime double-buffers it. After this pass no `View`
-//! attributes or `resource` declarations affect later stages — the program
-//! looks exactly as if the bindings had been written inline.
+//! derives the backing resource's `(set, binding)` and rewrites the `View` attribute
+//! into the concrete `StorageImage` / `Texture` binding attribute. After this
+//! pass no `View` attributes or `resource` declarations affect later stages —
+//! the program looks exactly as if the bindings had been written inline.
 
 use crate::ast::{self, Declaration, Pattern};
+use crate::err_type_at;
 use crate::error::Result;
 use crate::interface;
-use crate::interface::{
-    Attribute, FeedbackPair, ResolvedAttribute, ResourceDecl, ResourceUsage, StorageAccess,
-};
+use crate::interface::{Attribute, ResolvedAttribute, ResourceDecl, ResourceUsage, StorageAccess};
 use crate::module_manager;
 use crate::name_resolution;
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
-use crate::{err_type, err_type_at};
 
 pub type ResourcesResolvedFamily = ast::AstFamily<
     ast::SourceTree,
@@ -54,9 +49,6 @@ struct ResolvedResource {
     current_storage: Option<BindingRef>,
     /// Sampled view of the current frame. Present iff `sampled` is declared.
     current_sampled: Option<BindingRef>,
-    /// Sampled view of the previous frame, present iff `decl.history >= 1`
-    /// and `sampled` is declared.
-    previous_sampled: Option<BindingRef>,
 }
 
 pub fn resolve_resources(mut program: name_resolution::NamesResolved) -> Result<ResourcesResolved> {
@@ -69,22 +61,19 @@ pub fn resolve_resources(mut program: name_resolution::NamesResolved) -> Result<
         })
         .collect();
     let table = derive_bindings(&decls, &program)?;
-    let mut entry_feedback = std::collections::VecDeque::new();
     for declaration in &mut program.declarations {
         if let Declaration::Entry(entry) = declaration {
-            let mut feedback = Vec::new();
             for param in &mut entry.params {
-                rewrite_view_param(param, &table, &mut feedback)?;
+                rewrite_view_param(param, &table)?;
             }
-            entry_feedback.push_back(feedback);
         }
     }
-    materialize(program, entry_feedback)
+    materialize(program)
 }
 
-/// Assign each resource its current (and, for history resources, previous)
-/// binding: honor pins, then auto-assign the rest to free slots on the default
-/// set, avoiding slots already taken by explicit param attributes or pins.
+/// Assign each resource its binding: honor pins, then auto-assign the rest to
+/// free slots on the default set, avoiding slots already taken by explicit
+/// param attributes or pins.
 fn derive_bindings(
     decls: &[ResourceDecl],
     program: &name_resolution::NamesResolved,
@@ -117,10 +106,10 @@ fn derive_bindings(
         let wants_storage = has(r, ResourceUsage::StorageWrite) || has(r, ResourceUsage::StorageRead);
         let wants_sampled = has(r, ResourceUsage::Sampled);
 
-        // One distinct slot per view kind, assigned storage → sampled →
-        // previous so the pin (if any) lands on the storage allocation and
-        // the views stay grouped. A `layout =` pin applies to the primary
-        // slot (storage if present, else sampled).
+        // One distinct slot per view kind, assigned storage → sampled so the
+        // pin (if any) lands on the storage allocation and the views stay
+        // grouped. A `layout =` pin applies to the primary slot (storage if
+        // present, else sampled).
         let pin_set = r.layout.map(|b| b.set).unwrap_or(DEFAULT_RESOURCE_SET);
         let next = |used: &mut LookupSet<(u32, u32)>| auto_next(used, pin_set);
 
@@ -135,8 +124,6 @@ fn derive_bindings(
         } else {
             None
         };
-        let previous_sampled = (r.history >= 1 && wants_sampled).then(|| next(&mut used));
-
         // Two distinct resources must not pin the same primary slot.
         if let Some(pin) = r.layout {
             if let Some(prev) = pinned.insert((pin.set, pin.binding), r.name.clone()) {
@@ -156,7 +143,6 @@ fn derive_bindings(
                 decl: r.clone(),
                 current_storage,
                 current_sampled,
-                previous_sampled,
             },
         );
     }
@@ -165,11 +151,7 @@ fn derive_bindings(
 
 /// Apply the established entry-parameter rewrite. The later materialization
 /// step changes only the AST's attribute type.
-fn rewrite_view_param(
-    param: &mut Pattern,
-    table: &LookupMap<String, ResolvedResource>,
-    feedback: &mut Vec<FeedbackPair>,
-) -> Result<()> {
+fn rewrite_view_param(param: &mut Pattern, table: &LookupMap<String, ResolvedResource>) -> Result<()> {
     if !param.attributes().iter().any(|attribute| matches!(attribute, Attribute::View(_))) {
         return Ok(());
     }
@@ -182,11 +164,7 @@ fn rewrite_view_param(
         let Attribute::View(view) = attribute else {
             continue;
         };
-        let interface::ViewAttribute {
-            resource,
-            usage,
-            previous,
-        } = view.clone();
+        let interface::ViewAttribute { resource, usage } = view.clone();
         let resolved = table
             .get(&resource)
             .ok_or_else(|| err_type_at!(span, "unknown resource '{}' in view", resource))?;
@@ -231,36 +209,18 @@ fn rewrite_view_param(
                         resource
                     );
                 }
-                let binding = if previous {
-                    let previous_binding = resolved.previous_sampled.ok_or_else(|| {
-                        err_type_at!(
-                            span,
-                            "view of '{}' uses `previous`, but the resource has no `history`",
-                            resource
-                        )
-                    })?;
-                    if let Some(write) = resolved.current_storage {
-                        feedback.push(FeedbackPair {
-                            read: previous_binding,
-                            write,
-                        });
-                    }
-                    previous_binding
-                } else {
-                    let Some(current_sampled) = resolved.current_sampled else {
-                        return Err(err_type_at!(
-                            span,
-                            "resource '{}' has no sampled binding",
-                            resource
-                        ));
-                    };
-                    current_sampled
+                let Some(binding) = resolved.current_sampled else {
+                    return Err(err_type_at!(
+                        span,
+                        "resource '{}' has no sampled binding",
+                        resource
+                    ));
                 };
                 Attribute::Texture {
                     set: binding.set,
                     binding: binding.binding,
                     backing: resolved.current_storage,
-                    resource: (!previous).then_some(resource),
+                    resource: Some(resource),
                 }
             }
         };
@@ -268,21 +228,13 @@ fn rewrite_view_param(
     Ok(())
 }
 
-fn materialize(
-    program: name_resolution::NamesResolved,
-    mut entry_feedback: std::collections::VecDeque<Vec<FeedbackPair>>,
-) -> Result<ResourcesResolved> {
+fn materialize(program: name_resolution::NamesResolved) -> Result<ResourcesResolved> {
     program.try_rebuild(|declarations, global_context, _| {
         let mut resolved = Vec::with_capacity(declarations.len());
         for declaration in declarations {
             let declaration = match declaration {
                 Declaration::Decl(definition) => Some(Declaration::Decl(definition)),
-                Declaration::Entry(entry) => {
-                    let Some(feedback) = entry_feedback.pop_front() else {
-                        return Err(err_type!("resource analysis omitted entry feedback"));
-                    };
-                    Some(Declaration::Entry(materialize_entry(entry, feedback)?))
-                }
+                Declaration::Entry(entry) => Some(Declaration::Entry(materialize_entry(entry)?)),
                 Declaration::Extern(ext) => Some(Declaration::Extern(ext)),
                 Declaration::Frontend(frontend) => {
                     materialize_frontend(frontend).map(Declaration::Frontend)
@@ -292,7 +244,6 @@ fn materialize(
                 resolved.push(declaration);
             }
         }
-        debug_assert!(entry_feedback.is_empty());
         Ok((resolved, global_context))
     })
 }
@@ -311,13 +262,11 @@ fn materialize_pattern(pattern: Pattern) -> Result<Pattern<ast::SourceTree, Reso
 
 fn materialize_entry(
     entry: ast::EntryDecl,
-    feedback: Vec<FeedbackPair>,
 ) -> Result<ast::EntryDecl<ast::ResolvedEntry, ast::SourceTree, ResolvedAttribute>> {
     entry.try_rebuild(
         |data, _, name_span| {
             Ok(ast::ResolvedEntry {
                 syntax: data.try_map_attributes(|attribute| materialize_attribute(attribute, name_span))?,
-                feedback,
             })
         },
         |params, body| {

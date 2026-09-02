@@ -203,7 +203,6 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                     uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
-                feedback: vec![],
             }),
             Pipeline::Graphics(GraphicsPipeline {
                 invocation: GraphicsInvocation::default(),
@@ -225,9 +224,9 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                 }],
                 vertex_inputs: vec![],
                 fragment_outputs: vec![],
-                feedback: vec![],
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -270,7 +269,6 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
                     location: 0,
                     name: "scene_depth".to_string(),
                 }],
-                feedback: vec![],
             }),
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![Binding::Texture {
@@ -296,9 +294,9 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
                     uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
-                feedback: vec![],
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -352,7 +350,6 @@ fn producer_consumer_descriptor(producer_first: bool) -> PipelineDescriptor {
             bindings: vec![buffer(&format!("{entry}_binding"), access, usage)],
             stages: vec![stage(entry)],
             default_total_threads: None,
-            feedback: vec![],
         })
     };
     let producer = pipeline("producer", Access::WriteOnly, BufferUsage::Output);
@@ -361,6 +358,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> PipelineDescriptor {
 
     let mut descriptor = PipelineDescriptor {
         pipelines,
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
     descriptor.rebuild_frame_graph();
@@ -435,7 +433,6 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
                 bindings: vec![inst(Access::ReadOnly, BufferUsage::Input), occ(Access::WriteOnly)],
                 stages: vec![stage("reduce")],
                 default_total_threads: None,
-                feedback: vec![],
             }),
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![
@@ -444,9 +441,9 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
                 ],
                 stages: vec![stage("cull")],
                 default_total_threads: None,
-                feedback: vec![],
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
     descriptor.rebuild_frame_graph();
@@ -480,7 +477,6 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
                     location: 0,
                     name: "gbuf".to_string(),
                 }],
-                feedback: vec![],
             }),
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![Binding::StorageTexture {
@@ -505,9 +501,9 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
                     uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
-                feedback: vec![],
             }),
         ],
+        source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
     };
 
@@ -528,64 +524,6 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
 }
 
 #[test]
-fn frame_graph_marks_history_reads_without_self_dependency() {
-    let mut descriptor = PipelineDescriptor {
-        pipelines: vec![Pipeline::Compute(ComputePipeline {
-            bindings: vec![
-                Binding::StorageTexture {
-                    set: 1,
-                    binding: 0,
-                    name: "out_acc".to_string(),
-                    format: StorageImageFormat::Rgba16Float,
-                    access: Access::WriteOnly,
-                    size: StorageTextureSize::SameAsWindow,
-                    resource: None,
-                },
-                Binding::Texture {
-                    set: 1,
-                    binding: 1,
-                    name: "prev_acc".to_string(),
-                    sample_type: TextureSampleType::Float { filterable: true },
-                    view_dimension: TextureViewDimension::D2,
-                    multisampled: false,
-                    backing: Some(BackingRef { set: 1, binding: 0 }),
-                    resource: None,
-                },
-            ],
-            stages: vec![ComputeStage {
-                entry_point: "step".to_string(),
-                owner: "step".to_string(),
-                workgroup_size: (8, 8, 1),
-                dispatch_size: DispatchSize::DerivedFrom {
-                    len: DispatchLen::StorageImage { set: 1, binding: 0 },
-                    workgroup_size: 8,
-                },
-                uses: StageBindingUses::default(),
-            }],
-            default_total_threads: None,
-            feedback: vec![FeedbackPair {
-                read_set: 1,
-                read_binding: 1,
-                write_set: 1,
-                write_binding: 0,
-            }],
-        })],
-        frame_graph: FrameGraph::default(),
-    };
-
-    descriptor.rebuild_frame_graph();
-    let graph = &descriptor.frame_graph;
-    assert_eq!(graph.resources.len(), 1);
-    assert_eq!(graph.feedback.len(), 1);
-    assert_eq!(graph.feedback[0].read_resource, Some(0));
-    assert_eq!(graph.feedback[0].write_resource, Some(0));
-    assert!(graph.resources[0].history.iter().any(|role| role.role == FrameHistoryRoleKind::ReadPrevious));
-    assert!(graph.resources[0].history.iter().any(|role| role.role == FrameHistoryRoleKind::WriteCurrent));
-    assert_eq!(graph.passes[0].depends_on, Vec::<usize>::new());
-    assert!(graph.passes[0].reads.iter().any(|access| access.role == FrameAccessRole::Previous));
-}
-
-#[test]
 fn vertex_attribute_serde_round_trip() {
     let attr = VertexAttribute {
         slot: 1,
@@ -599,4 +537,24 @@ fn vertex_attribute_serde_round_trip() {
     assert_eq!(back.slot, 1);
     assert_eq!(back.name, "color");
     assert_eq!(back.format, VertexFormat::Float32x3);
+}
+
+#[test]
+fn source_result_binding_serde_round_trip() {
+    let descriptor = PipelineDescriptor {
+        pipelines: Vec::new(),
+        source_results: vec![SourceResultBinding {
+            entry: "pulse".to_string(),
+            result: 0,
+            pipeline_index: 2,
+            set: 0,
+            binding: 7,
+        }],
+        frame_graph: FrameGraph::default(),
+    };
+    let json = serde_json::to_string(&descriptor).unwrap();
+    assert!(json.contains("\"entry\":\"pulse\""));
+    assert!(json.contains("\"result\":0"));
+    let back: PipelineDescriptor = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.source_results, descriptor.source_results);
 }

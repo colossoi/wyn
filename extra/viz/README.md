@@ -16,6 +16,36 @@ viz info                     # Show GPU device info
 viz testpattern              # Render a built-in test pattern
 ```
 
+## Cross-frame feedback
+
+Interactive pipelines can feed an authored entry result back into one of that
+entry's inputs on the next frame. Put that host policy in a versioned
+`<shader>.viz.json` sidecar:
+
+```json
+{
+  "version": 1,
+  "feedback": [
+    {
+      "entry": "particles",
+      "input": "prev_pos",
+      "result": 0,
+      "initial": { "kind": "zero" }
+    }
+  ]
+}
+```
+
+Here, result 0 of the authored `particles` entry becomes `prev_pos` on the
+following frame. `initial.kind` may be `zero`, `rng`, or `file`; file initial
+state uses `{ "kind": "file", "path": "seed.bin" }`, with paths relative to
+the sidecar.
+
+`viz pipeline shader.spv` automatically loads `shader.viz.json` when present.
+Use `--config FILE` when the sidecar lives elsewhere, or `--no-config` to skip
+automatic loading. Feedback selectors deliberately do not use generated
+descriptor binding names such as `particles_output`.
+
 ## Host-provided images
 
 `--image NAME:FILE` (repeatable) uploads a PNG/JPEG once at startup as

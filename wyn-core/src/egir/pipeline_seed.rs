@@ -30,16 +30,6 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
         };
         let decl = &entry.declaration;
         let name = symbol_name_or_bug(&program.symbols, def.name).to_string();
-        let feedback = decl
-            .feedback
-            .iter()
-            .map(|pair| FeedbackPair {
-                read_set: pair.read.set,
-                read_binding: pair.read.binding,
-                write_set: pair.write.set,
-                write_binding: pair.write.binding,
-            })
-            .collect();
 
         if decl.entry_kind == EntryKind::Compute {
             let dispatch_size = decl
@@ -66,7 +56,6 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                     uses: StageBindingUses::default(),
                 }],
                 default_total_threads: None,
-                feedback,
             }));
             stage_symbols.push(vec![def.name]);
         } else {
@@ -109,7 +98,6 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                     bindings: Vec::new(),
                     vertex_inputs: Vec::new(),
                     fragment_outputs: Vec::new(),
-                    feedback,
                 }));
                 stage_symbols.push(vec![def.name]);
             }
@@ -119,6 +107,7 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
     PipelineSeed {
         pipeline: PipelineDescriptor {
             pipelines,
+            source_results: Vec::new(),
             frame_graph: Default::default(),
         },
         stage_symbols,

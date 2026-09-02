@@ -62,13 +62,9 @@ pub struct InteractivePipelineSpec {
     /// the descriptor's workgroup_size at dispatch time. Empty when
     /// the compiler's default dispatch is correct for every stage.
     pub dispatch_overrides: HashMap<String, (u32, u32, u32)>,
-    /// Ping-pong feedback pairs, one per `--feedback ENTRY:READ=WRITE`
-    /// on the CLI. Each entry is `(entry_point, read_binding_name,
-    /// write_binding_name)`. The host resolves names to `(set,
-    /// binding)` at state construction, allocates two physical
-    /// textures per write binding, and swaps which one is bound each
-    /// frame. Empty for shaders with no self-feedback.
-    pub feedback_specs: Vec<(String, String, String)>,
+    /// Sidecar feedback pairs already resolved from authored entry/input/result
+    /// selectors to descriptor slots before the window is opened.
+    pub feedback_pairs: Vec<gpu::FeedbackPair>,
     pub max_frames: Option<u32>,
     pub verbose: bool,
     pub validate: bool,
@@ -86,7 +82,7 @@ pub struct InteractivePipelineSpec {
     pub storage_dir: Option<PathBuf>,
     /// Host storage buffers to allocate and seed once, by binding name →
     /// init spec (from `--buffer-init NAME:BYTES:SPEC`). For a buffer the
-    /// shader writes but no `--input`/`--feedback` supplies (a scratch
+    /// shader writes but no `--input`/sidecar feedback supplies (a scratch
     /// framebuffer, `0`) or reads as random initial state (`rng`).
     pub buffer_inits: HashMap<String, gpu::BufferInit>,
     /// Scalar entry values supplied with `--push-constant`. For WGSL compute
@@ -479,165 +475,11 @@ impl State {
             render::configure_surface(&surface, &device, &adapter, size.width, size.height, present_mode)?;
         let depth_view = create_depth_view(&device, &config);
 
-        // Phase 6: resolve `--feedback ENTRY:READ=WRITE` specs against
-        // the descriptor. Each spec names a compute entry plus two
-        // binding names (read + write) inside it; we look them up to
-        // get `(set, binding)` tuples the storage-texture allocator and
-        // bind-group builder consume directly.
-        // A feedback spec resolves to either a texture pair (READ is a
-        // `Binding::Texture`, WRITE is a `Binding::StorageTexture`) or a
-        // buffer pair (both sides are `Binding::StorageBuffer`). Same-name
-        // matches across kinds within one spec are a mixed-kind error.
-        let mut texture_feedback_pairs: Vec<gpu::FeedbackPair> = Vec::new();
-        let mut buffer_feedback_pairs: Vec<gpu::FeedbackPair> = Vec::new();
-        for (entry, read, write) in &spec.feedback_specs {
-            let cp = spec
-                .descriptor
-                .pipelines
-                .iter()
-                .find_map(|p| match p {
-                    DescPipeline::Compute(cp) if cp.stages.iter().any(|s| s.entry_point == *entry) => {
-                        Some(cp)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    anyhow!(
-                        "--feedback '{}:{}={}' — no compute pipeline with that entry point",
-                        entry,
-                        read,
-                        write
-                    )
-                })?;
-            let mut tex_read: Option<(u32, u32)> = None;
-            let mut tex_write: Option<(u32, u32)> = None;
-            let mut buf_read: Option<(u32, u32)> = None;
-            let mut buf_write: Option<(u32, u32)> = None;
-            for b in &cp.bindings {
-                match b {
-                    wyn_pipeline_descriptor::Binding::Texture {
-                        set, binding, name, ..
-                    } if name == read => tex_read = Some((*set, *binding)),
-                    wyn_pipeline_descriptor::Binding::StorageTexture {
-                        set, binding, name, ..
-                    } if name == write => tex_write = Some((*set, *binding)),
-                    wyn_pipeline_descriptor::Binding::StorageBuffer {
-                        set, binding, name, ..
-                    } if name == read => buf_read = Some((*set, *binding)),
-                    wyn_pipeline_descriptor::Binding::StorageBuffer {
-                        set, binding, name, ..
-                    } if name == write => buf_write = Some((*set, *binding)),
-                    _ => {}
-                }
-            }
-            match (tex_read, tex_write, buf_read, buf_write) {
-                (Some((rs, rb)), Some((ws, wb)), None, None) => {
-                    texture_feedback_pairs.push(gpu::FeedbackPair {
-                        read_set: rs,
-                        read_binding: rb,
-                        write_set: ws,
-                        write_binding: wb,
-                    });
-                }
-                (None, None, Some((rs, rb)), Some((ws, wb))) => {
-                    buffer_feedback_pairs.push(gpu::FeedbackPair {
-                        read_set: rs,
-                        read_binding: rb,
-                        write_set: ws,
-                        write_binding: wb,
-                    });
-                }
-                (Some(_), _, Some(_), _) | (_, Some(_), _, Some(_)) => {
-                    return Err(anyhow!(
-                        "--feedback '{}:{}={}' — names match both texture and storage-buffer \
-                         bindings; feedback pairs must be all-texture or all-buffer",
-                        entry,
-                        read,
-                        write
-                    ));
-                }
-                _ => {
-                    // Enumerate what the entry actually exposes so the user
-                    // can see the real binding names — auto-allocated entries
-                    // name their feedback buffers generically (e.g. `input_N`
-                    // for reads, `tail_output` for the result), which rarely
-                    // match a hand-written `--feedback` spec.
-                    let mut textures: Vec<String> = Vec::new();
-                    let mut storage_images: Vec<String> = Vec::new();
-                    let mut storage_buffers: Vec<String> = Vec::new();
-                    for b in &cp.bindings {
-                        match b {
-                            wyn_pipeline_descriptor::Binding::Texture {
-                                set, binding, name, ..
-                            } => textures.push(format!("'{name}' (set={set}, binding={binding})")),
-                            wyn_pipeline_descriptor::Binding::StorageTexture {
-                                set, binding, name, ..
-                            } => storage_images.push(format!("'{name}' (set={set}, binding={binding})")),
-                            wyn_pipeline_descriptor::Binding::StorageBuffer {
-                                set, binding, name, ..
-                            } => storage_buffers.push(format!("'{name}' (set={set}, binding={binding})")),
-                            _ => {}
-                        }
-                    }
-                    let list = |v: &[String]| {
-                        if v.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            v.join(", ")
-                        }
-                    };
-                    let status = |found: bool| if found { "found" } else { "NOT FOUND" };
-                    return Err(anyhow!(
-                        "--feedback '{entry}:{read}={write}' could not resolve a feedback pair.\n\
-                         \x20 read binding '{read}': {}\n\
-                         \x20 write binding '{write}': {}\n\
-                         A pair must be a texture2d (read) + storage_image (write), or a \
-                         storage_buffer (read) + storage_buffer (write) — both on entry '{entry}'.\n\
-                         Bindings actually declared on '{entry}':\n\
-                         \x20 storage_buffers: {}\n\
-                         \x20 textures: {}\n\
-                         \x20 storage_images: {}\n\
-                         Tip: auto-allocated entries name buffers generically (reads `input_N`, \
-                         result `tail_output`); check the names in the descriptor JSON next to the .spv.",
-                        status(tex_read.is_some() || buf_read.is_some()),
-                        status(tex_write.is_some() || buf_write.is_some()),
-                        list(&storage_buffers),
-                        list(&textures),
-                        list(&storage_images),
-                    ));
-                }
-            }
-        }
-
-        // Also honor feedback pairs the compiler declared in the descriptor (a
-        // `history` resource's `previous` view) — no `--feedback` flag needed.
-        // Classify each by the write binding's kind: a storage-image write is a
-        // texture pair, a storage-buffer write is a buffer pair.
-        for p in &spec.descriptor.pipelines {
-            let DescPipeline::Compute(cp) = p else {
-                continue;
-            };
-            for fb in &cp.feedback {
-                let writes_storage_image = cp.bindings.iter().any(|b| {
-                    matches!(
-                        b,
-                        wyn_pipeline_descriptor::Binding::StorageTexture { set, binding, .. }
-                            if *set == fb.write_set && *binding == fb.write_binding
-                    )
-                });
-                let pair = gpu::FeedbackPair {
-                    read_set: fb.read_set,
-                    read_binding: fb.read_binding,
-                    write_set: fb.write_set,
-                    write_binding: fb.write_binding,
-                };
-                if writes_storage_image {
-                    texture_feedback_pairs.push(pair);
-                } else {
-                    buffer_feedback_pairs.push(pair);
-                }
-            }
-        }
+        // Feedback selectors were resolved against source-result metadata
+        // before opening the window. V1 sidecars feed storage-buffer results;
+        // texture ping-pong remains unused here.
+        let texture_feedback_pairs: Vec<gpu::FeedbackPair> = Vec::new();
+        let buffer_feedback_pairs = &spec.feedback_pairs;
 
         let feedback_reads: HashMap<(u32, u32), (u32, u32)> = texture_feedback_pairs
             .iter()
@@ -655,8 +497,12 @@ impl State {
             Some((config.width, config.height)),
             &texture_feedback_pairs,
         );
-        let feedback_buffers =
-            gpu::create_feedback_buffers(&device, &spec.descriptor, &buffer_feedback_pairs)?;
+        let feedback_buffers = gpu::create_feedback_buffers(
+            &device,
+            &spec.descriptor,
+            buffer_feedback_pairs,
+            &spec.dispatch_overrides,
+        )?;
         let host_textures =
             gpu::create_host_textures(&device, &queue, &spec.descriptor, &storage_textures, &spec.images);
         let mut parameter_bytes = gpu::ParameterBlockBytes::new();
@@ -899,7 +745,7 @@ impl State {
         //     framebuffer-clear lifted out as its own dispatch) gets the
         //     right per-element count.
         let mut dispatch_buffer_sizes = gpu::StorageBuffers::new();
-        for pair in &buffer_feedback_pairs {
+        for pair in buffer_feedback_pairs {
             if let Some(res) = feedback_buffers.get(&(pair.write_set, pair.write_binding)) {
                 let buf = &res.buffers[0];
                 dispatch_buffer_sizes.insert((pair.read_set, pair.read_binding), (buf.clone(), buf.size()));
@@ -1070,7 +916,13 @@ impl State {
                     &device,
                     &graphics_bindings,
                     set,
-                    wgpu::ShaderStages::FRAGMENT,
+                    // One layout is shared by the vertex and fragment stages.
+                    // Direct graphics lowering can declare shared uniforms in
+                    // both entry points, so every published graphics binding
+                    // must be visible to both stages. Narrowing this to
+                    // FRAGMENT produces an invalid Vulkan pipeline even when
+                    // the fragment shader is the binding's semantic consumer.
+                    wgpu::ShaderStages::VERTEX_FRAGMENT,
                     &storage_textures,
                     &host_textures,
                     &host_buffers,

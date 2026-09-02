@@ -108,7 +108,7 @@ pub enum Attribute<V = ViewAttribute> {
     Linked(String),
 }
 
-/// Source-only payload for `#[view(resource, usage[, previous])]`.
+/// Source-only payload for `#[view(resource, usage)]`.
 ///
 /// Resource resolution consumes this payload and produces
 /// `Attribute<Infallible>`, making unresolved resource views
@@ -117,9 +117,6 @@ pub enum Attribute<V = ViewAttribute> {
 pub struct ViewAttribute {
     pub resource: String,
     pub usage: ResourceUsage,
-    /// `true` for `#[view(r, sampled, previous)]` — samples the prior
-    /// frame of a `history` resource.
-    pub previous: bool,
 }
 
 pub type ResolvedAttribute = Attribute<std::convert::Infallible>;
@@ -617,7 +614,6 @@ pub struct EntryDecl {
     pub type_params: Vec<String>,
     pub params: Vec<EntryParamDecl>,
     pub outputs: Vec<EntryOutputDecl<ResolvedAttribute>>,
-    pub feedback: Vec<FeedbackPair>,
     pub param_diets: Vec<types::Diet>,
     pub return_diet: types::Diet,
 }
@@ -777,19 +773,8 @@ pub enum ResourceUsage {
     Sampled,
 }
 
-/// A ping-pong feedback pair on an entry: the `read` binding samples the
-/// *previous frame's* contents of the `write` binding (a `history` resource's
-/// `previous` view). Emitted into the pipeline descriptor so the runtime
-/// double-buffers and swaps each frame — the declarative form of a
-/// `--feedback ENTRY:READ=WRITE` flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FeedbackPair {
-    pub read: BindingRef,
-    pub write: BindingRef,
-}
-
 /// The backing kind of a top-level `resource` declaration. Only 2D images are
-/// supported today (the compute-write / fragment-sample ping-pong).
+/// represented by the unfinished resource-declaration model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     Image2d,
@@ -810,11 +795,6 @@ pub struct ResourceDecl {
     /// Explicit `layout = binding(set, binding)` pin for the current-frame
     /// binding, or `None` to let the compiler assign the slot.
     pub layout: Option<BindingRef>,
-    /// Number of previous frames kept (double-buffering). `0` = no history;
-    /// `1` = a `previous` view reads last frame (v1 supports 0 or 1). The
-    /// previous-frame binding is always compiler-assigned; the descriptor's
-    /// feedback pair, not a fixed slot number, is what the runtime consumes.
-    pub history: u32,
     pub span: ast::Span,
 }
 

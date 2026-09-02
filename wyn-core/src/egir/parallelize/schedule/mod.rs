@@ -909,7 +909,6 @@ impl KernelPlan {
                     bindings: Vec::new(),
                     stages: Vec::new(),
                     default_total_threads: None,
-                    feedback: Vec::new(),
                 },
             };
             (id, pipeline)

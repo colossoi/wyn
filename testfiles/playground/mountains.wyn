@@ -4,9 +4,9 @@
 -- License: MIT. Phacelle Noise and the Erosion Filter (Buffer B) are
 -- (c) 2025 Rune Skovbo Johansen under MPL-2.0.
 --
--- The root receives the two source textures, sampler, frame values, and
--- render target directly. The fragment callback captures those values and
--- performs the image computation in one pass.
+-- This playground version evaluates a procedural island height field and
+-- detail noise directly in the fragment stage, so it is self-contained and
+-- needs no Shadertoy buffer textures from the host.
 open f32
 
 ------------------------------------------------------------
@@ -128,10 +128,10 @@ def noised(p: vec2f32) vec3f32 =
 ------------------------------------------------------------
 
 -- Returns ((tNear, tFar), outNormal). tNear < 0 with no normal if no hit.
-def boxIntersection(ro: vec3f32, rd: vec3f32, boxSize: vec3f32) (vec2f32, vec3f32) =
+def box_intersection(ro: vec3f32, rd: vec3f32, box_size: vec3f32) (vec2f32, vec3f32) =
   let m = @[1.0 / rd.x, 1.0 / rd.y, 1.0 / rd.z] in
   let n = m * ro in
-  let k = vec.abs(m) * boxSize in
+  let k = vec.abs(m) * box_size in
   let t1 = (0.0 - n) - k in
   let t2 = (0.0 - n) + k in
   let tN = max(max(t1.x, t1.y), t1.z) in
@@ -152,14 +152,14 @@ def boxIntersection(ro: vec3f32, rd: vec3f32, boxSize: vec3f32) (vec2f32, vec3f3
 -- Camera
 ------------------------------------------------------------
 
-def CameraRay(fov: f32, size: vec2f32, pos: vec2f32) vec3f32 =
+def camera_ray(fov: f32, size: vec2f32, pos: vec2f32) vec3f32 =
   let xy = pos - size * 0.5 in
   let cot_half_fov = tan(radians(90.0 - fov * 0.5)) in
   let z = size.y * 0.5 * cot_half_fov in
   normalize(@[xy.x, xy.y, 0.0 - z])
 
 -- GLSL mat3, column-major. Outer arrays = columns at SPIR-V emission.
-def CameraRotation(angle: vec2f32) mat3f32 =
+def camera_rotation(angle: vec2f32) mat3f32 =
   let c = @[cos(angle.x), cos(angle.y)] in
   let s = @[sin(angle.x), sin(angle.y)] in
   @[[c.y,       0.0,       0.0 - s.y],
@@ -167,17 +167,17 @@ def CameraRotation(angle: vec2f32) mat3f32 =
     [s.y * c.x, 0.0 - s.x, c.y * c.x]]
 
 -- Returns (ro, rd).
-def GetRay(iTime: f32, iResolution: vec3f32, fragCoord: vec2f32) (vec3f32, vec3f32) =
+def get_ray(iTime: f32, iResolution: vec3f32, frag_coord: vec2f32) (vec3f32, vec3f32) =
   let iRevolution = iTime * 2.0 * pi in
-  let cameraAngle = @[iRevolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * pi,
+  let camera_angle = @[iRevolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * pi,
                       CAMERA_ELEVATION] in
-  let rot = CameraRotation(cameraAngle.yx) in
-  let rd0 = CameraRay(CAMERA_FOV, iResolution.xy, fragCoord) in
+  let rot = camera_rotation(camera_angle.yx) in
+  let rd0 = camera_ray(CAMERA_FOV, iResolution.xy, frag_coord) in
   let rd = rot * rd0 in
   let ro = CAMERA_LOOKAT + rot * @[0.0, 0.0, CAMERA_DIST] in
   (ro, rd)
 
-def SkyColor(rd: vec3f32, sun: vec3f32) vec3f32 =
+def sky_color(rd: vec3f32, sun: vec3f32) vec3f32 =
   let costh = dot(rd, sun) in
   AMBIENT_COLOR * (pi * (1.0 - abs(costh) * 0.8))
 
@@ -198,57 +198,57 @@ def Tonemap_ACES(x: vec3f32) vec3f32 =
 def pow5(x: f32) f32 =
   let x2 = x * x in x2 * x2 * x
 
-def D_GGX(linearRoughness: f32, NoH: f32) f32 =
-  let oneMinusNoHSquared = 1.0 - NoH * NoH in
-  let a = NoH * linearRoughness in
-  let k = linearRoughness / (oneMinusNoHSquared + a * a) in
+def D_GGX(linear_roughness: f32, no_h: f32) f32 =
+  let one_minus_no_h_squared = 1.0 - no_h * no_h in
+  let a = no_h * linear_roughness in
+  let k = linear_roughness / (one_minus_no_h_squared + a * a) in
   k * k * (1.0 / pi)
 
-def V_SmithGGXCorrelated(linearRoughness: f32, NoV: f32, NoL: f32) f32 =
-  let a2 = linearRoughness * linearRoughness in
-  let GGXV = NoL * sqrt((NoV - a2 * NoV) * NoV + a2) in
-  let GGXL = NoV * sqrt((NoL - a2 * NoL) * NoL + a2) in
+def v_smith_ggx_correlated(linear_roughness: f32, no_v: f32, no_l: f32) f32 =
+  let a2 = linear_roughness * linear_roughness in
+  let GGXV = no_l * sqrt((no_v - a2 * no_v) * no_v + a2) in
+  let GGXL = no_v * sqrt((no_l - a2 * no_l) * no_l + a2) in
   0.5 / (GGXV + GGXL)
 
-def F_Schlick_v(f0: vec3f32, VoH: f32) vec3f32 =
-  let m = pow5(1.0 - VoH) in
+def F_Schlick_v(f0: vec3f32, vo_h: f32) vec3f32 =
+  let m = pow5(1.0 - vo_h) in
   f0 + (1.0 - f0) * m
 
-def F_Schlick_s(f0: f32, f90: f32, VoH: f32) f32 =
-  f0 + (f90 - f0) * pow5(1.0 - VoH)
+def F_Schlick_s(f0: f32, f90: f32, vo_h: f32) f32 =
+  f0 + (f90 - f0) * pow5(1.0 - vo_h)
 
-def Fd_Burley(linearRoughness: f32, NoV: f32, NoL: f32, LoH: f32) f32 =
-  let f90 = 0.5 + 2.0 * linearRoughness * LoH * LoH in
-  let lightScatter = F_Schlick_s(1.0, f90, NoL) in
-  let viewScatter  = F_Schlick_s(1.0, f90, NoV) in
-  lightScatter * viewScatter * (1.0 / pi)
+def Fd_Burley(linear_roughness: f32, no_v: f32, no_l: f32, lo_h: f32) f32 =
+  let f90 = 0.5 + 2.0 * linear_roughness * lo_h * lo_h in
+  let light_scatter = F_Schlick_s(1.0, f90, no_l) in
+  let view_scatter  = F_Schlick_s(1.0, f90, no_v) in
+  light_scatter * view_scatter * (1.0 / pi)
 
 def Fd_Lambert: f32 = 1.0 / pi
 
 def Shade(diffuse: vec3f32, f0: vec3f32, smoothness: f32,
           n: vec3f32, v: vec3f32, l: vec3f32, lc: vec3f32) vec3f32 =
   let h = normalize(v + l) in
-  let NoV = abs(dot(n, v)) + 1e-5 in
-  let NoL = clamp01(dot(n, l)) in
-  let NoH = clamp01(dot(n, h)) in
-  let LoH = clamp01(dot(l, h)) in
+  let no_v = abs(dot(n, v)) + 1e-5 in
+  let no_l = clamp01(dot(n, l)) in
+  let no_h = clamp01(dot(n, h)) in
+  let lo_h = clamp01(dot(l, h)) in
   let roughness = 1.0 - smoothness in
-  let linearRoughness = roughness * roughness in
-  let D = D_GGX(linearRoughness, NoH) in
-  let V = V_SmithGGXCorrelated(linearRoughness, NoV, NoL) in
-  let F = F_Schlick_v(f0, LoH) in
+  let linear_roughness = roughness * roughness in
+  let D = D_GGX(linear_roughness, no_h) in
+  let V = v_smith_ggx_correlated(linear_roughness, no_v, no_l) in
+  let F = F_Schlick_v(f0, lo_h) in
   let Fr = F * (D * V) in
-  let Fd = diffuse * Fd_Burley(linearRoughness, NoV, NoL, LoH) in
-  (Fd + Fr) * lc * NoL
+  let Fd = diffuse * Fd_Burley(linear_roughness, no_v, no_l, lo_h) in
+  (Fd + Fr) * lc * no_l
 
 ------------------------------------------------------------
 -- Atmosphere
 ------------------------------------------------------------
 
-def PhaseRayleigh(costh: f32) f32 =
+def phase_rayleigh(costh: f32) f32 =
   3.0 * (1.0 + costh * costh) / (16.0 * pi)
 
-def PhaseMie(costh: f32, g_in: f32) f32 =
+def phase_mie(costh: f32, g_in: f32) f32 =
   let g = min(g_in, 0.9381) in
   let k = 1.55 * g - 0.55 * g * g * g in
   let kcosth = k * costh in
@@ -259,12 +259,12 @@ def PhaseMie(costh: f32, g_in: f32) f32 =
 ------------------------------------------------------------
 
 -- Returns (height_bump, slope.x, slope.y).
-def GetBrushDelta(mapPos: vec2f32, cursorPos: vec2f32, brushSize: f32) vec3f32 =
-  let dist = distance(cursorPos, mapPos) in
-  let raw_dir = cursorPos - mapPos in
+def get_brush_delta(map_pos: vec2f32, cursor_pos: vec2f32, brush_size: f32) vec3f32 =
+  let dist = distance(cursor_pos, map_pos) in
+  let raw_dir = cursor_pos - map_pos in
   let dir_len = max(magnitude(raw_dir), 1e-10) in
   let dir = raw_dir / dir_len in
-  let freq = 1.0 / brushSize in
+  let freq = 1.0 / brush_size in
   let x = clamp(1.0 - freq * dist, 0.0, 1.0) in
   let bump_h = x * x * (3.0 - 2.0 * x) in
   let bump_s = 6.0 * x * (1.0 - x) * freq in
@@ -275,38 +275,38 @@ def GetBrushDelta(mapPos: vec2f32, cursorPos: vec2f32, brushSize: f32) vec3f32 =
 ------------------------------------------------------------
 
 -- Returns vec4: (normalized cosine, normalized sine, sideDir.x, sideDir.y).
-def PhacelleNoise(p: vec2f32, normDir: vec2f32, freq: f32,
+def phacelle_noise(p: vec2f32, norm_dir: vec2f32, freq: f32,
                   offset_in: f32, normalization: f32) vec4f32 =
   -- Orthogonal to normDir, scaled by freq * TAU
-  let sideDir = @[(0.0 - normDir.y) * freq * 2.0 * pi,
-                  normDir.x * freq * 2.0 * pi] in
+  let side_dir = @[(0.0 - norm_dir.y) * freq * 2.0 * pi,
+                  norm_dir.x * freq * 2.0 * pi] in
   let offset = offset_in * 2.0 * pi in
 
   let pInt = vec.floor(p) in
   let pFrac = vec.fract(p) in
 
   -- 4x4 cell loop, i and j in [-1, 2]
-  let (phaseDirAcc, weightSumAcc) =
+  let (phase_dir_acc, weight_sum_acc) =
     loop (acc, ws) = (v2(0.0), 0.0) for ij < 16 do
       let i = ij % 4 - 1 in
       let j = ij / 4 - 1 in
-      let gridOffset = @[f32.i32(i), f32.i32(j)] in
-      let gridPoint = pInt + gridOffset in
-      let randomOffset = hash2(gridPoint) * 0.5 in
-      let vec_from = pFrac - gridOffset - randomOffset in
-      let sqrDist = dot(vec_from, vec_from) in
-      let weight_raw = exp(0.0 - sqrDist * 2.0) - 0.01111 in
+      let grid_offset = @[f32.i32(i), f32.i32(j)] in
+      let grid_point = pInt + grid_offset in
+      let random_offset = hash2(grid_point) * 0.5 in
+      let vec_from = pFrac - grid_offset - random_offset in
+      let sqr_dist = dot(vec_from, vec_from) in
+      let weight_raw = exp(0.0 - sqr_dist * 2.0) - 0.01111 in
       let weight = max(0.0, weight_raw) in
-      let waveInput = dot(vec_from, sideDir) + offset in
-      let contrib = @[cos(waveInput) * weight, sin(waveInput) * weight] in
+      let wave_input = dot(vec_from, side_dir) + offset in
+      let contrib = @[cos(wave_input) * weight, sin(wave_input) * weight] in
       (acc + contrib, ws + weight)
   in
 
-  let weightSum = max(weightSumAcc, 1e-10) in
-  let interpolated = phaseDirAcc / weightSum in
+  let weight_sum = max(weight_sum_acc, 1e-10) in
+  let interpolated = phase_dir_acc / weight_sum in
   let raw_mag = sqrt(dot(interpolated, interpolated)) in
   let mag = max(1.0 - normalization, raw_mag) in
-  @[interpolated.x / mag, interpolated.y / mag, sideDir.x, sideDir.y]
+  @[interpolated.x / mag, interpolated.y / mag, side_dir.x, side_dir.y]
 
 ------------------------------------------------------------
 -- Erosion filter utility functions
@@ -332,73 +332,73 @@ def safe_normalize2(n: vec2f32) vec2f32 =
 -- Returns (height-and-slope delta + magnitude, ridgeMap).
 ------------------------------------------------------------
 
-def ErosionFilter(p: vec2f32, heightAndSlope_in: vec3f32, fadeTarget_in: f32,
-                  strength_in: f32, gullyWeight: f32, detail: f32,
-                  rounding: vec4f32, onset: vec4f32, assumedSlope: vec2f32,
+def erosion_filter(p: vec2f32, height_and_slope_in: vec3f32, fade_target_in: f32,
+                  strength_in: f32, gully_weight: f32, detail: f32,
+                  rounding: vec4f32, onset: vec4f32, assumed_slope: vec2f32,
                   scale: f32, octaves: i32, lacunarity: f32,
-                  gain: f32, cellScale: f32, normalization: f32) (vec4f32, f32) =
+                  gain: f32, cell_scale: f32, normalization: f32) (vec4f32, f32) =
   let strength0 = strength_in * scale in
-  let fadeTarget0 = clamp(fadeTarget_in, 0.0 - 1.0, 1.0) in
-  let inputHeightAndSlope = heightAndSlope_in in
-  let freq0 = 1.0 / (scale * cellScale) in
-  let slopeLength = max(magnitude(heightAndSlope_in.yz), 1e-10) in
+  let fade_target0 = clamp(fade_target_in, 0.0 - 1.0, 1.0) in
+  let input_height_and_slope = height_and_slope_in in
+  let freq0 = 1.0 / (scale * cell_scale) in
+  let slope_length = max(magnitude(height_and_slope_in.yz), 1e-10) in
 
-  let roundingForInput = mix(rounding.y, rounding.x, clamp01(fadeTarget0 + 0.5)) * rounding.z in
-  let combiMask0 = ease_out(smooth_start(slopeLength * onset.x,
-                                          roundingForInput * onset.x)) in
-  let ridgeMapCombiMask0 = ease_out(slopeLength * onset.z) in
+  let rounding_for_input = mix(rounding.y, rounding.x, clamp01(fade_target0 + 0.5)) * rounding.z in
+  let combi_mask0 = ease_out(smooth_start(slope_length * onset.x,
+                                          rounding_for_input * onset.x)) in
+  let ridge_map_combi_mask0 = ease_out(slope_length * onset.z) in
 
   -- Initial gully slope mix between actual slope and assumed slope.
-  let actualSlope = heightAndSlope_in.yz in
-  let assumedDir = @[actualSlope.x / slopeLength * assumedSlope.x,
-                     actualSlope.y / slopeLength * assumedSlope.x] in
-  let gullySlope0 = mix(actualSlope, assumedDir, assumedSlope.y) in
+  let actual_slope = height_and_slope_in.yz in
+  let assumed_dir = @[actual_slope.x / slope_length * assumed_slope.x,
+                     actual_slope.y / slope_length * assumed_slope.x] in
+  let gully_slope0 = mix(actual_slope, assumed_dir, assumed_slope.y) in
 
   -- Loop state:
   --   (i, heightAndSlope, fadeTarget, combiMask, ridgeMapFadeTarget,
   --    ridgeMapCombiMask, magnitude, strength, freq, gullySlope, roundingMult)
-  let (_, has_final, _, _, ridgeFade_final, ridgeMask_final, mag_final, _, _, _, _) =
-    loop (i, has, fadeT, mask, ridgeFade, ridgeMask, mag, str, frq, gully, rmul)
-       = (0, heightAndSlope_in, fadeTarget0, combiMask0, fadeTarget0,
-          ridgeMapCombiMask0, 0.0, strength0, freq0, gullySlope0, 1.0)
+  let (_, has_final, _, _, ridge_fade_final, ridge_mask_final, mag_final, _, _, _, _) =
+    loop (i, has, fade_t, mask, ridge_fade, ridge_mask, mag, str, frq, gully, rmul)
+       = (0, height_and_slope_in, fade_target0, combi_mask0, fade_target0,
+          ridge_map_combi_mask0, 0.0, strength0, freq0, gully_slope0, 1.0)
        while i < octaves do
-      let phacelle = PhacelleNoise(p * frq, safe_normalize2(gully),
-                                    cellScale, 0.25, normalization) in
+      let phacelle = phacelle_noise(p * frq, safe_normalize2(gully),
+                                    cell_scale, 0.25, normalization) in
       -- phacelle = (cos, sin, sideDir.x, sideDir.y)
       -- Multiply derivative components by -freq.
       let zw = @[phacelle.z * (0.0 - frq), phacelle.w * (0.0 - frq)] in
       let sloping = abs(phacelle.y) in
-      let gully2 = gully + @[sign(phacelle.y) * zw.x * str * gullyWeight,
-                              sign(phacelle.y) * zw.y * str * gullyWeight] in
+      let gully2 = gully + @[sign(phacelle.y) * zw.x * str * gully_weight,
+                              sign(phacelle.y) * zw.y * str * gully_weight] in
 
       -- Gullies: x = height offset, yz = derivative
       let gullies = @[phacelle.x, phacelle.y * zw.x, phacelle.y * zw.y] in
-      let fadedGullies = mix(@[fadeT, 0.0, 0.0],
-                              gullies * gullyWeight,
+      let faded_gullies = mix(@[fade_t, 0.0, 0.0],
+                              gullies * gully_weight,
                               mask) in
-      let has2 = has + fadedGullies * str in
+      let has2 = has + faded_gullies * str in
       let mag2 = mag + str in
-      let fadeT2 = fadedGullies.x in
+      let fade_t2 = faded_gullies.x in
 
-      let roundingForOctave = mix(rounding.y, rounding.x, clamp01(phacelle.x + 0.5)) * rmul in
-      let newMask = ease_out(smooth_start(sloping * onset.y,
-                                           roundingForOctave * onset.y)) in
-      let mask2 = pow_inv(mask, detail) * newMask in
+      let rounding_for_octave = mix(rounding.y, rounding.x, clamp01(phacelle.x + 0.5)) * rmul in
+      let new_mask = ease_out(smooth_start(sloping * onset.y,
+                                           rounding_for_octave * onset.y)) in
+      let mask2 = pow_inv(mask, detail) * new_mask in
 
-      let ridgeFade2 = mix(ridgeFade, gullies.x, ridgeMask) in
-      let newRidgeMask = ease_out(sloping * onset.w) in
-      let ridgeMask2 = ridgeMask * newRidgeMask in
+      let ridge_fade2 = mix(ridge_fade, gullies.x, ridge_mask) in
+      let new_ridge_mask = ease_out(sloping * onset.w) in
+      let ridge_mask2 = ridge_mask * new_ridge_mask in
 
       let str2 = str * gain in
       let frq2 = frq * lacunarity in
       let rmul2 = rmul * rounding.w in
-      (i + 1, has2, fadeT2, mask2, ridgeFade2, ridgeMask2, mag2,
+      (i + 1, has2, fade_t2, mask2, ridge_fade2, ridge_mask2, mag2,
        str2, frq2, gully2, rmul2)
   in
 
-  let ridgeMap = ridgeFade_final * (1.0 - ridgeMask_final) in
-  let delta = has_final - inputHeightAndSlope in
-  (@[delta.x, delta.y, delta.z, mag_final], ridgeMap)
+  let ridge_map = ridge_fade_final * (1.0 - ridge_mask_final) in
+  let delta = has_final - input_height_and_slope in
+  (@[delta.x, delta.y, delta.z, mag_final], ridge_map)
 
 ------------------------------------------------------------
 -- Heightmap entry helper (Buffer B body)
@@ -424,10 +424,10 @@ def Heightmap(p: vec2f32, n: vec3f32, erosion_enabled: bool) vec4f32 =
     let EROSION_LACUNARITY = 2.0 in
     let EROSION_GAIN = 0.5 in
 
-    let fadeTarget = clamp((n.x - DEFAULT_HEIGHT) / 0.15, 0.0 - 1.0, 1.0) in
+    let fade_target = clamp((n.x - DEFAULT_HEIGHT) / 0.15, 0.0 - 1.0, 1.0) in
 
-    let (h, ridgeMap) =
-      ErosionFilter(p, n, fadeTarget,
+    let (h, ridge_map) =
+      erosion_filter(p, n, fade_target,
                     EROSION_STRENGTH, EROSION_GULLY_WEIGHT, EROSION_DETAIL,
                     EROSION_ROUNDING, EROSION_ONSET, EROSION_ASSUMED_SLOPE,
                     EROSION_SCALE, EROSION_OCTAVES, EROSION_LACUNARITY,
@@ -436,29 +436,29 @@ def Heightmap(p: vec2f32, n: vec3f32, erosion_enabled: bool) vec4f32 =
     let eroded_no_trees = n.x + h.x in
 
     let deriv = n.yz + h.yz in
-    let normalY = 1.0 / sqrt(1.0 + dot(deriv, deriv)) in
+    let normal_y = 1.0 / sqrt(1.0 + dot(deriv, deriv)) in
     let occlusion = h.x / h.w + 0.5 in
     let trees_mask =
       smoothstep(GRASS_HEIGHT + 0.05, GRASS_HEIGHT + 0.01,
                  eroded_no_trees + 0.01 + (occlusion - 0.8) * 0.05)
       * smoothstep(0.0, 0.4, occlusion)
-      * smoothstep(0.95, 1.0, normalY)
-      * smoothstep(0.0 - 1.4, 0.0, ridgeMap)
+      * smoothstep(0.95, 1.0, normal_y)
+      * smoothstep(0.0 - 1.4, 0.0, ridge_map)
       * smoothstep(WATER_HEIGHT, WATER_HEIGHT + 0.007, eroded_no_trees) in
-    let treesAmount = (trees_mask - 0.5) / 0.6 in
+    let trees_amount = (trees_mask - 0.5) / 0.6 in
 
     -- Modulate the trees mask by high-frequency noise so forest
     -- patches scatter naturally instead of appearing as solid blobs.
     -- Then lift the terrain slightly where trees show, so trunks
     -- read as standing on the ground rather than embedded in it.
     let tree_noise = noised((p + v2(0.5)) * 200.0).x in
-    let trees = (treesAmount - (tree_noise * 0.5 + 0.5) ** 2) * 1.5 in
+    let trees = (trees_amount - (tree_noise * 0.5 + 0.5) ** 2) * 1.5 in
     let eroded =
       if trees > 0.0 then eroded_no_trees + trees / 300.0
       else eroded_no_trees in
 
     let erosion_norm = clamp01(h.x / h.w * 0.5 + 0.5) in
-    let ridge_norm = clamp01(ridgeMap * 0.5 + 0.5) in
+    let ridge_norm = clamp01(ridge_map * 0.5 + 0.5) in
     let trees_norm = clamp01(trees * 0.5 + 0.5) in
 
     @[eroded, erosion_norm, ridge_norm, trees_norm]
@@ -466,33 +466,48 @@ def Heightmap(p: vec2f32, n: vec3f32, erosion_enabled: bool) vec4f32 =
     @[n.x, 0.5, 1.0, 0.5]
 
 ------------------------------------------------------------
--- Compute entry: Buffer A
---
--- Reads the previous-frame heightmap via `prev_a` (host-wired ping-pong)
--- and either resets it (frame < 2 or Backspace toggled) or accumulates
--- mouse-painted brush deltas into it.
---
--- Output channels: (height, slope.x, slope.y, unused).
+-- Cursor helper retained from the original interactive Buffer A pass.
 ------------------------------------------------------------
 
 -- World-space cursor position derived from the mouse ray hitting the
 -- DEFAULT_HEIGHT plane. Mirrors GetMouseWorldPos in the GLSL.
-def mouse_world_pos(ro: vec3f32, mrd: vec3f32, planeHeight: f32) vec3f32 =
-  let t = (planeHeight - ro.y) / mrd.y in
+def mouse_world_pos(ro: vec3f32, mrd: vec3f32, plane_height: f32) vec3f32 =
+  let t = (plane_height - ro.y) / mrd.y in
   ro + mrd * t
 
 -- Image / fragment helpers
 ------------------------------------------------------------
 
--- Single channel sample of Buffer B (height + raw slope, no packed data).
--- pre-multiplies UV by 1.0 (we use SameAsWindow sizing — no BUFFER_SIZE cap).
-def sample_b_full(tex_b: texture2d, samp: sampler, uv: vec2f32) vec4f32 =
-  texture_sample(tex_b, samp, uv, 0.0)
+-- Self-contained replacement for the original Buffer B height texture.
+-- The radial envelope makes an island; three derivative-noise octaves keep
+-- the terrain recognizably mountainous without requiring a host asset.
+def sample_b_full(uv: vec2f32) vec4f32 =
+  let centered = uv - v2(0.5) in
+  let p = centered * 4.0 in
+  let n0 = noised(p) in
+  let n1 = noised(p * 2.03 + v2(7.1)) in
+  let n2 = noised(p * 4.11 + v2(19.7)) in
+  let radial = clamp01(1.0 - magnitude(centered) * 2.0) in
+  let island = radial * radial * (3.0 - 2.0 * radial) in
+  let relief = 0.24 + n0.x * 0.055 + n1.x * 0.027 + n2.x * 0.013 in
+  let height = 0.34 + island * relief in
+  let erosion = clamp01(0.5 + n1.x * 0.2) in
+  let ridges = clamp01(0.65 + n0.x * 0.35) in
+  let trees = clamp01((height - WATER_HEIGHT) * 7.0 + n2.x * 0.35) in
+  @[height, erosion, ridges, trees]
+
+-- Self-contained replacement for Buffer C's breakup/noise texture.
+def sample_detail(uv: vec2f32) vec4f32 =
+  let a = noised(uv * 61.0 + v2(3.7)).x in
+  let b = noised(uv * 97.0 + v2(11.3)).x in
+  let c = noised(uv * 43.0 + v2(23.9)).x in
+  @[clamp01(0.5 + a * 0.5),
+    clamp01(0.5 + b * 0.5),
+    clamp01(0.5 + c * 0.5), 1.0]
 
 -- Computes the surface normal at uv by finite differences.
-def map_full(tex_b: texture2d, samp: sampler,
-             iResolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
-  let m = sample_b_full(tex_b, samp, uv) in
+def map_full(iResolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
+  let m = sample_b_full(uv) in
   let height = m.x in
   let erosion = m.y * 2.0 - 1.0 in
   let ridgemap = m.z in
@@ -501,43 +516,42 @@ def map_full(tex_b: texture2d, samp: sampler,
   let pixel_y = 1.0 / iResolution.y in
   let uv1 = @[uv.x + pixel_x, uv.y] in
   let uv2 = @[uv.x, uv.y + pixel_y] in
-  let h1 = sample_b_full(tex_b, samp, uv1).x in
-  let h2 = sample_b_full(tex_b, samp, uv2).x in
+  let h1 = sample_b_full(uv1).x in
+  let h2 = sample_b_full(uv2).x in
   let v1 = @[pixel_x, 0.0, h1 - height] in
   let v2 = @[0.0, pixel_y, h2 - height] in
   let normal = normalize(cross(v1, v2)).xzy in
   (height, normal, erosion, ridgemap, trees)
 
 -- UV from a world-space xz position (mirrors GetUV in the GLSL).
-def GetUV(p: vec3f32) vec2f32 =
+def get_uv(p: vec3f32) vec2f32 =
   vec.clamp(@[p.x + 0.5, p.z + 0.5], @[0.001, 0.001], @[0.999, 0.999])
 
-def mapHeight(tex_b: texture2d, samp: sampler, uv: vec2f32) f32 =
-  sample_b_full(tex_b, samp, uv).x
+def map_height(uv: vec2f32) f32 =
+  sample_b_full(uv).x
 
 ------------------------------------------------------------
 -- Ray-march the terrain
 -- Returns (t, normal, material, s_t).
 ------------------------------------------------------------
 
-def march(ro: vec3f32, rd: vec3f32,
-          tex_b: texture2d, samp: sampler) (f32, vec3f32, i32, f32) =
-  let (box, boxNormal) = boxIntersection(ro, rd, BOX_SIZE) in
+def march(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, f32) =
+  let (box, box_normal) = box_intersection(ro, rd, BOX_SIZE) in
   let tStart = max(0.0, box.x) + 1e-2 in
   let tEnd = box.y - 1e-2 in
   let samples = i32.f32(48.0 * RAYMARCH_QUALITY) in
-  let stepScale0 = 1.0 / RAYMARCH_QUALITY in
+  let step_scale0 = 1.0 / RAYMARCH_QUALITY in
 
   -- Loop state mirrors the original `t / stepSize / stepScale` machinery
   -- plus a `sky` flag for the first-sample-misses-the-bottom early bail
   -- and a `done` flag for any early termination.
   -- (i, t, stepScale, stepSize, sky, n_acc, mat_acc, s_t, done)
   let (_, t_loop, _, _, sky, n_hit, mat_hit, s_t_acc, _) =
-    loop (i, t, stepScale, stepSize, sky, n_acc, mat_acc, s_t, done)
-       = (0, tStart, stepScale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
+    loop (i, t, step_scale, step_size, sky, n_acc, mat_acc, s_t, done)
+       = (0, tStart, step_scale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
        while i < samples && !done do
       let pos = ro + rd * t in
-      let h = mapHeight(tex_b, samp, GetUV(pos)) in
+      let h = map_height(get_uv(pos)) in
       let altitude = pos.y - h in
       let s_t_new = max(0.0, min(s_t, altitude / t)) in
       if altitude < 0.0 then
@@ -545,24 +559,24 @@ def march(ro: vec3f32, rd: vec3f32,
           if pos.y < 0.35 then
             -- First sample is below the sea floor — ray misses the
             -- terrain entirely. Bail and let the caller render sky.
-            (i + 1, t, stepScale, stepSize, true, n_acc, mat_acc, 9999.0, true)
+            (i + 1, t, step_scale, step_size, true, n_acc, mat_acc, 9999.0, true)
           else
             -- First sample is below ground but above sea floor → the
             -- ray hit the bounding-box side wall. Terminate at this t
             -- with the M_STRATA material so the renderer paints the
             -- exposed cliff face.
-            (i + 1, t, stepScale, stepSize, sky, boxNormal, M_STRATA, s_t_new, true)
+            (i + 1, t, step_scale, step_size, sky, box_normal, M_STRATA, s_t_new, true)
         else
           -- Contact refinement: halve stepScale (persistently!) and
           -- step back. Next iteration's forward steps inherit the
           -- smaller stepScale too, so we converge on the surface.
-          let stepScale2 = stepScale * 0.5 in
-          let t2 = t - stepSize * stepScale2 in
-          (i + 1, t2, stepScale2, stepSize, sky, n_acc, mat_acc, s_t_new, false)
+          let step_scale2 = step_scale * 0.5 in
+          let t2 = t - step_size * step_scale2 in
+          (i + 1, t2, step_scale2, step_size, sky, n_acc, mat_acc, s_t_new, false)
       else
-        let stepSize2 = abs(altitude) + min(1e-2, abs(altitude) * 0.01) in
-        let t2 = t + stepSize2 * stepScale in
-        (i + 1, t2, stepScale, stepSize2, sky, n_acc, mat_acc, s_t_new, false)
+        let step_size2 = abs(altitude) + min(1e-2, abs(altitude) * 0.01) in
+        let t2 = t + step_size2 * step_scale in
+        (i + 1, t2, step_scale, step_size2, sky, n_acc, mat_acc, s_t_new, false)
   in
 
   -- After the loop, `t_loop` is whatever the marcher converged to —
@@ -573,11 +587,11 @@ def march(ro: vec3f32, rd: vec3f32,
   -- Account for water intersection. Water wins when its entry comes
   -- before the terrain hit (or there is no terrain hit) AND we
   -- didn't already terminate on a strata cliff face.
-  let (waterBox, waterNormal) =
-    boxIntersection(ro, rd, @[BOX_SIZE.x, WATER_HEIGHT, BOX_SIZE.z]) in
+  let (water_box, water_normal) =
+    box_intersection(ro, rd, @[BOX_SIZE.x, WATER_HEIGHT, BOX_SIZE.z]) in
   let (t_final, n_final, mat_final) =
-    if waterBox.y > 0.0 && (waterBox.x < t_hit || t_hit < 0.0) && mat_hit != M_STRATA then
-      (max(0.0, waterBox.x), waterNormal, M_WATER)
+    if water_box.y > 0.0 && (water_box.x < t_hit || t_hit < 0.0) && mat_hit != M_STRATA then
+      (max(0.0, water_box.x), water_normal, M_WATER)
     else
       (t_hit, n_hit, mat_hit) in
 
@@ -591,31 +605,31 @@ def march(ro: vec3f32, rd: vec3f32,
 -- Atmospheric scattering pass
 ------------------------------------------------------------
 
-def AtmosphereShade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
+def atmosphere_shade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
                     color_in: vec3f32) vec3f32 =
-  let (box, _) = boxIntersection(ro, rd, BOX_SIZE) in
+  let (box, _) = box_intersection(ro, rd, BOX_SIZE) in
   let costh = dot(rd, sun) in
-  let phaseR = PhaseRayleigh(costh) in
-  let phaseM = PhaseMie(costh, 0.6) in
-  let rayLength = (if t_in > 0.0 then t_in else box.y) - box.x in
-  let stepSize = rayLength / 16.0 in
+  let phase_r = phase_rayleigh(costh) in
+  let phase_m = phase_mie(costh, 0.6) in
+  let ray_length = (if t_in > 0.0 then t_in else box.y) - box.x in
+  let step_size = ray_length / 16.0 in
 
   let (od_final, tsm_final, sct_final) =
     loop (od, tsm, sct) = (v2(0.0), v3(1.0), v3(0.0))
        for i < 16 do
       let fi = f32.i32(i) in
-      let p = ro + rd * @[box.x + (fi + 0.5) * stepSize,
-                          box.x + (fi + 0.5) * stepSize,
-                          box.x + (fi + 0.5) * stepSize] in
+      let p = ro + rd * @[box.x + (fi + 0.5) * step_size,
+                          box.x + (fi + 0.5) * step_size,
+                          box.x + (fi + 0.5) * step_size] in
       let h = max(0.0, p.y - 0.35) in
       let d_raw = 1.0 - clamp01(h / 0.2) in
       let d = if p.y < 0.35 then 0.0 else d_raw in
-      let densityR = d * 1e5 in
-      let densityM = d * 1e5 in
-      let od2 = od + stepSize * @[densityR, densityM] in
+      let density_r = d * 1e5 in
+      let density_m = d * 1e5 in
+      let od2 = od + step_size * @[density_r, density_m] in
       let tsm2 = vec.exp((od2.x * C_RAYLEIGH + od2.y * C_MIE) * (0.0 - 1.0)) in
-      let sct_r = tsm2 * C_RAYLEIGH * (phaseR * densityR * stepSize) in
-      let sct_m = tsm2 * C_MIE * (phaseM * densityM * stepSize) in
+      let sct_r = tsm2 * C_RAYLEIGH * (phase_r * density_r * step_size) in
+      let sct_m = tsm2 * C_MIE * (phase_m * density_m * step_size) in
       let sct2 = sct + sct_r + sct_m in
       (od2, tsm2, sct2)
   in
@@ -625,45 +639,44 @@ def AtmosphereShade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
 -- Fragment entry: composite the rendered image
 ------------------------------------------------------------
 
-def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
-                  samp: sampler, iResolution: vec3f32, iTime: f32,
+def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
                   iMouse: vec4f32) vec4f32 =
   -- Flip Y for Vulkan NDC -> Shadertoy convention.
-  let fragCoord = @[pos_in.x, iResolution.y - pos_in.y] in
+  let frag_coord = @[pos_in.x, iResolution.y - pos_in.y] in
 
   -- Camera + primary ray.
-  let (ro, rd) = GetRay(iTime, iResolution, fragCoord) in
+  let (ro, rd) = get_ray(iTime, iResolution, frag_coord) in
 
   -- Mouse ray for the brush-radius cursor indicator. iMouse.y arrives
   -- top-down from the host; flip to Shadertoy bottom-up to match
   -- fragCoord.
-  let (_, mrd) = GetRay(iTime, iResolution, @[iMouse.x, iResolution.y - iMouse.y]) in
+  let (_, mrd) = get_ray(iTime, iResolution, @[iMouse.x, iResolution.y - iMouse.y]) in
   let cursor = mouse_world_pos(ro, mrd, DEFAULT_HEIGHT) in
 
   -- Fixed sun direction.
   let sun = normalize(@[0.0 - 1.0, 0.4, 0.05]) in
 
-  let fogColor = 1.0 - vec.exp(SkyColor(rd, sun) * (0.0 - 2.0)) in
+  let fog_color = 1.0 - vec.exp(sky_color(rd, sun) * (0.0 - 2.0)) in
 
-  let (t, normal0, material, _) = march(ro, rd, tex_b, samp) in
+  let (t, normal0, material, _) = march(ro, rd) in
 
   let color_shaded =
     if t < 0.0 then
       -- Sky
-      let y_frac = fragCoord.y / iResolution.y in
+      let y_frac = frag_coord.y / iResolution.y in
       let k = 1.0 + y_frac * y_frac * y_frac * 3.0 in
-      fogColor * @[k * 0.5, k * 0.5, k * 0.5]
+      fog_color * @[k * 0.5, k * 0.5, k * 0.5]
     else
       let pos = ro + rd * t in
-      let uv_map = GetUV(pos) in
+      let uv_map = get_uv(pos) in
       let (h_terrain, normal_terrain, erosion, ridgemap, trees) =
-        map_full(tex_b, samp, iResolution, uv_map) in
+        map_full(iResolution, uv_map) in
       let drainage = clamp01((1.0 - clamp01(ridgemap / DRAINAGE_WIDTH)) * 1.5) in
       let diff_h = pos.y - h_terrain in
 
       -- Detail texture sample
-      let breakupTex = texture_sample(tex_c, samp, uv_map, 0.0) in
-      let breakup = breakupTex.x in
+      let breakup_tex = sample_detail(uv_map) in
+      let breakup = breakup_tex.x in
 
       let f0 = v3(0.04) in
 
@@ -671,16 +684,16 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       let normal_base =
         if material == M_GROUND then normal_terrain
         else if material == M_WATER then
-          let n_perturbed = @[normal0.x + breakupTex.z * 0.1,
+          let n_perturbed = @[normal0.x + breakup_tex.z * 0.1,
                               normal0.y,
-                              normal0.z + breakupTex.y * 0.1] in
+                              normal0.z + breakup_tex.y * 0.1] in
           normalize(n_perturbed)
         else normal0 in
 
       let smoothness = if material == M_WATER then 0.95 else 0.0 in
 
       -- Material color.
-      let diffuseColor_raw =
+      let diffuse_color_raw =
         if material == M_GROUND then
           let occlusion = clamp01(erosion + 0.5) in
           let c1 = CLIFF_COLOR * smoothstep(0.4, 0.52, pos.y) in
@@ -688,14 +701,14 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
           let c3 = mix(c2, v3(1.0), smoothstep(0.53, 0.6, pos.y + breakup * 0.1)) in
           let c4 = mix(c3, SAND_COLOR,
                        smoothstep(WATER_HEIGHT + 0.005, WATER_HEIGHT, pos.y + breakup * 0.01)) in
-          let grassMix = mix(GRASS_COLOR1, GRASS_COLOR2,
+          let grass_mix = mix(GRASS_COLOR1, GRASS_COLOR2,
                               smoothstep(0.4, 0.6, pos.y - erosion * 0.05 + breakup * 0.3)) in
           let grass_mask =
             smoothstep(GRASS_HEIGHT + 0.05, GRASS_HEIGHT + 0.02,
                        pos.y + 0.01 + (occlusion - 0.8) * 0.05 - breakup * 0.02)
             * smoothstep(0.8, 1.0,
                          1.0 - (1.0 - normal_base.y) * (1.0 - trees) + breakup * 0.1) in
-          let c5 = mix(c4, grassMix, grass_mask) in
+          let c5 = mix(c4, grass_mix, grass_mask) in
           let c6 = mix(c5, TREE_COLOR * (trees ** 8.0),
                        clamp01(trees * 2.2 - 0.8) * 0.6) in
           let c7 = c6 * (1.0 + breakup * 0.5) in
@@ -719,19 +732,19 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       -- Brush-radius cursor indicator. Two cyan rings (inner at
       -- BRUSH_SIZE*0.2, outer at BRUSH_SIZE) drawn while the mouse is
       -- held, skipping cliff faces so they don't smear over strata.
-      let diffuseColor =
+      let diffuse_color =
         if iMouse.z > 0.0 && material != M_STRATA then
-          let cursorDist = distance(pos.xz, cursor.xz) in
-          let val = 1.0 - clamp01(min(200.0 * abs(cursorDist - BRUSH_SIZE * 0.2),
-                                       0.5 + 200.0 * abs(cursorDist - BRUSH_SIZE))) in
-          mix(diffuseColor_raw, @[0.0, 1.0, 1.0], val)
-        else diffuseColor_raw in
+          let cursor_dist = distance(pos.xz, cursor.xz) in
+          let val = 1.0 - clamp01(min(200.0 * abs(cursor_dist - BRUSH_SIZE * 0.2),
+                                       0.5 + 200.0 * abs(cursor_dist - BRUSH_SIZE))) in
+          mix(diffuse_color_raw, @[0.0, 1.0, 1.0], val)
+        else diffuse_color_raw in
 
       -- Shadow ray.
       let shadow =
         if material != M_STRATA then
           let ro_shadow = pos + @[0.0, 1.0, 0.0] * @[1e-4, 1e-4, 1e-4] in
-          let (_, _, _, s_t) = march(ro_shadow, sun, tex_b, samp) in
+          let (_, _, _, s_t) = march(ro_shadow, sun) in
           1.0 - exp((0.0 - s_t) * 20.0)
         else 1.0 in
 
@@ -739,23 +752,23 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
       let neg_rd = @[0.0 - rd.x, 0.0 - rd.y, 0.0 - rd.z] in
       let r = reflect(rd, normal_base) in
 
-      let ambient = diffuseColor * SkyColor(normal_base, sun) * Fd_Lambert in
+      let ambient = diffuse_color * sky_color(normal_base, sun) * Fd_Lambert in
       let ambient2 = ambient * occlusion in
-      let direct = Shade(diffuseColor, f0, smoothness, normal_base, neg_rd, sun,
+      let direct = Shade(diffuse_color, f0, smoothness, normal_base, neg_rd, sun,
                          SUN_COLOR * shadow) in
       let bounce_dot = dot(normal_base, sun * @[1.0, 0.0 - 1.0, 1.0]) * 0.5 + 0.5 in
-      let bounce = diffuseColor * SUN_COLOR * (bounce_dot * Fd_Lambert / pi) in
+      let bounce = diffuse_color * SUN_COLOR * (bounce_dot * Fd_Lambert / pi) in
 
       -- Reflection: trace a secondary ray, fall back to sky.
-      let (_, _, _, r_t) = march(pos, r, tex_b, samp) in
-      let refl_color = SkyColor(r, sun) * 4.0 * (1.0 - exp((0.0 - r_t) * 10.0 * sq(smoothness))) in
+      let (_, _, _, r_t) = march(pos, r) in
+      let refl_color = sky_color(r, sun) * 4.0 * (1.0 - exp((0.0 - r_t) * 10.0 * sq(smoothness))) in
       let fres = F_Schlick_v(f0, dot(neg_rd, normal_base)) in
       let reflection = refl_color * fres in
 
       ambient2 + direct + bounce + reflection in
 
   -- Atmosphere over everything.
-  let color_atmos = AtmosphereShade(ro, rd, t, sun, color_shaded) in
+  let color_atmos = atmosphere_shade(ro, rd, t, sun, color_shaded) in
 
   -- Tonemap + gamma + dither. The original samples Shadertoy's
   -- iChannel2 noise texture / 255 for the dither; we approximate with
@@ -763,11 +776,10 @@ def fragment_main(pos_in: vec4f32, tex_b: texture2d, tex_c: texture2d,
   -- regions the same way.
   let tm = Tonemap_ACES(color_atmos) in
   let gamma = @[tm.x ** (1.0 / 2.2), tm.y ** (1.0 / 2.2), tm.z ** (1.0 / 2.2)] in
-  let dither = (hash2(fragCoord).x * 0.5 + 0.5) / 255.0 in
+  let dither = (hash2(frag_coord).x * 0.5 + 0.5) / 255.0 in
   @[gamma.x + dither, gamma.y + dither, gamma.z + dither, 1.0]
 
 entry mountains(
-    tex_b: texture2d, tex_c: texture2d, samp: sampler,
     iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
@@ -775,5 +787,4 @@ entry mountains(
     vertex_main) in
   shade(screen, covered,
     |fragment|
-      fragment_main(fragment.position, tex_b, tex_c, samp,
-                    iResolution, iTime, iMouse))
+      fragment_main(fragment.position, iResolution, iTime, iMouse))

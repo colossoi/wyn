@@ -67,6 +67,9 @@ function Invoke-NativeCaptured {
 $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 $executableSuffix = if ($isWindowsHost) { '.exe' } else { '' }
+if (-not $env:RUST_MIN_STACK) {
+    $env:RUST_MIN_STACK = '67108864'
+}
 $wynBinary = Join-Path $workspace "target/release/wyn$executableSuffix"
 $vizBinary = Join-Path $workspace "extra/viz/target/release/viz$executableSuffix"
 $outputDirectory = Join-Path $workspace 'tmp/playground'
@@ -78,9 +81,16 @@ try {
     Invoke-NativeChecked cargo @(
         'build', '--release', '--package', 'wyn', '--bin', 'wyn'
     ) 'Wyn build'
-    Invoke-NativeChecked cargo @(
-        'build', '--release', '--manifest-path', 'extra/viz/Cargo.toml'
-    ) 'viz build'
+    if ($isWindowsHost) {
+        Invoke-NativeChecked cargo @(
+            'rustc', '--release', '--manifest-path', 'extra/viz/Cargo.toml', '--bin', 'viz',
+            '--', '-C', "link-arg=/STACK:$env:RUST_MIN_STACK"
+        ) 'viz build'
+    } else {
+        Invoke-NativeChecked cargo @(
+            'build', '--release', '--manifest-path', 'extra/viz/Cargo.toml'
+        ) 'viz build'
+    }
 
     $null = New-Item -ItemType Directory -Force -Path $outputDirectory
     $files = @(
@@ -92,13 +102,14 @@ try {
     $results = foreach ($file in $files) {
         $name = $file.BaseName
         $spv = Join-Path $outputDirectory "$name.spv"
+        $vizConfig = Join-Path $file.DirectoryName "$name.viz.json"
 
         Write-Host ''
         Write-Host "=== $name ==="
-        Write-Host "$wynBinary compile $($file.FullName) --graphics -o $spv"
-        $compile = Invoke-NativeCaptured $wynBinary @(
-            'compile', $file.FullName, '--graphics', '-o', $spv
-        )
+        $compileArguments = @('compile', $file.FullName, '--graphics', '--direct', '-o', $spv)
+
+        Write-Host "$wynBinary $($compileArguments -join ' ')"
+        $compile = Invoke-NativeCaptured $wynBinary $compileArguments
 
         if ($compile.ExitCode -ne 0) {
             $compile.Output | ForEach-Object { Write-Host $_ }
@@ -107,6 +118,9 @@ try {
         }
 
         $vizArguments = @('pipeline', $spv)
+        if (Test-Path -LiteralPath $vizConfig -PathType Leaf) {
+            $vizArguments += @('--config', $vizConfig)
+        }
         if (-not $Wait) {
             $vizArguments += '--max-frames=15'
         }

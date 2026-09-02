@@ -965,12 +965,23 @@ pub struct StorageTextureResource {
 /// parity; the write binding at `(write_set, write_binding)` is bound
 /// to the slot AT the current parity. The host increments parity each
 /// frame so what was "current" becomes "previous" for next frame.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct FeedbackPair {
     pub read_set: u32,
     pub read_binding: u32,
     pub write_set: u32,
     pub write_binding: u32,
+    pub initial: FeedbackInit,
+}
+
+/// Initial contents copied into both slots of a feedback buffer before frame
+/// zero. File-backed data is loaded while resolving the sidecar so GPU setup
+/// remains independent of filesystem paths.
+#[derive(Debug, Clone)]
+pub enum FeedbackInit {
+    Zero,
+    Rng,
+    Bytes(Vec<u8>),
 }
 
 /// Walk every pipeline's bindings, allocate one `wgpu::Texture` per
@@ -1428,7 +1439,7 @@ pub fn create_host_buffers(
     Ok(out)
 }
 
-/// A ping-pong storage-buffer pair backing a `--feedback` spec where
+/// A ping-pong storage-buffer pair backing a sidecar feedback spec where
 /// both sides are `Binding::StorageBuffer`. Keyed in the host pool by
 /// the WRITE side's `(set, binding)`; the two `wgpu::Buffer`s alternate
 /// roles each frame (parity slot = current write target, opposite
@@ -1455,6 +1466,7 @@ pub fn create_feedback_buffers(
     device: &wgpu::Device,
     descriptor: &PipelineDescriptor,
     buffer_feedback_pairs: &[FeedbackPair],
+    dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
 ) -> Result<HashMap<(u32, u32), FeedbackBufferResource>> {
     let mut out: HashMap<(u32, u32), FeedbackBufferResource> = HashMap::new();
     for pair in buffer_feedback_pairs {
@@ -1487,7 +1499,7 @@ pub fn create_feedback_buffers(
         }
         let write_b = write_binding_desc.ok_or_else(|| {
             anyhow!(
-                "--feedback buffer pair write side ({}, {}) names no \
+                "feedback buffer pair write side ({}, {}) names no \
                  storage_buffer binding on any compute pipeline",
                 write_key.0,
                 write_key.1,
@@ -1495,7 +1507,7 @@ pub fn create_feedback_buffers(
         })?;
         let stage = owning_stage.ok_or_else(|| {
             anyhow!(
-                "--feedback buffer pair write side ({}, {}): no compute stage \
+                "feedback buffer pair write side ({}, {}): no compute stage \
                  declares it in `writes`; the producer must populate \
                  `ComputeStage.writes` so the host can size `SameAsDispatch` \
                  from the writer's dispatch.",
@@ -1509,7 +1521,7 @@ pub fn create_feedback_buffers(
         };
         let length = length.ok_or_else(|| {
             anyhow!(
-                "--feedback buffer pair write side '{}' ({}, {}) has no `length` policy in \
+                "feedback buffer pair write side '{}' ({}, {}) has no `length` policy in \
                  the descriptor; both ping-pong slots need a concrete byte size",
                 name,
                 write_key.0,
@@ -1520,22 +1532,40 @@ pub fn create_feedback_buffers(
         let byte_size: u64 = match &length {
             wyn_pipeline_descriptor::BufferLen::Fixed { bytes } => *bytes,
             wyn_pipeline_descriptor::BufferLen::SameAsDispatch { elem_bytes } => {
-                let (gx, gy, gz) = resolve_dispatch_size(&stage.dispatch_size, &HashMap::new(), &[]);
-                let wg = match stage.dispatch_size {
-                    DispatchSize::DerivedFrom { workgroup_size, .. } => workgroup_size,
-                    DispatchSize::Fixed { .. } => 1,
+                let threads = if let Some(&(x, y, z)) = dispatch_overrides.get(&stage.entry_point) {
+                    x as u64 * y as u64 * z as u64
+                } else {
+                    let (gx, gy, gz) = resolve_dispatch_size(&stage.dispatch_size, &HashMap::new(), &[]);
+                    let (wx, wy, wz) = stage.workgroup_size;
+                    gx as u64 * gy as u64 * gz as u64 * wx as u64 * wy as u64 * wz as u64
                 };
-                let threads = (gx as u64) * (gy as u64) * (gz as u64) * (wg as u64);
                 (threads * *elem_bytes as u64).max(4)
             }
             wyn_pipeline_descriptor::BufferLen::LikeInput { .. } => {
                 return Err(anyhow!(
-                    "--feedback buffer pair write side '{}' ({}, {}) uses `LikeInput` \
+                    "feedback buffer pair write side '{}' ({}, {}) uses `LikeInput` \
                      sizing; not supported yet — declare a `Fixed` or `SameAsDispatch` \
                      length, or wire input-byte-size lookup into create_feedback_buffers",
                     name,
                     write_key.0,
                     write_key.1,
+                ));
+            }
+        };
+
+        let initial = match &pair.initial {
+            FeedbackInit::Zero => vec![0; byte_size as usize],
+            FeedbackInit::Rng => buffer_init_bytes(BufferInit {
+                bytes: byte_size,
+                spec: BufferInitSpec::Rng,
+            }),
+            FeedbackInit::Bytes(bytes) if bytes.len() as u64 == byte_size => bytes.clone(),
+            FeedbackInit::Bytes(bytes) => {
+                return Err(anyhow!(
+                    "feedback initial file has {} bytes, but '{}': result buffer requires {} bytes",
+                    bytes.len(),
+                    name,
+                    byte_size
                 ));
             }
         };
@@ -1549,8 +1579,10 @@ pub fn create_feedback_buffers(
                     | BufferUsages::INDIRECT
                     | BufferUsages::COPY_DST
                     | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
+                mapped_at_creation: true,
             });
+            buffer.slice(..).get_mapped_range_mut().copy_from_slice(&initial);
+            buffer.unmap();
             buffers.push(buffer);
         }
         out.insert(write_key, FeedbackBufferResource { buffers });
@@ -1688,7 +1720,7 @@ pub fn build_resource_bind_group_for_set(
                 //   1. `backing` set — a compiler-managed `resource` sampled
                 //      view: sample the named storage allocation (current or,
                 //      for `previous`, opposite parity).
-                //   2. `--feedback` compatibility read with no `backing`:
+                //   2. sidecar feedback read with no `backing`:
                 //      sample the write side's storage texture at the
                 //      opposite parity.
                 //   3. otherwise — a shared-binding handoff or a host-uploaded
@@ -1898,7 +1930,7 @@ pub fn build_resource_bind_group_for_set(
                         anyhow!(
                             "storage buffer at ({}, {}) is not in the host-uploaded \
                              pool (e.g. `keyboard`) nor any feedback pair; declare it \
-                             host-uploaded or wire a `--feedback` spec for it",
+                             host-uploaded or wire it through a .viz.json feedback spec",
                             bset,
                             binding
                         )

@@ -18,11 +18,28 @@ use serde::{Deserialize, Serialize};
 pub struct PipelineDescriptor {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
+    /// Storage bindings that implement authored entry results. This preserves
+    /// source-level result identity independently of generated binding names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_results: Vec<SourceResultBinding>,
     /// Descriptor-derived pass/resource DAG. The compiler rebuilds this after
     /// binding publication so host runtimes can drive scheduling and allocation
     /// from data dependencies instead of hand-authored pass lists.
     #[serde(default, skip_serializing_if = "FrameGraph::is_empty")]
     pub frame_graph: FrameGraph,
+}
+
+/// The descriptor binding that stores one top-level result of an authored
+/// entry. `result` is the zero-based source result slot (a non-tuple return is
+/// slot 0); `pipeline_index` locates the binding table containing `(set,
+/// binding)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceResultBinding {
+    pub entry: String,
+    pub result: usize,
+    pub pipeline_index: usize,
+    pub set: u32,
+    pub binding: u32,
 }
 
 impl PipelineDescriptor {
@@ -40,9 +57,6 @@ pub struct FrameGraph {
     pub passes: Vec<FramePass>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<FrameResource>,
-    /// Ping-pong/history pairs resolved to logical frame-graph resources.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub feedback: Vec<FrameFeedback>,
     /// Draw passes and the command buffers that supply their indirect parameters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indirect_draws: Vec<IndirectDrawDependency>,
@@ -50,10 +64,7 @@ pub struct FrameGraph {
 
 impl FrameGraph {
     pub fn is_empty(&self) -> bool {
-        self.passes.is_empty()
-            && self.resources.is_empty()
-            && self.feedback.is_empty()
-            && self.indirect_draws.is_empty()
+        self.passes.is_empty() && self.resources.is_empty() && self.indirect_draws.is_empty()
     }
 
     /// An execution order satisfying every `depends_on`, or the passes that lie
@@ -101,26 +112,13 @@ impl FrameGraph {
             }
         }
 
-        for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
-            match pipeline {
-                Pipeline::Compute(compute) => {
-                    builder.publish_feedback(pipeline_index, &compute.bindings, &compute.feedback);
-                }
-                Pipeline::Graphics(graphics) => {
-                    builder.publish_feedback(pipeline_index, &graphics.bindings, &graphics.feedback);
-                }
-            }
-        }
-
         let mut last_writer = vec![None; builder.graph.resources.len()];
         let mut last_readers = vec![BTreeSet::new(); builder.graph.resources.len()];
         for (pipeline_index, pipeline) in pipelines.iter().enumerate() {
             match pipeline {
                 Pipeline::Compute(compute) => {
-                    let feedback_reads = feedback_read_slots(&compute.feedback);
                     for (stage_index, stage) in compute.stages.iter().enumerate() {
-                        let accesses =
-                            builder.compute_stage_accesses(pipeline_index, compute, stage, &feedback_reads);
+                        let accesses = builder.compute_stage_accesses(pipeline_index, compute, stage);
                         builder.push_pass(
                             FramePassKind::Compute,
                             stage.entry_point.clone(),
@@ -135,7 +133,6 @@ impl FrameGraph {
                     }
                 }
                 Pipeline::Graphics(graphics) => {
-                    let feedback_reads = feedback_read_slots(&graphics.feedback);
                     // Each `#[target(name)]` fragment output writes a render
                     // resource, keyed by name as a texture so it shares identity
                     // with any downstream pass that samples it. Attributed to the
@@ -145,7 +142,6 @@ impl FrameGraph {
                         .iter()
                         .map(|output| FrameAccess {
                             resource: builder.ensure_named(FrameResourceKind::Texture, &output.name),
-                            role: FrameAccessRole::Current,
                         })
                         .collect();
                     let indirect_resource = graphics.invocation.draw.indirect_commands().map(|buffer| {
@@ -155,21 +151,14 @@ impl FrameGraph {
                         builder.ensure_named(FrameResourceKind::StorageBuffer, buffer.frame_name())
                     });
                     for (stage_index, stage) in graphics.stages.iter().enumerate() {
-                        let accesses = builder.stage_accesses(
-                            pipeline_index,
-                            &graphics.bindings,
-                            &stage.uses,
-                            &feedback_reads,
-                        );
+                        let accesses =
+                            builder.stage_accesses(pipeline_index, &graphics.bindings, &stage.uses);
                         let is_vertex = matches!(stage.stage, ShaderStage::Vertex);
                         let mut stage_reads = accesses.reads;
                         if is_vertex {
                             for resource in [indirect_resource, index_resource].into_iter().flatten() {
                                 if !stage_reads.iter().any(|access| access.resource == resource) {
-                                    stage_reads.push(FrameAccess {
-                                        resource,
-                                        role: FrameAccessRole::Current,
-                                    });
+                                    stage_reads.push(FrameAccess { resource });
                                 }
                             }
                         }
@@ -240,22 +229,6 @@ impl FramePassKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameAccess {
     pub resource: usize,
-    #[serde(default, skip_serializing_if = "FrameAccessRole::is_current")]
-    pub role: FrameAccessRole,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FrameAccessRole {
-    #[default]
-    Current,
-    Previous,
-}
-
-impl FrameAccessRole {
-    fn is_current(&self) -> bool {
-        matches!(self, FrameAccessRole::Current)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,8 +243,6 @@ pub struct FrameResource {
     pub first_pass: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pass: Option<usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<FrameHistoryRole>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -316,29 +287,6 @@ pub enum FrameResourceExtent {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct FrameHistoryRole {
-    pub feedback: usize,
-    pub role: FrameHistoryRoleKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FrameHistoryRoleKind {
-    ReadPrevious,
-    WriteCurrent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FrameFeedback {
-    pub pipeline_index: usize,
-    pub pair: FeedbackPair,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read_resource: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub write_resource: Option<usize>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct IndirectDrawDependency {
     pub draw_pass: usize,
     pub buffer_resource: usize,
@@ -378,22 +326,6 @@ pub struct ComputePipeline {
     /// it remains dynamic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_total_threads: Option<std::num::NonZeroU32>,
-    /// Ping-pong feedback pairs: each entry's `read` slot samples the previous
-    /// frame of its `write` slot (a `history` resource's `previous` view). The
-    /// runtime double-buffers and swaps each frame — the declarative form of a
-    /// `--feedback ENTRY:READ=WRITE` flag.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub feedback: Vec<FeedbackPair>,
-}
-
-/// A ping-pong feedback pair within a pipeline: the read slot samples the
-/// previous frame of the write slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FeedbackPair {
-    pub read_set: u32,
-    pub read_binding: u32,
-    pub write_set: u32,
-    pub write_binding: u32,
 }
 
 /// The `(set, binding)` of a `StorageTexture` allocation that a sampled
@@ -478,9 +410,6 @@ pub struct GraphicsPipeline {
     pub bindings: Vec<Binding>,
     pub vertex_inputs: Vec<VertexAttribute>,
     pub fragment_outputs: Vec<FragmentOutput>,
-    /// Ping-pong feedback pairs (see `ComputePipeline::feedback`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub feedback: Vec<FeedbackPair>,
 }
 
 /// The source-level rasterization request associated with one graphics pipeline.
@@ -883,9 +812,8 @@ pub enum Binding {
     /// `backing`, when present, names the `StorageTexture` binding whose
     /// allocation this is a sampled *view* of — a `resource`'s `sampled`
     /// view aliasing its `storage_write` allocation. The runtime binds this
-    /// slot to that allocation's sampled view (current frame); a previous
-    /// view of the same allocation is additionally listed in `feedback`.
-    /// `None` is a host-provided / external texture.
+    /// slot to that allocation's sampled view. `None` is a host-provided /
+    /// external texture.
     Texture {
         set: u32,
         binding: u32,
@@ -1066,7 +994,6 @@ impl FrameGraphBuilder {
                 extent: binding_extent(binding),
                 first_pass: None,
                 last_pass: None,
-                history: Vec::new(),
             });
             index
         };
@@ -1142,64 +1069,8 @@ impl FrameGraphBuilder {
             extent: None,
             first_pass: None,
             last_pass: None,
-            history: Vec::new(),
         });
         index
-    }
-
-    fn publish_feedback(&mut self, pipeline_index: usize, bindings: &[Binding], pairs: &[FeedbackPair]) {
-        for pair in pairs {
-            let read_resource =
-                self.resource_for_slot(pipeline_index, bindings, pair.read_set, pair.read_binding);
-            let write_resource =
-                self.resource_for_slot(pipeline_index, bindings, pair.write_set, pair.write_binding);
-            let feedback_index = self.graph.feedback.len();
-            if let Some(resource) = read_resource {
-                self.push_history_role(
-                    resource,
-                    FrameHistoryRole {
-                        feedback: feedback_index,
-                        role: FrameHistoryRoleKind::ReadPrevious,
-                    },
-                );
-            }
-            if let Some(resource) = write_resource {
-                self.push_history_role(
-                    resource,
-                    FrameHistoryRole {
-                        feedback: feedback_index,
-                        role: FrameHistoryRoleKind::WriteCurrent,
-                    },
-                );
-            }
-            self.graph.feedback.push(FrameFeedback {
-                pipeline_index,
-                pair: *pair,
-                read_resource,
-                write_resource,
-            });
-        }
-    }
-
-    fn push_history_role(&mut self, resource: usize, role: FrameHistoryRole) {
-        let roles = &mut self.graph.resources[resource].history;
-        if !roles.iter().any(|existing| existing.feedback == role.feedback && existing.role == role.role) {
-            roles.push(role);
-        }
-    }
-
-    fn resource_for_slot(
-        &mut self,
-        pipeline_index: usize,
-        bindings: &[Binding],
-        set: u32,
-        binding: u32,
-    ) -> Option<usize> {
-        bindings
-            .iter()
-            .enumerate()
-            .find(|(_, candidate)| candidate.slot() == Some((set, binding)))
-            .map(|(binding_index, candidate)| self.ensure_binding(pipeline_index, binding_index, candidate))
     }
 
     fn compute_stage_accesses(
@@ -1207,9 +1078,8 @@ impl FrameGraphBuilder {
         pipeline_index: usize,
         compute: &ComputePipeline,
         stage: &ComputeStage,
-        feedback_reads: &BTreeSet<(u32, u32)>,
     ) -> StageAccesses {
-        self.stage_accesses(pipeline_index, &compute.bindings, &stage.uses, feedback_reads)
+        self.stage_accesses(pipeline_index, &compute.bindings, &stage.uses)
     }
 
     fn stage_accesses(
@@ -1217,17 +1087,10 @@ impl FrameGraphBuilder {
         pipeline_index: usize,
         bindings: &[Binding],
         uses: &StageBindingUses,
-        feedback_reads: &BTreeSet<(u32, u32)>,
     ) -> StageAccesses {
         let explicit_reads = (!uses.reads.is_empty()).then_some(uses.reads.as_slice());
         let explicit_writes = (!uses.writes.is_empty()).then_some(uses.writes.as_slice());
-        self.binding_table_accesses(
-            pipeline_index,
-            bindings,
-            explicit_reads,
-            explicit_writes,
-            feedback_reads,
-        )
+        self.binding_table_accesses(pipeline_index, bindings, explicit_reads, explicit_writes)
     }
 
     fn binding_table_accesses(
@@ -1236,7 +1099,6 @@ impl FrameGraphBuilder {
         bindings: &[Binding],
         explicit_reads: Option<&[usize]>,
         explicit_writes: Option<&[usize]>,
-        feedback_reads: &BTreeSet<(u32, u32)>,
     ) -> StageAccesses {
         let explicit = explicit_reads.is_some() || explicit_writes.is_some();
         let mut accesses = StageAccesses::default();
@@ -1244,13 +1106,7 @@ impl FrameGraphBuilder {
         if explicit {
             for index in explicit_reads.into_iter().flatten().copied() {
                 if let Some(binding) = bindings.get(index) {
-                    self.push_read(
-                        &mut accesses.reads,
-                        pipeline_index,
-                        index,
-                        binding,
-                        feedback_reads,
-                    );
+                    self.push_read(&mut accesses.reads, pipeline_index, index, binding);
                 }
             }
             for index in explicit_writes.into_iter().flatten().copied() {
@@ -1277,13 +1133,7 @@ impl FrameGraphBuilder {
             }
             let (read, write) = binding_declared_access(binding);
             if read {
-                self.push_read(
-                    &mut accesses.reads,
-                    pipeline_index,
-                    index,
-                    binding,
-                    feedback_reads,
-                );
+                self.push_read(&mut accesses.reads, pipeline_index, index, binding);
             }
             if write {
                 let resource = self.push_write(&mut accesses.writes, pipeline_index, index, binding);
@@ -1302,15 +1152,9 @@ impl FrameGraphBuilder {
         pipeline_index: usize,
         binding_index: usize,
         binding: &Binding,
-        feedback_reads: &BTreeSet<(u32, u32)>,
     ) {
         let resource = self.ensure_binding(pipeline_index, binding_index, binding);
-        let role = if binding.slot().is_some_and(|slot| feedback_reads.contains(&slot)) {
-            FrameAccessRole::Previous
-        } else {
-            FrameAccessRole::Current
-        };
-        push_unique_access(reads, FrameAccess { resource, role });
+        push_unique_access(reads, FrameAccess { resource });
     }
 
     fn push_write(
@@ -1321,13 +1165,7 @@ impl FrameGraphBuilder {
         binding: &Binding,
     ) -> usize {
         let resource = self.ensure_binding(pipeline_index, binding_index, binding);
-        push_unique_access(
-            writes,
-            FrameAccess {
-                resource,
-                role: FrameAccessRole::Current,
-            },
-        );
+        push_unique_access(writes, FrameAccess { resource });
         resource
     }
 
@@ -1377,10 +1215,8 @@ impl FrameGraphBuilder {
 
         let mut depends_on = BTreeSet::new();
         for access in &reads {
-            if access.role == FrameAccessRole::Current {
-                if let Some(writer) = last_writer[access.resource] {
-                    depends_on.insert(writer);
-                }
+            if let Some(writer) = last_writer[access.resource] {
+                depends_on.insert(writer);
             }
         }
         for access in &writes {
@@ -1401,9 +1237,7 @@ impl FrameGraphBuilder {
             self.producers.entry(resource).or_default().insert(pass_index);
         }
         for access in &reads {
-            if access.role == FrameAccessRole::Current {
-                self.readers.entry(access.resource).or_default().insert(pass_index);
-            }
+            self.readers.entry(access.resource).or_default().insert(pass_index);
         }
         for access in reads.iter().chain(writes.iter()) {
             let resource = &mut self.graph.resources[access.resource];
@@ -1416,9 +1250,7 @@ impl FrameGraphBuilder {
             last_readers[access.resource].clear();
         }
         for access in &reads {
-            if access.role == FrameAccessRole::Current
-                && !writes.iter().any(|write| write.resource == access.resource)
-            {
+            if !writes.iter().any(|write| write.resource == access.resource) {
                 last_readers[access.resource].insert(pass_index);
             }
         }
@@ -1470,9 +1302,9 @@ fn resource_key(pipeline_index: usize, binding: &Binding) -> ResourceKey {
             // with the resource's storage views and with the fragment
             // `#[target(name)]` that writes it — a sampled view records the
             // storage allocation it aliases in `backing`, but the name is the
-            // identity. A view carrying only a `backing` (a `previous` frame of
-            // a history resource) keys to that slot. A plain sampled texture is
-            // one logical resource by name across its readers.
+            // identity. A view carrying only a `backing` keys to that storage
+            // slot. A plain sampled texture is one logical resource by name
+            // across its readers.
             match (resource, backing) {
                 (Some(resource), _) => ResourceKey::Named {
                     kind: FrameResourceKind::Texture,
@@ -1650,10 +1482,6 @@ fn binding_declared_access(binding: &Binding) -> (bool, bool) {
         | Binding::Texture { .. }
         | Binding::Sampler { .. } => (true, false),
     }
-}
-
-fn feedback_read_slots(feedback: &[FeedbackPair]) -> BTreeSet<(u32, u32)> {
-    feedback.iter().map(|pair| (pair.read_set, pair.read_binding)).collect()
 }
 
 fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {

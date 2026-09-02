@@ -318,8 +318,8 @@ module type carrier = { type t }
 -- operators are overloaded per primitive type; inside this functor
 -- `a + b` etc. are resolved against the concrete `t` supplied by the
 -- carrier at instantiation, so each concrete integer module
--- (`i8`, `i32`, …) is just `IntegralOps(<carrier>)`.
-functor IntegralOps(B: carrier) = {
+-- (`i8`, `i32`, …) is just `integral_ops(<carrier>)`.
+functor integral_ops(B: carrier) = {
   type t = B.t
   def (+)(a: t, b: t) t = a + b
   def (-)(a: t, b: t) t = a - b
@@ -344,28 +344,28 @@ functor IntegralOps(B: carrier) = {
 -- current GPU backends, so prefer `i32` unless you specifically
 -- need 8-bit storage.
 module i8_t  = { type t = i8  }
-module i8 : (integral with t = i8) = IntegralOps(i8_t)
+module i8 : (integral with t = i8) = integral_ops(i8_t)
 module i16_t = { type t = i16 }
-module i16 : (integral with t = i16) = IntegralOps(i16_t)
+module i16 : (integral with t = i16) = integral_ops(i16_t)
 
 -- | The default integer type. Pick this unless you need a specific
 -- width — `iota`, range syntax `a..<b`, and array indexing all use
 -- `i32`.
 module i32_t = { type t = i32 }
-module i32 : (integral with t = i32) = IntegralOps(i32_t)
+module i32 : (integral with t = i32) = integral_ops(i32_t)
 module i64_t = { type t = i64 }
-module i64 : (integral with t = i64) = IntegralOps(i64_t)
+module i64 : (integral with t = i64) = integral_ops(i64_t)
 module u8_t  = { type t = u8  }
-module u8 : (integral with t = u8) = IntegralOps(u8_t)
+module u8 : (integral with t = u8) = integral_ops(u8_t)
 module u16_t = { type t = u16 }
-module u16 : (integral with t = u16) = IntegralOps(u16_t)
+module u16 : (integral with t = u16) = integral_ops(u16_t)
 
 -- | Unsigned 32-bit integer. Used for bit-level work, hash state,
 -- and texture/buffer indices that cross the host boundary.
 module u32_t = { type t = u32 }
-module u32 : (integral with t = u32) = IntegralOps(u32_t)
+module u32 : (integral with t = u32) = integral_ops(u32_t)
 module u64_t = { type t = u64 }
-module u64 : (integral with t = u64) = IntegralOps(u64_t)
+module u64 : (integral with t = u64) = integral_ops(u64_t)
 
 -- | 64-bit float. **Not supported by every backend** — WGSL has
 -- no `f64`, and many SPIR-V profiles require the `Float64`

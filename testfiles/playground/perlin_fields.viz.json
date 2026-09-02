@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "feedback": [
+    {
+      "entry": "perlin_fields",
+      "input": "prev",
+      "result": 0,
+      "initial": {
+        "kind": "zero"
+      }
+    }
+  ]
+}

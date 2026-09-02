@@ -15,7 +15,7 @@
 --     @compute  w_fragment_Umain_Uprepass_U0_Uphase1_Uchunks (chunked Redomap)
 --     @compute  w_fragment_Umain_Uprepass_U0_Uphase2_Ucombine (reduce partials → scalar)
 --
--- Pass `--direct-wgsl` on the CLI to disable the lift; `breath` then
+-- Pass `--direct` on the CLI to disable the lift; `breath` then
 -- evaluates inline in each fragment invocation (every pixel runs the
 -- 512-point reduce every frame — noticeably slower).
 

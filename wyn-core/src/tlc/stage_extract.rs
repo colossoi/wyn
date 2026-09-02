@@ -2678,7 +2678,6 @@ fn stage_def(
                 type_params: vec![],
                 params: param_decls,
                 outputs,
-                feedback: vec![],
                 param_diets: vec![Diet::observing(); arity],
                 return_diet: Diet::observing(),
             }),

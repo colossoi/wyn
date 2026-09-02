@@ -79,7 +79,10 @@ entry main() i32 = direct_draw(7)
     .expect("a user definition should shadow the enabled graphics builtin");
 }
 
-fn plan_direct_wgsl(source: &str) -> Result<egir::parallelize::Planned, Box<dyn std::error::Error>> {
+fn plan_direct(
+    source: &str,
+    target: CodegenTarget,
+) -> Result<egir::parallelize::Planned, Box<dyn std::error::Error>> {
     let program = compile_thru_tlc(source)?;
     let program = tlc::infer_input_slice_bounds(program);
     let program = to_egraph(program)?;
@@ -90,7 +93,7 @@ fn plan_direct_wgsl(source: &str) -> Result<egir::parallelize::Planned, Box<dyn 
     let program = egir::plan_logical_resources_with_policy(program, topology)?;
     Ok(egir::plan(
         program,
-        LoweringProfile::with_topology(CodegenTarget::Wgsl, SchedulePolicy::Serial, topology),
+        LoweringProfile::with_topology(target, SchedulePolicy::Serial, topology),
     )?)
 }
 
@@ -104,36 +107,50 @@ fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
-fn direct_wgsl_emits_only_the_requested_graphics_stages() {
+fn direct_backends_emit_only_the_requested_graphics_stages() {
     run_with_large_stack(|| {
-        let planned = plan_direct_wgsl(include_str!("../../testfiles/unified_triangle.wyn"))
-            .expect("direct graphics plan");
-        let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
-        assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
-        assert!(
-            ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
-            "direct graphics output must not contain compute prepasses"
-        );
-        assert!(
-            ssa.global_context
-                .pipeline
-                .pipelines
-                .iter()
-                .all(|pipeline| { matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)) }),
-            "direct graphics output must publish only the requested graphics pipeline"
-        );
-        let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
-        assert_eq!(wgsl.matches("@vertex").count(), 1);
-        assert_eq!(wgsl.matches("@fragment").count(), 1);
-        assert!(!wgsl.contains("@compute"));
+        let source = include_str!("../../testfiles/unified_triangle.wyn");
+        for target in [CodegenTarget::Spirv, CodegenTarget::Wgsl] {
+            let planned = plan_direct(source, target).expect("direct graphics plan");
+            let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
+            assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
+            assert!(
+                ssa.entry_points.iter().all(|entry| !entry.execution_model.is_compute()),
+                "direct graphics output must not contain compute prepasses"
+            );
+            assert!(
+                ssa.global_context
+                    .pipeline
+                    .pipelines
+                    .iter()
+                    .all(|pipeline| { matches!(pipeline, pipeline_descriptor::Pipeline::Graphics(_)) }),
+                "direct graphics output must publish only the requested graphics pipeline"
+            );
+            match target {
+                CodegenTarget::Spirv => {
+                    let lowered = lower_ssa_to_spirv(ssa).expect("direct SPIR-V lowering");
+                    assert_naga_accepts_spirv(&lowered.spirv);
+                }
+                CodegenTarget::Wgsl => {
+                    let wgsl = lower_ssa_to_wgsl(ssa).expect("direct WGSL lowering");
+                    assert_eq!(wgsl.matches("@vertex").count(), 1);
+                    assert_eq!(wgsl.matches("@fragment").count(), 1);
+                    assert!(!wgsl.contains("@compute"));
+                }
+                CodegenTarget::Portable => unreachable!("test selects concrete backends"),
+            }
+        }
     });
 }
 
 #[test]
-fn direct_wgsl_keeps_fragment_local_reduce_in_the_authored_stage() {
+fn direct_output_keeps_fragment_local_reduce_in_the_authored_stage() {
     run_with_large_stack(|| {
-        let planned = plan_direct_wgsl(include_str!("../../testfiles/playground/ripples.wyn"))
-            .expect("fragment-local reduction should remain serial in direct WGSL");
+        let planned = plan_direct(
+            include_str!("../../testfiles/playground/ripples.wyn"),
+            CodegenTarget::Wgsl,
+        )
+        .expect("fragment-local reduction should remain serial in direct WGSL");
         let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
         assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
         assert!(
@@ -147,11 +164,103 @@ fn direct_wgsl_keeps_fragment_local_reduce_in_the_authored_stage() {
     });
 }
 
+fn assert_direct_computed_result_descriptor(descriptor: &pipeline_descriptor::PipelineDescriptor) {
+    use pipeline_descriptor::{Binding, BufferUsage, FramePassKind, Pipeline, ShaderStage};
+
+    assert_eq!(
+        descriptor.pipelines.len(),
+        2,
+        "one compute and one graphics pipeline"
+    );
+    let Pipeline::Compute(compute) = &descriptor.pipelines[0] else {
+        panic!("the authored result producer must be the first pipeline")
+    };
+    assert_eq!(
+        compute.stages.len(),
+        1,
+        "the authored compute pipeline has one stage"
+    );
+    assert_eq!(compute.stages[0].entry_point, "frame");
+    assert!(
+        !compute.stages[0].entry_point.contains("prepass_scalar"),
+        "direct lowering must not publish a scalar prepass"
+    );
+
+    let result = descriptor
+        .source_results
+        .iter()
+        .find(|result| result.entry == "frame" && result.result == 0)
+        .expect("computed array keeps its authored result binding");
+    assert_eq!(result.pipeline_index, 0);
+    let result_binding = compute
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { set, binding, .. }
+                if (*set, *binding) == (result.set, result.binding))
+        })
+        .expect("compute pipeline publishes the authored result binding");
+    assert!(
+        compute.stages[0].writes.contains(&result_binding),
+        "compute stage writes the authored result binding"
+    );
+
+    let Pipeline::Graphics(graphics) = &descriptor.pipelines[1] else {
+        panic!("the authored graphics pipeline must follow the compute pipeline")
+    };
+    let graphics_binding = graphics
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(binding, Binding::StorageBuffer { set, binding, .. }
+                if (*set, *binding) == (result.set, result.binding))
+        })
+        .expect("graphics pipeline reads the authored result binding");
+    let fragment = graphics
+        .stages
+        .iter()
+        .find(|stage| matches!(stage.stage, ShaderStage::Fragment))
+        .expect("fragment stage");
+    assert!(fragment.reads.contains(&graphics_binding));
+
+    assert!(descriptor.pipelines.iter().all(|pipeline| {
+        let bindings = match pipeline {
+            Pipeline::Compute(pipeline) => &pipeline.bindings,
+            Pipeline::Graphics(pipeline) => &pipeline.bindings,
+        };
+        bindings.iter().all(|binding| {
+            !matches!(
+                binding,
+                Binding::StorageBuffer {
+                    usage: BufferUsage::Intermediate,
+                    ..
+                }
+            )
+        })
+    }));
+
+    let compute_pass = descriptor
+        .frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.pipeline_index == 0 && pass.kind == FramePassKind::Compute)
+        .expect("compute pass");
+    let fragment_pass = descriptor
+        .frame_graph
+        .passes
+        .iter()
+        .position(|pass| pass.pipeline_index == 1 && pass.kind == FramePassKind::Fragment)
+        .expect("fragment pass");
+    assert!(
+        descriptor.frame_graph.passes[fragment_pass].depends_on.contains(&compute_pass),
+        "fragment pass must depend on the authored compute result"
+    );
+}
+
 #[test]
-fn direct_wgsl_rejects_a_cross_stage_materialization() {
+fn direct_output_shares_an_authored_computed_result_with_fragment_shading() {
     run_with_large_stack(|| {
-        let error = plan_direct_wgsl(
-            r#"
+        let source = r#"
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(
     if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
@@ -160,18 +269,32 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
     @[0.0, 0.0])
 
 entry frame(xs: []f32,
-            screen: render_target<vec4f32>) render_target<vec4f32> =
+            screen: render_target<vec4f32>)
+    ([]f32, render_target<vec4f32>) =
   let mapped = map(|x: f32| x + 1.0, xs) in
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
-  shade(screen, raster,
-    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0])
-"#,
+  let screen1 = shade(screen, raster,
+    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0]) in
+  (mapped, screen1)
+"#;
+
+        let spirv = lower_ssa_to_spirv(
+            lower_egir_to_ssa(plan_direct(source, CodegenTarget::Spirv).expect("direct SPIR-V plan"))
+                .expect("direct SPIR-V SSA"),
         )
-        .expect_err("cross-stage array materialization must be rejected");
-        assert!(
-            error.to_string().contains("authored-only"),
-            "unexpected direct-output diagnostic: {error}"
-        );
+        .expect("direct SPIR-V lowering");
+        assert_naga_accepts_spirv(&spirv.spirv);
+        assert_direct_computed_result_descriptor(&spirv.pipeline);
+
+        let wgsl = lower_ssa_to_wgsl_with_pipeline(
+            lower_egir_to_ssa(plan_direct(source, CodegenTarget::Wgsl).expect("direct WGSL plan"))
+                .expect("direct WGSL SSA"),
+        )
+        .expect("direct WGSL lowering");
+        assert_eq!(wgsl.wgsl.matches("@compute").count(), 1);
+        assert_eq!(wgsl.wgsl.matches("@vertex").count(), 1);
+        assert_eq!(wgsl.wgsl.matches("@fragment").count(), 1);
+        assert_direct_computed_result_descriptor(&wgsl.pipeline);
     });
 }
 
@@ -11086,6 +11209,21 @@ fn compute_if_over_two_maps_compiles_runtime_sized() {
     let Pipeline::Compute(cp) = lowered.pipeline.pipelines.first().expect("one pipeline") else {
         panic!("expected single-compute pipeline");
     };
+    let output_slot = cp.bindings.iter().find_map(|binding| match binding {
+        pipeline_descriptor::Binding::StorageBuffer {
+            set, binding, name, ..
+        } if name == "tick_output" => Some((*set, *binding)),
+        _ => None,
+    });
+    let source_result = lowered.pipeline.source_results.as_slice();
+    assert_eq!(source_result.len(), 1);
+    assert_eq!(source_result[0].entry, "tick");
+    assert_eq!(source_result[0].result, 0);
+    assert_eq!(source_result[0].pipeline_index, 0);
+    assert_eq!(
+        Some((source_result[0].set, source_result[0].binding)),
+        output_slot
+    );
     // Output's size variable matches `prev`'s — the length-inference
     // rule emits `LikeInput` rather than `SameAsDispatch`.
     let output_len = cp.bindings.iter().find_map(|b| match b {

@@ -12,6 +12,7 @@ dist/
 /testfiles/playground/*.spv
 /testfiles/playground/*.spv.dis
 /testfiles/playground/*.json
+!/testfiles/playground/*.viz.json
 /lib/testfiles/*.json
 /extra/viz/*.spv
 /extra/viz/*.json

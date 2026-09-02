@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use wgpu::PresentMode;
 
 mod app;
+mod config;
 mod gpu;
 mod json;
 mod modes;
@@ -99,6 +100,14 @@ enum Command {
         /// when the descriptor lives somewhere else.
         #[arg(long, short)]
         pipeline: Option<PathBuf>,
+        /// Runtime configuration sidecar. Defaults to
+        /// `<shader-path>.viz.json` when that file exists. Feedback in this
+        /// file uses authored entry/input names and source result slots.
+        #[arg(long = "config", value_name = "FILE", conflicts_with = "no_config")]
+        config_path: Option<PathBuf>,
+        /// Do not auto-load `<shader-path>.viz.json`.
+        #[arg(long, conflicts_with = "config_path")]
+        no_config: bool,
         /// Input data: name:file.json (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
@@ -122,7 +131,7 @@ enum Command {
         dump_textures: Vec<String>,
         /// Seed a host storage buffer once at startup, by binding name
         /// (repeatable). Use for a host-provided buffer the shader
-        /// writes but no `--input`/`--feedback` supplies — e.g. a
+        /// writes but no `--input`/sidecar feedback supplies — e.g. a
         /// scatter framebuffer (`0`) or a random initial particle state
         /// (`rng`).
         ///
@@ -206,18 +215,6 @@ enum Command {
         ///   "erode_b:512x512x1"
         #[arg(long = "dispatch", value_name = "ENTRY:WxH[xD]", verbatim_doc_comment)]
         dispatch: Vec<String>,
-        /// Wire a ping-pong feedback pair: the binding named `READ` in
-        /// the compute entry `ENTRY` reads the *previous frame*'s value
-        /// of the storage_image named `WRITE` (Shadertoy-style
-        /// self-feedback). The host allocates two physical textures for
-        /// the pair and swaps which is bound each frame.
-        ///
-        /// Format: `ENTRY:READ=WRITE`. Repeatable.
-        ///
-        /// Example:
-        ///   "buffer_a:prev_a=out_a"
-        #[arg(long = "feedback", value_name = "ENTRY:READ=WRITE", verbatim_doc_comment)]
-        feedback: Vec<String>,
         /// Directory of per-binding files. For each `storage_buffer`
         /// declared in the descriptor (other than recognized
         /// host-uploaded names like `keyboard`), and for each
@@ -294,6 +291,8 @@ fn main() -> Result<()> {
         Command::Pipeline {
             path,
             pipeline,
+            config_path,
+            no_config,
             inputs,
             images,
             dump_textures,
@@ -304,7 +303,6 @@ fn main() -> Result<()> {
             push_constants,
             uniform_values,
             dispatch,
-            feedback,
             storage_dir,
             index_buffer,
             present_mode,
@@ -409,22 +407,12 @@ fn main() -> Result<()> {
                 })
                 .collect::<Result<HashMap<_, _>>>()?;
 
-            // Parse `--feedback ENTRY:READ=WRITE` into (entry, read,
-            // write) triples. Names are resolved to (set, binding) when
-            // we have the descriptor in hand.
-            let feedback_specs: Vec<(String, String, String)> = feedback
-                .iter()
-                .map(|s| {
-                    let (entry, rw) = s
-                        .split_once(':')
-                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
-                    let (read, write) = rw
-                        .split_once('=')
-                        .ok_or_else(|| anyhow!("Invalid --feedback '{}'. Expected ENTRY:READ=WRITE", s))?;
-                    Ok((entry.to_string(), read.to_string(), write.to_string()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-
+            let sidecar = config::load(&path, config_path.as_deref(), no_config)?;
+            if verbose {
+                if let Some(config_path) = &sidecar.path {
+                    eprintln!("[viz pipeline] config: {}", config_path.display());
+                }
+            }
             let pipeline_path = pipeline.unwrap_or_else(|| path.with_extension("json"));
             pollster::block_on(modes::pipeline::run_pipeline(
                 path,
@@ -433,7 +421,7 @@ fn main() -> Result<()> {
                 output_map,
                 &push_constants,
                 &dispatch_overrides,
-                &feedback_specs,
+                &sidecar.feedback,
                 modes::pipeline::InteractiveOpts {
                     storage_dir,
                     buffer_inits: buffer_init_specs,

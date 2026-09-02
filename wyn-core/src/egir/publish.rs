@@ -32,7 +32,8 @@ use crate::flow::ExecutionModel;
 use crate::interface::{IoDecoration, StorageAccess, TextureSource};
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
-    SamplerBindingType, StageBindingUses, TextureSampleType, TextureViewDimension, VertexAttribute,
+    SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
+    VertexAttribute,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -353,6 +354,16 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
                 let Some(br) = output.storage_binding() else {
                     continue;
                 };
+                let source_result = SourceResultBinding {
+                    entry: entry.name.clone(),
+                    result: i,
+                    pipeline_index,
+                    set: br.set,
+                    binding: br.binding,
+                };
+                if !self.source_results.contains(&source_result) {
+                    self.source_results.push(source_result);
+                }
                 // This name is the buffer's frame-graph identity — a reader
                 // binding the same name reads the same resource — and is what
                 // `viz --output <name>` takes on the command line.
