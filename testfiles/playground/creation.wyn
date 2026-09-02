@@ -10,11 +10,11 @@ open f32
 -- One iteration of the per-channel accumulation. Returns (c_i, l) where
 -- l is the radial distance used both for this iteration's warp and for
 -- the final divide in the fragment shader.
-def iter(fragXY: vec2f32, z: f32, iResolution: vec3f32) (f32, f32) =
-  let p0    = fragXY / iResolution.xy in
+def iter(frag_xy: vec2f32, z: f32, resolution: vec3f32) (f32, f32) =
+  let p0    = frag_xy / resolution.xy in
   let uv0   = p0 in
   let p1    = p0 - @[0.5, 0.5] in
-  let p     = @[p1.x * iResolution.x / iResolution.y, p1.y] in
+  let p     = @[p1.x * resolution.x / resolution.y, p1.y] in
   let l     = magnitude(p) in
   let phase = sin(z) + 1.0 in
   let warp  = abs(sin(l * 9.0 - z - z)) in
@@ -26,19 +26,14 @@ def iter(fragXY: vec2f32, z: f32, iResolution: vec3f32) (f32, f32) =
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
-  let fc = fragCoord.xy in
-  let z1 = iTime + 0.07 in
-  let (cx, _) = iter(fc, z1, iResolution) in
+  let fc = frag_coord.xy in
+  let z1 = time + 0.07 in
+  let (cx, _) = iter(fc, z1, resolution) in
   let z2 = z1 + 0.07 in
-  let (cy, _) = iter(fc, z2, iResolution) in
+  let (cy, _) = iter(fc, z2, resolution) in
   let z3 = z2 + 0.07 in
-  let (cz, l) = iter(fc, z3, iResolution) in
-  @[cx / l, cy / l, cz / l, iTime]
+  let (cz, l) = iter(fc, z3, resolution) in
+  @[cx / l, cy / l, cz / l, time]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out below)
