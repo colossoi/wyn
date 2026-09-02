@@ -53,7 +53,7 @@ def rotz(a: f32) mat3f32 =
 -- it falls back to an 8-tap average; otherwise it band-limits cos(x)
 -- with smoothstep on the pixel footprint.
 ------------------------------------------------------------
-def fcos(x: vec3f32, iResolution: vec3f32) vec3f32 =
+def fcos(x: vec3f32, resolution: vec3f32) vec3f32 =
   -- NOTE(hole): no vector `fwidth` in Wyn — `fwidth`/`dFdx`/`dFdy` are
   -- registered per-scalar-type only, so GLSL's component-wise
   -- `fwidth(vec3)` must be expanded by hand.
@@ -62,7 +62,7 @@ def fcos(x: vec3f32, iResolution: vec3f32) vec3f32 =
   if lw == 0.0 || isnan(lw) || isinf(lw) then
     let tc =
       loop tc = @[0.0, 0.0, 0.0] for i < 8 do
-        tc + vec.cos(x + x * f32.i32(i - 4) * (0.01 * 400.0 / iResolution.y))
+        tc + vec.cos(x + x * f32.i32(i - 4) * (0.01 * 400.0 / resolution.y))
     in
     tc / 8.0
   else
@@ -71,21 +71,21 @@ def fcos(x: vec3f32, iResolution: vec3f32) vec3f32 =
 ------------------------------------------------------------
 -- Cosine-palette colour of an interior point.
 ------------------------------------------------------------
-def getColor(p0: vec3f32, iResolution: vec3f32) vec3f32 =
+def get_color(p0: vec3f32, resolution: vec3f32) vec3f32 =
   let pa = vec.abs(p0) in
   let pb = pa * 1.25 in
   let p  = 0.5 * pb / dot(pb, pb) in
   let t  = 0.13 * magnitude(p) in
   let col =
     @[0.3, 0.4, 0.5]
-    + 0.12 * fcos(6.28318 * t * 1.0   + @[0.0, 0.8, 1.1], iResolution)
-    + 0.11 * fcos(6.28318 * t * 3.1   + @[0.3, 0.4, 0.1], iResolution)
-    + 0.10 * fcos(6.28318 * t * 5.1   + @[0.1, 0.7, 1.1], iResolution)
-    + 0.10 * fcos(6.28318 * t * 17.1  + @[0.2, 0.6, 0.7], iResolution)
-    + 0.10 * fcos(6.28318 * t * 31.1  + @[0.1, 0.6, 0.7], iResolution)
-    + 0.10 * fcos(6.28318 * t * 65.1  + @[0.0, 0.5, 0.8], iResolution)
-    + 0.10 * fcos(6.28318 * t * 115.1 + @[0.1, 0.4, 0.7], iResolution)
-    + 0.10 * fcos(6.28318 * t * 265.1 + @[1.1, 1.4, 2.7], iResolution)
+    + 0.12 * fcos(6.28318 * t * 1.0   + @[0.0, 0.8, 1.1], resolution)
+    + 0.11 * fcos(6.28318 * t * 3.1   + @[0.3, 0.4, 0.1], resolution)
+    + 0.10 * fcos(6.28318 * t * 5.1   + @[0.1, 0.7, 1.1], resolution)
+    + 0.10 * fcos(6.28318 * t * 17.1  + @[0.2, 0.6, 0.7], resolution)
+    + 0.10 * fcos(6.28318 * t * 31.1  + @[0.1, 0.6, 0.7], resolution)
+    + 0.10 * fcos(6.28318 * t * 65.1  + @[0.0, 0.5, 0.8], resolution)
+    + 0.10 * fcos(6.28318 * t * 115.1 + @[0.1, 0.4, 0.7], resolution)
+    + 0.10 * fcos(6.28318 * t * 265.1 + @[1.1, 1.4, 2.7], resolution)
   in
   vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0])
 
@@ -93,16 +93,16 @@ def getColor(p0: vec3f32, iResolution: vec3f32) vec3f32 =
 -- Shade a patch hit (and, when present, its self-intersection hit).
 -- GLSL out-params (colx, colsi) become tuple results.
 ------------------------------------------------------------
-def calcColor(ro: vec3f32, rd: vec3f32, d: f32, len: f32, si: bool, td: f32, iResolution: vec3f32)
+def calc_color(ro: vec3f32, rd: vec3f32, d: f32, len: f32, si: bool, td: f32, resolution: vec3f32)
   (vec4f32, vec4f32) =
   let pos = ro + rd * d in
   let a   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos)) in
-  let col = getColor(pos, iResolution) in
+  let col = get_color(pos, resolution) in
   let colx = @[col.x, col.y, col.z, a] in
   if si then
     let pos2 = ro + rd * td in
     let ta   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos2)) in
-    let col2 = getColor(pos2, iResolution) in
+    let col2 = get_color(pos2, resolution) in
     (colx, @[col2.x, col2.y, col2.z, ta])
   else
     (colx, @[0.0, 0.0, 0.0, 0.0])
@@ -111,7 +111,7 @@ def calcColor(ro: vec3f32, rd: vec3f32, d: f32, len: f32, si: bool, td: f32, iRe
 -- Ray / bilinear-patch intersection.
 -- Returns (hit, t, norm, si, tsi, normsi, fade, fadesi).
 ------------------------------------------------------------
-def iBilinearPatch(ro: vec3f32, rd: vec3f32, ps: vec4f32, ph: vec4f32, sz: f32)
+def i_bilinear_patch(ro: vec3f32, rd: vec3f32, ps: vec4f32, ph: vec4f32, sz: f32)
   (bool, f32, vec3f32, bool, f32, vec3f32, f32, f32) =
   let va = @[0.0, 0.0, ph.x + ph.w - ph.y - ph.z] in
   let vb = @[0.0, ps.w - ps.y, ph.z - ph.x] in
@@ -181,7 +181,7 @@ def dot2(v: vec3f32) f32 = dot(v, v)
 ------------------------------------------------------------
 -- Soft box shadow (iq).
 ------------------------------------------------------------
-def segShadow(ro: vec3f32, rd: vec3f32, pa: vec3f32, sh0: f32) f32 =
+def seg_shadow(ro: vec3f32, rd: vec3f32, pa: vec3f32, sh0: f32) f32 =
   let dm = dot(rd.yz, rd.yz) in
   let k1 = (ro.x - pa.x) * dm in
   let k2 = (ro.x + pa.x) * dm in
@@ -201,20 +201,20 @@ def segShadow(ro: vec3f32, rd: vec3f32, pa: vec3f32, sh0: f32) f32 =
       min(sh, dot2(cx + rd * t) / (t * t))
     else sh
 
-def boxSoftShadow(ro: vec3f32, rd0: vec3f32, rad: vec3f32, sk: f32) f32 =
+def box_soft_shadow(ro: vec3f32, rd0: vec3f32, rad: vec3f32, sk: f32) f32 =
   let rd  = rd0 + 0.0001 * (@[1.0, 1.0, 1.0] - vec.abs(vec.sign(rd0))) in
   let mm  = @[1.0, 1.0, 1.0] / rd in
   let n   = mm * ro in
   let k   = vec.abs(mm) * rad in
   let t1  = (0.0 - n) - k in
   let t2  = (0.0 - n) + k in
-  let tN  = max(max(t1.x, t1.y), t1.z) in
-  let tF  = min(min(t2.x, t2.y), t2.z) in
-  if tN < tF && tF > 0.0 then 0.0
+  let t_n  = max(max(t1.x, t1.y), t1.z) in
+  let t_f  = min(min(t2.x, t2.y), t2.z) in
+  if t_n < t_f && t_f > 0.0 then 0.0
   else
-    let sh1 = segShadow(ro.xyz, rd.xyz, rad.xyz, 1.0) in
-    let sh2 = segShadow(ro.yzx, rd.yzx, rad.yzx, sh1) in
-    let sh3 = segShadow(ro.zxy, rd.zxy, rad.zxy, sh2) in
+    let sh1 = seg_shadow(ro.xyz, rd.xyz, rad.xyz, 1.0) in
+    let sh2 = seg_shadow(ro.yzx, rd.yzx, rad.yzx, sh1) in
+    let sh3 = seg_shadow(ro.zxy, rd.zxy, rad.zxy, sh2) in
     let sh  = clamp(sk * sqrt(sh3), 0.0, 1.0) in
     sh * sh * (3.0 - 2.0 * sh)
 
@@ -253,7 +253,7 @@ def background(ro: vec3f32, rd: vec3f32, l_dir: vec3f32) (vec3f32, f32) =
   if t < 0.0 then (bgc, 0.0)
   else
     let uv   = ro.xy + t * rd.xy in
-    let shad = boxSoftShadow(ro + t * rd, normalize(l_dir + @[0.0, 0.0, 1.0]) * rotz(PI * 0.65), BOXDIMS, 1.5) in
+    let shad = box_soft_shadow(ro + t * rd, normalize(l_dir + @[0.0, 0.0, 1.0]) * rotz(PI * 0.65), BOXDIMS, 1.5) in
     let aof0 = smoothstep(0.0 - 0.95, 0.75, magnitude(vec.abs(uv) - vec.min(vec.abs(uv), @[0.45, 0.45]))) in
     let aofac = min(aof0, smoothstep(0.0 - 0.65, 1.0, shad)) in
     let lght = max(dot(normalize(ro + t * rd + @[0.0, 0.0, 0.0 - 5.0]), normalize(l_dir - @[0.0, 0.0, 1.0]) * rotz(PI * 0.65)), 0.0) in
@@ -270,7 +270,7 @@ def background(ro: vec3f32, rd: vec3f32, l_dir: vec3f32) (vec3f32, f32) =
 -- depth-sorted with layered transparency. Returns (color, alpha) plus
 -- the front-most hit distance via `tout`.
 ------------------------------------------------------------
-def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, iResolution: vec3f32)
+def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, resolution: vec3f32)
   (vec4f32, f32) =
   -- Orient ray into the face-local frame.
   let (ro1, rd1, l_dir) =
@@ -303,9 +303,9 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, iResolu
       let ro2 = ro * rmat in
       let rd2 = rd * rmat in
       let (hit, tnew, normnew, si, tsi, normsi, fade, fadesi) =
-        iBilinearPatch(ro2, rd2, ps, ph, bil_size) in
+        i_bilinear_patch(ro2, rd2, ps, ph, bil_size) in
       if hit && tnew > 0.0 then
-        let (tcol, tcolsi) = calcColor(ro2, rd2, tnew, bil_size, si, tsi, iResolution) in
+        let (tcol, tcolsi) = calc_color(ro2, rd2, tnew, bil_size, si, tsi, resolution) in
         if tcol.w > 0.0 then
           let dx2 = dx with [i] = @[tnew, f32.bool(si), tsi] in
           let dif0 = clamp(dot(normnew, l_dir), 0.0, 1.0) in
@@ -384,31 +384,26 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, iResolu
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   let l_dir = normalize(@[0.0, 1.0, 0.0]) * rotz(0.5) in
 
-  let mouseY0 = (1.0 - 1.15 * iMouse.y / iResolution.y) * 0.5 * PI in
-  let mouseY =
-    if iMouse.y < 1.0 then
-      PI * 0.49 - smoothstep(0.0, 8.5, mod((iTime + tshift) * 0.33, 25.0))
-        * (1.0 - smoothstep(14.0, 24.0, mod((iTime + tshift) * 0.33, 25.0))) * 0.55 * PI
-    else mouseY0 in
-  let mouseX = (0.0 - 2.0) * PI - 0.25 * (iTime * ROTATION_SPEED + tshift)
-             - (iMouse.x / iResolution.x) * 2.0 * PI in
+  let mouse_y0 = (1.0 - 1.15 * mouse.y / resolution.y) * 0.5 * PI in
+  let mouse_y =
+    if mouse.y < 1.0 then
+      PI * 0.49 - smoothstep(0.0, 8.5, mod((time + tshift) * 0.33, 25.0))
+        * (1.0 - smoothstep(14.0, 24.0, mod((time + tshift) * 0.33, 25.0))) * 0.55 * PI
+    else mouse_y0 in
+  let mouse_x = (0.0 - 2.0) * PI - 0.25 * (time * ROTATION_SPEED + tshift)
+             - (mouse.x / resolution.x) * 2.0 * PI in
 
-  let eye = 4.0 * @[cos(mouseX) * cos(mouseY), sin(mouseX) * cos(mouseY), sin(mouseY)] in
+  let eye = 4.0 * @[cos(mouse_x) * cos(mouse_y), sin(mouse_x) * cos(mouse_y), sin(mouse_y)] in
   let w = normalize(0.0 - eye) in
   let up = @[0.0, 0.0, 1.0] in
   let u = normalize(cross(w, up)) in
   let v = cross(u, w) in
 
-  let uv = (fc - 0.5 * iResolution.xy) / iResolution.x in
+  let uv = (fc - 0.5 * resolution.xy) / resolution.x in
   let rd = normalize(w * FDIST + uv.x * u + uv.y * v) in
 
   let (t, ni) = box(eye, rd, BOXDIMS, true) in
@@ -435,7 +430,7 @@ def main_image(
         let eye2 = @[coords2.x, coords2.y, 0.0 - 1.0] in
         let rd2trans0 = rd2.yzx * ni.x + rd2.zxy * ni.y + rd2.xyz * ni.z in
         let rd2trans = @[rd2trans0.x, rd2trans0.y, 0.0 - rd2trans0.z] in
-        let (internalcol, tb) = insides(eye2, rd2trans, ni, l_dir, iResolution) in
+        let (internalcol, tb) = insides(eye2, rd2trans, ni, l_dir, resolution) in
         let colo2 = if tb > 0.0 then colo with [j] = @[internalcol.x * accum, internalcol.y * accum, internalcol.z * accum, internalcol.w] else colo in
         if (tb <= 0.0) || (internalcol.w < 1.0) then
           let (toutb, no2) = box(ro_refr, rd2, BOXDIMS, false) in
