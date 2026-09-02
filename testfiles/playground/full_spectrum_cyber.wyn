@@ -40,7 +40,7 @@ def path(t: f32) vec3f32 =
 ------------------------------------------------------------
 -- hexagon SDF: signed distance to a regular hexagon of radius r
 ------------------------------------------------------------
-def hexagonSdf(p: vec2f32, r: f32) f32 =
+def hexagon_sdf(p: vec2f32, r: f32) f32 =
   let kx = 0.0 - 0.866025404 in
   let ky =  0.5 in
   let kz =  0.577350269 in
@@ -132,11 +132,11 @@ def sphere_line_ab(p: vec3f32, a: vec3f32, b: vec3f32) f32 =
 --   bcol   = sphere border colour mask
 --   hitbol = 1 if nearest object is the sphere, 0 if tunnel
 ------------------------------------------------------------
-def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) (f32, f32, f32, f32) =
+def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, time: f32) (f32, f32, f32, f32) =
   -- Tunnel: warp position along camera path
   let ppath  = path(p.z) in
   let pt    = @[p.x - ppath.x, p.y - ppath.y, p.z] in
-  let h_raw = abs(hexagonSdf(pt.xy, 3.0)) in
+  let h_raw = abs(hexagon_sdf(pt.xy, 3.0)) in
   let hexpos = hex(pt.yz) in
   let tcol   = smoothstep(0.0, 0.15, hexpos) in
   let h      = h_raw - tcol * 0.1 in
@@ -150,8 +150,8 @@ def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) (f32, f32, f32
   -- With fparam = 0 → pp.y -= 3*|sin(iTime)| - 2, i.e. + 2 after the
   -- subtraction. Keeps the sphere centred inside the tunnel rather
   -- than 2 units below it (which clips through walls).
-  let pp2  = pp1 with .y = pp1.y - abs(sin(iTime)) * 3.0 + 2.0 in
-  let rot_yz = rot2D(0.0 - iTime) in
+  let pp2  = pp1 with .y = pp1.y - abs(sin(time)) * 3.0 + 2.0 in
+  let rot_yz = rot2D(0.0 - time) in
   let pp   = pp2 with .yz *= rot_yz in
   let bola_base = magnitude(pp) - 1.0 in
 
@@ -192,12 +192,12 @@ def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) (f32, f32, f32
 ------------------------------------------------------------
 -- normal: central-difference surface normal
 ------------------------------------------------------------
-def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) vec3f32 =
+def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, time: f32) vec3f32 =
   let eps = 0.005 in
-  let (d0, _, _, _) = de(p,                                     hpos, point_dir, iTime) in
-  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir, iTime) in
-  let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir, iTime) in
-  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir, iTime) in
+  let (d0, _, _, _) = de(p,                                     hpos, point_dir, time) in
+  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir, time) in
+  let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir, time) in
+  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir, time) in
   normalize(@[dx - d0, dy - d0, dz - d0])
 
 ------------------------------------------------------------
@@ -208,7 +208,7 @@ def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) vec3f32 =
 -- `m` over the primary-hit tunnel-local point and modulated by two
 -- edge patterns driven by `hp` and `hexpos`.
 ------------------------------------------------------------
-def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime: f32) vec3f32 =
+def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, time: f32) vec3f32 =
   let odir = dir in
   let nd = normalize(point_dir) in
   let nd_abs = @[abs(nd.x), abs(nd.y), abs(nd.z)] in
@@ -217,7 +217,7 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime:
   let (p_hit, d_hit, _, g1, _) =
     loop (p, d, td, g, done) = (from, 1.0, 0.0, @[0.0, 0.0, 0.0], false)
     while td < 200.0 && !done do
-      let (d2, _tc, _bc, hitbol) = de(p, hpos, point_dir, iTime) in
+      let (d2, _tc, _bc, hitbol) = de(p, hpos, point_dir, time) in
       if d2 < 0.001
       then (p, d2, td, g, true)
       else
@@ -227,8 +227,8 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime:
 
   -- Step back slightly before normal sampling — matches GLSL p -= dir*.01.
   let p_back = p_hit - dir * 0.01 in
-  let n = normal(p_back, hpos, point_dir, iTime) in
-  let (_, tcol, bcol, hitbol_hit) = de(p_back, hpos, point_dir, iTime) in
+  let n = normal(p_back, hpos, point_dir, time) in
+  let (_, tcol, bcol, hitbol_hit) = de(p_back, hpos, point_dir, time) in
 
   -- Tunnel-local point at the primary hit, and hexpos/hp derived from it
   -- (used by the reflection-pass edge patterns).
@@ -252,7 +252,7 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime:
   let (p_refl, d_refl, _, g2, _) =
     loop (p, d, td, g, done) = (p_back, 1.0, 0.0, g1, false)
     while td < 200.0 && !done do
-      let (d2, _tc, _bc, _hb) = de(p, hpos, point_dir, iTime) in
+      let (d2, _tc, _bc, _hb) = de(p, hpos, point_dir, time) in
       if d2 < 0.001
       then (p, d2, td, g, true)
       else
@@ -277,11 +277,11 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime:
       let mixed = mix(col0, refcol, m_final) - @[m_final * 0.3, m_final * 0.3, m_final * 0.3] in
       -- step(0.3, hp) * step(0.9, fract(...)) * 0.7 — primary-tunnel edge pattern
       let edge1 =
-        if hp >= 0.3 && fract(pr.z * 0.05 + iTime * 0.5 + hp * 0.1) >= 0.9
+        if hp >= 0.3 && fract(pr.z * 0.05 + time * 0.5 + hp * 0.1) >= 0.9
         then 0.7 else 0.0 in
       -- step(0.3, hexpos) * step(0.9, fract(...)) * 0.3 — reflection-tunnel edge pattern
       let edge2 =
-        if hexpos >= 0.3 && fract(zz * 0.05 + iTime + hexpos * 0.1) >= 0.9
+        if hexpos >= 0.3 && fract(zz * 0.05 + time + hexpos * 0.1) >= 0.9
         then 0.3 else 0.0 in
       let edge = edge1 + edge2 in
       mixed + @[edge, edge, edge]
@@ -301,22 +301,17 @@ def march(from: vec3f32, dir: vec3f32, hpos: vec3f32, point_dir: vec3f32, iTime:
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
   -- Flip Y for Vulkan conventions
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let coord = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   -- UV in [-0.5, 0.5] corrected for aspect ratio
-  let uv_raw = coord / iResolution.xy - @[0.5, 0.5] in
-  let uv = @[uv_raw.x * (iResolution.x / iResolution.y), uv_raw.y] in
+  let uv_raw = coord / resolution.xy - @[0.5, 0.5] in
+  let uv = @[uv_raw.x * (resolution.x / resolution.y), uv_raw.y] in
 
-  let t    = iTime * 2.0 in
+  let t    = time * 2.0 in
 
   -- Camera position: follow path, optionally detach if iTime cycles
-  let detach = mod(iTime - 10.0, 20.0) > 10.0 in
+  let detach = mod(time - 10.0, 20.0) > 10.0 in
   let from_base = path(t) in
   let t_freeze = floor(t / 20.0) * 20.0 + 10.0 in
   let from_freeze = path(t_freeze) in
@@ -331,7 +326,7 @@ def main_image(
 
   -- Point toward next-look target with small time-varying spin
   let point_raw = normalize(adv - hpos) in
-  let rot_xz   = rot2D(sin(iTime) * 0.2) in
+  let rot_xz   = rot2D(sin(time) * 0.2) in
   let point_xz2 = @[point_raw.x, point_raw.z] * rot_xz in
   let point_dir  = @[point_xz2.x, point_raw.y, point_xz2.y] in
 
@@ -341,7 +336,7 @@ def main_image(
   let dir       = dir_local * cam_mat in
 
   -- March and apply warm tint
-  let col_raw = march(from, dir, hpos, point_dir, iTime) in
+  let col_raw = march(from, dir, hpos, point_dir, time) in
   let col     = col_raw * @[1.0, 0.9, 0.8] in
   @[col.x, col.y, col.z, 1.0]
 
