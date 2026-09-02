@@ -20,7 +20,7 @@
 -- `[-1, 1]`. `worley2` returns raw F1 distance (~`[0, 1.5]`); scale as
 -- needed. `fbm_*` outputs a sum whose range scales with `octaves * |base|`;
 -- divide by `(1 - gain^octaves) / (1 - gain)` to renormalize.
-import "rng"
+import "pkg:rng"
 
 functor Noise(G: RANDOM_ACCESS) = {
   -- | An independent noise stream. Build with `G.seed(s)` once and reuse.

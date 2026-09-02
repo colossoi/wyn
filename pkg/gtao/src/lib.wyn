@@ -29,7 +29,7 @@
 -- fragment helper called from shade. The helper can reconstruct normals,
 -- evaluate main_pass_single, optionally denoise values in ordinary
 -- computation, and return the final color. See
--- lib/testfiles/gtao_demo.wyn for a complete root entry.
+-- `test/gtao_demo.wyn` for a complete root entry.
 --
 -- The texture-free kernel layer is also suitable when depth samples have
 -- already been computed as ordinary values earlier in the same entry.

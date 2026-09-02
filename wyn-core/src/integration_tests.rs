@@ -8233,7 +8233,7 @@ fn compile_to_ssa_with_modules(input: &str) -> ssa::stage::Elaborated {
 //
 // Each test asserts the *desired* code-gen outcome for a construct the SPIR-V
 // backend currently can't handle; `#[ignore]`d so the suite stays green.
-// Surfaced while building the lib/ statistics generators. Drop the `#[ignore]`
+// Surfaced while building the statistics generators. Drop the `#[ignore]`
 // when the gap is closed.
 // =========================================================================
 
@@ -8272,7 +8272,7 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 /// A single-consumer runtime-sized array fuses into its consumer and never
 /// materializes (`f32.sum(map(…, 0..<n))` lowers fine), but binding it and
 /// reading it more than once forces materialization of an unsized Composite
-/// array, which the type lowering rejects. This is what blocks the lib/ `Stats`
+/// array, which the type lowering rejects. This is what blocks the `Stats`
 /// gatherer, whose sample array feeds `sum`, a deviation `map`, `minimum`, and
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
@@ -8293,7 +8293,7 @@ entry e() f32 = g(256)
 /// definition. The cascade in `hof_specialize::specialize_higher_order_functions` walks reachable defs, finds
 /// `SoacBody`s whose captures include `(_, arrow_ty, Var(known_callable))`,
 /// clones the lifted def with the callable substituted into the body,
-/// and drops the callable param from its signature. Lets `lib/noise.wyn`
+/// and drops the callable param from its signature. Lets procedural noise
 /// collapse its four `fbm_<kind>` defs into one generic `fbm2`.
 #[test]
 fn function_typed_param_with_named_callee_specializes() {
@@ -8457,7 +8457,7 @@ entry e() [4]f32 =
 
 /// The statistics-gatherer shape that motivated the reductions: reduce a sample
 /// stream to `[count, mean, variance, stddev, min, max]` using `f32.sum`,
-/// `f32.minimum`, `f32.maximum`. This is the lib/ `Stats` summarize body.
+/// `f32.minimum`, `f32.maximum`. This is the `Stats` summarize body.
 #[test]
 fn statistics_gatherer_lowers() {
     let source = r#"
@@ -12879,7 +12879,7 @@ entry e(xs: []u32) []u32 = map(|x: u32| (x ^ 5u32) << 1u32, xs)
 ///   2. the fn called to produce a *captured* value: `let k = f(7u32) in ..`
 ///   3. the fn *also* called inside the SOAC lambda
 /// An arithmetic-only body, a literal (non-call) `k`, or calling `f` only
-/// inside the lambda each compile fine. Surfaced by the lib/rng.wyn PCG hash
+/// inside the lambda each compile fine. Surfaced by a PCG hash
 /// (`pcg` has `let w = .. in (w >> 22) ^ w`, used for the hoisted key and
 /// inside the per-element map).
 #[test]
@@ -12920,7 +12920,7 @@ entry v() vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0, 1.0]
 /// partial_eval folds integer arithmetic; a u32 multiply like `C * K`
 /// overflows u32 (and its i128-free product would overflow i64), so the fold
 /// must wrap mod 2^32 rather than emit an out-of-range literal
-/// ("Invalid u32"). Surfaced by lib/rng.wyn's PCG hash.
+/// ("Invalid u32"). Surfaced by a PCG hash.
 #[test]
 fn folded_u32_arithmetic_wraps_to_width() {
     compile_to_spirv(
@@ -12937,7 +12937,7 @@ entry e() []u32 = map(|i: i32| C * 747796405u32 + 2891336453u32, 0i32 ..< 4)
 /// residual at every use site. Doing so is exponential in the chain depth
 /// (the term doubles per step) and at shallower depth also drops a binding
 /// ("Unknown global: x0"). partial_eval keeps non-trivial residual `let`s
-/// shared instead. Surfaced by lib/rng.wyn's Threefry `block`.
+/// shared instead. Surfaced by a Threefry `block`.
 #[test]
 fn deep_tuple_let_chain_keeps_sharing() {
     compile_to_spirv(
@@ -13516,7 +13516,7 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
 ///
 /// Both operations and their order are load-bearing: texture_load
 /// before the loop, or an image_load in place of the texture_load,
-/// compiles fine. This is the light-pass shape for driving lib/gtao.wyn
+/// compiles fine. This is the light-pass shape for driving GTAO
 /// from the map/iota idiom (loop over shadow taps, then sample the AO
 /// result).
 #[test]

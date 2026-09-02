@@ -1,5 +1,5 @@
-import "../dist"
-import "../disttest"
+import "../src/lib"
+import "disttest"
 
 -- Uniform integer on [0, 10) via fasthash, widened to f32 so `Stats` (which
 -- expects an f32 series) can reduce it. One draw per index, one position per

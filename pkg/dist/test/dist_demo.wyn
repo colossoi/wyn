@@ -1,4 +1,4 @@
-import "../dist"
+import "../src/lib"
 
 def SEED: u32 = 0x9e3779b9u32
 def N: i32 = 256

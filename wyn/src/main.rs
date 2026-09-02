@@ -14,6 +14,7 @@ use wyn_module_graph::{
     BuildFailure, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
     PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint, SourceGraph,
 };
+use wyn_package_manager::{load_local_input, LocalBuildError};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -46,12 +47,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile one or more source files to SPIR-V or WGSL
+    /// Compile one or more source files or local packages to SPIR-V or WGSL
     Compile {
-        /// Input source file(s). When multiple files are given, each
-        /// is compiled in turn within a single process — useful for
-        /// batch compilation and profiling.
-        #[arg(value_name = "FILE", required = true)]
+        /// Input source file(s), package directories, or `wyn.toml` manifests.
+        /// Multiple inputs are compiled in turn within one process.
+        #[arg(value_name = "INPUT", required = true)]
         inputs: Vec<PathBuf>,
 
         /// Output file, or an existing directory to write
@@ -102,10 +102,10 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Validate a source file without generating output
+    /// Validate a source file or local package without generating output
     Check {
-        /// Input source file
-        #[arg(value_name = "FILE")]
+        /// Input source file, package directory, or `wyn.toml` manifest
+        #[arg(value_name = "INPUT")]
         input: PathBuf,
 
         /// Enable the unified graphics pipeline vocabulary.
@@ -143,6 +143,9 @@ enum DriverError {
 
     #[error("Package plan error: {0}")]
     PackagePlan(#[from] PlanError),
+
+    #[error("{0}")]
+    LocalPackage(#[from] LocalBuildError),
 
     #[error("Pipeline descriptor serialization error: {0}")]
     DescriptorSerialization(#[from] serde_json::Error),
@@ -191,13 +194,20 @@ fn direct_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), Drive
     Ok((plan, sources))
 }
 
-fn type_check_frontend_file(
+fn input_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
+    if let Some(build) = load_local_input(input)? {
+        return Ok(build.into_parts());
+    }
+    direct_source_plan(input)
+}
+
+fn type_check_input(
     input: &Path,
     reject_holes: bool,
     graphics: bool,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
-    let (plan, mut sources) = direct_source_plan(input)?;
+    let (plan, mut sources) = input_source_plan(input)?;
     type_check_package_plan(plan, &mut sources, reject_holes, graphics, verbose)
 }
 
@@ -366,7 +376,7 @@ fn compile_file(
     // Wall-clock start for the always-printed timing summary below.
     let compile_start = Instant::now();
 
-    let program = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
+    let program = type_check_input(&input, !fill_holes, graphics, verbose)?;
     let source_graph = program.source_graph().clone();
 
     let program = retain_source(
@@ -581,7 +591,7 @@ fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), Drive
         info!("Checking {}...", input.display());
     }
 
-    let program = type_check_frontend_file(&input, true, graphics, verbose)?;
+    let program = type_check_input(&input, true, graphics, verbose)?;
     let source_graph = program.source_graph().clone();
     let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
     let program = retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;

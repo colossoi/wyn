@@ -1,0 +1,11 @@
+manifest-version = 1
+
+[package]
+name = "wyn/playground"
+version = "v0.1.0"
+wyn = "v0.1.0"
+library = "noise_demo.wyn"
+
+[dependencies]
+noise = { package = "wyn/noise", version = "v0.1.0", path = "../../pkg/noise" }
+rng = { package = "wyn/rng", version = "v0.1.0", path = "../../pkg/rng" }

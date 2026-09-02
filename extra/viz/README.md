@@ -101,7 +101,7 @@ viz pipeline shader.spv --max-frames 30 --dump-texture ao_out:ao.png
 ```
 
 Float formats are clamped to [0, 1] before 8-bit quantization;
-`r32float` dumps as grayscale. See `lib/testfiles/gtao_demo.wyn` for a
+`r32float` dumps as grayscale. See `pkg/gtao/test/gtao_demo.wyn` for a
 multi-pass pipeline whose AO output is snapshotted this way.
 
 ## Miner

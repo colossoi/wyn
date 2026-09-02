@@ -1,12 +1,13 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use wyn_module_graph::{
-    DependencyAlias, IdentityError, LocalSourceError, LocalSources, ModuleKey, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, PlanError, SourceFingerprint,
+    DependencyAlias, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
+    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint,
 };
 
 use crate::{Dependency, Manifest, ManifestError, PackageName, PackageVersion};
@@ -28,7 +29,53 @@ impl LocalBuild {
 pub fn load_local_build(root: impl AsRef<Path>) -> Result<LocalBuild, LocalBuildError> {
     let mut loader = LocalLoader::new();
     let root = loader.load(root.as_ref())?;
-    loader.finish(root)
+    let library = loader.packages[root].manifest.library().clone();
+    loader.finish(root, library)
+}
+
+/// Load `input` when it names a local package directory or its `wyn.toml`.
+///
+/// A source file beneath a package manifest becomes that package plan's root
+/// module. Other paths return `None`, allowing a command-line driver to retain
+/// a separate direct-source mode without knowing the manifest layout.
+pub fn load_local_input(input: impl AsRef<Path>) -> Result<Option<LocalBuild>, LocalBuildError> {
+    let input = input.as_ref();
+    if input.is_dir() {
+        return load_local_build(input).map(Some);
+    }
+    if input.file_name() == Some(OsStr::new("wyn.toml")) {
+        let Some(root) = input.parent() else {
+            return Ok(None);
+        };
+        let root = if root.as_os_str().is_empty() { Path::new(".") } else { root };
+        return load_local_build(root).map(Some);
+    }
+
+    if input.extension() != Some(OsStr::new("wyn")) {
+        return Ok(None);
+    }
+    let Ok(source) = input.canonicalize() else {
+        return Ok(None);
+    };
+    let Some(root) = source
+        .parent()
+        .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.join("wyn.toml").is_file()))
+    else {
+        return Ok(None);
+    };
+    let Ok(relative) = source.strip_prefix(root) else {
+        return Ok(None);
+    };
+    let Some(relative) = relative.to_str() else {
+        return Err(LocalBuildError::NonUtf8SourcePath { path: source });
+    };
+    let module = ModulePath::new(relative).map_err(|source| LocalBuildError::SourcePath {
+        path: input.to_owned(),
+        source,
+    })?;
+    let mut loader = LocalLoader::new();
+    let package = loader.load(root)?;
+    loader.finish(package, module).map(Some)
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +132,16 @@ pub enum LocalBuildError {
     Plan(#[from] PlanError),
     #[error("invalid local source root: {0}")]
     Sources(#[from] LocalSourceError),
+    #[error("package source path `{path}` is not UTF-8")]
+    NonUtf8SourcePath {
+        path: PathBuf,
+    },
+    #[error("invalid package source path `{path}`: {source}")]
+    SourcePath {
+        path: PathBuf,
+        #[source]
+        source: PathError,
+    },
 }
 
 #[derive(Debug)]
@@ -191,7 +248,7 @@ impl LocalLoader {
         Ok(child)
     }
 
-    fn finish(self, root: usize) -> Result<LocalBuild, LocalBuildError> {
+    fn finish(self, root: usize, root_module: ModulePath) -> Result<LocalBuild, LocalBuildError> {
         let fingerprint = SourceFingerprint::new("local-path")?;
         let mut plan = PackagePlanBuilder::new();
         let mut ids = Vec::with_capacity(self.packages.len());
@@ -208,10 +265,7 @@ impl LocalLoader {
                 plan.add_dependency(ids[index], alias.clone(), ids[*dependency])?;
             }
         }
-        plan.set_root(ModuleKey::new(
-            ids[root],
-            self.packages[root].manifest.library().clone(),
-        ))?;
+        plan.set_root(ModuleKey::new(ids[root], root_module))?;
         let plan = plan.build()?;
 
         let mut sources = LocalSources::new();

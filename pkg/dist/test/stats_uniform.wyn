@@ -1,5 +1,5 @@
-import "../dist"
-import "../disttest"
+import "../src/lib"
+import "disttest"
 
 -- Uniform real on [0, 1) via fasthash. One draw per index, one position per
 -- draw. Reference moments: mean 0.5, variance 1/12 ≈ 0.0833.

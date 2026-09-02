@@ -7,7 +7,7 @@
 -- Exercises filter piped into a size-polymorphic helper and same-frame
 -- array flow from ordinary computation into fragment processing.
 ---- The initial particle state is generated in Wyn. Each particle index seeds
--- an independent random-access stream from `lib/rng`; frame zero maps those
+-- an independent random-access stream from `wyn/rng`; frame zero maps those
 -- draws into a starting position + velocity. Later frames consume the
 -- previous position buffer supplied by viz's feedback pair.
 --
@@ -21,7 +21,7 @@
 --     --config testfiles\playground\particles.viz.json ^
 --     --size 512x512
 
-import "../../lib/rng"
+import "pkg:rng"
 
 def N:i32 = 512
 def CLUMPF:f32 = 0.1

@@ -1,4 +1,4 @@
-import "../noise"
+import "../src/lib"
 
 -- Smoke test: write each noise primitive's value at one query position into
 -- a 5-element output buffer. Compile-only; for visual / statistical checks

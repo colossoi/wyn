@@ -12,7 +12,7 @@
 -- particles' paths accumulate into the dense, hair-like curves the original
 -- draws. Particles respawn at a fresh random spot when they age out or leave
 -- the frame, so coverage keeps building. The field `noise()` is 4-octave fbm
--- (Processing's default), supplied here by `lib/noise.wyn`'s `fbm_perlin`.
+-- (Processing's default), supplied here by `wyn/noise`'s `fbm_perlin`.
 --
 -- This is the real technique, not a per-pixel approximation: a state
 -- feedback loop (`tick`) + a scatter rasterizer (`rasterize`) + a display
@@ -41,8 +41,8 @@
 --       --config ../../testfiles/playground/perlin_fields.viz.json \
 --       --size 720x720)
 
-import "../../lib/noise"
-import "../../lib/rng"
+import "pkg:noise"
+import "pkg:rng"
 
 open f32
 
@@ -66,7 +66,7 @@ def TWO_PI: f32 = 6.28318530718
 def FIELD_SEED: u32 = 1337
 
 ------------------------------------------------------------
--- rng helpers (lib/rng.wyn fasthash) — uniform f32 in [0, 1).
+-- rng helpers (`wyn/rng` fasthash) — uniform f32 in [0, 1).
 ------------------------------------------------------------
 
 def rand01(key: u32, pos: u32) f32 =

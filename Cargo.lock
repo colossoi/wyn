@@ -1566,10 +1566,13 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "toml",
  "wyn-core",
  "wyn-module-graph",
+ "wyn-package-manager",
 ]
 
 [[package]]

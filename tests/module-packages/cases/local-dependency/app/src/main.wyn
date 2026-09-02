@@ -1,0 +1,5 @@
+module Example = import "pkg:example"
+
+def answer: i32 = Example.answer
+
+entry compute(value: i32) i32 = Example.add_one(value)

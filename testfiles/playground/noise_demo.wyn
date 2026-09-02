@@ -1,10 +1,10 @@
--- Visual smoke test for `lib/noise.wyn` — drives `fhnoise.fbm_perlin` over
+-- Visual smoke test for `wyn/noise` — drives `fhnoise.fbm_perlin` over
 -- screen UV with `iTime` advancing the noise origin, mapped through a
 -- two-color ramp so the structure is visible. If the lib is wired up
 -- correctly you should see smooth, slowly-drifting cloud-like detail with
 -- pixel-grain octaves layered in.
 
-import "../../lib/noise"
+import "pkg:noise"
 
 open f32
 

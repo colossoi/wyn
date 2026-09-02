@@ -1,6 +1,6 @@
-import "../gtao"
+import "../src/lib"
 
--- Smoke test for the texture-free half of lib/gtao.wyn. Each slot is an
+-- Smoke test for the texture-free half of `wyn/gtao`. Each slot is an
 -- invariant that should hold analytically; see the expectations in
 -- scripts/run_tests.sh.
 --

@@ -1,4 +1,4 @@
-import "../gtao"
+import "../src/lib"
 
 -- GTAO end to end over a real depth buffer, on the minimal
 -- single-depth-texture path (no depth chain): pass 1 raycasts a simple
@@ -7,10 +7,10 @@ import "../gtao"
 -- reconstructed from depth); two denoise passes finish it. The fragment
 -- shader raycasts the same scene for shading and multiplies the AO
 -- term in. Four compute passes, four images — see the usage walkthrough
--- in lib/gtao.wyn's header for what else is optional.
+-- in `wyn/gtao`'s library source for what else is optional.
 --
 -- Run (from the repo root):
---   cargo run --release --bin wyn -- compile lib/testfiles/gtao_demo.wyn -o gtao_demo.spv
+--   cargo run --release --bin wyn -- compile pkg/gtao/test/gtao_demo.wyn -o gtao_demo.spv
 --   cd extra/viz && cargo run --release -- pipeline ../../gtao_demo.spv --size 1920x1080
 --
 -- Move the mouse right to sweep the no-AO | AO split (AO on the right of

@@ -1,0 +1,3 @@
+def answer: i32 = 42
+
+def add_one(value: i32) i32 = value + 1

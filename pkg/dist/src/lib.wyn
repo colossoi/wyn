@@ -10,7 +10,7 @@
 -- it applied to `fasthash` and `threefry`. Each sampler documents how many
 -- consecutive positions it consumes — advance your position by that many to
 -- get an independent next draw.
-import "rng"
+import "pkg:rng"
 
 -- | Pure distribution transforms over uniform draws `u ∈ [0, 1)`.
 module dist = {

@@ -1,5 +1,5 @@
-import "../dist"
-import "../disttest"
+import "../src/lib"
+import "disttest"
 
 -- Exponential at rate λ=1 via fasthash. One draw per index, one position per
 -- draw. Reference moments: mean 1/λ = 1, variance 1/λ² = 1.

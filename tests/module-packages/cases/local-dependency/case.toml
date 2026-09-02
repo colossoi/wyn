@@ -1,0 +1,4 @@
+name = "local dependency"
+root = "app"
+command = "check"
+expect = "success"

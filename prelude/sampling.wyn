@@ -4,7 +4,7 @@
 -- Quasirandom (low-discrepancy) sequences cover a domain far more
 -- evenly than independent random draws, so Monte-Carlo estimates
 -- converge with many fewer samples. Unlike the hash generators in
--- `lib/rng`, consecutive indices are *correlated by design* — use one
+-- `wyn/rng`, consecutive indices are *correlated by design* — use one
 -- stream per integration domain, not as a general-purpose RNG.
 --
 -- A common GPU pattern (e.g. stratified per-pixel sampling) maps each

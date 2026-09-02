@@ -4,6 +4,8 @@ target/
 /repro/
 node_modules/
 dist/
+!/pkg/dist/
+!/pkg/dist/**
 .wrangler/
 /playground/.react-router/
 /extra/XeGTAO/

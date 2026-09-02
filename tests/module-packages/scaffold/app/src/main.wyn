@@ -1,0 +1,3 @@
+module Example = import "pkg:example"
+
+def answer: i32 = Example.answer

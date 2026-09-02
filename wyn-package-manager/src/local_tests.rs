@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use wyn_module_graph::SourceProvider;
 
-use super::{load_local_build, LocalBuildError};
+use super::{load_local_build, load_local_input, LocalBuildError};
 
 struct TestTree {
     root: PathBuf,
@@ -155,4 +155,38 @@ fn package_dependency_cycles_are_representable() {
 
     let build = load_local_build(first).expect("package dependency cycle should close");
     assert_eq!(build.into_parts().0.packages().count(), 2);
+}
+
+#[test]
+fn local_input_recognizes_package_directories_manifests_and_source_roots() {
+    let tree = TestTree::new();
+    let root = tree.package("root", "test/root", "v1.0.0", "");
+
+    let directory = load_local_input(&root)
+        .expect("package directory should load")
+        .expect("package directory should be recognized");
+    assert_eq!(directory.into_parts().0.packages().count(), 1);
+
+    let manifest = load_local_input(root.join("wyn.toml"))
+        .expect("package manifest should load")
+        .expect("package manifest should be recognized");
+    assert_eq!(manifest.into_parts().0.packages().count(), 1);
+
+    let example = root.join("test/example.wyn");
+    fs::create_dir_all(example.parent().expect("example should have a parent"))
+        .expect("example directory should be created");
+    fs::write(&example, "def example: i32 = 1\n").expect("example source should be written");
+    let source = load_local_input(&example)
+        .expect("package source should load")
+        .expect("package source should be recognized");
+    assert_eq!(source.into_parts().0.root().path().as_str(), "test/example.wyn");
+
+    let standalone = tree.root.join("standalone.wyn");
+    fs::write(&standalone, "def standalone: i32 = 1\n").expect("standalone source should be written");
+    assert!(
+        load_local_input(standalone)
+            .expect("standalone source should not fail package recognition")
+            .is_none(),
+        "standalone source should remain available to the compiler driver",
+    );
 }
