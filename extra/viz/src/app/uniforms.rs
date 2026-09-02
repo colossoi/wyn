@@ -3,9 +3,9 @@
 //! The wyn compiler emits a JSON sidecar (`<spv_path>.json`) alongside
 //! the SPIR-V module declaring the (set, binding) location of each
 //! uniform the shader references — `iResolution`, `iTime`, `iMouse`,
-//! `iMouse`. This module reads that sidecar, allocates the
-//! uniform buffers, and builds a single bind group sized to the
-//! actually-declared uniforms.
+//! `iFrame`, or their unprefixed playground aliases. This module reads
+//! that sidecar, allocates the uniform buffers, and builds a single bind
+//! group sized to the actually-declared uniforms.
 //!
 //! `--shadertoy` is the only path that uses `build_shadertoy`; the
 //! WGSL test pattern has its own simpler `build_test_pattern_uniforms`
@@ -17,6 +17,28 @@ use wgpu::{
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferDescriptor,
     BufferUsages, ShaderStages,
 };
+
+#[cfg(test)]
+#[path = "uniforms_tests.rs"]
+mod uniforms_tests;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DynamicUniform {
+    Resolution,
+    Time,
+    Mouse,
+    Frame,
+}
+
+fn dynamic_uniform(name: &str) -> Option<DynamicUniform> {
+    match name {
+        "iResolution" | "resolution" => Some(DynamicUniform::Resolution),
+        "iTime" | "time" => Some(DynamicUniform::Time),
+        "iMouse" | "mouse" => Some(DynamicUniform::Mouse),
+        "iFrame" | "frame" => Some(DynamicUniform::Frame),
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Uniform repr-C structs. wgpu's std140 layout: vec3<f32> pads to 16 bytes,
@@ -131,11 +153,12 @@ pub struct PipelineUniforms {
 /// declare the same `(set, binding)` as the graphics pipeline reuse
 /// the same buffer.
 ///
-/// Recognized names: `iResolution` (vec3 + pad), `iTime` (f32),
-/// `iMouse` (vec4), `iFrame` (u32 + pad). Unknown uniform names error
-/// — silently dropping them would leave their bind slot unbound at
-/// draw time. Initial buffer contents are zero; the per-frame render
-/// path writes updated values.
+/// Recognized dynamic names: `iResolution`, `iTime`, `iMouse`, and
+/// `iFrame`, plus the unprefixed `resolution`, `time`, `mouse`, and
+/// `frame` names used by the playground wrapper. Unknown uniform names
+/// error when their descriptor has no published size — silently dropping
+/// them would leave their bind slot unbound at draw time. Initial buffer
+/// contents are zero; the per-frame render path writes dynamic values.
 pub fn build_pipeline_uniforms(
     device: &wgpu::Device,
     all_uniform_bindings: &[wyn_pipeline_descriptor::Binding],
@@ -165,35 +188,37 @@ pub fn build_pipeline_uniforms(
         if by_set_binding.contains_key(&(*set, *binding)) {
             continue;
         }
-        let (size_bytes, label) = match name.as_str() {
-            "iResolution" => (
+        let dynamic = dynamic_uniform(name);
+        let (size_bytes, label) = match dynamic {
+            Some(DynamicUniform::Resolution) => (
                 std::mem::size_of::<ResolutionUniform>() as u64,
-                "pipeline.uniform.iResolution".to_string(),
+                format!("pipeline.uniform.{name}"),
             ),
-            "iTime" => (
+            Some(DynamicUniform::Time) => (
                 // Pad to 16 bytes — wgpu's UNIFORM minimum binding size
                 // is 16 on many adapters.
                 16u64,
-                "pipeline.uniform.iTime".to_string(),
+                format!("pipeline.uniform.{name}"),
             ),
-            "iMouse" => (
+            Some(DynamicUniform::Mouse) => (
                 std::mem::size_of::<MouseUniform>() as u64,
-                "pipeline.uniform.iMouse".to_string(),
+                format!("pipeline.uniform.{name}"),
             ),
-            "iFrame" => (
+            Some(DynamicUniform::Frame) => (
                 std::mem::size_of::<FrameUniform>() as u64,
-                "pipeline.uniform.iFrame".to_string(),
+                format!("pipeline.uniform.{name}"),
             ),
-            // Any other uniform with a published block size gets a
+            // Any non-dynamic uniform with a published block size gets a
             // zero-initialized buffer of that size; `--uniform` writes
             // member values into it at startup. Descriptors that
             // predate size publication carry 0 and keep erroring.
-            other if *size > 0 => ((*size).max(16) as u64, format!("pipeline.uniform.{other}")),
-            other => {
+            None if *size > 0 => ((*size).max(16) as u64, format!("pipeline.uniform.{name}")),
+            None => {
                 return Err(anyhow!(
                     "viz pipeline-interactive: graphics pipeline declares unknown uniform `{}` \
-                     with no published size. Known names: iResolution, iTime, iMouse, iFrame.",
-                    other
+                     with no published size. Known dynamic names: iResolution/resolution, \
+                     iTime/time, iMouse/mouse, iFrame/frame.",
+                    name
                 ));
             }
         };
@@ -209,14 +234,14 @@ pub fn build_pipeline_uniforms(
         // and the typed Option both hold valid handles to the same GPU
         // resource.
         by_set_binding.insert((*set, *binding), buffer.clone());
-        match name.as_str() {
-            "iResolution" => resolution = Some(buffer),
-            "iTime" => time = Some(buffer),
-            "iMouse" => mouse = Some(buffer),
-            "iFrame" => frame = Some(buffer),
+        match dynamic {
+            Some(DynamicUniform::Resolution) => resolution = Some(buffer),
+            Some(DynamicUniform::Time) => time = Some(buffer),
+            Some(DynamicUniform::Mouse) => mouse = Some(buffer),
+            Some(DynamicUniform::Frame) => frame = Some(buffer),
             // User block uniforms live only in by_set_binding; their
             // content is zeroed at creation and written by --uniform.
-            _ => {}
+            None => {}
         }
     }
 
