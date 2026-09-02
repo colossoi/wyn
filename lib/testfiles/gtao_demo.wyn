@@ -101,35 +101,35 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
 
 def fragment_main(fragment: fragment_invocation<vec2f32>,
                   depth: texture2d,
-                  iResolution: vec3f32,
-                  iMouse: vec4f32,
-                  iFrame: u32) vec4f32 =
+                  resolution: vec3f32,
+                  mouse: vec4f32,
+                  frame: u32) vec4f32 =
   let pos = fragment.position in
   let xy = @[i32(pos.x), i32(pos.y)] in
-  let uv = @[pos.x / iResolution.x, pos.y / iResolution.y] in
+  let uv = @[pos.x / resolution.x, pos.y / resolution.y] in
   let normal = gtao.compute_viewspace_normal(xy, depth, C) in
   let noise = gtao.spatiotemporal_noise(
-    @[u32.i32(xy.x), u32.i32(xy.y)], iFrame % 64u32) in
+    @[u32.i32(xy.x), u32.i32(xy.y)], frame % 64u32) in
   let (slices, steps) = gtao.preset_high in
   let (visibility, _) =
     gtao.main_pass_single(xy, slices, steps, noise, normal, C, depth) in
   let ao = gtao.saturate(visibility) in
   let (_, n, albedo) = scene_hit(ray_dir(uv)) in
-  let split = iMouse.x / iResolution.x in
-  let ao = if uv.x < split then 1.0f32 else ao in
+  let split = mouse.x / resolution.x in
+  let display_ao = if uv.x < split then 1.0f32 else ao in
   let light = normalize(@[0.0f32 - 0.3f32, 0.8f32, 0.0f32 - 0.5f32]) in
   let diffuse = f32.max(0.0f32, dot(n, light)) in
-  let lit = 0.55f32 * ao + 0.5f32 * diffuse * ao in
+  let lit = 0.55f32 * display_ao + 0.5f32 * diffuse * display_ao in
   @[albedo.x * lit, albedo.y * lit, albedo.z * lit, 1.0f32]
 
 entry gtao_demo(depth: texture2d,
-                iResolution: vec3f32,
-                iMouse: vec4f32,
-                iFrame: u32,
+                resolution: vec3f32,
+                mouse: vec4f32,
+                frame: u32,
                 screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
     |fragment| fragment_main(
-      fragment, depth, iResolution, iMouse, iFrame))
+      fragment, depth, resolution, mouse, frame))
