@@ -34,27 +34,27 @@ def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2
   let d3 = d2 with .yz *= rotview2 in
   d3 with .xz *= rotview1
 
-def fragment_main(iResolution: vec3f32, iTime: f32,
+def fragment_main(resolution: vec3f32, time: f32,
                   fragment: fragment_invocation<vec2f32>) vec4f32 =
-  let fragCoord = fragment.position
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y]
-  let uv = @[coord.x / iResolution.x - 0.5f32, coord.y / iResolution.y - 0.5f32]
+  let frag_coord = fragment.position
+  let coord = @[frag_coord.x, resolution.y - frag_coord.y]
+  let uv = @[coord.x / resolution.x - 0.5f32, coord.y / resolution.y - 0.5f32]
   let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32]
 
-  let view1 = rot(iTime * 0.3f32)
-  let view2 = rot(iTime * 0.5f32)
-  let mx = iTime * 0.1f32
-  let my = iTime * 0.07f32
+  let view1 = rot(time * 0.3f32)
+  let view2 = rot(time * 0.5f32)
+  let mx = time * 0.1f32
+  let my = time * 0.07f32
 
   let d = transform(dir0, mx, my, view1, view2) in
   @[d.x * 0.5f32 + 0.5f32, d.y * 0.5f32 + 0.5f32, d.z * 0.5f32 + 0.5f32, 1.0f32]
 
 entry swizzle_demo(
-    iResolution: vec3f32,
-    iTime: f32,
+    resolution: vec3f32,
+    time: f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    fragment_main(iResolution, iTime, _))
+    fragment_main(resolution, time, _))
