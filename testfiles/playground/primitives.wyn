@@ -24,17 +24,17 @@ def ndot(a:vec2f32, b:vec2f32) f32 = a.x*b.x - a.y*b.y
 -- SDF Primitives
 ------------------------------------------------------------
 
-def sdPlane(p:vec3f32) f32 = p.y
+def sd_plane(p:vec3f32) f32 = p.y
 
-def sdSphere(p:vec3f32, s:f32) f32 = magnitude(p) - s
+def sd_sphere(p:vec3f32, s:f32) f32 = magnitude(p) - s
 
-def sdBox(p:vec3f32, b:vec3f32) f32 =
+def sd_box(p:vec3f32, b:vec3f32) f32 =
   let d = @[f32.abs(p.x) - b.x, f32.abs(p.y) - b.y, f32.abs(p.z) - b.z] in
   let inside = f32.min(f32.max(d.x, f32.max(d.y, d.z)), 0.0) in
   let outside = magnitude(max(d, @[0.0, 0.0, 0.0])) in
   inside + outside
 
-def sdBoxFrame(p:vec3f32, b:vec3f32, e:f32) f32 =
+def sd_box_frame(p:vec3f32, b:vec3f32, e:f32) f32 =
   let pa = @[f32.abs(p.x) - b.x, f32.abs(p.y) - b.y, f32.abs(p.z) - b.z] in
   let q = @[f32.abs(pa.x + e) - e, f32.abs(pa.y + e) - e, f32.abs(pa.z + e) - e] in
   let d1 = magnitude(max(@[pa.x, q.y, q.z], @[0.0, 0.0, 0.0])) +
@@ -45,7 +45,7 @@ def sdBoxFrame(p:vec3f32, b:vec3f32, e:f32) f32 =
            f32.min(f32.max(q.x, f32.max(q.y, pa.z)), 0.0) in
   f32.min(f32.min(d1, d2), d3)
 
-def sdEllipsoid(p:vec3f32, r:vec3f32) f32 =
+def sd_ellipsoid(p:vec3f32, r:vec3f32) f32 =
   let pr = p / r in
   let rr = r * r in
   let prr = p / rr in
@@ -53,26 +53,26 @@ def sdEllipsoid(p:vec3f32, r:vec3f32) f32 =
   let k1 = magnitude(prr) in
   k0 * (k0 - 1.0) / k1
 
-def sdTorus(p:vec3f32, t:vec2f32) f32 =
+def sd_torus(p:vec3f32, t:vec2f32) f32 =
   let q = @[magnitude(p.xz) - t.x, p.y] in
   magnitude(q) - t.y
 
-def sdCappedTorus(p:vec3f32, sc:vec2f32, ra:f32, rb:f32) f32 =
+def sd_capped_torus(p:vec3f32, sc:vec2f32, ra:f32, rb:f32) f32 =
   let px = f32.abs(p.x) in
   let k = if sc.y * px > sc.x * p.y then dot(@[px, p.y], sc) else magnitude(@[px, p.y]) in
   f32.sqrt(dot2(p) + ra*ra - 2.0*ra*k) - rb
 
-def sdCapsule(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
+def sd_capsule(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
   let pa = p - a in
   let ba = b - a in
   let h = clamp(dot(pa, ba) / dot2(ba), 0.0, 1.0) in
   magnitude(@[pa.x - ba.x*h, pa.y - ba.y*h, pa.z - ba.z*h]) - r
 
-def sdVerticalCylinder(p:vec3f32, h:vec2f32) f32 =
+def sd_vertical_cylinder(p:vec3f32, h:vec2f32) f32 =
   let d = @[f32.abs(magnitude(p.xz)) - h.x, f32.abs(p.y) - h.y] in
   f32.min(f32.max(d.x, d.y), 0.0) + magnitude(max(d, @[0.0, 0.0]))
 
-def sdCylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
+def sd_cylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
   let pa = p - a in
   let ba = b - a in
   let baba = dot2(ba) in
@@ -86,7 +86,7 @@ def sdCylinder(p:vec3f32, a:vec3f32, b:vec3f32, r:f32) f32 =
           else (if x > 0.0 then x2 else 0.0) + (if y > 0.0 then y2 else 0.0) in
   sign(d) * f32.sqrt(f32.abs(d)) / baba
 
-def sdVerticalCone(p:vec3f32, c:vec2f32, h:f32) f32 =
+def sd_vertical_cone(p:vec3f32, c:vec2f32, h:f32) f32 =
   let q = @[h * c.x / c.y, 0.0 - h] in
   let w = @[magnitude(p.xz), p.y] in
   let a_t = clamp(dot(w, q) / dot2(q), 0.0, 1.0) in
@@ -98,7 +98,7 @@ def sdVerticalCone(p:vec3f32, c:vec2f32, h:f32) f32 =
   let s = f32.max(k * (w.x*q.y - w.y*q.x), k * (w.y - q.y)) in
   f32.sqrt(d) * sign(s)
 
-def sdCappedCone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
+def sd_capped_cone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
   let q = @[magnitude(p.xz), p.y] in
   let k1 = @[r2, h] in
   let k2 = @[r2 - r1, 2.0*h] in
@@ -108,7 +108,7 @@ def sdCappedCone(p:vec3f32, h:f32, r1:f32, r2:f32) f32 =
   let s = if cb.x < 0.0 then (if ca.y < 0.0 then 0.0 - 1.0 else 1.0) else 1.0 in
   s * f32.sqrt(f32.min(dot2(ca), dot2(cb)))
 
-def sdRoundCone(p:vec3f32, r1:f32, r2:f32, h:f32) f32 =
+def sd_round_cone(p:vec3f32, r1:f32, r2:f32, h:f32) f32 =
   let q = @[magnitude(p.xz), p.y] in
   let b = (r1 - r2) / h in
   let a = f32.sqrt(1.0 - b*b) in
@@ -117,7 +117,7 @@ def sdRoundCone(p:vec3f32, r1:f32, r2:f32, h:f32) f32 =
   else if k > a*h then magnitude(@[q.x, q.y - h]) - r2
   else dot(q, @[a, b]) - r1
 
-def sdOctahedron(p:vec3f32, s:f32) f32 =
+def sd_octahedron(p:vec3f32, s:f32) f32 =
   let pa = abs(p) in
   let m = pa.x + pa.y + pa.z - s in
   if 3.0*pa.x < m then
@@ -130,7 +130,7 @@ def sdOctahedron(p:vec3f32, s:f32) f32 =
     let k = clamp(0.5*(q.z - q.y + s), 0.0, s) in magnitude(@[q.x, q.y - s + k, q.z - k])
   else m * 0.57735027
 
-def sdPyramid(p:vec3f32, h:f32) f32 =
+def sd_pyramid(p:vec3f32, h:f32) f32 =
   let m2 = h*h + 0.25 in
   let pxz = @[f32.abs(p.x), f32.abs(p.z)] in
   let pxz2 = if pxz.y > pxz.x then pxz.yx else pxz in
@@ -143,7 +143,7 @@ def sdPyramid(p:vec3f32, h:f32) f32 =
   let d2 = if f32.min(q.y, 0.0 - q.x*m2 - q.y*0.5) > 0.0 then 0.0 else f32.min(a, b) in
   f32.sqrt((d2 + q.z*q.z) / m2) * sign(f32.max(q.z, 0.0 - p.y))
 
-def sdRhombus(p:vec3f32, la:f32, lb:f32, h:f32, ra:f32) f32 =
+def sd_rhombus(p:vec3f32, la:f32, lb:f32, h:f32, ra:f32) f32 =
   let pa = abs(p) in
   let b = @[la, lb] in
   let f = clamp(ndot(b, @[b.x - 2.0*pa.x, b.y - 2.0*pa.z]) / dot2(b), 0.0 - 1.0, 1.0) in
@@ -156,55 +156,55 @@ def sdRhombus(p:vec3f32, la:f32, lb:f32, h:f32, ra:f32) f32 =
 ------------------------------------------------------------
 
 -- Union operation returning closest surface
-def opU(d1:vec2f32, d2:vec2f32) vec2f32 =
+def op_u(d1:vec2f32, d2:vec2f32) vec2f32 =
   if d1.x < d2.x then d1 else d2
 
 ------------------------------------------------------------
 -- The Scene Map
 ------------------------------------------------------------
 
-def sdfScene(pos:vec3f32) vec2f32 =
+def sdf_scene(pos:vec3f32) vec2f32 =
   let res = @[pos.y, 0.0] in
 
   -- bounding box check 1
-  let res = if sdBox(@[pos.x - -2.0, pos.y - 0.3, pos.z - 0.25], @[0.3, 0.3, 1.0]) < res.x
-    then let r1 = opU(res, @[sdSphere(@[pos.x - -2.0, pos.y - 0.25, pos.z], 0.25), 26.9]) in
-         let r2 = opU(r1, @[sdRhombus(@[pos.x - -2.0, pos.z - 1.0, pos.y - 0.25], 0.15, 0.25, 0.04, 0.08), 17.0]) in
+  let res = if sd_box(@[pos.x - -2.0, pos.y - 0.3, pos.z - 0.25], @[0.3, 0.3, 1.0]) < res.x
+    then let r1 = op_u(res, @[sd_sphere(@[pos.x - -2.0, pos.y - 0.25, pos.z], 0.25), 26.9]) in
+         let r2 = op_u(r1, @[sd_rhombus(@[pos.x - -2.0, pos.z - 1.0, pos.y - 0.25], 0.15, 0.25, 0.04, 0.08), 17.0]) in
          r2
     else res in
 
   -- bounding box check 2
-  let res = if sdBox(@[pos.x, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
-    then let r1 = opU(res, @[sdCappedTorus(@[(pos.x) * 1.0, (pos.y - 0.30) * -1.0, (pos.z - 1.0) * 1.0], @[0.866025, -0.5], 0.25, 0.05), 25.0]) in
-         let r2 = opU(r1, @[sdBoxFrame(@[pos.x, pos.y - 0.25, pos.z], @[0.3, 0.25, 0.2], 0.025), 16.9]) in
-         let r3 = opU(r2, @[sdVerticalCone(@[pos.x, pos.y - 0.45, pos.z - -1.0], @[0.6, 0.8], 0.45), 55.0]) in
-         let r4 = opU(r3, @[sdCappedCone(@[pos.x, pos.y - 0.25, pos.z - -2.0], 0.25, 0.25, 0.1), 13.67]) in
-         let r5 = opU(r4, @[sdOctahedron(@[pos.x, pos.y, pos.z - -3.0], 0.4), 49.13]) in
+  let res = if sd_box(@[pos.x, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
+    then let r1 = op_u(res, @[sd_capped_torus(@[(pos.x) * 1.0, (pos.y - 0.30) * -1.0, (pos.z - 1.0) * 1.0], @[0.866025, -0.5], 0.25, 0.05), 25.0]) in
+         let r2 = op_u(r1, @[sd_box_frame(@[pos.x, pos.y - 0.25, pos.z], @[0.3, 0.25, 0.2], 0.025), 16.9]) in
+         let r3 = op_u(r2, @[sd_vertical_cone(@[pos.x, pos.y - 0.45, pos.z - -1.0], @[0.6, 0.8], 0.45), 55.0]) in
+         let r4 = op_u(r3, @[sd_capped_cone(@[pos.x, pos.y - 0.25, pos.z - -2.0], 0.25, 0.25, 0.1), 13.67]) in
+         let r5 = op_u(r4, @[sd_octahedron(@[pos.x, pos.y, pos.z - -3.0], 0.4), 49.13]) in
          r5
     else res in
 
   -- bounding box check 3
-  let res = if sdBox(@[pos.x - 1.0, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
-    then let r1 = opU(res, @[sdTorus(@[pos.x - 1.0, pos.z - 1.0, pos.y - 0.30], @[0.25, 0.05]), 7.1]) in
-         let r2 = opU(r1, @[sdBox(@[pos.x - 1.0, pos.y - 0.25, pos.z], @[0.3, 0.25, 0.1]), 3.0]) in
-         let r3 = opU(r2, @[sdCapsule(@[pos.x - 1.0, pos.y, pos.z - -1.0], @[-0.1, 0.1, -0.1], @[0.2, 0.4, 0.2], 0.1), 31.9]) in
-         let r4 = opU(r3, @[sdVerticalCylinder(@[pos.x - 1.0, pos.y - 0.25, pos.z - -2.0], @[0.15, 0.25]), 8.0]) in
+  let res = if sd_box(@[pos.x - 1.0, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
+    then let r1 = op_u(res, @[sd_torus(@[pos.x - 1.0, pos.z - 1.0, pos.y - 0.30], @[0.25, 0.05]), 7.1]) in
+         let r2 = op_u(r1, @[sd_box(@[pos.x - 1.0, pos.y - 0.25, pos.z], @[0.3, 0.25, 0.1]), 3.0]) in
+         let r3 = op_u(r2, @[sd_capsule(@[pos.x - 1.0, pos.y, pos.z - -1.0], @[-0.1, 0.1, -0.1], @[0.2, 0.4, 0.2], 0.1), 31.9]) in
+         let r4 = op_u(r3, @[sd_vertical_cylinder(@[pos.x - 1.0, pos.y - 0.25, pos.z - -2.0], @[0.15, 0.25]), 8.0]) in
          r4
     else res in
 
   -- bounding box check 4
-  let res = if sdBox(@[pos.x - -1.0, pos.y - 0.35, pos.z - -1.0], @[0.35, 0.35, 2.5]) < res.x
-    then let r1 = opU(res, @[sdPyramid(@[pos.x - -1.0, pos.y - -0.6, pos.z - -3.0], 1.0), 13.56]) in
-         let r2 = opU(r1, @[sdOctahedron(@[pos.x - -1.0, pos.y - 0.15, pos.z - -2.0], 0.35), 23.56]) in
-         let r3 = opU(r2, @[sdEllipsoid(@[pos.x - -1.0, pos.y - 0.25, pos.z], @[0.2, 0.25, 0.05]), 43.17]) in
+  let res = if sd_box(@[pos.x - -1.0, pos.y - 0.35, pos.z - -1.0], @[0.35, 0.35, 2.5]) < res.x
+    then let r1 = op_u(res, @[sd_pyramid(@[pos.x - -1.0, pos.y - -0.6, pos.z - -3.0], 1.0), 13.56]) in
+         let r2 = op_u(r1, @[sd_octahedron(@[pos.x - -1.0, pos.y - 0.15, pos.z - -2.0], 0.35), 23.56]) in
+         let r3 = op_u(r2, @[sd_ellipsoid(@[pos.x - -1.0, pos.y - 0.25, pos.z], @[0.2, 0.25, 0.05]), 43.17]) in
          r3
     else res in
 
   -- bounding box check 5
-  let res = if sdBox(@[pos.x - 2.0, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
-    then let r1 = opU(res, @[sdCylinder(@[pos.x - 2.0, pos.y - 0.14, pos.z - -2.0], @[0.1, -0.1, 0.0], @[-0.2, 0.35, 0.1], 0.08), 31.2]) in
-         let r2 = opU(r1, @[sdRoundCone(@[pos.x - 2.0, pos.y - 0.15, pos.z], 0.15, 0.05, 0.35), 51.7]) in
-         let r3 = opU(r2, @[sdRoundCone(@[pos.x - 2.0, pos.y - 0.20, pos.z - 1.0], 0.2, 0.1, 0.3), 37.0]) in
+  let res = if sd_box(@[pos.x - 2.0, pos.y - 0.3, pos.z - -1.0], @[0.35, 0.3, 2.5]) < res.x
+    then let r1 = op_u(res, @[sd_cylinder(@[pos.x - 2.0, pos.y - 0.14, pos.z - -2.0], @[0.1, -0.1, 0.0], @[-0.2, 0.35, 0.1], 0.08), 31.2]) in
+         let r2 = op_u(r1, @[sd_round_cone(@[pos.x - 2.0, pos.y - 0.15, pos.z], 0.15, 0.05, 0.35), 51.7]) in
+         let r3 = op_u(r2, @[sd_round_cone(@[pos.x - 2.0, pos.y - 0.20, pos.z - 1.0], 0.2, 0.1, 0.3), 37.0]) in
          r3
     else res in
 
@@ -214,7 +214,7 @@ def sdfScene(pos:vec3f32) vec2f32 =
 -- Ray-Box Intersection
 ------------------------------------------------------------
 
-def iBox(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
+def i_box(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
   let m = 1.0 / rd in
   let n = m * ro in
   let k = @[f32.abs(m.x) * rad.x, f32.abs(m.y) * rad.y, f32.abs(m.z) * rad.z] in
@@ -237,19 +237,19 @@ def raycast(ro:vec3f32, rd:vec3f32) vec2f32 =
     else (tmax, @[0.0 - 1.0, 0.0 - 1.0]) in
 
   -- raymarch primitives
-  let tb = iBox(@[ro.x, ro.y - 0.4, ro.z - -0.5], rd, @[2.5, 0.41, 3.0]) in
+  let tb = i_box(@[ro.x, ro.y - 0.4, ro.z - -0.5], rd, @[2.5, 0.41, 3.0]) in
   if tb.x < tb.y then
     if tb.y > 0.0 then
       if tb.x < tmax then
         let tmin2 = f32.max(tb.x, tmin) in
         let tmax = f32.min(tb.y, tmax) in
-        let marchResult = loop (i, t, r) = (0, tmin2, res) while i < 70 do
+        let march_result = loop (i, t, r) = (0, tmin2, res) while i < 70 do
           if t < tmax then
-            let h = sdfScene(ro + rd * t) in
+            let h = sdf_scene(ro + rd * t) in
             if f32.abs(h.x) < 0.0001 * t then (70, t, @[t, h.y])
             else (i + 1, t + h.x, r)
           else (70, t, r)
-        in marchResult.2
+        in march_result.2
       else res
     else res
   else res
@@ -258,7 +258,7 @@ def raycast(ro:vec3f32, rd:vec3f32) vec2f32 =
 -- Normal Calculation
 ------------------------------------------------------------
 
-def calcNormal(pos:vec3f32) vec3f32 =
+def calc_normal(pos:vec3f32) vec3f32 =
   let (_, n) = loop (i, acc) = (0, @[0.0, 0.0, 0.0]) while i < 4 do
     let e_base = @[
       (if ((i+3)/2) % 2 == 1 then 1.0 else -1.0),
@@ -266,7 +266,7 @@ def calcNormal(pos:vec3f32) vec3f32 =
       (if i % 2 == 1 then 1.0 else -1.0)
     ] in
     let e = e_base * 0.5773 in
-    let m = (sdfScene(pos + e * 0.0005)).x in
+    let m = (sdf_scene(pos + e * 0.0005)).x in
     (i + 1, acc + e * m)
   in normalize(n)
 
@@ -274,38 +274,38 @@ def calcNormal(pos:vec3f32) vec3f32 =
 -- Ambient Occlusion
 ------------------------------------------------------------
 
-def calcAO(pos:vec3f32, nor:vec3f32) f32 =
-  let aoResult = loop (i, occ, sca) = (0, 0.0, 1.0) while i < 5 do
+def calc_ao(pos:vec3f32, nor:vec3f32) f32 =
+  let ao_result = loop (i, occ, sca) = (0, 0.0, 1.0) while i < 5 do
     let h = 0.01 + 0.12 * (f32.i32(i)) / 4.0 in
-    let d = (sdfScene(pos + nor * h)).x in
+    let d = (sdf_scene(pos + nor * h)).x in
     let occ2 = occ + (h - d) * sca in
     let sca2 = sca * 0.95 in
     if occ2 > 0.35 then (5, occ2, sca2) else (i + 1, occ2, sca2)
-  in clamp(1.0 - 3.0*aoResult.1, 0.0, 1.0) * (0.5 + 0.5*nor.y)
+  in clamp(1.0 - 3.0*ao_result.1, 0.0, 1.0) * (0.5 + 0.5*nor.y)
 
 ------------------------------------------------------------
 -- Soft Shadow
 ------------------------------------------------------------
 
-def calcSoftshadow(ro:vec3f32, rd:vec3f32, mint:f32, tmax_in:f32) f32 =
+def calc_softshadow(ro:vec3f32, rd:vec3f32, mint:f32, tmax_in:f32) f32 =
   let tp = (0.8 - ro.y) / rd.y in
   let tmax = if tp > 0.0 then f32.min(tmax_in, tp) else tmax_in in
-  let shadowResult = loop (i, res, t) = (0, 1.0, mint) while i < 24 do
-    let h = (sdfScene(ro + rd * t)).x in
+  let shadow_result = loop (i, res, t) = (0, 1.0, mint) while i < 24 do
+    let h = (sdf_scene(ro + rd * t)).x in
     let s = clamp(8.0*h/t, 0.0, 1.0) in
     let res2 = f32.min(res, s) in
     let t2 = t + clamp(h, 0.01, 0.2) in
     if res2 < 0.004 then (24, res2, t2)
     else if t2 > tmax then (24, res2, t2)
     else (i + 1, res2, t2)
-  in let res_clamped = clamp(shadowResult.1, 0.0, 1.0) in
+  in let res_clamped = clamp(shadow_result.1, 0.0, 1.0) in
   res_clamped * res_clamped * (3.0 - 2.0*res_clamped)
 
 ------------------------------------------------------------
 -- Checkerboard Pattern
 ------------------------------------------------------------
 
-def checkersGradBox(p:vec2f32, dpdx:vec2f32, dpdy:vec2f32) f32 =
+def checkers_grad_box(p:vec2f32, dpdx:vec2f32, dpdy:vec2f32) f32 =
   let w = @[f32.abs(dpdx.x) + f32.abs(dpdy.x) + 0.001, f32.abs(dpdx.y) + f32.abs(dpdy.y) + 0.001] in
   let i1 = fract(@[(p.x - 0.5*w.x)*0.5, (p.y - 0.5*w.y)*0.5]) in
   let i2 = fract(@[(p.x + 0.5*w.x)*0.5, (p.y + 0.5*w.y)*0.5]) in
@@ -327,7 +327,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 
   if m > 0.0 - 0.5 then
     let pos = ro + rd * t in
-    let nor = if m < 1.5 then @[0.0, 1.0, 0.0] else calcNormal(pos) in
+    let nor = if m < 1.5 then @[0.0, 1.0, 0.0] else calc_normal(pos) in
     let ref = reflect(rd, nor) in
 
     -- material
@@ -336,18 +336,18 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
       -- floor with checkerboard
       let dpdx = @[ro.y * (rd.x/rd.y - rdx.x/rdx.y), 0.0, ro.y * (rd.z/rd.y - rdx.z/rdx.y)] in
       let dpdy = @[ro.y * (rd.x/rd.y - rdy.x/rdy.y), 0.0, ro.y * (rd.z/rd.y - rdy.z/rdy.y)] in
-      let f = checkersGradBox(@[3.0*pos.x, 3.0*pos.z], @[3.0*dpdx.x, 3.0*dpdx.z], @[3.0*dpdy.x, 3.0*dpdy.z]) in
+      let f = checkers_grad_box(@[3.0*pos.x, 3.0*pos.z], @[3.0*dpdx.x, 3.0*dpdx.z], @[3.0*dpdy.x, 3.0*dpdy.z]) in
       (@[0.15 + f*0.05, 0.15 + f*0.05, 0.15 + f*0.05], 0.4)
     else (mat_col, 1.0) in
 
     -- lighting
-    let occ = calcAO(pos, nor) in
+    let occ = calc_ao(pos, nor) in
 
     -- sun
     let lig = normalize(@[0.0 - 0.5, 0.4, 0.0 - 0.6]) in
     let hal = normalize(lig - rd) in
     let dif_raw = clamp(dot(nor, lig), 0.0, 1.0) in
-    let dif = dif_raw * calcSoftshadow(pos, lig, 0.02, 2.5) in
+    let dif = dif_raw * calc_softshadow(pos, lig, 0.02, 2.5) in
     let spe_raw = pow(clamp(dot(nor, hal), 0.0, 1.0), 16.0) in
     let spe = spe_raw * dif * (0.04 + 0.96 * pow(clamp(1.0 - dot(hal, lig), 0.0, 1.0), 5.0)) in
     let lin_sun = @[col2.x * 2.20 * dif * 1.30, col2.y * 2.20 * dif * 1.00, col2.z * 2.20 * dif * 0.70] in
@@ -356,7 +356,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
     -- sky
     let dif_sky = f32.sqrt(clamp(0.5 + 0.5*nor.y, 0.0, 1.0)) * occ in
     let spe_sky_raw = smoothstep(-0.2, 0.2, ref.y) * dif_sky in
-    let spe_sky = spe_sky_raw * (0.04 + 0.96 * pow(clamp(1.0 + dot(nor, rd), 0.0, 1.0), 5.0)) * calcSoftshadow(pos, ref, 0.02, 2.5) in
+    let spe_sky = spe_sky_raw * (0.04 + 0.96 * pow(clamp(1.0 + dot(nor, rd), 0.0, 1.0), 5.0)) * calc_softshadow(pos, ref, 0.02, 2.5) in
     let lin_sky = @[col2.x * 0.60 * dif_sky * 0.40, col2.y * 0.60 * dif_sky * 0.60, col2.z * 0.60 * dif_sky * 1.15] in
     let lin_sky_spe = @[2.00 * spe_sky * 0.40 * ks, 2.00 * spe_sky * 0.60 * ks, 2.00 * spe_sky * 1.30 * ks] in
 
@@ -383,7 +383,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 -- Camera Setup
 ------------------------------------------------------------
 
-def setCamera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
+def set_camera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
   let cw = normalize(ta - ro) in
   let cp = @[f32.sin(cr), f32.cos(cr), 0.0] in
   let cu = normalize(cross(cw, cp)) in
@@ -398,25 +398,25 @@ def setCamera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
-  let mo = @[iMouse.x / iResolution.x, iMouse.y / iResolution.y] in
-  let time = 32.0 + iTime * 1.5 in
+  let i_resolution = resolution in
+  let i_time = time in
+  let i_mouse = mouse in
+  let frag_coord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
+  let frag = frag_coord in
+  let mo = @[i_mouse.x / i_resolution.x, i_mouse.y / i_resolution.y] in
+  let time = 32.0 + i_time * 1.5 in
 
   -- camera
   let ta = @[0.25, 0.0 - 0.75, 0.0 - 0.75] in
   let ro = @[ta.x + 4.5 * f32.cos(0.1*time + 7.0*mo.x),
              ta.y + 2.2,
              ta.z + 4.5 * f32.sin(0.1*time + 7.0*mo.x)] in
-  let ca = setCamera(ro, ta, 0.0) in
+  let ca = set_camera(ro, ta, 0.0) in
 
   -- pixel coordinates (AA=1, no antialiasing)
   -- Note: negate Y to flip from Vulkan (Y=0 at top) to OpenGL convention (Y=0 at bottom)
-  let p = @[(2.0*fragCoord.x - iResolution.x) / iResolution.y,
-            -((2.0*fragCoord.y - iResolution.y) / iResolution.y)] in
+  let p = @[(2.0*frag_coord.x - i_resolution.x) / i_resolution.y,
+            -((2.0*frag_coord.y - i_resolution.y) / i_resolution.y)] in
 
   -- focal length
   let fl = 2.5 in
@@ -426,10 +426,10 @@ def main_image(
   let rd = rd_local * ca in
 
   -- ray differentials (with Y flip)
-  let px = @[(2.0*(fragCoord.x + 1.0) - iResolution.x) / iResolution.y,
-             -((2.0*fragCoord.y - iResolution.y) / iResolution.y)] in
-  let py = @[(2.0*fragCoord.x - iResolution.x) / iResolution.y,
-             -((2.0*(fragCoord.y + 1.0) - iResolution.y) / iResolution.y)] in
+  let px = @[(2.0*(frag_coord.x + 1.0) - i_resolution.x) / i_resolution.y,
+             -((2.0*frag_coord.y - i_resolution.y) / i_resolution.y)] in
+  let py = @[(2.0*frag_coord.x - i_resolution.x) / i_resolution.y,
+             -((2.0*(frag_coord.y + 1.0) - i_resolution.y) / i_resolution.y)] in
   let rdx_local = normalize(@[px.x, px.y, fl]) in
   let rdy_local = normalize(@[py.x, py.y, fl]) in
   let rdx = rdx_local * ca in
