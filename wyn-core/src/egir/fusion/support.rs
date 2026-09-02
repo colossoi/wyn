@@ -92,20 +92,56 @@ pub(super) fn pure_depends_on_avoiding(
     target: ValueId,
     cut: &HashSet<ValueId>,
 ) -> bool {
+    let target = graph.canonical_value(target);
     let mut pending = vec![root];
     let mut visited = HashSet::new();
     while let Some(node) = pending.pop() {
+        if cut.contains(&node) {
+            continue;
+        }
+        let node = graph.canonical_value(node);
         if cut.contains(&node) || !visited.insert(node) {
             continue;
         }
         if node == target {
             return true;
         }
-        if let Some(definition) = graph.nodes.get(node) {
-            pending.extend(definition.kind.children());
+        if graph.nodes.get(node).is_some() {
+            pending.extend(graph.value_dependencies(node));
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::TypeName;
+    use crate::ssa::types::ConstantValue;
+    use polytype::Type;
+
+    #[test]
+    fn dependency_walk_follows_canonical_aliases() {
+        let mut graph = EGraph::new();
+        let ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let target = graph.alloc_side_effect_result(ty.clone());
+        let alias = graph.intern_constant(ConstantValue::I32(0), ty);
+        graph.nodes[alias].alias = Some(target);
+
+        assert!(pure_depends_on_avoiding(&graph, alias, target, &HashSet::new()));
+        assert!(!pure_depends_on_avoiding(
+            &graph,
+            alias,
+            target,
+            &HashSet::from([alias]),
+        ));
+        assert!(!pure_depends_on_avoiding(
+            &graph,
+            alias,
+            target,
+            &HashSet::from([target]),
+        ));
+    }
 }
 
 pub(super) fn try_rewrite_body_graph(

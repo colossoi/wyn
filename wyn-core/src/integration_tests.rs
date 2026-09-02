@@ -107,6 +107,20 @@ fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
+fn playground_da_rasterizer_preserves_aliased_output_producers() {
+    run_with_large_stack(|| {
+        let source = format!(
+            "{}\n{}",
+            include_str!("../../scripts/playground_image_header.wyn"),
+            include_str!("../../testfiles/playground/da_rasterizer.wyn"),
+        );
+        let ssa = compile_thru_ssa(&source)
+            .expect("indexed fusion must retain producers observed through aliased output routes");
+        lower_ssa_to_wgsl(ssa).expect("da_rasterizer lowers to WGSL");
+    });
+}
+
+#[test]
 fn direct_backends_emit_only_the_requested_graphics_stages() {
     run_with_large_stack(|| {
         let source = include_str!("../../testfiles/unified_triangle.wyn");
@@ -146,11 +160,13 @@ fn direct_backends_emit_only_the_requested_graphics_stages() {
 #[test]
 fn direct_output_keeps_fragment_local_reduce_in_the_authored_stage() {
     run_with_large_stack(|| {
-        let planned = plan_direct(
+        let source = format!(
+            "{}\n{}",
+            include_str!("../../scripts/playground_image_header.wyn"),
             include_str!("../../testfiles/playground/ripples.wyn"),
-            CodegenTarget::Wgsl,
-        )
-        .expect("fragment-local reduction should remain serial in direct WGSL");
+        );
+        let planned = plan_direct(&source, CodegenTarget::Wgsl)
+            .expect("fragment-local reduction should remain serial in direct WGSL");
         let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
         assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
         assert!(
@@ -8734,11 +8750,11 @@ entry vertex_main(vid: i32) vec4f32 =
 /// enough that compile_to_ssa_with_modules succeeds.)
 #[test]
 fn test_ssa_raytrace_well_formed() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../testfiles/playground/raytrace.wyn"
-    ))
-    .expect("Could not read testfiles/playground/raytrace.wyn");
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../scripts/playground_image_header.wyn"),
+        include_str!("../../testfiles/playground/raytrace.wyn"),
+    );
 
     let ssa = compile_to_ssa_with_modules(&source);
 
@@ -8746,11 +8762,11 @@ fn test_ssa_raytrace_well_formed() {
     // before SSA and then removed by DCE. Verify the durable contract instead:
     // both extracted graphical stages survived and SSA construction completed.
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__vertex"),
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_image__vertex"),
         "the extracted raytrace vertex stage should be in SSA output"
     );
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__fragment"),
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_image__fragment"),
         "the extracted raytrace fragment stage should be in SSA output"
     );
 }

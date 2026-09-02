@@ -122,6 +122,31 @@ fn indexed_result_emission_supports_array_of_products_and_product_of_arrays() {
 }
 
 #[test]
+fn dynamic_place_backed_projection_stays_at_its_demand_site() {
+    let mut graph = EGraph::<Physical>::new();
+    let block = graph.skeleton.entry;
+    let scalar = u32_ty();
+    let array = fixed_array_ty(scalar.clone(), 4);
+    let place = alloca_place(&mut graph, array.clone());
+    let view_ty = types::view_array_of(&array, types::no_buffer());
+    let view = graph.add_place_view(place, view_ty, None).value();
+    let index = graph.add_block_param(block, u32_ty());
+    let projection = graph.intern_pure(PureOp::Index, smallvec![view, index], scalar, None);
+    let mut effect_ids = IdSource::new();
+
+    materialize_place_backed_projections(&mut graph, view, block, &mut effect_ids);
+
+    assert!(graph.skeleton.blocks[block].side_effects.is_empty());
+    assert!(matches!(
+        graph.nodes[projection].kind(),
+        ValueKind::Pure {
+            op: PureOp::Index,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let mut graph = EGraph::<Semantic>::new();
     let entry = graph.skeleton.entry;
