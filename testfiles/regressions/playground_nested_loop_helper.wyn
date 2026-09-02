@@ -7,10 +7,12 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   vertex_output(vertices[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 def xs: [2]vec2f32 = [@[1.0, 2.0], @[3.0, 4.0]]
+def edges: [2]vec2i32 = [@[0, 1], @[1, 0]]
 
 def sum(ys: [2]vec2f32) f32 =
   let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
-    (i + 1, acc + ys[i].x)
+    let edge = edges[i] in
+    (i + 1, acc + ys[edge.x].x)
   in acc
 
 def main_image(fragment: fragment_invocation<vec2f32>) vec4f32 =

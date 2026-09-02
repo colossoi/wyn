@@ -1,213 +1,67 @@
--- Wyn Playground image-shader wrapper.
---
--- This file is loaded as text by the playground. The three marker comments
--- are replaced immediately before compilation; users edit and save only the
--- source inserted at PLAYGROUND_USER_SOURCE.
+-- Minimal playground regression for nested mapped arrays consumed through
+-- dynamically indexed helper calls. Before 4ba89994, this first lost a
+-- side-effect producer during fusion projection. With only that fixed, WGSL
+-- lowering exposed a second bug by hoisting the dynamic indexed load before
+-- its index was bound.
 
-def __playground_vertices: [3]vec4f32 =
+def vertices: [3]vec4f32 =
   [@[-1.0, -1.0, 0.0, 1.0],
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-def __playground_vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(
-    __playground_vertices[i32(vertex.vertex_index)],
-    @[0.0, 0.0])
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(vertices[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-
-open f32
-
--- Constants (using vector literals)
-def red: vec3f32 = @[1.0, 0.0, 0.0]
-def green: vec3f32 = @[0.0, 1.0, 0.0]
-def blue: vec3f32 = @[0.0, 0.8, 1.0]
-def white: vec3f32 = @[1.0, 1.0, 0.97]
-def yellow: vec3f32 = @[1.0, 1.0, 0.0]
-
--- Matrix functions (inlined from graphics32)
 def translation(p: vec3f32) mat4f32 =
-  @[
-    [1.0f32, 0.0f32, 0.0f32, p.x],
-    [0.0f32, 1.0f32, 0.0f32, p.y],
-    [0.0f32, 0.0f32, 1.0f32, p.z],
-    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
-  ]
+  @[[1.0, 0.0, 0.0, p.x],
+    [0.0, 1.0, 0.0, p.y],
+    [0.0, 0.0, 1.0, p.z],
+    [0.0, 0.0, 0.0, 1.0]]
 
-def rotation_euler(a: vec3f32) mat4f32 =
-  let s = [sin(a.x), sin(a.y), sin(a.z)] in
-  let c = [cos(a.x), cos(a.y), cos(a.z)] in
-  @[
-    [c[1]*c[2], c[1]*s[2], 0.0f32 - s[1], 0.0f32],
-    [s[0]*s[1]*c[2] - c[0]*s[2], s[0]*s[1]*s[2] + c[0]*c[2], s[0]*c[1], 0.0f32],
-    [c[0]*s[1]*c[2] + s[0]*s[2], c[0]*s[1]*s[2] - s[0]*c[2], c[0]*c[1], 0.0f32],
-    [0.0f32, 0.0f32, 0.0f32, 1.0f32]
-  ]
+def line(p0: vec2f32, p1: vec2f32) f32 = p0.x + p1.y
 
--- Helper functions
-def clamp(x:f32, min:f32, max:f32) f32 =
-  if x < min then min else if x > max then max else x
+def edge_line(verts: [2]vec3f32, edge: vec2i32) f32 =
+  let a = verts[edge.x] in
+  let b = verts[edge.y] in
+  line(a.xy, b.xy)
 
-def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 = mix(a, b, t)
-
--- Rasterize helpers
-def line(weight:f32, p:vec2f32, p0:vec2f32, p1:vec2f32, w:f32) f32 =
-  let d = p1 - p0 in
-  let denom = dot(d, d) in
-  let dp = p - p0 in
-  let t_raw = if denom == 0.0 then 0.0 else (dot(d, dp) / denom) in
-  let t = clamp(t_raw, 0.0, 1.0) in
-  let proj = p0 + d * t in
-  let pdiff = p - proj in
-  let dist = magnitude(pdiff) in
-  let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
-  min(s*s, 1.0)
-
-def circle(weight:f32, p:vec2f32, c:vec2f32, r:f32, w:f32) f32 =
-  let diff = p - c in
-  let dist = abs(magnitude(diff)) + r in
-  let s = (if dist == 0.0 then 0.0 else (1.0 / dist)) * weight * w in
-  min(s*s, 1.0)
-
-def edge_line(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, e: vec2i32) f32 =
-  let a = verts[e.x] in
-  let b = verts[e.y] in
-  line(weight, uv, a.xy, b.xy, line_width)
-
-def sum_edges(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, edges: [12]vec2i32) f32 =
-  let (_, acc) = loop (i, acc) = (0, 0.0f32) while i < 12 do
-    (i + 1, acc + edge_line(verts, weight, uv, line_width, edges[i]))
+def sum_edges(verts: [2]vec3f32, edges: [2]vec2i32) f32 =
+  let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
+    (i + 1, acc + edge_line(verts, edges[i]))
   in acc
 
--- utils
-def mix3(a:vec3f32, b:vec3f32, c:vec3f32, t:f32) vec3f32 =
-  if t > 0.5 then mix3v(b, c, t*2.0 - 1.0) else mix3v(a, b, t*2.0)
+def points: [2]vec3f32 =
+  [@[-1.0, -1.0, 1.0], @[-1.0, 1.0, 1.0]]
 
-def fragment(p:vec3f32, iTime:f32) vec3f32 =
-  let t = sin(p.x*0.8 + iTime*0.5)*0.5 + 0.5 in
-  let fog = min(p.z*p.z*p.z*400.0, 1.0) in
-  let col = mix3(red, green, blue, t) in
-  col * fog
+def instances: [2]vec3f32 =
+  [@[0.0, 0.0, -1.0], @[-1.0, 0.0, -1.0]]
 
-def cube_corners: [8]vec3f32 =
-    [ @[-1.0, -1.0, 1.0],
-      @[-1.0, 1.0, 1.0],
-      @[1.0, 1.0, 1.0],
-      @[1.0, -1.0, 1.0],
-      @[-1.0, -1.0, -1.0],
-      @[-1.0, 1.0, -1.0],
-      @[1.0, 1.0, -1.0],
-      @[1.0, -1.0, -1.0] ]
+def edges: [2]vec2i32 = [@[0, 1], @[1, 0]]
 
-def instances_a: [18]vec3f32 =
-  -- Instances (first batch, 18 boxes)
-    [ @[0.0, 0.0, -1.0],
-      @[-1.0, 0.0, -1.0],
-      @[1.0, 0.0, -1.0],
-      @[0.0, 1.0, -1.0],
-      @[0.0, -1.0, -1.0],
-      @[-1.0, 0.0, 0.0],
-      @[1.0, 0.0, 0.0],
-      @[0.0, 1.0, 0.0],
-      @[0.0, -1.0, 0.0],
-      @[-1.0, -1.0, 0.0],
-      @[1.0, 1.0, 0.0],
-      @[-1.0, 1.0, 0.0],
-      @[1.0, -1.0, 0.0],
-      @[0.0, 0.0, 1.0],
-      @[-1.0, 0.0, 1.0],
-      @[1.0, 0.0, 1.0],
-      @[0.0, 1.0, 1.0],
-      @[0.0, -1.0, 1.0] ]
-
-def instances_b: [8]vec3f32 =
-    -- Second instances (8 circles)
-    [ @[-1.0, 1.0, -1.0],
-      @[1.0, 1.0, -1.0],
-      @[-1.0, -1.0, -1.0],
-      @[1.0, -1.0, -1.0],
-      @[-1.0, 1.0, 1.0],
-      @[1.0, 1.0, 1.0],
-      @[-1.0, -1.0, 1.0],
-      @[1.0, -1.0, 1.0] ]
-
-def edge_indexes: [12]vec2i32 =
-  -- Edge indices (loop invariant)
-    [ @[0,1],@[1,2],@[2,3],@[3,0],
-      @[4,5],@[5,6],@[6,7],@[7,4],
-      @[0,4],@[1,5],@[2,6],@[3,7] ]
-
--- Main per-fragment function
--- Inputs:
---   resolution : [w, h, _]
---   time       : time in seconds
---   frag_coord : pixel coordinate [x, y]
--- Output: vec4f32 color
-def main_image(
-    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
-    ) vec4f32 =
-  let weight = 3.0 / resolution.x in
-
-  -- Normalized, centered UV with aspect correction
-  let uv0 : vec2f32 = @[(frag_coord.x / resolution.x), (frag_coord.y / resolution.y)] in
-  let uv1 : vec2f32 = uv0 * 2.0 - 1.0 in
-  let uv  : vec2f32 = @[(uv1.x * (resolution.x/resolution.y)), uv1.y] in
-
-  let line_width = 0.4 in
+def main_image(time: f32) vec4f32 =
   let animation_time = time * 0.31415 in
-
-  let base_col = mix3v(@[0.19, 0.13, 0.10], @[1.0, 1.0, 1.0],
-                         (0.5 * ((magnitude(uv) * 0.5) ** 2.0))) in
-  let cam = translation(@[0.0, 0.0, 10.0]) in
-
-  -- #define LINEAR_ROTATION
-  let rot = rotation_euler(@[animation_time, (animation_time*0.86), (animation_time*0.473)]) in
-
-  -- Precompute rot * cam (loop invariant)
-  -- Using row-vector convention (v * M), same as GLSL/DirectX
-  let rot_cam : mat4f32 = rot * cam in
-
-
-  -- Accumulate color
-  let c_box_result =
-    loop (idx, acc) = (0i32, base_col) while idx < 18 do
-      let inst = instances_a[idx] in
-      let pos  = translation(inst * 4.0) in
-      let mat  : mat4f32 = pos * rot_cam in
-
-      -- Transform & perspective
-      let v4s : [8]vec4f32 = map(|v:vec3f32| @[v.x, v.y, v.z, 1.0] * mat, cube_corners) in
-      let verts1 : [8]vec3f32 =
-        map(|q:vec4f32|
-                  let zinv = 1.0 / q.z in
-                  @[(q.x*zinv), (q.y*zinv), zinv],
-               v4s) in
-
-      let i_sum = sum_edges(verts1, weight, uv, line_width, edge_indexes) in
-
-      let shade = fragment(verts1[0], time) in
-      let intensity = min(i_sum, 1.0) in
-      let shade_scaled = shade * intensity in
-      let acc' = acc + shade_scaled in
-      (idx + 1, acc') in
-  let (dummy1, c_box) = c_box_result in
-
-
-
-  @[c_box.x, c_box.y, c_box.z, 1.0]
-
+  let base_color = @[0.0, 0.0, 0.0] in
+  let shared = translation(@[animation_time, 0.0, 10.0]) in
+  let result =
+    loop (i, color) = (0i32, base_color) while i < 2 do
+      let instance = instances[i] in
+      let position = translation(instance * 4.0) in
+      let matrix = position * shared in
+      let transformed: [2]vec4f32 = map(
+        |v: vec3f32| @[v.x, v.y, v.z, 1.0] * matrix,
+        points) in
+      let projected: [2]vec3f32 = map(
+        |v: vec4f32|
+          let inverse_z = 1.0 / v.z in
+          @[v.x * inverse_z, v.y * inverse_z, inverse_z],
+        transformed) in
+      let total = sum_edges(projected, edges) in
+      (i + 1, color + projected[0] * total) in
+  let (_, color) = result in
+  @[color.x, color.y, color.z, 1.0]
 
 entry image(
-            resolution: vec3f32,
-            time: f32,
-            mouse: vec4f32,
-            screen: render_target<vec4f32>) render_target<vec4f32> =
-  let raster = rasterize_triangles(
-    direct_draw(3u32, 1u32), __playground_vertex_main)
-  in
-  shade(screen, raster, |fragment|
-    main_image(
-      resolution,
-      time,
-      mouse,
-      fragment.position.xy
-    ))
+    time: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, |fragment| main_image(time))
