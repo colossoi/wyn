@@ -73,6 +73,8 @@ if (-not $env:RUST_MIN_STACK) {
 $wynBinary = Join-Path $workspace "target/release/wyn$executableSuffix"
 $vizBinary = Join-Path $workspace "extra/viz/target/release/viz$executableSuffix"
 $outputDirectory = Join-Path $workspace 'tmp/playground'
+$playgroundDirectory = Join-Path $workspace 'testfiles/playground'
+$playgroundHeader = Join-Path $workspace 'scripts/playground_image_header.wyn'
 $exitCode = 0
 
 Push-Location $workspace
@@ -94,7 +96,7 @@ try {
 
     $null = New-Item -ItemType Directory -Force -Path $outputDirectory
     $files = @(
-        Get-ChildItem -LiteralPath (Join-Path $workspace 'testfiles/playground') -File |
+        Get-ChildItem -LiteralPath $playgroundDirectory -File |
             Where-Object Extension -EQ '.wyn' |
             Sort-Object FullName
     )
@@ -104,12 +106,31 @@ try {
         $spv = Join-Path $outputDirectory "$name.spv"
         $vizConfig = Join-Path $file.DirectoryName "$name.viz.json"
 
+        $compileSource = $file.FullName
+        $preparedSource = $null
+        $hasExplicitEntry = [IO.File]::ReadLines($file.FullName) |
+            Where-Object { $_ -match '^entry ' } |
+            Select-Object -First 1
+        if (-not $hasExplicitEntry) {
+            $preparedSource = Join-Path $playgroundDirectory ".run-$name-$([guid]::NewGuid()).wyn"
+            $source = [IO.File]::ReadAllText($playgroundHeader) +
+                [Environment]::NewLine + [IO.File]::ReadAllText($file.FullName)
+            [IO.File]::WriteAllText($preparedSource, $source, [Text.UTF8Encoding]::new($false))
+            $compileSource = $preparedSource
+        }
+
         Write-Host ''
         Write-Host "=== $name ==="
-        $compileArguments = @('compile', $file.FullName, '--graphics', '--direct', '-o', $spv)
+        $compileArguments = @('compile', $compileSource, '--graphics', '--direct', '-o', $spv)
 
         Write-Host "$wynBinary $($compileArguments -join ' ')"
-        $compile = Invoke-NativeCaptured $wynBinary $compileArguments
+        try {
+            $compile = Invoke-NativeCaptured $wynBinary $compileArguments
+        } finally {
+            if ($null -ne $preparedSource) {
+                Remove-Item -LiteralPath $preparedSource -Force -ErrorAction SilentlyContinue
+            }
+        }
 
         if ($compile.ExitCode -ne 0) {
             $compile.Output | ForEach-Object { Write-Host $_ }
