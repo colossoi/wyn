@@ -67,7 +67,7 @@ def hash_terrain(uv: vec2f32, jt: f32) f32 =
 -- disabled, those all return zero, the a-weights collapse to 1, and
 -- the corner-hash computation is dead. Only the geometric edge
 -- distance remains.
-def edgeMin(dx: f32, da: vec2f32, db: vec2f32, _uv: vec2f32) f32 =
+def edge_min(dx: f32, da: vec2f32, db: vec2f32, _uv: vec2f32) f32 =
   min(min((1.0 - dx) * db.y, da.x), da.y)
 
 -- Triangular-grid value noise: returns (height, edge_mask)
@@ -87,7 +87,7 @@ def trinoise(uv_in: vec2f32, jt: f32) (f32, f32) =
   let nmid = mix(n2, n3, d.y) in
   let ns   = mix(nn, n_alt, da.y) in
   let dx   = da.x / db.y in
-  (mix(ns, nmid, dx), edgeMin(dx, da, db, @[uv.x + d.x, uv.y + d.y]))
+  (mix(ns, nmid, dx), edge_min(dx, da, db, @[uv.x + d.x, uv.y + d.y]))
 
 ------------------------------------------------------------
 -- Scene SDF (terrain)
@@ -201,19 +201,14 @@ def gsky(rd: vec3f32, ld: vec3f32, show_sun: bool) vec3f32 =
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
   -- Flip Y for Vulkan
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   -- Camera time (jTime in original; iTimeDelta not available, dt ≈ 0)
-  let jt = mod(iTime, 4000.0) in
+  let jt = mod(time, 4000.0) in
 
   -- Screen UV
-  let uv = (2.0 * fc - iResolution.xy) / iResolution.y in
+  let uv = (2.0 * fc - resolution.xy) / resolution.y in
 
   -- Ray origin: scrolling forward at SPEED
   let ro = @[0.0, 1.0, -20000.0 + jt * SPEED] in
