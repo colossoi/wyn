@@ -12,19 +12,14 @@ open f32
 def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
-  let iResolution = resolution in
-  let iTime = time in
-  let iMouse = mouse in
-  let fragCoord = @[frag_coord.x, frag_coord.y, 0.0, 0.0] in
-  let frag = fragCoord in
   -- UV in [0, 1]². The fragCoord -> uv mapping leaves cells roughly square
   -- when we scale by iResolution.xy below.
-  let uv = fragCoord.xy / iResolution.xy in
+  let uv = frag_coord.xy / resolution.xy in
   -- Scale into noise space: ~3 cells across the short axis. iTime drifts
   -- the origin so the pattern flows; the y-only drift keeps the visual
   -- "wind direction" obvious for QA.
   let scale = 3.0f32 in
-  let p: vec2f32 = @[uv.x * scale, uv.y * scale + iTime * 0.15] in
+  let p: vec2f32 = @[uv.x * scale, uv.y * scale + time * 0.15] in
   -- 5-octave fbm_perlin, classic 1/f knobs.
   let k = fasthash.seed(0x9e3779b9u32) in
   let n = fhnoise.fbm_perlin(k, p, 5i32, 2.0f32, 0.5f32) in
