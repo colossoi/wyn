@@ -121,7 +121,7 @@ try {
 
         Write-Host ''
         Write-Host "=== $name ==="
-        $compileArguments = @('compile', $compileSource, '--graphics', '--direct', '-o', $spv)
+        $compileArguments = @('build', $compileSource, '--graphics', '--direct', '-o', $spv)
 
         Write-Host "$wynBinary $($compileArguments -join ' ')"
         try {

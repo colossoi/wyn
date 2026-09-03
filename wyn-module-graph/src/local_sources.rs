@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::{ModuleKey, PackageId, SourceProvider};
+use crate::{ModuleKey, PackageId, SourceReader};
 
 /// Failure while reading a verified local package source tree.
 #[derive(Debug, Error)]
@@ -99,7 +99,7 @@ impl LocalSources {
     }
 }
 
-impl SourceProvider for LocalSources {
+impl SourceReader for LocalSources {
     type Error = LocalSourceError;
 
     fn load(&mut self, module: &ModuleKey) -> Result<Arc<str>, Self::Error> {

@@ -5,7 +5,7 @@ use std::fmt;
 use crate::graph::ImportTraceFrame;
 use crate::ids::{ImportSiteId, ModuleId};
 use crate::path::PathError;
-use crate::plan::{DependencyAlias, ModuleKey, PackagePlan};
+use crate::plan::{DependencyAlias, ModuleKey, PackageGraph};
 use crate::source::{SourceLocation, SourceMap, SourceTextError, Span, SpanError};
 
 /// A graph-construction error together with every source buffer loaded before
@@ -21,7 +21,7 @@ pub struct BuildFailure<FrontendError, ProviderError> {
 
 #[derive(Debug)]
 struct FailureContext {
-    plan: PackagePlan,
+    packages: PackageGraph,
     module_ids: HashMap<ModuleKey, ModuleId>,
     sources: SourceMap,
 }
@@ -29,14 +29,14 @@ struct FailureContext {
 impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
     pub(crate) fn new(
         error: BuildError<FrontendError, ProviderError>,
-        plan: PackagePlan,
+        packages: PackageGraph,
         module_ids: HashMap<ModuleKey, ModuleId>,
         sources: SourceMap,
     ) -> Self {
         Self {
             error,
             context: Box::new(FailureContext {
-                plan,
+                packages,
                 module_ids,
                 sources,
             }),
@@ -48,9 +48,9 @@ impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
         &self.error
     }
 
-    /// The closed package plan used by the failed graph build.
-    pub const fn plan(&self) -> &PackagePlan {
-        &self.context.plan
+    /// The closed package graph used by the failed module-graph build.
+    pub const fn package_graph(&self) -> &PackageGraph {
+        &self.context.packages
     }
 
     /// The stable package-relative identity assigned to a discovered module.
@@ -74,12 +74,12 @@ impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
     }
 
     fn fmt_module(&self, formatter: &mut fmt::Formatter<'_>, key: &ModuleKey) -> fmt::Result {
-        let root_package = self.context.plan.root().package();
+        let root_package = self.context.packages.root().package();
         if key.package() == root_package {
             return write!(formatter, "{}", key.path());
         }
 
-        let Some(package) = self.context.plan.package(key.package()) else {
+        let Some(package) = self.context.packages.package(key.package()) else {
             return write!(formatter, "{}", key.path());
         };
         write!(

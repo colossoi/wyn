@@ -33,6 +33,7 @@ pub type ImportsResolved = Program<ImportsResolvedTag, ImportsResolvedFamily, Se
 /// whole-program AST.
 pub fn resolve_imports(modules: ParsedModules) -> std::result::Result<ImportsResolved, CompilationFailure> {
     let ParsedModules {
+        options: _,
         graph,
         node_ids,
         semantic_modules,

@@ -1,7 +1,7 @@
 use super::*;
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder,
-    SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
+    PackagePlan, SourceFingerprint,
 };
 
 fn reported_imports(source: &str) -> Vec<(ImportSiteId, ImportTarget, TextRange)> {
@@ -61,7 +61,7 @@ fn semantic_failure_retains_dependency_source_identity() {
     let fingerprint = SourceFingerprint::new("frontend-failure-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
             PackageIdentity::new("example/root", "v0.1.0", fingerprint.clone())
@@ -95,8 +95,8 @@ fn semantic_failure_retains_dependency_source_identity() {
         .add_override(dependency, "def broken: i32 = true")
         .expect("dependency override should be unique");
 
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("source graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("source graph should load");
     let failure = modules.type_check().expect_err("dependency should fail type checking");
     let span = failure.error().span().expect("type error should retain its source span");
     let module = span.module().expect("type error should belong to physical source");

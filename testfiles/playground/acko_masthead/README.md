@@ -22,7 +22,7 @@ CRT post-process (barrel curvature + RGB sub-pixel + 16-px quantize +
 | `scene.wyn` | Vertex + fragment shader for the lit 3D pass. Vertex reads the three `.bin`s as storage buffers; fragment is the TrackShader port. | Yes. |
 | `post.wyn` | Vertex + fragment shader for the CRT post-process pass. Reads the scene render target as a `Sampler2D`. | Yes. |
 | `pipeline.json` | Two-stage graphics pipeline descriptor wiring scene → rgba16f attachment → post → swapchain. | Yes. |
-| `scene.spv` / `scene.json` | `wyn compile` output. | No — `build_scene.bat` regenerates. |
+| `scene.spv` / `scene.json` | `wyn build` output. | No — `build_scene.bat` regenerates. |
 | `README.md` | This file. | Yes. |
 
 `N` = 62792 (62792 cross-section ring vertices across 16 tracks; the

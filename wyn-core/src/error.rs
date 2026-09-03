@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use thiserror::Error;
-use wyn_module_graph::SourceGraph;
+use wyn_module_graph::{BuildFailure, LocalSourceError, SourceGraph};
 
 use crate::ast::Span;
 
@@ -70,6 +70,16 @@ impl CompilerError {
             | Self::Internal(_) => None,
         }
     }
+}
+
+/// Failure while initializing and loading the parsed source-module closure.
+#[derive(Debug, Error)]
+pub enum LoadModulesError {
+    #[error("failed to initialize the compiler prelude: {0}")]
+    Prelude(#[source] CompilerError),
+
+    #[error(transparent)]
+    Modules(#[from] BuildFailure<CompilerError, LocalSourceError>),
 }
 
 /// A compiler error together with the source graph needed to render its span

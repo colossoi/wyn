@@ -36,7 +36,7 @@
 -- express yet.
 --
 -- Run (canvas is RES x RES = 720 x 720; size the window to match):
---   cargo run --bin wyn -- compile testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
+--   cargo run --bin wyn -- build testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
 --   (cd extra/viz && cargo run -- pipeline /tmp/pf.spv \
 --       --config ../../testfiles/playground/perlin_fields.viz.json \
 --       --size 720x720)

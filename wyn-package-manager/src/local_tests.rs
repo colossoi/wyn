@@ -2,9 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wyn_module_graph::SourceProvider;
+use wyn_module_graph::SourceReader;
 
-use super::{load_local_build, load_local_input, LocalBuildError};
+use super::{prepare_package, PreparationError};
 
 struct TestTree {
     root: PathBuf,
@@ -68,8 +68,9 @@ fn dependency(alias: &str, package: &str, version: &str, path: &str) -> String {
     )
 }
 
-fn package_id(plan: &wyn_module_graph::PackagePlan, name: &str) -> wyn_module_graph::PackageId {
-    plan.packages()
+fn package_id(packages: &wyn_module_graph::PackageGraph, name: &str) -> wyn_module_graph::PackageId {
+    packages
+        .packages()
         .find_map(|(id, package)| (package.identity().canonical_name() == name).then_some(id))
         .expect("package should belong to the plan")
 }
@@ -85,11 +86,11 @@ fn local_manifests_produce_a_closed_plan_and_confined_sources() {
         &dependency("dependency", "test/dependency", "v1.2.0", "../dependency"),
     );
 
-    let build = load_local_build(root).expect("local graph should load");
-    let (plan, mut sources) = build.into_parts();
-    assert_eq!(plan.packages().count(), 2);
-    let dependency = package_id(&plan, "test/dependency");
-    let root_package = plan.package(plan.root().package()).expect("root package should exist");
+    let input = prepare_package(root, None).expect("local graph should load");
+    let (packages, mut sources) = input.into_parts();
+    assert_eq!(packages.packages().count(), 2);
+    let dependency = package_id(&packages, "test/dependency");
+    let root_package = packages.package(packages.root().package()).expect("root package should exist");
     let edge = root_package.dependencies().next().expect("dependency edge should exist");
     assert_eq!(edge.alias().as_str(), "dependency");
     assert_eq!(edge.package(), dependency);
@@ -116,8 +117,29 @@ fn local_dependency_must_satisfy_its_minimum() {
     );
 
     assert!(matches!(
-        load_local_build(root),
-        Err(LocalBuildError::VersionMismatch { .. })
+        prepare_package(root, None),
+        Err(PreparationError::VersionMismatch { .. })
+    ));
+}
+
+#[test]
+fn git_dependency_requires_materialization_before_compilation() {
+    let tree = TestTree::new();
+    let root = tree.package(
+        "root",
+        "test/root",
+        "v1.0.0",
+        concat!(
+            "[dependencies]\n",
+            "dependency = { package = \"test/dependency\", version = \"v1.2.0\", ",
+            "git = \"https://example.invalid/dependency\" }\n",
+        ),
+    );
+
+    assert!(matches!(
+        prepare_package(root, None),
+        Err(PreparationError::MaterializationUnavailable { repository, .. })
+            if repository == "https://example.invalid/dependency"
     ));
 }
 
@@ -132,8 +154,8 @@ fn one_package_name_cannot_come_from_two_local_roots() {
     let root = tree.package("root", "test/root", "v1.0.0", &dependencies);
 
     assert!(matches!(
-        load_local_build(root),
-        Err(LocalBuildError::ConflictingPackageRoots { .. })
+        prepare_package(root, None),
+        Err(PreparationError::ConflictingPackageRoots { .. })
     ));
 }
 
@@ -153,40 +175,6 @@ fn package_dependency_cycles_are_representable() {
         &dependency("first", "test/first", "v1.0.0", "../first"),
     );
 
-    let build = load_local_build(first).expect("package dependency cycle should close");
-    assert_eq!(build.into_parts().0.packages().count(), 2);
-}
-
-#[test]
-fn local_input_recognizes_package_directories_manifests_and_source_roots() {
-    let tree = TestTree::new();
-    let root = tree.package("root", "test/root", "v1.0.0", "");
-
-    let directory = load_local_input(&root)
-        .expect("package directory should load")
-        .expect("package directory should be recognized");
-    assert_eq!(directory.into_parts().0.packages().count(), 1);
-
-    let manifest = load_local_input(root.join("wyn.toml"))
-        .expect("package manifest should load")
-        .expect("package manifest should be recognized");
-    assert_eq!(manifest.into_parts().0.packages().count(), 1);
-
-    let example = root.join("test/example.wyn");
-    fs::create_dir_all(example.parent().expect("example should have a parent"))
-        .expect("example directory should be created");
-    fs::write(&example, "def example: i32 = 1\n").expect("example source should be written");
-    let source = load_local_input(&example)
-        .expect("package source should load")
-        .expect("package source should be recognized");
-    assert_eq!(source.into_parts().0.root().path().as_str(), "test/example.wyn");
-
-    let standalone = tree.root.join("standalone.wyn");
-    fs::write(&standalone, "def standalone: i32 = 1\n").expect("standalone source should be written");
-    assert!(
-        load_local_input(standalone)
-            .expect("standalone source should not fail package recognition")
-            .is_none(),
-        "standalone source should remain available to the compiler driver",
-    );
+    let input = prepare_package(first, None).expect("package dependency cycle should close");
+    assert_eq!(input.into_parts().0.packages().count(), 2);
 }

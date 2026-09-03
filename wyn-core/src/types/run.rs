@@ -15,7 +15,7 @@ use crate::resolve_opens;
 use crate::resolve_placeholders;
 use crate::semantic_modules;
 use crate::types::checker::{TypeChecker, TypeWarning};
-use crate::LookupMap;
+use crate::{CompilerOptions, LookupMap};
 
 pub type TypeCheckedFamily = ast::AstFamily<
     ast::TypedTree,
@@ -33,11 +33,12 @@ pub enum TypeCheckedTag {}
 pub type TypeChecked =
     ast::Program<TypeCheckedTag, TypeCheckedFamily, ast::TypedGlobal<ast::TypedDefinition, ast::TypedTree>>;
 
-pub fn type_check(program: resolve_opens::OpensResolved) -> Result<TypeChecked> {
+pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOptions) -> Result<TypeChecked> {
     let name_resolution = name_resolution::build_name_resolution(
         &program,
         &program.global_context.semantic_modules,
         builtins::catalog(),
+        options,
     );
     let checked = program.try_rebuild(|declarations, global_context, _| {
         let resolve_placeholders::PlaceholdersResolvedGlobal {

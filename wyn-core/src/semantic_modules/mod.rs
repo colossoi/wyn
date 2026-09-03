@@ -15,7 +15,6 @@ use crate::parser::Parser;
 use crate::resolve_imports;
 use crate::scope;
 use crate::scope::ScopeStack;
-use crate::CompilerOptions;
 use crate::StableMap;
 use crate::{bail_module, err_module, err_module_at, err_parse};
 use crate::{LookupMap, LookupSet};
@@ -117,7 +116,6 @@ pub struct PreElaboratedPrelude {
 /// Owns elaborated modules, module types, functors, aliases, and prelude declarations.
 #[derive(Debug)]
 pub struct SemanticModules {
-    options: CompilerOptions,
     /// Module type registry: type name -> ModuleTypeExpression
     module_type_registry: LookupMap<String, ModuleTypeExpression>,
     /// Elaborated modules: module_name -> ElaboratedModule.
@@ -160,7 +158,6 @@ impl SemanticModules {
         let known_modules = Self::BUILTIN_MODULES.iter().map(|s| s.to_string()).collect();
 
         SemanticModules {
-            options: CompilerOptions::default(),
             module_type_registry: LookupMap::new(),
             elaborated_modules: StableMap::new(),
             functor_modules: LookupMap::new(),
@@ -214,14 +211,7 @@ impl SemanticModules {
     /// Note: Caller must use a NodeCounter that was advanced during prelude creation
     /// (see get_prelude_cache in lib.rs which caches both prelude and node_counter)
     pub fn from_prelude(prelude: PreElaboratedPrelude) -> Self {
-        Self::from_prelude_with_options(prelude, CompilerOptions::default())
-    }
-
-    /// Create semantic module state from a cached prelude with explicit language
-    /// features for subsequent user-source parsing and resolution.
-    pub fn from_prelude_with_options(prelude: PreElaboratedPrelude, options: CompilerOptions) -> Self {
         SemanticModules {
-            options,
             module_type_registry: prelude.module_type_registry,
             elaborated_modules: prelude.elaborated_modules,
             functor_modules: LookupMap::new(), // Prelude doesn't have functors
@@ -230,10 +220,6 @@ impl SemanticModules {
             prelude_functions: prelude.prelude_functions,
             user_module_names: LookupSet::new(),
         }
-    }
-
-    pub fn options(&self) -> CompilerOptions {
-        self.options
     }
 
     /// Check if a name is a known module
@@ -260,7 +246,7 @@ impl SemanticModules {
         // Parse the source
         let module = ModuleId::from(0);
         let tokens = lexer::tokenize(module, source).map_err(|e| err_parse!("{}", e))?;
-        let mut parser = Parser::with_graphics(module, tokens, node_counter, self.options.graphics);
+        let mut parser = Parser::with_graphics(module, tokens, node_counter, false);
         let declarations = parser.parse()?;
 
         // Register module types first

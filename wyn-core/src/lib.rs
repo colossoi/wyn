@@ -25,8 +25,8 @@ pub mod semantic_modules;
 pub mod ssa;
 pub mod types;
 
-pub use error::CompilationFailure;
-pub use frontend::{Compiler, ParsedModules};
+pub use error::{CompilationFailure, LoadModulesError};
+pub use frontend::{initialize_frontend, ParsedModules};
 
 pub mod lowering_common;
 pub mod name_registry;
@@ -347,8 +347,7 @@ pub use polytype::Context as PolytypeContext;
 // driven by named functions that consume one generic program stage and return
 // the next.
 //
-//   let compiler = Compiler::new(options)?;
-//   let modules = compiler.load_modules(plan, sources)?;
+//   let modules = ParsedModules::load(plan, options)?;
 //   let program = modules.type_check()?;
 //     let program = ast_type_holes::reject_type_holes(program)?;
 //
@@ -764,8 +763,7 @@ pub fn compile_thru_frontend_with_options(
     source: &str,
     options: CompilerOptions,
 ) -> error::Result<types::run::TypeChecked> {
-    let compiler = Compiler::new(options)?;
-    let modules = test_pipeline::load_test_modules(source, compiler);
+    let modules = test_pipeline::load_test_modules(source, options);
     modules.type_check().map_err(error::CompilationFailure::into_error)
 }
 

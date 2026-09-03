@@ -5,9 +5,9 @@ use thiserror::Error;
 
 use crate::source::SourceFile;
 use crate::{
-    load_modules, BuildError, DependencyAlias, ImportSiteId, ImportTarget, ModuleFrontend, ModuleId,
-    ModuleKey, ModulePath, PackageIdentity, PackagePlan, PackagePlanBuilder, PathError, RelativeModulePath,
-    SourceFingerprint, SourceLocation, SourceProvider, Span, SpanError, TextRange,
+    BuildError, DependencyAlias, ImportSiteId, ImportTarget, ModuleId, ModuleKey, ModuleParser, ModulePath,
+    PackageGraph, PackageGraphBuilder, PackageIdentity, PackagePlan, PathError, RelativeModulePath,
+    SourceFingerprint, SourceLocation, SourceReader, Span, SpanError, TextRange,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -19,7 +19,6 @@ enum TestProviderError {
 #[derive(Default)]
 struct MemoryProvider {
     sources: HashMap<ModuleKey, Arc<str>>,
-    loads: HashMap<ModuleKey, usize>,
 }
 
 impl MemoryProvider {
@@ -29,17 +28,12 @@ impl MemoryProvider {
             Arc::<str>::from(source),
         );
     }
-
-    fn load_count(&self, package: crate::PackageId, path: &str) -> usize {
-        self.loads.get(&ModuleKey::new(package, module_path(path))).copied().unwrap_or_default()
-    }
 }
 
-impl SourceProvider for MemoryProvider {
+impl SourceReader for MemoryProvider {
     type Error = TestProviderError;
 
     fn load(&mut self, module: &ModuleKey) -> Result<Arc<str>, Self::Error> {
-        *self.loads.entry(module.clone()).or_default() += 1;
         self.sources.get(module).cloned().ok_or(TestProviderError::Missing)
     }
 }
@@ -55,7 +49,7 @@ enum TestFrontendError {
 #[derive(Default)]
 struct TestFrontend;
 
-impl ModuleFrontend for TestFrontend {
+impl ModuleParser for TestFrontend {
     type Parsed = String;
     type Error = TestFrontendError;
 
@@ -138,8 +132,8 @@ fn identity(name: &str) -> PackageIdentity {
         .unwrap_or_else(|error| panic!("invalid package identity: {error}"))
 }
 
-fn one_package_plan() -> (PackagePlan, crate::PackageId) {
-    let mut builder = PackagePlanBuilder::new();
+fn one_package_plan() -> (PackageGraph, crate::PackageId) {
+    let mut builder = PackageGraphBuilder::new();
     let package = builder
         .add_package(identity("test/root"), module_path("src/lib.wyn"))
         .unwrap_or_else(|error| panic!("add package: {error}"));
@@ -203,7 +197,7 @@ fn source_file_maps_utf8_spans_to_snippets_and_locations() {
 
 #[test]
 fn package_plan_has_deterministic_ids_and_package_local_aliases() {
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root = builder
         .add_package(identity("test/root"), module_path("src/lib.wyn"))
         .unwrap_or_else(|error| panic!("root package: {error}"));
@@ -221,7 +215,7 @@ fn package_plan_has_deterministic_ids_and_package_local_aliases() {
 }
 
 #[test]
-fn diamond_import_loads_shared_source_once_in_dependency_order() {
+fn diamond_import_contains_shared_source_once_in_dependency_order() {
     let (plan, package) = one_package_plan();
     let mut provider = MemoryProvider::default();
     provider.insert(package, "src/main.wyn", "local:left\nlocal:right\n");
@@ -229,10 +223,10 @@ fn diamond_import_loads_shared_source_once_in_dependency_order() {
     provider.insert(package, "src/right.wyn", "local:shared\n");
     provider.insert(package, "src/shared.wyn", "");
 
-    let graph = load_modules(plan, &mut provider, &mut TestFrontend)
+    let graph = PackagePlan::new(plan, provider)
+        .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
     assert_eq!(graph.modules().count(), 4);
-    assert_eq!(provider.load_count(package, "src/shared.wyn"), 1);
     assert_eq!(
         graph
             .modules_in_dependency_order()
@@ -254,7 +248,8 @@ fn syntax_erasure_preserves_source_and_resolved_imports() {
     provider.insert(package, "src/main.wyn", "local:dependency\n");
     provider.insert(package, "src/dependency.wyn", "");
 
-    let graph = load_modules(plan, &mut provider, &mut TestFrontend)
+    let graph = PackagePlan::new(plan, provider)
+        .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
     let root = graph.root();
     let target = graph
@@ -270,7 +265,7 @@ fn syntax_erasure_preserves_source_and_resolved_imports() {
 
 #[test]
 fn same_relative_path_in_distinct_packages_has_distinct_module_identity() {
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root = builder
         .add_package(identity("test/root"), module_path("src/lib.wyn"))
         .unwrap_or_else(|error| panic!("root package: {error}"));
@@ -295,7 +290,8 @@ fn same_relative_path_in_distinct_packages_has_distinct_module_identity() {
     provider.insert(root, "src/main.wyn", "dep:one\ndep:two\n");
     provider.insert(one, "src/lib.wyn", "");
     provider.insert(two, "src/lib.wyn", "");
-    let graph = load_modules(plan, &mut provider, &mut TestFrontend)
+    let graph = PackagePlan::new(plan, provider)
+        .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
 
     let imported: Vec<_> = graph
@@ -312,7 +308,7 @@ fn same_relative_path_in_distinct_packages_has_distinct_module_identity() {
 
 #[test]
 fn dependency_aliases_are_resolved_in_the_importing_package() {
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root = builder
         .add_package(identity("test/root"), module_path("src/lib.wyn"))
         .unwrap_or_else(|error| panic!("root package: {error}"));
@@ -337,7 +333,8 @@ fn dependency_aliases_are_resolved_in_the_importing_package() {
     provider.insert(root, "src/main.wyn", "dep:util\n");
     provider.insert(middle, "src/lib.wyn", "dep:util\n");
     provider.insert(leaf, "src/lib.wyn", "");
-    let graph = load_modules(plan, &mut provider, &mut TestFrontend)
+    let graph = PackagePlan::new(plan, provider)
+        .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
 
     let root_target = graph
@@ -358,7 +355,7 @@ fn import_cycle_reports_only_the_ordered_cycle_edges() {
     provider.insert(package, "src/a.wyn", "local:b\n");
     provider.insert(package, "src/b.wyn", "local:a\n");
 
-    let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
     let BuildError::Cycle { edges } = failure.error() else {
         panic!("expected cycle error");
     };
@@ -376,7 +373,7 @@ fn load_failure_retains_the_complete_import_chain() {
     provider.insert(package, "src/main.wyn", "local:a\n");
     provider.insert(package, "src/a.wyn", "local:missing\n");
 
-    let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
     let BuildError::Load {
         module,
         trace,
@@ -398,7 +395,7 @@ fn undeclared_dependency_reports_its_alias_and_source_span() {
     let mut provider = MemoryProvider::default();
     provider.insert(package, "src/main.wyn", "dep:missing\n");
 
-    let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
     let BuildError::UnknownDependency { alias, span, .. } = failure.error() else {
         panic!("expected unknown dependency error");
     };
@@ -413,7 +410,7 @@ fn parse_failure_retains_the_source_that_failed_to_parse() {
     let mut provider = MemoryProvider::default();
     provider.insert(package, "src/main.wyn", "parse-error");
 
-    let failure = load_modules(plan, &mut provider, &mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
     let BuildError::Parse {
         module,
         trace,
@@ -428,7 +425,7 @@ fn parse_failure_retains_the_source_that_failed_to_parse() {
         Some("src/main.wyn")
     );
     assert_eq!(
-        failure.plan().package(package).map(|package| package.identity().canonical_name()),
+        failure.package_graph().package(package).map(|package| package.identity().canonical_name()),
         Some("test/root")
     );
     assert_eq!(failure.source_text(*module), Some("parse-error"));

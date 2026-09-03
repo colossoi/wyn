@@ -47,7 +47,7 @@ def ensure_built() -> None:
 def compile_shader() -> None:
     print(f"Compiling {SHADER.relative_to(REPO_ROOT)} -> {SPV}")
     subprocess.run(
-        [str(WYN_BIN), "compile", str(SHADER), "-o", str(SPV)],
+        [str(WYN_BIN), "build", str(SHADER), "-o", str(SPV)],
         cwd=REPO_ROOT,
         check=True,
     )

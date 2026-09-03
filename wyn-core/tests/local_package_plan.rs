@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wyn_core::{Compiler, CompilerOptions};
+use wyn_core::{CompilerOptions, ParsedModules};
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder,
-    SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
+    PackagePlan, SourceFingerprint,
 };
 
 struct TestDirectory {
@@ -75,7 +75,7 @@ fn verified_local_package_roots_compile_as_one_program() {
     let fingerprint = SourceFingerprint::new("local-package-plan-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("src/lib.wyn").expect("valid dependency path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
             PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
@@ -108,9 +108,7 @@ fn verified_local_package_roots_compile_as_one_program() {
         .add_package_root(dependency_package, &dependency_directory)
         .expect("dependency source tree should be verified");
 
-    Compiler::new(CompilerOptions::default())
-        .expect("compiler should initialize")
-        .load_modules(plan, &mut sources)
+    ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
         .expect("local package graph should load")
         .type_check()
         .expect("local packages should type check as one program");

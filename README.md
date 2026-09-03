@@ -597,24 +597,24 @@ entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
 
 ```bash
 # Compile to SPIR-V
-cargo run --bin wyn -- compile input.wyn -o output.spv
+cargo run --bin wyn -- build input.wyn -o output.spv
 
 # Compile to WGSL
-cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl
+cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
 # Compile a graphics program directly, without compiler-created prepasses
-cargo run --bin wyn -- compile input.wyn -o output.spv --graphics --direct
-cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --graphics --direct
+cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
+cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --graphics --direct
 
 # Opt in to backend-local u64 emulation for WGSL
-cargo run --bin wyn -- compile input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
+cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
 
 # Type check without generating code (`--graphics` is required for graphics vocabulary)
 cargo run --bin wyn -- check input.wyn --graphics
 
 # Output intermediate representations
-cargo run --bin wyn -- compile input.wyn --output-init-ssa out.ssa   # Initial SSA
-cargo run --bin wyn -- compile input.wyn --output-annotated out.ann  # Annotated source
+cargo run --bin wyn -- build input.wyn --output-init-ssa out.ssa   # Initial SSA
+cargo run --bin wyn -- build input.wyn --output-annotated out.ann  # Annotated source
 
 # Run a compiler-published SPIR-V or WGSL pipeline
 cd extra/viz && cargo run -- pipeline ../../shader.wgsl

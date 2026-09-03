@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::ast::{NodeCounter, SourceImport};
-use crate::error::{CompilationFailure, CompilerError, Result};
+use crate::error::{CompilationFailure, CompilerError, LoadModulesError, Result};
 use crate::parser::{self, ParsedFile};
 use crate::semantic_modules::{PreElaboratedPrelude, SemanticModules};
 use crate::{
@@ -9,34 +9,47 @@ use crate::{
     resolve_placeholders, resolve_resources, types, CompilerOptions,
 };
 use wyn_module_graph::{
-    BuildFailure, DependencyAlias, ImportSiteId, ImportTarget, ModuleFrontend, ModuleGraph, ModuleId,
-    PackagePlan, RelativeModulePath, SourceProvider, TextRange,
+    DependencyAlias, ImportSiteId, ImportTarget, ModuleGraph, ModuleId, ModuleParser, PackagePlan,
+    RelativeModulePath, TextRange,
 };
 
 static COMPILER_PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
-
-/// State owned by one compilation before its source-module graph is loaded.
-pub struct Compiler {
-    pub(crate) node_ids: NodeCounter,
-    pub(crate) semantic_modules: SemanticModules,
-}
 
 /// Parsed source modules together with the compiler state that produced them.
 ///
 /// This is an opaque compiler checkpoint. Later frontend phases consume it so
 /// parsed syntax cannot be separated from its module graph or ID allocators.
 pub struct ParsedModules {
+    pub(crate) options: CompilerOptions,
     pub(crate) graph: ModuleGraph<ParsedFile>,
     pub(crate) node_ids: NodeCounter,
     pub(crate) semantic_modules: SemanticModules,
 }
 
 impl ParsedModules {
+    /// Initialize the frontend and load the complete source closure.
+    pub fn load(
+        input: PackagePlan,
+        options: CompilerOptions,
+    ) -> std::result::Result<Self, LoadModulesError> {
+        let (prelude, mut node_ids) = compiler_prelude().map_err(LoadModulesError::Prelude)?;
+        let semantic_modules = SemanticModules::from_prelude(prelude);
+        let mut frontend = WynFrontend::new(&mut node_ids, options);
+        let graph = input.load(&mut frontend)?;
+        Ok(Self {
+            options,
+            graph,
+            node_ids,
+            semantic_modules,
+        })
+    }
+
     /// Run the complete semantic frontend through type checking.
     ///
     /// Failures retain the source graph so callers can render package-aware
     /// locations without consulting the filesystem.
     pub fn type_check(self) -> std::result::Result<types::run::TypeChecked, CompilationFailure> {
+        let options = self.options;
         let program = resolve_imports::resolve_imports(self)?;
         let source_graph = Arc::clone(&program.source_graph);
         let result = (|| {
@@ -46,39 +59,9 @@ impl ParsedModules {
             let program = ast_const_fold::fold_constants(program);
             let program = resolve_placeholders::resolve_type_placeholders(program);
             let program = resolve_opens::resolve_opens(program)?;
-            types::run::type_check(program)
+            types::run::type_check(program, options)
         })();
         result.map_err(|error| CompilationFailure::new(error, source_graph))
-    }
-}
-
-impl Compiler {
-    /// Create a compiler with a cached, pre-elaborated standard prelude.
-    pub fn new(options: CompilerOptions) -> Result<Self> {
-        let (prelude, node_ids) = compiler_prelude()?;
-        Ok(Self {
-            node_ids,
-            semantic_modules: SemanticModules::from_prelude_with_options(prelude, options),
-        })
-    }
-
-    /// Load and parse every source module reachable from a closed package plan.
-    pub fn load_modules<S>(
-        mut self,
-        plan: PackagePlan,
-        sources: &mut S,
-    ) -> std::result::Result<ParsedModules, BuildFailure<CompilerError, S::Error>>
-    where
-        S: SourceProvider,
-    {
-        let options = self.semantic_modules.options();
-        let mut frontend = WynFrontend::new(&mut self.node_ids, options);
-        let graph = wyn_module_graph::load_modules(plan, sources, &mut frontend)?;
-        Ok(ParsedModules {
-            graph,
-            node_ids: self.node_ids,
-            semantic_modules: self.semantic_modules,
-        })
     }
 }
 
@@ -93,6 +76,11 @@ fn compiler_prelude() -> Result<(PreElaboratedPrelude, NodeCounter)> {
     Ok((prelude.clone(), node_ids.clone()))
 }
 
+/// Initialize and validate the cached compiler frontend without loading user source.
+pub fn initialize_frontend() -> Result<()> {
+    compiler_prelude().map(drop)
+}
+
 /// The Wyn-specific adapter at the syntax-independent module graph boundary.
 pub(crate) struct WynFrontend<'a> {
     node_ids: &'a mut NodeCounter,
@@ -105,7 +93,7 @@ impl<'a> WynFrontend<'a> {
     }
 }
 
-impl ModuleFrontend for WynFrontend<'_> {
+impl ModuleParser for WynFrontend<'_> {
     type Parsed = ParsedFile;
     type Error = CompilerError;
 

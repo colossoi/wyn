@@ -1,10 +1,11 @@
 use crate::{
     ast_const_fold, ast_type_holes, compile_thru_tlc, elaborate_modules, name_resolution, resolve_imports,
-    resolve_opens, resolve_placeholders, resolve_resources, symbol_name_or_bug, Compiler, CompilerOptions,
+    resolve_opens, resolve_placeholders, resolve_resources, symbol_name_or_bug, CompilerOptions,
+    ParsedModules,
 };
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder,
-    SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
+    PackagePlan, SourceFingerprint,
 };
 
 fn has_definition(program: &super::super::stage::Reachable, name: &str) -> bool {
@@ -55,7 +56,7 @@ fn unused_dependency_contributes_no_reachable_definitions() {
     let fingerprint = SourceFingerprint::new("dce-package-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
             PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
@@ -95,8 +96,8 @@ fn unused_dependency_contributes_no_reachable_definitions() {
         .add_override(dependency, "def unused(value: i32) i32 = value + 1")
         .expect("dependency override should be unique");
 
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
     let program = name_resolution::resolve_names(program);
@@ -104,7 +105,8 @@ fn unused_dependency_contributes_no_reachable_definitions() {
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);
     let program = resolve_opens::resolve_opens(program).expect("opens should resolve");
-    let program = crate::types::run::type_check(program).expect("program should type check");
+    let program = crate::types::run::type_check(program, CompilerOptions::default())
+        .expect("program should type check");
     let program = ast_type_holes::reject_type_holes(program).expect("program should have no holes");
     let program = super::super::lower_from_ast(program).expect("AST should lower to TLC");
     let program = super::super::pin_entry_buffers(program).expect("entry buffers should pin");

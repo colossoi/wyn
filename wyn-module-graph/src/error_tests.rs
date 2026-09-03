@@ -3,10 +3,10 @@ use std::io;
 use std::sync::Arc;
 
 use super::*;
-use crate::{ModulePath, PackageIdentity, PackagePlanBuilder, SourceFingerprint, TextRange};
+use crate::{ModulePath, PackageGraph, PackageGraphBuilder, PackageIdentity, SourceFingerprint, TextRange};
 
 struct TestPlan {
-    plan: PackagePlan,
+    plan: PackageGraph,
     root: ModuleKey,
     dependency: ModuleKey,
 }
@@ -15,7 +15,7 @@ fn test_plan() -> TestPlan {
     let root_path = ModulePath::new("src/main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("src/lib.wyn").expect("valid dependency path");
     let fingerprint = SourceFingerprint::new("diagnostic-test").expect("valid fingerprint");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
             PackageIdentity::new("example/root", "v0.1.0", fingerprint.clone())

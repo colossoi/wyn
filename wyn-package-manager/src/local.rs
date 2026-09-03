@@ -1,85 +1,85 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use wyn_module_graph::{
-    DependencyAlias, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint,
+    DependencyAlias, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath,
+    PackageGraphBuilder, PackageGraphError, PackageIdentity, PackagePlan, PathError, SourceFingerprint,
 };
 
-use crate::{Dependency, Manifest, ManifestError, PackageName, PackageVersion};
+use crate::{Dependency, DependencySource, Manifest, ManifestError, PackageName, PackageVersion};
 
-/// A closed local package plan and its confined filesystem source provider.
-#[derive(Debug)]
-pub struct LocalBuild {
-    plan: PackagePlan,
-    sources: LocalSources,
-}
-
-impl LocalBuild {
-    pub fn into_parts(self) -> (PackagePlan, LocalSources) {
-        (self.plan, self.sources)
-    }
-}
-
-/// Read a root `wyn.toml` and every reachable local-path dependency.
-pub fn load_local_build(root: impl AsRef<Path>) -> Result<LocalBuild, LocalBuildError> {
-    let mut loader = LocalLoader::new();
-    let root = loader.load(root.as_ref())?;
-    let library = loader.packages[root].manifest.library().clone();
-    loader.finish(root, library)
-}
-
-/// Load `input` when it names a local package directory or its `wyn.toml`.
+/// Prepare compiler inputs for the package rooted beside `wyn.toml`.
 ///
-/// A source file beneath a package manifest becomes that package plan's root
-/// module. Other paths return `None`, allowing a command-line driver to retain
-/// a separate direct-source mode without knowing the manifest layout.
-pub fn load_local_input(input: impl AsRef<Path>) -> Result<Option<LocalBuild>, LocalBuildError> {
-    let input = input.as_ref();
-    if input.is_dir() {
-        return load_local_build(input).map(Some);
-    }
-    if input.file_name() == Some(OsStr::new("wyn.toml")) {
-        let Some(root) = input.parent() else {
-            return Ok(None);
-        };
-        let root = if root.as_os_str().is_empty() { Path::new(".") } else { root };
-        return load_local_build(root).map(Some);
-    }
+/// `root_module` selects a source module in the root package. When omitted,
+/// the package manifest's library module is used. Every reachable dependency
+/// must be materialized before this returns.
+pub fn prepare_package(
+    root: impl AsRef<Path>,
+    root_module: Option<ModulePath>,
+) -> Result<PackagePlan, PreparationError> {
+    let mut preparer = PackagePreparer::new();
+    let root = preparer.load_package(root.as_ref())?;
+    let root_module = match root_module {
+        Some(module) => module,
+        None => preparer.packages[root].manifest.library().clone(),
+    };
+    preparer.finish(root, root_module)
+}
 
-    if input.extension() != Some(OsStr::new("wyn")) {
-        return Ok(None);
-    }
-    let Ok(source) = input.canonicalize() else {
-        return Ok(None);
-    };
-    let Some(root) = source
-        .parent()
-        .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.join("wyn.toml").is_file()))
-    else {
-        return Ok(None);
-    };
-    let Ok(relative) = source.strip_prefix(root) else {
-        return Ok(None);
-    };
-    let Some(relative) = relative.to_str() else {
-        return Err(LocalBuildError::NonUtf8SourcePath { path: source });
-    };
-    let module = ModulePath::new(relative).map_err(|source| LocalBuildError::SourcePath {
-        path: input.to_owned(),
-        source,
+/// Prepare compiler inputs for one source file outside a package.
+pub fn prepare_standalone(source: impl AsRef<Path>) -> Result<PackagePlan, PreparationError> {
+    let source = source.as_ref();
+    let source = source.canonicalize().map_err(|error| PreparationError::ResolveStandaloneSource {
+        path: source.to_owned(),
+        source: error,
     })?;
-    let mut loader = LocalLoader::new();
-    let package = loader.load(root)?;
-    loader.finish(package, module).map(Some)
+    let Some(root) = source.parent() else {
+        return Err(PreparationError::StandaloneSourceWithoutParent { path: source });
+    };
+    let Some(root_file) = source.file_name().and_then(|name| name.to_str()) else {
+        return Err(PreparationError::NonUtf8StandaloneSource { path: source });
+    };
+
+    let root_file = ModulePath::new(root_file).map_err(|error| PreparationError::StandaloneSourcePath {
+        path: source.clone(),
+        source: error,
+    })?;
+    let fingerprint = SourceFingerprint::new("direct-local-source")?;
+    let identity = PackageIdentity::new("direct/root", "v0.0.0", fingerprint)?;
+    let mut packages = PackageGraphBuilder::new();
+    let package = packages.add_package(identity, root_file.clone())?;
+    packages.set_root(ModuleKey::new(package, root_file))?;
+
+    let mut sources = LocalSources::new();
+    sources.add_package_root(package, root)?;
+    Ok(PackagePlan::new(packages.build()?, sources))
 }
 
 #[derive(Debug, Error)]
-pub enum LocalBuildError {
+pub enum PreparationError {
+    #[error("failed to resolve standalone source `{path}`: {source}")]
+    ResolveStandaloneSource {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("standalone source `{path}` has no parent directory")]
+    StandaloneSourceWithoutParent {
+        path: PathBuf,
+    },
+    #[error("standalone source path `{path}` is not UTF-8")]
+    NonUtf8StandaloneSource {
+        path: PathBuf,
+    },
+    #[error("invalid standalone source path `{path}`: {source}")]
+    StandaloneSourcePath {
+        path: PathBuf,
+        #[source]
+        source: PathError,
+    },
     #[error("failed to resolve local package directory `{path}`: {source}")]
     ResolvePackage {
         path: PathBuf,
@@ -103,6 +103,15 @@ pub enum LocalBuildError {
         package: PackageName,
         alias: DependencyAlias,
         path: PathBuf,
+    },
+    #[error(
+        "dependency `{alias}` in `{package}` requires materializing `{dependency}` from Git repository `{repository}`, but Git materialization is unavailable"
+    )]
+    MaterializationUnavailable {
+        package: PackageName,
+        alias: DependencyAlias,
+        dependency: PackageName,
+        repository: String,
     },
     #[error(
         "dependency `{alias}` in `{package}` declares `{expected}` but the local package is `{actual}`"
@@ -129,19 +138,9 @@ pub enum LocalBuildError {
     #[error("invalid package identity: {0}")]
     Identity(#[from] IdentityError),
     #[error("invalid package plan: {0}")]
-    Plan(#[from] PlanError),
+    PackageGraph(#[from] PackageGraphError),
     #[error("invalid local source root: {0}")]
     Sources(#[from] LocalSourceError),
-    #[error("package source path `{path}` is not UTF-8")]
-    NonUtf8SourcePath {
-        path: PathBuf,
-    },
-    #[error("invalid package source path `{path}`: {source}")]
-    SourcePath {
-        path: PathBuf,
-        #[source]
-        source: PathError,
-    },
 }
 
 #[derive(Debug)]
@@ -151,13 +150,13 @@ struct LoadedPackage {
     dependencies: Vec<(DependencyAlias, usize)>,
 }
 
-struct LocalLoader {
+struct PackagePreparer {
     packages: Vec<LoadedPackage>,
     by_root: HashMap<PathBuf, usize>,
     by_name: HashMap<PackageName, usize>,
 }
 
-impl LocalLoader {
+impl PackagePreparer {
     fn new() -> Self {
         Self {
             packages: Vec::new(),
@@ -166,8 +165,8 @@ impl LocalLoader {
         }
     }
 
-    fn load(&mut self, root: &Path) -> Result<usize, LocalBuildError> {
-        let root = root.canonicalize().map_err(|source| LocalBuildError::ResolvePackage {
+    fn load_package(&mut self, root: &Path) -> Result<usize, PreparationError> {
+        let root = root.canonicalize().map_err(|source| PreparationError::ResolvePackage {
             path: root.to_owned(),
             source,
         })?;
@@ -177,16 +176,16 @@ impl LocalLoader {
 
         let manifest_path = root.join("wyn.toml");
         let source =
-            fs::read_to_string(&manifest_path).map_err(|source| LocalBuildError::ReadManifest {
+            fs::read_to_string(&manifest_path).map_err(|source| PreparationError::ReadManifest {
                 path: manifest_path.clone(),
                 source,
             })?;
-        let manifest = Manifest::parse(&source).map_err(|source| LocalBuildError::Manifest {
+        let manifest = Manifest::parse(&source).map_err(|source| PreparationError::Manifest {
             path: manifest_path,
             source,
         })?;
         if let Some(&existing) = self.by_name.get(manifest.package()) {
-            return Err(LocalBuildError::ConflictingPackageRoots {
+            return Err(PreparationError::ConflictingPackageRoots {
                 package: manifest.package().clone(),
                 first: self.packages[existing].root.clone(),
                 second: root,
@@ -219,18 +218,12 @@ impl LocalLoader {
         package: usize,
         alias: &DependencyAlias,
         dependency: &Dependency,
-    ) -> Result<usize, LocalBuildError> {
-        if dependency.path().is_absolute() {
-            return Err(LocalBuildError::AbsoluteDependencyPath {
-                package: self.packages[package].manifest.package().clone(),
-                alias: alias.clone(),
-                path: dependency.path().to_owned(),
-            });
-        }
-        let child = self.load(&root.join(dependency.path()))?;
+    ) -> Result<usize, PreparationError> {
+        let child_root = self.materialize_dependency(root, package, alias, dependency)?;
+        let child = self.load_package(&child_root)?;
         let actual = &self.packages[child].manifest;
         if actual.package() != dependency.package() {
-            return Err(LocalBuildError::PackageMismatch {
+            return Err(PreparationError::PackageMismatch {
                 package: self.packages[package].manifest.package().clone(),
                 alias: alias.clone(),
                 expected: dependency.package().clone(),
@@ -238,7 +231,7 @@ impl LocalLoader {
             });
         }
         if !actual.version().satisfies(dependency.minimum()) {
-            return Err(LocalBuildError::VersionMismatch {
+            return Err(PreparationError::VersionMismatch {
                 package: self.packages[package].manifest.package().clone(),
                 alias: alias.clone(),
                 minimum: dependency.minimum().clone(),
@@ -248,9 +241,36 @@ impl LocalLoader {
         Ok(child)
     }
 
-    fn finish(self, root: usize, root_module: ModulePath) -> Result<LocalBuild, LocalBuildError> {
+    fn materialize_dependency(
+        &self,
+        root: &Path,
+        package: usize,
+        alias: &DependencyAlias,
+        dependency: &Dependency,
+    ) -> Result<PathBuf, PreparationError> {
+        match dependency.source() {
+            DependencySource::LocalPath(path) => {
+                if path.is_absolute() {
+                    return Err(PreparationError::AbsoluteDependencyPath {
+                        package: self.packages[package].manifest.package().clone(),
+                        alias: alias.clone(),
+                        path: path.clone(),
+                    });
+                }
+                Ok(root.join(path))
+            }
+            DependencySource::Git { repository } => Err(PreparationError::MaterializationUnavailable {
+                package: self.packages[package].manifest.package().clone(),
+                alias: alias.clone(),
+                dependency: dependency.package().clone(),
+                repository: repository.clone(),
+            }),
+        }
+    }
+
+    fn finish(self, root: usize, root_module: ModulePath) -> Result<PackagePlan, PreparationError> {
         let fingerprint = SourceFingerprint::new("local-path")?;
-        let mut plan = PackagePlanBuilder::new();
+        let mut packages = PackageGraphBuilder::new();
         let mut ids = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
             let identity = PackageIdentity::new(
@@ -258,21 +278,21 @@ impl LocalLoader {
                 package.manifest.version().to_string(),
                 fingerprint.clone(),
             )?;
-            ids.push(plan.add_package(identity, package.manifest.library().clone())?);
+            ids.push(packages.add_package(identity, package.manifest.library().clone())?);
         }
         for (index, package) in self.packages.iter().enumerate() {
             for (alias, dependency) in &package.dependencies {
-                plan.add_dependency(ids[index], alias.clone(), ids[*dependency])?;
+                packages.add_dependency(ids[index], alias.clone(), ids[*dependency])?;
             }
         }
-        plan.set_root(ModuleKey::new(ids[root], root_module))?;
-        let plan = plan.build()?;
+        packages.set_root(ModuleKey::new(ids[root], root_module))?;
+        let packages = packages.build()?;
 
         let mut sources = LocalSources::new();
         for (id, package) in ids.into_iter().zip(self.packages) {
             sources.add_package_root(id, package.root)?;
         }
-        Ok(LocalBuild { plan, sources })
+        Ok(PackagePlan::new(packages, sources))
     }
 }
 

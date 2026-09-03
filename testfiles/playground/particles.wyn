@@ -14,7 +14,7 @@
 -- Run (the explicit config path is needed because this example writes the
 -- compiled shader to a different directory than its sidecar):
 --
---   wyn compile testfiles\playground\particles.wyn ^
+--   wyn build testfiles\playground\particles.wyn ^
 --     -o C:\Users\<you>\AppData\Local\Temp\p.spv
 --   extra\viz\target\release\viz.exe pipeline ^
 --     C:\Users\<you>\AppData\Local\Temp\p.spv ^

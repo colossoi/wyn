@@ -14,39 +14,39 @@ cargo build -p wyn || exit /b 1
 
 echo == compile + validate ==
 
-"%WYN%" compile pkg\dist\test\dist_demo.wyn -o "%TEMP%\dist_demo.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\dist_demo.wyn -o "%TEMP%\dist_demo.spv" || exit /b 1
 spirv-val "%TEMP%\dist_demo.spv" || exit /b 1
-"%WYN%" compile pkg\dist\test\dist_demo.wyn -t wgsl -o "%TEMP%\dist_demo.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\dist_demo.wyn -t wgsl -o "%TEMP%\dist_demo.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\dist\test\stats_normal.wyn -o "%TEMP%\stats_normal.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_normal.wyn -o "%TEMP%\stats_normal.spv" || exit /b 1
 spirv-val "%TEMP%\stats_normal.spv" || exit /b 1
-"%WYN%" compile pkg\dist\test\stats_normal.wyn -t wgsl -o "%TEMP%\stats_normal.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_normal.wyn -t wgsl -o "%TEMP%\stats_normal.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\dist\test\stats_uniform.wyn -o "%TEMP%\stats_uniform.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform.wyn -o "%TEMP%\stats_uniform.spv" || exit /b 1
 spirv-val "%TEMP%\stats_uniform.spv" || exit /b 1
-"%WYN%" compile pkg\dist\test\stats_uniform.wyn -t wgsl -o "%TEMP%\stats_uniform.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform.wyn -t wgsl -o "%TEMP%\stats_uniform.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\dist\test\stats_exponential.wyn -o "%TEMP%\stats_exponential.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_exponential.wyn -o "%TEMP%\stats_exponential.spv" || exit /b 1
 spirv-val "%TEMP%\stats_exponential.spv" || exit /b 1
-"%WYN%" compile pkg\dist\test\stats_exponential.wyn -t wgsl -o "%TEMP%\stats_exponential.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_exponential.wyn -t wgsl -o "%TEMP%\stats_exponential.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\dist\test\stats_uniform_int.wyn -o "%TEMP%\stats_uniform_int.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform_int.wyn -o "%TEMP%\stats_uniform_int.spv" || exit /b 1
 spirv-val "%TEMP%\stats_uniform_int.spv" || exit /b 1
-"%WYN%" compile pkg\dist\test\stats_uniform_int.wyn -t wgsl -o "%TEMP%\stats_uniform_int.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform_int.wyn -t wgsl -o "%TEMP%\stats_uniform_int.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\noise\test\noise_smoke.wyn -o "%TEMP%\noise_smoke.spv" || exit /b 1
+"%WYN%" build pkg\noise\test\noise_smoke.wyn -o "%TEMP%\noise_smoke.spv" || exit /b 1
 spirv-val "%TEMP%\noise_smoke.spv" || exit /b 1
-"%WYN%" compile pkg\noise\test\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
+"%WYN%" build pkg\noise\test\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
 
-"%WYN%" compile pkg\gtao\test\gtao_smoke.wyn -o "%TEMP%\gtao_smoke.spv" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_smoke.wyn -o "%TEMP%\gtao_smoke.spv" || exit /b 1
 spirv-val "%TEMP%\gtao_smoke.spv" || exit /b 1
-"%WYN%" compile pkg\gtao\test\gtao_smoke.wyn -t wgsl -o "%TEMP%\gtao_smoke.wgsl" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_smoke.wyn -t wgsl -o "%TEMP%\gtao_smoke.wgsl" || exit /b 1
 
 rem Compile-only (the demo needs a window, a GPU, and an input image; see
 rem the package source for the interactive run command).
-"%WYN%" compile pkg\gtao\test\gtao_demo.wyn --graphics -o "%TEMP%\gtao_demo.spv" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_demo.wyn --graphics -o "%TEMP%\gtao_demo.spv" || exit /b 1
 spirv-val "%TEMP%\gtao_demo.spv" || exit /b 1
-"%WYN%" compile pkg\gtao\test\gtao_demo.wyn --graphics -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_demo.wyn --graphics -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
 
 echo compile + validate: OK
 

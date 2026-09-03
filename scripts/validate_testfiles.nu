@@ -80,7 +80,7 @@ def main [
             let out_path = ($out_dir | path join $"($base).wgsl")
             print -n $"Compiling ($f) -> WGSL... "
 
-            let compile = (do { ^$wyn_bin compile $compile_source --graphics -t wgsl -o $out_path } | complete)
+            let compile = (do { ^$wyn_bin build $compile_source --graphics -t wgsl -o $out_path } | complete)
             if $prepared_source != null { rm --force $prepared_source }
             if $compile.exit_code != 0 {
                 print "COMPILE FAILED"
@@ -111,7 +111,7 @@ def main [
             let spv_path = ($out_dir | path join $"($base).spv")
             print -n $"Compiling ($f)... "
 
-            let compile = (do { ^$wyn_bin compile $compile_source --graphics -o $spv_path } | complete)
+            let compile = (do { ^$wyn_bin build $compile_source --graphics -o $spv_path } | complete)
             if $prepared_source != null { rm --force $prepared_source }
             if $compile.exit_code != 0 {
                 print "COMPILE FAILED"

@@ -6,15 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
+use wyn_core::pipeline_descriptor::PipelineDescriptor;
 use wyn_core::{
-    CodegenTarget, CompilationFailure, Compiler, CompilerOptions, LoweringProfile, PipelineTopologyPolicy,
-    SchedulePolicy,
+    CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, LoweringProfile, ParsedModules,
+    PipelineTopologyPolicy, SchedulePolicy,
 };
-use wyn_module_graph::{
-    BuildFailure, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, PathError, PlanError, SourceFingerprint, SourceGraph,
-};
-use wyn_package_manager::{load_local_input, LocalBuildError};
+use wyn_module_graph::{ModulePath, PackagePlan, PathError, SourceGraph};
+use wyn_package_manager::{prepare_package, prepare_standalone, PreparationError};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -24,6 +22,41 @@ enum Target {
     Spirv,
     /// WGSL source code (WebGPU shading language)
     Wgsl,
+}
+
+impl Target {
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Spirv => "spv",
+            Self::Wgsl => "wgsl",
+        }
+    }
+}
+
+struct CompileOptions {
+    target: Target,
+    direct: bool,
+    wgsl_emulate_u64: bool,
+    fill_holes: bool,
+    output_tlc: Option<PathBuf>,
+    output_mir: Option<PathBuf>,
+    verbose: bool,
+}
+
+struct Compilation {
+    code: CompiledCode,
+    pipeline: PipelineDescriptor,
+    auxiliary: Vec<TextArtifact>,
+}
+
+enum CompiledCode {
+    Spirv(Vec<u32>),
+    Wgsl(String),
+}
+
+struct TextArtifact {
+    path: PathBuf,
+    contents: String,
 }
 
 /// Times the execution of a closure and prints the elapsed time if verbose.
@@ -47,17 +80,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile one or more source files or local packages to SPIR-V or WGSL
-    Compile {
-        /// Input source file(s), package directories, or `wyn.toml` manifests.
-        /// Multiple inputs are compiled in turn within one process.
-        #[arg(value_name = "INPUT", required = true)]
-        inputs: Vec<PathBuf>,
+    /// Build a source program or local package as SPIR-V or WGSL
+    Build {
+        /// Input source file or package directory
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
 
-        /// Output file, or an existing directory to write
-        /// <input-stem>.<ext> into. Omitted: each output is written
-        /// next to its input. A non-directory path is only valid with
-        /// a single input.
+        /// Output file, or an existing directory in which to write it
         #[arg(short, long, value_name = "FILE|DIR")]
         output: Option<PathBuf>,
 
@@ -104,7 +133,7 @@ enum Commands {
 
     /// Validate a source file or local package without generating output
     Check {
-        /// Input source file, package directory, or `wyn.toml` manifest
+        /// Input source file or package directory
         #[arg(value_name = "INPUT")]
         input: PathBuf,
 
@@ -126,26 +155,17 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
-    #[error("Source module error: {0}")]
-    SourceModule(#[from] BuildFailure<wyn_core::error::CompilerError, LocalSourceError>),
+    #[error(transparent)]
+    LoadModules(#[from] LoadModulesError),
 
     #[error("{0}")]
     Compilation(#[from] CompilationFailure),
 
-    #[error("Local source error: {0}")]
-    LocalSource(#[from] LocalSourceError),
-
-    #[error("Package identity error: {0}")]
-    PackageIdentity(#[from] IdentityError),
-
     #[error("Module path error: {0}")]
     ModulePath(#[from] PathError),
 
-    #[error("Package plan error: {0}")]
-    PackagePlan(#[from] PlanError),
-
     #[error("{0}")]
-    LocalPackage(#[from] LocalBuildError),
+    PackagePreparation(#[from] PreparationError),
 
     #[error("Pipeline descriptor serialization error: {0}")]
     DescriptorSerialization(#[from] serde_json::Error),
@@ -167,38 +187,73 @@ fn retain_source<T>(
     result.map_err(|error| CompilationFailure::new(error, source_graph.clone()).into())
 }
 
-fn direct_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
-    let input = input.canonicalize()?;
-    let Some(root) = input.parent() else {
-        return Err(DriverError::InvalidOption(format!(
-            "input file `{}` has no parent directory",
-            input.display()
-        )));
-    };
-    let Some(root_file) = input.file_name().and_then(|name| name.to_str()) else {
-        return Err(DriverError::InvalidOption(format!(
-            "input file `{}` is not a UTF-8 path",
-            input.display()
-        )));
-    };
-
-    let root_file = ModulePath::new(root_file)?;
-    let fingerprint = SourceFingerprint::new("direct-local-source")?;
-    let identity = PackageIdentity::new("direct/root", "v0.0.0", fingerprint)?;
-    let mut builder = PackagePlanBuilder::new();
-    let package = builder.add_package(identity, root_file.clone())?;
-    builder.set_root(ModuleKey::new(package, root_file))?;
-    let plan = builder.build()?;
-    let mut sources = LocalSources::new();
-    sources.add_package_root(package, root)?;
-    Ok((plan, sources))
+enum BuildInput {
+    Package {
+        root: PathBuf,
+        root_module: Option<ModulePath>,
+    },
+    Standalone(PathBuf),
 }
 
-fn input_source_plan(input: &Path) -> Result<(PackagePlan, LocalSources), DriverError> {
-    if let Some(build) = load_local_input(input)? {
-        return Ok(build.into_parts());
+fn normalize_input(input: &Path) -> Result<PathBuf, DriverError> {
+    let input = input.canonicalize()?;
+    if input.is_dir() || input.extension().and_then(|extension| extension.to_str()) == Some("wyn") {
+        return Ok(input);
     }
-    direct_source_plan(input)
+    Err(DriverError::InvalidOption(format!(
+        "input `{}` must be a package directory or `.wyn` source file",
+        input.display()
+    )))
+}
+
+fn find_build_input(path: &Path) -> Result<BuildInput, DriverError> {
+    if path.is_dir() {
+        return Ok(BuildInput::Package {
+            root: path.to_owned(),
+            root_module: None,
+        });
+    }
+
+    let Some(package_root) = path
+        .parent()
+        .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.join("wyn.toml").is_file()))
+    else {
+        return Ok(BuildInput::Standalone(path.to_owned()));
+    };
+    let Ok(relative) = path.strip_prefix(package_root) else {
+        return Ok(BuildInput::Standalone(path.to_owned()));
+    };
+    let Some(relative) = relative.to_str() else {
+        return Err(DriverError::InvalidOption(format!(
+            "input `{}` is not a UTF-8 path",
+            path.display()
+        )));
+    };
+    let root_module = ModulePath::new(relative)?;
+    Ok(BuildInput::Package {
+        root: package_root.to_owned(),
+        root_module: Some(root_module),
+    })
+}
+
+fn output_path(input: &Path, output: Option<PathBuf>, target: Target) -> Result<PathBuf, DriverError> {
+    match output {
+        Some(directory) if directory.is_dir() => {
+            let Some(stem) = input.file_stem().and_then(|stem| stem.to_str()) else {
+                return Err(DriverError::InvalidOption(format!(
+                    "input `{}` has no UTF-8 file stem",
+                    input.display()
+                )));
+            };
+            Ok(directory.join(format!("{stem}.{}", target.extension())))
+        }
+        Some(path) => Ok(path),
+        None => {
+            let mut path = input.to_path_buf();
+            path.set_extension(target.extension());
+            Ok(path)
+        }
+    }
 }
 
 fn type_check_input(
@@ -207,21 +262,31 @@ fn type_check_input(
     graphics: bool,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
-    let (plan, mut sources) = input_source_plan(input)?;
-    type_check_package_plan(plan, &mut sources, reject_holes, graphics, verbose)
+    let input = normalize_input(input)?;
+    let package_plan = match find_build_input(&input)? {
+        BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
+        BuildInput::Standalone(source) => prepare_standalone(source)?,
+    };
+    type_check_package_plan(package_plan, reject_holes, graphics, verbose)
 }
 
 fn type_check_package_plan(
     plan: PackagePlan,
-    sources: &mut LocalSources,
     reject_holes: bool,
     graphics: bool,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
-    let compiler = time("frontend", verbose, || {
-        Compiler::new(CompilerOptions { graphics })
+    let modules = time("load_modules", verbose, || {
+        ParsedModules::load(plan, CompilerOptions { graphics })
     })?;
-    let modules = time("load_modules", verbose, || compiler.load_modules(plan, sources))?;
+    finish_type_check(modules, reject_holes, verbose)
+}
+
+fn finish_type_check(
+    modules: ParsedModules,
+    reject_holes: bool,
+    verbose: bool,
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let program = time("type_check", verbose, || modules.type_check())?;
 
     for warning in &program.global_context.warnings {
@@ -283,8 +348,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), DriverError> {
     match cli.command {
-        Commands::Compile {
-            inputs,
+        Commands::Build {
+            input,
             output,
             target,
             output_tlc,
@@ -294,70 +359,27 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             wgsl_emulate_u64,
             fill_holes,
             verbose,
-        } => {
-            if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
-                return Err(DriverError::InvalidOption(
-                    "--wgsl-emulate-u64 requires --target wgsl".to_string(),
-                ));
-            }
-            // Output handling:
-            //   omitted            → each output written next to its input
-            //   existing directory → DIR/<input-stem>.<ext> per file
-            //   regular file path  → only valid with a single input
-            let out_dir: Option<PathBuf> = match &output {
-                Some(p) if p.is_dir() => Some(p.clone()),
-                Some(p) if inputs.len() > 1 => {
-                    eprintln!(
-                        "error: --output must be an existing directory when compiling multiple files (got {})",
-                        p.display()
-                    );
-                    std::process::exit(1);
-                }
-                _ => None,
-            };
-            for (i, input) in inputs.iter().enumerate() {
-                let per_output = if let Some(dir) = &out_dir {
-                    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                    let ext = match target {
-                        Target::Spirv => "spv",
-                        Target::Wgsl => "wgsl",
-                    };
-                    Some(dir.join(format!("{stem}.{ext}")))
-                } else if inputs.len() == 1 {
-                    output.clone()
-                } else {
-                    None
-                };
-                if verbose && inputs.len() > 1 {
-                    eprintln!("[{}/{}] {}", i + 1, inputs.len(), input.display());
-                }
-                compile_file(
-                    input.clone(),
-                    per_output,
-                    target,
-                    output_tlc.clone(),
-                    output_mir.clone(),
-                    graphics,
-                    direct,
-                    wgsl_emulate_u64,
-                    fill_holes,
-                    verbose,
-                )?;
-            }
-        }
+        } => build(
+            input,
+            output,
+            target,
+            output_tlc,
+            output_mir,
+            graphics,
+            direct,
+            wgsl_emulate_u64,
+            fill_holes,
+            verbose,
+        ),
         Commands::Check {
             input,
             graphics,
             verbose,
-        } => {
-            check_file(input, graphics, verbose)?;
-        }
+        } => check(input, graphics, verbose),
     }
-
-    Ok(())
 }
 
-fn compile_file(
+fn build(
     input: PathBuf,
     output: Option<PathBuf>,
     target: Target,
@@ -369,27 +391,78 @@ fn compile_file(
     fill_holes: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
+    if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
+        return Err(DriverError::InvalidOption(
+            "--wgsl-emulate-u64 requires --target wgsl".to_string(),
+        ));
+    }
+
+    let output_path = output_path(&input, output, target)?;
+
     if verbose {
-        info!("Compiling {}...", input.display());
+        info!("Building {}...", input.display());
     }
 
     // Wall-clock start for the always-printed timing summary below.
-    let compile_start = Instant::now();
+    let build_start = Instant::now();
 
-    let program = type_check_input(&input, !fill_holes, graphics, verbose)?;
+    let normalized_input = normalize_input(&input)?;
+    let package_plan = match find_build_input(&normalized_input)? {
+        BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
+        BuildInput::Standalone(source) => prepare_standalone(source)?,
+    };
+    let parsed_modules = time("load_modules", verbose, || {
+        ParsedModules::load(package_plan, CompilerOptions { graphics })
+    })?;
+    let compilation = compile(
+        parsed_modules,
+        CompileOptions {
+            target,
+            direct,
+            wgsl_emulate_u64,
+            fill_holes,
+            output_tlc,
+            output_mir,
+            verbose,
+        },
+    )?;
+    write_artifacts(&output_path, compilation, verbose)?;
+
+    // Always-on wall-clock summary (per-pass breakdown is available via
+    // `-v`). Printed to stderr so it doesn't pollute any piped output.
+    eprintln!(
+        "Built {} → {} in {:.2}s",
+        input.display(),
+        output_path.display(),
+        build_start.elapsed().as_secs_f64()
+    );
+
+    Ok(())
+}
+
+fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilation, DriverError> {
+    let CompileOptions {
+        target,
+        direct,
+        wgsl_emulate_u64,
+        fill_holes,
+        output_tlc,
+        output_mir,
+        verbose,
+    } = options;
+    let program = finish_type_check(modules, !fill_holes, verbose)?;
     let source_graph = program.source_graph().clone();
 
     let program = retain_source(
         time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program)),
         &source_graph,
     )?;
-
-    // Output TLC if requested (before optimization)
-    if let Some(ref tlc_path) = output_tlc {
-        fs::write(tlc_path, format!("{program}"))?;
-        if verbose {
-            info!("Wrote TLC to {}", tlc_path.display());
-        }
+    let mut auxiliary = Vec::new();
+    if let Some(path) = output_tlc {
+        auxiliary.push(TextArtifact {
+            path,
+            contents: format!("{program}"),
+        });
     }
 
     let program = retain_source(
@@ -497,46 +570,22 @@ fn compile_file(
         wyn_core::lower_egir_to_ssa(program)
     })?;
 
-    // Dump MIR if requested
-    if let Some(ref path) = output_mir {
-        fs::write(path, wyn_core::ssa::print::format_program(&ssa))?;
-        if verbose {
-            info!("Wrote MIR to {}", path.display());
-        }
+    if let Some(path) = output_mir {
+        auxiliary.push(TextArtifact {
+            path,
+            contents: wyn_core::ssa::print::format_program(&ssa),
+        });
     }
 
     let soac_lowered = ssa;
 
-    // Output path (default: input name with the target's extension).
-    let output_path = output.unwrap_or_else(|| {
-        let mut path = input.clone();
-        path.set_extension(match target {
-            Target::Spirv => "spv",
-            Target::Wgsl => "wgsl",
-        });
-        path
-    });
-
-    let pipeline = match target {
+    let (code, pipeline) = match target {
         Target::Spirv => {
             let lowered = retain_source(
                 time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered)),
                 &source_graph,
             )?;
-
-            // Write SPIR-V binary
-            let mut file = fs::File::create(&output_path)?;
-            let spirv_len = lowered.spirv.len();
-            for word in &lowered.spirv {
-                file.write_all(&word.to_le_bytes())?;
-            }
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
-                info!("Generated {} words of SPIR-V", spirv_len);
-            }
-
-            lowered.pipeline
+            (CompiledCode::Spirv(lowered.spirv), lowered.pipeline)
         }
         Target::Wgsl => {
             let options = if wgsl_emulate_u64 {
@@ -551,42 +600,67 @@ fn compile_file(
                 &source_graph,
             )?;
 
-            fs::write(&output_path, &lowered.wgsl)?;
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
-            }
-
-            lowered.pipeline
+            (CompiledCode::Wgsl(lowered.wgsl), lowered.pipeline)
         }
     };
 
+    Ok(Compilation {
+        code,
+        pipeline,
+        auxiliary,
+    })
+}
+
+fn write_artifacts(output_path: &Path, compilation: Compilation, verbose: bool) -> Result<(), DriverError> {
+    let Compilation {
+        code,
+        pipeline,
+        auxiliary,
+    } = compilation;
+
+    match code {
+        CompiledCode::Spirv(words) => {
+            let mut file = fs::File::create(output_path)?;
+            for word in &words {
+                file.write_all(&word.to_le_bytes())?;
+            }
+            if verbose {
+                info!(
+                    "Wrote {} words of SPIR-V to {}",
+                    words.len(),
+                    output_path.display()
+                );
+            }
+        }
+        CompiledCode::Wgsl(source) => {
+            fs::write(output_path, source)?;
+            if verbose {
+                info!("Wrote WGSL to {}", output_path.display());
+            }
+        }
+    }
+
+    for artifact in auxiliary {
+        fs::write(&artifact.path, artifact.contents)?;
+        if verbose {
+            info!("Wrote compiler output to {}", artifact.path.display());
+        }
+    }
+
     // Both executable backends share the same planned runtime contract.
     if !pipeline.pipelines.is_empty() {
-        let descriptor_path = {
-            let mut p = output_path.clone();
-            p.set_extension("json");
-            p
-        };
+        let mut descriptor_path = output_path.to_owned();
+        descriptor_path.set_extension("json");
         fs::write(&descriptor_path, serde_json::to_string_pretty(&pipeline)?)?;
         if verbose {
             info!("Wrote pipeline descriptor to {}", descriptor_path.display());
         }
     }
 
-    // Always-on wall-clock summary (per-pass breakdown is available via
-    // `-v`). Printed to stderr so it doesn't pollute any piped output.
-    eprintln!(
-        "Compiled {} → {} in {:.2}s",
-        input.display(),
-        output_path.display(),
-        compile_start.elapsed().as_secs_f64()
-    );
-
     Ok(())
 }
 
-fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
+fn check(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
     if verbose {
         info!("Checking {}...", input.display());
     }

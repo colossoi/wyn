@@ -141,7 +141,7 @@ fn local_package_cases() {
 }
 
 #[test]
-fn package_manifest_is_accepted_as_the_cli_input() {
+fn package_manifest_is_not_a_cli_input() {
     let case =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
     assert_local_manifests(&case);
@@ -152,10 +152,11 @@ fn package_manifest_is_accepted_as_the_cli_input() {
         .output()
         .expect("Wyn compiler should run");
 
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "manifest input unexpectedly succeeded");
     assert!(
-        output.status.success(),
-        "manifest input failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
+        error.contains("must be a package directory or `.wyn` source file"),
+        "unexpected manifest-input diagnostic:\n{error}",
     );
 }
 
@@ -186,7 +187,7 @@ fn package_compiles_with_a_local_dependency() {
     let copied = CaseCopy::new(&case);
     let output_path = copied.root.join("package.wgsl");
     let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
-        .arg("compile")
+        .arg("build")
         .arg(copied.root.join("app"))
         .args(["--target", "wgsl", "--output"])
         .arg(&output_path)

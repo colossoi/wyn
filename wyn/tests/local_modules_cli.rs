@@ -187,7 +187,7 @@ fn wgsl_output_is_independent_of_source_directory() {
 
     for (root, output) in [(&first_root, &first_output), (&second_root, &second_output)] {
         let result = Command::new(env!("CARGO_BIN_EXE_wyn"))
-            .arg("compile")
+            .arg("build")
             .arg(root)
             .args(["--target", "wgsl", "--output"])
             .arg(output)
@@ -287,7 +287,7 @@ fn compile_reports_backend_error_in_imported_source() {
     let output_path = package.directory.join("output.wgsl");
 
     let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
-        .arg("compile")
+        .arg("build")
         .arg(root)
         .args(["--target", "wgsl", "--wgsl-emulate-u64", "--output"])
         .arg(output_path)

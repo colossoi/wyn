@@ -18,7 +18,7 @@ trap "rm -rf $TEMP_DIR" EXIT
 
 # Compile the wyn file
 echo "Compiling $WYN_FILE..."
-cargo run --release -q --bin wyn -- compile "$WYN_FILE" --partial-eval -o "$TEMP_DIR/original.spv"
+cargo run --release -q --bin wyn -- build "$WYN_FILE" --partial-eval -o "$TEMP_DIR/original.spv"
 spirv-dis "$TEMP_DIR/original.spv" > "$TEMP_DIR/original.spvasm"
 
 # Optimization flags to try (excluding loop unrolling)

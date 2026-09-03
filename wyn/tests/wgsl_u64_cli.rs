@@ -37,14 +37,7 @@ fn temp_case() -> (PathBuf, PathBuf, PathBuf) {
 
 fn compile(source: &PathBuf, output: &PathBuf, extra: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_wyn"));
-    command
-        .arg("compile")
-        .arg(source)
-        .arg("--target")
-        .arg("wgsl")
-        .arg("--output")
-        .arg(output)
-        .args(extra);
+    command.arg("build").arg(source).arg("--target").arg("wgsl").arg("--output").arg(output).args(extra);
     command.output().expect("run wyn compiler")
 }
 
@@ -85,7 +78,7 @@ fn wgsl_u64_requires_opt_in_and_compiles_blake2b_mix_when_enabled() {
 fn wgsl_u64_flag_is_rejected_for_spirv() {
     let (directory, source, output) = temp_case();
     let result = Command::new(env!("CARGO_BIN_EXE_wyn"))
-        .arg("compile")
+        .arg("build")
         .arg(&source)
         .arg("--target")
         .arg("spirv")

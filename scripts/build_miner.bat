@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0\.."
 
 echo Compiling miner.wyn...
-cargo run --release --bin wyn -- compile testfiles\miner.wyn -o %TEMP%\miner.spv
+cargo run --release --bin wyn -- build testfiles\miner.wyn -o %TEMP%\miner.spv
 if errorlevel 1 goto :fail
 
 echo Assembling sha256_compress...

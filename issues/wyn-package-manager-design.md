@@ -198,6 +198,24 @@ The package manager is the only component allowed to access the network. The
 compiler receives a closed compile plan containing local, verified source
 roots.
 
+Package preparation always follows the same boundary, including before remote
+fetching is implemented:
+
+1. Parse dependency requirements and their declared source kinds.
+2. Resolve each requirement to the source that must provide it.
+3. Materialize that source as a verified local package root.
+4. Read the materialized package's manifest and continue until the dependency
+   graph is closed.
+5. Construct `PackagePlan` only when every selected package has a local
+   source root.
+
+A local path is already materialized, so the current implementation
+canonicalizes it and validates its manifest identity and version. A Git source
+is retained as a source requirement but preparation reports that Git
+materialization is unavailable. Later cache lookup and fetching replace that
+failure without changing the compiler boundary or permitting a partially
+materialized `PackagePlan`.
+
 Fetched sources live in a content-addressed, read-only cache. Cache entries are
 keyed by canonical source checksum and include the resolved commit and manifest.
 The cache treats package trees as inert data and stores build output separately.
@@ -241,8 +259,8 @@ the resolved build graph carry semantic versions.
 
 ## Whole-program compilation
 
-After resolution and fetching, the package manager constructs one `PackagePlan`
-containing:
+After resolution and fetching, the package manager constructs one
+`PackageGraph` containing:
 
 - the root package and selected entry point;
 - every selected package's stable identity and library root module;
@@ -250,8 +268,8 @@ containing:
 - the compiler-version requirement;
 - enough source provenance for diagnostics and reproducibility reports.
 
-The driver pairs this plan with the verified local source root for each selected
-package when it constructs the module graph's source provider.
+The package manager pairs this graph with a source reader over the verified
+local roots to produce the `PackagePlan` accepted by the compiler.
 
 The syntax-light `wyn-module-graph` crate loads and parses the plan through a Wyn
 frontend adapter, producing `ModuleGraph<ParsedFile>`. The compiler performs
@@ -309,7 +327,8 @@ layer. Suggested components are:
 - `checksum`: canonical source-tree hashing;
 - `cache`: transactional, content-addressed source storage;
 - `lockfile`: deterministic read, validation, and atomic write;
-- `plan`: construction of the closed `PackagePlan` consumed by module loading;
+- `plan`: construction of the closed `PackageGraph` and materialized
+  `PackagePlan` consumed by module loading;
 - `api_check`: compiler-backed compatibility checks;
 - `cli`: user-oriented edits, plans, and diagnostics.
 
@@ -327,7 +346,9 @@ the resolution result.
 ### Stage 1: closed local package graph
 
 - Land the compiler changes in the companion TODO.
-- Parse manifests with path dependencies only.
+- Parse local-path and Git dependency sources.
+- Materialize local paths and report Git requirements at the explicit
+  materialization boundary.
 - Build package-aware module graphs and one compile plan.
 - Preserve whole-program optimization across package boundaries.
 - Land unit tests with each library component and the local-package functional

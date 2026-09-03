@@ -4,7 +4,7 @@ use super::super::{Decl, ExprKind, Expression, Header, Node, NodeId, Program, So
 use crate::resolve_imports::{self, ImportsResolvedFamily};
 use crate::test_pipeline;
 use crate::types::Diet;
-use crate::{Compiler, CompilerOptions};
+use crate::CompilerOptions;
 
 #[derive(Debug)]
 enum Before {}
@@ -24,8 +24,7 @@ fn unit(id: u32) -> Expression {
 
 #[test]
 fn program_rebuild_preserves_the_shared_node_allocator() {
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = test_pipeline::load_test_modules("", compiler);
+    let modules = test_pipeline::load_test_modules("", CompilerOptions::default());
     let root = modules.graph.root();
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = program.map_global_context::<Before, _>(|_| 42usize);

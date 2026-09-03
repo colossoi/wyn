@@ -18,39 +18,39 @@ WYN=./target/debug/wyn
 
 echo "== compile + validate =="
 
-$WYN compile pkg/dist/test/dist_demo.wyn -o /tmp/dist_demo.spv
+$WYN build pkg/dist/test/dist_demo.wyn -o /tmp/dist_demo.spv
 spirv-val /tmp/dist_demo.spv
-$WYN compile pkg/dist/test/dist_demo.wyn -t wgsl -o /tmp/dist_demo.wgsl
+$WYN build pkg/dist/test/dist_demo.wyn -t wgsl -o /tmp/dist_demo.wgsl
 
-$WYN compile pkg/dist/test/stats_normal.wyn -o /tmp/stats_normal.spv
+$WYN build pkg/dist/test/stats_normal.wyn -o /tmp/stats_normal.spv
 spirv-val /tmp/stats_normal.spv
-$WYN compile pkg/dist/test/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
+$WYN build pkg/dist/test/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
 
-$WYN compile pkg/dist/test/stats_uniform.wyn -o /tmp/stats_uniform.spv
+$WYN build pkg/dist/test/stats_uniform.wyn -o /tmp/stats_uniform.spv
 spirv-val /tmp/stats_uniform.spv
-$WYN compile pkg/dist/test/stats_uniform.wyn -t wgsl -o /tmp/stats_uniform.wgsl
+$WYN build pkg/dist/test/stats_uniform.wyn -t wgsl -o /tmp/stats_uniform.wgsl
 
-$WYN compile pkg/dist/test/stats_exponential.wyn -o /tmp/stats_exponential.spv
+$WYN build pkg/dist/test/stats_exponential.wyn -o /tmp/stats_exponential.spv
 spirv-val /tmp/stats_exponential.spv
-$WYN compile pkg/dist/test/stats_exponential.wyn -t wgsl -o /tmp/stats_exponential.wgsl
+$WYN build pkg/dist/test/stats_exponential.wyn -t wgsl -o /tmp/stats_exponential.wgsl
 
-$WYN compile pkg/dist/test/stats_uniform_int.wyn -o /tmp/stats_uniform_int.spv
+$WYN build pkg/dist/test/stats_uniform_int.wyn -o /tmp/stats_uniform_int.spv
 spirv-val /tmp/stats_uniform_int.spv
-$WYN compile pkg/dist/test/stats_uniform_int.wyn -t wgsl -o /tmp/stats_uniform_int.wgsl
+$WYN build pkg/dist/test/stats_uniform_int.wyn -t wgsl -o /tmp/stats_uniform_int.wgsl
 
-$WYN compile pkg/noise/test/noise_smoke.wyn -o /tmp/noise_smoke.spv
+$WYN build pkg/noise/test/noise_smoke.wyn -o /tmp/noise_smoke.spv
 spirv-val /tmp/noise_smoke.spv
-$WYN compile pkg/noise/test/noise_smoke.wyn -t wgsl -o /tmp/noise_smoke.wgsl
+$WYN build pkg/noise/test/noise_smoke.wyn -t wgsl -o /tmp/noise_smoke.wgsl
 
-$WYN compile pkg/gtao/test/gtao_smoke.wyn -o /tmp/gtao_smoke.spv
+$WYN build pkg/gtao/test/gtao_smoke.wyn -o /tmp/gtao_smoke.spv
 spirv-val /tmp/gtao_smoke.spv
-$WYN compile pkg/gtao/test/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
+$WYN build pkg/gtao/test/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
 
 # Compile-only (the demo needs a window, a GPU, and an input image; see
 # the package source for the interactive run command).
-$WYN compile pkg/gtao/test/gtao_demo.wyn --graphics -o /tmp/gtao_demo.spv
+$WYN build pkg/gtao/test/gtao_demo.wyn --graphics -o /tmp/gtao_demo.spv
 spirv-val /tmp/gtao_demo.spv
-$WYN compile pkg/gtao/test/gtao_demo.wyn --graphics -t wgsl -o /tmp/gtao_demo.wgsl
+$WYN build pkg/gtao/test/gtao_demo.wyn --graphics -t wgsl -o /tmp/gtao_demo.wgsl
 
 echo "compile + validate: OK"
 

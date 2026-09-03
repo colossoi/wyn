@@ -16,11 +16,12 @@ use polytype::TypeScheme;
 
 /// Create semantic module state with the given source elaborated (no prelude).
 fn semantic_modules_with(src: &str) -> SemanticModules {
-    let compiler = crate::Compiler {
-        node_ids: NodeCounter::new(),
-        semantic_modules: SemanticModules::new_empty(),
-    };
-    let modules = crate::test_pipeline::load_test_modules(src, compiler);
+    let modules = crate::test_pipeline::load_test_modules_with_state(
+        src,
+        crate::CompilerOptions::default(),
+        NodeCounter::new(),
+        SemanticModules::new_empty(),
+    );
     let program = resolve_imports::resolve_imports(modules).unwrap();
     elaborate_modules::elaborate_modules(program).unwrap().global_context
 }
@@ -62,11 +63,12 @@ fn test_query_f32_sin_from_math_prelude() {
 
     // Resolve placeholders in modules to build spec_schemes
     // (No program to resolve, just pass an empty one)
-    let compiler = crate::Compiler {
-        node_ids: node_counter,
-        semantic_modules: manager,
-    };
-    let modules = crate::test_pipeline::load_test_modules("", compiler);
+    let modules = crate::test_pipeline::load_test_modules_with_state(
+        "",
+        crate::CompilerOptions::default(),
+        node_counter,
+        manager,
+    );
     let program = resolve_imports::resolve_imports(modules).unwrap();
     let program = elaborate_modules::elaborate_modules(program).unwrap();
     let program = name_resolution::resolve_names(program);
@@ -78,6 +80,7 @@ fn test_query_f32_sin_from_math_prelude() {
         &program,
         &program.global_context.semantic_modules,
         builtins::catalog(),
+        crate::CompilerOptions::default(),
     );
     let resolve_placeholders::PlaceholdersResolvedGlobal {
         semantic_modules: manager,

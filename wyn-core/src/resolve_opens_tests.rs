@@ -13,11 +13,12 @@ use crate::resolve_resources;
 use crate::semantic_modules;
 
 fn parse(src: &str) -> resolve_resources::ResourcesResolved {
-    let compiler = crate::Compiler {
-        node_ids: ast::NodeCounter::new(),
-        semantic_modules: semantic_modules::SemanticModules::new_empty(),
-    };
-    let modules = crate::test_pipeline::load_test_modules(src, compiler);
+    let modules = crate::test_pipeline::load_test_modules_with_state(
+        src,
+        crate::CompilerOptions::default(),
+        ast::NodeCounter::new(),
+        semantic_modules::SemanticModules::new_empty(),
+    );
     let program = resolve_imports::resolve_imports(modules).expect("imports");
     let program = elaborate_modules::elaborate_modules(program).expect("modules");
     let program = name_resolution::resolve_names(program);

@@ -121,13 +121,13 @@ and store their own derived data keyed by `ModuleId`.
 The first implementation returns a complete graph or a structured error. This
 keeps compiler control flow simple and leaves recovery policy with the analyzer.
 
-## Package-plan input
+## Package input
 
 The package manager resolves versions and sources before module loading. It
-lowers that result into a syntax-independent `PackagePlan`:
+lowers that result into a syntax-independent `PackageGraph`:
 
 ```rust
-pub struct PackagePlan {
+pub struct PackageGraph {
     root: ModuleKey,
     packages: IdArena<PackageId, Package>,
 }
@@ -159,7 +159,7 @@ pub struct ModuleKey {
 The module crate treats version and fingerprint values as validated identity
 data. SemVer ordering and MVS remain package-manager responsibilities.
 
-`PackagePlanBuilder::new()` should allocate IDs and validate:
+`PackageGraphBuilder::new()` should allocate IDs and validate:
 
 - one root module;
 - unique canonical package identities;
@@ -171,12 +171,12 @@ data. SemVer ordering and MVS remain package-manager responsibilities.
 The package dependency graph describes which aliases are available. Actual
 source-module edges are discovered from imports.
 
-## Source provider
+## Source reader
 
 The graph builder reads verified source through a narrow interface:
 
 ```rust
-pub trait SourceProvider {
+pub trait SourceReader {
     type Error;
 
     fn load(&mut self, module: &ModuleKey)
@@ -192,14 +192,14 @@ APIs.
 The graph stores each returned `Arc<str>` once. `ModuleGraph::source(ModuleId)`
 and line-index methods provide the source interface used by diagnostics.
 
-## Frontend adapter
+## Module parser
 
 The module graph needs the imports contained in each source module. A frontend
 adapter returns its opaque parsed payload and reports each import through the
 call boundary:
 
 ```rust
-pub trait ModuleFrontend {
+pub trait ModuleParser {
     type Parsed;
     type Error;
 
@@ -256,7 +256,7 @@ Successful loading produces:
 
 ```rust
 pub struct ModuleGraph<T> {
-    plan: PackagePlan,
+    packages: PackageGraph,
     root: ModuleId,
     modules: IdArena<ModuleId, LoadedModule<T>>,
     dependency_order: Vec<ModuleId>,
@@ -280,7 +280,7 @@ The public query surface should include:
 
 ```rust
 impl<T> ModuleGraph<T> {
-    pub fn plan(&self) -> &PackagePlan;
+    pub fn package_graph(&self) -> &PackageGraph;
     pub fn root(&self) -> ModuleId;
     pub fn module(&self, id: ModuleId) -> Option<&LoadedModule<T>>;
     pub fn modules(&self) -> impl Iterator<Item = (ModuleId, &LoadedModule<T>)>;
@@ -303,30 +303,34 @@ graph provides deterministic iteration in dependency order and source order.
 Numeric IDs remain implementation details.
 
 The core API is an in-process Rust API. Lockfile and command protocols use
-separate serializable data-transfer types and lower into `PackagePlan` through
-validated constructors.
+separate serializable data-transfer types and lower into `PackageGraph` through
+validated constructors. The graph and its materialized source reader form a
+`PackagePlan`.
 
 ## Build API
 
-The main entry point can remain small:
+The main entry point remains small:
 
 ```rust
-pub fn load_modules<F, S>(
-    plan: PackagePlan,
-    sources: &mut S,
-    frontend: &mut F,
-) -> Result<ModuleGraph<F::Parsed>, BuildError<F::Error, S::Error>>
-where
-    F: ModuleFrontend,
-    S: SourceProvider;
+pub struct PackagePlan<S = LocalSources> {
+    package_graph: PackageGraph,
+    sources: S,
+}
+
+impl<S: SourceReader> PackagePlan<S> {
+    pub fn load<F: ModuleParser>(
+        self,
+        parser: &mut F,
+    ) -> Result<ModuleGraph<F::Parsed>, BuildFailure<F::Error, S::Error>>;
+}
 ```
 
 The builder performs these steps:
 
 1. Intern the root `ModuleKey` and mark it as loading.
-2. Ask `SourceProvider` for its source buffer.
+2. Ask `SourceReader` for its source buffer.
 3. Allocate its `ModuleId` before parsing so every resulting span can use it.
-4. Ask `ModuleFrontend` for syntax and import requests.
+4. Ask `ModuleParser` for syntax and import requests.
 5. Resolve each local target within the current package or each dependency
    target through the current package's alias map.
 6. Reuse an existing `ModuleId` for a previously discovered `ModuleKey`.
@@ -372,7 +376,7 @@ pub enum BuildError<ParseError, ProviderError> {
 ```
 
 `ImportTraceFrame` contains the import span and requested target. The span
-already identifies the importing module. `BuildFailure` retains the closed plan
+already identifies the importing module. `BuildFailure` retains the closed package graph
 and every source buffer loaded before failure, so its default display can name
 dependency releases as `name@version:path`, attach line and column numbers, and
 render “imported from” notes without exposing local cache paths.
@@ -396,22 +400,21 @@ pub fn parse_file(
 ) -> Result<ParsedFile>;
 ```
 
-The Wyn `ModuleFrontend` adapter owns a mutable reference to the compilation's
+The Wyn `ModuleParser` adapter owns a mutable reference to the compilation's
 `NodeCounter` and calls `parse_file`. Compilation-wide semantic state is created
-after `load_modules` returns.
+while the source closure is loaded.
 
 The compiler boundary is:
 
 ```rust
-let compiler = Compiler::new(options)?;
-let modules = compiler.load_modules(plan, sources)?;
+let modules = ParsedModules::load(plan, options)?;
 let typed = modules.type_check()?;
 ```
 
-`Compiler` owns the node allocator, semantic-module environment, language
-options, warnings, and compiler-provided prelude state. `ParsedModules` keeps
-that state inseparable from `ModuleGraph<ParsedFile>`. After physical imports
-are resolved, AST checkpoints share an `Arc<SourceGraph>`. A `FrontendFailure`
+`ParsedModules` owns the node allocator, semantic-module environment, language
+options, and compiler-provided prelude state, keeping that state inseparable
+from `ModuleGraph<ParsedFile>`. After physical imports are resolved, AST
+checkpoints share an `Arc<SourceGraph>`. A `CompilationFailure`
 holds another cheap reference to the same graph, so semantic diagnostics retain
 package identity, package-relative source paths, and source text even though
 the failing pass consumed its input checkpoint. Later AST nodes retain their
@@ -419,21 +422,21 @@ the failing pass consumed its input checkpoint. Later AST nodes retain their
 
 ## Compiler integration
 
-1. `wyn-module-graph` owns ID arenas, paths, package plans, spans, source
+1. `wyn-module-graph` owns ID arenas, paths, package graphs and plans, spans, source
    lookup, physical import resolution, and in-memory tests.
 2. `Span` identifies an optional `ModuleId` and a `TextRange`.
 3. The private Wyn parser produces one `ParsedFile`; `WynFrontend` reports each
    physical import with its file-local `ImportSiteId`.
 4. The CLI constructs a synthetic one-package `PackagePlan` for direct source
    compilation.
-5. `Compiler::load_modules` produces an opaque `ParsedModules` checkpoint, and
+5. `ParsedModules::load` produces an opaque checkpoint, and
    `ParsedModules::type_check` runs the semantic frontend.
 6. Physical imports resolve through `(ModuleId, ImportSiteId)` before module
    elaboration.
 7. AST checkpoints share the syntax-free `SourceGraph`, and semantic identities
    carry `PackageId` wherever cross-package collisions are possible.
-8. The package manager will construct multi-package plans through the same
-   validated plan API.
+8. The package manager constructs multi-package plans through the same
+   validated graph and plan API.
 
 ## Test strategy
 
@@ -444,7 +447,7 @@ Wyn parser, and module graph together through the real CLI.
 ### Unit tests
 
 Unit tests live beside the implementation in `wyn-module-graph`. They use an
-in-memory `SourceProvider` and a small fake `ModuleFrontend`, so a test can state
+in-memory `SourceReader` and a small fake `ModuleParser`, so a test can state
 its package plan, source text, and discovered imports without constructing Wyn
 syntax or touching the filesystem.
 

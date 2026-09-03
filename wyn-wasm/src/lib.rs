@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    CodegenTarget, CompilationFailure, Compiler, CompilerOptions, LoweringProfile, ParsedModules,
-    PipelineTopologyPolicy, SchedulePolicy,
+    initialize_frontend, CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError,
+    LoweringProfile, ParsedModules, PipelineTopologyPolicy, SchedulePolicy,
 };
 use wyn_module_graph::{
-    BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, SourceFingerprint,
+    BuildError, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
+    SourceFingerprint,
 };
 
 /// Get the compiler version string
@@ -16,13 +16,13 @@ pub fn version() -> String {
     "005".to_string()
 }
 
-fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), String> {
+fn single_source_input(source: &str) -> Result<PackagePlan, String> {
     let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
     let fingerprint =
         SourceFingerprint::new("wasm-source").map_err(|error| error.to_string())?;
     let identity = PackageIdentity::new("wasm/root", "v0.0.0", fingerprint)
         .map_err(|error| error.to_string())?;
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let package = builder
         .add_package(identity, root_path.clone())
         .map_err(|error| error.to_string())?;
@@ -31,25 +31,21 @@ fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), Strin
     let plan = builder.build().map_err(|error| error.to_string())?;
     let mut sources = LocalSources::new();
     sources.add_override(root, source).map_err(|error| error.to_string())?;
-    Ok((plan, sources))
+    Ok(PackagePlan::new(plan, sources))
 }
 
 fn load_source_modules(
     source: &str,
     options: CompilerOptions,
 ) -> Result<ParsedModules, SourceModulesError> {
-    let compiler = Compiler::new(options).map_err(SourceModulesError::Compiler)?;
-    let (plan, mut sources) = single_source_plan(source).map_err(SourceModulesError::Setup)?;
-    compiler
-        .load_modules(plan, &mut sources)
-        .map_err(SourceModulesError::Build)
+    let input = single_source_input(source).map_err(SourceModulesError::Setup)?;
+    ParsedModules::load(input, options).map_err(SourceModulesError::Load)
 }
 
 #[derive(Debug)]
 enum SourceModulesError {
-    Compiler(CompilerError),
     Setup(String),
-    Build(BuildFailure<CompilerError, LocalSourceError>),
+    Load(LoadModulesError),
 }
 
 // =============================================================================
@@ -211,7 +207,7 @@ mod tlc_tree {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-    match Compiler::new(CompilerOptions::default()) {
+    match initialize_frontend() {
         Ok(_) => true,
         Err(error) => {
             web_sys::console::error_1(&format!("Failed to initialize compiler: {error}").into());
@@ -596,9 +592,9 @@ impl CompileResultWgsl {
 
     fn source_modules_err(source: &str, error: SourceModulesError) -> Self {
         match error {
-            SourceModulesError::Compiler(error) => Self::err(source, error),
             SourceModulesError::Setup(message) => Self::err_msg(message),
-            SourceModulesError::Build(failure) => {
+            SourceModulesError::Load(LoadModulesError::Prelude(error)) => Self::err(source, error),
+            SourceModulesError::Load(LoadModulesError::Modules(failure)) => {
                 let location = match failure.error() {
                     BuildError::Parse { source: error, .. } => error_location(source, error),
                     _ => None,

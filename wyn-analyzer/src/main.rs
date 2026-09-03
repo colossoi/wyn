@@ -13,9 +13,10 @@ use wyn_core::ast::{self, BindingName, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
-use wyn_core::{Compiler, CompilerOptions, ParsedModules};
+use wyn_core::{initialize_frontend, CompilerOptions, ParsedModules};
 use wyn_module_graph::{
-    LocalSources, ModuleId, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder, SourceFingerprint,
+    LocalSources, ModuleId, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
+    SourceFingerprint,
 };
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -75,7 +76,7 @@ fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Resul
     let fingerprint = SourceFingerprint::new("analyzer-document").map_err(|error| error.to_string())?;
     let identity =
         PackageIdentity::new("analyzer/root", "v0.0.0", fingerprint).map_err(|error| error.to_string())?;
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let package = builder.add_package(identity, root_path.clone()).map_err(|error| error.to_string())?;
     let root = ModuleKey::new(package, root_path);
     builder.set_root(root.clone()).map_err(|error| error.to_string())?;
@@ -85,8 +86,11 @@ fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Resul
         sources.add_package_root(package, root_directory).map_err(|error| error.to_string())?;
     }
     sources.add_override(root, text).map_err(|error| error.to_string())?;
-    let compiler = Compiler::new(CompilerOptions { graphics: true }).map_err(|error| error.to_string())?;
-    compiler.load_modules(plan, &mut sources).map_err(|error| error.to_string())
+    ParsedModules::load(
+        PackagePlan::new(plan, sources),
+        CompilerOptions { graphics: true },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn position_to_offset(text: &str, position: Position) -> Option<u32> {
@@ -1676,7 +1680,7 @@ async fn main() {
     }
 
     // Pre-initialize the compiler's prelude cache before serving requests.
-    if let Err(error) = Compiler::new(CompilerOptions { graphics: true }) {
+    if let Err(error) = initialize_frontend() {
         eprintln!("failed to initialize Wyn compiler: {error}");
         return;
     }

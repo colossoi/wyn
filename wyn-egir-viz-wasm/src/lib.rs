@@ -16,12 +16,12 @@ use wyn_core::egir::types::{
 };
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    BindingRef, CompilationFailure, Compiler, CompilerOptions, FunctionId, LoweringProfile, ParsedModules,
-    ResourceAccess,
+    initialize_frontend, BindingRef, CompilationFailure, CompilerOptions, FunctionId,
+    LoadModulesError, LoweringProfile, ParsedModules, ResourceAccess,
 };
 use wyn_module_graph::{
-    BuildError, BuildFailure, LocalSourceError, LocalSources, ModuleKey, ModulePath, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, SourceFingerprint,
+    BuildError, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
+    SourceFingerprint,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,18 +132,17 @@ impl InspectPass {
 
 #[derive(Debug)]
 enum SourceModulesError {
-    Compiler(CompilerError),
     Setup(String),
-    Build(BuildFailure<CompilerError, LocalSourceError>),
+    Load(LoadModulesError),
 }
 
-fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), String> {
+fn single_source_input(source: &str) -> Result<PackagePlan, String> {
     let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
     let fingerprint =
         SourceFingerprint::new("egir-viz-source").map_err(|error| error.to_string())?;
     let identity = PackageIdentity::new("egir-viz/root", "v0.0.0", fingerprint)
         .map_err(|error| error.to_string())?;
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let package = builder
         .add_package(identity, root_path.clone())
         .map_err(|error| error.to_string())?;
@@ -152,16 +151,12 @@ fn single_source_plan(source: &str) -> Result<(PackagePlan, LocalSources), Strin
     let plan = builder.build().map_err(|error| error.to_string())?;
     let mut sources = LocalSources::new();
     sources.add_override(root, source).map_err(|error| error.to_string())?;
-    Ok((plan, sources))
+    Ok(PackagePlan::new(plan, sources))
 }
 
 fn load_source_modules(source: &str) -> Result<ParsedModules, SourceModulesError> {
-    let compiler = Compiler::new(CompilerOptions { graphics: true })
-        .map_err(SourceModulesError::Compiler)?;
-    let (plan, mut sources) = single_source_plan(source).map_err(SourceModulesError::Setup)?;
-    compiler
-        .load_modules(plan, &mut sources)
-        .map_err(SourceModulesError::Build)
+    let input = single_source_input(source).map_err(SourceModulesError::Setup)?;
+    ParsedModules::load(input, CompilerOptions { graphics: true }).map_err(SourceModulesError::Load)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -495,7 +490,7 @@ impl InspectResult {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-    match Compiler::new(CompilerOptions { graphics: true }) {
+    match initialize_frontend() {
         Ok(_) => true,
         Err(error) => {
             web_sys::console::error_1(&format!("failed to initialize Wyn compiler: {error}").into());
@@ -543,9 +538,9 @@ fn frontend_error(pass: InspectPass, failure: CompilationFailure) -> InspectResu
 
 fn source_modules_error(pass: InspectPass, error: SourceModulesError) -> InspectResult {
     match error {
-        SourceModulesError::Compiler(error) => compiler_error(pass, error),
         SourceModulesError::Setup(message) => InspectResult::error(pass.id(), message, None),
-        SourceModulesError::Build(failure) => {
+        SourceModulesError::Load(LoadModulesError::Prelude(error)) => compiler_error(pass, error),
+        SourceModulesError::Load(LoadModulesError::Modules(failure)) => {
             let span = match failure.error() {
                 BuildError::Parse { source, .. } => source.span().and_then(SourceSpan::from_span),
                 _ => None,

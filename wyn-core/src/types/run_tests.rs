@@ -2,11 +2,11 @@ use super::type_check;
 use crate::ast::Declaration;
 use crate::{
     ast_const_fold, ast_type_holes, elaborate_modules, name_resolution, resolve_imports, resolve_opens,
-    resolve_placeholders, resolve_resources, symbol_name_or_bug, tlc, Compiler, CompilerOptions,
+    resolve_placeholders, resolve_resources, symbol_name_or_bug, tlc, CompilerOptions, ParsedModules,
 };
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlanBuilder,
-    SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
+    PackagePlan, SourceFingerprint,
 };
 
 #[test]
@@ -18,7 +18,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
         PackageIdentity::new("test/dependency", "v1.0.0", fingerprint).expect("valid dependency identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package =
         builder.add_package(root_identity, root_path.clone()).expect("root package should be unique");
     let dependency_package = builder
@@ -51,8 +51,8 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
         .add_override(dependency, "def identity<T>(value: T) T = value")
         .expect("dependency override should be unique");
 
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
     let program = name_resolution::resolve_names(program);
@@ -60,7 +60,7 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);
     let program = resolve_opens::resolve_opens(program).expect("opens should resolve");
-    let typed = type_check(program).expect("program should type check");
+    let typed = type_check(program, CompilerOptions::default()).expect("program should type check");
 
     let entry = typed
         .declarations
@@ -125,7 +125,7 @@ fn dependency_local_aliases_have_independent_semantic_namespaces() {
     let fingerprint = SourceFingerprint::new("transitive-alias-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let library_path = ModulePath::new("lib.wyn").expect("valid library path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
             PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
@@ -242,8 +242,8 @@ fn dependency_local_aliases_have_independent_semantic_namespaces() {
         )
         .expect("package override should be unique");
 
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
     let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
     let program = name_resolution::resolve_names(program);
@@ -251,7 +251,7 @@ fn dependency_local_aliases_have_independent_semantic_namespaces() {
     let program = ast_const_fold::fold_constants(program);
     let program = resolve_placeholders::resolve_type_placeholders(program);
     let program = resolve_opens::resolve_opens(program).expect("opens should resolve");
-    let typed = type_check(program).expect("program should type check");
+    let typed = type_check(program, CompilerOptions::default()).expect("program should type check");
 
     let package_of = |namespace: &str, name: &str| {
         typed

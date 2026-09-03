@@ -1,18 +1,18 @@
 use super::*;
 use crate::semantic_modules::ElaboratedItem;
-use crate::{elaborate_modules, Compiler, CompilerOptions};
+use crate::{elaborate_modules, CompilerOptions, ParsedModules};
 use wyn_module_graph::{
-    LocalSources, ModuleKey, ModulePath, PackageIdentity, PackagePlan, PackagePlanBuilder,
+    LocalSources, ModuleKey, ModulePath, PackageGraph, PackageGraphBuilder, PackageIdentity, PackagePlan,
     SourceFingerprint,
 };
 
-fn local_plan() -> (PackagePlan, ModuleKey, ModuleKey) {
+fn local_plan() -> (PackageGraph, ModuleKey, ModuleKey) {
     let fingerprint = SourceFingerprint::new("test-sources").expect("valid fingerprint");
     let identity =
         PackageIdentity::new("test/root", "v0.0.0", fingerprint).expect("valid package identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("dependency.wyn").expect("valid dependency path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let package = builder.add_package(identity, root_path.clone()).expect("package should be unique");
     let root = ModuleKey::new(package, root_path);
     let dependency = ModuleKey::new(package, dependency_path);
@@ -31,7 +31,7 @@ fn imported_module_definitions(module_source: &str, leaf_source: Option<&str>) -
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let module_path = ModulePath::new("module.wyn").expect("valid module path");
     let leaf_path = ModulePath::new("leaf.wyn").expect("valid leaf path");
-    let mut builder = PackagePlanBuilder::new();
+    let mut builder = PackageGraphBuilder::new();
     let package = builder.add_package(identity, root_path.clone()).expect("package should be unique");
     let root = ModuleKey::new(package, root_path);
     let imported = ModuleKey::new(package, module_path);
@@ -47,10 +47,8 @@ fn imported_module_definitions(module_source: &str, leaf_source: Option<&str>) -
         sources.add_override(leaf, leaf_source).expect("leaf override should be unique");
     }
 
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler
-        .load_modules(builder.build().expect("plan should be complete"), &mut sources)
-        .expect("module graph should load");
+    let input = PackagePlan::new(builder.build().expect("plan should be complete"), sources);
+    let modules = ParsedModules::load(input, CompilerOptions::default()).expect("module graph should load");
     let program = resolve_imports(modules).expect("imports should resolve");
     let program = elaborate_modules::elaborate_modules(program).expect("modules should elaborate");
     let imported = program
@@ -78,8 +76,8 @@ fn module_binding_import_becomes_loaded_module_body() {
     sources
         .add_override(dependency, "def value: i32 = 42")
         .expect("dependency override should be unique");
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
 
     let program = resolve_imports(modules).expect("imports should resolve");
 
@@ -107,8 +105,8 @@ fn imported_nested_semantic_module_is_preserved() {
     sources
         .add_override(dependency, "module Nested = { def value: i32 = 42 }")
         .expect("dependency override should be unique");
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
     let program = resolve_imports(modules).expect("imports should resolve");
 
     let program = crate::elaborate_modules::elaborate_modules(program)
@@ -128,8 +126,8 @@ fn import_resolution_error(root_source: &str, dependency_source: &str) -> String
     let mut sources = LocalSources::new();
     sources.add_override(root, root_source).expect("root override should be unique");
     sources.add_override(dependency, dependency_source).expect("dependency override should be unique");
-    let compiler = Compiler::new(CompilerOptions::default()).expect("compiler should initialize");
-    let modules = compiler.load_modules(plan, &mut sources).expect("module graph should load");
+    let modules = ParsedModules::load(PackagePlan::new(plan, sources), CompilerOptions::default())
+        .expect("module graph should load");
 
     resolve_imports(modules).expect_err("imported entry should be rejected").to_string()
 }

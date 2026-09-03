@@ -41,7 +41,7 @@ kinds=(tlc mir json)
 
 compile_run() {
   local outdir="$1"; mkdir -p "$outdir"
-  "$WYN" compile "$src" \
+  "$WYN" build "$src" \
     --output-tlc "$outdir/dump.tlc" \
     --output-mir "$outdir/dump.mir" \
     -t "$TARGET" \

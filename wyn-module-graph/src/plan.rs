@@ -192,14 +192,14 @@ impl ModuleKey {
     }
 }
 
-/// A validated, closed package plan consumed by module loading.
+/// Validated package topology retained by module graphs and diagnostics.
 #[derive(Clone, Debug)]
-pub struct PackagePlan {
+pub struct PackageGraph {
     root: ModuleKey,
     packages: IdArena<PackageId, Package>,
 }
 
-impl PackagePlan {
+impl PackageGraph {
     pub const fn root(&self) -> &ModuleKey {
         &self.root
     }
@@ -213,14 +213,14 @@ impl PackagePlan {
     }
 }
 
-/// Error produced while assembling a closed package plan.
+/// Error produced while assembling a closed package graph.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum PlanError {
-    #[error("package `{canonical_name}` already belongs to the plan")]
+pub enum PackageGraphError {
+    #[error("package `{canonical_name}` already belongs to the package graph")]
     DuplicatePackage {
         canonical_name: Arc<str>,
     },
-    #[error("package ID {package:?} does not belong to this plan")]
+    #[error("package ID {package:?} does not belong to this package graph")]
     UnknownPackage {
         package: PackageId,
     },
@@ -229,19 +229,19 @@ pub enum PlanError {
         package: PackageId,
         alias: DependencyAlias,
     },
-    #[error("the package plan has no root module")]
+    #[error("the package graph has no root module")]
     MissingRoot,
 }
 
-/// Incrementally constructs and validates a deterministic package plan.
+/// Incrementally constructs and validates deterministic package topology.
 #[derive(Clone, Debug, Default)]
-pub struct PackagePlanBuilder {
+pub struct PackageGraphBuilder {
     root: Option<ModuleKey>,
     packages: IdArena<PackageId, Package>,
     names: HashMap<Arc<str>, PackageId>,
 }
 
-impl PackagePlanBuilder {
+impl PackageGraphBuilder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -250,9 +250,9 @@ impl PackagePlanBuilder {
         &mut self,
         identity: PackageIdentity,
         library_root: ModulePath,
-    ) -> Result<PackageId, PlanError> {
+    ) -> Result<PackageId, PackageGraphError> {
         if self.names.contains_key(identity.canonical_name()) {
-            return Err(PlanError::DuplicatePackage {
+            return Err(PackageGraphError::DuplicatePackage {
                 canonical_name: identity.canonical_name.clone(),
             });
         }
@@ -272,13 +272,14 @@ impl PackagePlanBuilder {
         from: PackageId,
         alias: DependencyAlias,
         target: PackageId,
-    ) -> Result<(), PlanError> {
+    ) -> Result<(), PackageGraphError> {
         if self.packages.get(target).is_none() {
-            return Err(PlanError::UnknownPackage { package: target });
+            return Err(PackageGraphError::UnknownPackage { package: target });
         }
-        let package = self.packages.get_mut(from).ok_or(PlanError::UnknownPackage { package: from })?;
+        let package =
+            self.packages.get_mut(from).ok_or(PackageGraphError::UnknownPackage { package: from })?;
         if package.dependencies.iter().any(|dependency| dependency.alias == alias) {
-            return Err(PlanError::DuplicateAlias { package: from, alias });
+            return Err(PackageGraphError::DuplicateAlias { package: from, alias });
         }
         package.dependencies.push(Dependency {
             alias,
@@ -287,9 +288,9 @@ impl PackagePlanBuilder {
         Ok(())
     }
 
-    pub fn set_root(&mut self, root: ModuleKey) -> Result<(), PlanError> {
+    pub fn set_root(&mut self, root: ModuleKey) -> Result<(), PackageGraphError> {
         if self.packages.get(root.package()).is_none() {
-            return Err(PlanError::UnknownPackage {
+            return Err(PackageGraphError::UnknownPackage {
                 package: root.package(),
             });
         }
@@ -297,9 +298,9 @@ impl PackagePlanBuilder {
         Ok(())
     }
 
-    pub fn build(self) -> Result<PackagePlan, PlanError> {
-        let root = self.root.ok_or(PlanError::MissingRoot)?;
-        Ok(PackagePlan {
+    pub fn build(self) -> Result<PackageGraph, PackageGraphError> {
+        let root = self.root.ok_or(PackageGraphError::MissingRoot)?;
+        Ok(PackageGraph {
             root,
             packages: self.packages,
         })

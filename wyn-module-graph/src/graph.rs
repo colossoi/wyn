@@ -7,19 +7,19 @@ use wyn_base::IdArena;
 use crate::error::{BuildError, BuildFailure};
 use crate::source::SourceMap;
 use crate::{
-    DependencyAlias, ImportSiteId, ModuleId, ModuleKey, PackageId, PackagePlan, RelativeModulePath,
-    SourceLocation, Span, SpanError, TextRange,
+    DependencyAlias, ImportSiteId, ModuleId, ModuleKey, PackageGraph, PackageId, PackagePlan,
+    RelativeModulePath, SourceLocation, Span, SpanError, TextRange,
 };
 
 /// Supplies verified source text for a module in a closed package plan.
-pub trait SourceProvider {
+pub trait SourceReader {
     type Error;
 
     fn load(&mut self, module: &ModuleKey) -> Result<Arc<str>, Self::Error>;
 }
 
 /// Parses one source file and extracts its physical import requests.
-pub trait ModuleFrontend {
+pub trait ModuleParser {
     type Parsed;
     type Error;
 
@@ -32,7 +32,6 @@ pub trait ModuleFrontend {
 }
 
 /// One physical import discovered by a frontend.
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct ImportRequest {
     site: ImportSiteId,
     target: ImportTarget,
@@ -93,10 +92,10 @@ impl<T> LoadedModule<T> {
     }
 }
 
-/// Immutable physical module graph produced from a closed package plan.
+/// Immutable physical module graph produced from a closed package graph.
 #[derive(Clone, Debug)]
 pub struct ModuleGraph<T> {
-    plan: PackagePlan,
+    packages: PackageGraph,
     root: ModuleId,
     modules: IdArena<ModuleId, LoadedModule<T>>,
     dependency_order: Vec<ModuleId>,
@@ -107,8 +106,8 @@ pub struct ModuleGraph<T> {
 pub type SourceGraph = ModuleGraph<()>;
 
 impl<T> ModuleGraph<T> {
-    pub const fn plan(&self) -> &PackagePlan {
-        &self.plan
+    pub const fn package_graph(&self) -> &PackageGraph {
+        &self.packages
     }
 
     pub const fn root(&self) -> ModuleId {
@@ -150,7 +149,7 @@ impl<T> ModuleGraph<T> {
         let loaded = self.module(module).ok_or(SpanError::UnknownModule { module })?;
         let location = self.location(span)?;
         Ok(DisplaySourceLocation {
-            plan: &self.plan,
+            packages: &self.packages,
             module: loaded.key(),
             location,
         })
@@ -164,7 +163,7 @@ impl<T> ModuleGraph<T> {
     /// source provenance.
     pub fn erase_syntax(self) -> SourceGraph {
         let Self {
-            plan,
+            packages,
             root,
             modules,
             dependency_order,
@@ -185,7 +184,7 @@ impl<T> ModuleGraph<T> {
             debug_assert_eq!(copied_id, module_id);
         }
         SourceGraph {
-            plan,
+            packages,
             root,
             modules: source_modules,
             dependency_order,
@@ -195,15 +194,15 @@ impl<T> ModuleGraph<T> {
 }
 
 struct DisplaySourceLocation<'a> {
-    plan: &'a PackagePlan,
+    packages: &'a PackageGraph,
     module: &'a ModuleKey,
     location: SourceLocation,
 }
 
 impl fmt::Display for DisplaySourceLocation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.module.package() != self.plan.root().package() {
-            if let Some(package) = self.plan.package(self.module.package()) {
+        if self.module.package() != self.packages.root().package() {
+            if let Some(package) = self.packages.package(self.module.package()) {
                 write!(
                     formatter,
                     "{}@{}:",
@@ -233,81 +232,78 @@ pub struct ImportTraceFrame {
 pub type BuildResult<Parsed, FrontendError, ProviderError> =
     Result<ModuleGraph<Parsed>, BuildFailure<FrontendError, ProviderError>>;
 
-/// Load, parse, and resolve every source module reachable from the plan root.
-pub fn load_modules<F, S>(
-    plan: PackagePlan,
-    sources: &mut S,
-    frontend: &mut F,
-) -> BuildResult<F::Parsed, F::Error, S::Error>
-where
-    F: ModuleFrontend,
-    S: SourceProvider,
-{
-    GraphBuilder::new(plan, sources, frontend).build()
+impl<S: SourceReader> PackagePlan<S> {
+    /// Load the complete source closure using the supplied language frontend.
+    pub fn load<F: ModuleParser>(self, frontend: &mut F) -> BuildResult<F::Parsed, F::Error, S::Error> {
+        let PackagePlan {
+            package_graph,
+            mut sources,
+        } = self;
+        let mut traversal = GraphTraversal {
+            modules: IdArena::new(),
+            by_key: HashMap::new(),
+            active: Vec::new(),
+            dependency_order: Vec::new(),
+            source_map: SourceMap::default(),
+        };
+
+        let root_key = package_graph.root().clone();
+        let root = match traversal.visit_module(&package_graph, &mut sources, frontend, root_key, None) {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(BuildFailure::new(
+                    error,
+                    package_graph,
+                    traversal.by_key,
+                    traversal.source_map,
+                ));
+            }
+        };
+        let mut modules = IdArena::new();
+        for (id, module) in traversal.modules {
+            let module = match module {
+                Some(module) => module,
+                None => panic!("module loader completed with an unfinished module"),
+            };
+            let copied_id = modules.alloc(module);
+            debug_assert_eq!(copied_id, id);
+        }
+        Ok(ModuleGraph {
+            packages: package_graph,
+            root,
+            modules,
+            dependency_order: traversal.dependency_order,
+            sources: traversal.source_map,
+        })
+    }
 }
 
-#[derive(Clone, Debug)]
 struct ActiveFrame {
     module: ModuleId,
     incoming: Option<ImportTraceFrame>,
 }
 
-struct GraphBuilder<'a, F: ModuleFrontend, S: SourceProvider> {
-    plan: PackagePlan,
-    sources: &'a mut S,
-    frontend: &'a mut F,
-    modules: IdArena<ModuleId, Option<LoadedModule<F::Parsed>>>,
+struct GraphTraversal<T> {
+    modules: IdArena<ModuleId, Option<LoadedModule<T>>>,
     by_key: HashMap<ModuleKey, ModuleId>,
     active: Vec<ActiveFrame>,
     dependency_order: Vec<ModuleId>,
     source_map: SourceMap,
 }
 
-impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
-    fn new(plan: PackagePlan, sources: &'a mut S, frontend: &'a mut F) -> Self {
-        Self {
-            plan,
-            sources,
-            frontend,
-            modules: IdArena::new(),
-            by_key: HashMap::new(),
-            active: Vec::new(),
-            dependency_order: Vec::new(),
-            source_map: SourceMap::default(),
-        }
-    }
-
-    fn build(mut self) -> BuildResult<F::Parsed, F::Error, S::Error> {
-        let root_key = self.plan.root().clone();
-        let root = match self.load(root_key, None) {
-            Ok(root) => root,
-            Err(error) => {
-                return Err(BuildFailure::new(error, self.plan, self.by_key, self.source_map));
-            }
-        };
-        let mut modules = IdArena::new();
-        for (id, module) in self.modules {
-            let module = match module {
-                Some(module) => module,
-                None => panic!("module builder completed with an unfinished module"),
-            };
-            let copied_id = modules.alloc(module);
-            debug_assert_eq!(copied_id, id);
-        }
-        Ok(ModuleGraph {
-            plan: self.plan,
-            root,
-            modules,
-            dependency_order: self.dependency_order,
-            sources: self.source_map,
-        })
-    }
-
-    fn load(
+impl<T> GraphTraversal<T> {
+    fn visit_module<F, S>(
         &mut self,
+        packages: &PackageGraph,
+        sources: &mut S,
+        frontend: &mut F,
         key: ModuleKey,
         incoming: Option<ImportTraceFrame>,
-    ) -> Result<ModuleId, BuildError<F::Error, S::Error>> {
+    ) -> Result<ModuleId, BuildError<F::Error, S::Error>>
+    where
+        F: ModuleParser<Parsed = T>,
+        S: SourceReader,
+    {
         if let Some(&module) = self.by_key.get(&key) {
             return match self.modules.get(module) {
                 Some(Some(_)) => Ok(module),
@@ -323,7 +319,7 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
         self.active.push(ActiveFrame { module, incoming });
 
         let trace = self.import_trace();
-        let text = self.sources.load(&key).map_err(|source| BuildError::Load {
+        let text = sources.load(&key).map_err(|source| BuildError::Load {
             module: key.clone(),
             trace: trace.clone().into_boxed_slice(),
             source,
@@ -338,8 +334,7 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
             .source_map
             .source(module)
             .unwrap_or_else(|| panic!("source map lost a newly inserted module"));
-        let syntax = self
-            .frontend
+        let syntax = frontend
             .parse(module, source_text, &mut |site, target, range| {
                 requests.push(ImportRequest { site, target, range });
             })
@@ -367,12 +362,12 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
                 trace: self.import_trace().into_boxed_slice(),
                 source,
             })?;
-            let target_key = self.resolve_target(&key, &request, span)?;
+            let target_key = self.resolve_target(packages, &key, &request, span)?;
             let frame = ImportTraceFrame {
                 span,
                 requested: target_key.clone(),
             };
-            let target = self.load(target_key, Some(frame))?;
+            let target = self.visit_module(packages, sources, frontend, target_key, Some(frame))?;
             imports.push(ImportEdge {
                 site: request.site,
                 span,
@@ -387,12 +382,13 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
         Ok(module)
     }
 
-    fn resolve_target(
+    fn resolve_target<FrontendError, ProviderError>(
         &self,
+        packages: &PackageGraph,
         from_key: &ModuleKey,
         request: &ImportRequest,
         span: Span,
-    ) -> Result<ModuleKey, BuildError<F::Error, S::Error>> {
+    ) -> Result<ModuleKey, BuildError<FrontendError, ProviderError>> {
         match &request.target {
             ImportTarget::Local(relative) => {
                 let path = from_key.path().resolve(relative).map_err(|source| BuildError::InvalidPath {
@@ -404,7 +400,7 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
             }
             ImportTarget::Dependency { alias, module } => {
                 let Some(package) =
-                    self.plan.package(from_key.package()).and_then(|package| package.dependency(alias))
+                    packages.package(from_key.package()).and_then(|package| package.dependency(alias))
                 else {
                     return Err(BuildError::UnknownDependency {
                         alias: alias.clone(),
@@ -412,7 +408,7 @@ impl<'a, F: ModuleFrontend, S: SourceProvider> GraphBuilder<'a, F, S> {
                         trace: self.import_trace().into_boxed_slice(),
                     });
                 };
-                let Some(target_package) = self.plan.package(package) else {
+                let Some(target_package) = packages.package(package) else {
                     return Err(BuildError::UnknownDependency {
                         alias: alias.clone(),
                         span,

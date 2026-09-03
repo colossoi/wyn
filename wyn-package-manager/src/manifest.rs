@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -60,12 +60,21 @@ pub enum PackageNameError {
     },
 }
 
-/// One local-path dependency declared by a package.
+/// Where a declared package dependency can be materialized from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencySource {
+    LocalPath(PathBuf),
+    Git {
+        repository: String,
+    },
+}
+
+/// One dependency declared by a package.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dependency {
     package: PackageName,
     minimum: PackageVersion,
-    path: PathBuf,
+    source: DependencySource,
 }
 
 impl Dependency {
@@ -77,12 +86,12 @@ impl Dependency {
         &self.minimum
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub const fn source(&self) -> &DependencySource {
+        &self.source
     }
 }
 
-/// Strict, validated `wyn.toml` data for the local-only implementation stage.
+/// Strict, validated `wyn.toml` data for package preparation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     package: PackageName,
@@ -122,12 +131,18 @@ impl Manifest {
                     source,
                 }
             })?;
+            let source = match (raw_dependency.path, raw_dependency.git) {
+                (Some(path), None) => DependencySource::LocalPath(path),
+                (None, Some(repository)) => DependencySource::Git { repository },
+                (None, None) => return Err(ManifestError::MissingDependencySource { alias }),
+                (Some(_), Some(_)) => return Err(ManifestError::MultipleDependencySources { alias }),
+            };
             dependencies.insert(
                 alias,
                 Dependency {
                     package,
                     minimum,
-                    path: raw_dependency.path,
+                    source,
                 },
             );
         }
@@ -181,6 +196,14 @@ pub enum ManifestError {
     LibraryPath(PathError),
     #[error("invalid dependency alias: {0}")]
     DependencyAlias(AliasError),
+    #[error("dependency `{alias}` has no source; expected exactly one of `path` or `git`")]
+    MissingDependencySource {
+        alias: DependencyAlias,
+    },
+    #[error("dependency `{alias}` has multiple sources; expected exactly one of `path` or `git`")]
+    MultipleDependencySources {
+        alias: DependencyAlias,
+    },
 }
 
 #[derive(Deserialize)]
@@ -206,7 +229,8 @@ struct RawPackage {
 struct RawDependency {
     package: String,
     version: String,
-    path: PathBuf,
+    path: Option<PathBuf>,
+    git: Option<String>,
 }
 
 #[cfg(test)]

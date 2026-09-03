@@ -24,7 +24,7 @@ use crate::resolve_opens;
 use crate::semantic_modules;
 use crate::LookupMap;
 use crate::LookupSet;
-use crate::{SymbolId, SymbolTable};
+use crate::{CompilerOptions, SymbolId, SymbolTable};
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
@@ -481,10 +481,11 @@ pub fn build_name_resolution(
     program: &resolve_opens::OpensResolved,
     semantic_modules: &SemanticModules,
     catalog: &BuiltinCatalog,
+    options: CompilerOptions,
 ) -> NameResolution {
     let catalog = EnabledBuiltinCatalog {
         catalog,
-        graphics: semantic_modules.options().graphics,
+        graphics: options.graphics,
     };
     let mut nr = NameResolution::new();
     let mut top_level: ScopeStack<()> = ScopeStack::new();

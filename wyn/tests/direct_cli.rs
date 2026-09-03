@@ -26,7 +26,7 @@ fn temp_case(extension: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 fn compile(source: &PathBuf, output: &PathBuf, target: &str, direct_flag: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_wyn"))
-        .arg("compile")
+        .arg("build")
         .arg(source)
         .arg("--graphics")
         .arg("--target")

@@ -9,6 +9,7 @@
 mod error;
 mod graph;
 mod ids;
+mod input;
 mod local_sources;
 mod path;
 mod plan;
@@ -16,15 +17,16 @@ mod source;
 
 pub use error::{BuildError, BuildFailure};
 pub use graph::{
-    load_modules, BuildResult, ImportEdge, ImportTarget, ImportTraceFrame, LoadedModule, ModuleFrontend,
-    ModuleGraph, SourceGraph, SourceProvider,
+    BuildResult, ImportEdge, ImportTarget, ImportTraceFrame, LoadedModule, ModuleGraph, ModuleParser,
+    SourceGraph, SourceReader,
 };
 pub use ids::{ImportSiteId, ModuleId, PackageId};
+pub use input::PackagePlan;
 pub use local_sources::{LocalSourceError, LocalSources};
 pub use path::{ModulePath, PathError, RelativeModulePath};
 pub use plan::{
-    AliasError, Dependency, DependencyAlias, IdentityError, ModuleKey, Package, PackageIdentity,
-    PackagePlan, PackagePlanBuilder, PlanError, SourceFingerprint,
+    AliasError, Dependency, DependencyAlias, IdentityError, ModuleKey, Package, PackageGraph,
+    PackageGraphBuilder, PackageGraphError, PackageIdentity, SourceFingerprint,
 };
 pub use source::{SourceLocation, SourceTextError, Span, SpanError, TextRange};
 

@@ -151,7 +151,7 @@ try {
 
         Write-Host "Compiling $sourcePath"
         Invoke-NativeChecked $wynBinary @(
-            'compile', $compileSource, '--graphics', '--direct', '-o', $spvPath
+            'build', $compileSource, '--graphics', '--direct', '-o', $spvPath
         ) 'playground compilation'
     } finally {
         if ($null -ne $preparedSource) {
