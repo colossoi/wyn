@@ -2,6 +2,15 @@ use super::*;
 use wyn_pipeline_descriptor::{BufferLen, UniformMember};
 
 #[test]
+fn spirv_passthrough_is_only_enabled_for_vulkan() {
+    assert!(supports_spirv_passthrough(Backend::Vulkan));
+    assert!(!supports_spirv_passthrough(Backend::Metal));
+    assert!(!supports_spirv_passthrough(Backend::Dx12));
+    assert!(!supports_spirv_passthrough(Backend::Gl));
+    assert!(!supports_spirv_passthrough(Backend::BrowserWebGpu));
+}
+
+#[test]
 fn packs_wgsl_parameter_blocks_at_descriptor_offsets() {
     let bindings = vec![Binding::StorageBuffer {
         set: 1,

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use wgpu::{
-    Adapter, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    Adapter, Backend, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, BufferDescriptor, BufferUsages,
     CommandEncoderDescriptor, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor,
     InstanceFlags, Limits, MemoryHints, PowerPreference, Queue, RequestAdapterOptions, ShaderStages,
@@ -70,7 +70,11 @@ impl GpuContext {
             .await
             .context("request_adapter failed")?;
 
-        let supported_features = adapter.features() & req.desired_features;
+        let backend = adapter.get_info().backend;
+        let mut supported_features = adapter.features() & req.desired_features;
+        if !supports_spirv_passthrough(backend) {
+            supported_features.remove(Features::EXPERIMENTAL_PASSTHROUGH_SHADERS);
+        }
 
         let mut limits = Limits::default();
         // Sparse resource sets get their binding holes padded with dummy
@@ -123,6 +127,10 @@ impl GpuContext {
             surface,
         })
     }
+}
+
+fn supports_spirv_passthrough(backend: Backend) -> bool {
+    backend == Backend::Vulkan
 }
 
 /// Knobs for `GpuContext::request`. Callers fill in only the fields
