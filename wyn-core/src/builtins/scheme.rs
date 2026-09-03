@@ -78,10 +78,6 @@ fn i32_ty() -> Type {
 fn u32_ty() -> Type {
     Type::Constructed(TypeName::UInt(32), vec![])
 }
-fn bool_ty() -> Type {
-    Type::Constructed(TypeName::Bool, vec![])
-}
-
 // ---------------------------------------------------------------------------
 // Scalar shapes
 // ---------------------------------------------------------------------------
@@ -473,95 +469,11 @@ pub fn indexed_indirect_draws_u32_scheme(ctx: &mut dyn TypeVarGenerator) -> Type
     indexed_indirect_draws_for(ctx, u32_ty())
 }
 
-fn depth_test_ty() -> Type {
-    types::sum(
-        [
-            "disabled",
-            "never",
-            "less",
-            "less_equal",
-            "equal",
-            "greater_equal",
-            "greater",
-            "always",
-        ]
-        .into_iter()
-        .map(|name| (name.to_string(), vec![]))
-        .collect(),
-    )
-}
-
-fn blend_mode_ty() -> Type {
-    types::sum(
-        ["replace", "source_over", "add"].into_iter().map(|name| (name.to_string(), vec![])).collect(),
-    )
-}
-
-fn fragment_state_ty() -> Type {
-    types::record(vec![
-        ("depth_test".to_string(), depth_test_ty()),
-        ("depth_write".to_string(), bool_ty()),
-        ("blend".to_string(), blend_mode_ty()),
-        ("color_write".to_string(), bool_ty()),
-    ])
-}
-
 /// forall v. vec4f32 -> v -> vertex<v>.
 pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let v = ctx.new_variable();
     let output = pipeline_ty(TypeName::Vertex, vec![v.clone()]);
     quantify(arrow_chain(&[vec_n(f32_ty(), 4), v], output))
-}
-
-fn raster_state_ty() -> Type {
-    let viewport = types::record(vec![
-        ("origin".to_string(), vec_n(f32_ty(), 2)),
-        ("extent".to_string(), vec_n(f32_ty(), 2)),
-        ("depth".to_string(), vec_n(f32_ty(), 2)),
-    ]);
-    let scissor = types::record(vec![
-        ("origin".to_string(), vec_n(i32_ty(), 2)),
-        ("extent".to_string(), vec_n(u32_ty(), 2)),
-    ]);
-    types::record(vec![
-        (
-            "viewport".to_string(),
-            types::sum(vec![
-                ("target".to_string(), vec![]),
-                ("custom".to_string(), vec![viewport]),
-            ]),
-        ),
-        (
-            "scissor".to_string(),
-            types::sum(vec![
-                ("target".to_string(), vec![]),
-                ("custom".to_string(), vec![scissor]),
-            ]),
-        ),
-        (
-            "front_face".to_string(),
-            types::sum(vec![
-                ("clockwise".to_string(), vec![]),
-                ("counter_clockwise".to_string(), vec![]),
-            ]),
-        ),
-        (
-            "cull".to_string(),
-            types::sum(vec![
-                ("none".to_string(), vec![]),
-                ("front".to_string(), vec![]),
-                ("back".to_string(), vec![]),
-            ]),
-        ),
-        (
-            "fill".to_string(),
-            types::sum(vec![
-                ("fill".to_string(), vec![]),
-                ("line".to_string(), vec![]),
-                ("point".to_string(), vec![]),
-            ]),
-        ),
-    ])
 }
 
 /// forall v. raster_state -> draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
@@ -572,7 +484,7 @@ pub fn rasterize_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         pipeline_ty(TypeName::Vertex, vec![v.clone()]),
     );
     quantify(arrow_chain(
-        &[raster_state_ty(), draw_ty(), callback],
+        &[types::raster_state(), draw_ty(), callback],
         pipeline_ty(TypeName::Raster, vec![v]),
     ))
 }
@@ -610,7 +522,7 @@ pub fn shade_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
     quantify(arrow_chain(
-        &[fragment_state_ty(), target.clone(), raster, callback],
+        &[types::fragment_state(), target.clone(), raster, callback],
         target,
     ))
 }
@@ -641,7 +553,7 @@ pub fn shade_with_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         types::fragment_output(c),
     );
     quantify(arrow_chain(
-        &[fragment_state_ty(), target.clone(), raster, callback],
+        &[types::fragment_state(), target.clone(), raster, callback],
         target,
     ))
 }

@@ -135,6 +135,19 @@ fn stage_helper(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, Stag
     ))
 }
 
+fn stage_constant(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, StageHelper)> {
+    if !matches!(definition.meta, DefMeta::Function) || definition.arity != 0 {
+        return None;
+    }
+    Some((
+        definition.name,
+        StageHelper {
+            params: Vec::new(),
+            body: definition.body.clone(),
+        },
+    ))
+}
+
 fn inline_stage_helpers(
     term: Term,
     helpers: &LookupMap<SymbolId, StageHelper>,
@@ -162,6 +175,12 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
 
     fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
         let candidate = match &term.kind {
+            TermKind::Var(VarRef::Symbol(symbol)) => self
+                .helpers
+                .get(symbol)
+                .filter(|candidate| candidate.params.is_empty())
+                .cloned()
+                .map(|candidate| (*symbol, candidate, true, false)),
             TermKind::App { func, args } => match &func.kind {
                 TermKind::Var(VarRef::Symbol(symbol)) => self
                     .helpers
@@ -171,13 +190,13 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
                     .map(|candidate| {
                         let carries_render_target =
                             args.iter().any(|argument| is_render_target_type(&argument.ty));
-                        (*symbol, candidate, carries_render_target)
+                        (*symbol, candidate, false, carries_render_target)
                     }),
                 _ => None,
             },
             _ => None,
         };
-        let Some((symbol, candidate, carries_render_target)) = candidate else {
+        let Some((symbol, candidate, is_constant, carries_render_target)) = candidate else {
             return (term, RewriteDecision::Unchanged);
         };
         if !self.active.insert(symbol) {
@@ -186,18 +205,23 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         let params = candidate.params.clone();
         let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
         let Term { id, span, kind, .. } = term;
-        let TermKind::App { args, .. } = kind else {
-            unreachable!()
+        let mut replacement = match kind {
+            TermKind::Var(VarRef::Symbol(_)) => body,
+            TermKind::App { args, .. } => {
+                super::inline::build_inline_lets(&params, args, body, span, self.term_ids)
+            }
+            _ => unreachable!(),
         };
-        let mut replacement = super::inline::build_inline_lets(&params, args, body, span, self.term_ids);
         replacement.id = id;
-        // The normal post-order rewrite intentionally expands each helper only
-        // once; revisiting every inserted body would explode prelude SOAC
-        // helpers such as filter. Render targets cannot survive as shader-stage
-        // values, though, so recursively expose just those helper chains before
-        // target_load/target_sample rewriting. Active-call tracking leaves a
-        // recursive source edge intact instead of recursing forever.
-        if carries_render_target {
+        // The normal post-order rewrite intentionally expands each function
+        // helper only once; revisiting every inserted body would explode
+        // prelude SOAC helpers such as filter. Constants must be expanded
+        // transitively so a named descriptor can itself use named constants.
+        // Render targets also cannot survive as shader-stage values, so expose
+        // those helper chains before target_load/target_sample rewriting.
+        // Active-call tracking leaves a recursive source edge intact instead
+        // of recursing forever.
+        if is_constant || carries_render_target {
             replacement = self.rewrite_owned(replacement);
         }
         self.active.remove(&symbol);
@@ -295,6 +319,7 @@ pub(super) fn extract(
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
     let helpers = source_defs.iter().filter_map(stage_helper).collect::<LookupMap<_, _>>();
+    let constants = source_defs.iter().filter_map(stage_constant).collect::<LookupMap<_, _>>();
     let mut extracted = Vec::with_capacity(source_defs.len());
 
     for mut definition in source_defs {
@@ -307,7 +332,8 @@ pub(super) fn extract(
             continue;
         }
 
-        if let Some(stages) = extract_root(&definition, &builtins, &helpers, symbols, term_ids) {
+        if let Some(stages) = extract_root(&definition, &builtins, &helpers, &constants, symbols, term_ids)
+        {
             extracted.extend(stages);
             continue;
         }
@@ -343,6 +369,7 @@ fn extract_root(
     definition: &Def<UnpinnedPolymorphic>,
     builtins: &InvocationBuiltins,
     helpers: &LookupMap<SymbolId, StageHelper>,
+    constants: &LookupMap<SymbolId, StageHelper>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Vec<Def<UnpinnedPolymorphic>>> {
@@ -419,12 +446,14 @@ fn extract_root(
                     Box::new(inline_stage_helpers(*fragment_lambda.body, helpers, term_ids));
 
                 let raster_state = if has_raster_state {
-                    parse_raster_state(raster_args.first()?)?
+                    let state = inline_stage_helpers(raster_args.first()?.clone(), constants, term_ids);
+                    parse_raster_state(&state)?
                 } else {
                     Default::default()
                 };
                 let fragment_state = if shade_builtin == builtins.shade_with {
-                    parse_fragment_state(shade_args.first()?)?
+                    let state = inline_stage_helpers(shade_args.first()?.clone(), constants, term_ids);
+                    parse_fragment_state(&state)?
                 } else {
                     Default::default()
                 };

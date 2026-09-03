@@ -4347,6 +4347,46 @@ entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_root_accepts_named_explicit_fragment_state() {
+    let lowered = compile_thru_spirv(
+        r#"
+def opaque_depth: fragment_state = {
+  depth_test = #less_equal,
+  depth_write = true,
+  blend = #replace,
+  color_write = true,
+}
+
+entry reproduce(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[1.0, 0.5, 0.25, 1.0])) in
+  shade_with(opaque_depth, target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a named fragment_state supplies context to its sum fields");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.invocation.fragment_state.depth_test,
+        pipeline_descriptor::DepthTest::LessEqual
+    );
+    assert!(graphics.invocation.fragment_state.depth_write);
+    assert_eq!(
+        graphics.invocation.fragment_state.blend,
+        pipeline_descriptor::BlendMode::Replace
+    );
+    assert!(graphics.invocation.fragment_state.color_write);
+}
+
+#[test]
 fn unified_root_flattens_structured_compute_results() {
     let lowered = compile_thru_spirv(
         r#"

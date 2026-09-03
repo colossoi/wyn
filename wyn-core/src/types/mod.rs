@@ -1112,6 +1112,101 @@ pub fn sum(variants: Vec<(String, Vec<Type>)>) -> Type {
     Type::Constructed(TypeName::Sum(variants), vec![])
 }
 
+/// Construct the predeclared viewport record used by `raster_state`.
+pub fn viewport() -> Type {
+    record(vec![
+        ("origin".to_string(), vec(2, f32())),
+        ("extent".to_string(), vec(2, f32())),
+        ("depth".to_string(), vec(2, f32())),
+    ])
+}
+
+/// Construct the predeclared scissor record used by `raster_state`.
+pub fn scissor() -> Type {
+    record(vec![
+        ("origin".to_string(), vec(2, i32())),
+        (
+            "extent".to_string(),
+            vec(2, Type::Constructed(TypeName::UInt(32), vec![])),
+        ),
+    ])
+}
+
+/// Construct the predeclared `raster_state` record type.
+pub fn raster_state() -> Type {
+    record(vec![
+        (
+            "viewport".to_string(),
+            sum(vec![
+                ("target".to_string(), vec![]),
+                ("custom".to_string(), vec![viewport()]),
+            ]),
+        ),
+        (
+            "scissor".to_string(),
+            sum(vec![
+                ("target".to_string(), vec![]),
+                ("custom".to_string(), vec![scissor()]),
+            ]),
+        ),
+        (
+            "front_face".to_string(),
+            sum(vec![
+                ("clockwise".to_string(), vec![]),
+                ("counter_clockwise".to_string(), vec![]),
+            ]),
+        ),
+        (
+            "cull".to_string(),
+            sum(vec![
+                ("none".to_string(), vec![]),
+                ("front".to_string(), vec![]),
+                ("back".to_string(), vec![]),
+            ]),
+        ),
+        (
+            "fill".to_string(),
+            sum(vec![
+                ("fill".to_string(), vec![]),
+                ("line".to_string(), vec![]),
+                ("point".to_string(), vec![]),
+            ]),
+        ),
+    ])
+}
+
+/// Construct the predeclared depth-test sum type.
+pub fn depth_test() -> Type {
+    sum([
+        "disabled",
+        "never",
+        "less",
+        "less_equal",
+        "equal",
+        "greater_equal",
+        "greater",
+        "always",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), vec![]))
+    .collect())
+}
+
+/// Construct the predeclared blend-mode sum type.
+pub fn blend_mode() -> Type {
+    sum(["replace", "source_over", "add"].into_iter().map(|name| (name.to_string(), vec![])).collect())
+}
+
+/// Construct the predeclared `fragment_state` record type.
+pub fn fragment_state() -> Type {
+    record(vec![
+        ("depth_test".to_string(), depth_test()),
+        ("depth_write".to_string(), bool_type()),
+        ("blend".to_string(), blend_mode()),
+        ("color_write".to_string(), bool_type()),
+    ])
+}
+
 /// Construct the predeclared `fragment_output<C>` generic sum token.
 pub fn fragment_output(color: Type) -> Type {
     Type::Constructed(TypeName::FragmentOutput, vec![color])

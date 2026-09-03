@@ -1175,6 +1175,21 @@ impl<'a> Parser<'a> {
                 self.advance();
                 return Ok((ty.clone(), Diet::Leaf(false)));
             }
+            if self.graphics {
+                let graphics_alias = match name_str.as_str() {
+                    "viewport" => Some(types::viewport()),
+                    "scissor" => Some(types::scissor()),
+                    "raster_state" => Some(types::raster_state()),
+                    "depth_test" => Some(types::depth_test()),
+                    "blend_mode" => Some(types::blend_mode()),
+                    "fragment_state" => Some(types::fragment_state()),
+                    _ => None,
+                };
+                if let Some(ty) = graphics_alias {
+                    self.advance();
+                    return Ok((ty, Diet::Leaf(false)));
+                }
+            }
         }
 
         match self.peek() {
