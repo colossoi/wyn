@@ -15,9 +15,10 @@ test binary. It:
    expectation; and
 6. verify that the checked-in fixture tree was unchanged.
 
-The runner rejects manifests containing Git, URL, or registry sources before
-it starts Wyn. Stage 1 has no network-capable dependency source; the runner can
-pass `--offline` once that option acquires meaning with the source cache.
+The table-driven case runner rejects manifests containing GitHub, URL, or
+registry sources before it starts Wyn. A separate functional test synthesizes
+a GitHub manifest and a completed unpacked cache entry, then checks the package
+through the CLI without making a network request.
 
 `scaffold/` is a template for new cases and is skipped by the runner. Copy it
 to `cases/<case-name>/`, edit its package trees, and record the expected result

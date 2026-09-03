@@ -79,7 +79,7 @@ fn assert_local_manifests(root: &Path) {
                 "dependency `{alias}` in `{}` is not a local path dependency",
                 path.display(),
             );
-            for source_key in ["git", "url", "registry"] {
+            for source_key in ["github", "url", "registry"] {
                 assert!(
                     !dependency.contains_key(source_key),
                     "dependency `{alias}` in `{}` uses forbidden source `{source_key}`",
@@ -200,4 +200,35 @@ fn package_compiles_with_a_local_dependency() {
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(output_path.is_file(), "package output should be written");
+}
+
+#[test]
+fn package_uses_an_unpacked_github_dependency_from_the_local_cache() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    let copied = CaseCopy::new(&case);
+    let manifest_path = copied.root.join("app/wyn.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("app manifest should be readable");
+    let manifest = manifest.replace(
+        "path = \"../deps/example\"",
+        "github = \"github.com/example/dependency\"",
+    );
+    fs::write(&manifest_path, manifest).expect("GitHub dependency manifest should be written");
+
+    let cache_root = copied.root.join("package-cache");
+    let cached_dependency = cache_root.join("github.com").join("example").join("dependency").join("v1.0.0");
+    copy_tree(&copied.root.join("deps/example"), &cached_dependency);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(copied.root.join("app"))
+        .env("WYN_PKG_CACHE", cache_root)
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "cached GitHub package failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
 }

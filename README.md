@@ -25,6 +25,9 @@ The project is organized as a Rust workspace:
 - **`extra/viz/`** - Visualization tool for rendering SPIR-V shaders
 - **`prelude/`** - Standard library functions written in Wyn
 
+For package layout, manifests, dependencies, imports, and build commands, see
+[Writing Wyn Packages](PACKAGES.md).
+
 ## Compiler Architecture
 
 The compiler uses a multi-stage pipeline with typestate-driven phases. Each

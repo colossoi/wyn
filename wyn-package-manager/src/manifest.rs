@@ -64,7 +64,7 @@ pub enum PackageNameError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DependencySource {
     LocalPath(PathBuf),
-    Git {
+    GitHub {
         repository: String,
     },
 }
@@ -131,9 +131,9 @@ impl Manifest {
                     source,
                 }
             })?;
-            let source = match (raw_dependency.path, raw_dependency.git) {
+            let source = match (raw_dependency.path, raw_dependency.github) {
                 (Some(path), None) => DependencySource::LocalPath(path),
-                (None, Some(repository)) => DependencySource::Git { repository },
+                (None, Some(repository)) => DependencySource::GitHub { repository },
                 (None, None) => return Err(ManifestError::MissingDependencySource { alias }),
                 (Some(_), Some(_)) => return Err(ManifestError::MultipleDependencySources { alias }),
             };
@@ -196,11 +196,11 @@ pub enum ManifestError {
     LibraryPath(PathError),
     #[error("invalid dependency alias: {0}")]
     DependencyAlias(AliasError),
-    #[error("dependency `{alias}` has no source; expected exactly one of `path` or `git`")]
+    #[error("dependency `{alias}` has no source; expected exactly one of `path` or `github`")]
     MissingDependencySource {
         alias: DependencyAlias,
     },
-    #[error("dependency `{alias}` has multiple sources; expected exactly one of `path` or `git`")]
+    #[error("dependency `{alias}` has multiple sources; expected exactly one of `path` or `github`")]
     MultipleDependencySources {
         alias: DependencyAlias,
     },
@@ -230,7 +230,7 @@ struct RawDependency {
     package: String,
     version: String,
     path: Option<PathBuf>,
-    git: Option<String>,
+    github: Option<String>,
 }
 
 #[cfg(test)]

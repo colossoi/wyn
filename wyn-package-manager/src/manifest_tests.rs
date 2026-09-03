@@ -44,14 +44,14 @@ fn rejects_unknown_fields() {
 }
 
 #[test]
-fn parses_git_dependencies_before_materialization() {
-    let source = MANIFEST.replace("path = \"../rng\"", "git = \"https://example.invalid/rng\"");
-    let manifest = Manifest::parse(&source).expect("Git dependency should parse");
+fn parses_github_dependencies_before_materialization() {
+    let source = MANIFEST.replace("path = \"../rng\"", "github = \"github.com/example/rng\"");
+    let manifest = Manifest::parse(&source).expect("GitHub dependency should parse");
     let (_, dependency) = manifest.dependencies().next().expect("dependency should exist");
     assert_eq!(
         dependency.source(),
-        &DependencySource::Git {
-            repository: "https://example.invalid/rng".to_owned(),
+        &DependencySource::GitHub {
+            repository: "github.com/example/rng".to_owned(),
         }
     );
 }
@@ -66,7 +66,7 @@ fn dependencies_require_exactly_one_source() {
 
     let multiple = MANIFEST.replace(
         "path = \"../rng\"",
-        "path = \"../rng\", git = \"https://example.invalid/rng\"",
+        "path = \"../rng\", github = \"github.com/example/rng\"",
     );
     assert!(matches!(
         Manifest::parse(&multiple),

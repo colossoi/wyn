@@ -14,15 +14,15 @@ optimization and leaving room for a future registry.
 - Select one major version of each canonical package for the whole build.
 - Keep package fetching separate from compilation.
 - Encourage compatible releases by making the compatible path the easy path.
-- Use Git repositories and semantic-version tags as the initial package source.
+- Use GitHub tag archives as the initial remote package source.
 
 ## Initial scope
 
 - Packages contain Wyn source and declarative metadata.
-- One Git repository contains one package rooted beside `wyn.toml`.
+- One GitHub repository contains one package rooted beside `wyn.toml`.
 - Dependencies form one unconditional graph.
 - Semantic versions express single minimum requirements.
-- A content-addressed cache stores immutable source trees.
+- A source cache stores unpacked release trees by repository specifier and version.
 - Whole-program compilation begins after the complete source graph is ready.
 
 ## Package model
@@ -141,7 +141,7 @@ wyn = "v0.1.0"
 library = "src/lib.wyn"
 
 [dependencies]
-rng = { package = "wyn/rng", version = "v1.4.2", git = "https://example.invalid/wyn/rng.git" }
+rng = { package = "wyn/rng", version = "v1.4.2", github = "github.com/example/wyn-rng" }
 ```
 
 Rules:
@@ -154,17 +154,17 @@ Rules:
 - the root lockfile controls the selected build list;
 - each manifest uses the fields defined by its declared manifest format.
 
-A future registry can map package names to Git sources while preserving the
+A future registry can map package names to remote sources while preserving the
 resolver's version semantics.
 
 For local development, a dependency entry may use `path = "../rng"` in place of
-`git`. The path source uses the same package name, version, and alias fields as a
-Git source.
+`github`. The path source uses the same package name, version, and alias fields
+as a GitHub source.
 
 ## Lockfile and reproducibility
 
 MVS gives stable version selection because publication alone leaves the
-requirement graph unchanged. `wyn.lock` adds immutable Git commits, source
+requirement graph unchanged. `wyn.lock` adds immutable source revisions, source
 verification, and reliable offline reconstruction.
 
 The root lockfile records:
@@ -173,7 +173,7 @@ The root lockfile records:
 - the root manifest hash;
 - the complete selected build list;
 - canonical package name and exact selected version for each entry;
-- source URL and immutable Git commit;
+- source specifier and immutable source revision;
 - a canonical source-tree checksum;
 - dependency edges and the aliases visible from each package;
 - local path metadata, when a dependency uses a path source.
@@ -209,30 +209,52 @@ fetching is implemented:
 5. Construct `PackagePlan` only when every selected package has a local
    source root.
 
-A local path is already materialized, so the current implementation
-canonicalizes it and validates its manifest identity and version. A Git source
-is retained as a source requirement but preparation reports that Git
-materialization is unavailable. Later cache lookup and fetching replace that
-failure without changing the compiler boundary or permitting a partially
-materialized `PackagePlan`.
+A local path is already materialized, so preparation canonicalizes it and
+validates its manifest identity and version. For an HTTPS GitHub source, the
+declared version selects the equivalently named repository tag. Preparation downloads
+that tag's source archive, safely unpacks its single package tree into a staging
+directory, and atomically installs the result in the source cache before
+reading its manifest.
 
-Fetched sources live in a content-addressed, read-only cache. Cache entries are
-keyed by canonical source checksum and include the resolved commit and manifest.
-The cache treats package trees as inert data and stores build output separately.
+The initial cache follows the operational simplicity of early `go get`: it
+stores ordinary unpacked source trees by repository specifier and version. It omits
+repository history and build output. A completed cache entry can be reused
+without network access. `WYN_PKG_CACHE` selects the cache root; otherwise a
+platform cache directory is used.
 
-The initial Git source protocol is:
+The initial GitHub source protocol is:
 
-- list and fetch semantic-version tags only when an explicit add or update
-  command requires discovery;
-- resolve a selected tag to a full commit ID;
-- verify that the checked-out manifest name and version match the requested
-  release;
-- hash a canonical representation of tracked package files;
-- copy or materialize the verified tree into the content-addressed cache;
-- reject ambiguous, malformed, or moving identities rather than guessing.
+- accept `github.com/OWNER/REPOSITORY` specifiers;
+- select the semantic-version tag named by the dependency requirement;
+- fetch the tag's `.tar.gz` source archive with a small synchronous HTTP client;
+- accept one confined archive root containing `wyn.toml`;
+- install through a same-cache temporary directory and atomic rename;
+- verify that the materialized manifest name and version satisfy the importing
+  package's declaration.
+
+Immutable commit IDs and canonical source checksums remain lockfile concerns.
 
 The first version should require one package at the repository root. This avoids
 needing tag-prefix and subdirectory conventions before they are necessary.
+
+## Environment
+
+Wyn uses a small set of optional path overrides:
+
+| Variable | Role |
+| --- | --- |
+| `WYN_ROOT` | Root of the installed Wyn toolchain and its compiler-owned resources. The executable normally infers this location. |
+| `WYN_PKG_CACHE` | Shared cache of downloaded and unpacked package sources. |
+| `WYN_BIN` | Destination for executables installed from packages. |
+| `WYN_TMP` | Scratch directory for compiler and package-manager temporary files. |
+
+Package installation staging remains inside `WYN_PKG_CACHE`, beside the final
+cache entry, so publication can use an atomic same-filesystem rename. `WYN_TMP`
+applies to temporary data that does not require that placement.
+
+Environment values are overrides rather than prerequisites. Wyn infers
+`WYN_ROOT` from its executable and uses platform-appropriate defaults for
+user-writable locations. Configured paths must be absolute.
 
 ## Imports and package namespaces
 
@@ -313,7 +335,10 @@ Command semantics:
 - `update` applies the same operation to all direct dependencies.
 - `graph` explains why each selected version is present and which requirement
   won.
-- `fetch` fills and verifies the cache as a distinct step from compilation.
+- `build` and `check` materialize missing sources while preparing the package
+  graph.
+- `fetch` may fill and verify the cache ahead of time, but is never required
+  before a build.
 
 ## Implementation shape
 
@@ -323,7 +348,7 @@ layer. Suggested components are:
 - `manifest`: strict parsing, normalization, and semantic validation;
 - `version`: SemVer ordering and major-version validation;
 - `resolve`: MVS graph construction and explanation paths;
-- `source`: Git discovery and immutable revision resolution;
+- `source`: release discovery and immutable revision resolution;
 - `checksum`: canonical source-tree hashing;
 - `cache`: transactional, content-addressed source storage;
 - `lockfile`: deterministic read, validation, and atomic write;
@@ -346,17 +371,18 @@ the resolution result.
 ### Stage 1: closed local package graph
 
 - Land the compiler changes in the companion TODO.
-- Parse local-path and Git dependency sources.
-- Materialize local paths and report Git requirements at the explicit
+- Parse local-path and GitHub dependency sources.
+- Materialize local paths and report GitHub requirements at the explicit
   materialization boundary.
 - Build package-aware module graphs and one compile plan.
 - Preserve whole-program optimization across package boundaries.
 - Land unit tests with each library component and the local-package functional
   harness with the package CLI.
 
-### Stage 2: exact Git releases and lockfile
+### Stage 2: immutable releases and lockfile
 
-- Add Git-tag discovery, immutable commits, checksums, and cache storage.
+- Extend exact-tag archive fetching with tag discovery, immutable commits,
+  checksums, and a lockfile.
 - Initially require exact versions at the CLI boundary while validating all
   source and lockfile behavior.
 - Add locked and offline builds.
@@ -385,12 +411,12 @@ Implementation uses two test levels:
   CLI.
 
 Functional fixtures live below `tests/module-packages/` and use local `path`
-dependencies exclusively. The runner verifies that restriction before invoking
-Wyn. The Cargo integration test `wyn/tests/package_manager_functional.rs`
-serves as the test binary. It copies each fixture to a temporary directory,
-invokes `CARGO_BIN_EXE_wyn`, and checks status plus stable diagnostics, graph
-output, or lockfile contents. Once Stage 2 introduces network-capable sources,
-the runner also passes `--offline`.
+dependencies exclusively. The table-driven runner verifies that restriction
+before invoking Wyn. Cache behavior is tested with a pre-populated unpacked
+source cache. Functional tests make no network requests. The Cargo integration
+test `wyn/tests/package_manager_functional.rs` serves as the test binary. It
+copies each fixture to a temporary directory, invokes `CARGO_BIN_EXE_wyn`, and
+checks status plus stable diagnostics, graph output, or lockfile contents.
 
 The convenience scripts `scripts/test_local_packages.sh` and
 `scripts/test_local_packages.ps1` invoke that test binary through Cargo. The

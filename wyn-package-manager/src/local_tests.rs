@@ -123,7 +123,7 @@ fn local_dependency_must_satisfy_its_minimum() {
 }
 
 #[test]
-fn git_dependency_requires_materialization_before_compilation() {
+fn unsupported_github_host_is_rejected_before_compilation() {
     let tree = TestTree::new();
     let root = tree.package(
         "root",
@@ -132,14 +132,16 @@ fn git_dependency_requires_materialization_before_compilation() {
         concat!(
             "[dependencies]\n",
             "dependency = { package = \"test/dependency\", version = \"v1.2.0\", ",
-            "git = \"https://example.invalid/dependency\" }\n",
+            "github = \"https://example.invalid/dependency\" }\n",
         ),
     );
 
     assert!(matches!(
         prepare_package(root, None),
-        Err(PreparationError::MaterializationUnavailable { repository, .. })
-            if repository == "https://example.invalid/dependency"
+        Err(PreparationError::DependencyMaterialization {
+            detail,
+            ..
+        }) if detail.contains("https://example.invalid/dependency")
     ));
 }
 
@@ -148,9 +150,7 @@ fn one_package_name_cannot_come_from_two_local_roots() {
     let tree = TestTree::new();
     tree.package("first", "test/shared", "v1.0.0", "");
     tree.package("second", "test/shared", "v1.0.0", "");
-    let dependencies = format!(
-        "[dependencies]\nfirst = {{ package = \"test/shared\", version = \"v1.0.0\", path = \"../first\" }}\nsecond = {{ package = \"test/shared\", version = \"v1.0.0\", path = \"../second\" }}\n"
-    );
+    let dependencies = "[dependencies]\nfirst = { package = \"test/shared\", version = \"v1.0.0\", path = \"../first\" }\nsecond = { package = \"test/shared\", version = \"v1.0.0\", path = \"../second\" }\n".to_string();
     let root = tree.package("root", "test/root", "v1.0.0", &dependencies);
 
     assert!(matches!(

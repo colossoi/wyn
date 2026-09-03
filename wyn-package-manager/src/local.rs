@@ -9,6 +9,7 @@ use wyn_module_graph::{
     PackageGraphBuilder, PackageGraphError, PackageIdentity, PackagePlan, PathError, SourceFingerprint,
 };
 
+use crate::materialize::{GitHubArchiveFetcher, GitHubRepository, PackageCache};
 use crate::{Dependency, DependencySource, Manifest, ManifestError, PackageName, PackageVersion};
 
 /// Prepare compiler inputs for the package rooted beside `wyn.toml`.
@@ -96,7 +97,7 @@ pub enum PreparationError {
     Manifest {
         path: PathBuf,
         #[source]
-        source: ManifestError,
+        source: Box<ManifestError>,
     },
     #[error("dependency `{alias}` in `{package}` uses an absolute local path `{path}`")]
     AbsoluteDependencyPath {
@@ -104,14 +105,12 @@ pub enum PreparationError {
         alias: DependencyAlias,
         path: PathBuf,
     },
-    #[error(
-        "dependency `{alias}` in `{package}` requires materializing `{dependency}` from Git repository `{repository}`, but Git materialization is unavailable"
-    )]
-    MaterializationUnavailable {
+    #[error("failed to materialize dependency `{alias}` (`{dependency}`) of `{package}`: {detail}")]
+    DependencyMaterialization {
         package: PackageName,
         alias: DependencyAlias,
         dependency: PackageName,
-        repository: String,
+        detail: String,
     },
     #[error(
         "dependency `{alias}` in `{package}` declares `{expected}` but the local package is `{actual}`"
@@ -127,6 +126,15 @@ pub enum PreparationError {
         package: PackageName,
         alias: DependencyAlias,
         minimum: PackageVersion,
+        actual: PackageVersion,
+    },
+    #[error(
+        "dependency `{alias}` in `{package}` selected GitHub tag {selected}, but its manifest declares {actual}"
+    )]
+    GitHubTagVersionMismatch {
+        package: PackageName,
+        alias: DependencyAlias,
+        selected: PackageVersion,
         actual: PackageVersion,
     },
     #[error("package `{package}` is supplied by both `{first}` and `{second}`")]
@@ -154,6 +162,8 @@ struct PackagePreparer {
     packages: Vec<LoadedPackage>,
     by_root: HashMap<PathBuf, usize>,
     by_name: HashMap<PackageName, usize>,
+    cache: PackageCache,
+    github: GitHubArchiveFetcher,
 }
 
 impl PackagePreparer {
@@ -162,6 +172,8 @@ impl PackagePreparer {
             packages: Vec::new(),
             by_root: HashMap::new(),
             by_name: HashMap::new(),
+            cache: PackageCache::from_environment(),
+            github: GitHubArchiveFetcher::new(),
         }
     }
 
@@ -182,7 +194,7 @@ impl PackagePreparer {
             })?;
         let manifest = Manifest::parse(&source).map_err(|source| PreparationError::Manifest {
             path: manifest_path,
-            source,
+            source: Box::new(source),
         })?;
         if let Some(&existing) = self.by_name.get(manifest.package()) {
             return Err(PreparationError::ConflictingPackageRoots {
@@ -230,6 +242,16 @@ impl PackagePreparer {
                 actual: actual.package().clone(),
             });
         }
+        if matches!(dependency.source(), DependencySource::GitHub { .. })
+            && actual.version() != dependency.minimum()
+        {
+            return Err(PreparationError::GitHubTagVersionMismatch {
+                package: self.packages[package].manifest.package().clone(),
+                alias: alias.clone(),
+                selected: dependency.minimum().clone(),
+                actual: actual.version().clone(),
+            });
+        }
         if !actual.version().satisfies(dependency.minimum()) {
             return Err(PreparationError::VersionMismatch {
                 package: self.packages[package].manifest.package().clone(),
@@ -242,7 +264,7 @@ impl PackagePreparer {
     }
 
     fn materialize_dependency(
-        &self,
+        &mut self,
         root: &Path,
         package: usize,
         alias: &DependencyAlias,
@@ -259,12 +281,21 @@ impl PackagePreparer {
                 }
                 Ok(root.join(path))
             }
-            DependencySource::Git { repository } => Err(PreparationError::MaterializationUnavailable {
-                package: self.packages[package].manifest.package().clone(),
-                alias: alias.clone(),
-                dependency: dependency.package().clone(),
-                repository: repository.clone(),
-            }),
+            DependencySource::GitHub { repository } => {
+                let materialized = GitHubRepository::parse(repository).and_then(|repository| {
+                    let cache_key = repository.cache_key(dependency.minimum());
+                    let github = &mut self.github;
+                    self.cache.get_or_insert(&cache_key, |destination| {
+                        github.fetch(&repository, dependency.minimum(), destination)
+                    })
+                });
+                materialized.map_err(|error| PreparationError::DependencyMaterialization {
+                    package: self.packages[package].manifest.package().clone(),
+                    alias: alias.clone(),
+                    dependency: dependency.package().clone(),
+                    detail: error.to_string(),
+                })
+            }
         }
     }
 
