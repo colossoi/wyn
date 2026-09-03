@@ -249,6 +249,11 @@ def fragment_main(fragment: fragment_invocation<track_varying>) vec4f32 =
 -- Root operation
 ------------------------------------------------------------
 
+type masthead_depth_test =
+  #disabled | #never | #less | #less_equal | #equal | #greater_equal | #greater | #always
+
+type masthead_blend_mode = #replace | #source_over | #add
+
 entry acko_masthead(position: []vec4f32,
                     normal: []vec4f32,
                     vertex_color: []vec4f32,
@@ -263,4 +268,11 @@ entry acko_masthead(position: []vec4f32,
       let i = i32(vertex.vertex_index) in
       vertex_main(position[i], normal[i], vertex_color[i],
                   vert_s[i], track_meta[i], resolution, time)) in
-  shade(screen, covered, fragment_main)
+  shade_with(
+    { depth_test = (#less : masthead_depth_test),
+      depth_write = true,
+      blend = (#replace : masthead_blend_mode),
+      color_write = true },
+    screen,
+    covered,
+    fragment_main)

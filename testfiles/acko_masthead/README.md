@@ -16,6 +16,7 @@ CRT post-process (barrel curvature + RGB sub-pixel + 16-px quantize +
 
 | File | What | Committed? |
 |---|---|---|
+| `wyn.toml` | Package manifest; selects `scene.wyn` as the library module. | Yes. |
 | `positions.bin` | Per-vertex world position + AO: `N × vec4f32` `(x, y, z, ao)`, little-endian. | Yes — shipped data. |
 | `normals.bin` | Per-vertex normal: `N × vec4f32` `(nx, ny, nz, 1.0)`. | Yes — shipped data. |
 | `vertex_colors.bin` | Per-vertex color: `N × vec4f32` `(r, g, b, 1.0)`, each track's palette color. | Yes — shipped data. |
@@ -24,6 +25,18 @@ CRT post-process (barrel curvature + RGB sub-pixel + 16-px quantize +
 | `pipeline.json` | Two-stage graphics pipeline descriptor wiring scene → rgba16f attachment → post → swapchain. | Yes. |
 | `scene.spv` / `scene.json` | `wyn build` output. | No — `build_scene.bat` regenerates. |
 | `README.md` | This file. | Yes. |
+
+## Building
+
+From the repository root, build the package with graphics support:
+
+```bash
+wyn build testfiles/acko_masthead --graphics \
+  -o testfiles/acko_masthead/scene.spv
+```
+
+The repository's `scripts/build_scene.bat` helper runs the same package build
+through Cargo and validates the resulting SPIR-V with `spirv-val`.
 
 `N` = 62792 (62792 cross-section ring vertices across 16 tracks; the
 4 placeholder tracks in `Acko.TrackData` with `n < 3` are degenerate
