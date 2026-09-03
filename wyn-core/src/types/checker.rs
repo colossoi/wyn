@@ -1230,6 +1230,12 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, Some(expected_type), expr),
+            ExprKind::LetIn(let_in) => {
+                self.type_let_in(let_in, Some(expected_type))?;
+                let result = expected_type.apply(&self.context);
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(result.clone()));
+                Ok(result)
+            }
             ExprKind::RecordLiteral(fields) => {
                 let applied = expected_type.apply(&self.context);
                 let Type::Constructed(TypeName::Record(expected_fields), expected_types) = &applied else {
@@ -1367,6 +1373,44 @@ impl<'a> TypeChecker<'a> {
                 Ok(actual_type)
             }
         }
+    }
+
+    /// Type a let expression, checking its body contextually when the caller
+    /// supplies an expected type. The binding value itself is inferred first
+    /// so ordinary let-polymorphism and annotation handling remain unchanged.
+    fn type_let_in(&mut self, let_in: &LetInExpr, expected_body: Option<&Type>) -> Result<Type> {
+        let value_type = self.infer_expression(&let_in.value)?;
+
+        let resolved_annotation = let_in
+            .ty
+            .as_ref()
+            .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()))
+            .transpose()?;
+        if let Some(declared_type) = &resolved_annotation {
+            self.unify_or_err_weakening(
+                &value_type,
+                declared_type,
+                let_in.value.h.span,
+                "Type mismatch in let binding",
+            )?;
+        }
+
+        self.scope_stack.push_scope();
+        let bound_type = resolved_annotation.unwrap_or_else(|| value_type.clone());
+        let bound_type = self.open_existential(bound_type);
+
+        // Always restore the enclosing scope, including when pattern binding
+        // or body checking reports an error.
+        let body_result =
+            self.bind_irrefutable_pattern(&let_in.pattern, &bound_type, true).and_then(|_| {
+                match expected_body {
+                    Some(expected) => self.check_expression(&let_in.body, expected),
+                    None => self.infer_expression(&let_in.body),
+                }
+            });
+        self.scope_stack.pop_scope();
+
+        body_result
     }
 
     /// Resolve type aliases in a type annotation. SizeVar/UserVar
@@ -2970,45 +3014,7 @@ impl<'a> TypeChecker<'a> {
                 Ok(tuple(elem_types?))
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, None, expr),
-            ExprKind::LetIn(let_in) => {
-                // Infer type of the value expression
-                let value_type = self.infer_expression(&let_in.value)?;
-
-                let resolved_annotation = let_in
-                    .ty
-                    .as_ref()
-                    .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()))
-                    .transpose()?;
-                if let Some(declared_type) = &resolved_annotation {
-                    self.unify_or_err_weakening(
-                        &value_type,
-                        declared_type,
-                        let_in.value.h.span,
-                        "Type mismatch in let binding",
-                    )?;
-                }
-
-                // Push new scope and bind pattern
-                self.scope_stack.push_scope();
-                let bound_type = resolved_annotation.unwrap_or_else(|| value_type.clone());
-
-                // Open existential types: ?k. T becomes T[k'/k] where k' is fresh
-                let bound_type = self.open_existential(bound_type);
-
-                // Bind all names in the pattern.
-                // Let bindings should be generalized for polymorphism.
-                // Refutability is enforced — refutable patterns must use
-                // `match` instead.
-                self.bind_irrefutable_pattern(&let_in.pattern, &bound_type, true)?;
-
-                // Infer type of body expression
-                let body_type = self.infer_expression(&let_in.body)?;
-
-                // Pop scope
-                self.scope_stack.pop_scope();
-
-                Ok(body_type)
-            }
+            ExprKind::LetIn(let_in) => self.type_let_in(let_in, None),
             ExprKind::Application(func, args) => {
                 // Resolve callee to candidate function types
                 let callee = self.resolve_callee_candidates(func)?;

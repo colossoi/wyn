@@ -4210,7 +4210,9 @@ def normalize_output(output: fragment_output<vec4f32>) fragment_output<vec4f32> 
 def fragment_stage(fragment: fragment_invocation<vec4f32>) fragment_output<vec4f32> =
   normalize_output(
     if fragment.front_facing
-    then #depth(fragment.value, 0.25)
+    then
+      let depth = 0.25 in
+      #depth(fragment.value, depth)
     else #discard)
 
 entry helper(target: render_target<vec4f32>) render_target<vec4f32> =

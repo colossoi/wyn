@@ -3308,6 +3308,20 @@ def conditional(value: vec4f32, keep: bool) fragment_output<vec4f32> =
 }
 
 #[test]
+fn expected_sum_type_flows_through_let_expression_body() {
+    typecheck_program(
+        r#"
+def conditional(value: vec4f32, keep: bool) fragment_output<vec4f32> =
+  if keep then
+    let depth = 0.25 in
+    #depth(value, depth)
+  else
+    #discard
+"#,
+    );
+}
+
+#[test]
 fn fragment_output_supports_exhaustive_pattern_matching() {
     typecheck_program(
         r#"
