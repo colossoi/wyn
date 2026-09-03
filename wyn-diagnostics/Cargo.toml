@@ -1,0 +1,10 @@
+[package]
+name = "wyn-diagnostics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Syntax-independent rendering of human-readable source diagnostics"
+
+[dependencies]
+unicode-width = "0.1"

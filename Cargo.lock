@@ -1983,6 +1983,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyn-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "wyn-graph"
 version = "0.1.0"
 dependencies = [

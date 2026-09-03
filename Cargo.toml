@@ -2,6 +2,7 @@
 members = [
     "wyn-base",
     "wyn-core",
+    "wyn-diagnostics",
     "wyn",
     "wyn-analyzer",
     "wyn-pipeline-descriptor",
