@@ -52,8 +52,9 @@ wyn-base       wyn-graph
           wyn driver
 ```
 
-`wyn-module-graph` depends only on domain-independent crates. The driver composes
-the package plan, source provider, and Wyn frontend adapter.
+`wyn-module-graph` depends only on domain-independent crates. The package manager
+pairs the package graph with a source reader, and the compiler supplies the Wyn
+module parser.
 
 ## Design principles
 
@@ -61,7 +62,8 @@ the package plan, source provider, and Wyn frontend adapter.
 
 `PackageId`, `ModuleId`, and `ImportSiteId` are small integers valid within one
 graph. Callers use them as opaque keys. Persisted files use stable package names,
-versions, source fingerprints, and package-relative module paths.
+versions, and package-relative module paths. A future lockfile owns immutable
+source hashes.
 
 This keeps common compiler data compact while making cache movement and arena
 allocation order irrelevant to semantic identity.
@@ -101,7 +103,7 @@ for source text and diagnostic locations.
 `ModulePath` is a normalized, UTF-8 path within one package. Its constructors
 perform separator normalization, dot-segment resolution, extension handling,
 and package-root confinement. Absolute cache and checkout paths stay in the
-driver's source provider.
+source reader.
 
 Graph diagnostics display a stable name such as:
 
@@ -141,7 +143,6 @@ pub struct Package {
 pub struct PackageIdentity {
     canonical_name: Arc<str>,
     version: Arc<str>,
-    source_fingerprint: SourceFingerprint,
 }
 
 pub struct Dependency {
@@ -156,8 +157,8 @@ pub struct ModuleKey {
 }
 ```
 
-The module crate treats version and fingerprint values as validated identity
-data. SemVer ordering and MVS remain package-manager responsibilities.
+The module crate treats versions as validated identity data. SemVer ordering,
+source verification, and MVS remain package-manager responsibilities.
 
 `PackageGraphBuilder::new()` should allocate IDs and validate:
 
@@ -259,7 +260,6 @@ pub struct ModuleGraph<T> {
     packages: PackageGraph,
     root: ModuleId,
     modules: IdArena<ModuleId, LoadedModule<T>>,
-    dependency_order: Vec<ModuleId>,
     sources: SourceMap,
 }
 
@@ -288,8 +288,6 @@ impl<T> ModuleGraph<T> {
     pub fn source(&self, id: ModuleId) -> Option<&str>;
     pub fn import_target(&self, from: ModuleId, site: ImportSiteId)
         -> Option<ModuleId>;
-    pub fn modules_in_dependency_order(&self)
-        -> impl Iterator<Item = ModuleId>;
     pub fn location(&self, span: Span) -> Result<SourceLocation, SpanError>;
     pub fn display_location(&self, span: Span)
         -> Result<impl Display + '_, SpanError>;
@@ -299,8 +297,8 @@ impl<T> ModuleGraph<T> {
 ```
 
 Fields stay private so invariants are established once by the builder. The
-graph provides deterministic iteration in dependency order and source order.
-Numeric IDs remain implementation details.
+graph assigns modules deterministically while traversing imports in source
+order. Numeric IDs remain implementation details.
 
 The core API is an in-process Rust API. Lockfile and command protocols use
 separate serializable data-transfer types and lower into `PackageGraph` through
@@ -469,12 +467,11 @@ The unit suite covers:
 - direct and indirect cycles with ordered import spans;
 - parse and load failures retaining their complete importing chain;
 - deterministic module IDs, traversal, and graph iteration;
-- equivalent results from in-memory and filesystem providers; and
+- equivalent results from in-memory and filesystem readers; and
 - a domain-independent dependency tree for the graph crate.
 
-Any source-fetching cases use fake providers with in-memory responses. This
-keeps the unit suite deterministic while still covering checksum and source
-identity errors.
+Source-fetching tests use fake HTTP clients with in-memory responses. This keeps
+the unit suite deterministic and free of network access.
 
 ### Functional tests
 

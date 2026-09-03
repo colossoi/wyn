@@ -20,7 +20,7 @@ impl PackageVersion {
         Ok(Self(version))
     }
 
-    pub const fn major(&self) -> u64 {
+    const fn major(&self) -> u64 {
         self.0.major
     }
 
@@ -28,10 +28,6 @@ impl PackageVersion {
     /// one-major-per-package rule.
     pub fn satisfies(&self, minimum: &Self) -> bool {
         self.major() == minimum.major() && self >= minimum
-    }
-
-    pub fn is_prerelease(&self) -> bool {
-        !self.0.pre.is_empty()
     }
 }
 

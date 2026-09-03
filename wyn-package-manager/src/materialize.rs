@@ -93,9 +93,9 @@ pub(crate) enum MaterializationError {
     MissingArchiveRoot {
         repository: String,
     },
-    #[error("materialized package from `{repository}` has no `wyn.toml` at its root")]
+    #[error("materialized package `{path}` has no `wyn.toml` at its root")]
     MissingManifest {
-        repository: String,
+        path: PathBuf,
     },
     #[error("failed to install materialized package at `{path}`: {source}")]
     Install {
@@ -141,14 +141,18 @@ impl HttpClient for MinreqHttpClient {
     }
 }
 
-/// Source-agnostic storage for unpacked package source trees.
+/// Cache for materialized Wyn source packages.
 pub(crate) struct PackageCache {
+    #[cfg(test)]
     root_override: Option<PathBuf>,
 }
 
 impl PackageCache {
     pub(crate) fn from_environment() -> Self {
-        Self { root_override: None }
+        Self {
+            #[cfg(test)]
+            root_override: None,
+        }
     }
 
     #[cfg(test)]
@@ -163,10 +167,13 @@ impl PackageCache {
         key: &Path,
         fetch: impl FnOnce(&Path) -> Result<PathBuf, MaterializationError>,
     ) -> Result<PathBuf, MaterializationError> {
+        #[cfg(test)]
         let cache_root = match &self.root_override {
             Some(root) => root.clone(),
             None => default_cache_root()?,
         };
+        #[cfg(not(test))]
+        let cache_root = default_cache_root()?;
         let destination = cache_root.join(key);
         if destination.is_dir() {
             if destination.join("wyn.toml").is_file() {
@@ -185,9 +192,7 @@ impl PackageCache {
         let staging = StagingDirectory::create(parent)?;
         let source_root = fetch(staging.path())?;
         if !source_root.join("wyn.toml").is_file() {
-            return Err(MaterializationError::MissingManifest {
-                repository: source_root.display().to_string(),
-            });
+            return Err(MaterializationError::MissingManifest { path: source_root });
         }
         match fs::rename(&source_root, &destination) {
             Ok(()) => Ok(destination),

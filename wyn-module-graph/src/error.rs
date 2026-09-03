@@ -14,8 +14,8 @@ use crate::source::{SourceLocation, SourceMap, SourceTextError, Span, SpanError}
 /// Keeping the partial source map makes all spans in the error and its import
 /// trace usable by diagnostics, including parse and transitive load failures.
 #[derive(Debug)]
-pub struct BuildFailure<FrontendError, ProviderError> {
-    error: BuildError<FrontendError, ProviderError>,
+pub struct BuildFailure<FrontendError, ReaderError> {
+    error: BuildError<FrontendError, ReaderError>,
     context: Box<FailureContext>,
 }
 
@@ -26,9 +26,9 @@ struct FailureContext {
     sources: SourceMap,
 }
 
-impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
+impl<FrontendError, ReaderError> BuildFailure<FrontendError, ReaderError> {
     pub(crate) fn new(
-        error: BuildError<FrontendError, ProviderError>,
+        error: BuildError<FrontendError, ReaderError>,
         packages: PackageGraph,
         module_ids: HashMap<ModuleKey, ModuleId>,
         sources: SourceMap,
@@ -44,7 +44,7 @@ impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
     }
 
     /// The structured reason graph construction stopped.
-    pub const fn error(&self) -> &BuildError<FrontendError, ProviderError> {
+    pub const fn error(&self) -> &BuildError<FrontendError, ReaderError> {
         &self.error
     }
 
@@ -118,8 +118,8 @@ impl<FrontendError, ProviderError> BuildFailure<FrontendError, ProviderError> {
     }
 }
 
-impl<FrontendError: fmt::Display, ProviderError: fmt::Display> fmt::Display
-    for BuildFailure<FrontendError, ProviderError>
+impl<FrontendError: fmt::Display, ReaderError: fmt::Display> fmt::Display
+    for BuildFailure<FrontendError, ReaderError>
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error {
@@ -197,10 +197,10 @@ impl<FrontendError: fmt::Display, ProviderError: fmt::Display> fmt::Display
     }
 }
 
-impl<FrontendError, ProviderError> Error for BuildFailure<FrontendError, ProviderError>
+impl<FrontendError, ReaderError> Error for BuildFailure<FrontendError, ReaderError>
 where
     FrontendError: Error + 'static,
-    ProviderError: Error + 'static,
+    ReaderError: Error + 'static,
 {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(&self.error)
@@ -209,11 +209,11 @@ where
 
 /// Failure produced while constructing a physical source-module graph.
 #[derive(Debug)]
-pub enum BuildError<FrontendError, ProviderError> {
+pub enum BuildError<FrontendError, ReaderError> {
     Load {
         module: ModuleKey,
         trace: Box<[ImportTraceFrame]>,
-        source: ProviderError,
+        source: ReaderError,
     },
     SourceText {
         module: ModuleKey,
@@ -251,8 +251,8 @@ pub enum BuildError<FrontendError, ProviderError> {
     },
 }
 
-impl<FrontendError: fmt::Display, ProviderError: fmt::Display> fmt::Display
-    for BuildError<FrontendError, ProviderError>
+impl<FrontendError: fmt::Display, ReaderError: fmt::Display> fmt::Display
+    for BuildError<FrontendError, ReaderError>
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -280,10 +280,10 @@ impl<FrontendError: fmt::Display, ProviderError: fmt::Display> fmt::Display
     }
 }
 
-impl<FrontendError, ProviderError> Error for BuildError<FrontendError, ProviderError>
+impl<FrontendError, ReaderError> Error for BuildError<FrontendError, ReaderError>
 where
     FrontendError: Error + 'static,
-    ProviderError: Error + 'static,
+    ReaderError: Error + 'static,
 {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {

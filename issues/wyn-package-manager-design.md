@@ -42,10 +42,11 @@ For example, the package named `example/noise` may refer to `wyn/rng` using the
 alias `rng`.
 
 Every exact release has a stable `PackageIdentity` containing its canonical
-name, semantic version, and locked source hash. The module graph assigns compact
-`PackageId` and `ModuleId` keys for one compilation. Stable module identity is
-the package identity plus normalized package-relative module path, which remains
-unchanged across source-cache locations.
+name and semantic version. A future lockfile supplies the immutable source hash.
+The module graph assigns compact `PackageId` and `ModuleId` keys for one
+compilation. Stable module identity is the package identity plus normalized
+package-relative module path, which remains unchanged across source-cache
+locations.
 
 ## Version semantics
 
@@ -287,14 +288,13 @@ After resolution and fetching, the package manager constructs one
 - the root package and selected entry point;
 - every selected package's stable identity and library root module;
 - each package's dependency alias map;
-- the compiler-version requirement;
 - enough source provenance for diagnostics and reproducibility reports.
 
 The package manager pairs this graph with a source reader over the verified
 local roots to produce the `PackagePlan` accepted by the compiler.
 
-The syntax-light `wyn-module-graph` crate loads and parses the plan through a Wyn
-frontend adapter, producing `ModuleGraph<ParsedFile>`. The compiler performs
+The syntax-light `wyn-module-graph` crate loads and parses the plan through the
+compiler's Wyn `ModuleParser`, producing `ModuleGraph<ParsedFile>`. The compiler performs
 cross-package semantic-module elaboration, name resolution, and type checking on
 that graph, then runs its existing whole-program monomorphization and
 optimization pipeline. Package boundaries govern namespace, provenance, and
@@ -405,8 +405,8 @@ the resolution result.
 Implementation uses two test levels:
 
 - unit tests exercise manifests, versions, MVS, lockfiles, checksums, package
-  plans, source providers, and module-graph construction through in-memory
-  inputs and fake providers;
+  plans, source readers, and module-graph construction through in-memory inputs
+  and fake readers;
 - functional tests exercise complete local package trees through the real Wyn
   CLI.
 

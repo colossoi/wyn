@@ -1,9 +1,8 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -14,20 +13,24 @@ use super::{
 };
 use crate::PackageVersion;
 
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 struct TestCache {
     root: PathBuf,
 }
 
 impl TestCache {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("wyn_materialize_test_{}_{}", std::process::id(), unique));
-        fs::create_dir(&root).expect("test cache should be created");
-        Self { root }
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("wyn_materialize_test_{}_{sequence}", std::process::id()));
+            match fs::create_dir(&root) {
+                Ok(()) => return Self { root },
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test cache should be created: {error}"),
+            }
+        }
     }
 }
 

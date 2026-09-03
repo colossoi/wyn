@@ -763,7 +763,7 @@ pub fn compile_thru_frontend_with_options(
     source: &str,
     options: CompilerOptions,
 ) -> error::Result<types::run::TypeChecked> {
-    let modules = test_pipeline::load_test_modules(source, options);
+    let modules = test_pipeline::try_load_test_modules(source, options)?;
     modules.type_check().map_err(error::CompilationFailure::into_error)
 }
 

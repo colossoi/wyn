@@ -20,7 +20,6 @@ fn versions_order_by_semver_rules() {
 
     assert!(prerelease < release);
     assert!(release < later);
-    assert!(prerelease.is_prerelease());
     assert_eq!(later.to_string(), "v1.5.0");
 }
 

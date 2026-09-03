@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const BLAKE2B_MIX_SOURCE: &str = r#"
 def rotr16(x: u64) u64 = (x >> 16u64) | (x << 48u64)
@@ -26,9 +28,16 @@ entry blake2b_mix(words: []u32) []u32 =
 "#;
 
 fn temp_case() -> (PathBuf, PathBuf, PathBuf) {
-    let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-    let directory = std::env::temp_dir().join(format!("wyn_wgsl_u64_{}_{}", std::process::id(), unique));
-    fs::create_dir_all(&directory).expect("create test directory");
+    let directory = loop {
+        let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("wyn_wgsl_u64_{}_{sequence}", std::process::id()));
+        match fs::create_dir(&directory) {
+            Ok(()) => break directory,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create test directory: {error}"),
+        }
+    };
     let source = directory.join("blake2b_mix.wyn");
     let output = directory.join("blake2b_mix.wgsl");
     fs::write(&source, BLAKE2B_MIX_SOURCE).expect("write test source");

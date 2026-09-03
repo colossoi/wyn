@@ -7,21 +7,21 @@ use crate::source::SourceFile;
 use crate::{
     BuildError, DependencyAlias, ImportSiteId, ImportTarget, ModuleId, ModuleKey, ModuleParser, ModulePath,
     PackageGraph, PackageGraphBuilder, PackageIdentity, PackagePlan, PathError, RelativeModulePath,
-    SourceFingerprint, SourceLocation, SourceReader, Span, SpanError, TextRange,
+    SourceLocation, SourceReader, Span, SpanError, TextRange,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-enum TestProviderError {
+enum TestReaderError {
     #[error("missing test source")]
     Missing,
 }
 
 #[derive(Default)]
-struct MemoryProvider {
+struct MemoryReader {
     sources: HashMap<ModuleKey, Arc<str>>,
 }
 
-impl MemoryProvider {
+impl MemoryReader {
     fn insert(&mut self, package: crate::PackageId, path: &str, source: &str) {
         self.sources.insert(
             ModuleKey::new(package, module_path(path)),
@@ -30,11 +30,11 @@ impl MemoryProvider {
     }
 }
 
-impl SourceReader for MemoryProvider {
-    type Error = TestProviderError;
+impl SourceReader for MemoryReader {
+    type Error = TestReaderError;
 
     fn load(&mut self, module: &ModuleKey) -> Result<Arc<str>, Self::Error> {
-        self.sources.get(module).cloned().ok_or(TestProviderError::Missing)
+        self.sources.get(module).cloned().ok_or(TestReaderError::Missing)
     }
 }
 
@@ -126,10 +126,7 @@ fn alias(alias: &str) -> DependencyAlias {
 }
 
 fn identity(name: &str) -> PackageIdentity {
-    let fingerprint = SourceFingerprint::new(format!("test:{name}"))
-        .unwrap_or_else(|error| panic!("invalid fingerprint: {error}"));
-    PackageIdentity::new(name, "v1.0.0", fingerprint)
-        .unwrap_or_else(|error| panic!("invalid package identity: {error}"))
+    PackageIdentity::new(name, "v1.0.0").unwrap_or_else(|error| panic!("invalid package identity: {error}"))
 }
 
 fn one_package_plan() -> (PackageGraph, crate::PackageId) {
@@ -215,40 +212,32 @@ fn package_plan_has_deterministic_ids_and_package_local_aliases() {
 }
 
 #[test]
-fn diamond_import_contains_shared_source_once_in_dependency_order() {
+fn diamond_import_loads_shared_source_once() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "local:left\nlocal:right\n");
-    provider.insert(package, "src/left.wyn", "local:shared\n");
-    provider.insert(package, "src/right.wyn", "local:shared\n");
-    provider.insert(package, "src/shared.wyn", "");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "local:left\nlocal:right\n");
+    reader.insert(package, "src/left.wyn", "local:shared\n");
+    reader.insert(package, "src/right.wyn", "local:shared\n");
+    reader.insert(package, "src/shared.wyn", "");
 
-    let graph = PackagePlan::new(plan, provider)
+    let graph = PackagePlan::new(plan, reader)
         .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
     assert_eq!(graph.modules().count(), 4);
     assert_eq!(
-        graph
-            .modules_in_dependency_order()
-            .map(|module| graph.module(module).map(|loaded| loaded.key().path().as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            Some("src/shared.wyn"),
-            Some("src/left.wyn"),
-            Some("src/right.wyn"),
-            Some("src/main.wyn"),
-        ]
+        graph.modules().filter(|(_, module)| module.key().path().as_str() == "src/shared.wyn").count(),
+        1
     );
 }
 
 #[test]
 fn syntax_erasure_preserves_source_and_resolved_imports() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "local:dependency\n");
-    provider.insert(package, "src/dependency.wyn", "");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "local:dependency\n");
+    reader.insert(package, "src/dependency.wyn", "");
 
-    let graph = PackagePlan::new(plan, provider)
+    let graph = PackagePlan::new(plan, reader)
         .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
     let root = graph.root();
@@ -286,11 +275,11 @@ fn same_relative_path_in_distinct_packages_has_distinct_module_identity() {
         .unwrap_or_else(|error| panic!("set root: {error}"));
     let plan = builder.build().unwrap_or_else(|error| panic!("build plan: {error}"));
 
-    let mut provider = MemoryProvider::default();
-    provider.insert(root, "src/main.wyn", "dep:one\ndep:two\n");
-    provider.insert(one, "src/lib.wyn", "");
-    provider.insert(two, "src/lib.wyn", "");
-    let graph = PackagePlan::new(plan, provider)
+    let mut reader = MemoryReader::default();
+    reader.insert(root, "src/main.wyn", "dep:one\ndep:two\n");
+    reader.insert(one, "src/lib.wyn", "");
+    reader.insert(two, "src/lib.wyn", "");
+    let graph = PackagePlan::new(plan, reader)
         .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
 
@@ -329,11 +318,11 @@ fn dependency_aliases_are_resolved_in_the_importing_package() {
         .unwrap_or_else(|error| panic!("set root: {error}"));
     let plan = builder.build().unwrap_or_else(|error| panic!("build plan: {error}"));
 
-    let mut provider = MemoryProvider::default();
-    provider.insert(root, "src/main.wyn", "dep:util\n");
-    provider.insert(middle, "src/lib.wyn", "dep:util\n");
-    provider.insert(leaf, "src/lib.wyn", "");
-    let graph = PackagePlan::new(plan, provider)
+    let mut reader = MemoryReader::default();
+    reader.insert(root, "src/main.wyn", "dep:util\n");
+    reader.insert(middle, "src/lib.wyn", "dep:util\n");
+    reader.insert(leaf, "src/lib.wyn", "");
+    let graph = PackagePlan::new(plan, reader)
         .load(&mut TestFrontend)
         .unwrap_or_else(|error| panic!("load graph: {error}"));
 
@@ -350,12 +339,12 @@ fn dependency_aliases_are_resolved_in_the_importing_package() {
 #[test]
 fn import_cycle_reports_only_the_ordered_cycle_edges() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "local:a\n");
-    provider.insert(package, "src/a.wyn", "local:b\n");
-    provider.insert(package, "src/b.wyn", "local:a\n");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "local:a\n");
+    reader.insert(package, "src/a.wyn", "local:b\n");
+    reader.insert(package, "src/b.wyn", "local:a\n");
 
-    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, reader).load(&mut TestFrontend).unwrap_err();
     let BuildError::Cycle { edges } = failure.error() else {
         panic!("expected cycle error");
     };
@@ -369,15 +358,15 @@ fn import_cycle_reports_only_the_ordered_cycle_edges() {
 #[test]
 fn load_failure_retains_the_complete_import_chain() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "local:a\n");
-    provider.insert(package, "src/a.wyn", "local:missing\n");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "local:a\n");
+    reader.insert(package, "src/a.wyn", "local:missing\n");
 
-    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, reader).load(&mut TestFrontend).unwrap_err();
     let BuildError::Load {
         module,
         trace,
-        source: TestProviderError::Missing,
+        source: TestReaderError::Missing,
     } = failure.error()
     else {
         panic!("expected load error");
@@ -392,10 +381,10 @@ fn load_failure_retains_the_complete_import_chain() {
 #[test]
 fn undeclared_dependency_reports_its_alias_and_source_span() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "dep:missing\n");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "dep:missing\n");
 
-    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, reader).load(&mut TestFrontend).unwrap_err();
     let BuildError::UnknownDependency { alias, span, .. } = failure.error() else {
         panic!("expected unknown dependency error");
     };
@@ -407,10 +396,10 @@ fn undeclared_dependency_reports_its_alias_and_source_span() {
 #[test]
 fn parse_failure_retains_the_source_that_failed_to_parse() {
     let (plan, package) = one_package_plan();
-    let mut provider = MemoryProvider::default();
-    provider.insert(package, "src/main.wyn", "parse-error");
+    let mut reader = MemoryReader::default();
+    reader.insert(package, "src/main.wyn", "parse-error");
 
-    let failure = PackagePlan::new(plan, provider).load(&mut TestFrontend).unwrap_err();
+    let failure = PackagePlan::new(plan, reader).load(&mut TestFrontend).unwrap_err();
     let BuildError::Parse {
         module,
         trace,

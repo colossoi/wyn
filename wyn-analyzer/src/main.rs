@@ -14,10 +14,8 @@ use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
 use wyn_core::{initialize_frontend, CompilerOptions, ParsedModules};
-use wyn_module_graph::{
-    LocalSources, ModuleId, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
-    SourceFingerprint,
-};
+use wyn_module_graph::{ModuleId, ModulePath, PackageIdentity, PackagePlan};
+use wyn_package_manager::{find_build_input, prepare_package, prepare_standalone, BuildInput};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
@@ -48,49 +46,27 @@ struct DocumentState {
 }
 
 fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Result<ParsedModules, String> {
-    let (root_file, root_directory) = match file_path {
+    let plan = match file_path {
         Some(file_path) => {
-            let Some(root_file) = file_path.file_name().and_then(|name| name.to_str()) else {
-                return Err(format!(
-                    "document path `{}` has no UTF-8 file name",
-                    file_path.display()
-                ));
+            let input = find_build_input(file_path).map_err(|error| error.to_string())?;
+            let plan = match input {
+                BuildInput::Package { root, root_module } => {
+                    prepare_package(root, root_module).map_err(|error| error.to_string())?
+                }
+                BuildInput::Standalone(source) => {
+                    prepare_standalone(source).map_err(|error| error.to_string())?
+                }
             };
-            let Some(root_directory) = file_path.parent() else {
-                return Err(format!(
-                    "document path `{}` has no parent directory",
-                    file_path.display()
-                ));
-            };
-            let root_directory = root_directory.canonicalize().map_err(|error| {
-                format!(
-                    "failed to resolve document directory `{}`: {error}",
-                    root_directory.display()
-                )
-            })?;
-            (root_file, Some(root_directory))
+            plan.with_root_source(text).map_err(|error| error.to_string())?
         }
-        None => (VIRTUAL_ROOT_MODULE, None),
+        None => {
+            let root = ModulePath::new(VIRTUAL_ROOT_MODULE).map_err(|error| error.to_string())?;
+            let identity =
+                PackageIdentity::new("analyzer/root", "v0.0.0").map_err(|error| error.to_string())?;
+            PackagePlan::single_source(identity, root, text)
+        }
     };
-    let root_path = ModulePath::new(root_file).map_err(|error| error.to_string())?;
-    let fingerprint = SourceFingerprint::new("analyzer-document").map_err(|error| error.to_string())?;
-    let identity =
-        PackageIdentity::new("analyzer/root", "v0.0.0", fingerprint).map_err(|error| error.to_string())?;
-    let mut builder = PackageGraphBuilder::new();
-    let package = builder.add_package(identity, root_path.clone()).map_err(|error| error.to_string())?;
-    let root = ModuleKey::new(package, root_path);
-    builder.set_root(root.clone()).map_err(|error| error.to_string())?;
-    let plan = builder.build().map_err(|error| error.to_string())?;
-    let mut sources = LocalSources::new();
-    if let Some(root_directory) = root_directory {
-        sources.add_package_root(package, root_directory).map_err(|error| error.to_string())?;
-    }
-    sources.add_override(root, text).map_err(|error| error.to_string())?;
-    ParsedModules::load(
-        PackagePlan::new(plan, sources),
-        CompilerOptions { graphics: true },
-    )
-    .map_err(|error| error.to_string())
+    ParsedModules::load(plan, CompilerOptions { graphics: true }).map_err(|error| error.to_string())
 }
 
 fn position_to_offset(text: &str, position: Position) -> Option<u32> {
@@ -1635,42 +1611,8 @@ fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
 }
 
 #[cfg(test)]
-mod source_position_tests {
-    use super::*;
-    use wyn_module_graph::TextRange;
-
-    #[test]
-    fn lsp_positions_round_trip_through_utf8_offsets() {
-        let source = "a\nβ😀z";
-
-        let positions = [
-            (Position::new(0, 0), 0),
-            (Position::new(0, 1), 1),
-            (Position::new(1, 0), 2),
-            (Position::new(1, 1), 4),
-            (Position::new(1, 3), 8),
-            (Position::new(1, 4), 9),
-        ];
-        for (position, offset) in positions {
-            assert_eq!(position_to_offset(source, position), Some(offset));
-            assert_eq!(offset_to_position(source, offset), Some(position));
-        }
-
-        assert_eq!(position_to_offset(source, Position::new(1, 2)), None);
-    }
-
-    #[test]
-    fn source_span_maps_to_an_lsp_range() {
-        let source = "a\nβ😀z";
-        let span = Span::new(ModuleId::from(0), TextRange::new(2, 8).expect("valid range"));
-
-        assert_eq!(
-            span_to_range(source, span),
-            Some(Range::new(Position::new(1, 0), Position::new(1, 3)))
-        );
-        assert_eq!(span_to_range(source, Span::generated()), None);
-    }
-}
+#[path = "main_tests.rs"]
+mod main_tests;
 
 #[tokio::main]
 async fn main() {

@@ -4,8 +4,7 @@ use crate::{
     ParsedModules,
 };
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
-    PackagePlan, SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
 };
 
 fn has_definition(program: &super::super::stage::Reachable, name: &str) -> bool {
@@ -53,20 +52,18 @@ fn every_root_entry_remains_and_unreachable_definitions_do_not() {
 
 #[test]
 fn unused_dependency_contributes_no_reachable_definitions() {
-    let fingerprint = SourceFingerprint::new("dce-package-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
     let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
-            PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
+            PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity"),
             root_path.clone(),
         )
         .expect("root package should be unique");
     let dependency_package = builder
         .add_package(
-            PackageIdentity::new("test/dependency", "v1.0.0", fingerprint)
-                .expect("valid dependency identity"),
+            PackageIdentity::new("test/dependency", "v1.0.0").expect("valid dependency identity"),
             dependency_path.clone(),
         )
         .expect("dependency package should be unique");

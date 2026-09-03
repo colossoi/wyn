@@ -5,17 +5,14 @@ use crate::{
     resolve_placeholders, resolve_resources, symbol_name_or_bug, tlc, CompilerOptions, ParsedModules,
 };
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
-    PackagePlan, SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
 };
 
 #[test]
 fn source_package_identity_reaches_typed_and_tlc_definitions() {
-    let fingerprint = SourceFingerprint::new("package-provenance-test").expect("valid fingerprint");
-    let root_identity =
-        PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity");
+    let root_identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity");
     let dependency_identity =
-        PackageIdentity::new("test/dependency", "v1.0.0", fingerprint).expect("valid dependency identity");
+        PackageIdentity::new("test/dependency", "v1.0.0").expect("valid dependency identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
     let mut builder = PackageGraphBuilder::new();
@@ -122,38 +119,36 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
 
 #[test]
 fn dependency_local_aliases_have_independent_semantic_namespaces() {
-    let fingerprint = SourceFingerprint::new("transitive-alias-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let library_path = ModulePath::new("lib.wyn").expect("valid library path");
     let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
-            PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
+            PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity"),
             root_path.clone(),
         )
         .expect("root package should be unique");
     let package_a = builder
         .add_package(
-            PackageIdentity::new("test/a", "v1.0.0", fingerprint.clone()).expect("valid package identity"),
+            PackageIdentity::new("test/a", "v1.0.0").expect("valid package identity"),
             library_path.clone(),
         )
         .expect("package should be unique");
     let package_b = builder
         .add_package(
-            PackageIdentity::new("test/b", "v1.0.0", fingerprint.clone()).expect("valid package identity"),
+            PackageIdentity::new("test/b", "v1.0.0").expect("valid package identity"),
             library_path.clone(),
         )
         .expect("package should be unique");
     let utility_a = builder
         .add_package(
-            PackageIdentity::new("test/utility-a", "v1.0.0", fingerprint.clone())
-                .expect("valid package identity"),
+            PackageIdentity::new("test/utility-a", "v1.0.0").expect("valid package identity"),
             library_path.clone(),
         )
         .expect("package should be unique");
     let utility_b = builder
         .add_package(
-            PackageIdentity::new("test/utility-b", "v1.0.0", fingerprint).expect("valid package identity"),
+            PackageIdentity::new("test/utility-b", "v1.0.0").expect("valid package identity"),
             library_path.clone(),
         )
         .expect("package should be unique");

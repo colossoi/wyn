@@ -20,8 +20,7 @@ use wyn_core::{
     LoadModulesError, LoweringProfile, ParsedModules, ResourceAccess,
 };
 use wyn_module_graph::{
-    BuildError, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
-    SourceFingerprint,
+    BuildError, ModulePath, PackageIdentity, PackagePlan,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,20 +137,9 @@ enum SourceModulesError {
 
 fn single_source_input(source: &str) -> Result<PackagePlan, String> {
     let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
-    let fingerprint =
-        SourceFingerprint::new("egir-viz-source").map_err(|error| error.to_string())?;
-    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0", fingerprint)
+    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0")
         .map_err(|error| error.to_string())?;
-    let mut builder = PackageGraphBuilder::new();
-    let package = builder
-        .add_package(identity, root_path.clone())
-        .map_err(|error| error.to_string())?;
-    let root = ModuleKey::new(package, root_path);
-    builder.set_root(root.clone()).map_err(|error| error.to_string())?;
-    let plan = builder.build().map_err(|error| error.to_string())?;
-    let mut sources = LocalSources::new();
-    sources.add_override(root, source).map_err(|error| error.to_string())?;
-    Ok(PackagePlan::new(plan, sources))
+    Ok(PackagePlan::single_source(identity, root_path, source))
 }
 
 fn load_source_modules(source: &str) -> Result<ParsedModules, SourceModulesError> {

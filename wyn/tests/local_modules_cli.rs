@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct LocalPackage {
     directory: PathBuf,
@@ -9,14 +11,16 @@ struct LocalPackage {
 
 impl LocalPackage {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("wyn_local_modules_{}_{}", std::process::id(), unique));
-        fs::create_dir_all(&directory).expect("test package directory should be created");
-        Self { directory }
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let directory =
+                std::env::temp_dir().join(format!("wyn_local_modules_{}_{sequence}", std::process::id()));
+            match fs::create_dir(&directory) {
+                Ok(()) => return Self { directory },
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test package directory should be created: {error}"),
+            }
+        }
     }
 
     fn write(&self, relative: impl AsRef<Path>, source: &str) -> PathBuf {

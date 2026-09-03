@@ -16,40 +16,17 @@ pub enum IdentityError {
     },
 }
 
-/// Immutable source identity supplied by the package manager.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SourceFingerprint(Arc<str>);
-
-impl SourceFingerprint {
-    pub fn new(value: impl Into<Arc<str>>) -> Result<Self, IdentityError> {
-        let value = value.into();
-        if value.is_empty() {
-            Err(IdentityError::Empty {
-                field: "source fingerprint",
-            })
-        } else {
-            Ok(Self(value))
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 /// Stable identity for one exact package release.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackageIdentity {
     canonical_name: Arc<str>,
     version: Arc<str>,
-    source_fingerprint: SourceFingerprint,
 }
 
 impl PackageIdentity {
     pub fn new(
         canonical_name: impl Into<Arc<str>>,
         version: impl Into<Arc<str>>,
-        source_fingerprint: SourceFingerprint,
     ) -> Result<Self, IdentityError> {
         let canonical_name = canonical_name.into();
         if canonical_name.is_empty() {
@@ -64,7 +41,6 @@ impl PackageIdentity {
         Ok(Self {
             canonical_name,
             version,
-            source_fingerprint,
         })
     }
 
@@ -74,10 +50,6 @@ impl PackageIdentity {
 
     pub fn version(&self) -> &str {
         &self.version
-    }
-
-    pub const fn source_fingerprint(&self) -> &SourceFingerprint {
-        &self.source_fingerprint
     }
 }
 
@@ -200,6 +172,23 @@ pub struct PackageGraph {
 }
 
 impl PackageGraph {
+    pub(crate) fn single_package(identity: PackageIdentity, library_root: ModulePath) -> (Self, ModuleKey) {
+        let mut packages = IdArena::new();
+        let package = packages.alloc(Package {
+            identity,
+            library_root: library_root.clone(),
+            dependencies: Vec::new(),
+        });
+        let root = ModuleKey::new(package, library_root);
+        (
+            Self {
+                root: root.clone(),
+                packages,
+            },
+            root,
+        )
+    }
+
     pub const fn root(&self) -> &ModuleKey {
         &self.root
     }

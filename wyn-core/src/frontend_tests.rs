@@ -1,7 +1,6 @@
 use super::*;
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
-    PackagePlan, SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
 };
 
 fn reported_imports(source: &str) -> Vec<(ImportSiteId, ImportTarget, TextRange)> {
@@ -58,21 +57,18 @@ fn decodes_local_and_package_imports() {
 
 #[test]
 fn semantic_failure_retains_dependency_source_identity() {
-    let fingerprint = SourceFingerprint::new("frontend-failure-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("lib.wyn").expect("valid dependency path");
     let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
-            PackageIdentity::new("example/root", "v0.1.0", fingerprint.clone())
-                .expect("valid root identity"),
+            PackageIdentity::new("example/root", "v0.1.0").expect("valid root identity"),
             root_path.clone(),
         )
         .expect("root package should be unique");
     let dependency_package = builder
         .add_package(
-            PackageIdentity::new("example/dependency", "v2.3.4", fingerprint)
-                .expect("valid dependency identity"),
+            PackageIdentity::new("example/dependency", "v2.3.4").expect("valid dependency identity"),
             dependency_path.clone(),
         )
         .expect("dependency package should be unique");

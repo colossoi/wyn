@@ -1913,6 +1913,7 @@ dependencies = [
  "tower-lsp",
  "wyn-core",
  "wyn-module-graph",
+ "wyn-package-manager",
 ]
 
 [[package]]

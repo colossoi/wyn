@@ -6,20 +6,37 @@
 
 use crate::ast_type_holes;
 use crate::compile_thru_frontend;
+use crate::error::{CompilerError, LoadModulesError};
 use crate::frontend::{ParsedModules, WynFrontend};
 use crate::optimize_tlc_for_test;
 use crate::optimize_tlc_for_test_thru_soac_normalization;
 use crate::semantic_modules::SemanticModules;
 use crate::tlc;
 use crate::{ast::NodeCounter, CompilerOptions};
-use wyn_module_graph::{
-    LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
-    SourceFingerprint,
-};
+use wyn_module_graph::{BuildError, ModulePath, PackageIdentity, PackagePlan};
 
 pub(crate) fn load_test_modules(source: &str, options: CompilerOptions) -> ParsedModules {
+    try_load_test_modules(source, options).expect("test source graph should load")
+}
+
+pub(crate) fn try_load_test_modules(
+    source: &str,
+    options: CompilerOptions,
+) -> Result<ParsedModules, CompilerError> {
     let plan = test_package_plan(source);
-    ParsedModules::load(plan, options).expect("test source graph should load")
+    match ParsedModules::load(plan, options) {
+        Ok(modules) => Ok(modules),
+        Err(LoadModulesError::Prelude(error)) => Err(error),
+        Err(LoadModulesError::Modules(failure)) => match failure.error() {
+            BuildError::Parse {
+                source: CompilerError::ParseError(message, span),
+                ..
+            } => Err(CompilerError::ParseError(message.clone(), *span)),
+            error => Err(CompilerError::Internal(format!(
+                "test source module failed to load: {error}"
+            ))),
+        },
+    }
 }
 
 pub(crate) fn load_test_modules_with_state(
@@ -40,18 +57,9 @@ pub(crate) fn load_test_modules_with_state(
 }
 
 fn test_package_plan(source: &str) -> PackagePlan {
-    let fingerprint = SourceFingerprint::new("wyn-core-test-source").expect("valid fingerprint");
-    let identity =
-        PackageIdentity::new("test/root", "v0.0.0", fingerprint).expect("valid package identity");
+    let identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid package identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root module path");
-    let mut builder = PackageGraphBuilder::new();
-    let package = builder.add_package(identity, root_path.clone()).expect("test package should be unique");
-    let root = ModuleKey::new(package, root_path);
-    builder.set_root(root.clone()).expect("test package should contain its root");
-    let plan = builder.build().expect("test plan should be complete");
-    let mut sources = LocalSources::new();
-    sources.add_override(root, source).expect("test source override should be unique");
-    PackagePlan::new(plan, sources)
+    PackagePlan::single_source(identity, root_path, source)
 }
 
 /// Front-end (parse → resolve → type-check → to_tlc → pin_entry_buffers →

@@ -6,11 +6,56 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use wyn_module_graph::{
     DependencyAlias, IdentityError, LocalSourceError, LocalSources, ModuleKey, ModulePath,
-    PackageGraphBuilder, PackageGraphError, PackageIdentity, PackagePlan, PathError, SourceFingerprint,
+    PackageGraphBuilder, PackageGraphError, PackageIdentity, PackagePlan, PathError,
 };
 
 use crate::materialize::{GitHubArchiveFetcher, GitHubRepository, PackageCache};
-use crate::{Dependency, DependencySource, Manifest, ManifestError, PackageName, PackageVersion};
+use crate::{
+    Dependency, DependencySource, Manifest, ManifestError, PackageName, PackageVersion, VersionError,
+};
+
+/// How a source path participates in package preparation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuildInput {
+    Package {
+        root: PathBuf,
+        root_module: Option<ModulePath>,
+    },
+    Standalone(PathBuf),
+}
+
+/// Find the package and root module selected by a normalized build path.
+pub fn find_build_input(path: &Path) -> Result<BuildInput, PreparationError> {
+    if path.is_dir() {
+        return Ok(BuildInput::Package {
+            root: path.to_owned(),
+            root_module: None,
+        });
+    }
+
+    let Some(package_root) = path
+        .parent()
+        .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.join("wyn.toml").is_file()))
+    else {
+        return Ok(BuildInput::Standalone(path.to_owned()));
+    };
+    let Ok(relative) = path.strip_prefix(package_root) else {
+        return Ok(BuildInput::Standalone(path.to_owned()));
+    };
+    let Some(relative) = relative.to_str() else {
+        return Err(PreparationError::NonUtf8PackageSource {
+            path: path.to_owned(),
+        });
+    };
+    let root_module = ModulePath::new(relative).map_err(|source| PreparationError::PackageSourcePath {
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(BuildInput::Package {
+        root: package_root.to_owned(),
+        root_module: Some(root_module),
+    })
+}
 
 /// Prepare compiler inputs for the package rooted beside `wyn.toml`.
 ///
@@ -22,7 +67,9 @@ pub fn prepare_package(
     root_module: Option<ModulePath>,
 ) -> Result<PackagePlan, PreparationError> {
     let mut preparer = PackagePreparer::new();
-    let root = preparer.load_package(root.as_ref())?;
+    let current_wyn = PackageVersion::parse(concat!("v", env!("CARGO_PKG_VERSION")))
+        .map_err(PreparationError::CompilerVersion)?;
+    let root = preparer.load_package(root.as_ref(), &current_wyn)?;
     let root_module = match root_module {
         Some(module) => module,
         None => preparer.packages[root].manifest.library().clone(),
@@ -33,23 +80,26 @@ pub fn prepare_package(
 /// Prepare compiler inputs for one source file outside a package.
 pub fn prepare_standalone(source: impl AsRef<Path>) -> Result<PackagePlan, PreparationError> {
     let source = source.as_ref();
-    let source = source.canonicalize().map_err(|error| PreparationError::ResolveStandaloneSource {
+    let Some(root) = source.parent() else {
+        return Err(PreparationError::StandaloneSourceWithoutParent {
+            path: source.to_owned(),
+        });
+    };
+    let Some(root_file) = source.file_name().and_then(|name| name.to_str()) else {
+        return Err(PreparationError::NonUtf8StandaloneSource {
+            path: source.to_owned(),
+        });
+    };
+    let root = root.canonicalize().map_err(|error| PreparationError::ResolveStandaloneRoot {
+        path: root.to_owned(),
+        source: error,
+    })?;
+
+    let root_file = ModulePath::new(root_file).map_err(|error| PreparationError::StandaloneSourcePath {
         path: source.to_owned(),
         source: error,
     })?;
-    let Some(root) = source.parent() else {
-        return Err(PreparationError::StandaloneSourceWithoutParent { path: source });
-    };
-    let Some(root_file) = source.file_name().and_then(|name| name.to_str()) else {
-        return Err(PreparationError::NonUtf8StandaloneSource { path: source });
-    };
-
-    let root_file = ModulePath::new(root_file).map_err(|error| PreparationError::StandaloneSourcePath {
-        path: source.clone(),
-        source: error,
-    })?;
-    let fingerprint = SourceFingerprint::new("direct-local-source")?;
-    let identity = PackageIdentity::new("direct/root", "v0.0.0", fingerprint)?;
+    let identity = PackageIdentity::new("direct/root", "v0.0.0")?;
     let mut packages = PackageGraphBuilder::new();
     let package = packages.add_package(identity, root_file.clone())?;
     packages.set_root(ModuleKey::new(package, root_file))?;
@@ -61,8 +111,8 @@ pub fn prepare_standalone(source: impl AsRef<Path>) -> Result<PackagePlan, Prepa
 
 #[derive(Debug, Error)]
 pub enum PreparationError {
-    #[error("failed to resolve standalone source `{path}`: {source}")]
-    ResolveStandaloneSource {
+    #[error("failed to resolve standalone source directory `{path}`: {source}")]
+    ResolveStandaloneRoot {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -74,6 +124,16 @@ pub enum PreparationError {
     #[error("standalone source path `{path}` is not UTF-8")]
     NonUtf8StandaloneSource {
         path: PathBuf,
+    },
+    #[error("package source path `{path}` is not UTF-8")]
+    NonUtf8PackageSource {
+        path: PathBuf,
+    },
+    #[error("invalid package source path `{path}`: {source}")]
+    PackageSourcePath {
+        path: PathBuf,
+        #[source]
+        source: PathError,
     },
     #[error("invalid standalone source path `{path}`: {source}")]
     StandaloneSourcePath {
@@ -98,6 +158,14 @@ pub enum PreparationError {
         path: PathBuf,
         #[source]
         source: Box<ManifestError>,
+    },
+    #[error("the compiler's own version is invalid: {0}")]
+    CompilerVersion(VersionError),
+    #[error("package `{package}` requires Wyn {minimum}, but this is Wyn {current}")]
+    UnsupportedWynVersion {
+        package: PackageName,
+        minimum: PackageVersion,
+        current: PackageVersion,
     },
     #[error("dependency `{alias}` in `{package}` uses an absolute local path `{path}`")]
     AbsoluteDependencyPath {
@@ -177,7 +245,11 @@ impl PackagePreparer {
         }
     }
 
-    fn load_package(&mut self, root: &Path) -> Result<usize, PreparationError> {
+    fn load_package(
+        &mut self,
+        root: &Path,
+        current_wyn: &PackageVersion,
+    ) -> Result<usize, PreparationError> {
         let root = root.canonicalize().map_err(|source| PreparationError::ResolvePackage {
             path: root.to_owned(),
             source,
@@ -196,6 +268,13 @@ impl PackagePreparer {
             path: manifest_path,
             source: Box::new(source),
         })?;
+        if current_wyn < manifest.minimum_wyn() {
+            return Err(PreparationError::UnsupportedWynVersion {
+                package: manifest.package().clone(),
+                minimum: manifest.minimum_wyn().clone(),
+                current: current_wyn.clone(),
+            });
+        }
         if let Some(&existing) = self.by_name.get(manifest.package()) {
             return Err(PreparationError::ConflictingPackageRoots {
                 package: manifest.package().clone(),
@@ -218,7 +297,7 @@ impl PackagePreparer {
         });
 
         for (alias, dependency) in dependencies {
-            let child = self.load_dependency(&root, package, &alias, &dependency)?;
+            let child = self.load_dependency(&root, package, &alias, &dependency, current_wyn)?;
             self.packages[package].dependencies.push((alias, child));
         }
         Ok(package)
@@ -230,9 +309,10 @@ impl PackagePreparer {
         package: usize,
         alias: &DependencyAlias,
         dependency: &Dependency,
+        current_wyn: &PackageVersion,
     ) -> Result<usize, PreparationError> {
         let child_root = self.materialize_dependency(root, package, alias, dependency)?;
-        let child = self.load_package(&child_root)?;
+        let child = self.load_package(&child_root, current_wyn)?;
         let actual = &self.packages[child].manifest;
         if actual.package() != dependency.package() {
             return Err(PreparationError::PackageMismatch {
@@ -300,14 +380,12 @@ impl PackagePreparer {
     }
 
     fn finish(self, root: usize, root_module: ModulePath) -> Result<PackagePlan, PreparationError> {
-        let fingerprint = SourceFingerprint::new("local-path")?;
         let mut packages = PackageGraphBuilder::new();
         let mut ids = Vec::with_capacity(self.packages.len());
         for package in &self.packages {
             let identity = PackageIdentity::new(
                 package.manifest.package().as_str(),
                 package.manifest.version().to_string(),
-                fingerprint.clone(),
             )?;
             ids.push(packages.add_package(identity, package.manifest.library().clone())?);
         }

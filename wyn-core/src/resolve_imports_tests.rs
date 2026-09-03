@@ -3,13 +3,10 @@ use crate::semantic_modules::ElaboratedItem;
 use crate::{elaborate_modules, CompilerOptions, ParsedModules};
 use wyn_module_graph::{
     LocalSources, ModuleKey, ModulePath, PackageGraph, PackageGraphBuilder, PackageIdentity, PackagePlan,
-    SourceFingerprint,
 };
 
 fn local_plan() -> (PackageGraph, ModuleKey, ModuleKey) {
-    let fingerprint = SourceFingerprint::new("test-sources").expect("valid fingerprint");
-    let identity =
-        PackageIdentity::new("test/root", "v0.0.0", fingerprint).expect("valid package identity");
+    let identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid package identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("dependency.wyn").expect("valid dependency path");
     let mut builder = PackageGraphBuilder::new();
@@ -25,9 +22,7 @@ fn local_plan() -> (PackageGraph, ModuleKey, ModuleKey) {
 }
 
 fn imported_module_definitions(module_source: &str, leaf_source: Option<&str>) -> Vec<String> {
-    let fingerprint = SourceFingerprint::new("import-visibility-test").expect("valid fingerprint");
-    let identity =
-        PackageIdentity::new("test/root", "v0.0.0", fingerprint).expect("valid package identity");
+    let identity = PackageIdentity::new("test/root", "v0.0.0").expect("valid package identity");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let module_path = ModulePath::new("module.wyn").expect("valid module path");
     let leaf_path = ModulePath::new("leaf.wyn").expect("valid leaf path");

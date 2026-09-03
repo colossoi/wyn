@@ -98,7 +98,6 @@ pub struct ModuleGraph<T> {
     packages: PackageGraph,
     root: ModuleId,
     modules: IdArena<ModuleId, LoadedModule<T>>,
-    dependency_order: Vec<ModuleId>,
     sources: SourceMap,
 }
 
@@ -134,10 +133,6 @@ impl<T> ModuleGraph<T> {
         self.module(from)?.imports.iter().find(|edge| edge.site == site).map(|edge| edge.target)
     }
 
-    pub fn modules_in_dependency_order(&self) -> impl ExactSizeIterator<Item = ModuleId> + '_ {
-        self.dependency_order.iter().copied()
-    }
-
     pub fn location(&self, span: Span) -> Result<SourceLocation, SpanError> {
         self.sources.location(span)
     }
@@ -166,7 +161,6 @@ impl<T> ModuleGraph<T> {
             packages,
             root,
             modules,
-            dependency_order,
             sources,
         } = self;
         let mut source_modules = IdArena::new();
@@ -187,7 +181,6 @@ impl<T> ModuleGraph<T> {
             packages,
             root,
             modules: source_modules,
-            dependency_order,
             sources,
         }
     }
@@ -228,13 +221,12 @@ pub struct ImportTraceFrame {
     pub requested: ModuleKey,
 }
 
-/// Result type returned by physical module-graph construction.
-pub type BuildResult<Parsed, FrontendError, ProviderError> =
-    Result<ModuleGraph<Parsed>, BuildFailure<FrontendError, ProviderError>>;
+type LoadResult<Parsed, FrontendError, ReaderError> =
+    Result<ModuleGraph<Parsed>, BuildFailure<FrontendError, ReaderError>>;
 
 impl<S: SourceReader> PackagePlan<S> {
     /// Load the complete source closure using the supplied language frontend.
-    pub fn load<F: ModuleParser>(self, frontend: &mut F) -> BuildResult<F::Parsed, F::Error, S::Error> {
+    pub fn load<F: ModuleParser>(self, frontend: &mut F) -> LoadResult<F::Parsed, F::Error, S::Error> {
         let PackagePlan {
             package_graph,
             mut sources,
@@ -243,7 +235,6 @@ impl<S: SourceReader> PackagePlan<S> {
             modules: IdArena::new(),
             by_key: HashMap::new(),
             active: Vec::new(),
-            dependency_order: Vec::new(),
             source_map: SourceMap::default(),
         };
 
@@ -272,7 +263,6 @@ impl<S: SourceReader> PackagePlan<S> {
             packages: package_graph,
             root,
             modules,
-            dependency_order: traversal.dependency_order,
             sources: traversal.source_map,
         })
     }
@@ -287,7 +277,6 @@ struct GraphTraversal<T> {
     modules: IdArena<ModuleId, Option<LoadedModule<T>>>,
     by_key: HashMap<ModuleKey, ModuleId>,
     active: Vec<ActiveFrame>,
-    dependency_order: Vec<ModuleId>,
     source_map: SourceMap,
 }
 
@@ -378,17 +367,16 @@ impl<T> GraphTraversal<T> {
         let finished = self.active.pop();
         debug_assert_eq!(finished.as_ref().map(|frame| frame.module), Some(module));
         self.modules[module] = Some(LoadedModule { key, syntax, imports });
-        self.dependency_order.push(module);
         Ok(module)
     }
 
-    fn resolve_target<FrontendError, ProviderError>(
+    fn resolve_target<FrontendError, ReaderError>(
         &self,
         packages: &PackageGraph,
         from_key: &ModuleKey,
         request: &ImportRequest,
         span: Span,
-    ) -> Result<ModuleKey, BuildError<FrontendError, ProviderError>> {
+    ) -> Result<ModuleKey, BuildError<FrontendError, ReaderError>> {
         match &request.target {
             ImportTarget::Local(relative) => {
                 let path = from_key.path().resolve(relative).map_err(|source| BuildError::InvalidPath {

@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,17 +23,21 @@ struct CaseCopy {
 
 impl CaseCopy {
     fn new(source: &Path) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "wyn_package_functional_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        copy_tree(source, &root);
-        Self { root }
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "wyn_package_functional_{}_{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    copy_tree(source, &root);
+                    return Self { root };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test case directory should be created: {error}"),
+            }
+        }
     }
 }
 
@@ -200,6 +206,35 @@ fn package_compiles_with_a_local_dependency() {
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(output_path.is_file(), "package output should be written");
+}
+
+#[test]
+fn current_package_directory_can_name_an_output_directory() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    assert_local_manifests(&case);
+    let copied = CaseCopy::new(&case);
+    let package = copied.root.join("app");
+    let output_directory = copied.root.join("output");
+    fs::create_dir(&output_directory).expect("output directory should be created");
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .current_dir(&package)
+        .arg("build")
+        .arg(".")
+        .args(["--target", "wgsl", "--output"])
+        .arg(&output_directory)
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "current package compilation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        output_directory.join("app.wgsl").is_file(),
+        "package-named output should be written"
+    );
 }
 
 #[test]

@@ -1,12 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use wyn_core::{CompilerOptions, ParsedModules};
 use wyn_module_graph::{
-    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity,
-    PackagePlan, SourceFingerprint,
+    DependencyAlias, LocalSources, ModuleKey, ModulePath, PackageGraphBuilder, PackageIdentity, PackagePlan,
 };
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TestDirectory {
     path: PathBuf,
@@ -14,17 +15,18 @@ struct TestDirectory {
 
 impl TestDirectory {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "wyn_local_package_plan_{}_{}",
-            std::process::id(),
-            unique
-        ));
-        fs::create_dir_all(&path).expect("test directory should be created");
-        Self { path }
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "wyn_local_package_plan_{}_{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self { path },
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test directory should be created: {error}"),
+            }
+        }
     }
 
     fn package(&self, name: &str) -> PathBuf {
@@ -72,20 +74,18 @@ fn verified_local_package_roots_compile_as_one_program() {
         "def identity<T>(value: T) T = value\n",
     );
 
-    let fingerprint = SourceFingerprint::new("local-package-plan-test").expect("valid fingerprint");
     let root_path = ModulePath::new("main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("src/lib.wyn").expect("valid dependency path");
     let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
-            PackageIdentity::new("test/root", "v0.0.0", fingerprint.clone()).expect("valid root identity"),
+            PackageIdentity::new("test/root", "v0.0.0").expect("valid root identity"),
             root_path.clone(),
         )
         .expect("root package should be unique");
     let dependency_package = builder
         .add_package(
-            PackageIdentity::new("test/dependency", "v1.0.0", fingerprint)
-                .expect("valid dependency identity"),
+            PackageIdentity::new("test/dependency", "v1.0.0").expect("valid dependency identity"),
             dependency_path.clone(),
         )
         .expect("dependency package should be unique");

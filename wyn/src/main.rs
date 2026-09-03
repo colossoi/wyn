@@ -11,8 +11,10 @@ use wyn_core::{
     CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, LoweringProfile, ParsedModules,
     PipelineTopologyPolicy, SchedulePolicy,
 };
-use wyn_module_graph::{ModulePath, PackagePlan, PathError, SourceGraph};
-use wyn_package_manager::{prepare_package, prepare_standalone, PreparationError};
+use wyn_module_graph::{PackagePlan, SourceGraph};
+use wyn_package_manager::{
+    find_build_input, prepare_package, prepare_standalone, BuildInput, PreparationError,
+};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -161,9 +163,6 @@ enum DriverError {
     #[error("{0}")]
     Compilation(#[from] CompilationFailure),
 
-    #[error("Module path error: {0}")]
-    ModulePath(#[from] PathError),
-
     #[error("{0}")]
     PackagePreparation(#[from] PreparationError),
 
@@ -187,14 +186,6 @@ fn retain_source<T>(
     result.map_err(|error| CompilationFailure::new(error, source_graph.clone()).into())
 }
 
-enum BuildInput {
-    Package {
-        root: PathBuf,
-        root_module: Option<ModulePath>,
-    },
-    Standalone(PathBuf),
-}
-
 fn normalize_input(input: &Path) -> Result<PathBuf, DriverError> {
     let input = input.canonicalize()?;
     if input.is_dir() || input.extension().and_then(|extension| extension.to_str()) == Some("wyn") {
@@ -204,36 +195,6 @@ fn normalize_input(input: &Path) -> Result<PathBuf, DriverError> {
         "input `{}` must be a package directory or `.wyn` source file",
         input.display()
     )))
-}
-
-fn find_build_input(path: &Path) -> Result<BuildInput, DriverError> {
-    if path.is_dir() {
-        return Ok(BuildInput::Package {
-            root: path.to_owned(),
-            root_module: None,
-        });
-    }
-
-    let Some(package_root) = path
-        .parent()
-        .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.join("wyn.toml").is_file()))
-    else {
-        return Ok(BuildInput::Standalone(path.to_owned()));
-    };
-    let Ok(relative) = path.strip_prefix(package_root) else {
-        return Ok(BuildInput::Standalone(path.to_owned()));
-    };
-    let Some(relative) = relative.to_str() else {
-        return Err(DriverError::InvalidOption(format!(
-            "input `{}` is not a UTF-8 path",
-            path.display()
-        )));
-    };
-    let root_module = ModulePath::new(relative)?;
-    Ok(BuildInput::Package {
-        root: package_root.to_owned(),
-        root_module: Some(root_module),
-    })
 }
 
 fn output_path(input: &Path, output: Option<PathBuf>, target: Target) -> Result<PathBuf, DriverError> {
@@ -397,8 +358,6 @@ fn build(
         ));
     }
 
-    let output_path = output_path(&input, output, target)?;
-
     if verbose {
         info!("Building {}...", input.display());
     }
@@ -407,6 +366,7 @@ fn build(
     let build_start = Instant::now();
 
     let normalized_input = normalize_input(&input)?;
+    let output_path = output_path(&normalized_input, output, target)?;
     let package_plan = match find_build_input(&normalized_input)? {
         BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
         BuildInput::Standalone(source) => prepare_standalone(source)?,

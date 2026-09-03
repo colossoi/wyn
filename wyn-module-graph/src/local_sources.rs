@@ -63,6 +63,15 @@ pub struct LocalSources {
 }
 
 impl LocalSources {
+    pub(crate) fn from_override(module: ModuleKey, source: impl Into<Arc<str>>) -> Self {
+        let mut overrides = HashMap::new();
+        overrides.insert(module, source.into());
+        Self {
+            package_roots: HashMap::new(),
+            overrides,
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

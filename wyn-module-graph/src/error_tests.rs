@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 
 use super::*;
-use crate::{ModulePath, PackageGraph, PackageGraphBuilder, PackageIdentity, SourceFingerprint, TextRange};
+use crate::{ModulePath, PackageGraph, PackageGraphBuilder, PackageIdentity, TextRange};
 
 struct TestPlan {
     plan: PackageGraph,
@@ -14,19 +14,16 @@ struct TestPlan {
 fn test_plan() -> TestPlan {
     let root_path = ModulePath::new("src/main.wyn").expect("valid root path");
     let dependency_path = ModulePath::new("src/lib.wyn").expect("valid dependency path");
-    let fingerprint = SourceFingerprint::new("diagnostic-test").expect("valid fingerprint");
     let mut builder = PackageGraphBuilder::new();
     let root_package = builder
         .add_package(
-            PackageIdentity::new("example/root", "v0.1.0", fingerprint.clone())
-                .expect("valid root identity"),
+            PackageIdentity::new("example/root", "v0.1.0").expect("valid root identity"),
             root_path.clone(),
         )
         .expect("root package should be unique");
     let dependency_package = builder
         .add_package(
-            PackageIdentity::new("example/dependency", "v2.3.4", fingerprint)
-                .expect("valid dependency identity"),
+            PackageIdentity::new("example/dependency", "v2.3.4").expect("valid dependency identity"),
             dependency_path.clone(),
         )
         .expect("dependency package should be unique");

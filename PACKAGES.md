@@ -64,7 +64,7 @@ required, and unknown fields are rejected.
 | `manifest-version` | Manifest format version. The current format is `1`. |
 | `package.name` | Canonical ecosystem name for the package. |
 | `package.version` | Version of this package. |
-| `package.wyn` | Earliest Wyn version targeted by the package. It is currently validated and retained as package metadata. |
+| `package.wyn` | Earliest Wyn version that may build the package. Preparation rejects packages requiring a newer Wyn. |
 | `package.library` | Package-relative path to the library root source file. |
 
 Package names are slash-separated lowercase names such as `wyn/noise` or
@@ -166,9 +166,9 @@ The dependency path must be relative and must lead to a directory containing a
 matching `wyn.toml`. Preparation recursively reads transitive dependencies and
 checks the declared package names and versions.
 
-A requirement of `v1.4.2` accepts a materialized `v1.4.2` or later `v1`
-release. A `v2` release belongs to a different compatibility range. The same
-major-version rule applies to `v0` packages.
+For a local path dependency, a requirement of `v1.4.2` accepts a materialized
+`v1.4.2` or later `v1` release. A `v2` release belongs to a different
+compatibility range. The same major-version rule applies to `v0` packages.
 
 Import the dependency by alias:
 
@@ -251,8 +251,9 @@ A GitHub repository specifier can provide a dependency:
 rng = { package = "wyn/rng", version = "v0.1.0", github = "github.com/example/wyn-rng" }
 ```
 
-For a GitHub dependency, the declared version selects a repository tag with the
-same spelling. The example above fetches tag `v0.1.0`. Package preparation:
+Until version resolution is implemented, a GitHub dependency's declared
+version selects the exact repository tag with the same spelling. The example
+above fetches tag `v0.1.0`. Package preparation:
 
 1. looks for the unpacked tag in the local package cache;
 2. downloads the GitHub source archive when the cache has no completed entry;

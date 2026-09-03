@@ -1,10 +1,40 @@
+use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use wyn_module_graph::SourceReader;
+use wyn_module_graph::{DependencyAlias, ImportSiteId, ImportTarget, ModuleId, ModuleParser, TextRange};
 
 use super::{prepare_package, PreparationError};
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct TestParser;
+
+impl ModuleParser for TestParser {
+    type Parsed = ();
+    type Error = Infallible;
+
+    fn parse(
+        &mut self,
+        _module: ModuleId,
+        source: &str,
+        report_import: &mut dyn FnMut(ImportSiteId, ImportTarget, TextRange),
+    ) -> Result<Self::Parsed, Self::Error> {
+        if source == "load-dependency\n" {
+            let end = u32::try_from(source.len()).expect("test source should fit in a byte range");
+            report_import(
+                ImportSiteId::from(0),
+                ImportTarget::Dependency {
+                    alias: DependencyAlias::new("dependency").expect("valid dependency alias"),
+                    module: None,
+                },
+                TextRange::new(0, end).expect("valid import range"),
+            );
+        }
+        Ok(())
+    }
+}
 
 struct TestTree {
     root: PathBuf,
@@ -12,17 +42,30 @@ struct TestTree {
 
 impl TestTree {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should follow the Unix epoch")
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("wyn_package_manager_{}_{}", std::process::id(), unique));
-        fs::create_dir_all(&root).expect("test tree should be created");
-        Self { root }
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("wyn_package_manager_{}_{sequence}", std::process::id()));
+            match fs::create_dir(&root) {
+                Ok(()) => return Self { root },
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test tree should be created: {error}"),
+            }
+        }
     }
 
     fn package(&self, relative: &str, name: &str, version: &str, dependencies: &str) -> PathBuf {
+        self.package_with_wyn(relative, name, version, "v0.1.0", dependencies)
+    }
+
+    fn package_with_wyn(
+        &self,
+        relative: &str,
+        name: &str,
+        version: &str,
+        wyn: &str,
+        dependencies: &str,
+    ) -> PathBuf {
         let root = self.root.join(relative);
         fs::create_dir_all(root.join("src")).expect("package source directory should be created");
         fs::write(
@@ -33,11 +76,11 @@ impl TestTree {
                     "[package]\n",
                     "name = \"{}\"\n",
                     "version = \"{}\"\n",
-                    "wyn = \"v0.1.0\"\n",
+                    "wyn = \"{}\"\n",
                     "library = \"src/lib.wyn\"\n",
                     "{}",
                 ),
-                name, version, dependencies
+                name, version, wyn, dependencies
             ),
         )
         .expect("manifest should be written");
@@ -48,6 +91,17 @@ impl TestTree {
         .expect("source should be written");
         root
     }
+}
+
+#[test]
+fn packages_cannot_require_a_newer_wyn_version() {
+    let tree = TestTree::new();
+    let root = tree.package_with_wyn("root", "test/root", "v1.0.0", "v999.0.0", "");
+
+    assert!(matches!(
+        prepare_package(root, None),
+        Err(PreparationError::UnsupportedWynVersion { .. })
+    ));
 }
 
 impl Drop for TestTree {
@@ -85,22 +139,23 @@ fn local_manifests_produce_a_closed_plan_and_confined_sources() {
         "v1.0.0",
         &dependency("dependency", "test/dependency", "v1.2.0", "../dependency"),
     );
+    fs::write(root.join("src/lib.wyn"), "load-dependency\n").expect("root source should be written");
 
-    let input = prepare_package(root, None).expect("local graph should load");
-    let (packages, mut sources) = input.into_parts();
+    let input = prepare_package(root, None).expect("local package should prepare");
+    let graph = input.load(&mut TestParser).expect("local graph should load");
+    let packages = graph.package_graph();
     assert_eq!(packages.packages().count(), 2);
-    let dependency = package_id(&packages, "test/dependency");
+    let dependency = package_id(packages, "test/dependency");
     let root_package = packages.package(packages.root().package()).expect("root package should exist");
     let edge = root_package.dependencies().next().expect("dependency edge should exist");
     assert_eq!(edge.alias().as_str(), "dependency");
     assert_eq!(edge.package(), dependency);
 
-    let source = sources
-        .load(&wyn_module_graph::ModuleKey::new(
-            dependency,
-            wyn_module_graph::ModulePath::new("src/lib.wyn").expect("valid source path"),
-        ))
-        .expect("verified dependency source should load");
+    let dependency_module = graph
+        .modules()
+        .find_map(|(id, module)| (module.key().package() == dependency).then_some(id))
+        .expect("dependency module should load");
+    let source = graph.source(dependency_module).expect("verified dependency source should load");
     assert!(source.contains("package_name"));
     assert!(dependency_root.is_dir());
 }
@@ -176,5 +231,6 @@ fn package_dependency_cycles_are_representable() {
     );
 
     let input = prepare_package(first, None).expect("package dependency cycle should close");
-    assert_eq!(input.into_parts().0.packages().count(), 2);
+    let graph = input.load(&mut TestParser).expect("root source should load");
+    assert_eq!(graph.package_graph().packages().count(), 2);
 }

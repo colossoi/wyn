@@ -1,4 +1,6 @@
-use crate::{LocalSources, PackageGraph};
+use std::sync::Arc;
+
+use crate::{LocalSources, ModulePath, PackageGraph, PackageIdentity};
 
 /// A closed package graph paired with access to its materialized sources.
 ///
@@ -17,13 +19,28 @@ impl<S> PackagePlan<S> {
             sources,
         }
     }
+}
 
-    pub const fn package_graph(&self) -> &PackageGraph {
-        &self.package_graph
+impl PackagePlan {
+    /// Construct a complete in-memory plan containing one source module.
+    pub fn single_source(
+        identity: PackageIdentity,
+        module: ModulePath,
+        source: impl Into<Arc<str>>,
+    ) -> Self {
+        let (package_graph, root) = PackageGraph::single_package(identity, module);
+        Self {
+            package_graph,
+            sources: LocalSources::from_override(root, source),
+        }
     }
 
-    /// Separate retained package metadata from the source reader.
-    pub fn into_parts(self) -> (PackageGraph, S) {
-        (self.package_graph, self.sources)
+    /// Read the root module from memory instead of its package source tree.
+    pub fn with_root_source(
+        mut self,
+        source: impl Into<Arc<str>>,
+    ) -> Result<Self, crate::LocalSourceError> {
+        self.sources.add_override(self.package_graph.root().clone(), source)?;
+        Ok(self)
     }
 }
