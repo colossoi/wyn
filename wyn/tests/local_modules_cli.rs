@@ -141,7 +141,10 @@ fn check_reports_undeclared_package_alias_at_import() {
         "undeclared package alias should be rejected"
     );
     assert!(
-        error.contains("main.wyn:1:1: unknown package dependency alias `missing`"),
+        error.contains("error: unknown package dependency alias `missing`")
+            && error.contains("--> main.wyn:1:1")
+            && error.contains("| import \"pkg:missing\"")
+            && error.contains("| ^^^^^^^^^^^^^^^^^^^^"),
         "unexpected package-alias diagnostic:\n{error}"
     );
     assert!(
@@ -168,7 +171,10 @@ fn check_rejects_import_outside_package_root() {
 
     assert!(!output.status.success(), "escaping import should be rejected");
     assert!(
-        error.contains("main.wyn:1:1: invalid import path: module path escapes its package root"),
+        error.contains("error: invalid import path: module path escapes its package root")
+            && error.contains("--> main.wyn:1:1")
+            && error.contains("| import \"../outside\"")
+            && error.contains("| ^^^^^^^^^^^^^^^^^^^"),
         "unexpected escaping-import diagnostic:\n{error}"
     );
 }
@@ -261,7 +267,10 @@ fn check_reports_type_hole_in_imported_source() {
         "type holes use their dedicated exit code"
     );
     assert!(
-        error.contains("at library/dependency.wyn:1:") && error.contains("inferred `i32`"),
+        error.contains("error: type hole inferred as `i32`")
+            && error.contains("--> library/dependency.wyn:1:23")
+            && error.contains("| def incomplete: i32 = ???")
+            && error.contains("|                       ^^^"),
         "unexpected type-hole diagnostic:\n{error}"
     );
     assert!(

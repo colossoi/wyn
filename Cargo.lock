@@ -1931,6 +1931,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "wyn-core",
+ "wyn-diagnostics",
  "wyn-module-graph",
  "wyn-package-manager",
 ]

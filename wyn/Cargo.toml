@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 wyn-core = { path = "../wyn-core" }
+wyn-diagnostics = { path = "../wyn-diagnostics" }
 wyn-module-graph = { path = "../wyn-module-graph" }
 wyn-package-manager = { path = "../wyn-package-manager" }
 clap.workspace = true

@@ -33,11 +33,9 @@ pub enum CompilerError {
     #[error("Flattening error: {0}")]
     FlatteningError(String, Option<Span>),
 
-    /// Program contains unresolved `???` type holes. The payload is a
-    /// pre-formatted multi-line diagnostic listing each hole's
-    /// inferred type and source location.
+    /// Program contains unresolved or unfillable `???` expressions.
     #[error("{0}")]
-    TypeHole(String),
+    TypeHole(TypeHoleErrors),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -63,12 +61,49 @@ impl CompilerError {
             Self::WgslError(_, span) => *span,
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
-            Self::TypeHole(_) => None,
+            Self::TypeHole(errors) => errors.iter().find_map(|error| error.span),
             Self::IoError(_)
             | Self::FormattingError(_)
             | Self::SpirvBuilderError(_)
             | Self::Internal(_) => None,
         }
+    }
+}
+
+/// One source-preserving type-hole failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeHoleError {
+    pub message: String,
+    pub span: Option<Span>,
+}
+
+/// All type-hole failures found during one compilation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeHoleErrors(Box<[TypeHoleError]>);
+
+impl TypeHoleErrors {
+    pub fn new(errors: impl IntoIterator<Item = TypeHoleError>) -> Self {
+        Self(errors.into_iter().collect())
+    }
+
+    pub fn single(message: String, span: Option<Span>) -> Self {
+        Self(vec![TypeHoleError { message, span }].into_boxed_slice())
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &TypeHoleError> {
+        self.0.iter()
+    }
+}
+
+impl fmt::Display for TypeHoleErrors {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, error) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            formatter.write_str(&error.message)?;
+        }
+        Ok(())
     }
 }
 
@@ -195,7 +230,9 @@ macro_rules! err_alias {
 #[macro_export]
 macro_rules! err_type_hole {
     ($($arg:tt)*) => {
-        $crate::error::CompilerError::TypeHole(format!($($arg)*))
+        $crate::error::CompilerError::TypeHole(
+            $crate::error::TypeHoleErrors::single(format!($($arg)*), None)
+        )
     };
 }
 

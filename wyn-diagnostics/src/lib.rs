@@ -19,14 +19,36 @@ pub fn render_error(
     source: &str,
     range: Range<usize>,
 ) -> Result<String, RenderError> {
+    render("error", message, source_name, source, range)
+}
+
+/// Render a warning associated with a half-open UTF-8 byte range in source text.
+pub fn render_warning(
+    message: &str,
+    source_name: &str,
+    source: &str,
+    range: Range<usize>,
+) -> Result<String, RenderError> {
+    render("warning", message, source_name, source, range)
+}
+
+fn render(
+    level: &str,
+    message: &str,
+    source_name: &str,
+    source: &str,
+    range: Range<usize>,
+) -> Result<String, RenderError> {
     validate_range(source, &range)?;
-    let mut output = render_error_message(message);
+    let mut output = format!("{level}: {message}");
     let lines = Lines::new(source);
     let start_line = lines.containing(range.start);
     let end_offset = if range.is_empty() { range.end } else { range.end - 1 };
     let end_line = lines.containing(end_offset);
+    let display_start = start_line.saturating_sub(1);
+    let display_end = (end_line + 1).min(lines.items.len() - 1);
     let start_column = source[lines.items[start_line].start..range.start].chars().count() + 1;
-    let gutter_width = (end_line + 1).to_string().len();
+    let gutter_width = (display_end + 1).to_string().len();
 
     output.push_str(&format!(
         "\n  --> {}:{}:{}\n{:width$} |",
@@ -37,7 +59,7 @@ pub fn render_error(
         width = gutter_width + 1,
     ));
 
-    for line_index in start_line..=end_line {
+    for line_index in display_start..=display_end {
         let line = &lines.items[line_index];
         let rendered_line = expand_tabs(line.text(source), TAB_WIDTH);
         output.push_str(&format!(
@@ -46,6 +68,10 @@ pub fn render_error(
             rendered_line,
             width = gutter_width,
         ));
+
+        if line_index < start_line || line_index > end_line {
+            continue;
+        }
 
         let selected_start =
             if line_index == start_line { range.start.min(line.content_end) } else { line.start };
@@ -71,6 +97,11 @@ pub fn render_error(
 /// Render an error that has no physical source location.
 pub fn render_error_message(message: &str) -> String {
     format!("error: {message}")
+}
+
+/// Render a warning that has no physical source location.
+pub fn render_warning_message(message: &str) -> String {
+    format!("warning: {message}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,7 +231,7 @@ fn display_width(text: &str, initial: usize, tab_width: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_error, render_error_message, RenderError};
+    use super::{render_error, render_error_message, render_warning, render_warning_message, RenderError};
 
     #[test]
     fn renders_an_error_without_source() {
@@ -208,6 +239,13 @@ mod tests {
             render_error_message("failed to initialize the compiler"),
             "error: failed to initialize the compiler"
         );
+    }
+
+    #[test]
+    fn renders_warnings_with_and_without_source() {
+        assert_eq!(render_warning_message("unused value"), "warning: unused value");
+        let rendered = render_warning("unused value", "main.wyn", "value", 0..5).unwrap();
+        assert!(rendered.starts_with("warning: unused value\n  --> main.wyn:1:1"));
     }
 
     #[test]
@@ -224,7 +262,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "error: expected `vec4f32`, found `vec3f32`\n  --> shader.wyn:2:5\n   |\n 2 |     vec3f32(r, g, b)\n   |     ^^^^^^^"
+            "error: expected `vec4f32`, found `vec3f32`\n  --> shader.wyn:2:5\n   |\n 1 | fn shade() {\n 2 |     vec3f32(r, g, b)\n   |     ^^^^^^^\n 3 | }"
         );
     }
 
@@ -237,7 +275,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "error: incompatible branch types\n  --> shader.wyn:2:5\n   |\n 2 |     first()\n   |     ^^^^^^^\n 3 |     second()\n   | ^^^^^^^^^^"
+            "error: incompatible branch types\n  --> shader.wyn:2:5\n   |\n 1 | if ready {\n 2 |     first()\n   |     ^^^^^^^\n 3 |     second()\n   | ^^^^^^^^^^\n 4 | }"
         );
     }
 

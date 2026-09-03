@@ -11,7 +11,10 @@ use wyn_core::{
     CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, LoweringProfile, ParsedModules,
     PipelineTopologyPolicy, SchedulePolicy,
 };
-use wyn_module_graph::{PackagePlan, SourceGraph};
+use wyn_diagnostics::{render_error, render_error_message, render_warning, render_warning_message};
+use wyn_module_graph::{
+    BuildError, BuildFailure, LocalSourceError, ModuleKey, PackageGraph, PackagePlan, SourceGraph, Span,
+};
 use wyn_package_manager::{
     find_build_input, prepare_package, prepare_standalone, BuildInput, PreparationError,
 };
@@ -186,6 +189,144 @@ fn retain_source<T>(
     result.map_err(|error| CompilationFailure::new(error, source_graph.clone()).into())
 }
 
+fn source_name(packages: &PackageGraph, key: &ModuleKey) -> String {
+    if key.package() == packages.root().package() {
+        return key.path().to_string();
+    }
+    match packages.package(key.package()) {
+        Some(package) => format!(
+            "{}@{}:{}",
+            package.identity().canonical_name(),
+            package.identity().version(),
+            key.path()
+        ),
+        None => key.path().to_string(),
+    }
+}
+
+fn render_at(message: &str, graph: &SourceGraph, span: Span, warning: bool) -> Option<String> {
+    let module = span.module()?;
+    let key = graph.module(module)?.key();
+    let source = graph.source(module)?;
+    let range = span.range();
+    let range = usize::try_from(range.start()).ok()?..usize::try_from(range.end()).ok()?;
+    let name = source_name(graph.package_graph(), key);
+    if warning {
+        render_warning(message, &name, source, range).ok()
+    } else {
+        render_error(message, &name, source, range).ok()
+    }
+}
+
+fn render_compilation_failure(failure: &CompilationFailure) -> String {
+    match failure.error() {
+        wyn_core::error::CompilerError::TypeHole(errors) => errors
+            .iter()
+            .map(|error| {
+                error
+                    .span
+                    .and_then(|span| render_at(&error.message, failure.source_graph(), span, false))
+                    .unwrap_or_else(|| render_error_message(&error.message))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        error => error
+            .span()
+            .and_then(|span| render_at(&error.to_string(), failure.source_graph(), span, false))
+            .unwrap_or_else(|| render_error_message(&error.to_string())),
+    }
+}
+
+fn build_failure_span(
+    error: &BuildError<wyn_core::error::CompilerError, LocalSourceError>,
+) -> Option<Span> {
+    match error {
+        BuildError::Parse { source, .. } => source.span(),
+        BuildError::UnknownDependency { span, .. }
+        | BuildError::InvalidPath { span, .. }
+        | BuildError::InvalidImportSpan { span, .. }
+        | BuildError::DuplicateImportSite { span, .. } => Some(*span),
+        BuildError::Cycle { edges } => edges.first().map(|edge| edge.span),
+        BuildError::Load { .. } | BuildError::SourceText { .. } => None,
+    }
+}
+
+fn build_failure_trace(
+    error: &BuildError<wyn_core::error::CompilerError, LocalSourceError>,
+) -> &[wyn_module_graph::ImportTraceFrame] {
+    match error {
+        BuildError::Load { trace, .. }
+        | BuildError::SourceText { trace, .. }
+        | BuildError::Parse { trace, .. }
+        | BuildError::UnknownDependency { trace, .. }
+        | BuildError::InvalidPath { trace, .. }
+        | BuildError::InvalidImportSpan { trace, .. }
+        | BuildError::DuplicateImportSite { trace, .. } => trace,
+        BuildError::Cycle { edges } => edges,
+    }
+}
+
+fn retained_location(
+    failure: &BuildFailure<wyn_core::error::CompilerError, LocalSourceError>,
+    span: Span,
+) -> Option<String> {
+    let module = span.module()?;
+    let key = failure.module_key(module)?;
+    let location = failure.location(span).ok()?;
+    Some(format!(
+        "{}:{}:{}",
+        source_name(failure.package_graph(), key),
+        location.line,
+        location.column
+    ))
+}
+
+fn render_build_failure(
+    failure: &BuildFailure<wyn_core::error::CompilerError, LocalSourceError>,
+) -> String {
+    let message = failure.error().to_string();
+    let Some(span) = build_failure_span(failure.error()) else {
+        return render_error_message(&failure.to_string());
+    };
+    let Some(module) = span.module() else {
+        return render_error_message(&failure.to_string());
+    };
+    let Some(key) = failure.module_key(module) else {
+        return render_error_message(&failure.to_string());
+    };
+    let Some(source) = failure.source_text(module) else {
+        return render_error_message(&failure.to_string());
+    };
+    let range = span.range();
+    let Ok(start) = usize::try_from(range.start()) else {
+        return render_error_message(&failure.to_string());
+    };
+    let Ok(end) = usize::try_from(range.end()) else {
+        return render_error_message(&failure.to_string());
+    };
+    let name = source_name(failure.package_graph(), key);
+    let mut rendered = render_error(&message, &name, source, start..end)
+        .unwrap_or_else(|_| render_error_message(&failure.to_string()));
+    for frame in build_failure_trace(failure.error()) {
+        if let Some(location) = retained_location(failure, frame.span) {
+            match failure.error() {
+                BuildError::Cycle { .. } => {
+                    rendered.push_str(&format!("\n  {location} imports {}", frame.requested.path()));
+                }
+                _ => rendered.push_str(&format!("\n  imported from {location}")),
+            }
+        }
+    }
+    rendered
+}
+
+fn render_load_modules_error(error: &LoadModulesError) -> String {
+    match error {
+        LoadModulesError::Prelude(error) => render_error_message(&error.to_string()),
+        LoadModulesError::Modules(failure) => render_build_failure(failure),
+    }
+}
+
 fn normalize_input(input: &Path) -> Result<PathBuf, DriverError> {
     let input = input.canonicalize()?;
     if input.is_dir() || input.extension().and_then(|extension| extension.to_str()) == Some("wyn") {
@@ -252,15 +393,18 @@ fn finish_type_check(
 
     for warning in &program.global_context.warnings {
         let message = warning.message(&wyn_core::types::format_type);
-        match program.source_graph().display_location(*warning.span()) {
-            Ok(location) => eprintln!("{location}: warning: {message}"),
-            Err(_) => eprintln!("warning: {message}"),
-        }
+        let rendered = render_at(&message, program.source_graph(), *warning.span(), true)
+            .unwrap_or_else(|| render_warning_message(&message));
+        eprintln!("{rendered}");
     }
+    let source_graph = program.source_graph().clone();
     let program = if reject_holes {
-        wyn_core::ast_type_holes::reject_type_holes(program)?
+        retain_source(
+            wyn_core::ast_type_holes::reject_type_holes(program),
+            &source_graph,
+        )?
     } else {
-        wyn_core::ast_type_holes::fill_type_holes(program)?
+        retain_source(wyn_core::ast_type_holes::fill_type_holes(program), &source_graph)?
     };
 
     Ok(program)
@@ -285,23 +429,28 @@ fn main() -> ExitCode {
     //   2 — program contains unresolved `???` type holes
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(DriverError::CompilationError(wyn_core::error::CompilerError::TypeHole(msg))) => {
-            eprintln!("{msg}");
+        Err(DriverError::CompilationError(wyn_core::error::CompilerError::TypeHole(errors))) => {
+            for error in errors.iter() {
+                eprintln!("{}", render_error_message(&error.message));
+            }
             ExitCode::from(2)
         }
         Err(DriverError::CompilationError(e)) => {
-            match e.span() {
-                Some(span) if !span.is_generated() => eprintln!("{span}: {e}"),
-                _ => eprintln!("{e}"),
-            }
+            eprintln!("{}", render_error_message(&e.to_string()));
             ExitCode::from(1)
         }
         Err(DriverError::Compilation(failure)) => {
-            eprintln!("{failure}");
+            let exit_code =
+                if matches!(failure.error(), wyn_core::error::CompilerError::TypeHole(_)) { 2 } else { 1 };
+            eprintln!("{}", render_compilation_failure(&failure));
+            ExitCode::from(exit_code)
+        }
+        Err(DriverError::LoadModules(error)) => {
+            eprintln!("{}", render_load_modules_error(&error));
             ExitCode::from(1)
         }
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", render_error_message(&e.to_string()));
             ExitCode::from(1)
         }
     }

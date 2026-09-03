@@ -3,8 +3,8 @@
 #![deny(clippy::let_underscore_must_use)]
 
 use crate::ast;
-use crate::err_type_hole;
 use crate::error;
+use crate::error::{CompilerError, TypeHoleError, TypeHoleErrors};
 use crate::interface;
 use crate::types;
 
@@ -38,24 +38,18 @@ pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<Hole
         })
         .collect();
     if !holes.is_empty() {
-        let mut message = String::from("type hole(s) in program:\n");
-        for (ty, span) in holes {
-            let location = program
-                .source_graph()
-                .display_location(*span)
-                .map(|location| location.to_string())
-                .unwrap_or_else(|_| "generated source".to_string());
-            message.push_str(&format!(
-                "  at {location} — inferred `{}`\n",
-                types::format_type(ty),
-            ));
-        }
-        return Err(err_type_hole!("{}", message.trim_end()));
+        return Err(CompilerError::TypeHole(TypeHoleErrors::new(
+            holes.into_iter().map(|(ty, span)| TypeHoleError {
+                message: format!("type hole inferred as `{}`", types::format_type(ty)),
+                span: Some(*span),
+            }),
+        )));
     }
-    rebuild(program, &mut |_header, _hole, _node_ids| {
-        Err(err_type_hole!(
-            "type checker omitted a warning for a stored type hole"
-        ))
+    rebuild(program, &mut |header, _hole, _node_ids| {
+        Err(CompilerError::TypeHole(TypeHoleErrors::single(
+            "type checker omitted a warning for a stored type hole".to_owned(),
+            Some(header.span),
+        )))
     })
 }
 
@@ -67,7 +61,7 @@ pub fn fill_type_holes(program: types::run::TypeChecked) -> error::Result<HolesR
     if errors.is_empty() {
         Ok(rebuilt)
     } else {
-        Err(err_type_hole!("{}", errors.join("\n")))
+        Err(CompilerError::TypeHole(TypeHoleErrors::new(errors)))
     }
 }
 
@@ -178,7 +172,7 @@ fn rebuild_expression(
 fn default_kind(
     header: &ast::TypedHeader,
     node_ids: &mut ast::NodeCounter,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<TypeHoleError>,
 ) -> ast::ExprKind<ast::HolesResolvedTree> {
     let ty = scheme_type(&header.ty);
     match ty {
@@ -235,7 +229,7 @@ fn default_expression(
     ty: &ast::Type,
     span: ast::Span,
     node_ids: &mut ast::NodeCounter,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<TypeHoleError>,
 ) -> ast::Expression<ast::HolesResolvedTree> {
     let header = ast::TypedHeader {
         id: node_ids.next_id(),
@@ -248,15 +242,13 @@ fn default_expression(
 
 fn default_error(
     header: &ast::TypedHeader,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<TypeHoleError>,
     reason: &str,
 ) -> ast::ExprKind<ast::HolesResolvedTree> {
-    errors.push(format!(
-        "--fill-holes: at {}: {} (type: {:?})",
-        header.span,
-        reason,
-        scheme_type(&header.ty)
-    ));
+    errors.push(TypeHoleError {
+        message: format!("--fill-holes: {reason} (type: {:?})", scheme_type(&header.ty)),
+        span: Some(header.span),
+    });
     ast::ExprKind::IntLiteral("0".into())
 }
 
