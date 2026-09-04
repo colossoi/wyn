@@ -111,6 +111,7 @@ pub struct SpirvBuilder {
     u32_type: TypeId,
     f32_type: TypeId,
     glsl_ext_inst_id: spirv::Word,
+    capabilities: HashSet<Capability>,
     // Constant deduping. Each cache is keyed by the value; the value
     // (or the bit pattern, for floats) maps to the SPIR-V id, with
     // a reverse map for integers so consumers that need the literal
@@ -120,6 +121,7 @@ pub struct SpirvBuilder {
     uint_const_cache: HashMap<u32, ConstId>,
     uint_const_reverse: HashMap<ConstId, u32>,
     float_const_cache: HashMap<u32, ConstId>, // bits as u32
+    f16_const_cache: HashMap<u16, ConstId>,
     bool_const_cache: HashMap<bool, ConstId>,
     // Every constant id emitted via this builder, so consumers can
     // ask `is_constant(id)` to decide whether a composite can be
@@ -214,11 +216,13 @@ impl SpirvBuilder {
             u32_type,
             f32_type,
             glsl_ext_inst_id,
+            capabilities: HashSet::from([Capability::Shader]),
             int_const_cache: HashMap::new(),
             int_const_reverse: HashMap::new(),
             uint_const_cache: HashMap::new(),
             uint_const_reverse: HashMap::new(),
             float_const_cache: HashMap::new(),
+            f16_const_cache: HashMap::new(),
             bool_const_cache: HashMap::new(),
             constant_ids: HashSet::new(),
             vec_type_cache: HashMap::new(),
@@ -272,6 +276,13 @@ impl SpirvBuilder {
         self.glsl_ext_inst_id
     }
 
+    /// Declare a module capability once.
+    pub fn enable_capability(&mut self, capability: Capability) {
+        if self.capabilities.insert(capability) {
+            self.inner.capability(capability);
+        }
+    }
+
     /// Get or create an `OpConstant` for an `i32` value.
     pub fn const_i32(&mut self, value: i32) -> ConstId {
         if let Some(&id) = self.int_const_cache.get(&value) {
@@ -304,6 +315,18 @@ impl SpirvBuilder {
         }
         let id = ConstId::new(self.inner.constant_bit32(*self.f32_type, bits));
         self.float_const_cache.insert(bits, id);
+        self.constant_ids.insert(id);
+        id
+    }
+
+    /// Get or create an `OpConstant` for an IEEE-754 binary16 bit pattern.
+    pub fn const_f16_bits(&mut self, bits: u16) -> ConstId {
+        if let Some(&id) = self.f16_const_cache.get(&bits) {
+            return id;
+        }
+        let ty = self.type_float(16);
+        let id = ConstId::new(self.inner.constant_bit32(*ty, u32::from(bits)));
+        self.f16_const_cache.insert(bits, id);
         self.constant_ids.insert(id);
         id
     }
@@ -535,6 +558,11 @@ impl SpirvBuilder {
         if let Some(&ty) = self.float_type_cache.get(&width) {
             return ty;
         }
+        match width {
+            16 => self.enable_capability(Capability::Float16),
+            64 => self.enable_capability(Capability::Float64),
+            _ => {}
+        }
         let ty = TypeId::new(self.inner.type_float(width));
         self.float_type_cache.insert(width, ty);
         ty
@@ -711,7 +739,7 @@ impl SpirvBuilder {
         param_types: &[TypeId],
         return_type: TypeId,
     ) -> Result<FuncId, dr::Error> {
-        self.inner.capability(Capability::Linkage);
+        self.enable_capability(Capability::Linkage);
         let func_type =
             self.inner.type_function(*return_type, param_types.iter().map(|t| **t).collect::<Vec<_>>());
         let func_id =

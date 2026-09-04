@@ -127,6 +127,9 @@ impl Constructor {
             Some(elem) => elem.clone(),
             None => array_ty.clone(),
         };
+        if types::contains_16_bit_scalar(&elem_ty) {
+            self.builder.enable_capability(spirv::Capability::StorageBuffer16BitAccess);
+        }
         let elem_spirv = self.polytype_to_spirv(&elem_ty)?;
 
         // The std430 array stride is the element size rounded up to the

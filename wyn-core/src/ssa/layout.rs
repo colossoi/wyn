@@ -212,7 +212,7 @@ fn collect_array_strides(ty: &Type, out: &mut Vec<u32>) {
 }
 
 /// Block layout rule set for interface blocks (uniform / storage).
-/// For the member shapes `block_layout` supports (32-bit scalars and
+/// For the member shapes `block_layout` supports (16/32-bit scalars and
 /// vectors of them) the two sets produce identical member offsets;
 /// they differ only in the final size rounding — std140 rounds the
 /// block size up to 16.
@@ -286,30 +286,34 @@ fn std430_type_layout(ty: &Type) -> Option<(u32, u32)> {
     }
 }
 
-/// Layout for an interface-block value: a 32-bit `f32`/`i32`/`u32`
-/// scalar, a vec2/3/4 of them, or a FLAT record/tuple of those. Under
+/// Layout for an interface-block value: a 16/32-bit numeric scalar, a
+/// vec2/3/4 of them, or a FLAT record/tuple of those. Under
 /// Std430 (storage buffers) a member may also be a fixed-size array of
 /// supported scalars/vectors (the SOAC passes synthesize tuple
 /// elements like `(u32, [4]u32)`); std140's array rules (16-rounded
 /// strides) are not implemented, so arrays stay unsupported for
 /// uniforms. Returns `None` for anything else (bool, matrices, nested
-/// aggregates, runtime arrays, non-32-bit scalars) — callers gate
+/// aggregates, runtime arrays, other scalar widths) — callers gate
 /// support on this.
 pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
     // (size, alignment) of one supported member.
     fn member(ty: &Type, rules: StorageLayout) -> Option<(u32, u32)> {
         match ty {
-            Type::Constructed(TypeName::Int(32), _)
-            | Type::Constructed(TypeName::UInt(32), _)
-            | Type::Constructed(TypeName::Float(32), _) => Some((4, 4)),
+            Type::Constructed(TypeName::Int(bits), _)
+            | Type::Constructed(TypeName::UInt(bits), _)
+            | Type::Constructed(TypeName::Float(bits), _)
+                if matches!(bits, 16 | 32) =>
+            {
+                let bytes = (*bits / 8) as u32;
+                Some((bytes, bytes))
+            }
             _ if ty.is_vec() => {
-                // Element must itself be a supported 32-bit scalar.
-                member(ty.elem_type()?, rules)?;
+                let (elem_size, _) = member(ty.elem_type()?, rules)?;
                 let n = ty.vec_size()? as u32;
                 if !(2..=4).contains(&n) {
                     return None;
                 }
-                Some((4 * n, if n == 2 { 8 } else { 16 }))
+                Some((elem_size * n, if n == 2 { 2 * elem_size } else { 4 * elem_size }))
             }
             _ if ty.is_array() && rules == StorageLayout::Std430 => {
                 let (elem_size, elem_align) = member(ty.elem_type()?, rules)?;
@@ -336,7 +340,7 @@ pub fn block_layout(ty: &Type, rules: StorageLayout) -> Option<BlockLayout> {
 
     let mut member_offsets = Vec::with_capacity(fields.len());
     let mut offset = 0u32;
-    let mut align = 4u32;
+    let mut align = 1u32;
     for field in fields {
         let (field_size, field_align) = member(field, rules)?;
         offset = offset.div_ceil(field_align) * field_align;

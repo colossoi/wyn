@@ -275,7 +275,6 @@ fn block_layout_rejects_unsupported_members() {
     let nested = record(&[("inner", record(&[("x", f32t())]))]);
     for ty in [
         scalar(TypeName::Bool),
-        scalar(TypeName::Float(16)),
         matrix.clone(),
         array.clone(),
         nested,
@@ -295,6 +294,47 @@ fn block_layout_rejects_unsupported_members() {
     let l = block_layout(&with_array, StorageLayout::Std430).expect("std430 supports fixed arrays");
     assert_eq!(l.member_offsets, vec![0, 4]);
     assert_eq!(l.size, 20);
+}
+
+#[test]
+fn block_layout_supports_f16_scalars_vectors_and_records() {
+    let f16t = scalar(TypeName::Float(16));
+    let vec2f16 = Type::Constructed(
+        TypeName::Vec,
+        vec![f16t.clone(), Type::Constructed(TypeName::Size(2), vec![])],
+    );
+    let vec3f16 = Type::Constructed(
+        TypeName::Vec,
+        vec![f16t.clone(), Type::Constructed(TypeName::Size(3), vec![])],
+    );
+
+    assert_eq!(
+        block_layout(&f16t, StorageLayout::Std430),
+        Some(BlockLayout {
+            size: 2,
+            align: 2,
+            member_offsets: vec![0],
+        })
+    );
+    assert_eq!(
+        block_layout(&vec3f16, StorageLayout::Std430),
+        Some(BlockLayout {
+            size: 8,
+            align: 8,
+            member_offsets: vec![0],
+        })
+    );
+    assert_eq!(
+        block_layout(
+            &record(&[("scalar", f16t), ("vector", vec2f16)]),
+            StorageLayout::Std430,
+        ),
+        Some(BlockLayout {
+            size: 8,
+            align: 4,
+            member_offsets: vec![0, 4],
+        })
+    );
 }
 
 #[test]

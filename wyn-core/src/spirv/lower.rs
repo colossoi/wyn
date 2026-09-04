@@ -272,9 +272,27 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 },
 
                 op::OpTag::Float(s) => {
-                    let val: f32 =
-                        s.parse().map_err(|_| err_spirv_at!(self.blame_span(), "Invalid f32: {}", s))?;
-                    self.constructor.const_f32(val)
+                    // The literal spelling is width-agnostic after parsing; type
+                    // inference records whether it is f16 or f32 on its SSA result.
+                    let literal_ty = ssa_result_ty
+                        .as_ref()
+                        .expect("float literal instruction must produce an SSA result");
+                    let val: f32 = s
+                        .parse()
+                        .map_err(|_| err_spirv_at!(self.blame_span(), "Invalid float literal: {}", s))?;
+                    match literal_ty {
+                        PolyType::Constructed(TypeName::Float(16), _) => {
+                            *self.constructor.builder.const_f16_bits(half::f16::from_f32(val).to_bits())
+                        }
+                        PolyType::Constructed(TypeName::Float(32), _) => self.constructor.const_f32(val),
+                        ty => {
+                            return Err(err_spirv_at!(
+                                self.blame_span(),
+                                "unsupported float literal type: {:?}",
+                                ty
+                            ));
+                        }
+                    }
                 }
 
                 op::OpTag::Bool(b) => self.constructor.const_bool(*b),

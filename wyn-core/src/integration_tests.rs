@@ -2731,6 +2731,26 @@ fn spirv_has_builtin(words: &[u32], builtin: spirv::BuiltIn) -> bool {
     false
 }
 
+fn spirv_has_capability(words: &[u32], capability: spirv::Capability) -> bool {
+    let mut index = 5usize;
+    while index < words.len() {
+        let instruction = words[index];
+        let word_count = (instruction >> 16) as usize;
+        let opcode = instruction & 0xffff;
+        if opcode == spirv::Op::Capability as u32
+            && word_count >= 2
+            && words[index + 1] == capability as u32
+        {
+            return true;
+        }
+        if word_count == 0 {
+            break;
+        }
+        index += word_count;
+    }
+    false
+}
+
 #[test]
 fn filter_over_iota_emits_well_typed_length_and_index_operations() {
     let lowered = compile_thru_spirv(
@@ -12857,6 +12877,36 @@ fn ctor_vec3_and_vec4_constructors_compile_to_spirv() {
     "#;
     compile_thru_spirv(v3).expect("vec3f32(vec3i32) must compile");
     compile_thru_spirv(v4).expect("vec4f32(vec4u32) must compile");
+}
+
+#[test]
+fn f16_scalar_arithmetic_compiles_to_spirv() {
+    let src = r#"
+        entry half_add(xs: []f16) []f16 =
+          map(|x: f16| x + 1.5f16, xs)
+    "#;
+    let lowered = compile_thru_spirv(src).expect("f16 arithmetic must compile to SPIR-V");
+    assert_naga_accepts_spirv(&lowered.spirv);
+    assert!(spirv_has_capability(&lowered.spirv, spirv::Capability::Float16));
+    assert!(spirv_has_capability(
+        &lowered.spirv,
+        spirv::Capability::StorageBuffer16BitAccess
+    ));
+}
+
+#[test]
+fn f16_vector_types_compile_to_spirv() {
+    for (name, literal) in [
+        ("vec2f16", "@[1.0f16, 2.0f16]"),
+        ("vec3f16", "@[1.0f16, 2.0f16, 3.0f16]"),
+        ("vec4f16", "@[1.0f16, 2.0f16, 3.0f16, 4.0f16]"),
+    ] {
+        let src =
+            format!("entry half_vector(xs: []{name}) []{name} =\n  map(|x: {name}| x + {literal}, xs)");
+        let lowered = compile_thru_spirv(&src)
+            .unwrap_or_else(|error| panic!("{name} must compile to SPIR-V: {error}"));
+        assert_naga_accepts_spirv(&lowered.spirv);
+    }
 }
 
 // ---- ArrayVariantAbstract — `filter` → size-polymorphic consumer ----

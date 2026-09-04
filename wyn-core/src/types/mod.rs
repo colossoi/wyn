@@ -60,6 +60,7 @@ pub fn vec_field_type(type_name: &str, field_name: &str) -> Option<Type> {
     }
     let elem_type_str = &type_name[4..];
     let elem_type_name = match elem_type_str {
+        "f16" => TypeName::Float(16),
         "f32" => TypeName::Float(32),
         "f64" => TypeName::Float(64),
         "i32" => TypeName::Int(32),
@@ -850,6 +851,10 @@ pub fn f32() -> Type {
     Type::Constructed(TypeName::Float(32), vec![])
 }
 
+pub fn f16() -> Type {
+    Type::Constructed(TypeName::Float(16), vec![])
+}
+
 pub fn bool_type() -> Type {
     Type::Constructed(TypeName::Bool, vec![])
 }
@@ -1123,6 +1128,17 @@ pub fn count_arrows(ty: &Type) -> usize {
 /// but we also accept signed integers for compatibility
 pub fn is_integer_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _))
+}
+
+/// Whether a type contains a 16-bit numeric scalar. SPIR-V interface
+/// storage classes require an additional capability when such a scalar is
+/// nested inside a vector, matrix, array, tuple, or record.
+pub fn contains_16_bit_scalar(ty: &Type) -> bool {
+    match ty {
+        Type::Constructed(TypeName::Int(16) | TypeName::UInt(16) | TypeName::Float(16), _) => true,
+        Type::Constructed(_, args) => args.iter().any(contains_16_bit_scalar),
+        Type::Variable(_) => false,
+    }
 }
 
 /// Create a record type: {field1: type1, field2: type2}

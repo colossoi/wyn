@@ -14,6 +14,20 @@ fn arrow(a: Type, b: Type) -> Type {
 }
 
 #[test]
+fn f16_vector_type_family_is_available() {
+    let f16_ty = f16();
+    let vectors = vector_type_constructors();
+
+    for size in 2..=4 {
+        assert_eq!(
+            vectors.get(&format!("vec{size}f16")),
+            Some(&vec(size, f16_ty.clone()))
+        );
+    }
+    assert_eq!(vec_field_type("vec4f16", "z"), Some(f16_ty));
+}
+
+#[test]
 fn raster_formats_as_a_spellable_source_type() {
     let raster = Type::Constructed(TypeName::Raster, vec![f32_ty()]);
     assert_eq!(format_type(&raster), "raster<f32>");

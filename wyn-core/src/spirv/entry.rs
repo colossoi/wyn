@@ -83,6 +83,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         .filter_map(|(i, inp)| inp.push_constant().map(|pc| (i, pc.offset)))
         .collect();
     let pc_var = if !pc_inputs.is_empty() {
+        if pc_inputs.iter().any(|&(i, _)| types::contains_16_bit_scalar(&entry.inputs[i].ty)) {
+            constructor.builder.enable_capability(spirv::Capability::StoragePushConstant16);
+        }
         // Build member types for push constant block
         let member_types = pc_inputs
             .iter()
@@ -150,6 +153,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         let input_type = constructor.polytype_to_spirv(&input.ty)?;
 
         if let Some(IoDecoration::BuiltIn(builtin)) = input.decoration() {
+            if types::contains_16_bit_scalar(&input.ty) {
+                constructor.builder.enable_capability(spirv::Capability::StorageInputOutput16);
+            }
             // WGSL's `@builtin(position)` is stage-aware (vertex-out vs
             // fragment-in), so the Wyn frontend lets either `position` or
             // `frag_coord` parse to `BuiltIn::Position`/`BuiltIn::FragCoord`
@@ -205,6 +211,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                 interfaces.push(var_id);
             }
         } else if let Some(br) = input.uniform_binding() {
+            if types::contains_16_bit_scalar(&input.ty) {
+                constructor
+                    .builder
+                    .enable_capability(spirv::Capability::UniformAndStorageBuffer16BitAccess);
+            }
             // `#[uniform(set, binding)]` → Block-decorated struct in
             // Uniform storage class. A scalar/vector uniform is a
             // single-member `{value}` block; a record uniform's fields
@@ -306,6 +317,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // decorate it `NonWritable` twice (spirv-val rejects).
             interfaces.push(var_id);
         } else {
+            if types::contains_16_bit_scalar(&input.ty) {
+                constructor.builder.enable_capability(spirv::Capability::StorageInputOutput16);
+            }
             // Regular input with location
             let loc = input
                 .decoration()
@@ -333,7 +347,12 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
-        if let Some(br) = output.storage_binding() {
+        let storage_binding = output.storage_binding();
+        if storage_binding.is_none() && types::contains_16_bit_scalar(&output.ty) {
+            constructor.builder.enable_capability(spirv::Capability::StorageInputOutput16);
+        }
+
+        if let Some(br) = storage_binding {
             let storage_use = constructor.storage_use(br);
             let var_id =
                 constructor.create_storage_buffer(&output.ty, br.set, br.binding, storage_use.writable)?;

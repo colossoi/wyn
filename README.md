@@ -677,9 +677,11 @@ Use `cargo test --workspace` for the full Rust suite. All SPIR-V testfiles in `t
 
 ### Types
 
-- **Primitives**: `i32`, `u32`, `f32`, `bool`
+- **Primitives**: `i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/`u64`,
+  `f16`/`f32`/`f64`, `bool`
 - **Arrays**: `[N]T` for fixed size, `[]T` for inferred size
-- **Vectors**: `vec2f32`, `vec3f32`, `vec4f32` (SPIR-V types)
+- **Vectors**: `vec2T`, `vec3T`, and `vec4T`, including `vec2f16`,
+  `vec3f16`, and `vec4f16`
 - **Matrices**: `mat2f32`, `mat3f32`, `mat4f32`
 - **Tuples**: `(T1, T2, ...)`
 - **Functions**: `T1 -> T2`

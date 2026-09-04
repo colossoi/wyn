@@ -147,6 +147,23 @@ fn type_f32() {
 }
 
 #[test]
+fn type_f16_and_vector_family() {
+    let mut e = TypeEmitter::new();
+    assert_eq!(e.type_to_wgsl(&scalar_ty(TypeName::Float(16))).unwrap(), "f16");
+    for size in 2..=4 {
+        let ty = PolyType::Constructed(
+            TypeName::Vec,
+            vec![
+                scalar_ty(TypeName::Float(16)),
+                PolyType::Constructed(TypeName::Size(size), vec![]),
+            ],
+        );
+        assert_eq!(e.type_to_wgsl(&ty).unwrap(), format!("vec{size}<f16>"));
+    }
+    assert!(e.uses_f16());
+}
+
+#[test]
 fn type_i32() {
     let mut e = TypeEmitter::new();
     assert_eq!(e.type_to_wgsl(&scalar_ty(TypeName::Int(32))).unwrap(), "i32");
@@ -315,6 +332,20 @@ fn compile_to_wgsl(source: &str) -> error::Result<String> {
 fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
     let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
     lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::U64_EMULATION)
+}
+
+#[test]
+fn f16_scalar_and_vectors_lower_to_valid_wgsl() {
+    let source = r#"
+entry half_vectors(xs: []vec4f16) []vec4f16 =
+  map(|x: vec4f16| x + @[1.0f16, 2.0f16, 3.0f16, 4.0f16], xs)
+"#;
+
+    let wgsl = compile_to_wgsl(source).expect("f16 must lower to WGSL");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("enable f16;"));
+    assert!(wgsl.contains("1.0h"));
+    assert!(wgsl.contains("vec4<f16>"));
 }
 
 #[test]
