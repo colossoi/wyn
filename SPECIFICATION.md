@@ -1569,10 +1569,9 @@ adding type annotations to the loop parameter can resolve this.
 
 ### Size Coercion
 
-Size coercion, written with `:>`, performs a runtime-checked
-coercion of one size to another. It is the escape hatch from the
-size type system — useful when a value has an unknown size that the
-programmer knows is equal to some named size:
+Size coercion, written with `:>`, checks at runtime that one size equals
+another. It is used when a value has an unknown size that the programmer
+knows is equal to some named size:
 
 ```wyn
 def take_n<A>(n: i64, xs: []A) [n]A =

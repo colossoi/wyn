@@ -276,7 +276,7 @@ publication state is rewritten to name them.
 | **`plan_logical_resources`** | `plan_direct_stage_prelude` | When neither earlier planner succeeds, select at most one cost-eligible stage-invariant scalar frontier for a direct shader stage |
 | **`plan_logical_resources`** | `materialize_stage_prelude` | When `plan_direct_stage_prelude` succeeds, create its scalar handoff entry, rewrite the stage prefix, then restart the fixpoint; otherwise residency is complete |
 
-The semantic EGIR order is load-bearing:
+The semantic EGIR order must be preserved:
 
 - **`from_tlc` before `reify_soacs`** - conversion constructs every declared output route; reification then links those routes against the completed graph before constructing semantic SOAC state.
 - **`reify_soacs` before `optimize_semantic_operations`** - fusion legality depends on explicit domains, canonical resource summaries, semantic operation IDs, effects, and dependency edges.
@@ -323,7 +323,7 @@ construction boundary; there is no later resource-verification pass.
 | **`plan`** | `reconcile_program_calls` | After every internal boundary is stable, reconcile calls in functions, entries, and constants through the canonical call-binding API; extern declarations retain their explicit ABI |
 | **`plan`** | `verify_physical::check` | Validate physical types and irreducible cross-arena links: parameter bindings, returns, calls, and SOAC operand metadata |
 
-The staged order is load-bearing:
+The staged order must be preserved:
 
 - **Filter storage construction before `finalize_staged_ir`** — direct
   publication and residency materialization derive and check capacity sizes
@@ -505,7 +505,7 @@ is independent.
 - **Parallel `Scatter` → no hard prerequisite**, but the duplicate-
   index semantics ("last write wins" sequentially) become racy in
   parallel. Either accept the race (matches Futhark's documented
-  behavior) or gate on atomic-store availability.
+  behavior) or require atomic-store support.
 
 ### View Buffer Provenance
 
