@@ -390,6 +390,30 @@ pub(crate) fn apply_type_substitution(ty: &Type<TypeName>, subst: &TypeSubstitut
     }
 }
 
+/// Extend a specialization substitution by structurally matching an expected
+/// polymorphic type against an actual type. All constructed arguments are
+/// visited, so representation/resource slots participate exactly like element
+/// and size variables.
+pub(crate) fn extend_type_substitution(
+    expected: &Type<TypeName>,
+    actual: &Type<TypeName>,
+    subst: &mut TypeSubstitution,
+) {
+    match (expected, actual) {
+        (Type::Variable(id), concrete) => {
+            subst.insert(*id, concrete.clone());
+        }
+        (Type::Constructed(expected_name, expected_args), Type::Constructed(actual_name, actual_args))
+            if expected_name == actual_name && expected_args.len() == actual_args.len() =>
+        {
+            for (expected, actual) in expected_args.iter().zip(actual_args) {
+                extend_type_substitution(expected, actual, subst);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Count the arity of a function type by counting the number of arrow constructors.
 /// For `A -> B -> C`, returns 2.
 /// For non-function types, returns 0.

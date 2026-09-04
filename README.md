@@ -608,7 +608,9 @@ sub-passes don't pattern-match on args indices directly.
 | `Existential(vars)` | t | — | — | Bound size-var names in the variant payload; inner type in args[0] |
 | `Named(s)`, `Size(n)`, `SizeVar(s)`, `UserVar(s)` | — | — | — | Nullary; data carried in the variant payload |
 | `SizePlaceholder`, `AddressPlaceholder`, `ArrayVariant{View,Composite,Virtual,Bounded}`, `Pointer{Function,Input,Output,Storage}` | — | — | — | Nullary marker types used only as args of other variants |
-| `Texture2D`, `Sampler`, `StorageTexture` | — | — | — | Nullary opaque GPU handles. Format/access for storage textures live on `EntryInput.storage_image_binding` (per-param), not on the language-level type |
+| `Texture2D`, `Sampler` | — | — | — | Nullary opaque GPU handles. Their bindings live on entry-interface metadata |
+| `StorageTexture` | buffer/region | — | — | Compile-time-only storage-image handle. Its hidden buffer slot is pinned and specialized like an array view, then erased before SSA |
+| `RenderTarget` | color | resource | — | Source spelling is `render_target<C>`; the hidden resource slot flows through inference, aggregates, and helper specialization so stage extraction can select the target without a value-provenance side table |
 
 ## Example Program
 

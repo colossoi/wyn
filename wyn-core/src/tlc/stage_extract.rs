@@ -10,9 +10,9 @@ use super::data;
 use super::partial_eval::PartialEvaled;
 use super::run::UnpinnedPolymorphic;
 use super::{
-    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
-    ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
-    WalkDecision,
+    apply_type_substitution, clone_term_with_fresh_ids, curried_function_type, extend_type_substitution,
+    Def, DefMeta, EntryPoint, Lambda, Program, ProgramParts, RewriteDecision, Term, TermIdSource, TermKind,
+    TermRewriter, TermVisitor, TypeSubstitution, VarRef, WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -24,7 +24,7 @@ use crate::interface::{self, Attribute, EntryKind};
 use crate::op;
 use crate::pipeline_descriptor;
 use crate::types;
-use crate::types::{Diet, Type, TypeName, TypeScheme};
+use crate::types::{Diet, Type, TypeExt, TypeName, TypeScheme};
 use crate::BindingRef;
 use crate::{LookupMap, LookupSet, SymbolId, SymbolTable};
 
@@ -162,7 +162,7 @@ fn inline_stage_helpers(
         active: LookupSet::new(),
     }
     .rewrite_owned(term);
-    DeadTargetContainerEliminator { term_ids }.rewrite_owned(term)
+    normalize_static_resource_aggregates(term, term_ids)
 }
 
 struct StageHelperInliner<'a> {
@@ -191,26 +191,39 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
                     .filter(|candidate| candidate.params.len() == args.len())
                     .cloned()
                     .map(|candidate| {
-                        let carries_render_target =
-                            args.iter().any(|argument| is_render_target_type(&argument.ty));
-                        (*symbol, candidate, false, carries_render_target)
+                        let carries_static_resource =
+                            args.iter().any(|argument| contains_static_resource_type(&argument.ty));
+                        (*symbol, candidate, false, carries_static_resource)
                     }),
                 _ => None,
             },
             _ => None,
         };
-        let Some((symbol, candidate, is_constant, carries_render_target)) = candidate else {
+        let Some((symbol, candidate, is_constant, carries_static_resource)) = candidate else {
             return (term, RewriteDecision::Unchanged);
         };
         if !self.active.insert(symbol) {
             return (term, RewriteDecision::Unchanged);
         }
-        let params = candidate.params.clone();
-        let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
+        let mut params = candidate.params.clone();
+        let mut body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
         let Term { id, ty, span, kind } = term;
         let mut replacement = match kind {
             TermKind::Var(VarRef::Symbol(_)) => body,
             TermKind::App { args, .. } => {
+                // This is the same structural specialization used by the
+                // monomorphizer. Applying it while exposing a stage helper
+                // preserves hidden array/resource slots in the cloned body.
+                let mut subst = TypeSubstitution::new();
+                for ((_, param_ty), argument) in params.iter().zip(&args) {
+                    extend_type_substitution(param_ty, &argument.ty, &mut subst);
+                }
+                if !subst.is_empty() {
+                    for (_, param_ty) in &mut params {
+                        *param_ty = apply_type_substitution(param_ty, &subst);
+                    }
+                    body.rewrite_types(self.term_ids, &mut |ty| apply_type_substitution(ty, &subst));
+                }
                 super::inline::build_inline_lets(&params, args, body, span, self.term_ids)
             }
             _ => unreachable!(),
@@ -225,7 +238,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         // those helper chains before target_load/target_sample rewriting.
         // Active-call tracking leaves a recursive source edge intact instead
         // of recursing forever.
-        if is_constant || carries_render_target {
+        if is_constant || carries_static_resource {
             replacement = self.rewrite_owned(replacement);
         }
         self.active.remove(&symbol);
@@ -233,35 +246,63 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
     }
 }
 
-/// Helper inlining can expose an unused record/tuple that retains a render
-/// target. Remove structurally pure instances before capture discovery: render
-/// targets have no shader-value representation, and counting the dead RHS as a
-/// use would synthesize a texture interface for a value the stage never reads.
-struct DeadTargetContainerEliminator<'a> {
+/// Scalar-replace structural aggregates containing compile-time-only resource
+/// leaves. Such leaves have no shader value representation, while sibling
+/// fields (for example an array view captured beside a render target) still do.
+/// Repeating to a fixed point also removes projections exposed by substitution.
+fn normalize_static_resource_aggregates(mut term: Term, term_ids: &mut TermIdSource) -> Term {
+    loop {
+        let (rewritten, changed) =
+            StaticResourceAggregateNormalizer { term_ids }.rewrite_owned_tracked(term);
+        term = rewritten;
+        if !changed {
+            return term;
+        }
+    }
+}
+
+struct StaticResourceAggregateNormalizer<'a> {
     term_ids: &'a mut TermIdSource,
 }
 
-impl TermRewriter<data::Empty, data::Empty> for DeadTargetContainerEliminator<'_> {
+impl TermRewriter<data::Empty, data::Empty> for StaticResourceAggregateNormalizer<'_> {
     fn next_term_id(&mut self) -> super::TermId {
         self.term_ids.next_id()
     }
 
     fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
-        let removable = matches!(
-            &term.kind,
-            TermKind::Let { name, name_ty, rhs, body }
-                if !is_render_target_type(name_ty)
-                    && contains_render_target_type(name_ty)
-                    && is_structural_value(rhs)
-                    && !referenced_symbols(body).contains(name)
-        );
-        if !removable {
-            return (term, RewriteDecision::Unchanged);
+        match term.kind {
+            TermKind::Let {
+                name,
+                name_ty,
+                rhs,
+                body,
+            } if !is_static_resource_type(&name_ty)
+                && contains_static_resource_type(&name_ty)
+                && is_structural_value(&rhs) =>
+            {
+                let replacement = *rhs;
+                let body = super::subst::substitute_with(
+                    *body,
+                    name,
+                    &mut |occurrence, ids| {
+                        let mut value = clone_term_with_fresh_ids(&replacement, ids);
+                        value.span = occurrence.span;
+                        value
+                    },
+                    self.term_ids,
+                );
+                (body, RewriteDecision::Changed)
+            }
+            TermKind::TupleProj { tuple, idx } if matches!(&tuple.kind, TermKind::Tuple(values) if values.iter().all(is_structural_value)) =>
+            {
+                let TermKind::Tuple(mut values) = tuple.kind else {
+                    unreachable!()
+                };
+                (values.remove(idx), RewriteDecision::Changed)
+            }
+            kind => (Term { kind, ..term }, RewriteDecision::Unchanged),
         }
-        let TermKind::Let { body, .. } = term.kind else {
-            unreachable!()
-        };
-        (*body, RewriteDecision::Changed)
     }
 }
 
@@ -523,7 +564,7 @@ fn extract_root(
 
                 let (vertex_external, vertex_external_decls, vertex_substitutions, vertex_target_reads) =
                     stage_captures(
-                        &vertex_lambda.body,
+                        &vertex_lambda,
                         &root_lambda,
                         root_entry,
                         &shape.computed,
@@ -531,14 +572,14 @@ fn extract_root(
                         &shape.targets,
                         Some(operation.target_symbol),
                         symbols,
-                    );
+                    )?;
                 let (
                     fragment_external,
                     fragment_external_decls,
                     fragment_substitutions,
                     fragment_target_reads,
                 ) = stage_captures(
-                    &fragment_lambda.body,
+                    &fragment_lambda,
                     &root_lambda,
                     root_entry,
                     &shape.computed,
@@ -546,7 +587,7 @@ fn extract_root(
                     &shape.targets,
                     Some(operation.target_symbol),
                     symbols,
-                );
+                )?;
 
                 stages.push(build_vertex_stage(
                     definition,
@@ -778,7 +819,7 @@ fn root_shape<'a>(
     let mut next_target_binding = next_binding;
     let mut target_bindings = LookupMap::new();
     for ((_, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
-        let Some(color_ty) = render_target_color_type(ty) else {
+        let Some(color_ty) = ty.as_render_target().map(|target| target.color) else {
             continue;
         };
         target_bindings.insert(declaration.name.clone(), next_target_binding);
@@ -813,7 +854,7 @@ fn graphics_operation<'a>(
     let raster_symbol = direct_symbol(shade_args.get(target_index + 1)?)?;
     let target = targets.get(&target_symbol)?;
     let target_name = target.name.clone();
-    let target_color_ty = render_target_color_type(&target.ty)?.clone();
+    let target_color_ty = target.ty.as_render_target()?.color.clone();
     let raster_term = rasters.remove(&raster_symbol)?;
     Some(GraphicsOperation {
         raster_term,
@@ -971,12 +1012,20 @@ fn is_render_target_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
 }
 
-fn contains_render_target_type(ty: &Type) -> bool {
+fn is_static_resource_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Constructed(TypeName::RenderTarget | TypeName::StorageTexture, _)
+    )
+}
+
+fn contains_static_resource_type(ty: &Type) -> bool {
     match ty {
-        Type::Constructed(TypeName::RenderTarget, _) => true,
-        Type::Constructed(TypeName::Record(_) | TypeName::Tuple(_), components) => {
-            components.iter().any(contains_render_target_type)
-        }
+        _ if is_static_resource_type(ty) => true,
+        Type::Constructed(
+            TypeName::Record(_) | TypeName::Tuple(_) | TypeName::Existential(_),
+            components,
+        ) => components.iter().any(contains_static_resource_type),
         _ => false,
     }
 }
@@ -1480,13 +1529,39 @@ fn integer_constant(term: &Term) -> Option<i64> {
         _ => None,
     }
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct TargetRead {
     color_ty: Type,
     leaves: Vec<(SymbolId, Type)>,
 }
 
-type TargetReads = LookupMap<SymbolId, TargetRead>;
+#[derive(Clone, Default)]
+struct TargetReads {
+    /// Retained for root-operation aliases and dead static-value cleanup.
+    by_symbol: LookupMap<SymbolId, TargetRead>,
+    /// Shader read lowering is keyed by the hidden type-level resource slot,
+    /// not by a value-provenance side table.
+    by_resource: LookupMap<Type, TargetRead>,
+}
+
+impl TargetReads {
+    fn insert(&mut self, symbol: SymbolId, target_ty: &Type, read: TargetRead) -> Option<()> {
+        let resource = target_ty
+            .as_render_target()
+            .map(|target| target.resource)
+            .expect("target capture must carry a hidden resource type")
+            .clone();
+        if self.by_resource.get(&resource).is_some_and(|existing| existing != &read) {
+            // As with array views, one type-level resource variable cannot
+            // denote two distinct static descriptors. Refuse the root shape
+            // instead of silently selecting either target.
+            return None;
+        }
+        self.by_symbol.insert(symbol, read.clone());
+        self.by_resource.entry(resource).or_insert(read);
+        Some(())
+    }
+}
 type ExternalSubstitutions = LookupMap<(SymbolId, Vec<usize>), (SymbolId, Type)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1555,7 +1630,7 @@ fn collect_target_origins(term: &Term, origins: &mut TargetOrigins) {
 }
 
 fn target_origins(body: &Term, reads: &TargetReads) -> TargetOrigins {
-    let mut origins = known_target_origins(reads.keys().copied());
+    let mut origins = known_target_origins(reads.by_symbol.keys().copied());
     collect_target_origins(body, &mut origins);
     origins
 }
@@ -1572,7 +1647,7 @@ type StageCaptures = (
 );
 
 fn stage_captures(
-    body: &Term,
+    callback: &Lambda,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
@@ -1580,12 +1655,17 @@ fn stage_captures(
     targets: &LookupMap<SymbolId, TargetValue>,
     output_target: Option<SymbolId>,
     symbols: &mut SymbolTable,
-) -> StageCaptures {
-    let used = referenced_symbols(body);
+) -> Option<StageCaptures> {
+    // A generated stage is a closure over the unified root. Reuse closure
+    // conversion's scope-aware free-variable analysis for its logical capture
+    // set; representation lowering below decides how each typed capture crosses
+    // the stage ABI.
+    let bound = callback.params.iter().map(|(symbol, _)| *symbol).collect();
+    let used = captured_symbols(&callback.body, &bound, symbols);
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
-    let mut target_reads = LookupMap::new();
+    let mut target_reads = TargetReads::default();
     append_root_captures(
         &used,
         root_lambda,
@@ -1596,7 +1676,7 @@ fn stage_captures(
         &mut substitutions,
     );
     append_computed_captures(
-        body,
+        &callback.body,
         computed,
         computed_origins,
         symbols,
@@ -1612,8 +1692,22 @@ fn stage_captures(
         &mut params,
         &mut declarations,
         &mut target_reads,
-    );
-    (params, declarations, substitutions, target_reads)
+    )?;
+    Some((params, declarations, substitutions, target_reads))
+}
+
+fn captured_symbols(
+    term: &Term,
+    bound: &LookupSet<SymbolId>,
+    symbols: &SymbolTable,
+) -> LookupSet<SymbolId> {
+    super::defunctionalize::compute_free_vars(term, bound, &LookupSet::new(), &LookupSet::new(), symbols)
+        .into_iter()
+        .filter_map(|term| match term.kind {
+            TermKind::Var(VarRef::Symbol(symbol)) => Some(symbol),
+            _ => None,
+        })
+        .collect()
 }
 
 fn referenced_symbols(term: &Term) -> LookupSet<SymbolId> {
@@ -1718,7 +1812,7 @@ fn append_target_captures(
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
     target_reads: &mut TargetReads,
-) {
+) -> Option<()> {
     let mut captures = targets
         .iter()
         .filter(|(symbol, _)| used.contains(symbol) && Some(**symbol) != output_target)
@@ -1728,11 +1822,14 @@ fn append_target_captures(
 
     for (old_symbol, target) in captures {
         if let Some(read) = shared.get(&target.name).cloned() {
-            target_reads.insert(*old_symbol, read);
+            target_reads.insert(*old_symbol, &target.ty, read)?;
             continue;
         }
 
-        let color_ty = render_target_color_type(&target.ty)
+        let color_ty = target
+            .ty
+            .as_render_target()
+            .map(|target| target.color)
             .expect("target capture must retain its render_target color type")
             .clone();
         let mut leaves = Vec::new();
@@ -1757,15 +1854,9 @@ fn append_target_captures(
         }
         let read = TargetRead { color_ty, leaves };
         shared.insert(target.name.clone(), read.clone());
-        target_reads.insert(*old_symbol, read);
+        target_reads.insert(*old_symbol, &target.ty, read)?;
     }
-}
-
-fn render_target_color_type(target: &Type) -> Option<&Type> {
-    match target {
-        Type::Constructed(TypeName::RenderTarget, args) if args.len() == 1 => args.first(),
-        _ => None,
-    }
+    Some(())
 }
 
 fn target_read_type() -> Type {
@@ -1856,11 +1947,11 @@ fn build_compute_stage(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let used = referenced_symbols(operation.rhs);
+    let used = captured_symbols(operation.rhs, &LookupSet::new(), symbols);
     let mut params = Vec::new();
     let mut declarations = Vec::new();
     let mut substitutions = LookupMap::new();
-    let mut target_reads = LookupMap::new();
+    let mut target_reads = TargetReads::default();
     append_root_captures(
         &used,
         root_lambda,
@@ -1887,7 +1978,7 @@ fn build_compute_stage(
         &mut params,
         &mut declarations,
         &mut target_reads,
-    );
+    )?;
 
     let body = clone_term_with_fresh_ids(operation.rhs, term_ids);
     let target_origins = target_origins(&body, &target_reads);
@@ -2047,11 +2138,10 @@ impl TermRewriter<data::Empty, data::Empty> for ExternalValueRewriter<'_> {
         if args.len() != 3 || (id != self.target_load && id != self.target_sample) {
             return (term, RewriteDecision::Unchanged);
         }
-        let Some(TargetOrigin::Target(target_symbol)) = target_origin(&args[0], &self.target_origins)
-        else {
+        let Some(resource) = args[0].ty.as_render_target().map(|target| target.resource) else {
             return (term, RewriteDecision::Unchanged);
         };
-        let Some(read) = self.target_reads.get(&target_symbol).cloned() else {
+        let Some(read) = self.target_reads.by_resource.get(resource).cloned() else {
             return (term, RewriteDecision::Unchanged);
         };
         let replacement = if id == self.target_load {

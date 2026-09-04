@@ -14,6 +14,7 @@ mod closure_convert;
 mod hof_specialize;
 mod lower_calls;
 
+pub(crate) use closure_convert::compute_free_vars;
 pub(crate) use hof_specialize::verify_hof_specialized;
 
 /// TLC whose closure values and SOAC environments are explicit.

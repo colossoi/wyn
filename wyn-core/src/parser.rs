@@ -891,6 +891,15 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Render targets, like storage images, carry a hidden static resource
+        // slot. Source syntax supplies only the color type; inference fills
+        // and propagates the resource slot.
+        if let Type::Constructed(TypeName::RenderTarget, args) = &mut base {
+            if args.len() == 1 {
+                args.push(Type::Constructed(TypeName::AddressPlaceholder, vec![]));
+            }
+        }
+
         // Type application loop: keep applying type arguments
         // Grammar: type_application ::= type type_arg | "*" type
         //          type_arg         ::= "[" [dim] "]" | type

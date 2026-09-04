@@ -3482,6 +3482,158 @@ entry render_target_record_helper(scene: render_target<f32>,
 }
 
 #[test]
+fn unified_fragment_helper_chain_can_load_render_target_packed_in_record() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+type inputs = { scene: render_target<f32> }
+
+def read_scene(value: inputs) f32 =
+  target_load(value.scene, @[0i32, 0i32], 0u32)
+
+def lighting(value: inputs) f32 =
+  read_scene(value)
+
+def resolve(value: inputs, fragment: fragment_invocation<()>) f32 =
+  lighting(value)
+
+entry reproduce(scene: render_target<f32>,
+                surface: render_target<f32>) render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      ())) in
+  shade(surface, raster, resolve({ scene = scene }, _))
+"#,
+            )
+            .expect("a render target remains visible through a record-valued helper chain");
+            assert_naga_accepts_spirv(&lowered.spirv);
+        })
+        .expect("spawn record-packed render-target helper-chain regression")
+        .join()
+        .expect("record-packed render-target helper-chain regression panicked");
+}
+
+#[test]
+fn unified_fragment_helper_chain_can_mix_render_target_and_computed_array_in_record() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let lowered = compile_thru_spirv(
+                r#"
+type inputs = {
+  scene: render_target<f32>,
+  work: []f32,
+}
+
+def read_inputs(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
+  let xy = @[i32(fragment.position.x), i32(fragment.position.y)]
+  let original = target_load(value.scene, xy, 0u32)
+  let filtered = value.work[i32(fragment.position.x) % length(value.work)] in
+  @[original, filtered, 0.0, 1.0]
+
+def lighting(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
+  read_inputs(value, fragment)
+
+def resolve(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
+  lighting(value, fragment)
+
+entry reproduce(coords: []vec2i32, scene: render_target<f32>,
+                surface: render_target<vec4f32>)
+    ([]f32, render_target<vec4f32>) =
+  let work = map(
+    |coord: vec2i32| target_load(scene, coord, 0u32) * 0.5,
+    coords)
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      ()))
+  let surface1 = shade(
+    surface, raster,
+    resolve({ scene = scene, work = work }, _)) in
+  (work, surface1)
+"#,
+            )
+            .expect("a fragment helper record can mix a render target and computed array");
+            assert_naga_accepts_spirv(&lowered.spirv);
+        })
+        .expect("spawn mixed render-target and computed-array record regression")
+        .join()
+        .expect("mixed render-target and computed-array record regression panicked");
+}
+
+#[test]
+fn unified_fragment_helper_record_keeps_equal_colored_targets_distinct() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+type inputs = {
+  left: render_target<f32>,
+  right: render_target<f32>,
+}
+
+def read_inputs(value: inputs) vec4f32 =
+  @[target_load(value.left, @[0i32, 0i32], 0u32),
+    target_load(value.right, @[0i32, 0i32], 0u32),
+    0.0,
+    1.0]
+
+def resolve(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
+  read_inputs(value)
+
+entry reproduce(left: render_target<f32>,
+                right: render_target<f32>,
+                surface: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      ())) in
+  shade(surface, raster, resolve({ left = left, right = right }, _))
+"#;
+            let lowered = compile_thru_spirv(source)
+                .expect("equal-colored render targets retain separate static identities");
+            assert_naga_accepts_spirv(&lowered.spirv);
+
+            let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+                panic!("graphics pipeline")
+            };
+            for resource in ["left", "right"] {
+                assert!(graphics.bindings.iter().any(|binding| {
+                    matches!(
+                        binding,
+                        pipeline_descriptor::Binding::Texture {
+                            resource: Some(name),
+                            ..
+                        } if name == resource
+                    )
+                }));
+            }
+
+            let wgsl = lower_ssa_to_wgsl(
+                compile_thru_ssa(source).expect("lower distinct targets to SSA for WGSL"),
+            )
+            .expect("lower distinct targets to WGSL");
+            assert!(wgsl.contains("textureLoad(w_left"), "{wgsl}");
+            assert!(wgsl.contains("textureLoad(w_right"), "{wgsl}");
+        })
+        .expect("spawn distinct render-target identity regression")
+        .join()
+        .expect("distinct render-target identity regression panicked");
+}
+
+#[test]
 fn unified_fragment_discards_unused_record_containing_render_target() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)

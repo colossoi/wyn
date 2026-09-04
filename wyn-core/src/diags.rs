@@ -193,17 +193,19 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Texture2D => "texture2d".to_string(),
         TypeName::Sampler => "sampler".to_string(),
         TypeName::StorageTexture => "storage_image".to_string(),
-        TypeName::Raster
-        | TypeName::Vertex
-        | TypeName::FragmentInvocation
-        | TypeName::RenderTarget
-        | TypeName::FragmentOutput => {
+        TypeName::Raster | TypeName::Vertex | TypeName::FragmentInvocation | TypeName::FragmentOutput => {
             if args.len() == 1 {
                 format!("{}<{}>", name, format_type(&args[0]))
             } else {
                 format!("{}<?>", name)
             }
         }
+        // The second render-target argument is an internal resource identity,
+        // not part of source syntax or user-facing diagnostics.
+        TypeName::RenderTarget => args
+            .first()
+            .map(|color| format!("{}<{}>", name, format_type(color)))
+            .unwrap_or_else(|| format!("{}<?>", name)),
         TypeName::VertexInvocation | TypeName::Draw => name.to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }

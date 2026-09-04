@@ -353,7 +353,10 @@ pub enum TypeName {
     FragmentInvocation,
     /// Opaque direct, indexed, or indirect draw description.
     Draw,
-    /// Opaque render target with color shape `C`.
+    /// Opaque render target with color shape `C` and one hidden static
+    /// resource argument. The resource slot is inferred and propagated like
+    /// an array view's backing-buffer slot; source syntax remains
+    /// `render_target<C>`.
     RenderTarget,
     /// Fragment color, explicit depth, or discard result carrying color shape `C`.
     FragmentOutput,
@@ -552,6 +555,13 @@ pub struct ArrayStorage<'a> {
     pub region: &'a Type,
 }
 
+/// Static identity and color shape carried by a render-target type.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderTargetType<'a> {
+    pub color: &'a Type,
+    pub resource: &'a Type,
+}
+
 /// Extension trait for common type operations.
 ///
 /// Centralizes type queries so passes don't need to pattern-match
@@ -564,6 +574,7 @@ pub struct ArrayStorage<'a> {
 /// | `Vec`   | `args[0]` | `args[1..]` (rank 1)               | —                       |
 /// | `Mat`   | `args[0]` | `args[1..]` (columns, rows)        | —                       |
 /// | `Array` | `args[0]` | `args[2..args.len()-1]`            | variant, trailing region |
+/// | `RenderTarget` | color in `args[0]` | —                 | resource in `args[1]`    |
 ///
 /// Array rank is implicit: `args.len() - 3`. Current constructors produce
 /// rank-1 arrays, while the representation and tensor view support arbitrary
@@ -574,6 +585,9 @@ pub trait TypeExt {
 
     /// Return the runtime storage metadata of a structurally valid array.
     fn array_storage(&self) -> Option<ArrayStorage<'_>>;
+
+    /// View this type as a structurally valid render target.
+    fn as_render_target(&self) -> Option<RenderTargetType<'_>>;
 
     /// Check if this type is an array type
     fn is_array(&self) -> bool;
@@ -690,6 +704,16 @@ impl TypeExt for Type {
             return None;
         }
         Some(ArrayStorage { variant, region })
+    }
+
+    fn as_render_target(&self) -> Option<RenderTargetType<'_>> {
+        let Type::Constructed(TypeName::RenderTarget, args) = self else {
+            return None;
+        };
+        let [color, resource] = args.as_slice() else {
+            return None;
+        };
+        Some(RenderTargetType { color, resource })
     }
 
     fn is_array(&self) -> bool {
@@ -1697,11 +1721,14 @@ pub fn format_type(ty: &Type) -> String {
                 TypeName::Raster
                     | TypeName::Vertex
                     | TypeName::FragmentInvocation
-                    | TypeName::RenderTarget
                     | TypeName::FragmentOutput
             ) && args.len() == 1 =>
         {
             format!("{}<{}>", name, format_type(&args[0]))
+        }
+        // Hide the internal resource-identity slot from source-level display.
+        Type::Constructed(TypeName::RenderTarget, args) if args.len() == 2 => {
+            format!("render_target<{}>", format_type(&args[0]))
         }
         Type::Constructed(name, args) if args.is_empty() => format!("{}", name),
         Type::Constructed(name, args) => {

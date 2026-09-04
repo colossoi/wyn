@@ -15,8 +15,8 @@ use super::data::Empty;
 use super::pin_entry_buffers::Polymorphic;
 use super::soa::SoaNormalized;
 use super::{
-    apply_type_substitution, ArrayExpr, Def, DefMeta, Program, RewriteDecision, Term, TermId, TermIdSource,
-    TermKind, TermRewriter, TypeSubstitution, VarRef,
+    apply_type_substitution, extend_type_substitution, ArrayExpr, Def, DefMeta, Program, RewriteDecision,
+    Term, TermId, TermIdSource, TermKind, TermRewriter, TypeSubstitution, VarRef,
 };
 use crate::ast::TypeName;
 use crate::error::CompilerError;
@@ -346,7 +346,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         let mut subst = TypeSubstitution::new();
         let (param_types, _) = split_function_type(info.polymorphic_type());
         for (param_ty, arg_ty) in param_types.iter().zip(arg_types) {
-            Self::unify_for_subst(param_ty, arg_ty, &mut subst);
+            extend_type_substitution(param_ty, arg_ty, &mut subst);
         }
         subst
     }
@@ -357,25 +357,8 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         concrete_type: &Type<TypeName>,
     ) -> Option<TypeSubstitution> {
         let mut subst = TypeSubstitution::new();
-        Self::unify_for_subst(info.polymorphic_type(), concrete_type, &mut subst);
+        extend_type_substitution(info.polymorphic_type(), concrete_type, &mut subst);
         (!subst.is_empty()).then_some(subst)
-    }
-
-    fn unify_for_subst(expected: &Type<TypeName>, actual: &Type<TypeName>, subst: &mut TypeSubstitution) {
-        match (expected, actual) {
-            (Type::Variable(id), concrete) => {
-                subst.insert(*id, concrete.clone());
-            }
-            (
-                Type::Constructed(expected_name, expected_args),
-                Type::Constructed(actual_name, actual_args),
-            ) if expected_name == actual_name && expected_args.len() == actual_args.len() => {
-                for (expected, actual) in expected_args.iter().zip(actual_args) {
-                    Self::unify_for_subst(expected, actual, subst);
-                }
-            }
-            _ => {}
-        }
     }
 
     fn get_or_create_specialization(&mut self, function: SymbolId, spec_key: &SpecKey) -> SymbolId {

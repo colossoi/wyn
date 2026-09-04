@@ -20,6 +20,18 @@ fn raster_formats_as_a_spellable_source_type() {
     assert_eq!(diags::format_type(&raster), "raster<f32>");
 }
 
+#[test]
+fn render_target_view_exposes_identity_but_formatting_hides_it() {
+    let resource = Type::Variable(7);
+    let target = Type::Constructed(TypeName::RenderTarget, vec![f32_ty(), resource.clone()]);
+
+    let view = target.as_render_target().expect("well-formed render target");
+    assert_eq!(view.color, &f32_ty());
+    assert_eq!(view.resource, &resource);
+    assert_eq!(format_type(&target), "render_target<f32>");
+    assert_eq!(diags::format_type(&target), "render_target<f32>");
+}
+
 fn hash_value<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
