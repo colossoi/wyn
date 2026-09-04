@@ -31,7 +31,7 @@
 (def_declaration
   name: (identifier) @local.definition)
 
-(binding_declaration
+(let_declaration
   name: (identifier) @local.definition)
 
 (extern_declaration
@@ -58,6 +58,9 @@
 (param
   name: (identifier) @local.definition)
 
+(entry_param
+  name: (identifier) @local.definition)
+
 (extern_param
   name: (identifier) @local.definition)
 
@@ -67,8 +70,13 @@
 (size_param
   (identifier) @local.definition)
 
+(type_parameter) @local.definition
+
 (let_expression
   pattern: (identifier) @local.definition)
+
+(let_expression
+  name: (identifier) @local.definition)
 
 (loop_expression
   pattern: (identifier) @local.definition)

@@ -17,6 +17,8 @@
   "match"
   "case"
   "type"
+  "type~"
+  "type^"
   "module"
   "functor"
   "open"
@@ -90,9 +92,8 @@
 
 ; Types
 [
-  (primitive_type)
-  (vec_type)
-  (mat_type)
+  (builtin_type)
+  (generic_builtin_type)
 ] @type.builtin
 
 (type_declaration
@@ -104,7 +105,7 @@
 (module_type_declaration
   name: (identifier) @type.definition)
 
-(type_variable) @type.parameter
+(type_parameter) @type.parameter
 
 (size_param
   (identifier) @type.parameter)
@@ -112,6 +113,8 @@
 [
   (param type: (identifier) @type)
   (param type: (qualified_name) @type)
+  (entry_param type: (identifier) @type)
+  (entry_param type: (qualified_name) @type)
   (extern_param type: (identifier) @type)
   (extern_param type: (qualified_name) @type)
   (def_declaration return_type: (identifier) @type)
@@ -120,8 +123,12 @@
   (entry_declaration return_type: (qualified_name) @type)
   (sig_declaration type: (identifier) @type)
   (sig_declaration type: (qualified_name) @type)
+  (sig_declaration return_type: (identifier) @type)
+  (sig_declaration return_type: (qualified_name) @type)
   (spec_sig type: (identifier) @type)
   (spec_sig type: (qualified_name) @type)
+  (spec_sig return_type: (identifier) @type)
+  (spec_sig return_type: (qualified_name) @type)
   (type_declaration definition: (identifier) @type)
   (type_declaration definition: (qualified_name) @type)
   (spec_type definition: (identifier) @type)
@@ -146,9 +153,15 @@
   (module_type_with type: (qualified_name) @type)
   (let_expression type: (identifier) @type)
   (let_expression type: (qualified_name) @type)
-  (binding_declaration type: (identifier) @type)
-  (binding_declaration type: (qualified_name) @type)
+  (let_declaration type: (identifier) @type)
+  (let_declaration type: (qualified_name) @type)
 ]
+
+(type_application
+  constructor: (identifier) @type)
+
+(type_application
+  constructor: (qualified_name) @type)
 
 (record_field_type
   name: (identifier) @variable.other.member)
@@ -156,6 +169,9 @@
 ; Functions
 (def_declaration
   name: (identifier) @function)
+
+(def_declaration
+  name: (operator_name) @function.operator)
 
 (extern_declaration
   name: (identifier) @function)
@@ -182,10 +198,13 @@
   function: (qualified_name) @function.call)
 
 ; Variables and Parameters
-(binding_declaration
+(let_declaration
   name: (identifier) @variable)
 
 (param
+  name: (identifier) @variable.parameter)
+
+(entry_param
   name: (identifier) @variable.parameter)
 
 (extern_param
@@ -204,7 +223,7 @@
   pattern: (identifier) @variable)
 
 ; Constructors
-(constructor_name) @constructor
+(constructor) @constructor
 
 ; Attributes
 (attribute_item

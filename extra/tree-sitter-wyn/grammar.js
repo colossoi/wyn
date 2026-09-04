@@ -10,10 +10,9 @@
  * `src/grammar.json` / `src/node-types.json` via `tree-sitter
  * generate` after editing.
  *
- * Not yet covered — features scaffolded in the AST but not actually
- * emitted by the parser (dead variants; add when the parser starts
- * producing them):
- *   * Type params `'~a` (SizeType) and `'^a` (LiftedType).
+ * This file intentionally follows the surface syntax accepted by the
+ * hand-written parser.  Keep the generated files in `src/` in sync by
+ * running `tree-sitter generate` after editing it.
  */
 
 const PREC = {
@@ -58,8 +57,8 @@ module.exports = grammar({
     // ============================================
 
     _declaration: $ => choice(
+      $.let_declaration,
       $.def_declaration,
-      $.binding_declaration,
       $.extern_declaration,
       $.entry_declaration,
       $.sig_declaration,
@@ -77,9 +76,10 @@ module.exports = grammar({
     // - def name(params) = expr            (function, inferred return)
     // - def name(params) type = expr       (function with return type, no colon)
     def_declaration: $ => seq(
-      optional($.attribute),
+      repeat($.attribute),
       'def',
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.operator_name)),
+      optional($.generic_params),
       choice(
         // Function form: params followed by optional return type (no colon)
         seq($.params, optional(field('return_type', $._type))),
@@ -90,23 +90,22 @@ module.exports = grammar({
       field('body', $._expression),
     ),
 
-    // Attribute-bound `def` with no body — uniform or storage buffer
-    // binding declared by attribute:
-    //   #[uniform(set=0, binding=0)] def name: type
-    //   #[storage(set=0, binding=0)] def name: type
-    binding_declaration: $ => seq(
-      $.attribute,
-      'def',
-      field('name', $.identifier),
-      ':',
-      field('type', $._type),
+    // Top-level `let` is a monomorphic value declaration. Unlike local
+    // let-expressions it does not introduce a trailing `in` body.
+    let_declaration: $ => seq(
+      repeat($.attribute),
+      'let',
+      field('name', choice($.identifier, $.operator_name)),
+      optional(seq(':', field('type', $._type))),
+      '=',
+      field('value', $._expression),
     ),
 
     // `extern` FFI declarations — a linked SPIR-V function. The
     // `#[linked("symbol")]` attribute is required.
-    //   #[linked("foo")] extern name<[n], 'a>(p: T, ...) ReturnType
+    //   #[linked("foo")] extern name<[n], A>(p: T, ...) ReturnType
     extern_declaration: $ => seq(
-      $.attribute,
+      repeat1($.attribute),
       'extern',
       field('name', $.identifier),
       optional($.generic_params),
@@ -126,20 +125,20 @@ module.exports = grammar({
       field('type', $._type),
     ),
 
-    // `<[n], [m], 'a, 'b>` generic params for sig/extern/def forms
-    // with explicit quantification.
+    // `<[n], [m], A, B>` generic parameters. Size parameters retain
+    // brackets; ordinary type parameters begin with an uppercase letter.
     generic_params: $ => seq(
       '<',
-      commaSep1(choice($.size_param, $.type_variable)),
+      commaSep1(choice($.size_param, $.type_parameter)),
       '>',
     ),
 
     // Entry requires parentheses and explicit return type (see SPECIFICATION.md)
     entry_declaration: $ => seq(
-      optional($.attribute),
       'entry',
       field('name', $.identifier),
-      $.params,
+      optional($.generic_params),
+      $.entry_params,
       optional($.attribute),  // Return type attribute
       field('return_type', $._type),  // Required
       '=',
@@ -147,16 +146,20 @@ module.exports = grammar({
     ),
 
     sig_declaration: $ => seq(
+      repeat($.attribute),
       'sig',
       field('name', choice($.identifier, $.operator_name)),
-      ':',
-      field('type', $._type),
+      optional($.generic_params),
+      choice(
+        seq(field('params', $.signature_params), field('return_type', $._type)),
+        seq(':', field('type', $._type)),
+      ),
     ),
 
     type_declaration: $ => seq(
-      'type',
+      field('lifting', choice('type', 'type~', 'type^')),
       field('name', $.identifier),
-      optional($.type_params),
+      optional($.generic_params),
       '=',
       field('definition', $._type),
     ),
@@ -165,9 +168,14 @@ module.exports = grammar({
     module_declaration: $ => seq(
       'module',
       field('name', $.identifier),
-      optional(seq(':', field('signature', $._module_type_expression))),
-      '=',
-      field('body', $.module_body),
+      choice(
+        seq(
+          ':',
+          field('signature', $._module_type_expression),
+          optional(seq('=', field('body', $._module_expression))),
+        ),
+        seq('=', field('body', $._module_expression)),
+      ),
     ),
 
     // `module type NAME = MTE` — a named module-signature binding.
@@ -184,22 +192,17 @@ module.exports = grammar({
     functor_declaration: $ => seq(
       'functor',
       field('name', $.identifier),
-      $.functor_params,
-      optional(seq(':', field('signature', $._module_type_expression))),
+      repeat1($.functor_param),
       '=',
-      field('body', $.module_body),
-    ),
-
-    functor_params: $ => seq(
-      '(',
-      commaSep1($.functor_param),
-      ')',
+      field('body', $._module_expression),
     ),
 
     functor_param: $ => seq(
+      '(',
       field('name', $.identifier),
       ':',
       field('signature', $._module_type_expression),
+      ')',
     ),
 
     module_body: $ => seq(
@@ -207,6 +210,36 @@ module.exports = grammar({
       repeat($._declaration),
       '}',
     ),
+
+    _module_expression: $ => choice(
+      $.module_body,
+      $.module_import,
+      $.module_application,
+      $.module_ascription,
+      $.qualified_name,
+      $.identifier,
+      $.parenthesized_module_expression,
+    ),
+
+    parenthesized_module_expression: $ => seq('(', $._module_expression, ')'),
+
+    module_import: $ => seq('import', field('path', $.string_literal)),
+
+    module_application: $ => prec.left(2, seq(
+      field('function', $._module_expression),
+      field('argument', choice(
+        $.module_body,
+        $.qualified_name,
+        $.identifier,
+        $.parenthesized_module_expression,
+      )),
+    )),
+
+    module_ascription: $ => prec.left(1, seq(
+      field('module', $._module_expression),
+      ':',
+      field('signature', $._module_type_expression),
+    )),
 
     // Module-type expressions: named signatures, inline `{ spec* }`
     // signatures, refinement via `with type t = T`, and arrow/functor
@@ -228,12 +261,12 @@ module.exports = grammar({
       '}',
     ),
 
-    // `MTE with qualname type_params = type`
+    // `MTE with qualname generic_params = type`
     module_type_with: $ => prec.left(seq(
       field('base', $._module_type_expression),
       'with',
       field('name', choice($.identifier, $.qualified_name)),
-      optional($.type_params),
+      optional($.generic_params),
       '=',
       field('type', $._type),
     )),
@@ -260,17 +293,19 @@ module.exports = grammar({
     spec_sig: $ => seq(
       'sig',
       field('name', choice($.identifier, $.operator_name)),
-      optional($.type_params),
-      ':',
-      field('type', $._type),
+      optional($.generic_params),
+      choice(
+        seq(field('params', $.signature_params), field('return_type', $._type)),
+        seq(':', field('type', $._type)),
+      ),
     ),
 
-    // `type NAME [type_params] [= TYPE]` — the `= TYPE` half is
+    // `type NAME [generic_params] [= TYPE]` — the `= TYPE` half is
     // optional (abstract type vs. concrete alias).
     spec_type: $ => seq(
       'type',
       field('name', $.identifier),
-      optional($.type_params),
+      optional($.generic_params),
       optional(seq('=', field('definition', $._type))),
     ),
 
@@ -290,7 +325,7 @@ module.exports = grammar({
     // or a module-expression application.
     open_declaration: $ => seq(
       'open',
-      field('module', choice($.identifier, $.qualified_name)),
+      field('module', $._module_expression),
     ),
 
     import_declaration: $ => seq(
@@ -316,30 +351,43 @@ module.exports = grammar({
       optional(seq(':', field('type', $._type))),
     ),
 
-    type_params: $ => repeat1($._type_param),
+    entry_params: $ => seq(
+      '(',
+      commaSep($.entry_param),
+      ')',
+    ),
 
-    _type_param: $ => choice(
-      $.size_param,
-      $.type_variable,
+    entry_param: $ => seq(
+      repeat($.attribute),
+      field('name', $.identifier),
+      ':',
+      field('type', $._type),
+    ),
+
+    signature_params: $ => seq(
+      '(',
+      commaSep1($.extern_param),
+      ')',
     ),
 
     size_param: $ => seq('[', $.identifier, ']'),
+
+    type_parameter: $ => /[A-Z][a-zA-Z0-9_']*/,
 
     // ============================================
     // Types
     // ============================================
 
     _type: $ => choice(
-      $.primitive_type,
       $.array_type,
-      $.vec_type,
-      $.mat_type,
       $.tuple_type,
       $.record_type,
+      $.sum_type,
       $.function_type,
+      $.type_application,
       $.unique_type,
       $.existential_type,
-      $.type_variable,
+      $.builtin_type,
       $.identifier,
       $.qualified_name,
       $.parenthesized_type,
@@ -359,11 +407,70 @@ module.exports = grammar({
       field('inner', $._type),
     ),
 
+    // First-order, fully saturated applications such as `pair<i32, bool>`,
+    // `vector<[4], f32>`, and `render_target<vec4f32>`.
+    type_application: $ => prec(3, seq(
+      field('constructor', choice($.generic_builtin_type, $.qualified_name, $.identifier)),
+      '<',
+      commaSep1($.type_argument),
+      '>',
+    )),
+
+    type_argument: $ => choice(
+      $.size_argument,
+      $._type,
+    ),
+
+    // A bracketed argument is a size argument only when it ends at the comma
+    // or closing angle. `[n]A` remains an ordinary array-type argument.
+    size_argument: $ => seq(
+      '[',
+      optional(choice($.integer_literal, $.identifier)),
+      ']',
+    ),
+
+    builtin_type: $ => choice(
+      $.primitive_type,
+      $.vec_type,
+      $.mat_type,
+      $.opaque_type,
+      $.generic_builtin_type,
+      $.graphics_state_type,
+    ),
+
     primitive_type: $ => choice(
       'i8', 'i16', 'i32', 'i64',
       'u8', 'u16', 'u32', 'u64',
       'f16', 'f32', 'f64',
       'bool',
+    ),
+
+    // Opaque resources and invocation values with no visible type argument.
+    opaque_type: $ => choice(
+      'texture2d',
+      'sampler',
+      'storage_image',
+      'vertex_invocation',
+      'draw',
+    ),
+
+    // Spellable one-argument pipeline/resource type constructors.
+    generic_builtin_type: $ => choice(
+      'vertex',
+      'raster',
+      'fragment_invocation',
+      'fragment_output',
+      'render_target',
+    ),
+
+    // Predeclared graphics-state aliases available in graphics mode.
+    graphics_state_type: $ => choice(
+      'viewport',
+      'scissor',
+      'raster_state',
+      'depth_test',
+      'blend_mode',
+      'fragment_state',
     ),
 
     // Array type binds tighter than function type
@@ -377,10 +484,10 @@ module.exports = grammar({
 
     // Vector types: vec2f32, vec3i32, etc.
     // Use token.immediate to ensure these win over identifier
-    vec_type: $ => token(prec(2, /vec[234](i32|u32|f16|f32|f64)/)),
+    vec_type: $ => token(prec(2, /vec[234](i8|i16|i32|i64|u8|u16|u32|u64|f16|f32|f64|bool)/)),
 
     // Matrix types: mat2f32, mat3x4f32, etc.
-    mat_type: $ => token(prec(2, /mat[234](x[234])?(i32|u32|f16|f32|f64)/)),
+    mat_type: $ => token(prec(2, /mat[234](x[234])?(i8|i16|i32|i64|u8|u16|u32|u64|f16|f32|f64|bool)/)),
 
     // Tuple types must have 0 (unit) or 2+ elements
     // Single element (type) is parsed as parenthesized_type
@@ -396,18 +503,34 @@ module.exports = grammar({
     ),
 
     record_field_type: $ => seq(
-      field('name', $.identifier),
+      field('name', choice($.identifier, $.integer_literal)),
       ':',
       field('type', $._type),
     ),
 
+    sum_type: $ => prec.left(seq(
+      $.sum_variant,
+      repeat(seq('|', $.sum_variant)),
+    )),
+
+    sum_variant: $ => seq(
+      field('constructor', $.constructor),
+      optional(seq('(', commaSep($._type), ')')),
+    ),
+
     function_type: $ => prec.right(seq(
-      field('param', $._type),
+      field('param', choice($._type, $.named_parameter_type)),
       '->',
       field('return', $._type),
     )),
 
-    type_variable: $ => seq("'", $.identifier),
+    named_parameter_type: $ => seq(
+      '(',
+      field('name', $.identifier),
+      ':',
+      field('type', $._type),
+      ')',
+    ),
 
     // ============================================
     // Expressions
@@ -447,12 +570,24 @@ module.exports = grammar({
 
     let_expression: $ => prec.right(seq(
       'let',
-      field('pattern', $._pattern),
-      optional(seq(':', field('type', $._type))),
+      choice(
+        seq(
+          field('pattern', $._pattern),
+          optional(seq(':', field('type', $._type))),
+        ),
+        // Local function sugar: `let f(x: T) = value in body`.
+        seq(
+          field('name', $.identifier),
+          field('params', $.params),
+        ),
+      ),
       '=',
       field('value', $._expression),
-      'in',
-      field('body', $._expression),
+      choice(
+        seq('in', field('body', $._expression)),
+        // `in` may be omitted only when the body is another let.
+        field('body', $.let_expression),
+      ),
     )),
 
     if_expression: $ => prec.right(seq(
@@ -646,6 +781,7 @@ module.exports = grammar({
     _primary_expression: $ => choice(
       $.identifier,
       $.qualified_name,
+      $.constructor_expression,
       $._literal,
       $.array_literal,
       $.vec_literal,
@@ -675,6 +811,11 @@ module.exports = grammar({
       ',',
       commaSep1($._expression),
       ')',
+    ),
+
+    constructor_expression: $ => seq(
+      field('constructor', $.constructor),
+      optional(seq('(', commaSep($._expression), ')')),
     ),
 
     record_expression: $ => seq(
@@ -724,9 +865,11 @@ module.exports = grammar({
       $.identifier,
       $.constructor_pattern,
       $.wildcard,
+      $.negative_literal_pattern,
       $._literal,
       $.unit_pattern,
       $.tuple_pattern,
+      $.vec_pattern,
       $.record_pattern,
       $.parenthesized_pattern,
     ),
@@ -746,6 +889,12 @@ module.exports = grammar({
       ')',
     ),
 
+    vec_pattern: $ => seq(
+      '@[',
+      commaSep($._pattern),
+      ']',
+    ),
+
     record_pattern: $ => seq(
       '{',
       commaSep($.record_field_pattern),
@@ -757,17 +906,14 @@ module.exports = grammar({
       optional(seq('=', field('pattern', $._pattern))),
     ),
 
-    // `Ctor pat*` — constructor applied to zero or more args. The
-    // parser distinguishes constructors from plain name bindings
-    // by the first-letter case (uppercase → constructor).
-    constructor_pattern: $ => prec.left(seq(
-      field('constructor', $.constructor_name),
-      repeat($._primary_pattern),
-    )),
+    // Anonymous-sum constructors are `#`-prefixed and take an optional
+    // parenthesized payload in expressions, patterns, and types.
+    constructor_pattern: $ => seq(
+      field('constructor', $.constructor),
+      optional(seq('(', commaSep($._pattern), ')')),
+    ),
 
-    // Uppercase-leading identifier — the syntactic signal for a
-    // constructor in pattern position.
-    constructor_name: $ => /[A-Z][a-zA-Z0-9_']*/,
+    negative_literal_pattern: $ => seq('-', choice($.integer_literal, $.float_literal)),
 
     // ============================================
     // Attributes
@@ -829,6 +975,8 @@ module.exports = grammar({
     // ============================================
 
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_']*/,
+
+    constructor: $ => token(seq('#', /[a-zA-Z_][a-zA-Z0-9_']*/)),
 
     qualified_name: $ => prec.left(1, seq(
       $.identifier,
