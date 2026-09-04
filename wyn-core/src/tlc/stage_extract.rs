@@ -789,6 +789,14 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
                 leaves.push((path.clone(), labels.join("_"), ty.clone()));
                 true
             }
+            Type::Constructed(TypeName::Record(_), _) if is_indirect_draw_command_type(ty) => {
+                // Singular indirect draws consume one command record through
+                // the same storage-buffer ABI as an element of a command
+                // array. Keep the record intact so its fields remain
+                // contiguous in the compiler-owned handoff buffer.
+                leaves.push((path.clone(), labels.join("_"), ty.clone()));
+                true
+            }
             Type::Constructed(TypeName::Record(fields), components) => {
                 if components.is_empty() {
                     return false;
@@ -825,6 +833,28 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
 
     let mut leaves = Vec::new();
     collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves).then_some(leaves)
+}
+
+fn is_indirect_draw_command_type(ty: &Type) -> bool {
+    let Type::Constructed(TypeName::Record(fields), components) = ty else {
+        return false;
+    };
+    let field_ty = |name: &str| fields.get_index(name).and_then(|index| components.get(index));
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let is_u32 = |name| field_ty(name) == Some(&u32_ty);
+
+    (fields.len() == 4
+        && is_u32("vertex_count")
+        && is_u32("instance_count")
+        && is_u32("first_vertex")
+        && is_u32("first_instance"))
+        || (fields.len() == 5
+            && is_u32("index_count")
+            && is_u32("instance_count")
+            && is_u32("first_index")
+            && field_ty("vertex_offset") == Some(&i32_ty)
+            && is_u32("first_instance"))
 }
 
 fn direct_symbol(term: &Term) -> Option<SymbolId> {
@@ -1079,14 +1109,15 @@ fn indirect_command_source(
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
 ) -> Option<(pipeline_descriptor::DrawBufferRef, u64)> {
-    let TermKind::Index { array, index } = &command.kind else {
-        return None;
-    };
-    let command_index = u32_literal(index)? as u64;
-    Some((
-        draw_buffer_source(array, root_lambda, root_entry, computed)?,
-        command_index * stride,
-    ))
+    if let TermKind::Index { array, index } = &command.kind {
+        let command_index = u32_literal(index)? as u64;
+        return Some((
+            draw_buffer_source(array, root_lambda, root_entry, computed)?,
+            command_index * stride,
+        ));
+    }
+
+    Some((draw_buffer_source(command, root_lambda, root_entry, computed)?, 0))
 }
 
 fn draw_buffer_source(
@@ -1464,7 +1495,7 @@ fn stage_captures(
         &mut substitutions,
     );
     append_computed_captures(
-        &used,
+        body,
         computed,
         symbols,
         &mut params,
@@ -1530,7 +1561,7 @@ fn append_root_captures(
 }
 
 fn append_computed_captures(
-    used: &LookupSet<SymbolId>,
+    body: &Term,
     computed: &[ComputedValue],
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
@@ -1538,10 +1569,24 @@ fn append_computed_captures(
     substitutions: &mut ExternalSubstitutions,
 ) {
     for value in computed {
-        if !used.contains(&value.symbol) {
+        let mut used_paths = LookupSet::new();
+        let mut visitor = |term: &Term| {
+            if let Some((symbol, path)) = projected_symbol_path(term) {
+                if symbol == value.symbol {
+                    used_paths.insert(path);
+                    return WalkDecision::Prune;
+                }
+            }
+            WalkDecision::Recurse
+        };
+        visitor.walk(body);
+        if used_paths.is_empty() {
             continue;
         }
         for leaf in &value.leaves {
+            if !used_paths.contains(&leaf.path) {
+                continue;
+            }
             append_external_param(
                 value.symbol,
                 &leaf.path,
@@ -1717,7 +1762,7 @@ fn build_compute_stage(
         &mut substitutions,
     );
     append_computed_captures(
-        &used,
+        operation.rhs,
         computed,
         symbols,
         &mut params,

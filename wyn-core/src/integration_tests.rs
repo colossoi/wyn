@@ -4518,6 +4518,64 @@ entry compact_and_draw(values: []vec4f32,
 }
 
 #[test]
+fn unified_root_materializes_computed_scalar_indirect_draw_command() {
+    let lowered = compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+type prepared = {
+  instances: []vec4f32,
+  command: draw_command
+}
+
+entry reproduce(values: []vec4f32,
+                target: render_target<vec4f32>) render_target<vec4f32> =
+  let prepared = {
+    instances = map(|value: vec4f32| value, values),
+    command = {
+      vertex_count = 3u32,
+      instance_count = u32(length(values)),
+      first_vertex = 0u32,
+      first_instance = 0u32
+    }
+  } in
+  let covered = rasterize_triangles(
+    indirect_draw(prepared.command),
+    |vertex|
+      let position = prepared.instances[i32(vertex.instance_index)] in
+      vertex_output(position, position)) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a computed scalar command can drive an indirect draw");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("indirect graphics pipeline")
+    };
+    let pipeline_descriptor::DrawCall::Indirect { commands, offset, .. } = &graphics.invocation.draw else {
+        panic!("draw must be indirect")
+    };
+    assert_eq!(*offset, 0);
+    let resource = commands.resource.as_ref().expect("computed scalar draw resource");
+    lowered
+        .pipeline
+        .frame_graph
+        .indirect_draws
+        .iter()
+        .find(|dependency| {
+            lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
+        })
+        .expect("computed scalar command dependency");
+}
+
+#[test]
 fn unified_root_publishes_indexed_draws() {
     let lowered = compile_thru_spirv(
         r#"
