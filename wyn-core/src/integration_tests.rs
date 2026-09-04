@@ -4613,6 +4613,145 @@ entry reproduce(values: []vec4f32,
 }
 
 #[test]
+fn unified_root_tracks_computed_projections_from_destructured_helper_result() {
+    let lowered = compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32,
+}
+
+type prepared = { values: []vec4f32, draw: draw_command }
+
+def prepare(values: []vec4f32) (prepared, []vec4f32) =
+  let output = map(|value: vec4f32| value, values) in
+  ({ values = output,
+     draw = { vertex_count = 3u32,
+              instance_count = u32(length(output)),
+              first_vertex = 0u32,
+              first_instance = 0u32 } },
+   output)
+
+entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
+    ([]vec4f32, render_target<vec4f32>) =
+  let (prepared, output) = prepare(values)
+  let raster = rasterize_triangles(
+    indirect_draw(prepared.draw),
+    |vertex|
+      let position = prepared.values[i32(vertex.instance_index)] in
+      vertex_output(position, position))
+  let target1 = shade(target, raster, |fragment| fragment.value) in
+  (output, target1)
+"#,
+    )
+    .expect("destructured projections retain their computed producer provenance");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    assert!(matches!(
+        lowered.pipeline.pipelines[0],
+        pipeline_descriptor::Pipeline::Compute(_)
+    ));
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("indirect graphics pipeline")
+    };
+    let pipeline_descriptor::DrawCall::Indirect { commands, .. } = &graphics.invocation.draw else {
+        panic!("draw must be indirect")
+    };
+    let resource = commands.resource.as_ref().expect("computed draw resource");
+    assert!(
+        lowered.pipeline.frame_graph.indirect_draws.iter().any(|dependency| {
+            lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
+        }),
+        "computed command provenance must reach the indirect-draw dependency"
+    );
+}
+
+#[test]
+fn unified_root_tracks_distinct_projected_results_across_ordered_draws() {
+    let lowered = compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32,
+}
+
+type prepared = { values: []vec4f32, draw: draw_command }
+
+def prepare(values: []vec4f32) (prepared, prepared) =
+  let first = map(|value: vec4f32| value, values)
+  let second = map(|value: vec4f32| value, values) in
+  ({ values = first,
+     draw = { vertex_count = 3u32, instance_count = u32(length(first)),
+              first_vertex = 0u32, first_instance = 0u32 } },
+   { values = second,
+     draw = { vertex_count = 3u32, instance_count = u32(length(second)),
+              first_vertex = 0u32, first_instance = 0u32 } })
+
+entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
+    render_target<vec4f32> =
+  let (first, second) = prepare(values)
+  let raster1 = rasterize_triangles(
+    indirect_draw(first.draw),
+    |vertex|
+      let position = first.values[i32(vertex.instance_index)] in
+      vertex_output(position, position))
+  let target1 = shade(target, raster1, |fragment| fragment.value)
+  let raster2 = rasterize_triangles(
+    indirect_draw(second.draw),
+    |vertex|
+      let position = second.values[i32(vertex.instance_index)] in
+      vertex_output(position, position)) in
+  shade(target1, raster2, |fragment| fragment.value)
+"#,
+    )
+    .expect("distinct projected helper results retain their call-site result type");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 3);
+    let graphics = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| match pipeline {
+            pipeline_descriptor::Pipeline::Compute(_) => None,
+            pipeline_descriptor::Pipeline::Graphics(graphics) => Some(graphics),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(graphics.len(), 2);
+
+    let command_resources = graphics
+        .iter()
+        .map(|graphics| {
+            let pipeline_descriptor::DrawCall::Indirect { commands, .. } = &graphics.invocation.draw else {
+                panic!("draw must be indirect")
+            };
+            commands.resource.as_ref().expect("computed draw resource")
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(command_resources[0], command_resources[1]);
+    assert!(command_resources.iter().all(|resource| {
+        lowered.pipeline.frame_graph.indirect_draws.iter().any(|dependency| {
+            lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == **resource
+        })
+    }));
+
+    let fragment_passes = lowered
+        .pipeline
+        .frame_graph
+        .passes
+        .iter()
+        .filter(|pass| pass.kind == pipeline_descriptor::FramePassKind::Fragment)
+        .collect::<Vec<_>>();
+    assert_eq!(fragment_passes.len(), 2);
+    assert!(!fragment_passes[1].depends_on.is_empty());
+}
+
+#[test]
 fn unified_root_publishes_indexed_draws() {
     let lowered = compile_thru_spirv(
         r#"

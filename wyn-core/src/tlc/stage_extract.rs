@@ -207,7 +207,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         }
         let params = candidate.params.clone();
         let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
-        let Term { id, span, kind, .. } = term;
+        let Term { id, ty, span, kind } = term;
         let mut replacement = match kind {
             TermKind::Var(VarRef::Symbol(_)) => body,
             TermKind::App { args, .. } => {
@@ -216,6 +216,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
             _ => unreachable!(),
         };
         replacement.id = id;
+        replacement.ty = ty;
         // The normal post-order rewrite intentionally expands each function
         // helper only once; revisiting every inserted body would explode
         // prelude SOAC helpers such as filter. Constants must be expanded
@@ -299,6 +300,14 @@ struct ComputedValue {
     leaves: Vec<ComputedLeaf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionOrigin {
+    producer: SymbolId,
+    path: Vec<usize>,
+}
+
+type ProjectionOrigins = LookupMap<SymbolId, ProjectionOrigin>;
+
 #[derive(Clone)]
 struct TargetValue {
     ty: Type,
@@ -309,6 +318,7 @@ struct TargetValue {
 struct RootShape<'a> {
     operations: Vec<RootOperation<'a>>,
     computed: Vec<ComputedValue>,
+    computed_origins: ProjectionOrigins,
     targets: LookupMap<SymbolId, TargetValue>,
 }
 
@@ -413,9 +423,15 @@ fn extract_root(
     // contain an invocation without becoming a separate host entry.
     let mut root_lambda = source_root_lambda.clone();
     let body = inline_stage_helpers(*root_lambda.body, helpers, term_ids);
-    root_lambda.body = Box::new(normalize_root_bindings(body, builtins, term_ids));
+    let mut computed_origins = LookupMap::new();
+    root_lambda.body = Box::new(normalize_root_bindings(
+        body,
+        builtins,
+        term_ids,
+        &mut computed_origins,
+    ));
     let root_name = root_entry_name(definition)?;
-    let shape = root_shape(&root_lambda, root_entry, &root_name, builtins)?;
+    let shape = root_shape(&root_lambda, root_entry, &root_name, builtins, computed_origins)?;
     let graphics_count =
         shape.operations.iter().filter(|operation| matches!(operation, RootOperation::Graphics(_))).count();
     if graphics_count == 0 {
@@ -443,6 +459,7 @@ fn extract_root(
                     root_entry,
                     operation,
                     &shape.computed,
+                    &shape.computed_origins,
                     &shape.targets,
                     builtins,
                     symbols,
@@ -490,6 +507,7 @@ fn extract_root(
                     &root_lambda,
                     root_entry,
                     &shape.computed,
+                    &shape.computed_origins,
                     builtins,
                 )?;
                 let graphics_group = interface::GraphicsStageGroup {
@@ -509,6 +527,7 @@ fn extract_root(
                         &root_lambda,
                         root_entry,
                         &shape.computed,
+                        &shape.computed_origins,
                         &shape.targets,
                         Some(operation.target_symbol),
                         symbols,
@@ -523,6 +542,7 @@ fn extract_root(
                     &root_lambda,
                     root_entry,
                     &shape.computed,
+                    &shape.computed_origins,
                     &shape.targets,
                     Some(operation.target_symbol),
                     symbols,
@@ -564,9 +584,15 @@ fn extract_root(
     Some(stages)
 }
 
-/// Remove administrative root-level bindings by ordinary substitution so the
-/// planner sees the operation chain independently of local naming choices.
-fn normalize_root_bindings(term: Term, builtins: &InvocationBuiltins, term_ids: &mut TermIdSource) -> Term {
+/// Remove ordinary administrative root bindings by substitution, while
+/// retaining computed projection aliases so stage planning can preserve their
+/// producer provenance without placing projections in SOAC input positions.
+fn normalize_root_bindings(
+    term: Term,
+    builtins: &InvocationBuiltins,
+    term_ids: &mut TermIdSource,
+    computed_origins: &mut ProjectionOrigins,
+) -> Term {
     let Term { id, ty, span, kind } = term;
     let TermKind::Let {
         name,
@@ -578,13 +604,24 @@ fn normalize_root_bindings(term: Term, builtins: &InvocationBuiltins, term_ids: 
         return Term { id, ty, span, kind };
     };
 
-    let is_operation = rasterizer_app(&rhs, builtins).is_some()
+    let has_computed_leaves = computed_leaf_types(&name_ty).is_some();
+    let computed_origin = has_computed_leaves.then(|| projection_origin(&rhs, computed_origins)).flatten();
+    let retain_for_planning = rasterizer_app(&rhs, builtins).is_some()
         || matches!(name_ty, Type::Constructed(TypeName::Raster, _))
         || shade_app(&rhs, builtins).is_some()
-        || computed_leaf_types(&name_ty).is_some();
+        || has_computed_leaves;
 
-    if is_operation {
-        let body = normalize_root_bindings(*body, builtins, term_ids);
+    if retain_for_planning {
+        if has_computed_leaves {
+            computed_origins.insert(
+                name,
+                computed_origin.unwrap_or_else(|| ProjectionOrigin {
+                    producer: name,
+                    path: vec![],
+                }),
+            );
+        }
+        let body = normalize_root_bindings(*body, builtins, term_ids, computed_origins);
         return Term {
             id,
             ty,
@@ -609,7 +646,7 @@ fn normalize_root_bindings(term: Term, builtins: &InvocationBuiltins, term_ids: 
         },
         term_ids,
     );
-    normalize_root_bindings(body, builtins, term_ids)
+    normalize_root_bindings(body, builtins, term_ids, computed_origins)
 }
 
 fn root_shape<'a>(
@@ -617,6 +654,7 @@ fn root_shape<'a>(
     root_entry: &EntryPoint<()>,
     root_name: &str,
     builtins: &InvocationBuiltins,
+    computed_origins: ProjectionOrigins,
 ) -> Option<RootShape<'a>> {
     let mut targets = LookupMap::new();
     for ((symbol, ty), declaration) in root_lambda.params.iter().zip(&root_entry.declaration.params) {
@@ -667,13 +705,16 @@ fn root_shape<'a>(
             );
             operations.push(RootOperation::Graphics(operation));
         } else if computed_leaf_types(name_ty).is_some() {
-            operations.push(RootOperation::Compute(ComputeOperation {
-                symbol: *name,
-                ty: name_ty.clone(),
-                rhs: rhs.as_ref(),
-                entry_name: String::new(),
-                outputs: vec![],
-            }));
+            let origin = computed_origins.get(name)?;
+            if origin.producer == *name && origin.path.is_empty() {
+                operations.push(RootOperation::Compute(ComputeOperation {
+                    symbol: *name,
+                    ty: name_ty.clone(),
+                    rhs: rhs.as_ref(),
+                    entry_name: String::new(),
+                    outputs: vec![],
+                }));
+            }
         } else {
             return None;
         }
@@ -750,6 +791,7 @@ fn root_shape<'a>(
     Some(RootShape {
         operations,
         computed,
+        computed_origins,
         targets,
     })
 }
@@ -901,6 +943,30 @@ fn projected_symbol_path(term: &Term) -> Option<(SymbolId, Vec<usize>)> {
     }
 }
 
+fn projection_origin(term: &Term, origins: &ProjectionOrigins) -> Option<ProjectionOrigin> {
+    let (symbol, suffix) = projected_symbol_path(term)?;
+    let origin = origins.get(&symbol)?;
+    let mut path = origin.path.clone();
+    path.extend(suffix);
+    Some(ProjectionOrigin {
+        producer: origin.producer,
+        path,
+    })
+}
+
+fn resolve_projection(
+    symbol: SymbolId,
+    suffix: &[usize],
+    origins: &ProjectionOrigins,
+) -> (SymbolId, Vec<usize>) {
+    let Some(origin) = origins.get(&symbol) else {
+        return (symbol, suffix.to_vec());
+    };
+    let mut path = origin.path.clone();
+    path.extend_from_slice(suffix);
+    (origin.producer, path)
+}
+
 fn is_render_target_type(ty: &Type) -> bool {
     matches!(ty, Type::Constructed(TypeName::RenderTarget, _))
 }
@@ -997,6 +1063,7 @@ fn graphics_invocation(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
     builtins: &InvocationBuiltins,
 ) -> Option<pipeline_descriptor::GraphicsInvocation> {
     use crate::pipeline_descriptor::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
@@ -1054,7 +1121,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indexed {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
             index_format: index_format(indices)?,
             index_count: array_draw_count(indices)?,
             instance_count: u32_literal(instance_count)?,
@@ -1068,7 +1135,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indexed {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
             index_format: index_format(indices)?,
             index_count: DrawCount::Fixed(u32_literal(index_count)?),
             instance_count: u32_literal(instance_count)?,
@@ -1080,7 +1147,8 @@ fn graphics_invocation(
         let [command] = args else {
             return None;
         };
-        let (commands, offset) = indirect_command_source(command, 16, root_lambda, root_entry, computed)?;
+        let (commands, offset) =
+            indirect_command_source(command, 16, root_lambda, root_entry, computed, computed_origins)?;
         DrawCall::Indirect {
             commands,
             offset,
@@ -1091,7 +1159,7 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::Indirect {
-            commands: draw_buffer_source(commands, root_lambda, root_entry, computed)?,
+            commands: draw_buffer_source(commands, root_lambda, root_entry, computed, computed_origins)?,
             offset: 0,
             draw_count: array_draw_count(commands)?,
         }
@@ -1099,9 +1167,10 @@ fn graphics_invocation(
         let [indices, command] = args else {
             return None;
         };
-        let (commands, offset) = indirect_command_source(command, 20, root_lambda, root_entry, computed)?;
+        let (commands, offset) =
+            indirect_command_source(command, 20, root_lambda, root_entry, computed, computed_origins)?;
         DrawCall::IndexedIndirect {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
             index_format: index_format(indices)?,
             commands,
             offset,
@@ -1112,9 +1181,9 @@ fn graphics_invocation(
             return None;
         };
         DrawCall::IndexedIndirect {
-            indices: draw_buffer_source(indices, root_lambda, root_entry, computed)?,
+            indices: draw_buffer_source(indices, root_lambda, root_entry, computed, computed_origins)?,
             index_format: index_format(indices)?,
-            commands: draw_buffer_source(commands, root_lambda, root_entry, computed)?,
+            commands: draw_buffer_source(commands, root_lambda, root_entry, computed, computed_origins)?,
             offset: 0,
             draw_count: array_draw_count(commands)?,
         }
@@ -1133,16 +1202,20 @@ fn indirect_command_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
 ) -> Option<(pipeline_descriptor::DrawBufferRef, u64)> {
     if let TermKind::Index { array, index } = &command.kind {
         let command_index = u32_literal(index)? as u64;
         return Some((
-            draw_buffer_source(array, root_lambda, root_entry, computed)?,
+            draw_buffer_source(array, root_lambda, root_entry, computed, computed_origins)?,
             command_index * stride,
         ));
     }
 
-    Some((draw_buffer_source(command, root_lambda, root_entry, computed)?, 0))
+    Some((
+        draw_buffer_source(command, root_lambda, root_entry, computed, computed_origins)?,
+        0,
+    ))
 }
 
 fn draw_buffer_source(
@@ -1150,8 +1223,10 @@ fn draw_buffer_source(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
 ) -> Option<pipeline_descriptor::DrawBufferRef> {
     let (symbol, path) = projected_symbol_path(array)?;
+    let (symbol, path) = resolve_projection(symbol, &path, computed_origins);
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
@@ -1501,6 +1576,7 @@ fn stage_captures(
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
     targets: &LookupMap<SymbolId, TargetValue>,
     output_target: Option<SymbolId>,
     symbols: &mut SymbolTable,
@@ -1522,6 +1598,7 @@ fn stage_captures(
     append_computed_captures(
         body,
         computed,
+        computed_origins,
         symbols,
         &mut params,
         &mut declarations,
@@ -1588,30 +1665,29 @@ fn append_root_captures(
 fn append_computed_captures(
     body: &Term,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
     declarations: &mut Vec<interface::EntryParamDecl>,
     substitutions: &mut ExternalSubstitutions,
 ) {
-    for value in computed {
-        let mut used_paths = LookupSet::new();
-        let mut visitor = |term: &Term| {
-            if let Some((symbol, path)) = projected_symbol_path(term) {
-                if symbol == value.symbol {
-                    used_paths.insert(path);
-                    return WalkDecision::Prune;
-                }
-            }
-            WalkDecision::Recurse
-        };
-        visitor.walk(body);
-        if used_paths.is_empty() {
-            continue;
+    let mut used_sources = LookupMap::<(SymbolId, Vec<usize>), LookupSet<(SymbolId, Vec<usize>)>>::new();
+    let mut visitor = |term: &Term| {
+        if let Some((symbol, path)) = projected_symbol_path(term) {
+            let resolved = resolve_projection(symbol, &path, computed_origins);
+            used_sources.entry(resolved).or_default().insert((symbol, path));
+            return WalkDecision::Prune;
         }
+        WalkDecision::Recurse
+    };
+    visitor.walk(body);
+
+    for value in computed {
         for leaf in &value.leaves {
-            if !used_paths.contains(&leaf.path) {
+            let resolved = (value.symbol, leaf.path.clone());
+            let Some(source_paths) = used_sources.get(&resolved) else {
                 continue;
-            }
+            };
             append_external_param(
                 value.symbol,
                 &leaf.path,
@@ -1623,6 +1699,13 @@ fn append_computed_captures(
                 declarations,
                 substitutions,
             );
+            let replacement = substitutions
+                .get(&resolved)
+                .cloned()
+                .expect("computed capture substitution was just inserted");
+            for source_path in source_paths {
+                substitutions.insert(source_path.clone(), replacement.clone());
+            }
         }
     }
 }
@@ -1767,6 +1850,7 @@ fn build_compute_stage(
     root_entry: &EntryPoint<()>,
     operation: &ComputeOperation<'_>,
     computed: &[ComputedValue],
+    computed_origins: &ProjectionOrigins,
     targets: &LookupMap<SymbolId, TargetValue>,
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
@@ -1789,6 +1873,7 @@ fn build_compute_stage(
     append_computed_captures(
         operation.rhs,
         computed,
+        computed_origins,
         symbols,
         &mut params,
         &mut declarations,
