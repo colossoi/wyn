@@ -1515,6 +1515,76 @@ entry dynamic_parameter(n: u32) []u32 =
 }
 
 #[test]
+fn projected_runtime_parameter_drives_dispatch_and_output_allocation() {
+    use crate::pipeline_descriptor::{
+        Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, Pipeline,
+    };
+
+    let cases = [
+        (
+            r#"
+type params = { count: i32 }
+entry reproduce(params: params) []f32 =
+  map(|i| f32(i), iota(params.count))
+"#,
+            0,
+        ),
+        (
+            r#"
+type params = { padding: i32, count: i32 }
+entry reproduce(params: params) []f32 =
+  map(|i| f32(i), iota(params.count))
+"#,
+            4,
+        ),
+    ];
+
+    for (source, expected_offset) in cases {
+        let lowered = compile_thru_spirv(source).expect("projected runtime length compiles to SPIR-V");
+        let Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+            panic!("runtime map must publish a compute pipeline");
+        };
+        assert_eq!(
+            compute.stages[0].dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::PushConstant {
+                    offset: expected_offset,
+                },
+                workgroup_size: 64,
+            }
+        );
+        assert!(compute.bindings.iter().any(|binding| matches!(
+            binding,
+            Binding::StorageBuffer {
+                usage: BufferUsage::Output,
+                length: Some(BufferLen::SameAsDispatch { elem_bytes: 4 }),
+                ..
+            }
+        )));
+
+        let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
+            compile_to_semantic_egir(source),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+        ))
+        .expect("projected runtime length compiles to WGSL");
+        let Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+            panic!("runtime map must publish a compute pipeline");
+        };
+        assert_eq!(
+            compute.stages[0].dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::StorageBuffer {
+                    set: 1,
+                    binding: 0,
+                    offset: expected_offset,
+                },
+                workgroup_size: 64,
+            }
+        );
+    }
+}
+
+#[test]
 fn ranked_bucket_scatter_named_helper_reads_fixed_storage_array() {
     use crate::pipeline_descriptor::{Binding, BufferLen, Pipeline};
 

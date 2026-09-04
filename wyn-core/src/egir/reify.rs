@@ -374,22 +374,50 @@ fn space(
 }
 
 fn extent_from_node(graph: &EGraph<Raw>, entry: Option<&RawEntry>, node: ValueId) -> SegExtent<BindingRef> {
+    let node = graph.canonical_value(node);
     match &graph.nodes[node].kind {
         ValueKind::Pure {
             op: PureOp::Int(value) | PureOp::Uint(value),
             ..
         } => value.parse().map(SegExtent::Fixed).unwrap_or(SegExtent::Value(node)),
-        ValueKind::FuncParam { parameter } => entry
-            .and_then(|entry| {
-                entry.params().abi_position(*parameter).and_then(|position| entry.inputs.get(position))
-            })
-            .and_then(|input| input.push_constant())
-            .map(|slot| SegExtent::PushConstant {
-                node,
-                offset: slot.offset,
-            })
+        _ => entry
+            .and_then(|entry| push_constant_offset(graph, entry, node))
+            .map(|offset| SegExtent::PushConstant { node, offset })
             .unwrap_or(SegExtent::Value(node)),
-        _ => SegExtent::Value(node),
+    }
+}
+
+/// Recover the host-visible byte offset of a runtime scalar, following
+/// structural projections such as `params.count` back to the entry parameter
+/// that owns its push-constant bytes.
+fn push_constant_offset(graph: &EGraph<Raw>, entry: &RawEntry, node: ValueId) -> Option<u32> {
+    let node = graph.canonical_value(node);
+    match graph.nodes[node].kind() {
+        ValueKind::FuncParam { parameter } => {
+            let position = entry.params().abi_position(*parameter)?;
+            let [slot] = entry.parameter_inputs.get(position)?.as_slice() else {
+                return None;
+            };
+            entry.inputs.get(slot.0)?.push_constant().map(|slot| slot.offset)
+        }
+        ValueKind::Pure {
+            op: PureOp::Project { index },
+            operands,
+        } => {
+            let [base] = operands.as_slice() else {
+                return None;
+            };
+            let base = graph.canonical_value(*base);
+            let fields = match graph.nodes[base].ty() {
+                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields,
+                _ => return None,
+            };
+            let field_types = fields.iter().collect::<Vec<_>>();
+            let layout = ssa::layout::std430_struct_layout(&field_types)?;
+            let field_offset = *layout.member_offsets.get(*index as usize)?;
+            push_constant_offset(graph, entry, base)?.checked_add(field_offset)
+        }
+        _ => None,
     }
 }
 

@@ -689,14 +689,23 @@ fn adapt_pipeline_descriptor_for_wgsl(
                 let DispatchLen::PushConstant { offset } = *len else {
                     continue;
                 };
-                let Some((block, member)) = blocks.iter().find_map(|block| {
+                let Some((block, storage_offset)) = blocks.iter().find_map(|block| {
                     (block.entry_point == stage.entry_point)
-                        .then(|| block.members.iter().find(|member| member.push_constant_offset == offset))
+                        .then(|| {
+                            block.members.iter().find_map(|member| {
+                                let relative = offset.checked_sub(member.push_constant_offset)?;
+                                let end = relative.checked_add(4)?;
+                                (end <= member.size)
+                                    .then(|| {
+                                        member.offset.checked_add(relative).map(|offset| (*block, offset))
+                                    })
+                                    .flatten()
+                            })
+                        })
                         .flatten()
-                        .map(|member| (*block, member))
                 }) else {
                     return Err(err_wgsl!(
-                        "entry '{}': dynamic dispatch push constant at offset {} has no WGSL storage parameter",
+                        "entry '{}': dynamic dispatch push constant at offset {} has no containing WGSL storage parameter",
                         stage.entry_point,
                         offset
                     ));
@@ -704,7 +713,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
                 *len = DispatchLen::StorageBuffer {
                     set: block.set,
                     binding: block.binding,
-                    offset: member.offset,
+                    offset: storage_offset,
                 };
             }
         }
