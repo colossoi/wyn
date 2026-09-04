@@ -166,10 +166,11 @@ passes:
 
 | Checkpoint transition | Sub-pass sequence | Description |
 |-----------------------|-------------------|-------------|
-| `tlc::lower_from_ast` | `Transformer::transform_program`, `check_unextracted`, `stage_extract::extract` | Convert the fully typed AST to minimal typed lambda calculus, validate still-unextracted linear pipeline handles, then extract pipeline stages |
-| `tlc::pin_entry_buffers` | `pin_entry_buffers` | Substitute each storage entry parameter's concrete `Buffer(set, binding)` into its type, so view provenance flows by unification |
-| `tlc::validate_ownership` | `validate_ownership` | Reject source-level use-after-move before simplification or inlining can erase the call boundary carrying the `*T` contract |
-| `tlc::partial_eval` | `partial_eval` | Apply constant folding and algebraic simplifications |
+| `tlc::lower_from_ast` | `Transformer::transform_program` | Convert the fully typed AST to unified, unpinned typed lambda calculus while retaining root graphics orchestration |
+| `tlc::validate_ownership` | `validate_ownership` | Reject source-level use-after-move, invalid render-target use, and unconsumed or reused raster handles before simplification or stage extraction erases their source contracts |
+| `tlc::partial_eval` | `partial_eval` | Apply constant folding and algebraic simplifications, including resolving named scalar constants used by graphics descriptors |
+| `tlc::extract_stages` | `stage_extract::extract` | Replace each unified root with its ordered compute, vertex, and fragment entry stages after whole-program source analysis is complete |
+| `tlc::pin_entry_buffers` | `pin_entry_buffers` | Substitute each final stage's storage entry parameter binding as a concrete `Buffer(set, binding)` in its type, so view provenance flows by unification |
 | `tlc::normalize_soacs` | `soa::transform_program` | Transform SoA types, flatten Map+Zip, and eliminate standalone Zip operations during one traversal |
 | `tlc::monomorphize` | `specialize_intrinsics`, `Monomorphizer::monomorphize` | Specialize polymorphic intrinsics, then emit reachable user-function monomorphs, including separate monomorphs for distinct view buffers |
 | `tlc::rep_specialize` | `rep_specialize` | Clone callees whose abstract array parameters receive producer-known concrete variants, before forced SOAC-helper inlining |
@@ -194,7 +195,18 @@ Each notes how it's enforced; when you move a sub-pass, check it here.
 
 - **`validate_ownership` ≺ `partial_eval`** — source-level consumption must be
   checked while the call boundary carrying the `*T` contract still exists.
-  *Enforced by:* `partial_eval` is defined only on `TlcOwnershipValidated`.
+  *Enforced by:* `partial_eval` is defined only on `OwnershipValidated`.
+- **`partial_eval` ≺ `extract_stages`** — fixed graphics descriptors may use
+  named scalar expressions that only whole-program partial evaluation can
+  resolve, while ownership validation must still see the unified root first.
+  *Enforced by:* `extract_stages` is defined only on `PartialEvaled`.
+- **`extract_stages` ≺ `pin_entry_buffers`** — extraction creates the final
+  compute, vertex, and fragment entry interfaces whose storage bindings must be
+  pinned. *Enforced by:* `pin_entry_buffers` is defined only on
+  `StagesExtracted`.
+- **`pin_entry_buffers` ≺ `monomorphize`** — view-buffer identities must be
+  concrete before they participate in specialization keys. *Enforced by:* the
+  TLC typestate chain.
 - **`monomorphize` ≺ `defunctionalize`** — monomorphization specializes the
   still-higher-order program; defunctionalization then removes function-typed
   parameters and gives EGIR concrete callable references and captures.
@@ -518,10 +530,11 @@ last type argument) holds `Buffer(set, binding)`. Thus a rank-one view has
 four type arguments, `[elem, ArrayVariantView, dim_0, buffer]`; the runtime
 `{offset, len}` value is separate from this static type-level buffer slot.
 
-- **Born at entry params.** `pin_entry_buffers` (the first TLC sub-pass)
-  computes each storage entry-param's binding (auto-allocated `set 0,
-  0..N`, or an explicit `#[storage(set, binding)]`) and substitutes the
-  param's buffer *variable* → `Buffer(set, binding)` throughout the entry.
+- **Born at final entry params.** After `extract_stages` has created the final
+  entry interfaces, `pin_entry_buffers` computes each storage entry-param's
+  binding (auto-allocated `set 0, 0..N`, or an explicit
+  `#[storage(set, binding)]`) and substitutes the param's buffer *variable* →
+  `Buffer(set, binding)` throughout the entry.
 - **Flows by unification.** A view is buffer-polymorphic everywhere else
   (`∀b. View[…, b]`), so a slice, a `let`, a function argument, or a SOAC
   capture inherits its buffer the same way it inherits its element type —

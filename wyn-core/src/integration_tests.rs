@@ -3550,6 +3550,43 @@ entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_root_resolves_float_derived_direct_draw_count_before_stage_extraction() {
+    let program = compile_thru_tlc(
+        r#"
+def PER_COURSE: i32 = i32(f32.ceil((8.0 + 0.2) / 0.2)) + 1
+def INSTANCE_COUNT: i32 = 8 * PER_COURSE + 128 + 8
+
+entry reproduce(target: render_target<f32>) render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, u32(INSTANCE_COUNT)),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0], ())) in
+  shade(target, raster, |fragment| fragment.position.z)
+"#,
+    )
+    .expect("partial evaluation resolves float-derived draw counts before stage extraction");
+    let graphics = program
+        .defs
+        .iter()
+        .find_map(|definition| {
+            let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+                return None;
+            };
+            entry.declaration.graphics_group.as_ref()
+        })
+        .expect("graphics stage group");
+    assert_eq!(
+        graphics.invocation.draw,
+        pipeline_descriptor::DrawCall::Direct {
+            vertex_count: 3,
+            instance_count: 472,
+            first_vertex: 0,
+            first_instance: 0,
+        }
+    );
+}
+
+#[test]
 fn unified_root_flattens_nested_record_compute_output() {
     let lowered = compile_thru_spirv(
         r#"
@@ -8880,7 +8917,7 @@ fn test_ssa_raytrace_well_formed() {
         include_str!("../../testfiles/playground/raytrace.wyn"),
     );
 
-    let ssa = compile_to_ssa_with_modules(&source);
+    let ssa = stacker::grow(16 * 1024 * 1024, || compile_to_ssa_with_modules(&source));
 
     // SOAC-bearing helpers such as `trace` are intentionally force-inlined
     // before SSA and then removed by DCE. Verify the durable contract instead:

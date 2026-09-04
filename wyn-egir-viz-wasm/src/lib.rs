@@ -585,9 +585,10 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     };
     let program = try_compiler!(wyn_core::ast_type_holes::reject_type_holes(program));
     let program = try_compiler!(wyn_core::tlc::lower_from_ast(program));
-    let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));
     let program = try_compiler!(wyn_core::tlc::validate_ownership(program));
     let program = wyn_core::tlc::partial_eval(program);
+    let program = try_compiler!(wyn_core::tlc::extract_stages(program));
+    let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = try_compiler!(wyn_core::tlc::monomorphize(program));
     let program = wyn_core::tlc::rep_specialize(program);

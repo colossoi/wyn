@@ -645,15 +645,19 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(source, e),
     };
-    let program = match wyn_core::tlc::pin_entry_buffers(program) {
-        Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(source, e),
-    };
     let program = match wyn_core::tlc::validate_ownership(program) {
         Ok(t) => t,
         Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::partial_eval(program);
+    let program = match wyn_core::tlc::extract_stages(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(source, e),
+    };
+    let program = match wyn_core::tlc::pin_entry_buffers(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(source, e),
+    };
     let tlc_tree = tlc_tree::program_to_tree(&program);
 
     let program = wyn_core::tlc::normalize_soacs(program);

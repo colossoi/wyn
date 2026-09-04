@@ -5,7 +5,7 @@ use crate::ast::{BinaryOp, Span, TypeName};
 use crate::builtins;
 use crate::op::BinaryOperator;
 use crate::tlc;
-use crate::tlc::context::RewriteGlobal;
+use crate::tlc::context::TransformedGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
 use crate::tlc::ownership::OwnershipValidated;
 use crate::tlc::test_support::TestBuilder;
@@ -46,12 +46,12 @@ fn make_program(
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     )
 }
 
-fn rewrite_global() -> RewriteGlobal {
-    RewriteGlobal {
+fn transformed_global() -> TransformedGlobal {
+    TransformedGlobal {
         known_defs: Default::default(),
         auto_storage_binding_ids: Default::default(),
     }
@@ -276,7 +276,7 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let program = partial_eval(program);
@@ -564,7 +564,7 @@ fn test_function_inlining() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -684,7 +684,7 @@ fn test_function_alias_inlining() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -808,7 +808,7 @@ fn test_function_alias_partial_application() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -892,7 +892,7 @@ fn test_intrinsic_alias_inlining() {
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);

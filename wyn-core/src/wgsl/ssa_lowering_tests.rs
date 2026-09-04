@@ -470,8 +470,8 @@ fn validate_testfile_wgsl(rel_path: &str) {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/../{}", manifest, rel_path);
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-    let wgsl =
-        compile_to_wgsl(&src).unwrap_or_else(|e| panic!("wgsl compile failed for {}:\n{}", rel_path, e));
+    let wgsl = stacker::grow(16 * 1024 * 1024, || compile_to_wgsl(&src))
+        .unwrap_or_else(|e| panic!("wgsl compile failed for {}:\n{}", rel_path, e));
     validate_wgsl(&wgsl);
 }
 

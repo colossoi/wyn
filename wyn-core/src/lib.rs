@@ -353,9 +353,10 @@ pub use polytype::Context as PolytypeContext;
 //
 // TLC stages (typed AST → semantic input):
 //       tlc::lower_from_ast(program)    -> tlc::stage::Transformed
-//       tlc::pin_entry_buffers(...)      -> tlc::stage::BuffersPinned
 //       tlc::validate_ownership(...)     -> tlc::stage::OwnershipValidated
 //       tlc::partial_eval(...)           -> tlc::stage::PartialEvaled
+//       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
+//       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
 //       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
@@ -425,6 +426,8 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     program: tlc::stage::OwnershipValidated,
 ) -> error::Result<tlc::stage::SoacsAnfNormalized> {
     let program = tlc::partial_eval(program);
+    let program = tlc::extract_stages(program)?;
+    let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::normalize_soacs(program);
     let program = tlc::monomorphize(program)?;
     let program = tlc::rep_specialize(program);
@@ -774,7 +777,6 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     let type_checked = compile_thru_frontend(source)?;
     let program = ast_type_holes::reject_type_holes(type_checked)?;
     let program = tlc::lower_from_ast(program)?;
-    let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::validate_ownership(program)?;
     optimize_tlc_for_test(program)
 }

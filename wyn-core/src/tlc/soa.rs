@@ -15,7 +15,7 @@
 
 use super::data::Empty;
 use super::inline::SoacHelpersInlined;
-use super::partial_eval::PartialEvaled;
+use super::pin_entry_buffers::BuffersPinned;
 use super::{
     ArrayExpr, Family, Lambda, Program, RewriteDecision, SoacBody, SoacOp, Term, TermId, TermIdSource,
     TermKind, TermRewriter, VarRef,
@@ -769,7 +769,7 @@ fn build_tuple_reconstruction(
 ///    that touch array-of-tuple types.
 /// 2. Flattens Map+Zip into multi-input Map with split lambda params.
 /// 3. Converts standalone Zip to tuple construction.
-pub fn normalize_soacs(program: PartialEvaled) -> SoaNormalized {
+pub fn normalize_soacs(program: BuffersPinned) -> SoaNormalized {
     transform_program(program)
 }
 

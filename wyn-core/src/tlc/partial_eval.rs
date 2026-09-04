@@ -5,7 +5,7 @@
 
 use super::data::Empty;
 use super::ownership::OwnershipValidated;
-use super::pin_entry_buffers::Polymorphic;
+use super::run::UnpinnedPolymorphic;
 use super::{
     Def, Lambda, LoopKind, Program, RewriteDecision, Term, TermId, TermIdSource, TermKind, TermRewriter,
     VarRef,
@@ -26,7 +26,7 @@ use spirv::GLOp;
 #[derive(Debug, Clone, Copy)]
 pub enum PartialEvaledTag {}
 pub type PartialEvaled =
-    super::Program<PartialEvaledTag, super::pin_entry_buffers::Polymorphic, super::context::RewriteGlobal>;
+    super::Program<PartialEvaledTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
 
 /// Consume a validated TLC program and rebuild its definitions from the
 /// evaluator's residual terms.
@@ -47,11 +47,14 @@ pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
                 DefinitionTemplate {
                     arity: def.arity,
                     body: def.body.clone(),
+                    scalar_constant_candidate: matches!(&def.meta, super::DefMeta::Function)
+                        && def.arity == 0,
                 },
             )
         })
         .collect();
     let mut evaluator = PartialEvaluator::new(definitions, &mut term_ids);
+    evaluator.discover_global_scalars();
     let defs = defs.into_iter().map(|def| evaluator.evaluate_definition(def)).collect();
     drop(evaluator);
 
@@ -131,6 +134,7 @@ impl Value {
 struct DefinitionTemplate {
     arity: usize,
     body: Term<Empty, Empty>,
+    scalar_constant_candidate: bool,
 }
 
 struct PartialEvaluator<'a> {
@@ -143,6 +147,10 @@ struct PartialEvaluator<'a> {
     /// Definitions currently being evaluated. Re-entry means recursion, which
     /// is deliberately left residual instead of recursing in the compiler.
     active_defs: LookupSet<SymbolId>,
+    /// Zero-arity globals proven to reduce to immutable scalar values.
+    global_scalars: LookupMap<SymbolId, Scalar>,
+    /// Globals already considered for `global_scalars`, including failures.
+    resolved_global_scalars: LookupSet<SymbolId>,
 }
 
 impl<'a> PartialEvaluator<'a> {
@@ -152,11 +160,32 @@ impl<'a> PartialEvaluator<'a> {
             term_ids,
             env: LookupMap::new(),
             active_defs: LookupSet::new(),
+            global_scalars: LookupMap::new(),
+            resolved_global_scalars: LookupSet::new(),
         }
     }
 
-    fn evaluate_definition(&mut self, def: Def<Polymorphic>) -> Def<Polymorphic> {
-        let body_val = self.eval(&def.body);
+    /// Discover the scalar constant environment once, before residualizing any
+    /// definition bodies. Recursive resolution handles constants defined in
+    /// terms of other constants; `active_defs` leaves cycles residual.
+    fn discover_global_scalars(&mut self) {
+        let candidates = self
+            .definitions
+            .iter()
+            .filter_map(|(symbol, definition)| definition.scalar_constant_candidate.then_some(*symbol))
+            .collect::<Vec<_>>();
+        for symbol in candidates {
+            self.resolve_global_scalar(symbol);
+        }
+    }
+
+    fn evaluate_definition(&mut self, def: Def<UnpinnedPolymorphic>) -> Def<UnpinnedPolymorphic> {
+        let body_val = self
+            .global_scalars
+            .get(&def.name)
+            .copied()
+            .map(Value::from_scalar)
+            .unwrap_or_else(|| self.eval(&def.body));
         let body = self.reify(body_val, &def.body.ty, def.body.span);
         let body = body.rewrite(&mut ResidualConstantFolder { evaluator: self });
         Def { body, ..def }
@@ -197,7 +226,9 @@ impl<'a> PartialEvaluator<'a> {
                     val.clone()
                 } else if let Some(def) = self.definitions.get(&sym).cloned() {
                     if def.arity == 0 {
-                        if !self.active_defs.insert(sym) {
+                        if let Some(value) = self.resolve_global_scalar(sym) {
+                            Value::from_scalar(value)
+                        } else if !self.active_defs.insert(sym) {
                             Value::Unknown(term.clone())
                         } else {
                             let value = self.eval(&def.body);
@@ -669,7 +700,11 @@ impl<'a> PartialEvaluator<'a> {
         bound: &mut LookupSet<SymbolId>,
     ) -> bool {
         let replacement = match &term.kind {
-            TermKind::Var(VarRef::Symbol(name)) if !bound.contains(name) => self.env.get(name).cloned(),
+            TermKind::Var(VarRef::Symbol(name)) if !bound.contains(name) => self
+                .env
+                .get(name)
+                .cloned()
+                .or_else(|| self.global_scalars.get(name).copied().map(Value::from_scalar)),
             _ => None,
         };
         if let Some(value) = replacement {
@@ -751,6 +786,29 @@ impl<'a> PartialEvaluator<'a> {
             term.id = self.term_ids.next_id();
         }
         changed
+    }
+
+    /// Memoize a zero-arity global only when it reduces to a scalar. This is
+    /// intentionally narrower than general inlining: the resulting environment
+    /// can be copied into residual lambdas without duplicating runtime work or
+    /// aggregate construction.
+    fn resolve_global_scalar(&mut self, symbol: SymbolId) -> Option<Scalar> {
+        if let Some(value) = self.global_scalars.get(&symbol) {
+            return Some(*value);
+        }
+        if self.resolved_global_scalars.contains(&symbol) {
+            return None;
+        }
+        let definition = self.definitions.get(&symbol)?.clone();
+        if !definition.scalar_constant_candidate || !self.active_defs.insert(symbol) {
+            return None;
+        }
+        let value = self.eval(&definition.body);
+        self.active_defs.remove(&symbol);
+        self.resolved_global_scalars.insert(symbol);
+        let scalar = value.as_scalar()?;
+        self.global_scalars.insert(symbol, scalar);
+        Some(scalar)
     }
 
     fn reify_partial(

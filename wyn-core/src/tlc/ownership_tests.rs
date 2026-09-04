@@ -37,9 +37,10 @@ fn compile_to_tlc(source: &str) -> tlc::stage::SoaNormalized {
     let type_checked = compile_thru_frontend(source).expect("type_check");
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
     let program = tlc::partial_eval(program);
+    let program = tlc::extract_stages(program).expect("extract_stages");
+    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     tlc::normalize_soacs(program)
 }
 
@@ -552,7 +553,6 @@ fn has_use_after_move(source: &str) -> bool {
     let type_checked = compile_thru_frontend(source).expect("type_check");
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     super::check(&program).is_err()
 }
 

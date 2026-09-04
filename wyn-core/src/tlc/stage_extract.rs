@@ -2,14 +2,17 @@
 //!
 //! Source programs expose one host-visible root. Rasterization and shading calls
 //! in that root delimit callbacks whose bodies execute in platform stage
-//! contexts. This pass consumes those delimiters before ordinary TLC lowering
-//! can mistake their opaque orchestration values for shader values.
+//! contexts. This pass consumes those delimiters after unified-program
+//! analysis and before representation-oriented TLC transforms can mistake
+//! their opaque orchestration values for shader values.
 
 use super::data;
+use super::partial_eval::PartialEvaled;
 use super::run::UnpinnedPolymorphic;
 use super::{
-    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, ProgramParts,
-    RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef, WalkDecision,
+    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
+    ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
+    WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -309,9 +312,31 @@ struct RootShape<'a> {
     targets: LookupMap<SymbolId, TargetValue>,
 }
 
+/// Unified roots have been replaced by their final compute or graphics stage
+/// entries, but entry-buffer regions have not yet been pinned.
+#[derive(Debug, Clone, Copy)]
+pub enum StagesExtractedTag {}
+pub type StagesExtracted =
+    Program<StagesExtractedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
+
+/// Extract the final entry stages after source ownership and compile-time
+/// evaluation have finished observing the unified program.
+pub fn extract_stages(program: PartialEvaled) -> error::Result<StagesExtracted> {
+    let Program {
+        defs,
+        mut symbols,
+        mut term_ids,
+        global_context,
+        state: _,
+    } = program;
+    let mut parts = ProgramParts { defs };
+    extract(&mut parts, &mut symbols, &mut term_ids)?;
+    Ok(parts.with_symbols::<StagesExtractedTag, _>(symbols, term_ids, global_context))
+}
+
 /// Replace every unified graphics root with the ordered internal stages selected
 /// by its invocation operations.
-pub(super) fn extract(
+fn extract(
     parts: &mut ProgramParts<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -1341,9 +1366,9 @@ fn i32_literal(term: &Term) -> Option<i32> {
     i32::try_from(integer_constant(term)?).ok()
 }
 
-/// Resolve the small typed-integer constant language accepted by fixed
-/// graphics descriptors. The early AST folder exposes named constants as
-/// literals, while constructor-style casts reach TLC as resolved conversion
+/// Resolve the small residual typed-integer language accepted by fixed
+/// graphics descriptors. Partial evaluation exposes named scalar constants as
+/// literals, while constructor-style casts may remain as resolved conversion
 /// builtins (for example, `u32(PROP_WALLS)` becomes `u32.i32(<literal>)`).
 fn integer_constant(term: &Term) -> Option<i64> {
     match &term.kind {

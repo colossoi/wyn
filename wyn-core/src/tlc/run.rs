@@ -9,7 +9,7 @@ use wyn_base::IdSource;
 pub type UnpinnedPolymorphic =
     super::TreeFamily<super::data::PolymorphicDefinition, (), super::data::Empty, super::data::Empty>;
 
-/// AST has been transformed to TLC.
+/// AST has been transformed to unified, unpinned TLC.
 #[derive(Debug, Clone, Copy)]
 pub enum TransformedTag {}
 pub type Transformed =
@@ -31,25 +31,12 @@ pub fn lower_from_ast(mut ast: ast_type_holes::HolesResolved) -> error::Result<T
     support_defs.append(&mut parts.defs);
     parts.defs = support_defs;
     let known_defs = parts.defs.iter().map(|definition| definition.name).collect();
-    let program = parts.with_symbols::<TransformedTag, _>(
+    Ok(parts.with_symbols::<TransformedTag, _>(
         symbols,
         term_ids,
         super::context::TransformedGlobal {
             known_defs,
             auto_storage_binding_ids: IdSource::new(),
         },
-    );
-    super::ownership::check_unextracted(&program)?;
-
-    let super::Program {
-        defs,
-        mut symbols,
-        mut term_ids,
-        global_context,
-        state: _,
-    } = program;
-    let mut parts = super::ProgramParts { defs };
-    super::stage_extract::extract(&mut parts, &mut symbols, &mut term_ids)?;
-
-    Ok(parts.with_symbols::<TransformedTag, _>(symbols, term_ids, global_context))
+    ))
 }

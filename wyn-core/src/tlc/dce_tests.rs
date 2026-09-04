@@ -106,7 +106,6 @@ fn unused_dependency_contributes_no_reachable_definitions() {
         .expect("program should type check");
     let program = ast_type_holes::reject_type_holes(program).expect("program should have no holes");
     let program = super::super::lower_from_ast(program).expect("AST should lower to TLC");
-    let program = super::super::pin_entry_buffers(program).expect("entry buffers should pin");
     let program = super::super::validate_ownership(program).expect("ownership should validate");
     let program = crate::optimize_tlc_for_test(program).expect("TLC should optimize");
 

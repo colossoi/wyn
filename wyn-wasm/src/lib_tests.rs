@@ -11,9 +11,10 @@ fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
     let program = modules.type_check().expect("type_check failed");
     let program = wyn_core::ast_type_holes::reject_type_holes(program).expect("type holes");
     let program = wyn_core::tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = wyn_core::tlc::validate_ownership(program).expect("validate_ownership");
     let program = wyn_core::tlc::partial_eval(program);
+    let program = wyn_core::tlc::extract_stages(program).expect("extract_stages");
+    let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = wyn_core::tlc::monomorphize(program).expect("monomorphize");
     let program = wyn_core::tlc::rep_specialize(program);

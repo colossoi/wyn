@@ -418,19 +418,6 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         &source_graph,
     )?;
     let mut auxiliary = Vec::new();
-    if let Some(path) = output_tlc {
-        auxiliary.push(TextArtifact {
-            path,
-            contents: format!("{program}"),
-        });
-    }
-
-    let program = retain_source(
-        time("pin_entry_buffers", verbose, || {
-            wyn_core::tlc::pin_entry_buffers(program)
-        }),
-        &source_graph,
-    )?;
     let program = retain_source(
         time("validate_ownership", verbose, || {
             wyn_core::tlc::validate_ownership(program)
@@ -440,6 +427,24 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     let program = time("tlc_partial_eval", verbose, || {
         wyn_core::tlc::partial_eval(program)
     });
+    let program = retain_source(
+        time("extract_stages", verbose, || {
+            wyn_core::tlc::extract_stages(program)
+        }),
+        &source_graph,
+    )?;
+    let program = retain_source(
+        time("pin_entry_buffers", verbose, || {
+            wyn_core::tlc::pin_entry_buffers(program)
+        }),
+        &source_graph,
+    )?;
+    if let Some(path) = output_tlc {
+        auxiliary.push(TextArtifact {
+            path,
+            contents: format!("{program}"),
+        });
+    }
     let program = time("normalize_soacs", verbose, || {
         wyn_core::tlc::normalize_soacs(program)
     });
@@ -628,8 +633,10 @@ fn check(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverErro
     let program = type_check_input(&input, true, graphics, verbose)?;
     let source_graph = program.source_graph().clone();
     let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
-    let program = retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;
-    retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;
+    let program = retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;
+    let program = wyn_core::tlc::partial_eval(program);
+    let program = retain_source(wyn_core::tlc::extract_stages(program), &source_graph)?;
+    retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

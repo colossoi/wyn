@@ -96,10 +96,11 @@ fn source_package_identity_reaches_typed_and_tlc_definitions() {
     assert_eq!(package_of("Dependency.identity"), Some(dependency_package));
     assert_eq!(package_of("compute_main"), Some(root_package));
 
-    let pinned = tlc::pin_entry_buffers(lowered).expect("entry buffers should pin");
-    let ownership = tlc::validate_ownership(pinned).expect("ownership should validate");
+    let ownership = tlc::validate_ownership(lowered).expect("ownership should validate");
     let partial = tlc::partial_eval(ownership);
-    let normalized = tlc::normalize_soacs(partial);
+    let extracted = tlc::extract_stages(partial).expect("stages should extract");
+    let pinned = tlc::pin_entry_buffers(extracted).expect("entry buffers should pin");
+    let normalized = tlc::normalize_soacs(pinned);
     let monomorphic = tlc::monomorphize(normalized).expect("TLC should monomorphize");
     let dependency_specialization = monomorphic
         .defs
