@@ -123,10 +123,10 @@ smallest program that still reproduces the bug. Source:
    (`bash /tmp/interesting.sh path/to/bug.wyn; echo $?` → 0) before
    launching the reducer.
 
-   Always pass `--fill-holes` in the script; the reducer substitutes
-   `???` (type-hole) as the universal polymorphic replacement for
-   every candidate rewrite, and without `--fill-holes` the compiler
-   exits 2 at the type-check gate before the target bug can fire.
+   Pass `--fill-holes` if the reducer may need its final `???` fallback.
+   Before using holes, the reducer tries smaller concrete expressions and
+   relies on the interestingness command (normally the compiler plus the
+   bug check) to reject replacements that are not type-compatible.
 
 3. **Run the reducer** from the repo root (so the script's default
    `./target/release/wyn` resolves):
@@ -137,39 +137,40 @@ smallest program that still reproduces the bug. Source:
      -o /tmp/bug_min.wyn \
      --on-parse-error ignore \
      -j 4 \
-     -- bash /tmp/interesting.sh @@
+     -- bash /tmp/interesting.sh @@.wyn
    ```
-   `--stable` iterates passes until a pass makes zero progress (true
-   fixpoint). `-j 4` parallelizes. `-v` is important — without it
+   `--stable` iterates passes until a pass makes no byte-size progress,
+   including passes that only accepted replacements. `-j 4` parallelizes
+   the generic reduction pass. `-v` is important — without it
    treereduce only emits the final stats block, so a running job
    looks stalled. Typical run: 2–10 minutes depending on input size
    and how many rewrites the table allows.
 
-4. **Iterate on the replacement table** if the reducer's floor looks
-   too high. The table lives in
-   `extra/treereduce-wyn/src/main.rs` and maps tree-sitter node kinds
-   to replacement strings. Current vocabulary covers every expression
-   kind mapped to `???`, every pattern kind mapped to `_`, and
-   top-level `def_declaration` / `binding_declaration` mapped to `""`
-   (deletion). If a bug's minimum repro is structurally blocked (e.g.
-   the reducer can't delete a load-bearing def because removing it
-   breaks type-check), you may need to extend the table — **and
-   regenerate the parser** if you change `grammar.js`:
+4. **Iterate on the reduction rules** if the reducer's floor looks too
+   high. The rules live in `extra/treereduce-wyn/src/main.rs`. A sequential
+   structural pass first promotes useful children out of wrappers such as
+   `if`, `let`, calls, tuples, records, matches, and unary/binary expressions,
+   and removes comma-separated elements while repairing separators. It then
+   tries a concrete palette (`0`, `1`, booleans, unit, and empty collections)
+   before falling back to `???`; patterns may become `_`. The generic
+   tree-reduction pass follows. If you change `grammar.js`, regenerate the
+   parser before rebuilding:
    ```bash
    (cd extra/tree-sitter-wyn && tree-sitter generate)       # rebuild parser.c
    (cd extra/treereduce-wyn && cargo build --release)       # rebuild reducer
    ```
 
 5. **The reducer has known limitations**:
-   - It can only *delete* and *substitute*, not *synthesize*. If the
-     bug requires a specific expression to remain reachable (e.g.
-     `f32.sqrt` for the sqrt-panic demo), any substitution that
-     disconnects the call graph from that expression will be rejected
-     by interestingness — leaving the call chain intact in the output.
-   - It deterministically hits a fixpoint; re-running with the same
-     table and interestingness produces the same output. To go
-     further: relax the interestingness signature, extend the table,
-     or do a manual polish pass.
+   - Concrete replacements are checker-validated candidates, not expressions
+     synthesized from Wyn's inferred types. The interestingness command is the
+     type and bug-preservation oracle.
+   - Reduction is still single-file and syntax-driven. It does not use Wyn's
+     symbol graph, rewrite imported modules, or remove dependent declarations
+     as a group.
+   - If the bug requires a specific expression to stay reachable (for example,
+     `f32.sqrt` in the sqrt-panic demo), rejected rewrites can leave a call
+     chain in the result. Relax the interestingness signature, extend the
+     rules, or do a manual polish pass to go further.
 
 **See also:**
 - `extra/treereduce-wyn/interesting.sh` — the committed sqrt-panic
