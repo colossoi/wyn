@@ -232,6 +232,13 @@ If the use is not constrained, integral literals will be assigned type
 Underscores may be used as digit separators in numeric literals for
 readability (e.g., `1_000_000`, `0xFF_FF_FF`).
 
+### String Literals
+
+Wyn has no first-class string type. A string literal (`"..."`) is a
+lexical token accepted only in two non-expression positions: the path
+in `import "..."` and the linkage name in `#[linked("...")]`. Writing
+a string where a value is expected is a syntax error.
+
 ---
 
 ## Type Conversions
@@ -245,7 +252,7 @@ of `value`, with the source type read from `value`'s inferred type.
 let xi: i32 = i32(2.5f32)        -- f32 -> i32
 let xf: f32 = f32(7i32)          -- i32 -> f32
 let xu: u32 = u32(-1i32)         -- i32 -> u32 (bitcast)
-let v:  vec2i32 = vec2i32(uv)    -- vec2f32 -> vec2i32, componentwise
+def pixel_coord(uv: vec2f32) vec2i32 = vec2i32(uv)  -- componentwise
 ```
 
 For each `(target, source)` pair the compiler resolves an overload
@@ -320,14 +327,12 @@ stringchar ::= <any source character except "\" or newline or double quotes>
 existential_size ::= "?" name+ "." type
 ```
 
-### Description
-
 Compound types can be constructed based on the primitive types. The
 Wyn type system is entirely structural, and type abbreviations are
 merely shorthands. The only exception is abstract types whose
 definition has been hidden via the module system.
 
-#### Tuple Types
+### Tuple Types
 
 A tuple value or type is written as a sequence of comma-separated
 values or types enclosed in parentheses. For example, `(0, 1)` is a
@@ -339,7 +344,7 @@ tuple cannot have just one element, but empty tuples are permitted,
 although they are not very useful. Empty tuples are written `()` and
 are of type `()`.
 
-#### Array Types
+### Array Types
 
 An array value is written as a sequence of zero or more
 comma-separated values enclosed in square brackets: `[1, 2, 3]`. An
@@ -362,24 +367,168 @@ integers `m` and `n` such that `[m][n]i32` describes the array. The
 restriction to regular arrays is rooted in low-level concerns about
 efficient compilation.
 
-#### Vector Types
+### Vector Types
 
-A vector is a fixed-width aggregate of scalar components, written
-`vecNT` where `N` is the component count (2, 3, or 4) and `T` is the
-scalar element type — e.g. `vec3f32`, `vec4i32`. Vector literals use
-the `@[...]` syntax: `let v: vec3f32 = @[1.0, 2.0, 3.0]`. See Vector
-Types below for the full naming table, constructors, and swizzles.
+In addition to arrays, Wyn provides fixed-width vector types. They are
+distinct from arrays: they have a fixed component count and componentwise
+arithmetic.
 
-#### Matrix Types
+Vector types use the naming convention `vecNT` where:
 
-A matrix is a fixed-shape aggregate of scalar components, written
-`matRxCT` (rectangular) or `matNT` (square, equivalent to `matNxNT`).
-Supported dimensions are R, C ∈ {2, 3, 4}; element types are the
-primitive scalar types. Matrix literals use the
-`@[[...], [...], ...]` syntax. See Matrix Types below for naming and
-construction details.
+- `N` is the number of components (2, 3, or 4)
+- `T` is the element type (i32, f32, etc.)
 
-#### Sum Types
+Common vector types:
+
+| Component Type | 2-component | 3-component | 4-component |
+|----------------|-------------|-------------|-------------|
+| `i32` (signed) | `vec2i32`   | `vec3i32`   | `vec4i32`   |
+| `f32` (32-bit float) | `vec2f32` | `vec3f32` | `vec4f32`  |
+
+Vector types are distinct from array types and have different semantics:
+
+- **Vectors** are fixed-size, optimized for SIMD operations
+- **Arrays** are more general containers with runtime length operations
+
+Example usage:
+```wyn
+let position: vec3f32 = @[1.0, 2.0, 3.0]
+let color: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
+```
+
+#### Vector Swizzles
+
+A vector's components are accessed with field syntax (`v.x`). Wyn
+also supports swizzles: one to four letters drawn from a single
+"swizzle set". The two sets and their component indices are:
+
+| Set  | `0` | `1` | `2` | `3` |
+|------|-----|-----|-----|-----|
+| xyzw | `x` | `y` | `z` | `w` |
+| rgba | `r` | `g` | `b` | `a` |
+
+`rgba` is an alias set for `xyzw` (`r == x`, `g == y`, `b == z`,
+`a == w`) — the two sets address the same underlying components and
+produce identical values. Mixing letters from the two sets in one
+swizzle (`.xg`, `.rbw`) is a type error.
+
+A single-letter swizzle produces the scalar component; a 2-, 3-, or
+4-letter swizzle produces a new vector of that length. Letters may
+repeat and may be in any order.
+
+Each referenced component must lie within the source vector's length —
+`.z` (or `.b`) on a `vec2` is a type error.
+
+```wyn
+let v: vec4f32 = @[1.0, 2.0, 3.0, 4.0]
+let first: f32       = v.x        -- 1.0
+let alpha: f32       = v.a        -- 4.0   (same as v.w)
+let rgb:   vec3f32   = v.rgb      -- (1.0, 2.0, 3.0)
+let rev:   vec4f32   = v.wzyx     -- (4.0, 3.0, 2.0, 1.0)
+let splat: vec3f32   = v.xxx      -- (1.0, 1.0, 1.0)
+```
+
+##### Swizzle Update via `with`
+
+Wyn extends the `with` operator to vec swizzles, so the GLSL idiom
+`dir.yz *= rot(angle)` translates directly:
+
+```wyn
+let v1 = v0 with .yz = e          -- replace v0.y, v0.z with e.x, e.y
+let v2 = v1 with .yz *= m         -- compound: same as `with .yz = v1.yz * m`
+let v3 = v2 with .x = scalar      -- single-component LHS takes a scalar RHS
+```
+
+The compound forms `*= += -= /=` desugar to
+`target with .swizzle = target.swizzle <op> rhs`, with `target`
+evaluated once. The result is always a fresh vec — wyn is
+immutable, the original target is unchanged. Components on the
+LHS must be **distinct** (`v with .xx = e` is rejected); the RHS
+arity must match the swizzle length (a `vec2` for `.yz`, a scalar
+for `.x`); and each component must be in range for the target's
+size.
+
+#### Vector Constructors
+
+Vectors are constructed with the `@[...]` literal syntax:
+
+```wyn
+let v1: vec3f32 = @[1.0, 2.0, 3.0]
+let v2: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
+```
+
+The element type is inferred from the arguments or the context.
+
+#### Vector Arithmetic and Scalar Broadcasting
+
+The binary arithmetic operators `+`, `-`, `*`, and `/` apply
+component-wise to vectors. When both operands are vectors they must
+have the *same* vector type (same length and element type); the result
+is that type and each component is combined independently:
+
+```wyn
+let a: vec3f32 = @[1.0, 2.0, 3.0]
+let b: vec3f32 = @[4.0, 5.0, 6.0]
+let s: vec3f32 = a + b            -- (5.0, 7.0, 9.0)
+let p: vec3f32 = a * b            -- (4.0, 10.0, 18.0), component-wise
+```
+
+When one operand is a scalar, it is **broadcast** against the vector:
+the scalar is applied to every component, and the result has the
+vector's type. The scalar may appear on **either** side, so both
+`v op scalar` and `scalar op v` are accepted:
+
+```wyn
+let v: vec3f32 = @[1.0, 2.0, 3.0]
+let scaled: vec3f32 = v * 2.0         -- (2.0, 4.0, 6.0)
+let shifted: vec3f32 = 3.0 - 2.0 * v  -- 3.0 - (2.0, 4.0, 6.0) = (1.0, -1.0, -3.0)
+```
+
+Broadcasting performs **no implicit numeric conversion**: the scalar's
+type must equal the vector's element type. Mixing a `vec3f32` with an
+`i32` scalar is a type error — write the scalar as `f32`. Likewise,
+component-wise vector arithmetic between two vectors of different
+element types or lengths is rejected.
+
+For `*` specifically, matrix products (matrix×matrix, matrix×vector,
+vector×matrix, matrix×scalar) take priority over component-wise
+arithmetic; see [Matrix Types](#matrix-types).
+
+### Matrix Types
+
+Wyn provides built-in matrix types. A matrix value has a fixed row count R, a fixed column count C, and a scalar element type — written `matRxC<elem>`. Square matrices have a shorthand alias `matN<elem>`:
+
+| Shape | Square shorthand | Rectangular form |
+|-------|-----------------|------------------|
+| 2×2   | `mat2f32`       | `mat2x2f32`      |
+| 3×3   | `mat3f32`       | `mat3x3f32`      |
+| 4×4   | `mat4f32`       | `mat4x4f32`      |
+| R×C (R ≠ C) | n/a       | `matRxCf32`      |
+
+Both the shorthand and rectangular form name the same type — `mat2f32 = mat2x2f32`.
+
+Supported dimensions are R, C ∈ {2, 3, 4}. Supported element types are all of the SPIR-V scalar primitives: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f16`, `f32`, `f64`.
+
+#### Matrix Literals
+
+Matrices are written with the `@[[...], [...], ...]` literal syntax — outer brackets describe rows, inner brackets describe each row's components:
+
+```wyn
+let m: mat2x2f32 = @[[1.0, 0.0],
+                     [0.0, 1.0]]
+
+let rot: mat2f32 = @[[c, s],
+                     [-s, c]]
+```
+
+Each inner array becomes one column of the matrix at SPIR-V emission — the literal above produces the GLSL equivalent `mat2(c, s, -s, c)` (column-major, matching GPU convention).
+
+#### Matrices in Arrays
+
+Matrix types are valid array elements, so `[][N][M]T` arrays and SOAC inputs
+work over matrix values in the same manner as they do over scalars.
+
+### Sum Types
 
 Sum types are anonymous in Wyn, and are written as the constructors
 separated by vertical bars. Each constructor consists of a
@@ -407,7 +556,7 @@ representation of sum-typed values. A sum-typed value may carry
 storage for every constructor's payload; sum types with multiple
 large-payload constructors can be costly.
 
-#### Record Types
+### Record Types
 
 Records are mappings from field names to values, with the field names
 known statically. A tuple behaves in all respects like a record with
@@ -426,52 +575,6 @@ required:
 ```wyn
 let r: { x: f32, y: f32 } = make_point() in r.x
 ```
-
-#### Function Types
-
-Functions are classified via function types, but they are not fully
-first class. See Higher-order functions for the details.
-
-#### Generic Type Applications
-
-A generic type application names a type constructor followed by a fully
-saturated, comma-separated argument list in angle brackets. Ordinary type
-arguments are types; size arguments are enclosed in brackets.
-
-```wyn
-pair<i32, bool>
-two_vecs<[4], f32>
-vector<[4], f32>
-```
-
-Type constructors are first-order. A type constructor cannot be used without
-its arguments, partially applied, passed as a value, or received through a
-type parameter. Each constructor fixes the number and kind of its arguments.
-
-#### String Literals
-
-Wyn has no first-class string type. A string literal (`"..."`) is a
-lexical token accepted only in two non-expression positions: the path
-in `import "..."` and the linkage name in `#[linked("...")]`. Writing
-a string where a value is expected is a syntax error.
-
-#### Existential Size Quantifiers
-
-An existential size quantifier brings an unknown size into scope
-within a type. It is used to describe results whose size is not
-statically known — most commonly, the output of `filter`:
-
-```wyn
-def is_even(x: i32) bool = x % 2 == 0
-
-def evens(arr: [8]i32) ?k. [k]i32 =
-    filter(is_even, arr)
-```
-
-The return type `?k. [k]i32` says "for some size `k`, an array of
-length `k`". A caller of `evens` receives an array of
-unknown-but-fixed length; `k` is in scope within the type but cannot
-be statically determined by the caller.
 
 ---
 
@@ -723,6 +826,22 @@ mismatches are type errors.
 
 Applications nest in the usual way. For example, `outer<inner<i32>>` is
 accepted without whitespace between the two closing `>` characters.
+
+### Generic Type Applications
+
+A generic type application names a type constructor followed by a fully
+saturated, comma-separated argument list in angle brackets. Ordinary type
+arguments are types; size arguments are enclosed in brackets.
+
+```wyn
+pair<i32, bool>
+two_vecs<[4], f32>
+vector<[4], f32>
+```
+
+Type constructors are first-order. A type constructor cannot be used without
+its arguments, partially applied, passed as a value, or received through a
+type parameter. Each constructor fixes the number and kind of its arguments.
 
 ---
 
@@ -1248,6 +1367,11 @@ containing a function (a functional type):
 See also In-place Updates for details on how consumption interacts
 with higher-order functions.
 
+### Function Types
+
+Functions are classified by function types written `A -> B`. Arrow types are
+right-associative, so `A -> B -> C` means `A -> (B -> C)`.
+
 ### Function Arity and Partial Application
 
 Wyn functions are **not curried** by default. Every function has a
@@ -1426,6 +1550,24 @@ Sizes may be any expression of type `i64` that does not consume any
 free variables. Size parameters can be used as ordinary `i64`
 variables within their scope. The type checker verifies that the
 program obeys any constraints imposed by size annotations.
+
+### Existential Size Quantifiers
+
+An existential size quantifier brings an unknown size into scope
+within a type. It is used to describe results whose size is not
+statically known — most commonly, the output of `filter`:
+
+```wyn
+def is_even(x: i32) bool = x % 2 == 0
+
+def evens(arr: [8]i32) ?k. [k]i32 =
+    filter(is_even, arr)
+```
+
+The return type `?k. [k]i32` says "for some size `k`, an array of
+length `k`". A caller of `evens` receives an array of
+unknown-but-fixed length; `k` is in scope within the type but cannot
+be statically determined by the caller.
 
 Size-dependent types are supported, as the names of value parameters
 can be used in the return type of a function:
@@ -2005,170 +2147,6 @@ extern sha256_compress(state: [8]u32, block: [16]u32) [8]u32
 The supplied function must have exactly the declared Wyn function type. A
 program that uses a linked declaration for which the execution environment
 provides no matching definition cannot be executed.
-
-## Vector Types
-
-In addition to arrays, Wyn provides fixed-width vector types. They are
-distinct from arrays: they have a fixed component count and componentwise
-arithmetic.
-
-Vector types use the naming convention `vecNT` where:
-- `N` is the number of components (2, 3, or 4)
-- `T` is the element type (i32, f32, etc.)
-
-Common vector types:
-
-| Component Type | 2-component | 3-component | 4-component |
-|----------------|-------------|-------------|-------------|
-| `i32` (signed) | `vec2i32`   | `vec3i32`   | `vec4i32`   |
-| `f32` (32-bit float) | `vec2f32` | `vec3f32` | `vec4f32`  |
-
-Vector types are distinct from array types and have different semantics:
-- **Vectors** are fixed-size, optimized for SIMD operations
-- **Arrays** are more general containers with runtime length operations
-
-Example usage:
-```wyn
-let position: vec3f32 = @[1.0, 2.0, 3.0]
-let color: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
-```
-
-### Vector Swizzles
-
-A vector's components are accessed with field syntax (`v.x`). Wyn
-also supports swizzles: one to four letters drawn from a single
-"swizzle set". The two sets and their component indices are:
-
-| Set  | `0` | `1` | `2` | `3` |
-|------|-----|-----|-----|-----|
-| xyzw | `x` | `y` | `z` | `w` |
-| rgba | `r` | `g` | `b` | `a` |
-
-`rgba` is an alias set for `xyzw` (`r == x`, `g == y`, `b == z`,
-`a == w`) — the two sets address the same underlying components and
-produce identical values. Mixing letters from the two sets in one
-swizzle (`.xg`, `.rbw`) is a type error.
-
-A single-letter swizzle produces the scalar component; a 2-, 3-, or
-4-letter swizzle produces a new vector of that length. Letters may
-repeat and may be in any order.
-
-Each referenced component must lie within the source vector's length —
-`.z` (or `.b`) on a `vec2` is a type error.
-
-```wyn
-let v: vec4f32 = @[1.0, 2.0, 3.0, 4.0]
-let first: f32       = v.x        -- 1.0
-let alpha: f32       = v.a        -- 4.0   (same as v.w)
-let rgb:   vec3f32   = v.rgb      -- (1.0, 2.0, 3.0)
-let rev:   vec4f32   = v.wzyx     -- (4.0, 3.0, 2.0, 1.0)
-let splat: vec3f32   = v.xxx      -- (1.0, 1.0, 1.0)
-```
-
-#### Swizzle Update via `with`
-
-Wyn extends the `with` operator to vec swizzles, so the GLSL idiom
-`dir.yz *= rot(angle)` translates directly:
-
-```wyn
-let v1 = v0 with .yz = e          -- replace v0.y, v0.z with e.x, e.y
-let v2 = v1 with .yz *= m         -- compound: same as `with .yz = v1.yz * m`
-let v3 = v2 with .x = scalar      -- single-component LHS takes a scalar RHS
-```
-
-The compound forms `*= += -= /=` desugar to
-`target with .swizzle = target.swizzle <op> rhs`, with `target`
-evaluated once. The result is always a fresh vec — wyn is
-immutable, the original target is unchanged. Components on the
-LHS must be **distinct** (`v with .xx = e` is rejected); the RHS
-arity must match the swizzle length (a `vec2` for `.yz`, a scalar
-for `.x`); and each component must be in range for the target's
-size.
-
-### Vector Constructors
-
-Vectors are constructed with the `@[...]` literal syntax:
-
-```wyn
-let v1: vec3f32 = @[1.0, 2.0, 3.0]
-let v2: vec4f32 = @[1.0, 0.0, 0.0, 1.0]
-```
-
-The element type is inferred from the arguments or the context.
-
-### Vector Arithmetic and Scalar Broadcasting
-
-The binary arithmetic operators `+`, `-`, `*`, and `/` apply
-component-wise to vectors. When both operands are vectors they must
-have the *same* vector type (same length and element type); the result
-is that type and each component is combined independently:
-
-```wyn
-let a: vec3f32 = @[1.0, 2.0, 3.0]
-let b: vec3f32 = @[4.0, 5.0, 6.0]
-let s: vec3f32 = a + b            -- (5.0, 7.0, 9.0)
-let p: vec3f32 = a * b            -- (4.0, 10.0, 18.0), component-wise
-```
-
-When one operand is a scalar, it is **broadcast** against the vector:
-the scalar is applied to every component, and the result has the
-vector's type. The scalar may appear on **either** side, so both
-`v op scalar` and `scalar op v` are accepted:
-
-```wyn
-let v: vec3f32 = @[1.0, 2.0, 3.0]
-let scaled: vec3f32 = v * 2.0         -- (2.0, 4.0, 6.0)
-let shifted: vec3f32 = 3.0 - 2.0 * v  -- 3.0 - (2.0, 4.0, 6.0) = (1.0, -1.0, -3.0)
-```
-
-Broadcasting performs **no implicit numeric conversion**: the scalar's
-type must equal the vector's element type. Mixing a `vec3f32` with an
-`i32` scalar is a type error — write the scalar as `f32`. Likewise,
-component-wise vector arithmetic between two vectors of different
-element types or lengths is rejected.
-
-For `*` specifically, matrix products (matrix×matrix, matrix×vector,
-vector×matrix, matrix×scalar) take priority over component-wise
-arithmetic; see [Matrix Types](#matrix-types).
-
----
-
-## Matrix Types
-
-Wyn provides built-in matrix types. A matrix value has a fixed row count R, a fixed column count C, and a scalar element type — written `matRxC<elem>`. Square matrices have a shorthand alias `matN<elem>`:
-
-| Shape | Square shorthand | Rectangular form |
-|-------|-----------------|------------------|
-| 2×2   | `mat2f32`       | `mat2x2f32`      |
-| 3×3   | `mat3f32`       | `mat3x3f32`      |
-| 4×4   | `mat4f32`       | `mat4x4f32`      |
-| R×C (R ≠ C) | n/a       | `matRxCf32`      |
-
-Both the shorthand and rectangular form name the same type — `mat2f32 = mat2x2f32`.
-
-Supported dimensions are R, C ∈ {2, 3, 4}. Supported element types are all of the SPIR-V scalar primitives: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f16`, `f32`, `f64`.
-
-### Matrix Literals
-
-Matrices are written with the `@[[...], [...], ...]` literal syntax — outer brackets describe rows, inner brackets describe each row's components:
-
-```wyn
-let m: mat2x2f32 = @[[1.0, 0.0],
-                     [0.0, 1.0]]
-
-let rot: mat2f32 = @[[c, s],
-                     [-s, c]]
-```
-
-Each inner array becomes one column of the matrix at SPIR-V emission — the literal above produces the GLSL equivalent `mat2(c, s, -s, c)` (column-major, matching GPU convention).
-
-### Matrices in Arrays
-
-Matrix types are valid array elements, so `[][N][M]T` arrays and SOAC inputs
-work over matrix values in the same manner as they do over scalars.
-
----
-
 
 ## Appendix: Wyn Compared to Other Functional Languages
 
