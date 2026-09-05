@@ -129,6 +129,7 @@ fn default_diagnostic_range() -> Range {
 struct Backend {
     client: Client,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
+    document_texts: Arc<RwLock<HashMap<Url, String>>>,
 }
 
 impl Backend {
@@ -136,6 +137,35 @@ impl Backend {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
+            document_texts: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
+
+fn document_text(document_texts: &RwLock<HashMap<Url, String>>, uri: &Url) -> Option<String> {
+    if let Ok(texts) = document_texts.read() {
+        if let Some(text) = texts.get(uri) {
+            return Some(text.clone());
+        }
+    }
+
+    let path = uri.to_file_path().ok()?;
+    std::fs::read_to_string(path).ok()
+}
+
+fn update_document_state(
+    documents: &RwLock<HashMap<Url, DocumentState>>,
+    uri: Url,
+    state: Option<DocumentState>,
+) {
+    if let Ok(mut documents) = documents.write() {
+        match state {
+            Some(state) => {
+                documents.insert(uri, state);
+            }
+            None => {
+                documents.remove(&uri);
+            }
         }
     }
 }
@@ -219,6 +249,9 @@ impl LanguageServer for Backend {
         verbose!("[wyn-analyzer] didClose {}", params.text_document.uri);
         if let Ok(mut docs) = self.documents.write() {
             docs.remove(&params.text_document.uri);
+        }
+        if let Ok(mut texts) = self.document_texts.write() {
+            texts.remove(&params.text_document.uri);
         }
     }
 
@@ -446,13 +479,9 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         verbose!("[wyn-analyzer] semanticTokens/full {}", uri);
 
-        let path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
+        let text = match document_text(&self.document_texts, uri) {
+            Some(text) => text,
+            None => return Ok(None),
         };
 
         let tokens = compute_semantic_tokens(&text);
@@ -471,14 +500,13 @@ impl LanguageServer for Backend {
 
 impl Backend {
     async fn on_change(&self, doc: TextDocumentItem) {
+        if let Ok(mut texts) = self.document_texts.write() {
+            texts.insert(doc.uri.clone(), doc.text.clone());
+        }
         let (diagnostics, state) = self.check_document(&doc.uri, &doc.text);
         verbose!("{}", format_check_result(&doc.uri, &diagnostics, state.is_some()));
 
-        if let Some(state) = state {
-            if let Ok(mut docs) = self.documents.write() {
-                docs.insert(doc.uri.clone(), state);
-            }
-        }
+        update_document_state(&self.documents, doc.uri.clone(), state);
 
         self.client.publish_diagnostics(doc.uri, diagnostics, Some(doc.version)).await;
     }
@@ -1548,7 +1576,8 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
     use lexer::Token::*;
     match token {
         Let | Def | Entry | Sig | In | If | Then | Else | Loop | For | While | Do | Match | Case
-        | Module | Functor | Open | Import | Type | Include | With | Extern | True | False => Some(0), // KEYWORD
+        | Module | Functor | Open | Import | Type | TypeSizeLifted | TypeFullyLifted | Include | With
+        | Extern | Resource | True | False => Some(0), // KEYWORD
 
         IntLiteral(_) | FloatLiteral(_) | SuffixedLiteral(_, _) => Some(1), // NUMBER
 

@@ -125,3 +125,51 @@ fn unsaved_standalone_document_uses_its_parent_directory() {
     let modules = load_source_graph(Some(&document), source).expect("standalone source graph should load");
     modules.type_check().expect("standalone source should type check");
 }
+
+#[test]
+fn semantic_tokens_recognize_current_keywords() {
+    assert_eq!(token_type_index(&lexer::Token::Resource), Some(0));
+    assert_eq!(token_type_index(&lexer::Token::TypeSizeLifted), Some(0));
+    assert_eq!(token_type_index(&lexer::Token::TypeFullyLifted), Some(0));
+}
+
+#[test]
+fn semantic_tokens_prefer_the_open_document_buffer() {
+    let directory = TestDirectory::new();
+    let path = directory.write("buffer.wyn", "def saved: i32 = 0\n");
+    let uri = Url::from_file_path(path).expect("test path should convert to a file URL");
+    let texts = RwLock::new(HashMap::new());
+
+    assert_eq!(
+        document_text(&texts, &uri).as_deref(),
+        Some("def saved: i32 = 0\n")
+    );
+    texts
+        .write()
+        .expect("document text lock should be available")
+        .insert(uri.clone(), "def unsaved: i32 = 1\n".to_string());
+    assert_eq!(
+        document_text(&texts, &uri).as_deref(),
+        Some("def unsaved: i32 = 1\n")
+    );
+}
+
+#[test]
+fn failed_edits_clear_the_last_type_checked_document() {
+    let uri = Url::parse("file:///editor-buffer.wyn").expect("valid test URL");
+    let source = "def value: i32 = 0\n";
+    let ast = load_source_graph(None, source)
+        .expect("source graph should load")
+        .type_check()
+        .expect("source should type check");
+    let documents = RwLock::new(HashMap::from([(
+        uri.clone(),
+        DocumentState {
+            ast,
+            text: source.to_string(),
+        },
+    )]));
+
+    update_document_state(&documents, uri.clone(), None);
+    assert!(!documents.read().expect("document lock should be available").contains_key(&uri));
+}
