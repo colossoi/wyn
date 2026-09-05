@@ -3308,6 +3308,52 @@ def conditional(value: vec4f32, keep: bool) fragment_output<vec4f32> =
 }
 
 #[test]
+fn graphics_state_types_are_predeclared_structural_aliases() {
+    typecheck_program(
+        r#"
+def custom_viewport: viewport = {
+  origin = @[10.0, 20.0],
+  extent = @[640.0, 480.0],
+  depth = @[0.25, 0.75],
+}
+def custom_scissor: scissor = {
+  origin = @[4, 8],
+  extent = @[320u32, 240u32],
+}
+def raster_options: raster_state = {
+  viewport = #custom(custom_viewport),
+  scissor = #custom(custom_scissor),
+  front_face = #clockwise,
+  cull = #back,
+  fill = #line,
+}
+def depth_mode: depth_test = #less_equal
+def color_blend: blend_mode = #replace
+def fragment_options: fragment_state = {
+  depth_test = depth_mode,
+  depth_write = true,
+  blend = color_blend,
+  color_write = true,
+}
+"#,
+    );
+}
+
+#[test]
+fn expected_sum_type_flows_through_let_expression_body() {
+    typecheck_program(
+        r#"
+def conditional(value: vec4f32, keep: bool) fragment_output<vec4f32> =
+  if keep then
+    let depth = 0.25 in
+    #depth(value, depth)
+  else
+    #discard
+"#,
+    );
+}
+
+#[test]
 fn fragment_output_supports_exhaustive_pattern_matching() {
     typecheck_program(
         r#"

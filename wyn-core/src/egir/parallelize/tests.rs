@@ -92,7 +92,7 @@ fn output_ownership_comes_from_explicit_route_writer() {
     let mut entry = egir::program::AllocatedEntry::new_with_resources(
         "route_test".into(),
         identities.alloc_entry("route_test".into()),
-        Span::dummy(),
+        Span::generated(),
         ExecutionModel::Compute {
             local_size: (1, 1, 1),
         },
@@ -270,7 +270,7 @@ fn scan_phase2_writes_exclusive_prefix_before_combining_current_block() {
     let operator = Func::<Semantic>::new(
         operator_id,
         "combine".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         operator_params,
         by_value_function_result::<WynLanguage>(elem_ty.clone()),

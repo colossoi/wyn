@@ -19,13 +19,6 @@ def SPEED: f32 = 10.0
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0,  -1.0, 0.0, 1.0],
-   @[-1.0,  3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Math helpers
@@ -74,7 +67,7 @@ def hash_terrain(uv: vec2f32, jt: f32) f32 =
 -- disabled, those all return zero, the a-weights collapse to 1, and
 -- the corner-hash computation is dead. Only the geometric edge
 -- distance remains.
-def edgeMin(dx: f32, da: vec2f32, db: vec2f32, _uv: vec2f32) f32 =
+def edge_min(dx: f32, da: vec2f32, db: vec2f32, _uv: vec2f32) f32 =
   min(min((1.0 - dx) * db.y, da.x), da.y)
 
 -- Triangular-grid value noise: returns (height, edge_mask)
@@ -94,7 +87,7 @@ def trinoise(uv_in: vec2f32, jt: f32) (f32, f32) =
   let nmid = mix(n2, n3, d.y) in
   let ns   = mix(nn, n_alt, da.y) in
   let dx   = da.x / db.y in
-  (mix(ns, nmid, dx), edgeMin(dx, da, db, @[uv.x + d.x, uv.y + d.y]))
+  (mix(ns, nmid, dx), edge_min(dx, da, db, @[uv.x + d.x, uv.y + d.y]))
 
 ------------------------------------------------------------
 -- Scene SDF (terrain)
@@ -205,15 +198,17 @@ def gsky(rd: vec3f32, ld: vec3f32, show_sun: bool) vec3f32 =
 -- Fragment shader
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   -- Camera time (jTime in original; iTimeDelta not available, dt ≈ 0)
-  let jt = mod(iTime, 4000.0) in
+  let jt = mod(time, 4000.0) in
 
   -- Screen UV
-  let uv = (2.0 * fc - iResolution.xy) / iResolution.y in
+  let uv = (2.0 * fc - resolution.xy) / resolution.y in
 
   -- Ray origin: scrolling forward at SPEED
   let ro = @[0.0, 1.0, -20000.0 + jt * SPEED] in
@@ -519,12 +514,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 -- 	"model": "car"
 -- }
 -- */
-
-entry synthwave_sunset(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

@@ -509,7 +509,10 @@ pub(crate) fn materialize_place_backed_projections<P: Family>(
                 ValueKind::Pure {
                     op: PureOp::Index,
                     operands,
-                } if operands.len() == 2 && graph.canonical_value(operands[0]) == value => {
+                } if operands.len() == 2
+                    && graph.canonical_value(operands[0]) == value
+                    && is_static_index(graph, operands[1]) =>
+                {
                     Some((consumer, Some(operands[1]), 0, node.ty().clone(), node.span()))
                 }
                 _ => None,
@@ -540,6 +543,18 @@ pub(crate) fn materialize_place_backed_projections<P: Family>(
         }
     }
     graph.skeleton.blocks[block].side_effects.splice(0..0, loads);
+}
+
+fn is_static_index<P: Family>(graph: &EGraph<P>, value: ValueId) -> bool {
+    let value = graph.canonical_value(value);
+    matches!(
+        graph.nodes[value].kind(),
+        ValueKind::Constant(ConstantValue::I32(_) | ConstantValue::U32(_))
+            | ValueKind::Pure {
+                op: PureOp::Int(_) | PureOp::Uint(_),
+                ..
+            }
+    )
 }
 
 pub fn pack_result_values<P: Family>(

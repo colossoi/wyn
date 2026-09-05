@@ -107,6 +107,44 @@ fn run_with_large_stack(test: impl FnOnce() + Send + 'static) {
 }
 
 #[test]
+fn playground_da_rasterizer_preserves_aliased_output_producers() {
+    run_with_large_stack(|| {
+        let source = format!(
+            "{}\n{}",
+            include_str!("../../scripts/playground_image_header.wyn"),
+            include_str!("../../testfiles/playground/da_rasterizer.wyn"),
+        );
+        let ssa = compile_thru_ssa(&source)
+            .expect("indexed fusion must retain producers observed through aliased output routes");
+        lower_ssa_to_wgsl(ssa).expect("da_rasterizer lowers to WGSL");
+    });
+}
+
+#[test]
+fn playground_nested_fragment_loops_preserve_side_effect_producers() {
+    run_with_large_stack(|| {
+        let source = include_str!("../../testfiles/regressions/playground_nested_fragment_loops.wyn");
+        let ssa = lower_semantic_egir(
+            compile_to_semantic_egir(source),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+        );
+        lower_ssa_to_wgsl(ssa).expect("nested fragment loops lower to WGSL");
+    });
+}
+
+#[test]
+fn playground_nested_loop_helper_binds_all_wgsl_values() {
+    run_with_large_stack(|| {
+        let source = include_str!("../../testfiles/regressions/playground_nested_loop_helper.wyn");
+        let ssa = lower_semantic_egir(
+            compile_to_semantic_egir(source),
+            LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+        );
+        lower_ssa_to_wgsl(ssa).expect("nested loop helper binds every referenced WGSL value");
+    });
+}
+
+#[test]
 fn direct_backends_emit_only_the_requested_graphics_stages() {
     run_with_large_stack(|| {
         let source = include_str!("../../testfiles/unified_triangle.wyn");
@@ -146,11 +184,13 @@ fn direct_backends_emit_only_the_requested_graphics_stages() {
 #[test]
 fn direct_output_keeps_fragment_local_reduce_in_the_authored_stage() {
     run_with_large_stack(|| {
-        let planned = plan_direct(
+        let source = format!(
+            "{}\n{}",
+            include_str!("../../scripts/playground_image_header.wyn"),
             include_str!("../../testfiles/playground/ripples.wyn"),
-            CodegenTarget::Wgsl,
-        )
-        .expect("fragment-local reduction should remain serial in direct WGSL");
+        );
+        let planned = plan_direct(&source, CodegenTarget::Wgsl)
+            .expect("fragment-local reduction should remain serial in direct WGSL");
         let ssa = lower_egir_to_ssa(planned).expect("direct graphics SSA");
         assert_eq!(ssa.entry_points.len(), 2, "one vertex and one fragment entry");
         assert!(
@@ -317,7 +357,7 @@ fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
 
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
-/// `module_manager` covers both `type_check` and `to_tlc`.
+/// Semantic module coverage spans both `type_check` and `to_tlc`.
 fn compile_to_semantic_egir(input: &str) -> egir::ResourcesAllocated {
     let program = egir::optimize_semantic_operations(compile_to_segmented_egir(input))
         .expect("semantic EGIR optimization failed");
@@ -3510,6 +3550,43 @@ entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn unified_root_resolves_float_derived_direct_draw_count_before_stage_extraction() {
+    let program = compile_thru_tlc(
+        r#"
+def PER_COURSE: i32 = i32(f32.ceil((8.0 + 0.2) / 0.2)) + 1
+def INSTANCE_COUNT: i32 = 8 * PER_COURSE + 128 + 8
+
+entry reproduce(target: render_target<f32>) render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, u32(INSTANCE_COUNT)),
+    |vertex| vertex_output(
+      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0], ())) in
+  shade(target, raster, |fragment| fragment.position.z)
+"#,
+    )
+    .expect("partial evaluation resolves float-derived draw counts before stage extraction");
+    let graphics = program
+        .defs
+        .iter()
+        .find_map(|definition| {
+            let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+                return None;
+            };
+            entry.declaration.graphics_group.as_ref()
+        })
+        .expect("graphics stage group");
+    assert_eq!(
+        graphics.invocation.draw,
+        pipeline_descriptor::DrawCall::Direct {
+            vertex_count: 3,
+            instance_count: 472,
+            first_vertex: 0,
+            first_instance: 0,
+        }
+    );
+}
+
+#[test]
 fn unified_root_flattens_nested_record_compute_output() {
     let lowered = compile_thru_spirv(
         r#"
@@ -4170,7 +4247,9 @@ def normalize_output(output: fragment_output<vec4f32>) fragment_output<vec4f32> 
 def fragment_stage(fragment: fragment_invocation<vec4f32>) fragment_output<vec4f32> =
   normalize_output(
     if fragment.front_facing
-    then #depth(fragment.value, 0.25)
+    then
+      let depth = 0.25 in
+      #depth(fragment.value, depth)
     else #discard)
 
 entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
@@ -4287,6 +4366,46 @@ entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
 "#,
     )
     .expect("shade_with accepts the specified structural fragment state");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
+        panic!("graphics pipeline")
+    };
+    assert_eq!(
+        graphics.invocation.fragment_state.depth_test,
+        pipeline_descriptor::DepthTest::LessEqual
+    );
+    assert!(graphics.invocation.fragment_state.depth_write);
+    assert_eq!(
+        graphics.invocation.fragment_state.blend,
+        pipeline_descriptor::BlendMode::Replace
+    );
+    assert!(graphics.invocation.fragment_state.color_write);
+}
+
+#[test]
+fn unified_root_accepts_named_explicit_fragment_state() {
+    let lowered = compile_thru_spirv(
+        r#"
+def opaque_depth: fragment_state = {
+  depth_test = #less_equal,
+  depth_write = true,
+  blend = #replace,
+  color_write = true,
+}
+
+entry reproduce(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex| vertex_output(
+      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+      else @[0.0, 0.5, 0.0, 1.0],
+      @[1.0, 0.5, 0.25, 1.0])) in
+  shade_with(opaque_depth, target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a named fragment_state supplies context to its sum fields");
     assert_naga_accepts_spirv(&lowered.spirv);
 
     let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
@@ -4433,6 +4552,64 @@ entry compact_and_draw(values: []vec4f32,
             lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
         })
     );
+}
+
+#[test]
+fn unified_root_materializes_computed_scalar_indirect_draw_command() {
+    let lowered = compile_thru_spirv(
+        r#"
+type draw_command = {
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+}
+
+type prepared = {
+  instances: []vec4f32,
+  command: draw_command
+}
+
+entry reproduce(values: []vec4f32,
+                target: render_target<vec4f32>) render_target<vec4f32> =
+  let prepared = {
+    instances = map(|value: vec4f32| value, values),
+    command = {
+      vertex_count = 3u32,
+      instance_count = u32(length(values)),
+      first_vertex = 0u32,
+      first_instance = 0u32
+    }
+  } in
+  let covered = rasterize_triangles(
+    indirect_draw(prepared.command),
+    |vertex|
+      let position = prepared.instances[i32(vertex.instance_index)] in
+      vertex_output(position, position)) in
+  shade(target, covered, |fragment| fragment.value)
+"#,
+    )
+    .expect("a computed scalar command can drive an indirect draw");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    assert_eq!(lowered.pipeline.pipelines.len(), 2);
+    let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[1] else {
+        panic!("indirect graphics pipeline")
+    };
+    let pipeline_descriptor::DrawCall::Indirect { commands, offset, .. } = &graphics.invocation.draw else {
+        panic!("draw must be indirect")
+    };
+    assert_eq!(*offset, 0);
+    let resource = commands.resource.as_ref().expect("computed scalar draw resource");
+    lowered
+        .pipeline
+        .frame_graph
+        .indirect_draws
+        .iter()
+        .find(|dependency| {
+            lowered.pipeline.frame_graph.resources[dependency.buffer_resource].name == *resource
+        })
+        .expect("computed scalar command dependency");
 }
 
 #[test]
@@ -8193,7 +8370,7 @@ fn compile_to_ssa_with_modules(input: &str) -> ssa::stage::Elaborated {
 //
 // Each test asserts the *desired* code-gen outcome for a construct the SPIR-V
 // backend currently can't handle; `#[ignore]`d so the suite stays green.
-// Surfaced while building the lib/ statistics generators. Drop the `#[ignore]`
+// Surfaced while building the statistics generators. Drop the `#[ignore]`
 // when the gap is closed.
 // =========================================================================
 
@@ -8232,7 +8409,7 @@ entry e(j: i32) [1]f32 = [g(256)[j]]
 /// A single-consumer runtime-sized array fuses into its consumer and never
 /// materializes (`f32.sum(map(…, 0..<n))` lowers fine), but binding it and
 /// reading it more than once forces materialization of an unsized Composite
-/// array, which the type lowering rejects. This is what blocks the lib/ `Stats`
+/// array, which the type lowering rejects. This is what blocks the `Stats`
 /// gatherer, whose sample array feeds `sum`, a deviation `map`, `minimum`, and
 /// `maximum`. Distinct from `returning_runtime_sized_array_from_fn_lowers`,
 /// which is about *returning* such an array.
@@ -8253,7 +8430,7 @@ entry e() f32 = g(256)
 /// definition. The cascade in `hof_specialize::specialize_higher_order_functions` walks reachable defs, finds
 /// `SoacBody`s whose captures include `(_, arrow_ty, Var(known_callable))`,
 /// clones the lifted def with the callable substituted into the body,
-/// and drops the callable param from its signature. Lets `lib/noise.wyn`
+/// and drops the callable param from its signature. Lets procedural noise
 /// collapse its four `fbm_<kind>` defs into one generic `fbm2`.
 #[test]
 fn function_typed_param_with_named_callee_specializes() {
@@ -8417,7 +8594,7 @@ entry e() [4]f32 =
 
 /// The statistics-gatherer shape that motivated the reductions: reduce a sample
 /// stream to `[count, mean, variance, stddev, min, max]` using `f32.sum`,
-/// `f32.minimum`, `f32.maximum`. This is the lib/ `Stats` summarize body.
+/// `f32.minimum`, `f32.maximum`. This is the `Stats` summarize body.
 #[test]
 fn statistics_gatherer_lowers() {
     let source = r#"
@@ -8734,23 +8911,23 @@ entry vertex_main(vid: i32) vec4f32 =
 /// enough that compile_to_ssa_with_modules succeeds.)
 #[test]
 fn test_ssa_raytrace_well_formed() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../testfiles/playground/raytrace.wyn"
-    ))
-    .expect("Could not read testfiles/playground/raytrace.wyn");
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../scripts/playground_image_header.wyn"),
+        include_str!("../../testfiles/playground/raytrace.wyn"),
+    );
 
-    let ssa = compile_to_ssa_with_modules(&source);
+    let ssa = stacker::grow(16 * 1024 * 1024, || compile_to_ssa_with_modules(&source));
 
     // SOAC-bearing helpers such as `trace` are intentionally force-inlined
     // before SSA and then removed by DCE. Verify the durable contract instead:
     // both extracted graphical stages survived and SSA construction completed.
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__vertex"),
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_image__vertex"),
         "the extracted raytrace vertex stage should be in SSA output"
     );
     assert!(
-        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_raytrace__fragment"),
+        ssa.entry_points.iter().any(|entry| entry.name == "_w_stage_image__fragment"),
         "the extracted raytrace fragment stage should be in SSA output"
     );
 }
@@ -12839,7 +13016,7 @@ entry e(xs: []u32) []u32 = map(|x: u32| (x ^ 5u32) << 1u32, xs)
 ///   2. the fn called to produce a *captured* value: `let k = f(7u32) in ..`
 ///   3. the fn *also* called inside the SOAC lambda
 /// An arithmetic-only body, a literal (non-call) `k`, or calling `f` only
-/// inside the lambda each compile fine. Surfaced by the lib/rng.wyn PCG hash
+/// inside the lambda each compile fine. Surfaced by a PCG hash
 /// (`pcg` has `let w = .. in (w >> 22) ^ w`, used for the hoisted key and
 /// inside the per-element map).
 #[test]
@@ -12880,7 +13057,7 @@ entry v() vec4f32 = @[f32.i32(nested_lambda(100)), 0.0, 0.0, 1.0]
 /// partial_eval folds integer arithmetic; a u32 multiply like `C * K`
 /// overflows u32 (and its i128-free product would overflow i64), so the fold
 /// must wrap mod 2^32 rather than emit an out-of-range literal
-/// ("Invalid u32"). Surfaced by lib/rng.wyn's PCG hash.
+/// ("Invalid u32"). Surfaced by a PCG hash.
 #[test]
 fn folded_u32_arithmetic_wraps_to_width() {
     compile_to_spirv(
@@ -12897,7 +13074,7 @@ entry e() []u32 = map(|i: i32| C * 747796405u32 + 2891336453u32, 0i32 ..< 4)
 /// residual at every use site. Doing so is exponential in the chain depth
 /// (the term doubles per step) and at shallower depth also drops a binding
 /// ("Unknown global: x0"). partial_eval keeps non-trivial residual `let`s
-/// shared instead. Surfaced by lib/rng.wyn's Threefry `block`.
+/// shared instead. Surfaced by a Threefry `block`.
 #[test]
 fn deep_tuple_let_chain_keeps_sharing() {
     compile_to_spirv(
@@ -13446,151 +13623,6 @@ entry sim(prev: []vec4f32,
     .expect("returning a Screma result while a downstream scatter consumes it should compile");
 }
 
-// ============================================================================
-// Module-system spec-gap tests (ignored).
-//
-// These tests pin the behavior that `SPECIFICATION.md` describes but the
-// current compiler does NOT yet implement. They are `#[ignore]`d so the
-// suite stays green; running `cargo test -- --ignored` reveals the gap.
-//
-// When the implementation catches up:
-//   1. Un-ignore the relevant test(s).
-//   2. Remove the matching "Implementation discrepancy" callout in
-//      `SPECIFICATION.md` (search for "DISCREPANCY:" — there are two
-//      callouts, one in §Declaration Modifiers and one in §Referencing
-//      Other Files).
-// ============================================================================
-
-/// SPEC (`SPECIFICATION.md`, "Declaration Modifiers"):
-///   `local dec` binds the names defined by `dec` in the current scope
-///   but hides them from users of the enclosing module.
-///
-/// CURRENT IMPL: no `local` keyword exists. Parser errors with
-///   "Expected declaration, got Identifier(\"local\")".
-///
-/// IMPLEMENTATION OPTIONS (smallest → largest scope):
-///   A. Parser stub. Add `Local` keyword in `lexer/mod.rs`, a
-///      `Declaration::Local(Box<Declaration>)` AST variant, and parse it
-///      in `parser.rs`. Treat as equivalent to non-local everywhere else.
-///      Reserves the keyword and unblocks libraries that want to write
-///      `local open` for future-compat; does not yet hide anything.
-///   B. Filter at the user-module boundary. In
-///      `module_manager::elaborate_module_body`, drop `Local(...)` decls
-///      when building the exported `items` list. Hides locals from users
-///      of `module foo = { ... }` bodies.
-///   C. Filter at the file-import boundary. `import "lib.wyn"` is
-///      currently literal-inlining (`resolve_imports::run`), so by the
-///      time `resolve_opens` runs there's no remaining "this came from
-///      lib.wyn" boundary. Two paths: (i) run `resolve_opens` per-file
-///      before inlining and strip `Local(...)` from the inlined result,
-///      or (ii) inject begin/end-file scope markers around inlined
-///      decls and teach the resolver to pop opens at end markers.
-#[test]
-#[ignore = "SPEC: `local <dec>` / `local open` not implemented; see DISCREPANCY in SPECIFICATION.md"]
-fn local_open_parses_per_spec() {
-    let src = r#"
-        local open f32
-        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
-    "#;
-    compile_to_ssa(src);
-}
-
-/// SPEC (`SPECIFICATION.md`, "Referencing Other Files"):
-///   Qualified imports: `module M = import "file"` creates a module
-///   whose members are the file's top-level non-local decls, accessed
-///   as `M.foo`.
-///
-/// CURRENT IMPL: the parser accepts `module M = import "..."` (because
-/// `parse_module_expression` handles the `Import` form), but
-/// `module_manager::elaborate_module_body` returns
-/// "Unsupported module expression type" — it has no case for
-/// `ModuleExpression::Import`.
-///
-/// IMPLEMENTATION OPTIONS:
-///   A. In `elaborate_module_body`, when seeing
-///      `ModuleExpression::Import(path)`, resolve `path` to a file,
-///      parse it, and recursively elaborate its top-level non-local
-///      decls as if they were the body of a synthetic struct. Requires
-///      filesystem access at elaboration time — the manager would need
-///      a `base_dir` thread-through (which `resolve_imports::run`
-///      already does for its case).
-///   B. Desugar at parse time: rewrite `module M = import "path"` into
-///      `module M = { <inlined parsed decls> }` in a pass that runs
-///      after `resolve_imports` but before `elaborate_modules`.
-#[test]
-#[ignore = "SPEC: `module M = import \"...\"` not implemented; see DISCREPANCY in SPECIFICATION.md"]
-fn qualified_module_import_per_spec() {
-    // For a self-contained test, we'd usually point at a real file via
-    // `import`. Here we just exercise the elaboration path — when this
-    // form is supported, the test should be expanded to write a temp
-    // file and reference it.
-    let src = r#"
-        module M = import "nonexistent_for_now"
-        def use_it: f32 = M.something
-    "#;
-    compile_to_ssa(src);
-}
-
-/// SPEC (`SPECIFICATION.md`, "Referencing Other Files"):
-///   A plain `import "file"` is equivalent to `local open import "file"`
-///   — it pulls in another file's exports without re-exporting them.
-///
-/// CURRENT IMPL: `resolve_imports::run` literally inlines the imported
-/// file's decls into the importer's top-level declaration list. Every
-/// non-local decl AND every `open` from the imported file becomes a
-/// top-level decl in the importer's program. This is the opposite of
-/// "without re-exporting them" — closer to the spec's
-/// `open import "file"` semantics (re-export).
-///
-/// The dedupe fix in [`crate::resolve_opens`] for two identical
-/// `open M` entries prevents duplicate-open ambiguity but does not implement
-/// the specification's hiding semantics.
-///
-/// IMPLEMENTATION OPTIONS: see the C-variants documented on
-/// [`local_open_parses_per_spec`] — same machinery.
-#[test]
-#[ignore = "SPEC: plain `import \"file\"` should not re-export; see DISCREPANCY in SPECIFICATION.md"]
-fn bare_import_does_not_reexport_per_spec() {
-    // Sketch only — exercising this properly needs a real on-disk
-    // import. The intended assertion: after `import "lib"`, a name
-    // that `lib` opened (e.g. `f32.clamp` brought in by lib's
-    // `open f32`) is NOT visible bare in the importer; the importer
-    // must do its own `open f32` to see it.
-    let src = r#"
-        import "lib_that_opens_f32"
-        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
-    "#;
-    compile_to_ssa(src);
-}
-
-/// SPEC (`SPECIFICATION.md`, "Declaration Modifiers"):
-///   `local dec` is general — `dec` can be any declaration form,
-///   including `import "file"`. `local import "file"` is the explicit
-///   spelling of the same thing plain `import "file"` is *already*
-///   defined to mean (`local open import "file"`); writing it
-///   explicitly should still parse.
-///
-/// More generally: the parser should accept `local` in front of every
-/// declaration kind — `local def`, `local type`, `local module`,
-/// `local open`, `local import`, etc. — and each should hide its
-/// bound name(s) from users of the enclosing module while keeping
-/// them visible to siblings.
-///
-/// CURRENT IMPL: no `local` keyword; all of these are parse errors.
-///
-/// IMPLEMENTATION OPTIONS: see `local_open_parses_per_spec`. The
-/// parser-stub option (A) covers every `local <dec>` form uniformly
-/// by wrapping the inner decl in `Declaration::Local(Box<_>)`.
-#[test]
-#[ignore = "SPEC: `local <dec>` (including `local import`) not implemented; see DISCREPANCY in SPECIFICATION.md"]
-fn local_import_parses_per_spec() {
-    let src = r#"
-        local import "lib_that_opens_f32"
-        def f (x: f32) f32 = clamp(x, 0.0f32, 1.0f32)
-    "#;
-    compile_to_ssa(src);
-}
-
 /// `f32.from_bits` / `f32.to_bits` are per-type members whose schemes
 /// come from the prelude `float` signature but whose lowering must be
 /// published in the builtin catalog under the member names — the module
@@ -13621,7 +13653,7 @@ entry e() [1]f32 = [fsqrt(4.0f32)]
 ///
 /// Both operations and their order are load-bearing: texture_load
 /// before the loop, or an image_load in place of the texture_load,
-/// compiles fine. This is the light-pass shape for driving lib/gtao.wyn
+/// compiles fine. This is the light-pass shape for driving GTAO
 /// from the map/iota idiom (loop over shadow taps, then sample the AO
 /// result).
 #[test]

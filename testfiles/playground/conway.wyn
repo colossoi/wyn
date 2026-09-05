@@ -57,14 +57,14 @@ def verts: [3]vec4f32 =
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
     vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
-def display(iResolution: vec3f32, grid_width: i32, grid_height: i32,
-            display_board: []i32, fragCoord: vec4f32) vec4f32 =
+def display(resolution: vec3f32, grid_width: i32, grid_height: i32,
+            display_board: []i32, frag_coord: vec4f32) vec4f32 =
     -- Flip Y so (0, 0) renders at the top-left visually.
-    let px = fragCoord.x in
-    let py = iResolution.y - fragCoord.y in
+    let px = frag_coord.x in
+    let py = resolution.y - frag_coord.y in
 
-    let cell_w = iResolution.x / f32.i32(grid_width) in
-    let cell_h = iResolution.y / f32.i32(grid_height) in
+    let cell_w = resolution.x / f32.i32(grid_width) in
+    let cell_h = resolution.y / f32.i32(grid_height) in
 
     let gx = i32.f32(px / cell_w) in
     let gy = i32.f32(py / cell_h) in
@@ -80,7 +80,7 @@ entry conway(
     board: []i32,
     width: i32,
     height: i32,
-    iResolution: vec3f32,
+    resolution: vec3f32,
     screen: render_target<vec4f32>)
     ([]i32, render_target<vec4f32>) =
   let next = step(board, width, height) in
@@ -91,5 +91,5 @@ entry conway(
     screen,
     covered,
     |fragment|
-      display(iResolution, width, height, next, fragment.position)) in
+      display(resolution, width, height, next, fragment.position)) in
   (next, screen')

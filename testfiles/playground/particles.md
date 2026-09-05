@@ -15,11 +15,11 @@ From the repo root:
 
 ```bash
 cargo build --release -p wyn
-./target/release/wyn compile testfiles/playground/particles.wyn \
+./target/release/wyn build testfiles/playground/particles.wyn \
   -o testfiles/playground/particles.spv
 ```
 
-`wyn compile` emits both `particles.spv` and `particles.json` — the JSON
+`wyn build` emits both `particles.spv` and `particles.json` — the JSON
 descriptor is the runtime's source of truth for bindings, dispatch
 sizes, buffer lengths, etc.
 

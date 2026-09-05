@@ -123,7 +123,7 @@ struct State {
     queue: wgpu::Queue,
     config: SurfaceConfiguration,
     start_time: std::time::Instant,
-    // Mouse tracking (consumed by pipeline mode's iMouse uniform;
+    // Mouse tracking (consumed by pipeline mode's iMouse/mouse uniform;
     // harmless for testpattern, which doesn't read it).
     mouse_pos: [f32; 2],
     mouse_click_pos: [f32; 2],
@@ -662,11 +662,11 @@ impl State {
             None
         };
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
-        // Phase 4: Shadertoy-style uniforms (iResolution / iTime /
-        // iMouse / iFrame). One buffer per `(set, binding)` declared by
-        // any pipeline (graphics OR compute); same-slot declarations
-        // across pipelines reuse the same physical buffer. The
-        // per-frame render path writes their values.
+        // Phase 4: Shadertoy/playground uniforms (iResolution/resolution,
+        // iTime/time, iMouse/mouse, iFrame/frame). One buffer per
+        // `(set, binding)` declared by any pipeline (graphics OR compute);
+        // same-slot declarations across pipelines reuse the same physical
+        // buffer. The per-frame render path writes their values.
         let all_uniform_bindings: Vec<wyn_pipeline_descriptor::Binding> = spec
             .descriptor
             .pipelines
@@ -1537,7 +1537,7 @@ fn render_pipeline(
         queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
     }
     if let Some(ref buf) = state.time_buffer {
-        // iTime is padded to 16 bytes (`min_binding_size` on most
+        // iTime/time is padded to 16 bytes (`min_binding_size` on most
         // adapters); write a vec4 with `[t, 0, 0, 0]`.
         let t = start_time.elapsed().as_secs_f32();
         queue.write_buffer(buf, 0, bytemuck::cast_slice(&[t, 0.0, 0.0, 0.0]));

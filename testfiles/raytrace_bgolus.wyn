@@ -130,8 +130,8 @@ def brdf(
   let spec_denom = 4.0 * n_dot_v * n_dot_l + epsilon
   let specular = d * g * fr / spec_denom
 
-  let kD = (1.0 - fr) * (1.0 - metallic)
-  let diffuse = kD * albedo / f32.pi in
+  let k_d = (1.0 - fr) * (1.0 - metallic)
+  let diffuse = k_d * albedo / f32.pi in
 
   (diffuse + specular) * n_dot_l
 
@@ -187,10 +187,10 @@ def find_closest_hit(hits: [12](f32, i32, vec3f32)) (f32, i32, vec3f32) =
          hits)
 
 def intersect_scene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
-  let tPlane = intersect_plane(ro, rd)
+  let t_plane = intersect_plane(ro, rd)
   let ground_hit =
-    if tPlane > 0.0 then
-      (tPlane, 1, @[0.0, 1.0, 0.0])
+    if t_plane > 0.0 then
+      (t_plane, 1, @[0.0, 1.0, 0.0])
     else
       (max_dist, 0, @[0.0, 1.0, 0.0])
 
@@ -198,10 +198,10 @@ def intersect_scene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
   let sphere_hits = intersect_all_spheres(ro, rd)
   let closest_sphere = find_closest_hit(sphere_hits)
 
-  let (tGround, mGround, nGround) = ground_hit
-  let (tSphere, mSphere, nSphere) = closest_sphere in
+  let (t_ground, m_ground, n_ground) = ground_hit
+  let (t_sphere, m_sphere, n_sphere) = closest_sphere in
 
-  if tGround < tSphere then ground_hit else closest_sphere
+  if t_ground < t_sphere then ground_hit else closest_sphere
 
 ------------------------------------------------------------
 -- Ben Golus-style Pristine Floor Grid
@@ -251,7 +251,7 @@ def pristine_grid_from_deriv(
   -- Premultiplied-style line overlap.
   grid_x * (1.0 - grid_y) + grid_y
 
-def floor_grid(iResolution: vec3f32, hit_point: vec3f32, ray_dir: vec3f32, ray_dist: f32) vec3f32 =
+def floor_grid(resolution: vec3f32, hit_point: vec3f32, ray_dir: vec3f32, ray_dist: f32) vec3f32 =
   let grid_scale = 2.0
   let uv = @[hit_point.x * grid_scale, hit_point.z * grid_scale] in
 
@@ -263,7 +263,7 @@ def floor_grid(iResolution: vec3f32, hit_point: vec3f32, ray_dir: vec3f32, ray_d
   -- Here, estimate the UV footprint from ray distance, screen height,
   -- FOV, and grazing angle against the floor.
   let fov = 1.5
-  let pixel_world = ray_dist * 2.0 / (fov * iResolution.y)
+  let pixel_world = ray_dist * 2.0 / (fov * resolution.y)
   let grazing = 1.0 / max(abs(ray_dir.y), min_view_cos)
   let pixel_uv = max(pixel_world * grazing * grid_scale, 0.0001)
   let uv_deriv = @[pixel_uv, pixel_uv]
@@ -298,14 +298,14 @@ def floor_grid(iResolution: vec3f32, hit_point: vec3f32, ray_dir: vec3f32, ray_d
 -- Materials
 ------------------------------------------------------------
 def get_material(
-  iResolution: vec3f32,
+  resolution: vec3f32,
   mat_id: i32,
   hit_point: vec3f32,
   ray_dir: vec3f32,
   ray_dist: f32
 ) (vec3f32, f32, f32, f32) =
   if mat_id == 1 then
-    let albedo = floor_grid(iResolution, hit_point, ray_dir, ray_dist) in
+    let albedo = floor_grid(resolution, hit_point, ray_dir, ray_dist) in
     (albedo, 0.0, 0.35, 0.65)
   else if mat_id >= 2 then
     let idx = mat_id - 2 in
@@ -353,7 +353,7 @@ def shade_surface(
 ------------------------------------------------------------
 -- Main Trace Function
 ------------------------------------------------------------
-def trace(iResolution: vec3f32, ro: vec3f32, rd: vec3f32, max_bounces: i32) vec3f32 =
+def trace(resolution: vec3f32, ro: vec3f32, rd: vec3f32, max_bounces: i32) vec3f32 =
   let trace_result =
     loop (color, ray_o, ray_d, tint, bounce) =
       (@[0.0, 0.0, 0.0], ro, rd, @[1.0, 1.0, 1.0], 0)
@@ -371,7 +371,7 @@ def trace(iResolution: vec3f32, ro: vec3f32, rd: vec3f32, max_bounces: i32) vec3
         let view_dir = -ray_d
 
         let (albedo, metallic, roughness, reflectivity) =
-          get_material(iResolution, mat_id, hit_point, ray_d, t)
+          get_material(resolution, mat_id, hit_point, ray_d, t)
 
 
         let surface_color =
@@ -433,28 +433,28 @@ def get_camera(
 -- Fragment Shader
 ------------------------------------------------------------
 def trace_sample(
-  iResolution: vec3f32,
-  iTime: f32,
-  iMouse: vec4f32,
+  resolution: vec3f32,
+  time: f32,
+  mouse: vec4f32,
   difficulty: i32,
   frag_coord: vec4f32,
   offset_x: f32,
   offset_y: f32
 ) vec3f32 =
   let coord =
-    @[frag_coord.x + offset_x, iResolution.y - frag_coord.y + offset_y]
+    @[frag_coord.x + offset_x, resolution.y - frag_coord.y + offset_y]
 
 
   let uv =
-    @[(coord.x / iResolution.x) * 2.0 - 1.0,
-      (coord.y / iResolution.y) * 2.0 - 1.0]
+    @[(coord.x / resolution.x) * 2.0 - 1.0,
+      (coord.y / resolution.y) * 2.0 - 1.0]
 
 
-  let aspect = iResolution.x / iResolution.y
+  let aspect = resolution.x / resolution.y
   let uv2 = @[uv.x * aspect, uv.y]
 
   let (cam_pos, forward, right, up) =
-    get_camera(iTime, iMouse, iResolution.xy)
+    get_camera(time, mouse, resolution.xy)
 
 
   let fov = 1.5
@@ -468,18 +468,18 @@ def trace_sample(
 
 
   let max_bounces = difficulty in
-  trace(iResolution, cam_pos, rd, max_bounces)
+  trace(resolution, cam_pos, rd, max_bounces)
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag_coord: vec4f32) vec4f32 =
-  let color = trace_sample(iResolution, iTime, iMouse, MAX_REFLECTION_BOUNCES, frag_coord, 0.0, 0.0)
+def fragment_main(resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec4f32) vec4f32 =
+  let color = trace_sample(resolution, time, mouse, MAX_REFLECTION_BOUNCES, frag_coord, 0.0, 0.0)
   let gamma = 1.0 / 2.2 in
   @[color.x ** gamma, color.y ** gamma, color.z ** gamma, 1.0]
 
 entry raytrace_bgolus(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
+    resolution: vec3f32, time: f32, mouse: vec4f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))
+    |fragment| fragment_main(resolution, time, mouse, fragment.position))

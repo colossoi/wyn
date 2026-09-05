@@ -153,7 +153,7 @@ fn physical_callable(
     Func::<Physical>::new(
         region,
         name.into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         result_abi,

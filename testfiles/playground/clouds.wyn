@@ -70,40 +70,31 @@ def camera(ro: vec3f32, ta: vec3f32) mat3f32 =
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Fragment shader (mainImage)
 ------------------------------------------------------------
-def fragment_main(
-  iResolution: vec3f32,
-  iTime: f32,
-  fragCoord: vec4f32
-) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan NDC
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let uv = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
+  let uv = (fc * 2.0 - resolution.xy) / min(resolution.x, resolution.y) in
 
   -- Camera orbit derived from time
-  let mo = @[iTime * 0.1, cos(iTime * 0.25) * 3.0] in
-  let camDist = 25.0 in
+  let mo = @[time * 0.1, cos(time * 0.25) * 3.0] in
+  let cam_dist = 25.0 in
   let ta = @[0.0, 1.0, 0.0] in
-  let ro = camDist * normalize(@[cos(2.75 - 3.0 * mo.x),
+  let ro = cam_dist * normalize(@[cos(2.75 - 3.0 * mo.x),
                                  0.7 - 1.0 * (mo.y - 1.0),
                                  sin(2.75 - 3.0 * mo.x)]) in
-  let targetDepth = 1.3 in
+  let target_depth = 1.3 in
   let c   = camera(ro, ta) in
-  let dir = c * normalize(@[uv.x, uv.y, targetDepth]) in
+  let dir = c * normalize(@[uv.x, uv.y, target_depth]) in
 
   -- Raymarch settings
-  let zMax       = 40.0 in
-  let zstep      = zMax / 64.0 in
+  let z_max       = 40.0 in
+  let zstep      = z_max / 64.0 in
   let absorption = 100.0 in
 
   -- Front-to-back accumulation with early-out when transmittance is spent.
@@ -129,14 +120,6 @@ def fragment_main(
   let bg = mix(@[0.3, 0.1, 0.8], @[0.7, 0.7, 1.0], 1.0 - (uv.y + 1.0) * 0.5) in
   color_acc with .xyz += bg
 
-entry clouds(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))
 
 ------------------------------------------------------------
 -- Original GLSL (Shadertoy lss3zr), commented out below.

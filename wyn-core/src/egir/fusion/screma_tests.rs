@@ -45,7 +45,7 @@ entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
         program: &program,
         identities: &mut identities,
         scope: "conditional_projection_test",
-        span: Span::dummy(),
+        span: Span::generated(),
         outer_types: &outer_types,
     };
     let (results, projected) = emit_projected_lambda_results(

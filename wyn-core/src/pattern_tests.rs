@@ -28,12 +28,7 @@ fn mk_pattern(kind: PatternKind) -> Pattern {
     Pattern {
         h: Header {
             id: NodeId(0),
-            span: Span {
-                start_line: 0,
-                start_col: 0,
-                end_line: 0,
-                end_col: 0,
-            },
+            span: Span::generated(),
         },
         kind,
     }

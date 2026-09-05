@@ -11,8 +11,14 @@ path = "src/main.rs"
 
 [dependencies]
 wyn-core = { path = "../wyn-core" }
+wyn-module-graph = { path = "../wyn-module-graph" }
+wyn-package-manager = { path = "../wyn-package-manager" }
 clap.workspace = true
 serde_json = "1.0"
 thiserror.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"

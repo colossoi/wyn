@@ -21,6 +21,7 @@ def main [
     let wyn = if $nu.os-info.name == "windows" { "target/release/wyn.exe" } else { "target/release/wyn" }
     let viz = if $nu.os-info.name == "windows" { "extra/viz/target/release/viz.exe" } else { "extra/viz/target/release/viz" }
     let out_dir = "tmp/playground"
+    let playground_header = "scripts/playground_image_header.wyn"
     mkdir $out_dir
 
     let results = (ls testfiles/playground/*.wyn | each { |f|
@@ -28,12 +29,24 @@ def main [
         let src = $f.name
         let spv = ($out_dir | path join $"($name).spv")
         let viz_config = ($src | path dirname | path join $"($name).viz.json")
+        let has_explicit_entry = (
+            open $src | lines | any { |line| $line starts-with "entry " }
+        )
+        let prepared_source = if not $has_explicit_entry {
+            let path = ($src | path dirname | path join $".run-($name)-(random uuid).wyn")
+            [(open --raw $playground_header), "\n", (open --raw $src)] | str join | save $path
+            $path
+        } else {
+            null
+        }
+        let compile_source = if $prepared_source != null { $prepared_source } else { $src }
 
         print $"=== ($name) ==="
 
-        let compile_args = ["compile", $src, "--graphics", "--direct", "-o", $spv]
+        let compile_args = ["build", $compile_source, "--graphics", "--direct", "-o", $spv]
         print $"$ ($wyn) ($compile_args | str join ' ')"
         let compile = (do { ^$wyn ...$compile_args } | complete)
+        if $prepared_source != null { rm --force $prepared_source }
         if $compile.exit_code != 0 {
             print $compile.stderr
             {name: $name, stage: "compile", ok: false}

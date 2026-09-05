@@ -33,7 +33,7 @@ fn dummy_body(program: &mut Defunctionalized) -> Term<ExplicitClosurePayload, Ex
     Term {
         id: program.next_term_id(),
         ty: unit_ty(),
-        span: ast::Span::dummy(),
+        span: ast::Span::generated(),
         kind: TermKind::IntLit("0".into()),
     }
 }
@@ -51,6 +51,7 @@ fn def_with_no_arrow_params_passes() {
     p.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: arrow(unit_ty(), unit_ty()),
         body,
         meta: DefMeta::Function,
@@ -70,6 +71,7 @@ fn def_with_function_typed_param_fails() {
     p.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: arrow(arrow_ty, unit_ty()),
         body,
         meta: DefMeta::Function,
@@ -93,6 +95,7 @@ fn function_typed_return_is_ignored() {
     p.defs.push(Def {
         data: (),
         name: sym,
+        package: None,
         ty: arrow(unit_ty(), arrow_ty),
         body,
         meta: DefMeta::Function,

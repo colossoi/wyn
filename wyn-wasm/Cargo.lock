@@ -484,6 +484,7 @@ dependencies = [
  "thiserror",
  "wyn-base",
  "wyn-graph",
+ "wyn-module-graph",
  "wyn-pipeline-descriptor",
  "wyn-spirv",
  "wyn-staged-ir",
@@ -494,6 +495,14 @@ name = "wyn-graph"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "wyn-module-graph"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wyn-base",
 ]
 
 [[package]]
@@ -531,6 +540,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "wyn-core",
+ "wyn-module-graph",
 ]
 
 [[package]]

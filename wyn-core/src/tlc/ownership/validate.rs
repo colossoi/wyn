@@ -10,7 +10,7 @@ use crate::error;
 use crate::error::CompilerError;
 use crate::tlc;
 use crate::tlc::data::Empty;
-use crate::tlc::stage::BuffersPinned;
+use crate::tlc::run::{Transformed, UnpinnedPolymorphic};
 use crate::tlc::{
     var_term_builtin_id, ArrayExpr, Family, LoopKind, Program, SoacBody, SoacOp, Term, TermId, TermKind,
     VarRef,
@@ -21,17 +21,17 @@ use polytype::Type;
 #[derive(Debug, Clone, Copy)]
 pub enum OwnershipValidatedTag {}
 pub type OwnershipValidated =
-    tlc::Program<OwnershipValidatedTag, tlc::family::Polymorphic, tlc::context::RewriteGlobal>;
+    tlc::Program<OwnershipValidatedTag, UnpinnedPolymorphic, tlc::context::TransformedGlobal>;
 
-pub fn validate_ownership(program: BuffersPinned) -> error::Result<OwnershipValidated> {
+pub fn validate_ownership(program: Transformed) -> error::Result<OwnershipValidated> {
     check(&program)?;
     Ok(program.retag())
 }
 
-/// Validate the linear pipeline handles before stage extraction consumes their
-/// orchestration calls. Ordinary buffer ownership is checked again after entry
-/// buffers have been pinned.
-pub(crate) fn check_unextracted(program: &tlc::run::Transformed) -> error::Result<()> {
+/// Validate source ownership while the unified root still contains its
+/// graphics orchestration calls and before partial evaluation can erase
+/// source-level consumption boundaries.
+pub fn check(program: &Transformed) -> error::Result<()> {
     let model = analyze(program);
     if let Some(err) = check_shade_target_capture(program, &model) {
         return Err(err);
@@ -42,15 +42,6 @@ pub(crate) fn check_unextracted(program: &tlc::run::Transformed) -> error::Resul
     if let Some(err) = check_linear_rasters(program, &model) {
         return Err(err);
     }
-    Ok(())
-}
-
-/// Run the ownership analysis and report a use-after-move error if
-/// any owner is consumed at a program point where a successor still
-/// reads it. Used by the `wyn check` subcommand and indirectly by
-/// `promote_inplace`.
-pub fn check(program: &BuffersPinned) -> error::Result<()> {
-    let model = analyze(program);
     if let Some(err) = check_use_after_move(program, &model) {
         return Err(err);
     }
@@ -223,7 +214,7 @@ fn check_linear_rasters<Tag, F: Family, GlobalContext>(
     ))
 }
 
-fn check_linear_image_results(program: &BuffersPinned, model: &AnalysisState) -> Option<CompilerError> {
+fn check_linear_image_results(program: &Transformed, model: &AnalysisState) -> Option<CompilerError> {
     for def in &program.defs {
         if let Some(err) =
             check_linear_image_results_in_term(&def.body, program, model, LinearImageUseContext::Used)
@@ -240,7 +231,7 @@ enum LinearImageUseContext {
     Discarded,
 }
 
-fn is_image_with_app(term: &Term<Empty, Empty>, program: &BuffersPinned) -> bool {
+fn is_image_with_app(term: &Term<Empty, Empty>, program: &Transformed) -> bool {
     match &term.kind {
         TermKind::App { func, args } if args.len() == 3 => {
             var_term_builtin_id(func, &program.symbols) == Some(catalog().known().image_with)
@@ -249,7 +240,7 @@ fn is_image_with_app(term: &Term<Empty, Empty>, program: &BuffersPinned) -> bool
     }
 }
 
-fn is_image_load_app(term: &Term<Empty, Empty>, program: &BuffersPinned) -> bool {
+fn is_image_load_app(term: &Term<Empty, Empty>, program: &Transformed) -> bool {
     match &term.kind {
         TermKind::App { func, args } if args.len() == 2 => {
             var_term_builtin_id(func, &program.symbols) == Some(catalog().known().image_load)
@@ -268,7 +259,7 @@ fn image_update_drop_error(term: &Term<Empty, Empty>, model: &AnalysisState) -> 
 
 fn check_linear_image_results_in_term(
     term: &Term<Empty, Empty>,
-    program: &BuffersPinned,
+    program: &Transformed,
     model: &AnalysisState,
     context: LinearImageUseContext,
 ) -> Option<CompilerError> {
@@ -445,7 +436,7 @@ fn check_linear_image_results_in_term(
 
 fn check_linear_image_results_in_array_expr(
     ae: &ArrayExpr<Empty, Empty>,
-    program: &BuffersPinned,
+    program: &Transformed,
     model: &AnalysisState,
 ) -> Option<CompilerError> {
     match ae {
@@ -497,7 +488,7 @@ fn check_linear_image_results_in_array_expr(
 
 fn check_linear_image_results_in_soac(
     op: &SoacOp<Empty, Empty>,
-    program: &BuffersPinned,
+    program: &Transformed,
     model: &AnalysisState,
 ) -> Option<CompilerError> {
     let check_body = |sb: &SoacBody<Empty, Empty>| {

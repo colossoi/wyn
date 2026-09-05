@@ -244,14 +244,12 @@ impl Parser<'_> {
 
             Some(Token::Import) => {
                 // import "path"
-                self.advance();
-                let path = self.expect_string_literal()?;
-                ModuleExpression::Import(path)
+                ModuleExpression::Import(self.parse_source_import()?)
             }
 
             Some(Token::Identifier(_)) => {
                 // qualname
-                let name = self.expect_identifier()?;
+                let name = self.expect_qualified_identifier()?;
                 ModuleExpression::Name(name)
             }
 
@@ -303,7 +301,7 @@ impl Parser<'_> {
             }
 
             Some(Token::Identifier(_)) => {
-                let name = self.expect_identifier()?;
+                let name = self.expect_qualified_identifier()?;
                 Ok(ModuleExpression::Name(name))
             }
 
@@ -377,7 +375,7 @@ impl Parser<'_> {
             }
 
             Some(Token::Identifier(_)) => {
-                let name = self.expect_identifier()?;
+                let name = self.expect_qualified_identifier()?;
                 ModuleTypeExpression::Name(name)
             }
 
@@ -392,7 +390,7 @@ impl Parser<'_> {
                 Some(Token::With) => {
                     // with clause: mod_type with qualname type_params = type
                     self.advance();
-                    let qualname = self.expect_identifier()?;
+                    let qualname = self.expect_qualified_identifier()?;
 
                     // Parse optional type parameters: <[n], A>
                     let type_params = self.parse_type_params()?;

@@ -8,8 +8,6 @@
 use crate::ast;
 use crate::ast::*;
 use crate::builtins;
-use crate::interface;
-use crate::parser::{Parsed, ParsedFamily};
 use crate::tlc::VarRef;
 use crate::types::TypeExt;
 use polytype::Type as PolyType;
@@ -242,161 +240,11 @@ impl AstFormatter {
         formatter.output
     }
 
-    /// Format a program and return the formatted string.
-    pub fn format_program(program: &Parsed) -> String {
-        let mut formatter = AstFormatter::new();
-        for decl in &program.declarations {
-            formatter.write_declaration(decl);
-            formatter.newline();
-        }
-        formatter.output
-    }
-
-    /// Format a program with node IDs and return the formatted string.
-    pub fn format_program_with_ids(program: &Parsed) -> String {
-        let mut formatter = AstFormatter::with_node_ids();
-        for decl in &program.declarations {
-            formatter.write_declaration(decl);
-            formatter.newline();
-        }
-        formatter.output
-    }
-
     fn write_line(&mut self, content: &str) {
         let indent = "  ".repeat(self.indent);
         self.output.push_str(&indent);
         self.output.push_str(content);
         self.output.push('\n');
-    }
-
-    fn newline(&mut self) {
-        self.output.push('\n');
-    }
-
-    fn write_declaration(&mut self, decl: &Declaration<ParsedFamily>) {
-        match decl {
-            Declaration::Decl(d) => self.write_decl(d),
-            Declaration::Entry(e) => self.write_entry(e),
-            Declaration::Frontend(ParsedFrontend::Sig(v)) => {
-                let mut header = format!("sig {}", v.name);
-                // Rust-style generics: <[n], [m], A, B>
-                if !v.size_params.is_empty() || !v.type_params.is_empty() {
-                    header.push('<');
-                    let mut parts = Vec::new();
-                    for s in &v.size_params {
-                        parts.push(format!("[{}]", s));
-                    }
-                    for t in &v.type_params {
-                        parts.push(t.clone());
-                    }
-                    header.push_str(&parts.join(", "));
-                    header.push('>');
-                }
-                header.push_str(&format!(": {}", v.ty));
-                self.write_line(&header);
-            }
-            Declaration::Frontend(ParsedFrontend::TypeBind(tb)) => {
-                self.write_line(&format!("type {} = {}", tb.name, tb.definition));
-            }
-            Declaration::Frontend(ParsedFrontend::Module(md)) => {
-                let name = match md {
-                    ModuleDecl::Module { name, .. } => name,
-                    ModuleDecl::Functor { name, .. } => name,
-                };
-                self.write_line(&format!("module {} = ...", name));
-            }
-            Declaration::Frontend(ParsedFrontend::ModuleTypeBind(mtb)) => {
-                self.write_line(&format!("module type {} = ...", mtb.name));
-            }
-            Declaration::Frontend(ParsedFrontend::Open(_)) => {
-                self.write_line("open ...");
-            }
-            Declaration::Frontend(ParsedFrontend::Import(path)) => {
-                self.write_line(&format!("import \"{}\"", path));
-            }
-            Declaration::Extern(e) => {
-                self.write_line(&format!(
-                    "#[linked(\"{}\")]\nextern {}: {}",
-                    e.data.linkage_name, e.name, e.data.ty
-                ));
-            }
-            Declaration::Frontend(ParsedFrontend::Resource(r)) => {
-                self.write_line(&format!(
-                    "resource {}: {:?} {{ format = {:?}, usages = {:?} }}",
-                    r.name, r.kind, r.format, r.usages
-                ));
-            }
-        }
-    }
-
-    fn write_decl(&mut self, decl: &Decl<DefinitionSyntax, SourceTree>) {
-        let mut header = format!("{} {}", decl.data.keyword, decl.name);
-
-        // Rust-style generics: <[n], [m], A, B>
-        if !decl.size_params.is_empty() || !decl.type_params.is_empty() {
-            header.push('<');
-            let mut parts = Vec::new();
-            for s in &decl.size_params {
-                parts.push(format!("[{}]", s));
-            }
-            for t in &decl.type_params {
-                parts.push(t.clone());
-            }
-            header.push_str(&parts.join(", "));
-            header.push('>');
-        }
-
-        // Rust-style comma-separated params: (x: T, y: U)
-        if !decl.params.is_empty() {
-            let params: Vec<String> = decl.params.iter().map(|p| self.format_pattern(p)).collect();
-            header.push_str(&format!("({})", params.join(", ")));
-        } else {
-            header.push_str("()");
-        }
-
-        // Rust-style return type: -> T
-        if let Some(ty) = &decl.ty {
-            header.push_str(&format!(" -> {}", ty));
-        }
-
-        header.push_str(" =");
-        self.write_line(&header);
-
-        self.indent += 1;
-        self.write_expression(&decl.body);
-        self.indent -= 1;
-    }
-
-    /// Format a function parameter - bare name or (pattern: type)
-    fn format_param(&self, pattern: &Pattern) -> String {
-        match &pattern.kind {
-            PatternKind::Name(name) => name.clone(),
-            PatternKind::Typed(inner, ty) => {
-                format!("({}: {})", self.format_pattern(inner), ty)
-            }
-            _ => format!("({})", self.format_pattern(pattern)),
-        }
-    }
-
-    fn write_entry(&mut self, entry: &EntryDecl<EntrySyntax, SourceTree>) {
-        let entry_kind = match entry.data.entry_kind {
-            interface::EntryKind::Vertex => "vertex",
-            interface::EntryKind::Root => "entry",
-            interface::EntryKind::Fragment => "fragment",
-            interface::EntryKind::Compute => "compute",
-        };
-        let mut header = format!("{} {}", entry_kind, entry.name);
-
-        for param in &entry.params {
-            header.push_str(&format!(" {}", self.format_param(param)));
-        }
-
-        header.push_str(" =");
-        self.write_line(&header);
-
-        self.indent += 1;
-        self.write_expression(&entry.body);
-        self.indent -= 1;
     }
 
     fn write_expression(&mut self, expr: &Expression) {

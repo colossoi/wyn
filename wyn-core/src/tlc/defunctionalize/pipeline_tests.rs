@@ -176,6 +176,7 @@ fn test_defunc_simple_lambda_no_capture() {
         vec![Def {
             data: (),
             name: f_sym,
+            package: None,
             ty: lam.ty.clone(),
             body: lam,
             meta: DefMeta::Function,
@@ -277,6 +278,7 @@ fn test_defunc_lambda_with_capture() {
         vec![Def {
             data: (),
             name: f_sym,
+            package: None,
             ty: outer_lam.ty.clone(),
             body: outer_lam,
             meta: DefMeta::Function,
@@ -488,6 +490,7 @@ fn test_nested_hof_passthrough() {
             Def {
                 data: (),
                 name: hof_inner_sym,
+                package: None,
                 ty: hof_inner.ty.clone(),
                 body: hof_inner,
                 meta: DefMeta::Function,
@@ -498,6 +501,7 @@ fn test_nested_hof_passthrough() {
             Def {
                 data: (),
                 name: hof_outer_sym,
+                package: None,
                 ty: hof_outer.ty.clone(),
                 body: hof_outer,
                 meta: DefMeta::Function,
@@ -508,6 +512,7 @@ fn test_nested_hof_passthrough() {
             Def {
                 data: (),
                 name: main_sym,
+                package: None,
                 ty: main_def.ty.clone(),
                 body: main_def,
                 meta: DefMeta::Function,
@@ -676,6 +681,7 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
             Def {
                 data: (),
                 name: apply_sym,
+                package: None,
                 ty: apply_ty,
                 body: apply_lam,
                 meta: DefMeta::Function,
@@ -686,6 +692,7 @@ fn specialized_hof_preserves_consuming_data_param_diet() {
             Def {
                 data: (),
                 name: main_sym,
+                package: None,
                 ty: main_lam.ty.clone(),
                 body: main_lam,
                 meta: DefMeta::Function,

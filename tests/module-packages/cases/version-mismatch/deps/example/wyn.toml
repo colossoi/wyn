@@ -1,0 +1,7 @@
+manifest-version = 1
+
+[package]
+name = "test/version-mismatch-dependency"
+version = "v1.0.0"
+wyn = "v0.1.0"
+library = "src/lib.wyn"

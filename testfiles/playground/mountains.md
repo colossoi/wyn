@@ -20,12 +20,12 @@ From the repo root:
 
 ```bash
 cargo build --release -p wyn
-./target/release/wyn compile testfiles/playground/mountains.wyn \
+./target/release/wyn build testfiles/playground/mountains.wyn \
   --graphics --direct \
   -o testfiles/playground/mountains.spv
 ```
 
-`wyn compile` emits both `mountains.spv` and `mountains.json` — the
+`wyn build` emits both `mountains.spv` and `mountains.json` — the
 JSON descriptor is the runtime's source of truth for bindings,
 dispatch sizes, storage-texture formats, etc.
 

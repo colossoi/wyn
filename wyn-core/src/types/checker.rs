@@ -6,13 +6,13 @@ use crate::builtins::{by_id, BuiltinId};
 use crate::error::{CompilerError, Result};
 use crate::interface;
 use crate::interface::{AttrExt, Attribute};
-use crate::module_manager;
-use crate::module_manager::ModuleManager;
 use crate::name_resolution;
 use crate::name_resolution::NameResolution;
 use crate::op;
 use crate::resolve_opens;
 use crate::scope::{IdentifierKind, ScopeEntry, ScopeStack};
+use crate::semantic_modules;
+use crate::semantic_modules::SemanticModules;
 use crate::ssa;
 use crate::types;
 use crate::{bail_type_at, err_type, err_type_at, err_undef_at, LookupMap, LookupSet, StableMap};
@@ -151,8 +151,8 @@ impl LookupContext {
 /// [`LookupContext`].
 ///
 /// Each map is `StableMap` to preserve insertion order across runs —
-/// same reason `module_manager.elaborated_modules` / `prelude_functions`
-/// are `StableMap` (`module_manager/mod.rs:55-67`): deterministic
+/// same reason `semantic_modules.elaborated_modules` / `prelude_functions`
+/// are `StableMap` (`semantic_modules/mod.rs`): deterministic
 /// type-check order, stable diagnostic output, stable golden
 /// downstream. Lookups don't care; iteration does.
 #[derive(Debug, Default, Clone)]
@@ -184,11 +184,11 @@ pub struct TypeChecker<'a> {
     pub(super) current_context: LookupContext,
     pub(super) context: Context<TypeName>, // Polytype unification context
     record_field_map: LookupMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
-    module_manager: &'a ModuleManager,     // Lazy module loading
+    semantic_modules: &'a SemanticModules,
     pub(super) type_table: LookupMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
-    warnings: Vec<TypeWarning>,            // Collected warnings
-    type_holes: Vec<(NodeId, Span)>,       // Track type hole locations for warning emission
-    arity_map: LookupMap<String, usize>,   // function name -> required arity (number of params)
+    warnings: Vec<TypeWarning>,                           // Collected warnings
+    type_holes: Vec<(NodeId, Span)>,                      // Track type hole locations for warning emission
+    arity_map: LookupMap<String, usize>, // function name -> required arity (number of params)
     /// Names of top-level functions that consume an argument — a consuming
     /// function may not be passed as a value, so a call passing one is
     /// rejected.
@@ -611,8 +611,8 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Resolve type aliases in a type with optional module context.
-    /// - Qualified names (containing '.') are looked up as-is
-    /// - Unqualified names are qualified with current_module if provided
+    /// - Names are searched from the current semantic-module namespace outward
+    /// - The source spelling is then checked as an absolute name
     /// - Recursively resolves nested aliases
     fn resolve_type_aliases_scoped(&self, ty: &Type, current_module: Option<&str>) -> Result<Type> {
         let mut visited = Vec::new();
@@ -633,17 +633,15 @@ impl<'a> TypeChecker<'a> {
                     .collect::<Result<_>>()?;
 
                 let mut keys = Vec::new();
-                if name.contains('.') {
-                    keys.push(name.clone());
-                } else {
-                    if let Some(module) = current_module {
-                        keys.push(format!("{}.{}", module, name));
-                    }
-                    keys.push(name.clone());
+                let mut namespace = current_module;
+                while let Some(current) = namespace {
+                    keys.push(format!("{}.{}", current, name));
+                    namespace = current.rsplit_once('.').map(|(parent, _)| parent);
                 }
+                keys.push(name.clone());
 
                 for key in keys {
-                    if let Some(alias) = self.module_manager.resolve_type_alias_definition(&key) {
+                    if let Some(alias) = self.semantic_modules.resolve_type_alias_definition(&key) {
                         if let Some(cycle_err) = Self::check_alias_cycle(visited, &key) {
                             return Err(cycle_err);
                         }
@@ -699,7 +697,7 @@ impl<'a> TypeChecker<'a> {
 
     fn apply_type_alias(
         name: &str,
-        alias: &module_manager::TypeAliasDefinition,
+        alias: &semantic_modules::TypeAliasDefinition,
         args: &[Type],
     ) -> Result<Type> {
         if alias.type_params.len() != args.len() {
@@ -810,7 +808,7 @@ impl<'a> TypeChecker<'a> {
             let mut cycle_path = visited.to_vec();
             cycle_path.push(key.to_string());
             Some(err_type_at!(
-                Span::new(0, 0, 0, 0),
+                Span::generated(),
                 "type alias cycle detected: {}",
                 cycle_path.join(" -> ")
             ))
@@ -1086,25 +1084,25 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Create a new TypeChecker with a reference to a ModuleManager.
-    pub fn new(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
+    /// Create a new type checker with access to semantic module state.
+    pub fn new(semantic_modules: &'a SemanticModules, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(semantic_modules, LookupMap::new(), name_resolution)
     }
 
     /// Create a TypeChecker with an empty type table (for building prelude).
-    pub fn new_empty(module_manager: &'a ModuleManager, name_resolution: NameResolution) -> Self {
-        Self::with_type_table(module_manager, LookupMap::new(), name_resolution)
+    pub fn new_empty(semantic_modules: &'a SemanticModules, name_resolution: NameResolution) -> Self {
+        Self::with_type_table(semantic_modules, LookupMap::new(), name_resolution)
     }
 
     /// Create a TypeChecker with an existing Context and spec_schemes (from resolve_placeholders pass).
     pub fn with_context_and_schemes(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         context: Context<TypeName>,
         spec_schemes: LookupMap<String, TypeScheme>,
         name_resolution: NameResolution,
     ) -> Self {
         Self::with_context_and_type_table(
-            module_manager,
+            semantic_modules,
             context,
             LookupMap::new(),
             spec_schemes,
@@ -1114,12 +1112,12 @@ impl<'a> TypeChecker<'a> {
 
     /// Create a TypeChecker with a given initial type table
     fn with_type_table(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         type_table: LookupMap<NodeId, TypeScheme>,
         name_resolution: NameResolution,
     ) -> Self {
         Self::with_context_and_type_table(
-            module_manager,
+            semantic_modules,
             Context::default(),
             type_table,
             LookupMap::new(),
@@ -1129,7 +1127,7 @@ impl<'a> TypeChecker<'a> {
 
     /// Create a TypeChecker with both an existing Context and type table.
     fn with_context_and_type_table(
-        module_manager: &'a ModuleManager,
+        semantic_modules: &'a SemanticModules,
         context: Context<TypeName>,
         type_table: LookupMap<NodeId, TypeScheme>,
         spec_schemes: LookupMap<String, TypeScheme>,
@@ -1150,7 +1148,7 @@ impl<'a> TypeChecker<'a> {
             current_context: LookupContext::UserFile,
             context,
             record_field_map: LookupMap::new(),
-            module_manager,
+            semantic_modules,
             type_table,
             warnings: Vec::new(),
             type_holes: Vec::new(),
@@ -1232,6 +1230,12 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, Some(expected_type), expr),
+            ExprKind::LetIn(let_in) => {
+                self.type_let_in(let_in, Some(expected_type))?;
+                let result = expected_type.apply(&self.context);
+                self.type_table.insert(expr.h.id, TypeScheme::Monotype(result.clone()));
+                Ok(result)
+            }
             ExprKind::RecordLiteral(fields) => {
                 let applied = expected_type.apply(&self.context);
                 let Type::Constructed(TypeName::Record(expected_fields), expected_types) = &applied else {
@@ -1369,6 +1373,44 @@ impl<'a> TypeChecker<'a> {
                 Ok(actual_type)
             }
         }
+    }
+
+    /// Type a let expression, checking its body contextually when the caller
+    /// supplies an expected type. The binding value itself is inferred first
+    /// so ordinary let-polymorphism and annotation handling remain unchanged.
+    fn type_let_in(&mut self, let_in: &LetInExpr, expected_body: Option<&Type>) -> Result<Type> {
+        let value_type = self.infer_expression(&let_in.value)?;
+
+        let resolved_annotation = let_in
+            .ty
+            .as_ref()
+            .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()))
+            .transpose()?;
+        if let Some(declared_type) = &resolved_annotation {
+            self.unify_or_err_weakening(
+                &value_type,
+                declared_type,
+                let_in.value.h.span,
+                "Type mismatch in let binding",
+            )?;
+        }
+
+        self.scope_stack.push_scope();
+        let bound_type = resolved_annotation.unwrap_or_else(|| value_type.clone());
+        let bound_type = self.open_existential(bound_type);
+
+        // Always restore the enclosing scope, including when pattern binding
+        // or body checking reports an error.
+        let body_result =
+            self.bind_irrefutable_pattern(&let_in.pattern, &bound_type, true).and_then(|_| {
+                match expected_body {
+                    Some(expected) => self.check_expression(&let_in.body, expected),
+                    None => self.infer_expression(&let_in.body),
+                }
+            });
+        self.scope_stack.pop_scope();
+
+        body_result
     }
 
     /// Resolve type aliases in a type annotation. SizeVar/UserVar
@@ -1801,7 +1843,7 @@ impl<'a> TypeChecker<'a> {
         // Register vector field mappings
         self.register_vector_fields();
 
-        // Note: Prelude files are automatically loaded when ModuleManager is created
+        // Prelude declarations are present when semantic module state is created.
 
         Ok(())
     }
@@ -2245,7 +2287,7 @@ impl<'a> TypeChecker<'a> {
     pub fn check_module_functions(&mut self) -> Result<()> {
         // Collect all module declarations that need flattening (includes constants like f32.pi)
         let module_functions: Vec<(String, ast::Decl)> = self
-            .module_manager
+            .semantic_modules
             .get_all_module_declarations()
             .into_iter()
             .map(|(module_name, decl)| (module_name.to_string(), decl.clone()))
@@ -2269,7 +2311,7 @@ impl<'a> TypeChecker<'a> {
     pub fn check_prelude_functions(&mut self) -> Result<()> {
         // Collect all prelude function declarations to avoid borrowing issues
         let prelude_functions: Vec<ast::Decl> =
-            self.module_manager.get_prelude_function_declarations().into_iter().cloned().collect();
+            self.semantic_modules.get_prelude_function_declarations().into_iter().cloned().collect();
 
         let saved_context = self.current_context.clone();
         self.current_context = LookupContext::Prelude;
@@ -2972,45 +3014,7 @@ impl<'a> TypeChecker<'a> {
                 Ok(tuple(elem_types?))
             }
             ExprKind::Lambda(lambda) => self.type_lambda(lambda, None, expr),
-            ExprKind::LetIn(let_in) => {
-                // Infer type of the value expression
-                let value_type = self.infer_expression(&let_in.value)?;
-
-                let resolved_annotation = let_in
-                    .ty
-                    .as_ref()
-                    .map(|ty| self.normalize_annotation_type(ty, self.current_module.as_deref()))
-                    .transpose()?;
-                if let Some(declared_type) = &resolved_annotation {
-                    self.unify_or_err_weakening(
-                        &value_type,
-                        declared_type,
-                        let_in.value.h.span,
-                        "Type mismatch in let binding",
-                    )?;
-                }
-
-                // Push new scope and bind pattern
-                self.scope_stack.push_scope();
-                let bound_type = resolved_annotation.unwrap_or_else(|| value_type.clone());
-
-                // Open existential types: ?k. T becomes T[k'/k] where k' is fresh
-                let bound_type = self.open_existential(bound_type);
-
-                // Bind all names in the pattern.
-                // Let bindings should be generalized for polymorphism.
-                // Refutability is enforced — refutable patterns must use
-                // `match` instead.
-                self.bind_irrefutable_pattern(&let_in.pattern, &bound_type, true)?;
-
-                // Infer type of body expression
-                let body_type = self.infer_expression(&let_in.body)?;
-
-                // Pop scope
-                self.scope_stack.pop_scope();
-
-                Ok(body_type)
-            }
+            ExprKind::LetIn(let_in) => self.type_let_in(let_in, None),
             ExprKind::Application(func, args) => {
                 // Resolve callee to candidate function types
                 let callee = self.resolve_callee_candidates(func)?;
@@ -3619,7 +3623,7 @@ impl<'a> TypeChecker<'a> {
         callee_node_id: NodeId,
     ) -> Option<CalleeCandidates> {
         // Scalar dispatch.
-        if self.module_manager.is_known_module(name) {
+        if self.semantic_modules.is_known_module(name) {
             let catalog = builtins::catalog();
             let entries = catalog.lookup_by_surface_prefix(name);
             let mut candidates: Vec<Candidate> = Vec::with_capacity(entries.len());

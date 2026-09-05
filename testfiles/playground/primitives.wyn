@@ -3,13 +3,6 @@
 -- License: MIT (see original GLSL below)
 
 -- Vertex shader: full-screen triangle
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 -- Helper functions that are not yet builtins
 
@@ -221,7 +214,7 @@ def sdf_scene(pos:vec3f32) vec2f32 =
 -- Ray-Box Intersection
 ------------------------------------------------------------
 
-def iBox(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
+def i_box(ro:vec3f32, rd:vec3f32, rad:vec3f32) vec2f32 =
   let m = 1.0 / rd in
   let n = m * ro in
   let k = @[f32.abs(m.x) * rad.x, f32.abs(m.y) * rad.y, f32.abs(m.z) * rad.z] in
@@ -244,7 +237,7 @@ def raycast(ro:vec3f32, rd:vec3f32) vec2f32 =
     else (tmax, @[0.0 - 1.0, 0.0 - 1.0]) in
 
   -- raymarch primitives
-  let tb = iBox(@[ro.x, ro.y - 0.4, ro.z - -0.5], rd, @[2.5, 0.41, 3.0]) in
+  let tb = i_box(@[ro.x, ro.y - 0.4, ro.z - -0.5], rd, @[2.5, 0.41, 3.0]) in
   if tb.x < tb.y then
     if tb.y > 0.0 then
       if tb.x < tmax then
@@ -402,21 +395,23 @@ def set_camera(ro:vec3f32, ta:vec3f32, cr:f32) mat3f32 =
 -- Fragment Shader (Main Entry Point)
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag_coord:vec4f32) vec4f32 =
-  let mo = @[iMouse.x / iResolution.x, iMouse.y / iResolution.y] in
-  let time = 32.0 + iTime * 1.5 in
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let mo = @[mouse.x / resolution.x, mouse.y / resolution.y] in
+  let animation_time = 32.0 + time * 1.5 in
 
   -- camera
   let ta = @[0.25, 0.0 - 0.75, 0.0 - 0.75] in
-  let ro = @[ta.x + 4.5 * f32.cos(0.1*time + 7.0*mo.x),
+  let ro = @[ta.x + 4.5 * f32.cos(0.1*animation_time + 7.0*mo.x),
              ta.y + 2.2,
-             ta.z + 4.5 * f32.sin(0.1*time + 7.0*mo.x)] in
+             ta.z + 4.5 * f32.sin(0.1*animation_time + 7.0*mo.x)] in
   let ca = set_camera(ro, ta, 0.0) in
 
   -- pixel coordinates (AA=1, no antialiasing)
   -- Note: negate Y to flip from Vulkan (Y=0 at top) to OpenGL convention (Y=0 at bottom)
-  let p = @[(2.0*frag_coord.x - iResolution.x) / iResolution.y,
-            -((2.0*frag_coord.y - iResolution.y) / iResolution.y)] in
+  let p = @[(2.0*frag_coord.x - resolution.x) / resolution.y,
+            -((2.0*frag_coord.y - resolution.y) / resolution.y)] in
 
   -- focal length
   let fl = 2.5 in
@@ -426,10 +421,10 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag_coord:
   let rd = rd_local * ca in
 
   -- ray differentials (with Y flip)
-  let px = @[(2.0*(frag_coord.x + 1.0) - iResolution.x) / iResolution.y,
-             -((2.0*frag_coord.y - iResolution.y) / iResolution.y)] in
-  let py = @[(2.0*frag_coord.x - iResolution.x) / iResolution.y,
-             -((2.0*(frag_coord.y + 1.0) - iResolution.y) / iResolution.y)] in
+  let px = @[(2.0*(frag_coord.x + 1.0) - resolution.x) / resolution.y,
+             -((2.0*frag_coord.y - resolution.y) / resolution.y)] in
+  let py = @[(2.0*frag_coord.x - resolution.x) / resolution.y,
+             -((2.0*(frag_coord.y + 1.0) - resolution.y) / resolution.y)] in
   let rdx_local = normalize(@[px.x, px.y, fl]) in
   let rdy_local = normalize(@[py.x, py.y, fl]) in
   let rdx = rdx_local * ca in
@@ -1115,12 +1110,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag_coord:
 --     
 --     fragColor = vec4( tot, 1.0 );
 -- }
-
-entry primitives(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

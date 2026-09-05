@@ -1,0 +1,269 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Deserialize;
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Case {
+    name: String,
+    root: PathBuf,
+    command: String,
+    expect: String,
+    diagnostic: Option<String>,
+}
+
+struct CaseCopy {
+    root: PathBuf,
+}
+
+impl CaseCopy {
+    fn new(source: &Path) -> Self {
+        loop {
+            let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "wyn_package_functional_{}_{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&root) {
+                Ok(()) => {
+                    copy_tree(source, &root);
+                    return Self { root };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("test case directory should be created: {error}"),
+            }
+        }
+    }
+}
+
+impl Drop for CaseCopy {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root) {
+            eprintln!("failed to remove test case `{}`: {error}", self.root.display());
+        }
+    }
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("fixture destination should be created");
+    for entry in fs::read_dir(source).expect("fixture directory should be readable") {
+        let entry = entry.expect("fixture entry should be readable");
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).expect("fixture file should be copied");
+        }
+    }
+}
+
+fn assert_local_manifests(root: &Path) {
+    for entry in fs::read_dir(root).expect("fixture directory should be readable") {
+        let entry = entry.expect("fixture entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            assert_local_manifests(&path);
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) != Some("wyn.toml") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("fixture manifest should be readable");
+        let manifest: toml::Value = toml::from_str(&source).expect("fixture manifest should be TOML");
+        let Some(dependencies) = manifest.get("dependencies").and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (alias, dependency) in dependencies {
+            let dependency = dependency.as_table().expect("fixture dependency should be an inline table");
+            assert!(
+                dependency.contains_key("path"),
+                "dependency `{alias}` in `{}` is not a local path dependency",
+                path.display(),
+            );
+            for source_key in ["github", "url", "registry"] {
+                assert!(
+                    !dependency.contains_key(source_key),
+                    "dependency `{alias}` in `{}` uses forbidden source `{source_key}`",
+                    path.display(),
+                );
+            }
+        }
+    }
+}
+
+fn run_case(case_directory: &Path) -> (Case, Output) {
+    assert_local_manifests(case_directory);
+    let source = fs::read_to_string(case_directory.join("case.toml"))
+        .expect("functional case should contain case.toml");
+    let case: Case = toml::from_str(&source).expect("functional case metadata should be valid");
+    let copied = CaseCopy::new(case_directory);
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg(&case.command)
+        .arg(copied.root.join(&case.root))
+        .output()
+        .expect("Wyn compiler should run");
+    (case, output)
+}
+
+#[test]
+fn local_package_cases() {
+    let cases = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases");
+    let mut case_directories: Vec<_> = fs::read_dir(cases)
+        .expect("functional case directory should be readable")
+        .map(|entry| entry.expect("functional case should be readable").path())
+        .filter(|path| path.is_dir())
+        .collect();
+    case_directories.sort();
+    assert!(
+        !case_directories.is_empty(),
+        "at least one functional case is required"
+    );
+
+    for case_directory in case_directories {
+        let (case, output) = run_case(&case_directory);
+        let error = String::from_utf8_lossy(&output.stderr);
+        match case.expect.as_str() {
+            "success" => assert!(output.status.success(), "case `{}` failed:\n{error}", case.name,),
+            "failure" => assert!(
+                !output.status.success(),
+                "case `{}` unexpectedly succeeded",
+                case.name,
+            ),
+            expectation => panic!("case `{}` has unknown expectation `{expectation}`", case.name),
+        }
+        if let Some(diagnostic) = case.diagnostic {
+            assert!(
+                error.contains(&diagnostic),
+                "case `{}` did not report `{diagnostic}`:\n{error}",
+                case.name,
+            );
+        }
+    }
+}
+
+#[test]
+fn package_manifest_is_not_a_cli_input() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    assert_local_manifests(&case);
+    let copied = CaseCopy::new(&case);
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(copied.root.join("app/wyn.toml"))
+        .output()
+        .expect("Wyn compiler should run");
+
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "manifest input unexpectedly succeeded");
+    assert!(
+        error.contains("must be a package directory or `.wyn` source file"),
+        "unexpected manifest-input diagnostic:\n{error}",
+    );
+}
+
+#[test]
+fn source_inside_a_package_uses_that_packages_dependency_plan() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    assert_local_manifests(&case);
+    let copied = CaseCopy::new(&case);
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(copied.root.join("app/test/alternate.wyn"))
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "package source input failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn package_compiles_with_a_local_dependency() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    assert_local_manifests(&case);
+    let copied = CaseCopy::new(&case);
+    let output_path = copied.root.join("package.wgsl");
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("build")
+        .arg(copied.root.join("app"))
+        .args(["--target", "wgsl", "--output"])
+        .arg(&output_path)
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "package compilation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output_path.is_file(), "package output should be written");
+}
+
+#[test]
+fn current_package_directory_can_name_an_output_directory() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    assert_local_manifests(&case);
+    let copied = CaseCopy::new(&case);
+    let package = copied.root.join("app");
+    let output_directory = copied.root.join("output");
+    fs::create_dir(&output_directory).expect("output directory should be created");
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .current_dir(&package)
+        .arg("build")
+        .arg(".")
+        .args(["--target", "wgsl", "--output"])
+        .arg(&output_directory)
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "current package compilation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        output_directory.join("app.wgsl").is_file(),
+        "package-named output should be written"
+    );
+}
+
+#[test]
+fn package_uses_an_unpacked_github_dependency_from_the_local_cache() {
+    let case =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/module-packages/cases/local-dependency");
+    let copied = CaseCopy::new(&case);
+    let manifest_path = copied.root.join("app/wyn.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("app manifest should be readable");
+    let manifest = manifest.replace(
+        "path = \"../deps/example\"",
+        "github = \"github.com/example/dependency\"",
+    );
+    fs::write(&manifest_path, manifest).expect("GitHub dependency manifest should be written");
+
+    let cache_root = copied.root.join("package-cache");
+    let cached_dependency = cache_root.join("github.com").join("example").join("dependency").join("v1.0.0");
+    copy_tree(&copied.root.join("deps/example"), &cached_dependency);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
+        .arg("check")
+        .arg(copied.root.join("app"))
+        .env("WYN_PKG_CACHE", cache_root)
+        .output()
+        .expect("Wyn compiler should run");
+
+    assert!(
+        output.status.success(),
+        "cached GitHub package failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}

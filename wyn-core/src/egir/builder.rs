@@ -52,7 +52,7 @@ impl<'a> EntryBuilder<'a> {
             id,
             current_block,
             name,
-            span: Span::new(0, 0, 0, 0),
+            span: Span::generated(),
             execution_model: ExecutionModel::Compute { local_size },
             inputs: Vec::new(),
             outputs: Vec::new(),

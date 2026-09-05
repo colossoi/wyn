@@ -1,0 +1,5 @@
+name = "local version mismatch"
+root = "app"
+command = "check"
+expect = "failure"
+diagnostic = "requires v1.1.0, but the local package is v1.0.0"

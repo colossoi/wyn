@@ -25,7 +25,7 @@ def SHADOW_CONE: f32 = 0.20  -- cone half-angle for the 5-sample penumbra
 def vround(v: vec3f32) vec3f32 = vec.floor(v + @[0.5, 0.5, 0.5])
 
 -- Nearest BCC centre. BCC = 2Z³ ∪ (2Z³ + (1,1,1)).
-def cellCenter(p: vec3f32) vec3f32 =
+def cell_center(p: vec3f32) vec3f32 =
   let one = @[1.0, 1.0, 1.0] in
   let a = vround(p * 0.5) * 2.0 in
   let b = vround((p - one) * 0.5) * 2.0 + one in
@@ -51,13 +51,13 @@ def vnoise(x: vec3f32) f32 =
   mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
       mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z)
 
-def mapTerrain(p0: vec3f32, iTime: f32) f32 =
+def map_terrain(p0: vec3f32, time: f32) f32 =
   let p1 = p0 * 0.1 in
   let p = p1 with .xz = p1.xz * 0.6 in
   -- iq's stepped morph: hold the noise phase flat for most of each unit
   -- interval, then smoothstep-snap it to the next state, so the terrain
   -- rearranges in bursts rather than drifting continuously.
-  let tm = 0.5 + 0.15 * iTime in
+  let tm = 0.5 + 0.15 * time in
   let time = floor(tm) + smoothstep(0.7, 1.0, fract(tm)) in
   let st = 1.4 * time in
   let f = 0.5 * vnoise(p * 1.00 + @[0.0, st, 0.0])
@@ -68,18 +68,18 @@ def mapTerrain(p0: vec3f32, iTime: f32) f32 =
 -- Cell occupancy: solid where the terrain field dips below 0.5. The height
 -- term tilts it into a heightfield; cells near the camera (gro) are cleared
 -- so the fly-through never starts buried.
-def mapSolid(c: vec3f32, gro: vec3f32, iTime: f32) bool =
-  let f0 = mapTerrain(c, iTime) + 0.25 * c.y in
+def map_solid(c: vec3f32, gro: vec3f32, time: f32) bool =
+  let f0 = map_terrain(c, time) + 0.25 * c.y in
   let f = if magnitude(gro - c) < 5.0 then 1.0 else f0 in
   f < 0.5
 
-def solidI(c: vec3f32, gro: vec3f32, iTime: f32) f32 =
-  if mapSolid(c, gro, iTime) then 1.0 else 0.0
+def solid_i(c: vec3f32, gro: vec3f32, time: f32) f32 =
+  if map_solid(c, gro, time) then 1.0 else 0.0
 
 ------------------------------------------------------------
 -- Exact ray / truncated-octahedron cell test (7 slabs).
 ------------------------------------------------------------
-def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
+def clip_slab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, rd: vec3f32)
   (f32, vec3f32, f32) =
   let denom = dot(n, rd) in
   let no = dot(n, o) in
@@ -93,40 +93,40 @@ def clipSlab(tin: f32, nrm: vec3f32, tout: f32, n: vec3f32, d: f32, o: vec3f32, 
     let (tin2, nrm2) = if te > tin then (te, normalize((0.0 - sign(denom)) * n)) else (tin, nrm) in
     (tin2, nrm2, min(tout, tx))
 
-def rayCell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
+def ray_cell(ro: vec3f32, rd: vec3f32, c: vec3f32, rc: f32, roo: f32) (f32, f32, vec3f32) =
   let o = ro - c in
-  let (t1, n1, x1) = clipSlab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
-  let (t2, n2, x2) = clipSlab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
-  let (t3, n3, x3) = clipSlab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
-  let (t4, n4, x4) = clipSlab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
-  let (t5, n5, x5) = clipSlab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
-  let (t6, n6, x6) = clipSlab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
-  let (t7, n7, x7) = clipSlab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
+  let (t1, n1, x1) = clip_slab(0.0 - BIG, @[0.0, 1.0, 0.0], BIG, @[1.0, 0.0, 0.0], rc, o, rd) in
+  let (t2, n2, x2) = clip_slab(t1, n1, x1, @[0.0, 1.0, 0.0], rc, o, rd) in
+  let (t3, n3, x3) = clip_slab(t2, n2, x2, @[0.0, 0.0, 1.0], rc, o, rd) in
+  let (t4, n4, x4) = clip_slab(t3, n3, x3, @[1.0, 1.0, 1.0], roo, o, rd) in
+  let (t5, n5, x5) = clip_slab(t4, n4, x4, @[1.0, 1.0, 0.0 - 1.0], roo, o, rd) in
+  let (t6, n6, x6) = clip_slab(t5, n5, x5, @[1.0, 0.0 - 1.0, 1.0], roo, o, rd) in
+  let (t7, n7, x7) = clip_slab(t6, n6, x6, @[0.0 - 1.0, 1.0, 1.0], roo, o, rd) in
   (t7, x7, n7)
 
 -- DDA over the BCC lattice: step Voronoi-region to Voronoi-region; the first
 -- region whose cell is solid is the hit, at the face we crossed into it.
 -- Returns (hit, t, normal, cell-centre).
-def raycast(ro: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32) (bool, f32, vec3f32, vec3f32) =
+def raycast(ro: vec3f32, rd: vec3f32, gro: vec3f32, time: f32) (bool, f32, vec3f32, vec3f32) =
   let (_, _, hit, ht, hn, hc) =
     loop (i, t, hit, ht, hn, hc) =
       (0, 0.0, false, 0.0, @[0.0, 1.0, 0.0], @[0.0, 0.0, 0.0])
     while i < 192 && !hit && t < 90.0 do
-      let c = cellCenter(ro + rd * (t + 0.001)) in
-      let (vin, vout, vn) = rayCell(ro, rd, c, 1.0, 1.5) in
-      if mapSolid(c, gro, iTime) then (i + 1, max(vin, 0.0), true, max(vin, 0.0), vn, c)
+      let c = cell_center(ro + rd * (t + 0.001)) in
+      let (vin, vout, vn) = ray_cell(ro, rd, c, 1.0, 1.5) in
+      if map_solid(c, gro, time) then (i + 1, max(vin, 0.0), true, max(vin, 0.0), vn, c)
       else (i + 1, vout + 0.002, false, ht, hn, hc)
   in
   (hit, ht, hn, hc)
 
 -- Occlusion toward a directional light: is any solid cell between `o` and the
 -- light within `tmax`? Returns 1.0 (lit) or 0.0 (in shadow).
-def occluded(o: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32, tmax: f32) f32 =
+def occluded(o: vec3f32, rd: vec3f32, gro: vec3f32, time: f32, tmax: f32) f32 =
   let (_, _, blk) =
     loop (i, t, blk) = (0, 0.05, false) while i < 48 && !blk && t < tmax do
-      let c = cellCenter(o + rd * (t + 0.001)) in
-      let (vin, vout, _) = rayCell(o, rd, c, 1.0, 1.5) in
-      if mapSolid(c, gro, iTime) && vin > 0.05 && vin < tmax then (i + 1, t, true)
+      let c = cell_center(o + rd * (t + 0.001)) in
+      let (vin, vout, _) = ray_cell(o, rd, c, 1.0, 1.5) in
+      if map_solid(c, gro, time) && vin > 0.05 && vin < tmax then (i + 1, t, true)
       else (i + 1, vout + 0.002, false)
   in
   if blk then 0.0 else 1.0
@@ -142,29 +142,29 @@ def occluded(o: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32, tmax: f32) f32 =
 --       uses this `occluded` primitive.
 --   (b) iq-style single-ray distance-aware penumbra: track min(vin/t) along
 --       one shadow ray. Smooth, one-ray cost, but doesn't fit our DDA cleanly.
-def softShadow(o: vec3f32, rd: vec3f32, gro: vec3f32, iTime: f32, tmax: f32, r: f32) f32 =
+def soft_shadow(o: vec3f32, rd: vec3f32, gro: vec3f32, time: f32, tmax: f32, r: f32) f32 =
   let a = normalize(cross(rd, @[0.07, 1.0, 0.13])) in
   let b = cross(a, rd) in
   let u = a * r in
   let v = b * r in
-  (occluded(o, rd, gro, iTime, tmax)
-   + occluded(o, normalize(rd + u), gro, iTime, tmax)
-   + occluded(o, normalize(rd - u), gro, iTime, tmax)
-   + occluded(o, normalize(rd + v), gro, iTime, tmax)
-   + occluded(o, normalize(rd - v), gro, iTime, tmax)) * 0.2
+  (occluded(o, rd, gro, time, tmax)
+   + occluded(o, normalize(rd + u), gro, time, tmax)
+   + occluded(o, normalize(rd - u), gro, time, tmax)
+   + occluded(o, normalize(rd + v), gro, time, tmax)
+   + occluded(o, normalize(rd - v), gro, time, tmax)) * 0.2
 
 -- Per-face ambient occlusion: how many of the four cells across the face rim
 -- are solid. Sampled from the cell centre `c` (not the per-pixel hit point),
 -- so it's constant across the face — no within-face pattern.
-def calcAO(c: vec3f32, nor: vec3f32, gro: vec3f32, iTime: f32) f32 =
+def calc_ao(c: vec3f32, nor: vec3f32, gro: vec3f32, time: f32) f32 =
   let up = if abs(nor.y) > 0.9 then @[1.0, 0.0, 0.0] else @[0.0, 1.0, 0.0] in
   let t1 = normalize(cross(nor, up)) in
   let t2 = cross(nor, t1) in
   let b = c + nor * 1.4 in
-  let occ = solidI(cellCenter(b + t1 * 1.7), gro, iTime)
-          + solidI(cellCenter(b - t1 * 1.7), gro, iTime)
-          + solidI(cellCenter(b + t2 * 1.7), gro, iTime)
-          + solidI(cellCenter(b - t2 * 1.7), gro, iTime) in
+  let occ = solid_i(cell_center(b + t1 * 1.7), gro, time)
+          + solid_i(cell_center(b - t1 * 1.7), gro, time)
+          + solid_i(cell_center(b + t2 * 1.7), gro, time)
+          + solid_i(cell_center(b - t2 * 1.7), gro, time) in
   clamp(1.0 - 0.18 * occ, 0.35, 1.0)
 
 ------------------------------------------------------------
@@ -178,26 +178,21 @@ def path(t: f32) vec3f32 =
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let p = (2.0 * fc - iResolution.xy) / iResolution.y in
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
+  let p = (2.0 * fc - resolution.xy) / resolution.y in
 
   -- Camera fly-through.
-  let time = 2.0 * iTime in
-  let ro = path(time) in
-  let ta = path(time + 5.0) - @[0.0, 6.0, 0.0] in
-  let cr = 0.2 * cos(0.1 * iTime) in
+  let camera_time = 2.0 * time in
+  let ro = path(camera_time) in
+  let ta = path(camera_time + 5.0) - @[0.0, 6.0, 0.0] in
+  let cr = 0.2 * cos(0.1 * time) in
   let cw = normalize(ta - ro) in
   let cp = @[sin(cr), cos(cr), 0.0] in
   let cu = normalize(cross(cw, cp)) in
@@ -205,13 +200,13 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
   let rd = normalize(p.x * cu + p.y * cv + 2.5 * cw) in
 
   let lig = normalize(@[0.0 - 0.4, 0.3, 0.7]) in
-  let (hit, t, nor, hc) = raycast(ro, rd, ro, iTime) in
+  let (hit, t, nor, hc) = raycast(ro, rd, ro, time) in
   let col =
     if hit then
       let pos = ro + rd * t in
-      let ao = calcAO(hc, nor, ro, iTime) in
+      let ao = calc_ao(hc, nor, ro, time) in
       -- Soft cast shadow on the key light; AO on the indirect terms.
-      let sh = softShadow(pos + nor * SHADOW_BIAS, lig, ro, iTime, SHADOW_TMAX, SHADOW_CONE) in
+      let sh = soft_shadow(pos + nor * SHADOW_BIAS, lig, ro, time, SHADOW_TMAX, SHADOW_CONE) in
       let dif = clamp(dot(nor, lig), 0.0, 1.0) * sh in
       let sky = 0.5 + 0.5 * nor.y in
       let bac = clamp(dot(nor, normalize(@[0.4, 0.0, 0.0 - 0.7])), 0.0, 1.0) in
@@ -223,16 +218,7 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
     else @[0.0, 0.0, 0.0]
   in
   -- vignette + gamma
-  let q = fc / iResolution.xy in
+  let q = fc / resolution.xy in
   let vig = 0.5 + 0.5 * (16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y)) ** 0.1 in
   let g = vec.pow(vec.clamp(col * vig, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
   @[g.x, g.y, g.z, 1.0]
-
-entry octahedra_voxels(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

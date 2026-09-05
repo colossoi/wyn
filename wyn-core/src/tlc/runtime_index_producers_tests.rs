@@ -107,7 +107,7 @@ fn count_lets(term: &Term) -> usize {
 }
 
 fn span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn i32_ty() -> Type<TypeName> {
@@ -330,6 +330,7 @@ fn runtime_index_inside_fused_scatter_envelope_becomes_let_bound_gather_shape() 
         vec![Def {
             data: (),
             name: main,
+            package: None,
             ty: unit_ty(),
             body: scatter,
             meta: DefMeta::Function,

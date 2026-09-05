@@ -1,10 +1,10 @@
 use std::convert::Infallible;
 
-use super::super::{
-    Decl, ExprKind, Expression, Header, Node, NodeCounter, NodeId, Program, SourceTree, Span,
-};
-use crate::parser::ParsedFamily;
+use super::super::{Decl, ExprKind, Expression, Header, Node, NodeId, Program, SourceTree, Span};
+use crate::resolve_imports::{self, ImportsResolvedFamily};
+use crate::test_pipeline;
 use crate::types::Diet;
+use crate::CompilerOptions;
 
 #[derive(Debug)]
 enum Before {}
@@ -16,7 +16,7 @@ fn unit(id: u32) -> Expression {
     Node {
         h: Header {
             id: NodeId(id),
-            span: Span::dummy(),
+            span: Span::generated(),
         },
         kind: ExprKind::Unit,
     }
@@ -24,29 +24,27 @@ fn unit(id: u32) -> Expression {
 
 #[test]
 fn program_rebuild_preserves_the_shared_node_allocator() {
-    let mut node_ids = NodeCounter::new();
-    assert_eq!(node_ids.next_id(), NodeId(0));
-    let program = Program::<Before, ParsedFamily, usize> {
-        declarations: Vec::new(),
-        node_ids,
-        global_context: 42,
-        state: std::marker::PhantomData,
-    };
+    let modules = test_pipeline::load_test_modules("", CompilerOptions::default());
+    let root = modules.graph.root();
+    let program = resolve_imports::resolve_imports(modules).expect("imports should resolve");
+    let program = program.map_global_context::<Before, _>(|_| 42usize);
+    let next_node_id = program.node_ids.peek_id();
 
-    let rebuilt: Program<After, ParsedFamily, String> = program
+    let rebuilt: Program<After, ImportsResolvedFamily, String> = program
         .try_rebuild(|declarations, global_context, node_ids| {
-            assert_eq!(node_ids.next_id(), NodeId(1));
+            assert_eq!(node_ids.next_id(), next_node_id);
             Ok::<_, Infallible>((declarations, global_context.to_string()))
         })
         .unwrap();
 
     assert_eq!(rebuilt.global_context, "42");
-    assert_eq!(rebuilt.node_ids.peek_id(), NodeId(2));
+    assert_eq!(rebuilt.node_ids.peek_id(), NodeId(next_node_id.0 + 1));
+    assert_eq!(rebuilt.source_graph().source(root), Some(""));
 }
 
 #[test]
 fn declaration_rebuild_carries_signature_fields() {
-    let span = Span::dummy();
+    let span = Span::generated();
     let definition = Decl::<u8, SourceTree> {
         data: 7,
         name: "f".to_owned(),

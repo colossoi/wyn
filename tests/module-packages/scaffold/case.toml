@@ -1,0 +1,4 @@
+name = "replace-me"
+root = "app"
+command = "check"
+expect = "success"

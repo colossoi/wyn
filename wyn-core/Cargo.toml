@@ -20,11 +20,13 @@ serde_json = "1.0"
 wyn-base = { path = "../wyn-base" }
 wyn-pipeline-descriptor = { path = "../wyn-pipeline-descriptor" }
 wyn-graph = { path = "../wyn-graph" }
+wyn-module-graph = { path = "../wyn-module-graph" }
 wyn-staged-ir = { path = "../wyn-staged-ir" }
 wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }
 
 [dev-dependencies]
 env_logger.workspace = true
+stacker = "0.1.25"
 # Used for in-process WGSL and SPIR-V validation in backend tests.
 naga = { version = "26.0", features = ["wgsl-in", "spv-in"] }
 anyhow = "1.0"

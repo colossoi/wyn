@@ -17,7 +17,7 @@ fn term(
     Term {
         id: term_ids.next_id(),
         ty: unit_type(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind,
     }
 }

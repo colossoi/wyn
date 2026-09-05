@@ -9,13 +9,6 @@ open f32
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0,  -1.0, 0.0, 1.0],
-   @[-1.0,  3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- palette: mix two colors by scalar d in [0,1]
@@ -43,8 +36,8 @@ def sub_half(v: vec2f32) vec2f32 = v - @[0.5, 0.5]
 -- Each iteration: rotate xz, rotate xy, fold (abs) xz, subtract 0.5
 -- from xz. Final distance: dot(sign(p), p) / 5.
 ------------------------------------------------------------
-def sdf(p_in: vec3f32, iTime: f32) f32 =
-  let t = iTime * 0.2 in
+def sdf(p_in: vec3f32, time: f32) f32 =
+  let t = time * 0.2 in
   let p =
     loop q = p_in for i < 8 do
       let q1 = q  with .xz = rotate(q.xz,  t) in
@@ -62,12 +55,12 @@ def sdf(p_in: vec3f32, iTime: f32) f32 =
 -- the SDF sample is < 0.02 (surface hit) or > 100 (escaped).
 -- Returns (r, g, b, alpha) where alpha encodes the final step size.
 ------------------------------------------------------------
-def rm(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
+def rm(ro: vec3f32, rd: vec3f32, time: f32) vec4f32 =
   let (_, _, cr, cg, cb, d_final, _) =
     loop (i, t, cr, cg, cb, d, stop) = (0, 0.0, 0.0, 0.0, 0.0, 1.0, false)
     while i < 64 && !stop do
       let p = ro + rd * t in
-      let d2 = sdf(p, iTime) * 0.5 in
+      let d2 = sdf(p, time) * 0.5 in
       let hit  = d2 < 0.02 in
       let miss = d2 > 100.0 in
       let done = hit || miss in
@@ -84,18 +77,20 @@ def rm(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
-  let half_res = iResolution.xy * 0.5 in
-  let uv = @[(fc.x - half_res.x) / iResolution.x, (fc.y - half_res.y) / iResolution.x] in
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
+  let half_res = resolution.xy * 0.5 in
+  let uv = @[(fc.x - half_res.x) / resolution.x, (fc.y - half_res.y) / resolution.x] in
   let ro0: vec3f32 = @[0.0, 0.0, 0.0 - 50.0] in
-  let ro  = ro0 with .xz = rotate(ro0.xz, iTime) in
+  let ro  = ro0 with .xz = rotate(ro0.xz, time) in
   let cf  = normalize(@[0.0 - ro.x, 0.0 - ro.y, 0.0 - ro.z]) in
   let cs  = normalize(cross(cf, @[0.0, 1.0, 0.0])) in
   let cu  = normalize(cross(cf, cs)) in
   let uuv = ro + cf * 3.0 + cs * uv.x + cu * uv.y in
   let rd  = normalize(uuv - ro) in
-  rm(ro, rd, iTime)
+  rm(ro, rd, time)
 
 ------------------------------------------------------------
 -- Original GLSL (commented out)
@@ -167,12 +162,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 -- 	"model": "car"
 -- }
 -- */
-
-entry fractal_pyramid(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

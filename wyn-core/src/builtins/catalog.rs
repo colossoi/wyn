@@ -1,6 +1,6 @@
 use crate::ast;
 use crate::builtins;
-use crate::type_checker;
+use crate::types::checker as type_checker;
 use crate::{LookupMap, StableMap};
 
 use crate::builtins::lowering::BuiltinLowering;

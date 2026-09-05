@@ -5,7 +5,7 @@
 //! when `module` is a known module name.
 //!
 //! The same AST-walking machinery is reused by the module-elaboration path
-//! (`module_manager::ModuleManager::resolve_names_in_expr`) — the walker is
+//! (`semantic_modules::SemanticModules::resolve_names_in_expr`) — the walker is
 //! generic over a `ResolveContext` that decides what a given identifier /
 //! field-access means in the current mode. See `Resolver` below.
 //!
@@ -20,23 +20,23 @@
 use crate::ast;
 use crate::elaborate_modules;
 use crate::error;
-use crate::module_manager;
 use crate::resolve_opens;
-use crate::resolve_placeholders;
+use crate::semantic_modules;
 use crate::LookupMap;
 use crate::LookupSet;
-use crate::{SymbolId, SymbolTable};
+use crate::{CompilerOptions, SymbolId, SymbolTable};
 
 use crate::ast::{Declaration, ExprKind, Expression, NodeId, Program};
 use crate::builtins::{BuiltinCatalog, BuiltinId};
-use crate::module_manager::ModuleManager;
 use crate::scope::{for_each_pattern_name, ScopeStack};
+use crate::semantic_modules::SemanticModules;
+use wyn_module_graph::PackageId;
 
 /// AST after module-qualified value names have been resolved.
 #[derive(Debug, Clone, Copy)]
 pub enum NamesResolvedTag {}
 pub type NamesResolved =
-    Program<NamesResolvedTag, elaborate_modules::ModulesElaboratedFamily, ModuleManager>;
+    Program<NamesResolvedTag, elaborate_modules::ModulesElaboratedFamily, SemanticModules>;
 
 /// Insert every name bound by `pattern` into `scope`.
 fn collect_pattern_bindings<T, A>(pattern: &ast::Pattern<T, A>, scope: &mut ScopeStack<()>)
@@ -66,8 +66,9 @@ pub trait ResolveContext {
     /// name.
     fn resolve_identifier(&self, _quals: &mut Vec<String>, _name: &mut String, _scope: &ScopeStack<()>) {}
 
-    /// Called for each `ExprKind::FieldAccess(obj, field)` where `obj` is
-    /// a plain `Identifier(obj_quals, obj_name)`. Return `Some(ExprKind)`
+    /// Called for each `ExprKind::FieldAccess(obj, field)` when `obj` is an
+    /// `Identifier`. For a chained access, it may be called again after the
+    /// inner access has been resolved to an `Identifier`. Return `Some(ExprKind)`
     /// to replace the entire FieldAccess expression (typical case:
     /// `mod.name` collapses to `Identifier([mod], name)`); return `None`
     /// to leave the FieldAccess alone — the walker will then recurse into
@@ -95,15 +96,27 @@ pub fn walk_expr<C: ResolveContext>(
             context.resolve_identifier(&mut identifier.qualifiers, &mut identifier.name, scope);
         }
         ExprKind::FieldAccess(object, field) => {
-            let replacement = if let ExprKind::Identifier(identifier) = &object.kind {
+            let object_was_identifier = matches!(object.kind, ExprKind::Identifier(_));
+            let mut replacement = if let ExprKind::Identifier(identifier) = &object.kind {
                 context.resolve_field_access(&identifier.qualifiers, &identifier.name, field, scope)
             } else {
                 None
             };
+            if replacement.is_none() {
+                walk_expr(object, context, scope)?;
+                if !object_was_identifier {
+                    if let ExprKind::Identifier(identifier) = &object.kind {
+                        replacement = context.resolve_field_access(
+                            &identifier.qualifiers,
+                            &identifier.name,
+                            field,
+                            scope,
+                        );
+                    }
+                }
+            }
             if let Some(kind) = replacement {
                 expression.kind = kind;
-            } else {
-                walk_expr(object, context, scope)?;
             }
         }
         ExprKind::Application(function, arguments) => {
@@ -258,9 +271,14 @@ impl<'a> ResolveContext for ProgramResolver<'a> {
         field: &str,
         _scope: &ScopeStack<()>,
     ) -> Option<ExprKind> {
-        if obj_quals.is_empty() && self.known_modules.contains(obj_name) {
+        let module_name = if obj_quals.is_empty() {
+            obj_name.to_string()
+        } else {
+            format!("{}.{}", obj_quals.join("."), obj_name)
+        };
+        if self.known_modules.contains(&module_name) {
             Some(ExprKind::Identifier(ast::Identifier {
-                qualifiers: vec![obj_name.to_string()],
+                qualifiers: module_name.split('.').map(str::to_string).collect(),
                 name: field.to_string(),
             }))
         } else {
@@ -386,16 +404,6 @@ pub enum ResolvedValueRef {
     Soac(SoacKind),
 }
 
-/// Program-wide context after all value binders and references have stable
-/// identities. `source` retains module/resource/type environments; `symbols`
-/// is the sole allocator and diagnostic-name table for source-level bindings.
-#[derive(Debug)]
-pub struct BindingsResolvedGlobal {
-    pub source: resolve_placeholders::PlaceholdersResolvedGlobal,
-    pub symbols: SymbolTable,
-    pub support_definitions: Vec<ast::SupportDefinition<ast::NameResolvedDefinition, ast::ResolvedTree>>,
-}
-
 /// Side table populated by `build_name_resolution`. Maps Identifier
 /// NodeIds to their catalog classification. Identifiers not in the
 /// catalog (locals, top-level defs, module values) are absent.
@@ -412,7 +420,13 @@ pub struct NameResolution {
     pub bindings: LookupMap<(NodeId, String), SymbolId>,
     /// Definition-node identity, kept separate from lexical name lookup so a
     /// shadowed prelude definition never shares a `SymbolId` with user code.
-    pub declarations: LookupMap<(String, ast::Span), SymbolId>,
+    declarations: LookupMap<(String, ast::Span), ResolvedDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedDeclaration {
+    pub(crate) symbol: SymbolId,
+    pub(crate) package: Option<PackageId>,
 }
 
 impl NameResolution {
@@ -427,6 +441,10 @@ impl NameResolution {
     }
     pub fn get(&self, id: NodeId) -> Option<&ResolvedValueRef> {
         self.values.get(&id)
+    }
+
+    pub(crate) fn take_declaration(&mut self, name: &str, span: ast::Span) -> Option<ResolvedDeclaration> {
+        self.declarations.remove(&(name.to_owned(), span))
     }
 
     /// Record the type checker's choice of overload index for a Builtin
@@ -457,16 +475,17 @@ impl NameResolution {
 /// Walks all elaborated modules, including prelude modules. This is
 /// safe because functor instantiation freshens NodeIds (via
 /// `clone_expr_fresh_ids` / `clone_pattern_fresh_ids` in
-/// `module_manager::elaborate_decl_signature`), so per-instance bodies
+/// `semantic_modules::elaborate_decl_signature`), so per-instance bodies
 /// have their own NodeId space and the previous collision risk is gone.
 pub fn build_name_resolution(
     program: &resolve_opens::OpensResolved,
-    module_manager: &ModuleManager,
+    semantic_modules: &SemanticModules,
     catalog: &BuiltinCatalog,
+    options: CompilerOptions,
 ) -> NameResolution {
     let catalog = EnabledBuiltinCatalog {
         catalog,
-        graphics: module_manager.options().graphics,
+        graphics: options.graphics,
     };
     let mut nr = NameResolution::new();
     let mut top_level: ScopeStack<()> = ScopeStack::new();
@@ -482,32 +501,32 @@ pub fn build_name_resolution(
     // shadows a SOAC iff the user has a file-scope `def` of the same
     // name. Prelude modules stay invariant: their `module_scope`
     // contains only their own siblings.
-    // `module_manager.user_module_names` is populated at elaboration
+    // `semantic_modules.user_module_names` is populated at elaboration
     // time with every module the user declared (as opposed to prelude
     // / system modules). Use it directly — by the time we reach name
     // resolution, the user's `module m = …` declaration has already
     // been moved out of `program.declarations` into
     // `elaborated_modules`, so we can't grep the source AST for it.
-    let user_module_names = &module_manager.user_module_names;
+    let user_module_names = &semantic_modules.user_module_names;
 
     // Walk every elaborated module body — both user-source and
     // prelude. Functor instantiations now produce per-instance fresh
     // NodeIds (via `clone_expr_fresh_ids` in
-    // `module_manager::elaborate_decl_signature`), so the previous
+    // `semantic_modules::elaborate_decl_signature`), so the previous
     // collision risk is gone and prelude bodies can safely be
     // covered by NameResolution.
-    for (mod_name, elaborated) in module_manager.elaborated_modules.iter() {
+    for (mod_name, elaborated) in semantic_modules.elaborated_modules.iter() {
         let mut module_scope: ScopeStack<()> = ScopeStack::new();
         if user_module_names.contains(mod_name) {
             collect_top_level_names(&program.declarations, &mut module_scope);
         }
         for item in &elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(d) = item {
+            if let semantic_modules::ElaboratedItem::Decl(d) = item {
                 module_scope.insert(d.name.clone(), ());
             }
         }
         for item in &elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(d) = item {
+            if let semantic_modules::ElaboratedItem::Decl(d) = item {
                 let mut scope = module_scope.clone();
                 scope.push_scope();
                 for p in &d.params {
@@ -524,7 +543,7 @@ pub fn build_name_resolution(
     // `elaborated_modules`, but their bodies reference catalog builtins
     // like `length` that must classify as `Builtin` to satisfy
     // `var_term_builtin_id`'s no-string-lookup invariant.
-    let prelude_decls = module_manager.get_prelude_function_declarations();
+    let prelude_decls = semantic_modules.get_prelude_function_declarations();
     let mut prelude_scope: ScopeStack<()> = ScopeStack::new();
     for d in &prelude_decls {
         prelude_scope.insert(d.name.clone(), ());
@@ -539,7 +558,7 @@ pub fn build_name_resolution(
         scope.pop_scope();
     }
 
-    assign_symbol_identities(program, module_manager, &mut nr);
+    assign_symbol_identities(program, semantic_modules, &mut nr);
     nr
 }
 
@@ -565,10 +584,19 @@ fn intern_definition(nr: &mut NameResolution, name: String) -> SymbolId {
     symbol
 }
 
-fn alloc_declaration(nr: &mut NameResolution, name: String, span: ast::Span) -> SymbolId {
+fn alloc_declaration(
+    nr: &mut NameResolution,
+    name: String,
+    span: ast::Span,
+    package: Option<PackageId>,
+) -> SymbolId {
     let symbol = nr.symbols.alloc(name.clone());
-    nr.declarations.insert((name, span), symbol);
+    nr.declarations.insert((name, span), ResolvedDeclaration { symbol, package });
     symbol
+}
+
+fn source_package(program: &resolve_opens::OpensResolved, span: ast::Span) -> Option<PackageId> {
+    span.module().and_then(|module| program.source_graph().package_of(module))
 }
 
 fn bind_symbol_pattern<T, A>(
@@ -620,31 +648,39 @@ fn bind_symbol_pattern<T, A>(
 
 fn assign_symbol_identities(
     program: &resolve_opens::OpensResolved,
-    module_manager: &ModuleManager,
+    semantic_modules: &SemanticModules,
     nr: &mut NameResolution,
 ) {
-    for (module, definition) in module_manager.get_all_module_declarations() {
+    for (module, definition) in semantic_modules.get_all_module_declarations() {
         let name = format!("{}.{}", module, definition.name);
-        let symbol = alloc_declaration(nr, name.clone(), definition.name_span);
+        let package = if semantic_modules.user_module_names.contains(module) {
+            source_package(program, definition.name_span)
+        } else {
+            None
+        };
+        let symbol = alloc_declaration(nr, name.clone(), definition.name_span, package);
         nr.definitions.entry(name).or_insert(symbol);
     }
-    let prelude = module_manager.get_prelude_function_declarations();
+    let prelude = semantic_modules.get_prelude_function_declarations();
     for definition in &prelude {
-        let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+        let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span, None);
         nr.definitions.entry(definition.name.clone()).or_insert(symbol);
     }
     for declaration in &program.declarations {
         match declaration {
             Declaration::Decl(definition) => {
-                let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span);
+                let package = source_package(program, definition.name_span);
+                let symbol = alloc_declaration(nr, definition.name.clone(), definition.name_span, package);
                 nr.definitions.insert(definition.name.clone(), symbol);
             }
             Declaration::Entry(entry) => {
-                let symbol = alloc_declaration(nr, entry.name.clone(), entry.name_span);
+                let package = source_package(program, entry.name_span);
+                let symbol = alloc_declaration(nr, entry.name.clone(), entry.name_span, package);
                 nr.definitions.insert(entry.name.clone(), symbol);
             }
             Declaration::Extern(external) => {
-                let symbol = alloc_declaration(nr, external.name.clone(), external.data.span);
+                let package = source_package(program, external.data.span);
+                let symbol = alloc_declaration(nr, external.name.clone(), external.data.span, package);
                 nr.definitions.insert(external.name.clone(), symbol);
             }
             Declaration::Frontend(_) => {}
@@ -673,16 +709,16 @@ fn assign_symbol_identities(
         }
     }
 
-    for (module, elaborated) in module_manager.elaborated_modules.iter() {
+    for (module, elaborated) in semantic_modules.elaborated_modules.iter() {
         let mut module_scope = ScopeStack::new();
         for item in &elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(definition) = item {
+            if let semantic_modules::ElaboratedItem::Decl(definition) = item {
                 let symbol = intern_definition(nr, format!("{}.{}", module, definition.name));
                 module_scope.insert(definition.name.clone(), symbol);
             }
         }
         for item in &elaborated.items {
-            if let module_manager::ElaboratedItem::Decl(definition) = item {
+            if let semantic_modules::ElaboratedItem::Decl(definition) = item {
                 let mut scope = module_scope.clone();
                 scope.push_scope();
                 for pattern in &definition.params {

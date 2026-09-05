@@ -10,18 +10,11 @@ def FAR: f32 = 55.0
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Two by two rotation matrix constructor
 ------------------------------------------------------------
-def rot2D(a: f32) mat2f32 =
+def rot_2d(a: f32) mat2f32 =
   let c = cos(a) in
   let s = sin(a) in
   @[[c, s], [0.0 - s, c]]
@@ -38,7 +31,7 @@ def hash2(p: vec3f32) f32 =
 ------------------------------------------------------------
 -- Camera path to move around
 ------------------------------------------------------------
-def camPath(t: f32) vec2f32 =
+def cam_path(t: f32) vec2f32 =
   let s = sin(t * 0.312) in
   let c = cos(t * 0.124) in
   @[c * 1.4 - s * 1.4, c * 1.7 + s * 2.5]
@@ -46,7 +39,7 @@ def camPath(t: f32) vec2f32 =
 ------------------------------------------------------------
 -- Foil gyroid distance function
 ------------------------------------------------------------
-def foilGyroid(p: vec3f32, t: f32) f32 =
+def foil_gyroid(p: vec3f32, t: f32) f32 =
   let ps = p * 0.6 in
   let sinp = @[sin(ps.x + t), sin(ps.y + t), sin(ps.z + t)] in
   let cosp = @[cos(ps.y + t), cos(ps.z + t), cos(ps.x + t)] in
@@ -56,22 +49,22 @@ def foilGyroid(p: vec3f32, t: f32) f32 =
 ------------------------------------------------------------
 -- Main raymarching function with chromatic offset
 ------------------------------------------------------------
-def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chromatic: f32, use_mouse: f32, iTime: f32) f32 =
-  let marchResult = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
+def raymarch(frag_coord: vec2f32, res: vec2f32, rot_x: mat2f32, rot_y: mat2f32, chromatic: f32, use_mouse: f32, time: f32) f32 =
+  let march_result = loop (i, dt, acc) = (0.0, 0.0, 0.0) while i < FAR do
     -- Ray origin with camera path
-    let ro_z = iTime * 0.5 in
-    let cam = camPath(ro_z) in
+    let ro_z = time * 0.5 in
+    let cam = cam_path(ro_z) in
     let ro = @[cam.x, cam.y, ro_z] in
 
     -- Calculate ray direction from screen coordinates
-    let rd_xy = @[(fragCoord.x + fragCoord.x - res.x) / res.y, (fragCoord.y + fragCoord.y - res.y) / res.y] in
+    let rd_xy = @[(frag_coord.x + frag_coord.x - res.x) / res.y, (frag_coord.y + frag_coord.y - res.y) / res.y] in
     let rd_raw = @[rd_xy.x, rd_xy.y, 1.0] in
     let rd_len = magnitude(rd_raw) in
     let rd = rd_raw / rd_len in
 
     -- Apply rotation to ray direction based on mouse
-    let rd2 = if use_mouse > 0.5 then rd with .yz *= rotY
-              else rd with .xy *= rotX in
+    let rd2 = if use_mouse > 0.5 then rd with .yz *= rot_y
+              else rd with .xy *= rot_x in
 
     -- Ray position
     let p = ro + rd2 * dt in
@@ -79,64 +72,66 @@ def raymarch(fragCoord: vec2f32, res: vec2f32, rotX: mat2f32, rotY: mat2f32, chr
     if abs(p.x) > 9.0 then (FAR, dt, acc)
     else
       -- Voxel grid for sparkles
-      let gridPos = @[floor(p.x * 4.0), floor(p.y * 4.0), floor(p.z * 4.0)] in
-      let localPos = @[fract(p.x * 4.0) - 0.5, fract(p.y * 4.0) - 0.5, fract(p.z * 4.0) - 0.5] in
+      let grid_pos = @[floor(p.x * 4.0), floor(p.y * 4.0), floor(p.z * 4.0)] in
+      let local_pos = @[fract(p.x * 4.0) - 0.5, fract(p.y * 4.0) - 0.5, fract(p.z * 4.0) - 0.5] in
 
       -- Sparkle detection
-      let localLen = magnitude(localPos) in
-      let sparkThresh = hash(gridPos) * 0.23 + 0.01 in
-      let sparkPlus = if localLen < sparkThresh then 1.0 else 0.0 in
-      let sparkHash = hash2(gridPos) * 6.28 in
+      let local_len = magnitude(local_pos) in
+      let spark_thresh = hash(grid_pos) * 0.23 + 0.01 in
+      let spark_plus = if local_len < spark_thresh then 1.0 else 0.0 in
+      let spark_hash = hash2(grid_pos) * 6.28 in
 
       -- Calculate distances
-      let foilDist = foilGyroid(p, iTime * 0.01) in
-      let cubeDist = foilGyroid(p, iTime * 0.04) in
-      let sineDist = magnitude(@[sin(cubeDist), 0.0, 0.0]) - 0.13 in
+      let foil_dist = foil_gyroid(p, time * 0.01) in
+      let cube_dist = foil_gyroid(p, time * 0.04) in
+      let sine_dist = magnitude(@[sin(cube_dist), 0.0, 0.0]) - 0.13 in
 
-      let combinedDist = max(max(cubeDist, foilDist - 0.1), sineDist)
+      let combined_dist = max(max(cube_dist, foil_dist - 0.1), sine_dist)
                          + chromatic * 0.001 - i / 130.0 in
 
-      let stepSize = 0.01 + 0.2 * abs(combinedDist) in
-      let dt2 = dt + stepSize in
+      let step_size = 0.01 + 0.2 * abs(combined_dist) in
+      let dt2 = dt + step_size in
 
       -- Sparkle glow
-      let sparkGlow = sparkPlus * sin(sparkHash + i * 0.04 + chromatic * 20.0) in
-      let sparkGlowClamped = max(0.0, sparkGlow) in
+      let spark_glow = spark_plus * sin(spark_hash + i * 0.04 + chromatic * 20.0) in
+      let spark_glow_clamped = max(0.0, spark_glow) in
 
       -- Volumetric glow contributions
-      let shapeGlow = 3.5 / stepSize in
-      let sparkBright = 15.0 / stepSize in
+      let shape_glow = 3.5 / step_size in
+      let spark_bright = 15.0 / step_size in
 
       -- Accumulate color
-      let contrib = shapeGlow * (0.3 + 0.23 * sin(i * 0.33 + chromatic * 5.0)) +
-                    sparkBright * sparkGlowClamped in
+      let contrib = shape_glow * (0.3 + 0.23 * sin(i * 0.33 + chromatic * 5.0)) +
+                    spark_bright * spark_glow_clamped in
 
       (i + 1.0, dt2, acc + contrib)
-  in marchResult.2
+  in march_result.2
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag: vec4f32) vec4f32 =
-  let res = iResolution.xy in
-  let uv = @[frag.x, res.y - frag.y] in
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  let res = resolution.xy in
+  let uv = @[frag_coord.x, res.y - frag_coord.y] in
 
   -- Mouse control for rotation, or auto-rotate based on time
-  let use_mouse = if iMouse.z > 0.0 then 1.0 else 0.0 in
+  let use_mouse = if mouse.z > 0.0 then 1.0 else 0.0 in
   let ma = if use_mouse > 0.5 then
-    @[(iMouse.x / res.x - 0.5) * 6.28, (iMouse.y / res.y - 0.5) * 6.28]
+    @[(mouse.x / res.x - 0.5) * 6.28, (mouse.y / res.y - 0.5) * 6.28]
   else
-    @[iTime / 12.0, iTime / 12.0]
+    @[time / 12.0, time / 12.0]
   in
 
   -- Rotation matrices for 3D camera orientation
-  let rotX = rot2D(ma.x) in
-  let rotY = rot2D(ma.y) in
+  let rot_x = rot_2d(ma.x) in
+  let rot_y = rot_2d(ma.y) in
 
   -- Raymarch three times with chromatic offset for RGB channels
-  let r_val = raymarch(uv, res, rotX, rotY, 0.0 - 1.0, use_mouse, iTime) in
-  let g_val = raymarch(uv, res, rotX, rotY, 0.0, use_mouse, iTime) in
-  let b_val = raymarch(uv, res, rotX, rotY, 1.0, use_mouse, iTime) in
+  let r_val = raymarch(uv, res, rot_x, rot_y, 0.0 - 1.0, use_mouse, time) in
+  let g_val = raymarch(uv, res, rot_x, rot_y, 0.0, use_mouse, time) in
+  let b_val = raymarch(uv, res, rot_x, rot_y, 1.0, use_mouse, time) in
 
   -- Tone mapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in
@@ -298,12 +293,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, frag: vec4f
 --     // Tone mapping to compress the high dynamic range glow.
 --     O = tanh(O * O / 1e7);
 -- }
-
-entry kuko(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

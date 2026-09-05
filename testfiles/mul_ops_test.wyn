@@ -25,10 +25,10 @@ def rot3z(a: f32) mat3f32 =
     [s, c, 0.0],
     [0.0, 0.0, 1.0]]
 
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
-  let uv = @[(fragCoord.x / iResolution.x) * 2.0 - 1.0,
-             (fragCoord.y / iResolution.y) * 2.0 - 1.0]
-  let t = iTime in
+def fragment_main(resolution: vec3f32, time: f32, frag_coord: vec4f32) vec4f32 =
+  let uv = @[(frag_coord.x / resolution.x) * 2.0 - 1.0,
+             (frag_coord.y / resolution.y) * 2.0 - 1.0]
+  let t = time in
 
   -- Case 1: mat2 * mat2 (OpMatrixTimesMatrix)
   let r1 = rot2(t)
@@ -86,10 +86,10 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
   @[c1, c2, c3 + c4, 1.0]
 
 entry mul_ops_test(
-    iResolution: vec3f32, iTime: f32,
+    resolution: vec3f32, time: f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))
+    |fragment| fragment_main(resolution, time, fragment.position))

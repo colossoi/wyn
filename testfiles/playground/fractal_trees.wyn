@@ -15,34 +15,27 @@ def MAXDIST: f32 = 50.0
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0,  -1.0, 0.0, 1.0],
-   @[-1.0,  3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Hue rotation in YIQ space (from netgrind)
 ------------------------------------------------------------
 def hue_rotate(color: vec3f32, shift: f32) vec3f32 =
-  let kRGBToYPrime = @[0.299, 0.587, 0.114] in
-  let kRGBToI      = @[0.596, -0.275, -0.321] in
-  let kRGBToQ      = @[0.212, -0.523, 0.311] in
-  let kYIQToR      = @[1.0, 0.956, 0.621] in
-  let kYIQToG      = @[1.0, -0.272, -0.647] in
-  let kYIQToB      = @[1.0, -1.107, 1.704] in
-  let yp     = dot(color, kRGBToYPrime) in
-  let i_val  = dot(color, kRGBToI) in
-  let q_val  = dot(color, kRGBToQ) in
+  let k_rgb_to_y_prime = @[0.299, 0.587, 0.114] in
+  let k_rgb_to_i      = @[0.596, -0.275, -0.321] in
+  let k_rgb_to_q      = @[0.212, -0.523, 0.311] in
+  let k_yiq_to_r      = @[1.0, 0.956, 0.621] in
+  let k_yiq_to_g      = @[1.0, -0.272, -0.647] in
+  let k_yiq_to_b      = @[1.0, -1.107, 1.704] in
+  let yp     = dot(color, k_rgb_to_y_prime) in
+  let i_val  = dot(color, k_rgb_to_i) in
+  let q_val  = dot(color, k_rgb_to_q) in
   let h      = atan2(q_val, i_val) in
   let chroma = sqrt(i_val * i_val + q_val * q_val) in
   let h2     = h + shift in
   let q2     = chroma * sin(h2) in
   let i2     = chroma * cos(h2) in
   let yiq    = @[yp, i2, q2] in
-  @[dot(yiq, kYIQToR), dot(yiq, kYIQToG), dot(yiq, kYIQToB)]
+  @[dot(yiq, k_yiq_to_r), dot(yiq, k_yiq_to_g), dot(yiq, k_yiq_to_b)]
 
 ------------------------------------------------------------
 -- SDF helpers
@@ -57,22 +50,22 @@ def length6(p: vec3f32) f32 =
   let p3 = p2 * p2 in
   (p3.x + p3.y + p3.z) ** (1.0 / 6.0)
 
-def fPlane(p: vec3f32, n: vec3f32, dist_from_origin: f32) f32 =
+def f_plane(p: vec3f32, n: vec3f32, dist_from_origin: f32) f32 =
   dot(p, n) + dist_from_origin
 
 -- 2D rotation: returns the rotated vector (pure function, no inout)
-def pR(p: vec2f32, a: f32) vec2f32 =
+def p_r(p: vec2f32, a: f32) vec2f32 =
   cos(a) * p + sin(a) * @[p.y, -p.x]
 
 ------------------------------------------------------------
 -- Fractal IFS (20 iterations)
 ------------------------------------------------------------
-def fractal(p_in: vec3f32, iTime: f32) f32 =
-  let d      = iTime * 5.0 - p_in.z in
+def fractal(p_in: vec3f32, time: f32) f32 =
+  let d      = time * 5.0 - p_in.z in
   -- swizzle p to yxz
   let p0     = @[p_in.y, p_in.x, p_in.z] in
   -- rotate p0.yz by pi/2
-  let yz0    = pR(@[p0.y, p0.z], 1.570795) in
+  let yz0    = p_r(@[p0.y, p0.z], 1.570795) in
   let p1     = @[p0.x + 6.5, yz0.x, yz0.y] in
   -- p.yz = mod(abs(p.yz) - 0.0, 20.) - 10.
   let yz1    = vec.mod(vec.abs(@[p1.y, p1.z]), @[20.0, 20.0]) - @[10.0, 10.0] in
@@ -86,11 +79,11 @@ def fractal(p_in: vec3f32, iTime: f32) f32 =
       let pxy_abs = vec.abs(@[p.x, p.y]) in
       let p_sc    = @[pxy_abs.x, pxy_abs.y, p.z] * scale
                     + @[-3.0 + d * 0.0095, -1.5, -0.5] in
-      let xy2     = pR(@[p_sc.x, p_sc.y], 0.35 - d * 0.015) in
+      let xy2     = p_r(@[p_sc.x, p_sc.y], 0.35 - d * 0.015) in
       -- Apply rotations sequentially: first xy to get new x,y; then yz
       -- on the result.
       let p_xy    = @[xy2.x, xy2.y, p_sc.z] in
-      let yz3     = pR(@[p_xy.y, p_xy.z], 0.5 + d * 0.02) in
+      let yz3     = p_r(@[p_xy.y, p_xy.z], 0.5 + d * 0.02) in
       let p_next  = @[p_xy.x, yz3.x, yz3.y] in
       (p_next, length6(p_next))
   in
@@ -99,21 +92,21 @@ def fractal(p_in: vec3f32, iTime: f32) f32 =
 ------------------------------------------------------------
 -- Scene SDF: returns (dist, material_id)
 ------------------------------------------------------------
-def scene_map(pos: vec3f32, iTime: f32) (f32, f32) =
+def scene_map(pos: vec3f32, time: f32) (f32, f32) =
   let d0 = 10.0 in
-  let d1 = min(d0, fractal(pos, iTime)) in
-  let d2 = smin(d1, fPlane(pos, @[0.0, 1.0, 0.0], 10.0), 4.6) in
+  let d1 = min(d0, fractal(pos, time)) in
+  let d2 = smin(d1, f_plane(pos, @[0.0, 1.0, 0.0], 10.0), 4.6) in
   (d2, 0.0)
 
 ------------------------------------------------------------
 -- Volumetric march (20 steps, early-exit encoded as done flag)
 ------------------------------------------------------------
-def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32, iTime: f32) vec3f32 =
+def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32, time: f32) vec3f32 =
   let c = hue_rotate(@[0.0, 0.0, 1.0], 5.5) in
   let (_, _, sum_final, _) =
     loop (i, p, sum, done) = (0, ro, @[0.0, 0.0, 0.0], false)
     while i < 20 && !done do
-      let (rx, _) = scene_map(p, iTime) in
+      let (rx, _) = scene_map(p, time) in
       if rx > 0.01 then
         (i + 1, p, sum, true)
       else
@@ -127,12 +120,12 @@ def vmarch(ro: vec3f32, rd: vec3f32, _dist: f32, iTime: f32) vec3f32 =
 ------------------------------------------------------------
 -- Ray march (50 steps, early-exit encoded as done flag)
 ------------------------------------------------------------
-def march(ro: vec3f32, rd: vec3f32, iTime: f32) (f32, f32) =
+def march(ro: vec3f32, rd: vec3f32, time: f32) (f32, f32) =
   let prec = 0.001 in
   let (_, res_t, res_mat, _) =
     loop (i, rt, rm, done) = (0, 0.0, 0.0, false)
     while i < 50 && !done do
-      let (sx, sy) = scene_map(ro + rd * rt, iTime) in
+      let (sx, sy) = scene_map(ro + rd * rt, time) in
       if rt > MAXDIST || sx < prec then
         (i + 1, rt, rm, true)
       else
@@ -143,24 +136,24 @@ def march(ro: vec3f32, rd: vec3f32, iTime: f32) (f32, f32) =
 ------------------------------------------------------------
 -- Normal estimation via central differences
 ------------------------------------------------------------
-def calc_normal(pos: vec3f32, iTime: f32) vec3f32 =
+def calc_normal(pos: vec3f32, time: f32) vec3f32 =
   let eps = 0.005 in
-  let (d0, _) = scene_map(pos, iTime) in
-  let (dx, _) = scene_map(@[pos.x + eps, pos.y, pos.z], iTime) in
-  let (dy, _) = scene_map(@[pos.x, pos.y + eps, pos.z], iTime) in
-  let (dz, _) = scene_map(@[pos.x, pos.y, pos.z + eps], iTime) in
+  let (d0, _) = scene_map(pos, time) in
+  let (dx, _) = scene_map(@[pos.x + eps, pos.y, pos.z], time) in
+  let (dy, _) = scene_map(@[pos.x, pos.y + eps, pos.z], time) in
+  let (dz, _) = scene_map(@[pos.x, pos.y, pos.z + eps], time) in
   normalize(@[dx - d0, dy - d0, dz - d0])
 
 ------------------------------------------------------------
 -- Render: trace + volumetric shading
 ------------------------------------------------------------
-def render(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
-  let (res_t, _) = march(ro, rd, iTime) in
+def render(ro: vec3f32, rd: vec3f32, time: f32) vec4f32 =
+  let (res_t, _) = march(ro, rd, time) in
   if res_t > MAXDIST then
     @[0.0, 0.0, 0.0, 50.0]
   else
     let pos  = ro + res_t * rd in
-    let col  = vmarch(pos, rd, res_t, iTime) in
+    let col  = vmarch(pos, rd, res_t, time) in
     let fade = clamp(res_t / 50.0, 0.0, 1.0) in
     let col2 = mix(col, @[0.0, 0.0, 0.0], fade) in
     @[col2.x, col2.y, col2.z, res_t]
@@ -168,16 +161,18 @@ def render(ro: vec3f32, rd: vec3f32, iTime: f32) vec4f32 =
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
-  let fc    = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc    = @[frag_coord.x, resolution.y - frag_coord.y] in
   -- UV setup with barrel-distortion term
-  let uv0   = fc / iResolution.xy in
+  let uv0   = fc / resolution.xy in
   let uv1   = uv0 * 2.0 - @[1.0, 1.0] in
-  let uv    = @[uv1.x * iResolution.x / iResolution.y,
+  let uv    = @[uv1.x * resolution.x / resolution.y,
                 uv1.y - uv1.x * uv1.x * 0.15] in
   -- Camera
-  let cam_pos = @[3.0, -1.5, iTime * 5.0] in
+  let cam_pos = @[3.0, -1.5, time * 5.0] in
   let cam_tgt = cam_pos + @[-1.25, 0.1, 1.0] in
   let forward = normalize(cam_tgt - cam_pos) in
   let world_up = @[0.0, 1.0, 0.0] in
@@ -187,7 +182,7 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
   let rd_local = normalize(@[uv.x, uv.y, 0.8]) in
   let rd       = normalize(cam_x * rd_local.x + cam_y * rd_local.y + forward * rd_local.z) in
   -- Render and invert color
-  let col    = render(cam_pos, rd, iTime) in
+  let col    = render(cam_pos, rd, time) in
   let alpha  = clamp(1.0 - col.w / MAXDIST, 0.0, 1.0) in
   @[1.0 - col.x, 1.0 - col.y, 1.0 - col.z, alpha]
 
@@ -407,12 +402,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 --
 -- 	fragColor = vec4(1.-col.xyz,clamp(1.-col.w/MAXDIST, 0., 1.));
 -- }
-
-entry fractal_trees(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

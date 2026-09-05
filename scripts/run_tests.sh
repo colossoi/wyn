@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Compile + validate the rng/dist library testfiles, and (with --run) execute
+# Compile + validate the library test packages, and (with --run) execute
 # them on the GPU via tephra to eyeball the output. Hand-coded commands, one
-# block per driver — when you add a driver to lib/testfiles/, add its commands
+# block per driver — when you add an asset below pkg/*/test/, add its commands
 # here. The unit-test suite is separate: run it with `cargo test`.
 #
 # Usage:  scripts/run_tests.sh [--run]
@@ -18,39 +18,39 @@ WYN=./target/debug/wyn
 
 echo "== compile + validate =="
 
-$WYN compile lib/testfiles/dist_demo.wyn -o /tmp/dist_demo.spv
+$WYN build pkg/dist/test/dist_demo.wyn -o /tmp/dist_demo.spv
 spirv-val /tmp/dist_demo.spv
-$WYN compile lib/testfiles/dist_demo.wyn -t wgsl -o /tmp/dist_demo.wgsl
+$WYN build pkg/dist/test/dist_demo.wyn -t wgsl -o /tmp/dist_demo.wgsl
 
-$WYN compile lib/testfiles/stats_normal.wyn -o /tmp/stats_normal.spv
+$WYN build pkg/dist/test/stats_normal.wyn -o /tmp/stats_normal.spv
 spirv-val /tmp/stats_normal.spv
-$WYN compile lib/testfiles/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
+$WYN build pkg/dist/test/stats_normal.wyn -t wgsl -o /tmp/stats_normal.wgsl
 
-$WYN compile lib/testfiles/stats_uniform.wyn -o /tmp/stats_uniform.spv
+$WYN build pkg/dist/test/stats_uniform.wyn -o /tmp/stats_uniform.spv
 spirv-val /tmp/stats_uniform.spv
-$WYN compile lib/testfiles/stats_uniform.wyn -t wgsl -o /tmp/stats_uniform.wgsl
+$WYN build pkg/dist/test/stats_uniform.wyn -t wgsl -o /tmp/stats_uniform.wgsl
 
-$WYN compile lib/testfiles/stats_exponential.wyn -o /tmp/stats_exponential.spv
+$WYN build pkg/dist/test/stats_exponential.wyn -o /tmp/stats_exponential.spv
 spirv-val /tmp/stats_exponential.spv
-$WYN compile lib/testfiles/stats_exponential.wyn -t wgsl -o /tmp/stats_exponential.wgsl
+$WYN build pkg/dist/test/stats_exponential.wyn -t wgsl -o /tmp/stats_exponential.wgsl
 
-$WYN compile lib/testfiles/stats_uniform_int.wyn -o /tmp/stats_uniform_int.spv
+$WYN build pkg/dist/test/stats_uniform_int.wyn -o /tmp/stats_uniform_int.spv
 spirv-val /tmp/stats_uniform_int.spv
-$WYN compile lib/testfiles/stats_uniform_int.wyn -t wgsl -o /tmp/stats_uniform_int.wgsl
+$WYN build pkg/dist/test/stats_uniform_int.wyn -t wgsl -o /tmp/stats_uniform_int.wgsl
 
-$WYN compile lib/testfiles/noise_smoke.wyn -o /tmp/noise_smoke.spv
+$WYN build pkg/noise/test/noise_smoke.wyn -o /tmp/noise_smoke.spv
 spirv-val /tmp/noise_smoke.spv
-$WYN compile lib/testfiles/noise_smoke.wyn -t wgsl -o /tmp/noise_smoke.wgsl
+$WYN build pkg/noise/test/noise_smoke.wyn -t wgsl -o /tmp/noise_smoke.wgsl
 
-$WYN compile lib/testfiles/gtao_smoke.wyn -o /tmp/gtao_smoke.spv
+$WYN build pkg/gtao/test/gtao_smoke.wyn -o /tmp/gtao_smoke.spv
 spirv-val /tmp/gtao_smoke.spv
-$WYN compile lib/testfiles/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
+$WYN build pkg/gtao/test/gtao_smoke.wyn -t wgsl -o /tmp/gtao_smoke.wgsl
 
 # Compile-only (the demo needs a window, a GPU, and an input image; see
-# the header of gtao_demo.wyn for the interactive run command).
-$WYN compile lib/testfiles/gtao_demo.wyn --graphics -o /tmp/gtao_demo.spv
+# the package source for the interactive run command).
+$WYN build pkg/gtao/test/gtao_demo.wyn --graphics -o /tmp/gtao_demo.spv
 spirv-val /tmp/gtao_demo.spv
-$WYN compile lib/testfiles/gtao_demo.wyn --graphics -t wgsl -o /tmp/gtao_demo.wgsl
+$WYN build pkg/gtao/test/gtao_demo.wyn --graphics -t wgsl -o /tmp/gtao_demo.wgsl
 
 echo "compile + validate: OK"
 
@@ -96,7 +96,7 @@ echo "Expect: first three in [-1, 1]; worley2 a small positive distance (~0..1.5
 echo "        fbm_perlin a damped sum of octaves (no fixed range, but bounded)."
 
 echo
-echo "--- gtao_smoke (lib/gtao.wyn pure-math invariants) ---"
+echo "--- gtao_smoke (wyn/gtao pure-math invariants) ---"
 $TEPHRA run /tmp/gtao_smoke.spv --entry gtao_smoke -n 16 -w 64
-echo "Slots: see the key in lib/testfiles/gtao_smoke.wyn."
+echo "Slots: see pkg/gtao/test/gtao_smoke.wyn."
 echo "Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, <0.06, <0.05, ~0, 1, 2, 0, 0.7, 6]"

@@ -537,6 +537,7 @@ impl HofSpecializer<'_> {
         self.specialized_defs.push(Def {
             data: (),
             name: specialized_symbol,
+            package: hof_def.package,
             ty: body.ty.clone(),
             body,
             meta: DefMeta::Function,
@@ -731,6 +732,7 @@ impl HofSpecializer<'_> {
         let def = Def {
             data: (),
             name: symbol,
+            package: lifted_def.package,
             ty: body.ty.clone(),
             body,
             meta: lifted_def.meta,

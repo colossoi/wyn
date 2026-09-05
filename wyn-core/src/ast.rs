@@ -1,8 +1,9 @@
+use std::sync::Arc;
+
 use crate::interface;
 use crate::lexer;
 use crate::name_resolution;
 use crate::op;
-use crate::parser;
 use crate::types;
 use crate::SymbolTable;
 pub use spirv;
@@ -14,6 +15,8 @@ use crate::interface::{Attribute, ComputeDispatchGrid, EntryKind, EntryOutputDec
 pub use crate::types::{Diet, RecordFields, Type, TypeName, TypeScheme};
 use crate::SymbolId;
 use wyn_base::IdSource;
+use wyn_module_graph::PackageId;
+pub use wyn_module_graph::Span;
 
 /// Qualified name representing a path through modules to a name
 /// E.g., M.N.x is represented as QualName { qualifiers: ["M", "N"], name: "x" }
@@ -53,106 +56,6 @@ impl QualName {
     }
 }
 
-/// Source location span tracking (line, column) start and end positions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Span {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
-}
-
-impl Span {
-    pub fn new(start_line: usize, start_col: usize, end_line: usize, end_col: usize) -> Self {
-        Span {
-            start_line,
-            start_col,
-            end_line,
-            end_col,
-        }
-    }
-
-    /// Create a dummy/generated span (all zeros) for test code
-    #[cfg(test)]
-    pub fn dummy() -> Self {
-        Span {
-            start_line: 0,
-            start_col: 0,
-            end_line: 0,
-            end_col: 0,
-        }
-    }
-
-    /// Check if this is a generated/dummy span (all zeros)
-    pub fn is_generated(&self) -> bool {
-        self.start_line == 0 && self.start_col == 0 && self.end_line == 0 && self.end_col == 0
-    }
-
-    /// Merge two spans to create a span covering both
-    pub fn merge(&self, other: &Span) -> Span {
-        let (start_line, start_col) = if self.start_line < other.start_line
-            || (self.start_line == other.start_line && self.start_col <= other.start_col)
-        {
-            (self.start_line, self.start_col)
-        } else {
-            (other.start_line, other.start_col)
-        };
-
-        let (end_line, end_col) = if self.end_line > other.end_line
-            || (self.end_line == other.end_line && self.end_col >= other.end_col)
-        {
-            (self.end_line, self.end_col)
-        } else {
-            (other.end_line, other.end_col)
-        };
-
-        Span {
-            start_line,
-            start_col,
-            end_line,
-            end_col,
-        }
-    }
-
-    /// Check if this span contains a position (1-based line/col)
-    pub fn contains(&self, line: usize, col: usize) -> bool {
-        if line < self.start_line || line > self.end_line {
-            return false;
-        }
-        if line == self.start_line && col < self.start_col {
-            return false;
-        }
-        if line == self.end_line && col > self.end_col {
-            return false;
-        }
-        true
-    }
-
-    /// Calculate the "size" of a span for comparison (smaller = more specific)
-    pub fn size(&self) -> usize {
-        if self.end_line == self.start_line {
-            self.end_col.saturating_sub(self.start_col)
-        } else {
-            // Rough estimate: 100 chars per line
-            (self.end_line - self.start_line) * 100 + self.end_col
-        }
-    }
-}
-
-impl std::fmt::Display for Span {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if self.start_line == self.end_line {
-            write!(f, "{}:{}..{}", self.start_line, self.start_col, self.end_col)
-        } else {
-            write!(
-                f,
-                "{}:{}..{}:{}",
-                self.start_line, self.start_col, self.end_line, self.end_col
-            )
-        }
-    }
-}
-
 /// Unique identifier for AST nodes (expressions)
 /// Looks up inferred types in the type table
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,6 +75,16 @@ impl From<u32> for NodeId {
 
 /// Counter for generating unique node IDs across compilation phases
 pub type NodeCounter = IdSource<NodeId>;
+
+/// Source AST family produced by the Wyn parser.
+pub type ParsedFamily = AstFamily<
+    SourceTree,
+    DefinitionSyntax,
+    EntrySyntax,
+    Attribute,
+    ExternSyntax,
+    ParsedFrontend<NestedDeclaration>,
+>;
 
 /// Extension trait for NodeCounter to provide AST node creation helpers
 pub trait NodeCounterExt {
@@ -199,7 +112,7 @@ pub trait NodeCounterTestExt {
 #[cfg(test)]
 impl NodeCounterTestExt for NodeCounter {
     fn mk_node_dummy<T>(&mut self, kind: T) -> Node<T> {
-        self.mk_node(kind, Span::dummy())
+        self.mk_node(kind, Span::generated())
     }
 }
 
@@ -446,11 +359,17 @@ pub struct Program<Tag, F: Family, GlobalContext> {
     pub declarations: Vec<Declaration<F>>,
     /// The sole allocator for nodes added while this AST is rebuilt.
     pub(crate) node_ids: NodeCounter,
+    pub(crate) source_graph: Arc<wyn_module_graph::SourceGraph>,
     pub global_context: GlobalContext,
     pub(crate) state: std::marker::PhantomData<fn() -> Tag>,
 }
 
 impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
+    /// Physical source, package, and import provenance for this compilation.
+    pub fn source_graph(&self) -> &wyn_module_graph::SourceGraph {
+        self.source_graph.as_ref()
+    }
+
     /// Change only the program's nominal state while retaining its exact tree
     /// representation and global context.
     pub fn retag<NewTag>(self) -> Program<NewTag, F, GlobalContext> {
@@ -466,6 +385,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Program {
             declarations: self.declarations,
             node_ids: self.node_ids,
+            source_graph: self.source_graph,
             global_context: map(self.global_context),
             state: std::marker::PhantomData,
         }
@@ -490,6 +410,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         let Program {
             declarations,
             mut node_ids,
+            source_graph,
             global_context,
             state: _,
         } = self;
@@ -497,6 +418,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
         Ok(Program {
             declarations,
             node_ids,
+            source_graph,
             global_context,
             state: std::marker::PhantomData,
         })
@@ -504,7 +426,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Declaration<F: Family = parser::ParsedFamily> {
+pub enum Declaration<F: Family = ParsedFamily> {
     Decl(Decl<F::DefinitionData, F::Tree>),
     Entry(EntryDecl<F::EntryData, F::Tree, F::EntryParameterAttribute>),
     Extern(ExternDecl<F::ExternData>),
@@ -523,6 +445,9 @@ pub struct DefinitionSyntax {
 pub struct NameResolvedDefinition {
     pub syntax: DefinitionSyntax,
     pub symbol: SymbolId,
+    /// Package containing the source declaration. Compiler-provided support
+    /// definitions have no source package.
+    pub package: Option<PackageId>,
 }
 
 /// Typed definition data. Identity is inherited from name resolution rather
@@ -628,6 +553,8 @@ pub struct TypedExtern {
 pub struct NameResolvedExtern {
     pub syntax: ExternSyntax,
     pub symbol: SymbolId,
+    /// Package containing the source declaration.
+    pub package: Option<PackageId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -694,6 +621,8 @@ pub struct ResolvedEntry {
 pub struct NameResolvedEntry {
     pub source: ResolvedEntry,
     pub symbol: SymbolId,
+    /// Package containing the source declaration.
+    pub package: Option<PackageId>,
 }
 
 /// Typed entry metadata, including the entry's inferred function scheme and
@@ -845,6 +774,18 @@ pub struct ModuleTypeBind {
     pub definition: ModuleTypeExpression,
 }
 
+/// A physical source import before its target has been resolved.
+///
+/// Its identity is local to the containing source file. The parser keeps the
+/// source spelling so the module-graph frontend can interpret package and
+/// relative paths without teaching the parser those rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceImport {
+    pub(crate) site: wyn_module_graph::ImportSiteId,
+    pub(crate) path: String,
+    pub(crate) span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModuleExpression<D = NestedDeclaration> {
     Name(String),                                               // qualname
@@ -856,7 +797,7 @@ pub enum ModuleExpression<D = NestedDeclaration> {
     ), // \ (params) [: sig] -> body
     Application(Box<ModuleExpression<D>>, Box<ModuleExpression<D>>), // mod_exp mod_exp
     Struct(Vec<D>),                                             // { dec* }
-    Import(String),                                             // import "path"
+    Import(SourceImport),                                       // import "path"
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -892,7 +833,7 @@ pub enum NestedDeclaration {
     Module(ModuleDecl),
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression),
-    Import(String),
+    Import(SourceImport),
     Resource(interface::ResourceDecl),
 }
 
@@ -904,7 +845,7 @@ pub enum ParsedFrontend<D> {
     Module(ModuleDecl<D>),
     ModuleTypeBind(ModuleTypeBind),
     Open(ModuleExpression<D>),
-    Import(String),
+    Import(SourceImport),
     Resource(interface::ResourceDecl),
 }
 

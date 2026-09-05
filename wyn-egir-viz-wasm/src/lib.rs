@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
-use wyn_core::ast::{NodeCounter, Span};
+use wyn_core::ast::Span;
 use wyn_core::egir::ir::{OperandRef, OperandType, PlaceOp, ProgramFamily, SideEffectKind};
 use wyn_core::egir::program::{
     CompilerResourceKind, LogicalResource, LogicalResourceArena, LogicalSize, NoStorageDeclaration,
@@ -16,8 +15,13 @@ use wyn_core::egir::types::{
     SegExtent, SegResourceAccess, SegSpace, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase,
 };
 use wyn_core::error::CompilerError;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
-use wyn_core::{BindingRef, FunctionId, LoweringProfile, ResourceAccess};
+use wyn_core::{
+    initialize_frontend, BindingRef, CompilationFailure, CompilerOptions, FunctionId,
+    LoadModulesError, LoweringProfile, ParsedModules, ResourceAccess,
+};
+use wyn_module_graph::{
+    BuildError, ModulePath, PackageIdentity, PackagePlan,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectPass {
@@ -125,31 +129,38 @@ impl InspectPass {
     }
 }
 
-struct PreludeCache {
-    prelude: PreElaboratedPrelude,
-    start_node_counter: NodeCounter,
+#[derive(Debug)]
+enum SourceModulesError {
+    Setup(String),
+    Load(LoadModulesError),
 }
 
-thread_local! {
-    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = const { RefCell::new(None) };
+fn single_source_input(source: &str) -> Result<PackagePlan, String> {
+    let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0")
+        .map_err(|error| error.to_string())?;
+    Ok(PackagePlan::single_source(identity, root_path, source))
+}
+
+fn load_source_modules(source: &str) -> Result<ParsedModules, SourceModulesError> {
+    let input = single_source_input(source).map_err(SourceModulesError::Setup)?;
+    ParsedModules::load(input, CompilerOptions { graphics: true }).map_err(SourceModulesError::Load)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceSpan {
-    pub start_line: usize,
-    pub start_col: usize,
-    pub end_line: usize,
-    pub end_col: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
-impl From<Span> for SourceSpan {
-    fn from(span: Span) -> Self {
-        Self {
-            start_line: span.start_line,
-            start_col: span.start_col,
-            end_line: span.end_line,
-            end_col: span.end_col,
-        }
+impl SourceSpan {
+    fn from_span(span: Span) -> Option<Self> {
+        span.module()?;
+        let range = span.range();
+        Some(Self {
+            start: range.start(),
+            end: range.end(),
+        })
     }
 }
 
@@ -449,7 +460,7 @@ pub struct InspectResult {
 }
 
 impl InspectResult {
-    fn error(pass: impl Into<String>, message: impl Into<String>, span: Option<Span>) -> Self {
+    fn error(pass: impl Into<String>, message: impl Into<String>, span: Option<SourceSpan>) -> Self {
         Self {
             success: false,
             pass: pass.into(),
@@ -458,7 +469,7 @@ impl InspectResult {
             relations: Vec::new(),
             error: Some(VizError {
                 message: message.into(),
-                span: span.map(Into::into),
+                span,
             }),
         }
     }
@@ -467,25 +478,13 @@ impl InspectResult {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-    PRELUDE_CACHE.with(|cache| {
-        if cache.borrow().is_some() {
-            return true;
+    match initialize_frontend() {
+        Ok(_) => true,
+        Err(error) => {
+            web_sys::console::error_1(&format!("failed to initialize Wyn compiler: {error}").into());
+            false
         }
-        let mut node_counter = NodeCounter::new();
-        match ModuleManager::create_prelude(&mut node_counter) {
-            Ok(prelude) => {
-                *cache.borrow_mut() = Some(PreludeCache {
-                    prelude,
-                    start_node_counter: node_counter,
-                });
-                true
-            }
-            Err(error) => {
-                web_sys::console::error_1(&format!("failed to initialize Wyn prelude: {error:?}").into());
-                false
-            }
-        }
-    })
+    }
 }
 
 #[wasm_bindgen]
@@ -515,21 +514,28 @@ pub fn inspect_pass(source: &str, pass: &str) -> JsValue {
     })
 }
 
-fn compiler_init() -> Option<(NodeCounter, ModuleManager)> {
-    PRELUDE_CACHE.with(|cache| {
-        let cache = cache.borrow();
-        let cached = cache.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude_with_options(
-            cached.prelude.clone(),
-            cached.start_node_counter.clone(),
-            wyn_core::CompilerOptions { graphics: true },
-        ))
-    })
+fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
+    let span = error.span().and_then(SourceSpan::from_span);
+    InspectResult::error(pass.id(), format_compiler_error(&error), span)
 }
 
-fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
-    let span = error.span();
-    InspectResult::error(pass.id(), format_compiler_error(&error), span)
+fn frontend_error(pass: InspectPass, failure: CompilationFailure) -> InspectResult {
+    let span = failure.error().span().and_then(SourceSpan::from_span);
+    InspectResult::error(pass.id(), failure.to_string(), span)
+}
+
+fn source_modules_error(pass: InspectPass, error: SourceModulesError) -> InspectResult {
+    match error {
+        SourceModulesError::Setup(message) => InspectResult::error(pass.id(), message, None),
+        SourceModulesError::Load(LoadModulesError::Prelude(error)) => compiler_error(pass, error),
+        SourceModulesError::Load(LoadModulesError::Modules(failure)) => {
+            let span = match failure.error() {
+                BuildError::Parse { source, .. } => source.span().and_then(SourceSpan::from_span),
+                _ => None,
+            };
+            InspectResult::error(pass.id(), failure.to_string(), span)
+        }
+    }
 }
 
 fn format_compiler_error(error: &CompilerError) -> String {
@@ -559,8 +565,9 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     if !init_compiler() {
         return InspectResult::error(pass.id(), "failed to initialize the Wyn compiler", None);
     }
-    let Some((node_counter, module_manager)) = compiler_init() else {
-        return InspectResult::error(pass.id(), "compiler cache is unavailable", None);
+    let modules = match load_source_modules(source) {
+        Ok(modules) => modules,
+        Err(error) => return source_modules_error(pass, error),
     };
 
     macro_rules! try_compiler {
@@ -572,23 +579,16 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         };
     }
 
-    let program = try_compiler!(wyn_core::parser::parse(source, node_counter, module_manager));
-    let program = try_compiler!(wyn_core::resolve_imports::resolve_imports(
-        program,
-        std::path::Path::new(".")
-    ));
-    let program = try_compiler!(wyn_core::elaborate_modules::elaborate_modules(program));
-    let program = wyn_core::name_resolution::resolve_names(program);
-    let program = try_compiler!(wyn_core::resolve_resources::resolve_resources(program));
-    let program = wyn_core::ast_const_fold::fold_constants(program);
-    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
-    let program = try_compiler!(wyn_core::resolve_opens::resolve_opens(program));
-    let program = try_compiler!(wyn_core::types::run::type_check(program));
+    let program = match modules.type_check() {
+        Ok(program) => program,
+        Err(failure) => return frontend_error(pass, failure),
+    };
     let program = try_compiler!(wyn_core::ast_type_holes::reject_type_holes(program));
     let program = try_compiler!(wyn_core::tlc::lower_from_ast(program));
-    let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));
     let program = try_compiler!(wyn_core::tlc::validate_ownership(program));
     let program = wyn_core::tlc::partial_eval(program);
+    let program = try_compiler!(wyn_core::tlc::extract_stages(program));
+    let program = try_compiler!(wyn_core::tlc::pin_entry_buffers(program));
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = try_compiler!(wyn_core::tlc::monomorphize(program));
     let program = wyn_core::tlc::rep_specialize(program);
@@ -2034,7 +2034,7 @@ fn snapshot_graph<P: SnapshotPhase>(
                 wyn_core::diags::format_type(value.ty())
             ),
             ty: Some(wyn_core::diags::format_type(value.ty())),
-            span: value.span().map(Into::into),
+            span: value.span().and_then(SourceSpan::from_span),
             operation: None,
         });
         for dependency in graph.value_dependencies(value_id) {
@@ -2061,7 +2061,7 @@ fn snapshot_graph<P: SnapshotPhase>(
             representation: matches!(place.op(), PlaceOp::Parameter { .. }).then(|| "place".to_string()),
             detail: format!("{:#?}\n\ntype: {:#?}", place.op(), place.ty()),
             ty: Some(wyn_core::diags::format_type(&place.ty().pointee)),
-            span: place.span().map(Into::into),
+            span: place.span().and_then(SourceSpan::from_span),
             operation: Some(operation),
         });
     }
@@ -2096,7 +2096,7 @@ fn snapshot_graph<P: SnapshotPhase>(
                 representation: None,
                 detail: display.detail,
                 ty: None,
-                span: effect.span().map(Into::into),
+                span: effect.span().and_then(SourceSpan::from_span),
                 operation: display.operation,
             });
             push_edge(snapshot, block_node.clone(), effect_id.clone(), "block");

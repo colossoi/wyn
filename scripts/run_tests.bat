@@ -1,7 +1,6 @@
 @echo off
-rem Compile + validate the rng library demos, and (with --run) execute them on
-rem the GPU via tephra. Hand-coded commands, one block per demo — when you add a
-rem driver to lib\testfiles\, add its commands here.
+rem Compile + validate the library test packages, and (with --run) execute them
+rem on the GPU via tephra. Hand-coded commands, one block per package.
 rem
 rem Usage:  scripts\run_tests.bat [--run]
 cd /d "%~dp0.."
@@ -15,39 +14,39 @@ cargo build -p wyn || exit /b 1
 
 echo == compile + validate ==
 
-"%WYN%" compile lib\testfiles\dist_demo.wyn -o "%TEMP%\dist_demo.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\dist_demo.wyn -o "%TEMP%\dist_demo.spv" || exit /b 1
 spirv-val "%TEMP%\dist_demo.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\dist_demo.wyn -t wgsl -o "%TEMP%\dist_demo.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\dist_demo.wyn -t wgsl -o "%TEMP%\dist_demo.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\stats_normal.wyn -o "%TEMP%\stats_normal.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_normal.wyn -o "%TEMP%\stats_normal.spv" || exit /b 1
 spirv-val "%TEMP%\stats_normal.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\stats_normal.wyn -t wgsl -o "%TEMP%\stats_normal.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_normal.wyn -t wgsl -o "%TEMP%\stats_normal.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\stats_uniform.wyn -o "%TEMP%\stats_uniform.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform.wyn -o "%TEMP%\stats_uniform.spv" || exit /b 1
 spirv-val "%TEMP%\stats_uniform.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\stats_uniform.wyn -t wgsl -o "%TEMP%\stats_uniform.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform.wyn -t wgsl -o "%TEMP%\stats_uniform.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\stats_exponential.wyn -o "%TEMP%\stats_exponential.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_exponential.wyn -o "%TEMP%\stats_exponential.spv" || exit /b 1
 spirv-val "%TEMP%\stats_exponential.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\stats_exponential.wyn -t wgsl -o "%TEMP%\stats_exponential.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_exponential.wyn -t wgsl -o "%TEMP%\stats_exponential.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\stats_uniform_int.wyn -o "%TEMP%\stats_uniform_int.spv" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform_int.wyn -o "%TEMP%\stats_uniform_int.spv" || exit /b 1
 spirv-val "%TEMP%\stats_uniform_int.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\stats_uniform_int.wyn -t wgsl -o "%TEMP%\stats_uniform_int.wgsl" || exit /b 1
+"%WYN%" build pkg\dist\test\stats_uniform_int.wyn -t wgsl -o "%TEMP%\stats_uniform_int.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\noise_smoke.wyn -o "%TEMP%\noise_smoke.spv" || exit /b 1
+"%WYN%" build pkg\noise\test\noise_smoke.wyn -o "%TEMP%\noise_smoke.spv" || exit /b 1
 spirv-val "%TEMP%\noise_smoke.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
+"%WYN%" build pkg\noise\test\noise_smoke.wyn -t wgsl -o "%TEMP%\noise_smoke.wgsl" || exit /b 1
 
-"%WYN%" compile lib\testfiles\gtao_smoke.wyn -o "%TEMP%\gtao_smoke.spv" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_smoke.wyn -o "%TEMP%\gtao_smoke.spv" || exit /b 1
 spirv-val "%TEMP%\gtao_smoke.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\gtao_smoke.wyn -t wgsl -o "%TEMP%\gtao_smoke.wgsl" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_smoke.wyn -t wgsl -o "%TEMP%\gtao_smoke.wgsl" || exit /b 1
 
 rem Compile-only (the demo needs a window, a GPU, and an input image; see
-rem the header of gtao_demo.wyn for the interactive run command).
-"%WYN%" compile lib\testfiles\gtao_demo.wyn --graphics -o "%TEMP%\gtao_demo.spv" || exit /b 1
+rem the package source for the interactive run command).
+"%WYN%" build pkg\gtao\test\gtao_demo.wyn --graphics -o "%TEMP%\gtao_demo.spv" || exit /b 1
 spirv-val "%TEMP%\gtao_demo.spv" || exit /b 1
-"%WYN%" compile lib\testfiles\gtao_demo.wyn --graphics -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
+"%WYN%" build pkg\gtao\test\gtao_demo.wyn --graphics -t wgsl -o "%TEMP%\gtao_demo.wgsl" || exit /b 1
 
 echo compile + validate: OK
 
@@ -95,7 +94,7 @@ echo Expect: first three in [-1, 1]; worley2 a small positive distance (~0..1.5)
 echo         fbm_perlin a damped sum of octaves (no fixed range, but bounded).
 
 echo.
-echo --- gtao_smoke (lib/gtao.wyn pure-math invariants) ---
+echo --- gtao_smoke (wyn/gtao pure-math invariants) ---
 "%TEPHRA%" run "%TEMP%\gtao_smoke.spv" --entry gtao_smoke -n 16 -w 64
-echo Slots: see the key in lib/testfiles/gtao_smoke.wyn.
+echo Slots: see pkg/gtao/test/gtao_smoke.wyn.
 echo Expect: [0, 1, 3, 2730, ~0.905, ~0.614, ~0, 1, ^<0.06, ^<0.05, ~0, 1, 2, 0, 0.7, 6]

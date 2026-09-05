@@ -57,7 +57,7 @@ fn mk_term(
     Term {
         id: ids.next_id(),
         ty,
-        span: Span::dummy(),
+        span: Span::generated(),
         kind,
     }
 }
@@ -581,6 +581,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
     let definition = |name, body| Def {
         data: (),
         name,
+        package: None,
         ty: ty.clone(),
         body,
         meta: DefMeta::Function,
@@ -627,6 +628,7 @@ fn construction_purity_propagates_effectful_builtin_calls() {
             Def {
                 data: (),
                 name: array_consumer,
+                package: None,
                 ty: Type::Constructed(
                     TypeName::Arrow,
                     vec![Type::Constructed(TypeName::Array, vec![]), ty.clone()],

@@ -15,13 +15,6 @@ def PI2: f32 = PI * 2.0
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- 2D rotation matrix.
@@ -62,58 +55,60 @@ def box(p: vec3f32, b: vec3f32) f32 =
 -- Five rounds of abs-fold + rotation, then a final xz rotation,
 -- then evaluate the box SDF.
 ------------------------------------------------------------
-def ifsBox(p0: vec3f32, iTime: f32) f32 =
+def ifs_box(p0: vec3f32, time: f32) f32 =
   let p_folded =
     loop p = p0 for i < 5 do
       let p1 = @[abs(p.x) - 1.0, abs(p.y) - 1.0, abs(p.z) - 1.0] in
-      let p2 = p1 with .xy *= rot(iTime * 0.3) in
-      let p3 = p2 with .xz *= rot(iTime * 0.1) in
+      let p2 = p1 with .xy *= rot(time * 0.3) in
+      let p3 = p2 with .xz *= rot(time * 0.1) in
       p3
   in
-  let pf = p_folded with .xz *= rot(iTime) in
+  let pf = p_folded with .xz *= rot(time) in
   box(pf, @[0.4, 0.8, 0.3])
 
 ------------------------------------------------------------
 -- Scene SDF.
 -- Folds space modularly in x, y, z and applies polar symmetry on xy.
 ------------------------------------------------------------
-def sceneMap(p: vec3f32, iTime: f32) f32 =
+def scene_map(p: vec3f32, time: f32) f32 =
   let px = mod(p.x - 5.0, 10.0) - 5.0 in
   let py = mod(p.y - 5.0, 10.0) - 5.0 in
   let pz = mod(p.z, 16.0) - 8.0 in
   let p1: vec3f32 = @[px, py, pz] in
   let pxy2 = pmod(@[p1.x, p1.y], 5.0) in
   let p2: vec3f32 = @[pxy2.x, pxy2.y, p1.z] in
-  ifsBox(p2, iTime)
+  ifs_box(p2, time)
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan so the screen-Y convention matches Shadertoy's.
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
   -- Screen-space UV ([-1,1] range, aspect-corrected)
-  let p = (fc * 2.0 - iResolution.xy) / min(iResolution.x, iResolution.y) in
+  let p = (fc * 2.0 - resolution.xy) / min(resolution.x, resolution.y) in
 
   -- Camera setup: flying forward along -Z
-  let cPos  = @[0.0, 0.0, 0.0 - 3.0 * iTime] in
-  let cDir  = normalize(@[0.0, 0.0, 0.0 - 1.0]) in
-  let cUp   = @[sin(iTime), 1.0, 0.0] in
-  let cSide = cross(cDir, cUp) in
-  let ray   = normalize(cSide * p.x + cUp * p.y + cDir) in
+  let c_pos  = @[0.0, 0.0, 0.0 - 3.0 * time] in
+  let c_dir  = normalize(@[0.0, 0.0, 0.0 - 1.0]) in
+  let c_up   = @[sin(time), 1.0, 0.0] in
+  let c_side = cross(c_dir, c_up) in
+  let ray   = normalize(c_side * p.x + c_up * p.y + c_dir) in
 
   -- Volumetric ray march (Phantom Mode by aiekick)
   -- Accumulates two glow channels: acc (base) and acc2 (pulse rings).
   let (acc, acc2, t) =
     loop (acc, acc2, t) = (0.0, 0.0, 0.0) for i < 99 do
-      let pos  = cPos + ray * t in
-      let dist = max(abs(sceneMap(pos, iTime)), 0.02) in
+      let pos  = c_pos + ray * t in
+      let dist = max(abs(scene_map(pos, time)), 0.02) in
       let a    = exp(0.0 - dist * 3.0) in
       -- Pulse rings: every 30 units (modulated by time) double the
       -- glow contribution `a` and add it to BOTH acc and acc2. The
       -- GLSL is `a *= 2; acc2 += a; ... acc += a;` so the doubled
       -- value also lands in the primary glow channel.
-      let in_ring   = mod(magnitude(pos) + 24.0 * iTime, 30.0) < 3.0 in
+      let in_ring   = mod(magnitude(pos) + 24.0 * time, 30.0) < 3.0 in
       let (a_eff, acc2_next) =
         if in_ring then let doubled = a * 2.0 in (doubled, acc2 + doubled)
         else (a, acc2) in
@@ -200,12 +195,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, fragCoord: vec4f32) vec4f32 
 --     vec3 col = vec3(acc * 0.01, acc * 0.011 + acc2*0.002, acc * 0.012+ acc2*0.005);
 --     fragColor = vec4(col, 1.0 - t * 0.03);
 -- }
-
-entry phantom_star(
-    iResolution: vec3f32, iTime: f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, fragment.position))

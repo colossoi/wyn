@@ -7,20 +7,19 @@
 use super::*;
 use crate::ast::{self, Declaration, ExprKind, Expression};
 use crate::elaborate_modules;
-use crate::module_manager;
 use crate::name_resolution;
-use crate::parser;
 use crate::resolve_imports;
 use crate::resolve_resources;
+use crate::semantic_modules;
 
 fn parse(src: &str) -> resolve_resources::ResourcesResolved {
-    let program = parser::parse(
+    let modules = crate::test_pipeline::load_test_modules_with_state(
         src,
+        crate::CompilerOptions::default(),
         ast::NodeCounter::new(),
-        module_manager::ModuleManager::new_empty(),
-    )
-    .expect("parse");
-    let program = resolve_imports::resolve_imports(program, std::path::Path::new(".")).expect("imports");
+        semantic_modules::SemanticModules::new_empty(),
+    );
+    let program = resolve_imports::resolve_imports(modules).expect("imports");
     let program = elaborate_modules::elaborate_modules(program).expect("modules");
     let program = name_resolution::resolve_names(program);
     resolve_resources::resolve_resources(program).expect("resources")

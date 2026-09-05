@@ -2,14 +2,17 @@
 //!
 //! Source programs expose one host-visible root. Rasterization and shading calls
 //! in that root delimit callbacks whose bodies execute in platform stage
-//! contexts. This pass consumes those delimiters before ordinary TLC lowering
-//! can mistake their opaque orchestration values for shader values.
+//! contexts. This pass consumes those delimiters after unified-program
+//! analysis and before representation-oriented TLC transforms can mistake
+//! their opaque orchestration values for shader values.
 
 use super::data;
+use super::partial_eval::PartialEvaled;
 use super::run::UnpinnedPolymorphic;
 use super::{
-    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, ProgramParts,
-    RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef, WalkDecision,
+    clone_term_with_fresh_ids, curried_function_type, Def, DefMeta, EntryPoint, Lambda, Program,
+    ProgramParts, RewriteDecision, Term, TermIdSource, TermKind, TermRewriter, TermVisitor, VarRef,
+    WalkDecision,
 };
 use crate::ast;
 use crate::ast::Span;
@@ -135,6 +138,19 @@ fn stage_helper(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, Stag
     ))
 }
 
+fn stage_constant(definition: &Def<UnpinnedPolymorphic>) -> Option<(SymbolId, StageHelper)> {
+    if !matches!(definition.meta, DefMeta::Function) || definition.arity != 0 {
+        return None;
+    }
+    Some((
+        definition.name,
+        StageHelper {
+            params: Vec::new(),
+            body: definition.body.clone(),
+        },
+    ))
+}
+
 fn inline_stage_helpers(
     term: Term,
     helpers: &LookupMap<SymbolId, StageHelper>,
@@ -162,6 +178,12 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
 
     fn rewrite_owned_node(&mut self, term: Term) -> (Term, RewriteDecision) {
         let candidate = match &term.kind {
+            TermKind::Var(VarRef::Symbol(symbol)) => self
+                .helpers
+                .get(symbol)
+                .filter(|candidate| candidate.params.is_empty())
+                .cloned()
+                .map(|candidate| (*symbol, candidate, true, false)),
             TermKind::App { func, args } => match &func.kind {
                 TermKind::Var(VarRef::Symbol(symbol)) => self
                     .helpers
@@ -171,13 +193,13 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
                     .map(|candidate| {
                         let carries_render_target =
                             args.iter().any(|argument| is_render_target_type(&argument.ty));
-                        (*symbol, candidate, carries_render_target)
+                        (*symbol, candidate, false, carries_render_target)
                     }),
                 _ => None,
             },
             _ => None,
         };
-        let Some((symbol, candidate, carries_render_target)) = candidate else {
+        let Some((symbol, candidate, is_constant, carries_render_target)) = candidate else {
             return (term, RewriteDecision::Unchanged);
         };
         if !self.active.insert(symbol) {
@@ -186,18 +208,23 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         let params = candidate.params.clone();
         let body = clone_term_with_fresh_ids(&candidate.body, self.term_ids);
         let Term { id, span, kind, .. } = term;
-        let TermKind::App { args, .. } = kind else {
-            unreachable!()
+        let mut replacement = match kind {
+            TermKind::Var(VarRef::Symbol(_)) => body,
+            TermKind::App { args, .. } => {
+                super::inline::build_inline_lets(&params, args, body, span, self.term_ids)
+            }
+            _ => unreachable!(),
         };
-        let mut replacement = super::inline::build_inline_lets(&params, args, body, span, self.term_ids);
         replacement.id = id;
-        // The normal post-order rewrite intentionally expands each helper only
-        // once; revisiting every inserted body would explode prelude SOAC
-        // helpers such as filter. Render targets cannot survive as shader-stage
-        // values, though, so recursively expose just those helper chains before
-        // target_load/target_sample rewriting. Active-call tracking leaves a
-        // recursive source edge intact instead of recursing forever.
-        if carries_render_target {
+        // The normal post-order rewrite intentionally expands each function
+        // helper only once; revisiting every inserted body would explode
+        // prelude SOAC helpers such as filter. Constants must be expanded
+        // transitively so a named descriptor can itself use named constants.
+        // Render targets also cannot survive as shader-stage values, so expose
+        // those helper chains before target_load/target_sample rewriting.
+        // Active-call tracking leaves a recursive source edge intact instead
+        // of recursing forever.
+        if is_constant || carries_render_target {
             replacement = self.rewrite_owned(replacement);
         }
         self.active.remove(&symbol);
@@ -285,9 +312,31 @@ struct RootShape<'a> {
     targets: LookupMap<SymbolId, TargetValue>,
 }
 
+/// Unified roots have been replaced by their final compute or graphics stage
+/// entries, but entry-buffer regions have not yet been pinned.
+#[derive(Debug, Clone, Copy)]
+pub enum StagesExtractedTag {}
+pub type StagesExtracted =
+    Program<StagesExtractedTag, UnpinnedPolymorphic, super::context::TransformedGlobal>;
+
+/// Extract the final entry stages after source ownership and compile-time
+/// evaluation have finished observing the unified program.
+pub fn extract_stages(program: PartialEvaled) -> error::Result<StagesExtracted> {
+    let Program {
+        defs,
+        mut symbols,
+        mut term_ids,
+        global_context,
+        state: _,
+    } = program;
+    let mut parts = ProgramParts { defs };
+    extract(&mut parts, &mut symbols, &mut term_ids)?;
+    Ok(parts.with_symbols::<StagesExtractedTag, _>(symbols, term_ids, global_context))
+}
+
 /// Replace every unified graphics root with the ordered internal stages selected
 /// by its invocation operations.
-pub(super) fn extract(
+fn extract(
     parts: &mut ProgramParts<UnpinnedPolymorphic>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -295,6 +344,7 @@ pub(super) fn extract(
     let builtins = InvocationBuiltins::get();
     let source_defs = std::mem::take(&mut parts.defs);
     let helpers = source_defs.iter().filter_map(stage_helper).collect::<LookupMap<_, _>>();
+    let constants = source_defs.iter().filter_map(stage_constant).collect::<LookupMap<_, _>>();
     let mut extracted = Vec::with_capacity(source_defs.len());
 
     for mut definition in source_defs {
@@ -307,7 +357,8 @@ pub(super) fn extract(
             continue;
         }
 
-        if let Some(stages) = extract_root(&definition, &builtins, &helpers, symbols, term_ids) {
+        if let Some(stages) = extract_root(&definition, &builtins, &helpers, &constants, symbols, term_ids)
+        {
             extracted.extend(stages);
             continue;
         }
@@ -343,6 +394,7 @@ fn extract_root(
     definition: &Def<UnpinnedPolymorphic>,
     builtins: &InvocationBuiltins,
     helpers: &LookupMap<SymbolId, StageHelper>,
+    constants: &LookupMap<SymbolId, StageHelper>,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Vec<Def<UnpinnedPolymorphic>>> {
@@ -419,12 +471,14 @@ fn extract_root(
                     Box::new(inline_stage_helpers(*fragment_lambda.body, helpers, term_ids));
 
                 let raster_state = if has_raster_state {
-                    parse_raster_state(raster_args.first()?)?
+                    let state = inline_stage_helpers(raster_args.first()?.clone(), constants, term_ids);
+                    parse_raster_state(&state)?
                 } else {
                     Default::default()
                 };
                 let fragment_state = if shade_builtin == builtins.shade_with {
-                    parse_fragment_state(shade_args.first()?)?
+                    let state = inline_stage_helpers(shade_args.first()?.clone(), constants, term_ids);
+                    parse_fragment_state(&state)?
                 } else {
                     Default::default()
                 };
@@ -760,6 +814,14 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
                 leaves.push((path.clone(), labels.join("_"), ty.clone()));
                 true
             }
+            Type::Constructed(TypeName::Record(_), _) if is_indirect_draw_command_type(ty) => {
+                // Singular indirect draws consume one command record through
+                // the same storage-buffer ABI as an element of a command
+                // array. Keep the record intact so its fields remain
+                // contiguous in the compiler-owned handoff buffer.
+                leaves.push((path.clone(), labels.join("_"), ty.clone()));
+                true
+            }
             Type::Constructed(TypeName::Record(fields), components) => {
                 if components.is_empty() {
                     return false;
@@ -796,6 +858,28 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
 
     let mut leaves = Vec::new();
     collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves).then_some(leaves)
+}
+
+fn is_indirect_draw_command_type(ty: &Type) -> bool {
+    let Type::Constructed(TypeName::Record(fields), components) = ty else {
+        return false;
+    };
+    let field_ty = |name: &str| fields.get_index(name).and_then(|index| components.get(index));
+    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let is_u32 = |name| field_ty(name) == Some(&u32_ty);
+
+    (fields.len() == 4
+        && is_u32("vertex_count")
+        && is_u32("instance_count")
+        && is_u32("first_vertex")
+        && is_u32("first_instance"))
+        || (fields.len() == 5
+            && is_u32("index_count")
+            && is_u32("instance_count")
+            && is_u32("first_index")
+            && field_ty("vertex_offset") == Some(&i32_ty)
+            && is_u32("first_instance"))
 }
 
 fn direct_symbol(term: &Term) -> Option<SymbolId> {
@@ -1050,14 +1134,15 @@ fn indirect_command_source(
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
 ) -> Option<(pipeline_descriptor::DrawBufferRef, u64)> {
-    let TermKind::Index { array, index } = &command.kind else {
-        return None;
-    };
-    let command_index = u32_literal(index)? as u64;
-    Some((
-        draw_buffer_source(array, root_lambda, root_entry, computed)?,
-        command_index * stride,
-    ))
+    if let TermKind::Index { array, index } = &command.kind {
+        let command_index = u32_literal(index)? as u64;
+        return Some((
+            draw_buffer_source(array, root_lambda, root_entry, computed)?,
+            command_index * stride,
+        ));
+    }
+
+    Some((draw_buffer_source(command, root_lambda, root_entry, computed)?, 0))
 }
 
 fn draw_buffer_source(
@@ -1281,9 +1366,9 @@ fn i32_literal(term: &Term) -> Option<i32> {
     i32::try_from(integer_constant(term)?).ok()
 }
 
-/// Resolve the small typed-integer constant language accepted by fixed
-/// graphics descriptors. The early AST folder exposes named constants as
-/// literals, while constructor-style casts reach TLC as resolved conversion
+/// Resolve the small residual typed-integer language accepted by fixed
+/// graphics descriptors. Partial evaluation exposes named scalar constants as
+/// literals, while constructor-style casts may remain as resolved conversion
 /// builtins (for example, `u32(PROP_WALLS)` becomes `u32.i32(<literal>)`).
 fn integer_constant(term: &Term) -> Option<i64> {
     match &term.kind {
@@ -1435,7 +1520,7 @@ fn stage_captures(
         &mut substitutions,
     );
     append_computed_captures(
-        &used,
+        body,
         computed,
         symbols,
         &mut params,
@@ -1501,7 +1586,7 @@ fn append_root_captures(
 }
 
 fn append_computed_captures(
-    used: &LookupSet<SymbolId>,
+    body: &Term,
     computed: &[ComputedValue],
     symbols: &mut SymbolTable,
     params: &mut Vec<(SymbolId, Type)>,
@@ -1509,10 +1594,24 @@ fn append_computed_captures(
     substitutions: &mut ExternalSubstitutions,
 ) {
     for value in computed {
-        if !used.contains(&value.symbol) {
+        let mut used_paths = LookupSet::new();
+        let mut visitor = |term: &Term| {
+            if let Some((symbol, path)) = projected_symbol_path(term) {
+                if symbol == value.symbol {
+                    used_paths.insert(path);
+                    return WalkDecision::Prune;
+                }
+            }
+            WalkDecision::Recurse
+        };
+        visitor.walk(body);
+        if used_paths.is_empty() {
             continue;
         }
         for leaf in &value.leaves {
+            if !used_paths.contains(&leaf.path) {
+                continue;
+            }
             append_external_param(
                 value.symbol,
                 &leaf.path,
@@ -1562,7 +1661,7 @@ fn append_target_captures(
             params.push((symbol, texture_ty.clone()));
             declarations.push(interface::EntryParamDecl {
                 name: name.clone(),
-                span: Span::new(0, 0, 0, 0),
+                span: Span::generated(),
                 ty: texture_ty,
                 attributes: vec![Attribute::Texture {
                     set: egir::from_tlc::AUTO_STORAGE_SET,
@@ -1615,7 +1714,7 @@ fn append_external_param(
     params.push((new_symbol, external_ty.clone()));
     declarations.push(interface::EntryParamDecl {
         name: name.to_string(),
-        span: Span::new(0, 0, 0, 0),
+        span: Span::generated(),
         ty: external_ty.clone(),
         attributes: external_binding_attribute(&external_ty, binding).into_iter().collect(),
     });
@@ -1688,7 +1787,7 @@ fn build_compute_stage(
         &mut substitutions,
     );
     append_computed_captures(
-        &used,
+        operation.rhs,
         computed,
         symbols,
         &mut params,
@@ -2665,6 +2764,7 @@ fn stage_def(
             scheme: Some(TypeScheme::Monotype(function_ty.clone())),
         },
         name: symbol,
+        package: root.package,
         ty: function_ty,
         body: lambda,
         meta: DefMeta::EntryPoint(EntryPoint {
@@ -2692,7 +2792,7 @@ fn stage_def(
 fn root_entry_span(root: &Def<UnpinnedPolymorphic>) -> Span {
     match &root.meta {
         DefMeta::EntryPoint(entry) => entry.declaration.name_span,
-        _ => Span::new(0, 0, 0, 0),
+        _ => Span::generated(),
     }
 }
 

@@ -16,14 +16,15 @@
 //! enough; `monomorphize` (which keys on the concrete region) then
 //! specializes view functions per buffer.
 //!
-//! Runs first in the TLC pipeline, before any pass that observes regions.
+//! Runs after stage extraction has created the final entry interfaces and
+//! before any pass that observes concrete regions.
 
 #[cfg(test)]
 #[path = "pin_entry_buffers_tests.rs"]
 mod pin_entry_buffers_tests;
 
 use super::data::Empty;
-use super::run::Transformed;
+use super::stage_extract::StagesExtracted;
 use super::{
     apply_type_substitution, data, extract_lambda_params_ref, Def, DefMeta, EntryPoint, Program, Term,
     TermIdSource, TermKind, VarRef,
@@ -54,7 +55,7 @@ pub type BuffersPinned = super::Program<BuffersPinnedTag, Polymorphic, super::co
 /// Buffer-variable → concrete `Buffer(set, binding)` substitution.
 type BufferSubst = LookupMap<usize, Type<TypeName>>;
 
-pub fn pin_entry_buffers(program: Transformed) -> error::Result<BuffersPinned> {
+pub fn pin_entry_buffers(program: StagesExtracted) -> error::Result<BuffersPinned> {
     let Program {
         defs,
         symbols,
@@ -86,6 +87,7 @@ fn pin_definition(
     let Def {
         data,
         name,
+        package,
         mut ty,
         mut body,
         meta,
@@ -130,6 +132,7 @@ fn pin_definition(
     Ok(Def {
         data,
         name,
+        package,
         ty,
         body,
         meta,

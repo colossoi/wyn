@@ -1,0 +1,67 @@
+-- Minimal playground regression for nested mapped arrays consumed through
+-- dynamically indexed helper calls. Before 4ba89994, this first lost a
+-- side-effect producer during fusion projection. With only that fixed, WGSL
+-- lowering exposed a second bug by hoisting the dynamic indexed load before
+-- its index was bound.
+
+def vertices: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(vertices[i32(vertex.vertex_index)], @[0.0, 0.0])
+
+def translation(p: vec3f32) mat4f32 =
+  @[[1.0, 0.0, 0.0, p.x],
+    [0.0, 1.0, 0.0, p.y],
+    [0.0, 0.0, 1.0, p.z],
+    [0.0, 0.0, 0.0, 1.0]]
+
+def line(p0: vec2f32, p1: vec2f32) f32 = p0.x + p1.y
+
+def edge_line(verts: [2]vec3f32, edge: vec2i32) f32 =
+  let a = verts[edge.x] in
+  let b = verts[edge.y] in
+  line(a.xy, b.xy)
+
+def sum_edges(verts: [2]vec3f32, edges: [2]vec2i32) f32 =
+  let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
+    (i + 1, acc + edge_line(verts, edges[i]))
+  in acc
+
+def points: [2]vec3f32 =
+  [@[-1.0, -1.0, 1.0], @[-1.0, 1.0, 1.0]]
+
+def instances: [2]vec3f32 =
+  [@[0.0, 0.0, -1.0], @[-1.0, 0.0, -1.0]]
+
+def edges: [2]vec2i32 = [@[0, 1], @[1, 0]]
+
+def main_image(time: f32) vec4f32 =
+  let animation_time = time * 0.31415 in
+  let base_color = @[0.0, 0.0, 0.0] in
+  let shared = translation(@[animation_time, 0.0, 10.0]) in
+  let result =
+    loop (i, color) = (0i32, base_color) while i < 2 do
+      let instance = instances[i] in
+      let position = translation(instance * 4.0) in
+      let matrix = position * shared in
+      let transformed: [2]vec4f32 = map(
+        |v: vec3f32| @[v.x, v.y, v.z, 1.0] * matrix,
+        points) in
+      let projected: [2]vec3f32 = map(
+        |v: vec4f32|
+          let inverse_z = 1.0 / v.z in
+          @[v.x * inverse_z, v.y * inverse_z, inverse_z],
+        transformed) in
+      let total = sum_edges(projected, edges) in
+      (i + 1, color + projected[0] * total) in
+  let (_, color) = result in
+  @[color.x, color.y, color.z, 1.0]
+
+entry image(
+    time: f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
+  shade(screen, raster, |fragment| main_image(time))

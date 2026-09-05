@@ -1,25 +1,25 @@
 //! Shared TLC definition-level dead-code elimination.
 //!
-//! Reachability is computed from entry points and extern definitions through
-//! top-level symbol references. The definition vector is retained in place, so
+//! Reachability is computed from entry points through top-level symbol
+//! references. The definition vector is retained in place, so
 //! live definitions and all of their tree allocations move through unchanged.
 
 use super::{Def, DefMeta, Family, Payload, SoacOp, Term, TermKind, VarRef, WalkDecision};
 use crate::{LookupMap, SymbolId};
 
-/// Remove definitions that are not reachable from an entry point or extern.
+#[cfg(test)]
+#[path = "dce_tests.rs"]
+mod dce_tests;
+
+/// Remove definitions that are not reachable from an entry point.
 ///
 /// This is shared by the final reachability phase and by transformations such
 /// as inlining that make definitions dead as a local consequence.
 pub(super) fn eliminate_unreachable_defs<F: Family>(defs: &mut Vec<Def<F>>) {
     let reachable = {
         let def_map: LookupMap<SymbolId, &Def<F>> = defs.iter().map(|def| (def.name, def)).collect();
-        let roots = defs
-            .iter()
-            .filter(|def| {
-                matches!(def.meta, DefMeta::EntryPoint(_)) || matches!(def.body.kind, TermKind::Extern(_))
-            })
-            .map(|def| def.name);
+        let roots =
+            defs.iter().filter(|def| matches!(def.meta, DefMeta::EntryPoint(_))).map(|def| def.name);
 
         wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |symbol, references| {
             if let Some(def) = def_map.get(&symbol) {

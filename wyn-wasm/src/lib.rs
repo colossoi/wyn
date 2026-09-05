@@ -1,29 +1,39 @@
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
-use wyn_core::ast::NodeCounter;
 use wyn_core::error::CompilerError;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::{
-    CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy,
+    initialize_frontend, CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError,
+    LoweringProfile, ParsedModules, PipelineTopologyPolicy, SchedulePolicy,
 };
-
-/// Cached prelude and starting node counter
-/// Creating the prelude parses all prelude files, which is expensive.
-/// We cache this and create fresh FrontEnds from it for each compilation.
-struct PreludeCache {
-    prelude: PreElaboratedPrelude,
-    start_node_counter: NodeCounter,
-}
-
-thread_local! {
-    static PRELUDE_CACHE: RefCell<Option<PreludeCache>> = RefCell::new(None);
-}
+use wyn_module_graph::{
+    BuildError, ModulePath, PackageIdentity, PackagePlan,
+};
 
 /// Get the compiler version string
 #[wasm_bindgen]
 pub fn version() -> String {
     "005".to_string()
+}
+
+fn single_source_input(source: &str) -> Result<PackagePlan, String> {
+    let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("wasm/root", "v0.0.0")
+        .map_err(|error| error.to_string())?;
+    Ok(PackagePlan::single_source(identity, root_path, source))
+}
+
+fn load_source_modules(
+    source: &str,
+    options: CompilerOptions,
+) -> Result<ParsedModules, SourceModulesError> {
+    let input = single_source_input(source).map_err(SourceModulesError::Setup)?;
+    ParsedModules::load(input, options).map_err(SourceModulesError::Load)
+}
+
+#[derive(Debug)]
+enum SourceModulesError {
+    Setup(String),
+    Load(LoadModulesError),
 }
 
 // =============================================================================
@@ -185,40 +195,13 @@ mod tlc_tree {
 #[wasm_bindgen]
 pub fn init_compiler() -> bool {
     console_error_panic_hook::set_once();
-
-    PRELUDE_CACHE.with(|cache| {
-        if cache.borrow().is_some() {
-            return true; // Already initialized
+    match initialize_frontend() {
+        Ok(_) => true,
+        Err(error) => {
+            web_sys::console::error_1(&format!("Failed to initialize compiler: {error}").into());
+            false
         }
-
-        let mut node_counter = NodeCounter::new();
-        match ModuleManager::create_prelude(&mut node_counter) {
-            Ok(prelude) => {
-                *cache.borrow_mut() = Some(PreludeCache {
-                    prelude,
-                    start_node_counter: node_counter,
-                });
-                true
-            }
-            Err(e) => {
-                web_sys::console::error_1(&format!("Failed to initialize prelude: {:?}", e).into());
-                false
-            }
-        }
-    })
-}
-
-/// Build a fresh `(NodeCounter, ModuleManager)` pair from the cached prelude.
-fn create_compiler_init(options: CompilerOptions) -> Option<(NodeCounter, ModuleManager)> {
-    PRELUDE_CACHE.with(|cache| {
-        let cache_ref = cache.borrow();
-        let cached = cache_ref.as_ref()?;
-        Some(wyn_core::init_compiler_from_prelude_with_options(
-            cached.prelude.clone(),
-            cached.start_node_counter.clone(),
-            options,
-        ))
-    })
+    }
 }
 
 /// Source location for an error
@@ -237,12 +220,28 @@ pub struct ErrorInfo {
     pub location: Option<ErrorLocation>,
 }
 
-fn error_location(e: &CompilerError) -> Option<ErrorLocation> {
-    e.span().map(|s| ErrorLocation {
-        start_line: s.start_line,
-        start_col: s.start_col,
-        end_line: s.end_line,
-        end_col: s.end_col,
+fn source_position(source: &str, offset: u32) -> Option<(usize, usize)> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let current_line = prefix.rsplit_once('\n').map_or(prefix, |(_, current_line)| current_line);
+    Some((line, current_line.chars().count() + 1))
+}
+
+fn error_location(source: &str, e: &CompilerError) -> Option<ErrorLocation> {
+    let span = e.span()?;
+    span.module()?;
+    let range = span.range();
+    let (start_line, start_col) = source_position(source, range.start())?;
+    let (end_line, end_col) = source_position(source, range.end())?;
+    Some(ErrorLocation {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
     })
 }
 
@@ -533,7 +532,7 @@ pub struct CompileResultWgsl {
 }
 
 impl CompileResultWgsl {
-    fn err(e: CompilerError) -> Self {
+    fn err(source: &str, e: CompilerError) -> Self {
         CompileResultWgsl {
             success: false,
             wgsl: None,
@@ -542,7 +541,7 @@ impl CompileResultWgsl {
             tlc: None,
             error: Some(ErrorInfo {
                 message: format_error(&e),
-                location: error_location(&e),
+                location: error_location(source, &e),
             }),
         }
     }
@@ -557,6 +556,49 @@ impl CompileResultWgsl {
                 message,
                 location: None,
             }),
+        }
+    }
+
+    fn frontend_err(source: &str, failure: CompilationFailure) -> Self {
+        let location = failure
+            .error()
+            .span()
+            .filter(|span| span.module() == Some(failure.source_graph().root()))
+            .and_then(|_| error_location(source, failure.error()));
+        Self {
+            success: false,
+            wgsl: None,
+            interface: None,
+            mir: None,
+            tlc: None,
+            error: Some(ErrorInfo {
+                message: failure.to_string(),
+                location,
+            }),
+        }
+    }
+
+    fn source_modules_err(source: &str, error: SourceModulesError) -> Self {
+        match error {
+            SourceModulesError::Setup(message) => Self::err_msg(message),
+            SourceModulesError::Load(LoadModulesError::Prelude(error)) => Self::err(source, error),
+            SourceModulesError::Load(LoadModulesError::Modules(failure)) => {
+                let location = match failure.error() {
+                    BuildError::Parse { source: error, .. } => error_location(source, error),
+                    _ => None,
+                };
+                Self {
+                    success: false,
+                    wgsl: None,
+                    interface: None,
+                    mir: None,
+                    tlc: None,
+                    error: Some(ErrorInfo {
+                        message: failure.to_string(),
+                        location,
+                    }),
+                }
+            }
         }
     }
 }
@@ -584,64 +626,44 @@ pub fn compile_to_wgsl_with_options(source: &str, graphics: bool, direct: bool) 
 }
 
 fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileResultWgsl {
-    let (node_counter, module_manager) = match create_compiler_init(CompilerOptions { graphics }) {
-        Some(f) => f,
-        None => return CompileResultWgsl::err_msg("Compiler not initialized".to_string()),
+    let modules = match load_source_modules(source, CompilerOptions { graphics }) {
+        Ok(modules) => modules,
+        Err(error) => return CompileResultWgsl::source_modules_err(source, error),
     };
 
-    // Frontend pipeline: parse → elaborate → resolve → fold → type-check →
-    // TLC → semantic EGIR → target-aware SSA lowering → WGSL.
-    let program = match wyn_core::parser::parse(source, node_counter, module_manager) {
+    // Frontend → TLC → semantic EGIR → target-aware SSA lowering → WGSL.
+    let program = match modules.type_check() {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = match wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new(".")) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = match wyn_core::elaborate_modules::elaborate_modules(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = wyn_core::name_resolution::resolve_names(program);
-    let program = match wyn_core::resolve_resources::resolve_resources(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = wyn_core::ast_const_fold::fold_constants(program);
-    let program = wyn_core::resolve_placeholders::resolve_type_placeholders(program);
-    let program = match wyn_core::resolve_opens::resolve_opens(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = match wyn_core::types::run::type_check(program) {
-        Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(failure) => return CompileResultWgsl::frontend_err(source, failure),
     };
     let program = match wyn_core::ast_type_holes::reject_type_holes(program) {
         Ok(p) => p,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
 
     let program = match wyn_core::tlc::lower_from_ast(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
-    };
-    let program = match wyn_core::tlc::pin_entry_buffers(program) {
-        Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = match wyn_core::tlc::validate_ownership(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::partial_eval(program);
+    let program = match wyn_core::tlc::extract_stages(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(source, e),
+    };
+    let program = match wyn_core::tlc::pin_entry_buffers(program) {
+        Ok(t) => t,
+        Err(e) => return CompileResultWgsl::err(source, e),
+    };
     let tlc_tree = tlc_tree::program_to_tree(&program);
 
     let program = wyn_core::tlc::normalize_soacs(program);
     let program = match wyn_core::tlc::monomorphize(program) {
         Ok(t) => t,
-        Err(e) => return CompileResultWgsl::err(e),
+        Err(e) => return CompileResultWgsl::err(source, e),
     };
     let program = wyn_core::tlc::rep_specialize(program);
     let program = wyn_core::tlc::inline_small(program);
@@ -673,8 +695,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         let program = wyn_core::egir::optimize_semantic_operations(program)
             .map_err(|error| wyn_core::egir::from_tlc::ConvertError::Internal(error.to_string()))?;
         let program = wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology);
-        let program =
-            wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
+        let program = wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
         let program = wyn_core::egir::plan(program, profile)?;
         wyn_core::lower_egir_to_ssa(program)
     };
@@ -694,7 +715,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
             tlc: Some(tlc_tree),
             error: None,
         },
-        Err(e) => CompileResultWgsl::err(e),
+        Err(e) => CompileResultWgsl::err(source, e),
     }
 }
 

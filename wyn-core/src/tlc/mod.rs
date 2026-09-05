@@ -40,6 +40,7 @@ use crate::types::SoacOwnership;
 use crate::{interface, LookupMap, LookupSet, SymbolId, SymbolTable};
 use polytype::Type;
 use std::num::NonZeroU32;
+use wyn_module_graph::PackageId;
 
 pub(crate) use from_ast::{PendingBinding, Transformer};
 
@@ -329,6 +330,7 @@ pub mod stage {
     pub use super::runtime_index_producers::RuntimeIndexProducersFloated;
     pub use super::soa::{InlinedSoaNormalized, SoaNormalized};
     pub use super::soac_anf::SoacsAnfNormalized;
+    pub use super::stage_extract::StagesExtracted;
 }
 
 // Named consuming TLC transitions. The stage types remain visible through
@@ -347,6 +349,7 @@ pub use run::lower_from_ast;
 pub use runtime_index_producers::float_runtime_index_nested_producers;
 pub use soa::{normalize_soacs, renormalize_inlined_soa};
 pub use soac_anf::normalize_soacs_to_anf;
+pub use stage_extract::extract_stages;
 
 // =============================================================================
 // Helper functions
@@ -1039,6 +1042,10 @@ pub struct EntryPoint<E: Clone + std::fmt::Debug> {
 pub struct Def<F: Family> {
     pub data: F::DefinitionData,
     pub name: SymbolId,
+    /// Source package whose declaration produced this definition.
+    /// Derived compiler definitions inherit their source declaration's package;
+    /// definitions without source-package lineage have no package.
+    pub package: Option<PackageId>,
     pub ty: Type<TypeName>,
     pub body: Term<F::ClosureData, F::SoacBodyData>,
     pub meta: DefMeta<F::EntryData>,
@@ -1217,7 +1224,7 @@ pub fn atom_var_term<C: Payload, S: Payload>(
     ty: Type<TypeName>,
     term_ids: &mut TermIdSource,
 ) -> Term<C, S> {
-    Term::fresh(term_ids, ty, Span::new(0, 0, 0, 0), TermKind::Var(vr))
+    Term::fresh(term_ids, ty, Span::generated(), TermKind::Var(vr))
 }
 
 pub(crate) fn synthetic_atom_var_term<C: Payload, S: Payload>(
@@ -1227,7 +1234,7 @@ pub(crate) fn synthetic_atom_var_term<C: Payload, S: Payload>(
     Term {
         id: TermId::SYNTHETIC,
         ty,
-        span: Span::new(0, 0, 0, 0),
+        span: Span::generated(),
         kind: TermKind::Var(vr),
     }
 }

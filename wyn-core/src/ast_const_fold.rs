@@ -22,16 +22,19 @@ use crate::ast::{
     Pattern, PatternKind, Program, RangeExpr, Type, TypeName,
 };
 use crate::interface;
-use crate::module_manager;
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::resolve_resources;
+use crate::semantic_modules;
 use crate::{LookupMap, NodeCounter};
 
 /// AST after early integer constants have been exposed.
 #[derive(Debug, Clone, Copy)]
 pub enum ConstantsFoldedTag {}
-pub type ConstantsFolded =
-    Program<ConstantsFoldedTag, resolve_resources::ResourcesResolvedFamily, module_manager::ModuleManager>;
+pub type ConstantsFolded = Program<
+    ConstantsFoldedTag,
+    resolve_resources::ResourcesResolvedFamily,
+    semantic_modules::SemanticModules,
+>;
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
@@ -228,6 +231,7 @@ impl AstConstFolder {
 
     /// Recursively fold constants in an expression.
     /// Modifies the expression in place.
+    #[cfg(test)]
     pub fn fold_expr(&mut self, expr: &mut Expression) {
         self.fold_expr_scoped(expr, &[]);
     }

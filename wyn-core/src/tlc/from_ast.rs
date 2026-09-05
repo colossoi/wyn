@@ -103,6 +103,7 @@ impl<'a> Transformer<'a> {
                             scheme: Some(e.data.scheme.clone()),
                         },
                         name: e.data.source.symbol,
+                        package: e.data.source.package,
                         ty,
                         body,
                         meta: DefMeta::Function,
@@ -131,6 +132,7 @@ impl<'a> Transformer<'a> {
                 scheme: Some(decl.data.scheme.clone()),
             },
             name: decl.data.source.symbol,
+            package: decl.data.source.package,
             ty: full_ty,
             body,
             meta: DefMeta::Function,
@@ -153,6 +155,7 @@ impl<'a> Transformer<'a> {
                 scheme: Some(entry.data.scheme.clone()),
             },
             name: entry.data.source.symbol,
+            package: entry.data.source.package,
             ty: full_ty,
             body,
             meta: DefMeta::EntryPoint(EntryPoint {

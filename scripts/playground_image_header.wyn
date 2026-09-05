@@ -1,0 +1,23 @@
+-- Fullscreen pipeline used to validate the bare image shaders in
+-- testfiles/playground. Keep this in sync with wyn-web's playground wrapper.
+
+def __playground_vertices: [3]vec4f32 =
+  [@[-1.0, -1.0, 0.0, 1.0],
+   @[3.0, -1.0, 0.0, 1.0],
+   @[-1.0, 3.0, 0.0, 1.0]]
+
+def __playground_vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+  vertex_output(
+    __playground_vertices[i32(vertex.vertex_index)],
+    @[0.0, 0.0])
+
+entry image(
+    resolution: vec3f32,
+    time: f32,
+    mouse: vec4f32,
+    screen: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32), __playground_vertex_main)
+  in
+  shade(screen, raster, |fragment|
+    main_image(resolution, time, mouse, fragment.position.xy))

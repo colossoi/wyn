@@ -12,8 +12,8 @@ use crate::err_type_at;
 use crate::error::Result;
 use crate::interface;
 use crate::interface::{Attribute, ResolvedAttribute, ResourceDecl, ResourceUsage, StorageAccess};
-use crate::module_manager;
 use crate::name_resolution;
+use crate::semantic_modules;
 use crate::types::{Type, TypeName};
 use crate::{bail_type_at, BindingRef, LookupMap, LookupSet};
 
@@ -31,7 +31,7 @@ pub type ResourcesResolvedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum ResourcesResolvedTag {}
 pub type ResourcesResolved =
-    ast::Program<ResourcesResolvedTag, ResourcesResolvedFamily, module_manager::ModuleManager>;
+    ast::Program<ResourcesResolvedTag, ResourcesResolvedFamily, semantic_modules::SemanticModules>;
 
 /// Default descriptor set for auto-assigned resource bindings. Set 0 is
 /// compiler-reserved; user resources live on set 1+.

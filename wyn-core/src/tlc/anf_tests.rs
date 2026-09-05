@@ -10,7 +10,7 @@ use polytype::Type;
 use wyn_base::IdSource;
 
 fn span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn i32_ty() -> Type<TypeName> {
@@ -89,6 +89,7 @@ fn prog(body: Term, ids: TermIdSource) -> tlc::stage::SoacsAnfNormalized {
         vec![Def {
             data: (),
             name: SymbolId::from(0),
+            package: None,
             ty: arr_ty(),
             body,
             meta: DefMeta::Function,

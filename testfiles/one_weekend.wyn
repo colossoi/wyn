@@ -71,7 +71,7 @@ def rnd3(seed: u32) (vec3f32, u32) =
   (@[x, y, z], s3)
 
 -- Uniform point on the unit sphere (drives lambertian scatter).
-def randUnitVec(seed: u32) (vec3f32, u32) =
+def rand_unit_vec(seed: u32) (vec3f32, u32) =
   let (u1, s1) = rnd(seed) in
   let (u2, s2) = rnd(s1) in
   let z = 1.0 - 2.0 * u1 in
@@ -80,13 +80,13 @@ def randUnitVec(seed: u32) (vec3f32, u32) =
   (@[r * cos(phi), r * sin(phi), z], s2)
 
 -- Uniform point inside the unit sphere (metal fuzz).
-def randInSphere(seed: u32) (vec3f32, u32) =
-  let (v, s1) = randUnitVec(seed) in
+def rand_in_sphere(seed: u32) (vec3f32, u32) =
+  let (v, s1) = rand_unit_vec(seed) in
   let (u1, s2) = rnd(s1) in
   (v * (u1 ** (1.0 / 3.0)), s2)
 
 -- Uniform point on the unit disk (defocus blur).
-def randInDisk(seed: u32) (vec2f32, u32) =
+def rand_in_disk(seed: u32) (vec2f32, u32) =
   let (u1, s1) = rnd(seed) in
   let (u2, s2) = rnd(s1) in
   let r = sqrt(u1) in
@@ -100,15 +100,15 @@ def randInDisk(seed: u32) (vec2f32, u32) =
 --   ground, glass hero, brown lambertian hero, metal hero.
 ------------------------------------------------------------
 
-def fixedCenters: [4]vec3f32 =
+def fixed_centers: [4]vec3f32 =
   [@[0.0, -1000.0, 0.0],
    @[0.0, 1.0, 0.0],
    @[-4.0, 1.0, 0.0],
    @[4.0, 1.0, 0.0]]
 
-def fixedRadii: [4]f32 = [1000.0, 1.0, 1.0, 1.0]
-def fixedKinds: [4]i32 = [0, 2, 0, 1]  -- lambert, glass, lambert, metal
-def fixedAlbedos: [4]vec3f32 =
+def fixed_radii: [4]f32 = [1000.0, 1.0, 1.0, 1.0]
+def fixed_kinds: [4]i32 = [0, 2, 0, 1]  -- lambert, glass, lambert, metal
+def fixed_albedos: [4]vec3f32 =
   [@[0.5, 0.5, 0.5],
    @[1.0, 1.0, 1.0],
    @[0.4, 0.2, 0.1],
@@ -122,7 +122,7 @@ def GRIDN: i32 = 484  -- GRID * GRID
 
 -- (center, radius); radius 0 marks the book's "skip if too close to the
 -- metal hero" placement rule.
-def cellSphere(i: i32) (vec3f32, f32) =
+def cell_sphere(i: i32) (vec3f32, f32) =
   let a = f32(i / GRID - 11) in
   let b = f32(i % GRID - 11) in
   let s0 = pcg(u32(i) * 2654435761u32 + 1u32) in
@@ -135,7 +135,7 @@ def cellSphere(i: i32) (vec3f32, f32) =
 
 -- (kind, albedo, fuzz), with the book's probabilities:
 -- < 0.8 diffuse (albedo = random * random), < 0.95 metal, else glass.
-def cellMaterial(i: i32) (i32, vec3f32, f32) =
+def cell_material(i: i32) (i32, vec3f32, f32) =
   let s0 = pcg(u32(i) * 747796405u32 + 7u32) in
   let (choose, s1) = rnd(s0) in
   if choose < 0.8 then
@@ -153,7 +153,7 @@ def cellMaterial(i: i32) (i32, vec3f32, f32) =
 -- Ray-sphere intersection (nearest positive root or -1)
 ------------------------------------------------------------
 
-def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 =
+def intersect_sphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 =
   let oc = ro - center in
   let b = dot(oc, rd) in
   let c = dot(oc, oc) - radius * radius in
@@ -172,11 +172,11 @@ def intersectSphere(ro: vec3f32, rd: vec3f32, center: vec3f32, radius: f32) f32 
 ------------------------------------------------------------
 
 -- Closest grid hit as (t, cellIndex).
-def intersectGrid(ro: vec3f32, rd: vec3f32) (f32, i32) =
+def intersect_grid(ro: vec3f32, rd: vec3f32) (f32, i32) =
   let hits =
     map(|i: i32|
-          let (c, r) = cellSphere(i) in
-          let t = if r > 0.0 then intersectSphere(ro, rd, c, r) else 0.0 - 1.0 in
+          let (c, r) = cell_sphere(i) in
+          let t = if r > 0.0 then intersect_sphere(ro, rd, c, r) else 0.0 - 1.0 in
           (if t > 0.0 then t else MAX_DIST, i),
         0i32 ..< GRIDN) in
   reduce(|(t1, i1): (f32, i32), (t2, i2): (f32, i32)|
@@ -185,10 +185,10 @@ def intersectGrid(ro: vec3f32, rd: vec3f32) (f32, i32) =
          hits)
 
 -- Closest fixed-sphere hit as (t, sphereIndex).
-def intersectFixed(ro: vec3f32, rd: vec3f32) (f32, i32) =
+def intersect_fixed(ro: vec3f32, rd: vec3f32) (f32, i32) =
   let hits =
     map(|k: i32|
-          let t = intersectSphere(ro, rd, fixedCenters[k], fixedRadii[k]) in
+          let t = intersect_sphere(ro, rd, fixed_centers[k], fixed_radii[k]) in
           (if t > 0.0 then t else MAX_DIST, k),
         0i32 ..< 4) in
   reduce(|(t1, i1): (f32, i32), (t2, i2): (f32, i32)|
@@ -197,18 +197,18 @@ def intersectFixed(ro: vec3f32, rd: vec3f32) (f32, i32) =
          hits)
 
 -- Full hit record: (t, outwardNormal, kind, albedo, fuzz). kind == MISS on no hit.
-def intersectScene(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, vec3f32, f32) =
-  let (tg, gi) = intersectGrid(ro, rd) in
-  let (tf, fi) = intersectFixed(ro, rd) in
+def intersect_scene(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, vec3f32, f32) =
+  let (tg, gi) = intersect_grid(ro, rd) in
+  let (tf, fi) = intersect_fixed(ro, rd) in
   if tg < tf then
-    let (c, r) = cellSphere(gi) in
-    let (kind, alb, fz) = cellMaterial(gi) in
+    let (c, r) = cell_sphere(gi) in
+    let (kind, alb, fz) = cell_material(gi) in
     let n = (ro + rd * tg - c) * (1.0 / r) in
     (tg, n, kind, alb, fz)
   else if tf < MAX_DIST then
-    let c = fixedCenters[fi] in
-    let n = (ro + rd * tf - c) * (1.0 / fixedRadii[fi]) in
-    (tf, n, fixedKinds[fi], fixedAlbedos[fi], 0.0)
+    let c = fixed_centers[fi] in
+    let n = (ro + rd * tf - c) * (1.0 / fixed_radii[fi]) in
+    (tf, n, fixed_kinds[fi], fixed_albedos[fi], 0.0)
   else
     (MAX_DIST, @[0.0, 1.0, 0.0], MISS, @[0.0, 0.0, 0.0], 0.0)
 
@@ -227,12 +227,12 @@ def schlick(cosine: f32, ratio: f32) f32 =
 -- setting bounce = MAX_BOUNCES exits (miss or absorbed ray).
 ------------------------------------------------------------
 
-def rayColor(ro0: vec3f32, rd0: vec3f32, seed0: u32) (vec3f32, u32) =
+def ray_color(ro0: vec3f32, rd0: vec3f32, seed0: u32) (vec3f32, u32) =
   let res =
     loop (ro, rd, atten, col, seed, bounce) =
          (ro0, rd0, @[1.0, 1.0, 1.0], @[0.0, 0.0, 0.0], seed0, 0)
     while bounce < MAX_BOUNCES do
-      let (t, nOut, kind, alb, fuzz) = intersectScene(ro, rd) in
+      let (t, n_out, kind, alb, fuzz) = intersect_scene(ro, rd) in
       if kind == MISS then
         -- The book's white-to-blue vertical sky gradient.
         let ud = normalize(rd) in
@@ -241,17 +241,17 @@ def rayColor(ro0: vec3f32, rd0: vec3f32, seed0: u32) (vec3f32, u32) =
         (ro, rd, atten, col + atten * sky, seed, MAX_BOUNCES)
       else
         let p = ro + rd * t in
-        let frontFace = dot(rd, nOut) < 0.0 in
-        let n = if frontFace then nOut else -nOut in
+        let front_face = dot(rd, n_out) < 0.0 in
+        let n = if front_face then n_out else -n_out in
         if kind == LAMBERT then
           -- Scatter along normal + random unit vector (degenerate sum -> normal).
-          let (uv, s1) = randUnitVec(seed) in
+          let (uv, s1) = rand_unit_vec(seed) in
           let sd0 = n + uv in
           let sd = if dot(sd0, sd0) < 1.0e-8 then n else normalize(sd0) in
           (p + n * EPS, sd, atten * alb, col, s1, bounce + 1)
         else if kind == METAL then
           let refl = reflect(normalize(rd), n) in
-          let (us, s1) = randInSphere(seed) in
+          let (us, s1) = rand_in_sphere(seed) in
           let sd = refl + us * fuzz in
           if dot(sd, n) > 0.0 then
             (p + n * EPS, normalize(sd), atten * alb, col, s1, bounce + 1)
@@ -260,14 +260,14 @@ def rayColor(ro0: vec3f32, rd0: vec3f32, seed0: u32) (vec3f32, u32) =
             (p, rd, atten, col, s1, MAX_BOUNCES)
         else
           -- Dielectric: refract when Snell allows and Schlick says transmit.
-          let ratio = if frontFace then 1.0 / IOR else IOR in
+          let ratio = if front_face then 1.0 / IOR else IOR in
           let ud = normalize(rd) in
-          let cosT = min(dot(-ud, n), 1.0) in
-          let sinT = sqrt(max(0.0, 1.0 - cosT * cosT)) in
+          let cos_t = min(dot(-ud, n), 1.0) in
+          let sin_t = sqrt(max(0.0, 1.0 - cos_t * cos_t)) in
           let (u1, s1) = rnd(seed) in
-          let mustReflect = ratio * sinT > 1.0 in
-          let doReflect = if mustReflect then true else schlick(cosT, ratio) > u1 in
-          if doReflect then
+          let must_reflect = ratio * sin_t > 1.0 in
+          let do_reflect = if must_reflect then true else schlick(cos_t, ratio) > u1 in
+          if do_reflect then
             (p + n * EPS, reflect(ud, n), atten, col, s1, bounce + 1)
           else
             (p - n * EPS, refract(ud, n, ratio), atten, col, s1, bounce + 1)
@@ -285,26 +285,26 @@ def LENS_RADIUS: f32 = 0.05          -- aperture 0.1 / 2
 def HALF_VFOV_TAN: f32 = 0.17632698  -- tan(20 degrees / 2)
 
 -- (s, t) in [0,1]^2 across the viewport -> primary ray (ro, rd, seed').
-def getRay(s: f32, t: f32, aspect: f32, seed: u32) (vec3f32, vec3f32, u32) =
+def get_ray(s: f32, t: f32, aspect: f32, seed: u32) (vec3f32, vec3f32, u32) =
   let w = normalize(LOOKFROM - LOOKAT) in
   let u = normalize(cross(@[0.0, 1.0, 0.0], w)) in
   let v = cross(w, u) in
-  let vpH = 2.0 * HALF_VFOV_TAN in
-  let vpW = aspect * vpH in
-  let horizontal = u * (FOCUS_DIST * vpW) in
-  let vertical = v * (FOCUS_DIST * vpH) in
-  let lowerLeft = LOOKFROM - horizontal * 0.5 - vertical * 0.5 - w * FOCUS_DIST in
-  let (dk, s1) = randInDisk(seed) in
+  let vp_h = 2.0 * HALF_VFOV_TAN in
+  let vp_w = aspect * vp_h in
+  let horizontal = u * (FOCUS_DIST * vp_w) in
+  let vertical = v * (FOCUS_DIST * vp_h) in
+  let lower_left = LOOKFROM - horizontal * 0.5 - vertical * 0.5 - w * FOCUS_DIST in
+  let (dk, s1) = rand_in_disk(seed) in
   let offset = u * (dk.x * LENS_RADIUS) + v * (dk.y * LENS_RADIUS) in
   let ro = LOOKFROM + offset in
-  let rd = normalize(lowerLeft + horizontal * s + vertical * t - ro) in
+  let rd = normalize(lower_left + horizontal * s + vertical * t - ro) in
   (ro, rd, s1)
 
 ------------------------------------------------------------
 -- Per-fragment Monte-Carlo batch.
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iFrame: u32, pos_in: vec4f32) vec4f32 =
+def fragment_main(resolution: vec3f32, frame: u32, pos_in: vec4f32) vec4f32 =
   let gid = @[u32(i32(pos_in.x)), u32(i32(pos_in.y)), 0u32] in
   let xy = @[i32(gid.x), i32(gid.y)] in
   let sum0 = @[0.0, 0.0, 0.0] in
@@ -316,16 +316,16 @@ def fragment_main(iResolution: vec3f32, iFrame: u32, pos_in: vec4f32) vec4f32 =
   let texel =
     if converged then @[sum0.x, sum0.y, sum0.z, count0]
     else
-      let aspect = iResolution.x / iResolution.y in
-      let base = pcg(gid.x * 1973u32 + gid.y * 9277u32 + iFrame * 26699u32) in
+      let aspect = resolution.x / resolution.y in
+      let base = pcg(gid.x * 1973u32 + gid.y * 9277u32 + frame * 26699u32) in
       let batch =
         loop (col, seed, k) = (@[0.0, 0.0, 0.0], base, 0) while k < SPP_PER_FRAME do
           let (jx, s1) = rnd(seed) in
           let (jy, s2) = rnd(s1) in
-          let s = (f32(gid.x) + jx) / iResolution.x in
-          let t = 1.0 - (f32(gid.y) + jy) / iResolution.y in
-          let (ro, rd, s3) = getRay(s, t, aspect, s2) in
-          let (c, s4) = rayColor(ro, rd, s3) in
+          let s = (f32(gid.x) + jx) / resolution.x in
+          let t = 1.0 - (f32(gid.y) + jy) / resolution.y in
+          let (ro, rd, s3) = get_ray(s, t, aspect, s2) in
+          let (c, s4) = ray_color(ro, rd, s3) in
           (col + c, s4, k + 1)
       in
       let sum = sum0 + batch.0 in
@@ -335,11 +335,11 @@ def fragment_main(iResolution: vec3f32, iFrame: u32, pos_in: vec4f32) vec4f32 =
   @[sqrt(c.x), sqrt(c.y), sqrt(c.z), 1.0]
 
 entry one_weekend(
-    iResolution: vec3f32,
-    iFrame: u32,
+    resolution: vec3f32,
+    frame: u32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(iResolution, iFrame, fragment.position))
+    |fragment| fragment_main(resolution, frame, fragment.position))

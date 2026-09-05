@@ -134,9 +134,9 @@ def box_intersection(ro: vec3f32, rd: vec3f32, box_size: vec3f32) (vec2f32, vec3
   let k = vec.abs(m) * box_size in
   let t1 = (0.0 - n) - k in
   let t2 = (0.0 - n) + k in
-  let tN = max(max(t1.x, t1.y), t1.z) in
-  let tF = min(min(t2.x, t2.y), t2.z) in
-  if tN > tF || tF < 0.0 then
+  let t_n = max(max(t1.x, t1.y), t1.z) in
+  let t_f = min(min(t2.x, t2.y), t2.z) in
+  if t_n > t_f || t_f < 0.0 then
     (@[0.0 - 1.0, 0.0 - 1.0], v3(0.0))
   else
     let s = @[0.0 - sign(rd.x), 0.0 - sign(rd.y), 0.0 - sign(rd.z)] in
@@ -146,7 +146,7 @@ def box_intersection(ro: vec3f32, rd: vec3f32, box_size: vec3f32) (vec2f32, vec3
     let st2 = @[if t1.z <= t1.x then 1.0 else 0.0,
                 if t1.x <= t1.y then 1.0 else 0.0,
                 if t1.y <= t1.z then 1.0 else 0.0] in
-    (@[tN, tF], s * st1 * st2)
+    (@[t_n, t_f], s * st1 * st2)
 
 ------------------------------------------------------------
 -- Camera
@@ -167,12 +167,12 @@ def camera_rotation(angle: vec2f32) mat3f32 =
     [s.y * c.x, 0.0 - s.x, c.y * c.x]]
 
 -- Returns (ro, rd).
-def get_ray(iTime: f32, iResolution: vec3f32, frag_coord: vec2f32) (vec3f32, vec3f32) =
-  let iRevolution = iTime * 2.0 * pi in
-  let camera_angle = @[iRevolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * pi,
+def get_ray(time: f32, resolution: vec3f32, frag_coord: vec2f32) (vec3f32, vec3f32) =
+  let i_revolution = time * 2.0 * pi in
+  let camera_angle = @[i_revolution * TIME_CAM_SPIN + CAMERA_ANGLE * 2.0 * pi,
                       CAMERA_ELEVATION] in
   let rot = camera_rotation(camera_angle.yx) in
-  let rd0 = camera_ray(CAMERA_FOV, iResolution.xy, frag_coord) in
+  let rd0 = camera_ray(CAMERA_FOV, resolution.xy, frag_coord) in
   let rd = rot * rd0 in
   let ro = CAMERA_LOOKAT + rot * @[0.0, 0.0, CAMERA_DIST] in
   (ro, rd)
@@ -282,8 +282,8 @@ def phacelle_noise(p: vec2f32, norm_dir: vec2f32, freq: f32,
                   norm_dir.x * freq * 2.0 * pi] in
   let offset = offset_in * 2.0 * pi in
 
-  let pInt = vec.floor(p) in
-  let pFrac = vec.fract(p) in
+  let p_int = vec.floor(p) in
+  let p_frac = vec.fract(p) in
 
   -- 4x4 cell loop, i and j in [-1, 2]
   let (phase_dir_acc, weight_sum_acc) =
@@ -291,9 +291,9 @@ def phacelle_noise(p: vec2f32, norm_dir: vec2f32, freq: f32,
       let i = ij % 4 - 1 in
       let j = ij / 4 - 1 in
       let grid_offset = @[f32.i32(i), f32.i32(j)] in
-      let grid_point = pInt + grid_offset in
+      let grid_point = p_int + grid_offset in
       let random_offset = hash2(grid_point) * 0.5 in
-      let vec_from = pFrac - grid_offset - random_offset in
+      let vec_from = p_frac - grid_offset - random_offset in
       let sqr_dist = dot(vec_from, vec_from) in
       let weight_raw = exp(0.0 - sqr_dist * 2.0) - 0.01111 in
       let weight = max(0.0, weight_raw) in
@@ -506,14 +506,14 @@ def sample_detail(uv: vec2f32) vec4f32 =
     clamp01(0.5 + c * 0.5), 1.0]
 
 -- Computes the surface normal at uv by finite differences.
-def map_full(iResolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
+def map_full(resolution: vec3f32, uv: vec2f32) (f32, vec3f32, f32, f32, f32) =
   let m = sample_b_full(uv) in
   let height = m.x in
   let erosion = m.y * 2.0 - 1.0 in
   let ridgemap = m.z in
   let trees = m.w in
-  let pixel_x = 1.0 / iResolution.x in
-  let pixel_y = 1.0 / iResolution.y in
+  let pixel_x = 1.0 / resolution.x in
+  let pixel_y = 1.0 / resolution.y in
   let uv1 = @[uv.x + pixel_x, uv.y] in
   let uv2 = @[uv.x, uv.y + pixel_y] in
   let h1 = sample_b_full(uv1).x in
@@ -537,8 +537,8 @@ def map_height(uv: vec2f32) f32 =
 
 def march(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, f32) =
   let (box, box_normal) = box_intersection(ro, rd, BOX_SIZE) in
-  let tStart = max(0.0, box.x) + 1e-2 in
-  let tEnd = box.y - 1e-2 in
+  let t_start = max(0.0, box.x) + 1e-2 in
+  let t_end = box.y - 1e-2 in
   let samples = i32.f32(48.0 * RAYMARCH_QUALITY) in
   let step_scale0 = 1.0 / RAYMARCH_QUALITY in
 
@@ -548,7 +548,7 @@ def march(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, f32) =
   -- (i, t, stepScale, stepSize, sky, n_acc, mat_acc, s_t, done)
   let (_, t_loop, _, _, sky, n_hit, mat_hit, s_t_acc, _) =
     loop (i, t, step_scale, step_size, sky, n_acc, mat_acc, s_t, done)
-       = (0, tStart, step_scale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
+       = (0, t_start, step_scale0, 0.0, false, @[0.0, 1.0, 0.0], M_GROUND, 9999.0, false)
        while i < samples && !done do
       let pos = ro + rd * t in
       let h = map_height(get_uv(pos)) in
@@ -597,7 +597,7 @@ def march(ro: vec3f32, rd: vec3f32) (f32, vec3f32, i32, f32) =
 
   let t_out =
     if box.y < 0.0 then 0.0 - 1.0
-    else if t_final > tEnd then 0.0 - 1.0
+    else if t_final > t_end then 0.0 - 1.0
     else t_final in
   (t_out, n_final, mat_final, s_t_acc)
 
@@ -639,18 +639,18 @@ def atmosphere_shade(ro: vec3f32, rd: vec3f32, t_in: f32, sun: vec3f32,
 -- Fragment entry: composite the rendered image
 ------------------------------------------------------------
 
-def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
-                  iMouse: vec4f32) vec4f32 =
+def fragment_main(pos_in: vec4f32, resolution: vec3f32, time: f32,
+                  mouse: vec4f32) vec4f32 =
   -- Flip Y for Vulkan NDC -> Shadertoy convention.
-  let frag_coord = @[pos_in.x, iResolution.y - pos_in.y] in
+  let frag_coord = @[pos_in.x, resolution.y - pos_in.y] in
 
   -- Camera + primary ray.
-  let (ro, rd) = get_ray(iTime, iResolution, frag_coord) in
+  let (ro, rd) = get_ray(time, resolution, frag_coord) in
 
   -- Mouse ray for the brush-radius cursor indicator. iMouse.y arrives
   -- top-down from the host; flip to Shadertoy bottom-up to match
   -- fragCoord.
-  let (_, mrd) = get_ray(iTime, iResolution, @[iMouse.x, iResolution.y - iMouse.y]) in
+  let (_, mrd) = get_ray(time, resolution, @[mouse.x, resolution.y - mouse.y]) in
   let cursor = mouse_world_pos(ro, mrd, DEFAULT_HEIGHT) in
 
   -- Fixed sun direction.
@@ -663,14 +663,14 @@ def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
   let color_shaded =
     if t < 0.0 then
       -- Sky
-      let y_frac = frag_coord.y / iResolution.y in
+      let y_frac = frag_coord.y / resolution.y in
       let k = 1.0 + y_frac * y_frac * y_frac * 3.0 in
       fog_color * @[k * 0.5, k * 0.5, k * 0.5]
     else
       let pos = ro + rd * t in
       let uv_map = get_uv(pos) in
       let (h_terrain, normal_terrain, erosion, ridgemap, trees) =
-        map_full(iResolution, uv_map) in
+        map_full(resolution, uv_map) in
       let drainage = clamp01((1.0 - clamp01(ridgemap / DRAINAGE_WIDTH)) * 1.5) in
       let diff_h = pos.y - h_terrain in
 
@@ -733,7 +733,7 @@ def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
       -- BRUSH_SIZE*0.2, outer at BRUSH_SIZE) drawn while the mouse is
       -- held, skipping cliff faces so they don't smear over strata.
       let diffuse_color =
-        if iMouse.z > 0.0 && material != M_STRATA then
+        if mouse.z > 0.0 && material != M_STRATA then
           let cursor_dist = distance(pos.xz, cursor.xz) in
           let val = 1.0 - clamp01(min(200.0 * abs(cursor_dist - BRUSH_SIZE * 0.2),
                                        0.5 + 200.0 * abs(cursor_dist - BRUSH_SIZE))) in
@@ -780,11 +780,11 @@ def fragment_main(pos_in: vec4f32, iResolution: vec3f32, iTime: f32,
   @[gamma.x + dither, gamma.y + dither, gamma.z + dither, 1.0]
 
 entry mountains(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
+    resolution: vec3f32, time: f32, mouse: vec4f32,
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
     |fragment|
-      fragment_main(fragment.position, iResolution, iTime, iMouse))
+      fragment_main(fragment.position, resolution, time, mouse))

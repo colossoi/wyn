@@ -1,28 +1,33 @@
 pub mod ast;
+mod ast_const_fold;
 pub mod ast_renumber;
 pub mod ast_type_holes;
 pub mod binding_layout;
 pub mod builtins;
 pub mod diags;
-pub mod elaborate_modules;
+mod elaborate_modules;
 pub mod error;
 pub mod flow;
+mod frontend;
 pub mod interface;
 pub mod lexer;
-pub mod module_manager;
-pub mod name_resolution;
+mod name_resolution;
 pub mod op;
-pub mod parser;
+mod parser;
 pub mod pattern;
+mod resolve_imports;
+mod resolve_opens;
+mod resolve_placeholders;
+mod resolve_resources;
 mod scalar_eval;
 pub mod scope;
+pub mod semantic_modules;
 pub mod ssa;
 pub mod types;
 
-// Re-export type_checker from its new location for backwards compatibility
-pub use types::checker as type_checker;
+pub use error::{CompilationFailure, LoadModulesError};
+pub use frontend::{initialize_frontend, ParsedModules};
 
-pub mod ast_const_fold;
 pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
@@ -33,10 +38,6 @@ pub use egir::program::ResourceId;
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
 pub use wyn_pipeline_descriptor as pipeline_descriptor;
-pub mod resolve_imports;
-pub mod resolve_opens;
-pub mod resolve_placeholders;
-pub mod resolve_resources;
 pub mod spirv;
 pub mod structured;
 pub mod wgsl;
@@ -56,8 +57,6 @@ use egir::from_tlc::ConvertError;
 use wyn_base::{IdArena, IdSource};
 
 use ast::NodeCounter;
-use error::Result;
-
 // =============================================================================
 // Collection aliases
 // =============================================================================
@@ -348,25 +347,16 @@ pub use polytype::Context as PolytypeContext;
 // driven by named functions that consume one generic program stage and return
 // the next.
 //
-//   let (node_ids, module_manager) = init_compiler();
-//
-// FrontEnd (AST) stages:
-//     let program = parser::parse(source, node_ids, module_manager)?;
-//     let program = resolve_imports::resolve_imports(program, ...)?;
-//     let program = elaborate_modules::elaborate_modules(program)?;
-//     let program = name_resolution::resolve_names(program);
-//     let program = resolve_resources::resolve_resources(program)?;
-//     let program = ast_const_fold::fold_constants(program);
-//     let program = resolve_placeholders::resolve_type_placeholders(program, ...);
-//     let program = resolve_opens::resolve_opens(program, ...)?;
-//     let program = types::run::type_check(program, ...)?;
+//   let modules = ParsedModules::load(plan, options)?;
+//   let program = modules.type_check()?;
 //     let program = ast_type_holes::reject_type_holes(program)?;
 //
 // TLC stages (typed AST → semantic input):
 //       tlc::lower_from_ast(program)    -> tlc::stage::Transformed
-//       tlc::pin_entry_buffers(...)      -> tlc::stage::BuffersPinned
 //       tlc::validate_ownership(...)     -> tlc::stage::OwnershipValidated
 //       tlc::partial_eval(...)           -> tlc::stage::PartialEvaled
+//       tlc::extract_stages(...)          -> tlc::stage::StagesExtracted
+//       tlc::pin_entry_buffers(...)       -> tlc::stage::BuffersPinned
 //       tlc::normalize_soacs(...)        -> tlc::stage::SoaNormalized
 //       tlc::monomorphize(...)           -> tlc::stage::Monomorphized
 //       tlc::rep_specialize(...)         -> tlc::stage::RepSpecialized
@@ -405,14 +395,6 @@ pub use polytype::Context as PolytypeContext;
 // Tests should prefer the `compile_thru_*` helpers below, which subsume
 // the chain up to a milestone and centralize updates as new passes land.
 
-/// Build a fresh `(NodeCounter, ModuleManager)` pair. The node counter is
-/// shared between user code parsing and prelude loading so all NodeIds
-/// stay unique. The module manager comes pre-loaded with the parsed
-/// prelude.
-pub fn init_compiler() -> Result<(NodeCounter, module_manager::ModuleManager)> {
-    init_compiler_with_options(CompilerOptions::default())
-}
-
 /// Source-language features enabled for one compilation.
 ///
 /// Graphics vocabulary is opt-in. When disabled, graphics-specific type
@@ -421,36 +403,6 @@ pub fn init_compiler() -> Result<(NodeCounter, module_manager::ModuleManager)> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CompilerOptions {
     pub graphics: bool,
-}
-
-/// Build a fresh compiler with an explicit source-language feature set.
-pub fn init_compiler_with_options(
-    options: CompilerOptions,
-) -> Result<(NodeCounter, module_manager::ModuleManager)> {
-    let mut node_counter = NodeCounter::new();
-    let prelude = module_manager::ModuleManager::create_prelude(&mut node_counter)?;
-    let module_manager = module_manager::ModuleManager::from_prelude_with_options(prelude, options);
-    Ok((node_counter, module_manager))
-}
-
-/// Build a `(NodeCounter, ModuleManager)` pair from an already-elaborated
-/// prelude. Faster than `init_compiler()` when callers can amortize the
-/// prelude across multiple compiles.
-pub fn init_compiler_from_prelude(
-    prelude: module_manager::PreElaboratedPrelude,
-    node_counter: NodeCounter,
-) -> (NodeCounter, module_manager::ModuleManager) {
-    init_compiler_from_prelude_with_options(prelude, node_counter, CompilerOptions::default())
-}
-
-/// Build a compiler from a cached prelude with explicit language features.
-pub fn init_compiler_from_prelude_with_options(
-    prelude: module_manager::PreElaboratedPrelude,
-    node_counter: NodeCounter,
-    options: CompilerOptions,
-) -> (NodeCounter, module_manager::ModuleManager) {
-    let module_manager = module_manager::ModuleManager::from_prelude_with_options(prelude, options);
-    (node_counter, module_manager)
 }
 
 // =============================================================================
@@ -474,6 +426,8 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     program: tlc::stage::OwnershipValidated,
 ) -> error::Result<tlc::stage::SoacsAnfNormalized> {
     let program = tlc::partial_eval(program);
+    let program = tlc::extract_stages(program)?;
+    let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::normalize_soacs(program);
     let program = tlc::monomorphize(program)?;
     let program = tlc::rep_specialize(program);
@@ -786,54 +740,6 @@ pub struct LoweredWgsl {
 }
 
 // =============================================================================
-// Test utilities - cached prelude for faster test execution
-// =============================================================================
-
-#[cfg(test)]
-use std::sync::OnceLock;
-
-/// Cached prelude data AND the node counter state after parsing it
-#[cfg(test)]
-static PRELUDE_CACHE: OnceLock<(module_manager::PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
-
-/// Get the cached prelude and a cloned node counter (test-only)
-/// This avoids re-parsing prelude files for each test, providing ~10x speedup
-#[cfg(test)]
-fn get_prelude_cache() -> (&'static module_manager::PreElaboratedPrelude, NodeCounter) {
-    let (prelude, counter) = PRELUDE_CACHE.get_or_init(|| {
-        let mut nc = NodeCounter::new();
-        let prelude =
-            module_manager::ModuleManager::create_prelude(&mut nc).expect("Failed to create prelude cache");
-        (prelude, nc)
-    });
-    (prelude, counter.clone())
-}
-
-/// Create a ModuleManager and NodeCounter using the cached prelude (test-only)
-#[cfg(test)]
-pub fn cached_module_manager() -> (module_manager::ModuleManager, NodeCounter) {
-    let (prelude, node_counter) = get_prelude_cache();
-    (
-        module_manager::ModuleManager::from_prelude_with_options(
-            prelude.clone(),
-            CompilerOptions { graphics: true },
-        ),
-        node_counter,
-    )
-}
-
-/// Build a `(NodeCounter, ModuleManager)` pair using the cached prelude (test-only).
-#[cfg(test)]
-pub fn cached_compiler_init() -> (NodeCounter, module_manager::ModuleManager) {
-    let (prelude, node_counter) = get_prelude_cache();
-    init_compiler_from_prelude_with_options(
-        prelude.clone(),
-        node_counter,
-        CompilerOptions { graphics: true },
-    )
-}
-
-// =============================================================================
 // Test-only milestone helpers
 // =============================================================================
 //
@@ -860,18 +766,8 @@ pub fn compile_thru_frontend_with_options(
     source: &str,
     options: CompilerOptions,
 ) -> error::Result<types::run::TypeChecked> {
-    let (prelude, node_ids) = get_prelude_cache();
-    let (node_ids, module_manager) =
-        init_compiler_from_prelude_with_options(prelude.clone(), node_ids, options);
-    let program = parser::parse(source, node_ids, module_manager)?;
-    let program = resolve_imports::resolve_imports(program, std::path::Path::new("."))?;
-    let program = elaborate_modules::elaborate_modules(program)?;
-    let program = name_resolution::resolve_names(program);
-    let program = resolve_resources::resolve_resources(program)?;
-    let program = ast_const_fold::fold_constants(program);
-    let program = resolve_placeholders::resolve_type_placeholders(program);
-    let program = resolve_opens::resolve_opens(program)?;
-    types::run::type_check(program)
+    let modules = test_pipeline::try_load_test_modules(source, options)?;
+    modules.type_check().map_err(error::CompilationFailure::into_error)
 }
 
 /// Run the canonical TLC optimization pipeline (no physical scheduling or
@@ -881,7 +777,6 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     let type_checked = compile_thru_frontend(source)?;
     let program = ast_type_holes::reject_type_holes(type_checked)?;
     let program = tlc::lower_from_ast(program)?;
-    let program = tlc::pin_entry_buffers(program)?;
     let program = tlc::validate_ownership(program)?;
     optimize_tlc_for_test(program)
 }

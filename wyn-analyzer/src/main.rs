@@ -2,19 +2,25 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::ast::{self, BindingName, NodeCounter, Span};
+use wyn_core::ast::{self, BindingName, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
-use wyn_core::module_manager::{ModuleManager, PreElaboratedPrelude};
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
+use wyn_core::{initialize_frontend, CompilerOptions, ParsedModules};
+use wyn_module_graph::{ModuleId, ModulePath, PackageIdentity, PackagePlan};
+use wyn_package_manager::{find_build_input, prepare_package, prepare_standalone, BuildInput};
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Stable package-relative identity for an editor buffer without a file path.
+const VIRTUAL_ROOT_MODULE: &str = "editor-buffer.wyn";
 
 /// Verbose diagnostics are auxiliary to the language-server protocol. If
 /// stderr closes, stop attempting them rather than terminating the server.
@@ -33,30 +39,91 @@ macro_rules! verbose {
     };
 }
 
-/// Cached prelude data AND the node counter state after parsing it
-static PRELUDE_CACHE: OnceLock<(PreElaboratedPrelude, NodeCounter)> = OnceLock::new();
-
-fn get_prelude() -> (&'static PreElaboratedPrelude, NodeCounter) {
-    let (prelude, counter) = PRELUDE_CACHE.get_or_init(|| {
-        let mut nc = NodeCounter::new();
-        let prelude = ModuleManager::create_prelude(&mut nc).expect("Failed to create prelude cache");
-        (prelude, nc)
-    });
-    (prelude, counter.clone())
-}
-
-fn init_compiler_cached() -> (NodeCounter, ModuleManager) {
-    let (prelude, node_counter) = get_prelude();
-    wyn_core::init_compiler_from_prelude_with_options(
-        prelude.clone(),
-        node_counter,
-        wyn_core::CompilerOptions { graphics: true },
-    )
-}
-
 /// Cached document state after successful type checking
 struct DocumentState {
     ast: wyn_core::types::run::TypeChecked,
+    text: String,
+}
+
+fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Result<ParsedModules, String> {
+    let plan = match file_path {
+        Some(file_path) => {
+            let input = find_build_input(file_path).map_err(|error| error.to_string())?;
+            let plan = match input {
+                BuildInput::Package { root, root_module } => {
+                    prepare_package(root, root_module).map_err(|error| error.to_string())?
+                }
+                BuildInput::Standalone(source) => {
+                    prepare_standalone(source).map_err(|error| error.to_string())?
+                }
+            };
+            plan.with_root_source(text).map_err(|error| error.to_string())?
+        }
+        None => {
+            let root = ModulePath::new(VIRTUAL_ROOT_MODULE).map_err(|error| error.to_string())?;
+            let identity =
+                PackageIdentity::new("analyzer/root", "v0.0.0").map_err(|error| error.to_string())?;
+            PackagePlan::single_source(identity, root, text)
+        }
+    };
+    ParsedModules::load(plan, CompilerOptions { graphics: true }).map_err(|error| error.to_string())
+}
+
+fn position_to_offset(text: &str, position: Position) -> Option<u32> {
+    let mut line_start = 0usize;
+    for _ in 0..position.line {
+        line_start += text[line_start..].find('\n')? + 1;
+    }
+
+    let line_end = text[line_start..].find('\n').map_or(text.len(), |end| line_start + end);
+    let line = &text[line_start..line_end];
+    let mut utf16_column = 0u32;
+    for (byte_offset, character) in line.char_indices() {
+        if utf16_column == position.character {
+            return u32::try_from(line_start + byte_offset).ok();
+        }
+        utf16_column += u32::try_from(character.len_utf16()).ok()?;
+        if utf16_column > position.character {
+            return None;
+        }
+    }
+
+    (utf16_column == position.character).then(|| u32::try_from(line_end).ok()).flatten()
+}
+
+fn offset_to_position(text: &str, offset: u32) -> Option<Position> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset > text.len() || !text.is_char_boundary(offset) {
+        return None;
+    }
+
+    let prefix = &text[..offset];
+    let line = u32::try_from(prefix.bytes().filter(|byte| *byte == b'\n').count()).ok()?;
+    let current_line = prefix.rsplit_once('\n').map_or(prefix, |(_, current_line)| current_line);
+    let character = u32::try_from(current_line.encode_utf16().count()).ok()?;
+    Some(Position { line, character })
+}
+
+fn span_to_range(text: &str, span: Span) -> Option<Range> {
+    span.module()?;
+    let range = span.range();
+    Some(Range {
+        start: offset_to_position(text, range.start())?,
+        end: offset_to_position(text, range.end())?,
+    })
+}
+
+fn default_diagnostic_range() -> Range {
+    Range {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: 0,
+            character: 1,
+        },
+    }
 }
 
 struct Backend {
@@ -160,16 +227,15 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] hover {}:{}", pos.line, pos.character);
 
-        // Convert 0-based LSP position to 1-based internal
-        let line = pos.line as usize + 1;
-        let col = pos.character as usize + 1;
-
         let docs = self.documents.read().ok();
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
+            let Some(offset) = position_to_offset(&doc.text, pos) else {
+                return Ok(None);
+            };
             // First check if cursor is on a declaration name
-            if let Some((name, kind)) = find_declaration_name_at(&doc.ast, line, col) {
+            if let Some((name, kind)) = find_declaration_name_at(&doc.ast, offset) {
                 if let Some(scheme) = definition_scheme(&doc.ast, &name) {
                     let type_str = format_scheme(scheme);
                     return Ok(Some(Hover {
@@ -183,23 +249,14 @@ impl LanguageServer for Backend {
             }
 
             // Fall back to expression type lookup
-            if let Some((scheme, span)) = find_node_at_position(&doc.ast, line, col) {
+            if let Some((scheme, span)) = find_node_at_position(&doc.ast, offset) {
                 let type_str = format_scheme(scheme);
                 return Ok(Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
                         value: format!("```wyn\n{}\n```", type_str),
                     }),
-                    range: Some(Range {
-                        start: Position {
-                            line: span.start_line.saturating_sub(1) as u32,
-                            character: span.start_col.saturating_sub(1) as u32,
-                        },
-                        end: Position {
-                            line: span.end_line.saturating_sub(1) as u32,
-                            character: span.end_col.saturating_sub(1) as u32,
-                        },
-                    }),
+                    range: span_to_range(&doc.text, span),
                 }));
             }
         }
@@ -221,15 +278,18 @@ impl LanguageServer for Backend {
             .unwrap_or(false);
 
         if is_dot_trigger {
-            // Field access completion
-            let line = pos.line as usize + 1;
-            let col = pos.character.saturating_sub(1) as usize + 1;
-
             let docs = self.documents.read().ok();
             let doc = docs.as_ref().and_then(|d| d.get(uri));
 
             if let Some(doc) = doc {
-                if let Some((scheme, _span)) = find_node_at_position(&doc.ast, line, col) {
+                let preceding = Position {
+                    line: pos.line,
+                    character: pos.character.saturating_sub(1),
+                };
+                let Some(offset) = position_to_offset(&doc.text, preceding) else {
+                    return Ok(None);
+                };
+                if let Some((scheme, _span)) = find_node_at_position(&doc.ast, offset) {
                     let items = get_field_completions(scheme);
                     if !items.is_empty() {
                         return Ok(Some(CompletionResponse::Array(items)));
@@ -238,18 +298,26 @@ impl LanguageServer for Backend {
             }
         }
 
-        // Default: prelude function completions
-        let (prelude, _) = get_prelude();
-        let items: Vec<CompletionItem> = prelude
-            .prelude_functions
-            .iter()
-            .map(|(name, _decl)| CompletionItem {
-                label: name.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("prelude function".to_string()),
-                ..Default::default()
+        // Default: prelude function completions from the checked document.
+        let docs = self.documents.read().ok();
+        let doc = docs.as_ref().and_then(|documents| documents.get(uri));
+        let items = doc
+            .map(|document| {
+                document
+                    .ast
+                    .global_context
+                    .support_definitions
+                    .iter()
+                    .filter(|definition| definition.namespace.is_none())
+                    .map(|definition| CompletionItem {
+                        label: definition.definition.name.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some("prelude function".to_string()),
+                        ..Default::default()
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -262,23 +330,16 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] gotoDefinition {}:{}", pos.line, pos.character);
 
-        let line = pos.line as usize + 1;
-        let col = pos.character as usize + 1;
-
         let docs = self.documents.read().ok();
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
-            if let Some(def_span) = find_definition(&doc.ast, line, col) {
-                let range = Range {
-                    start: Position {
-                        line: def_span.start_line.saturating_sub(1) as u32,
-                        character: def_span.start_col.saturating_sub(1) as u32,
-                    },
-                    end: Position {
-                        line: def_span.end_line.saturating_sub(1) as u32,
-                        character: def_span.end_col.saturating_sub(1) as u32,
-                    },
+            let Some(offset) = position_to_offset(&doc.text, pos) else {
+                return Ok(None);
+            };
+            if let Some(def_span) = find_definition(&doc.ast, offset) {
+                let Some(range) = span_to_range(&doc.text, def_span) else {
+                    return Ok(None);
                 };
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: uri.clone(),
@@ -295,31 +356,24 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position.position;
         verbose!("[wyn-analyzer] references {}:{}", pos.line, pos.character);
 
-        let line = pos.line as usize + 1;
-        let col = pos.character as usize + 1;
-
         let docs = self.documents.read().ok();
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
+            let Some(offset) = position_to_offset(&doc.text, pos) else {
+                return Ok(None);
+            };
             // Find the name at cursor position
-            if let Some(name) = find_name_at_position(&doc.ast, line, col) {
+            if let Some(name) = find_name_at_position(&doc.ast, offset) {
                 let include_declaration = params.context.include_declaration;
                 let refs = find_all_references(&doc.ast, &name, include_declaration);
                 let locations: Vec<Location> = refs
                     .into_iter()
-                    .map(|span| Location {
-                        uri: uri.clone(),
-                        range: Range {
-                            start: Position {
-                                line: span.start_line.saturating_sub(1) as u32,
-                                character: span.start_col.saturating_sub(1) as u32,
-                            },
-                            end: Position {
-                                line: span.end_line.saturating_sub(1) as u32,
-                                character: span.end_col.saturating_sub(1) as u32,
-                            },
-                        },
+                    .filter_map(|span| {
+                        Some(Location {
+                            uri: uri.clone(),
+                            range: span_to_range(&doc.text, span)?,
+                        })
                     })
                     .collect();
                 if !locations.is_empty() {
@@ -341,8 +395,12 @@ impl LanguageServer for Backend {
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
-            let symbols: Vec<DocumentSymbol> =
-                doc.ast.declarations.iter().filter_map(declaration_to_symbol).collect();
+            let symbols: Vec<DocumentSymbol> = doc
+                .ast
+                .declarations
+                .iter()
+                .filter_map(|declaration| declaration_to_symbol(&doc.text, declaration))
+                .collect();
             return Ok(Some(DocumentSymbolResponse::Nested(symbols)));
         }
 
@@ -354,33 +412,19 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] signatureHelp {}:{}", pos.line, pos.character);
 
-        let line = pos.line as usize + 1;
-        let col = pos.character as usize + 1;
-
         let docs = self.documents.read().ok();
         let doc = docs.as_ref().and_then(|d| d.get(uri));
 
         if let Some(doc) = doc {
-            if let Some((func_name, arg_index)) = find_application_context(&doc.ast, line, col) {
+            let Some(offset) = position_to_offset(&doc.text, pos) else {
+                return Ok(None);
+            };
+            if let Some((func_name, arg_index)) = find_application_context(&doc.ast, offset) {
                 if let Some(scheme) = definition_scheme(&doc.ast, &func_name) {
                     let label = format!("{}: {}", func_name, format_scheme(scheme));
                     return Ok(Some(SignatureHelp {
                         signatures: vec![SignatureInformation {
                             label,
-                            documentation: None,
-                            parameters: None,
-                            active_parameter: Some(arg_index as u32),
-                        }],
-                        active_signature: Some(0),
-                        active_parameter: Some(arg_index as u32),
-                    }));
-                }
-
-                let (prelude, _) = get_prelude();
-                if prelude.prelude_functions.contains_key(&func_name) {
-                    return Ok(Some(SignatureHelp {
-                        signatures: vec![SignatureInformation {
-                            label: format!("{} (prelude function)", func_name),
                             documentation: None,
                             parameters: None,
                             active_parameter: Some(arg_index as u32),
@@ -427,7 +471,7 @@ impl LanguageServer for Backend {
 
 impl Backend {
     async fn on_change(&self, doc: TextDocumentItem) {
-        let (diagnostics, state) = self.check_document(&doc.text);
+        let (diagnostics, state) = self.check_document(&doc.uri, &doc.text);
         verbose!("{}", format_check_result(&doc.uri, &diagnostics, state.is_some()));
 
         if let Some(state) = state {
@@ -439,51 +483,44 @@ impl Backend {
         self.client.publish_diagnostics(doc.uri, diagnostics, Some(doc.version)).await;
     }
 
-    fn check_document(&self, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
+    fn check_document(&self, uri: &Url, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
         let mut diagnostics = Vec::new();
+        let file_path = uri.to_file_path().ok();
 
-        let (node_counter, module_manager) = init_compiler_cached();
-        let result = wyn_core::parser::parse(text, node_counter, module_manager)
-            .and_then(|program| {
-                wyn_core::resolve_imports::resolve_imports(program, std::path::Path::new("."))
-            })
-            .and_then(wyn_core::elaborate_modules::elaborate_modules)
-            .map(wyn_core::name_resolution::resolve_names)
-            .and_then(wyn_core::resolve_resources::resolve_resources)
-            .map(wyn_core::ast_const_fold::fold_constants)
-            .map(wyn_core::resolve_placeholders::resolve_type_placeholders)
-            .and_then(wyn_core::resolve_opens::resolve_opens)
-            .and_then(wyn_core::types::run::type_check);
+        let modules = match load_source_graph(file_path.as_deref(), text) {
+            Ok(modules) => modules,
+            Err(message) => {
+                diagnostics.push(Diagnostic {
+                    range: default_diagnostic_range(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("wyn-analyzer".to_string()),
+                    message,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return (diagnostics, None);
+            }
+        };
+        let result = modules.type_check();
 
         match result {
             Ok(type_checked) => {
-                let state = DocumentState { ast: type_checked };
+                let state = DocumentState {
+                    ast: type_checked,
+                    text: text.to_owned(),
+                };
                 (diagnostics, Some(state))
             }
-            Err(e) => {
-                let range = if let Some(span) = e.span() {
-                    Range {
-                        start: Position {
-                            line: span.start_line.saturating_sub(1) as u32,
-                            character: span.start_col.saturating_sub(1) as u32,
-                        },
-                        end: Position {
-                            line: span.end_line.saturating_sub(1) as u32,
-                            character: span.end_col.saturating_sub(1) as u32,
-                        },
-                    }
-                } else {
-                    Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: 0,
-                            character: 1,
-                        },
-                    }
-                };
+            Err(failure) => {
+                let range = failure
+                    .error()
+                    .span()
+                    .filter(|span| span.module() == Some(failure.source_graph().root()))
+                    .and_then(|span| span_to_range(text, span))
+                    .unwrap_or_else(default_diagnostic_range);
 
                 diagnostics.push(Diagnostic {
                     range,
@@ -491,7 +528,7 @@ impl Backend {
                     code: None,
                     code_description: None,
                     source: Some("wyn-analyzer".to_string()),
-                    message: e.to_string(),
+                    message: failure.to_string(),
                     related_information: None,
                     tags: None,
                     data: None,
@@ -507,25 +544,33 @@ fn definition_scheme<'a>(
     program: &'a wyn_core::types::run::TypeChecked,
     name: &str,
 ) -> Option<&'a TypeScheme> {
-    program.declarations.iter().find_map(|declaration| match declaration {
-        ast::Declaration::Decl(definition) if definition.name == name => Some(&definition.data.scheme),
-        ast::Declaration::Entry(entry) if entry.name == name => Some(&entry.data.scheme),
-        ast::Declaration::Extern(external) if external.name == name => Some(&external.data.scheme),
-        ast::Declaration::Decl(_) | ast::Declaration::Entry(_) | ast::Declaration::Extern(_) => None,
-        ast::Declaration::Frontend(never) => match *never {},
-    })
+    program
+        .declarations
+        .iter()
+        .find_map(|declaration| match declaration {
+            ast::Declaration::Decl(definition) if definition.name == name => Some(&definition.data.scheme),
+            ast::Declaration::Entry(entry) if entry.name == name => Some(&entry.data.scheme),
+            ast::Declaration::Extern(external) if external.name == name => Some(&external.data.scheme),
+            ast::Declaration::Decl(_) | ast::Declaration::Entry(_) | ast::Declaration::Extern(_) => None,
+            ast::Declaration::Frontend(never) => match *never {},
+        })
+        .or_else(|| {
+            program.global_context.support_definitions.iter().find_map(|definition| {
+                (definition.namespace.is_none() && definition.definition.name == name)
+                    .then_some(&definition.definition.data.scheme)
+            })
+        })
 }
 
 /// Find the smallest AST node containing the given position
 fn find_node_at_position(
     ast: &wyn_core::types::run::TypeChecked,
-    line: usize,
-    col: usize,
+    offset: u32,
 ) -> Option<(&TypeScheme, Span)> {
     let mut best: Option<(&TypeScheme, Span)> = None;
 
     for decl in &ast.declarations {
-        find_in_declaration(decl, line, col, &mut best);
+        find_in_declaration(decl, offset, &mut best);
     }
 
     best
@@ -533,16 +578,15 @@ fn find_node_at_position(
 
 fn find_in_declaration<'a>(
     decl: &'a ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
-    line: usize,
-    col: usize,
+    offset: u32,
     best: &mut Option<(&'a TypeScheme, Span)>,
 ) {
     match decl {
         ast::Declaration::Decl(def) => {
-            find_in_expr(&def.body, line, col, best);
+            find_in_expr(&def.body, offset, best);
         }
         ast::Declaration::Entry(entry) => {
-            find_in_expr(&entry.body, line, col, best);
+            find_in_expr(&entry.body, offset, best);
         }
         _ => {}
     }
@@ -550,13 +594,12 @@ fn find_in_declaration<'a>(
 
 fn find_in_expr<'a>(
     expr: &'a ast::Expression<ast::TypedTree>,
-    line: usize,
-    col: usize,
+    offset: u32,
     best: &mut Option<(&'a TypeScheme, Span)>,
 ) {
     let span = expr.h.span;
 
-    if !span.contains(line, col) {
+    if !span.contains(offset) {
         return;
     }
 
@@ -570,96 +613,96 @@ fn find_in_expr<'a>(
         IntLiteral(_) | FloatLiteral(_) | BoolLiteral(_) | Unit => {}
         Identifier(_) | TypeHole(_) => {}
         Application(func, args) => {
-            find_in_expr(func, line, col, best);
+            find_in_expr(func, offset, best);
             for arg in args {
-                find_in_expr(arg, line, col, best);
+                find_in_expr(arg, offset, best);
             }
         }
         Lambda(lambda) => {
-            find_in_expr(&lambda.body, line, col, best);
+            find_in_expr(&lambda.body, offset, best);
         }
         LetIn(let_in) => {
-            find_in_expr(&let_in.value, line, col, best);
-            find_in_expr(&let_in.body, line, col, best);
+            find_in_expr(&let_in.value, offset, best);
+            find_in_expr(&let_in.body, offset, best);
         }
         If(if_expr) => {
-            find_in_expr(&if_expr.condition, line, col, best);
-            find_in_expr(&if_expr.then_branch, line, col, best);
-            find_in_expr(&if_expr.else_branch, line, col, best);
+            find_in_expr(&if_expr.condition, offset, best);
+            find_in_expr(&if_expr.then_branch, offset, best);
+            find_in_expr(&if_expr.else_branch, offset, best);
         }
         BinaryOp(_, lhs, rhs) => {
-            find_in_expr(lhs, line, col, best);
-            find_in_expr(rhs, line, col, best);
+            find_in_expr(lhs, offset, best);
+            find_in_expr(rhs, offset, best);
         }
         UnaryOp(_, operand) => {
-            find_in_expr(operand, line, col, best);
+            find_in_expr(operand, offset, best);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
-                find_in_expr(elem, line, col, best);
+                find_in_expr(elem, offset, best);
             }
         }
         Constructor(_, args) => {
             for arg in args {
-                find_in_expr(arg, line, col, best);
+                find_in_expr(arg, offset, best);
             }
         }
         ArrayIndex(arr, idx) => {
-            find_in_expr(arr, line, col, best);
-            find_in_expr(idx, line, col, best);
+            find_in_expr(arr, offset, best);
+            find_in_expr(idx, offset, best);
         }
         ArrayWith {
             array, index, value, ..
         } => {
-            find_in_expr(array, line, col, best);
-            find_in_expr(index, line, col, best);
-            find_in_expr(value, line, col, best);
+            find_in_expr(array, offset, best);
+            find_in_expr(index, offset, best);
+            find_in_expr(value, offset, best);
         }
         VecWith { target, value, .. } => {
-            find_in_expr(target, line, col, best);
-            find_in_expr(value, line, col, best);
+            find_in_expr(target, offset, best);
+            find_in_expr(value, offset, best);
         }
         RecordWith { record, value, .. } => {
-            find_in_expr(record, line, col, best);
-            find_in_expr(value, line, col, best);
+            find_in_expr(record, offset, best);
+            find_in_expr(value, offset, best);
         }
         FieldAccess(base, _) => {
-            find_in_expr(base, line, col, best);
+            find_in_expr(base, offset, best);
         }
         Loop(loop_expr) => {
             if let Some(init) = &loop_expr.init {
-                find_in_expr(init, line, col, best);
+                find_in_expr(init, offset, best);
             }
-            find_in_expr(&loop_expr.body, line, col, best);
+            find_in_expr(&loop_expr.body, offset, best);
         }
         RecordLiteral(fields) => {
             for (_, value) in fields {
-                find_in_expr(value, line, col, best);
+                find_in_expr(value, offset, best);
             }
         }
         Match(match_expr) => {
-            find_in_expr(&match_expr.scrutinee, line, col, best);
+            find_in_expr(&match_expr.scrutinee, offset, best);
             for case in &match_expr.cases {
-                find_in_expr(&case.body, line, col, best);
+                find_in_expr(&case.body, offset, best);
             }
         }
         TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            find_in_expr(inner, line, col, best);
+            find_in_expr(inner, offset, best);
         }
         Range(range_expr) => {
-            find_in_expr(&range_expr.start, line, col, best);
+            find_in_expr(&range_expr.start, offset, best);
             if let Some(step) = &range_expr.step {
-                find_in_expr(step, line, col, best);
+                find_in_expr(step, offset, best);
             }
-            find_in_expr(&range_expr.end, line, col, best);
+            find_in_expr(&range_expr.end, offset, best);
         }
         Slice(slice_expr) => {
-            find_in_expr(&slice_expr.array, line, col, best);
+            find_in_expr(&slice_expr.array, offset, best);
             if let Some(start) = &slice_expr.start {
-                find_in_expr(start, line, col, best);
+                find_in_expr(start, offset, best);
             }
             if let Some(end) = &slice_expr.end {
-                find_in_expr(end, line, col, best);
+                find_in_expr(end, offset, best);
             }
         }
     }
@@ -668,18 +711,17 @@ fn find_in_expr<'a>(
 /// Find the application context at cursor position
 fn find_application_context(
     ast: &wyn_core::types::run::TypeChecked,
-    line: usize,
-    col: usize,
+    offset: u32,
 ) -> Option<(String, usize)> {
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
-                if let Some(result) = find_application_in_expr(&def.body, line, col) {
+                if let Some(result) = find_application_in_expr(&def.body, offset) {
                     return Some(result);
                 }
             }
             ast::Declaration::Entry(entry) => {
-                if let Some(result) = find_application_in_expr(&entry.body, line, col) {
+                if let Some(result) = find_application_in_expr(&entry.body, offset) {
                     return Some(result);
                 }
             }
@@ -691,11 +733,10 @@ fn find_application_context(
 
 fn find_application_in_expr(
     expr: &ast::Expression<ast::TypedTree>,
-    line: usize,
-    col: usize,
+    offset: u32,
 ) -> Option<(String, usize)> {
     let span = expr.h.span;
-    if !span.contains(line, col) {
+    if !span.contains(offset) {
         return None;
     }
 
@@ -703,8 +744,8 @@ fn find_application_in_expr(
     match &expr.kind {
         Application(func, args) => {
             for (i, arg) in args.iter().enumerate() {
-                if arg.h.span.contains(line, col) {
-                    if let Some(result) = find_application_in_expr(arg, line, col) {
+                if arg.h.span.contains(offset) {
+                    if let Some(result) = find_application_in_expr(arg, offset) {
                         return Some(result);
                     }
                     if let Identifier(identifier) = &func.kind {
@@ -717,51 +758,51 @@ fn find_application_in_expr(
             }
         }
         Lambda(lambda) => {
-            return find_application_in_expr(&lambda.body, line, col);
+            return find_application_in_expr(&lambda.body, offset);
         }
         LetIn(let_in) => {
-            if let Some(r) = find_application_in_expr(&let_in.value, line, col) {
+            if let Some(r) = find_application_in_expr(&let_in.value, offset) {
                 return Some(r);
             }
-            return find_application_in_expr(&let_in.body, line, col);
+            return find_application_in_expr(&let_in.body, offset);
         }
         If(if_expr) => {
-            if let Some(r) = find_application_in_expr(&if_expr.condition, line, col) {
+            if let Some(r) = find_application_in_expr(&if_expr.condition, offset) {
                 return Some(r);
             }
-            if let Some(r) = find_application_in_expr(&if_expr.then_branch, line, col) {
+            if let Some(r) = find_application_in_expr(&if_expr.then_branch, offset) {
                 return Some(r);
             }
-            return find_application_in_expr(&if_expr.else_branch, line, col);
+            return find_application_in_expr(&if_expr.else_branch, offset);
         }
         BinaryOp(_, lhs, rhs) => {
-            if let Some(r) = find_application_in_expr(lhs, line, col) {
+            if let Some(r) = find_application_in_expr(lhs, offset) {
                 return Some(r);
             }
-            return find_application_in_expr(rhs, line, col);
+            return find_application_in_expr(rhs, offset);
         }
         UnaryOp(_, operand) => {
-            return find_application_in_expr(operand, line, col);
+            return find_application_in_expr(operand, offset);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
-                if let Some(r) = find_application_in_expr(elem, line, col) {
+                if let Some(r) = find_application_in_expr(elem, offset) {
                     return Some(r);
                 }
             }
         }
         Constructor(_, args) => {
             for arg in args {
-                if let Some(r) = find_application_in_expr(arg, line, col) {
+                if let Some(r) = find_application_in_expr(arg, offset) {
                     return Some(r);
                 }
             }
         }
         ArrayIndex(arr, idx) => {
-            if let Some(r) = find_application_in_expr(arr, line, col) {
+            if let Some(r) = find_application_in_expr(arr, offset) {
                 return Some(r);
             }
-            return find_application_in_expr(idx, line, col);
+            return find_application_in_expr(idx, offset);
         }
         _ => {}
     }
@@ -861,23 +902,17 @@ fn get_field_completions(scheme: &TypeScheme) -> Vec<CompletionItem> {
 /// Find if cursor is on a declaration name
 fn find_declaration_name_at(
     ast: &wyn_core::types::run::TypeChecked,
-    line: usize,
-    col: usize,
+    offset: u32,
 ) -> Option<(String, &'static str)> {
     for decl in &ast.declarations {
         match decl {
             ast::Declaration::Decl(def) => {
-                let body_span = def.body.h.span;
-                if line == body_span.start_line && col < body_span.start_col {
-                    return Some((def.name.clone(), def.data.source.syntax.keyword));
-                }
-                if line < body_span.start_line && line >= body_span.start_line.saturating_sub(5) {
+                if def.name_span.contains(offset) {
                     return Some((def.name.clone(), def.data.source.syntax.keyword));
                 }
             }
             ast::Declaration::Entry(entry) => {
-                let body_span = entry.body.h.span;
-                if line == body_span.start_line && col < body_span.start_col {
+                if entry.name_span.contains(offset) {
                     let kind = match entry.data.source.source.syntax.entry_kind {
                         interface::EntryKind::Vertex => "vertex",
                         interface::EntryKind::Root => "entry",
@@ -894,13 +929,9 @@ fn find_declaration_name_at(
 }
 
 /// Find the name at cursor position (identifier or declaration name)
-fn find_name_at_position(
-    ast: &wyn_core::types::run::TypeChecked,
-    line: usize,
-    col: usize,
-) -> Option<String> {
+fn find_name_at_position(ast: &wyn_core::types::run::TypeChecked, offset: u32) -> Option<String> {
     // Check if on a declaration name first
-    if let Some((name, _)) = find_declaration_name_at(ast, line, col) {
+    if let Some((name, _)) = find_declaration_name_at(ast, offset) {
         return Some(name);
     }
 
@@ -910,21 +941,21 @@ fn find_name_at_position(
             ast::Declaration::Decl(def) => {
                 // Check parameters
                 for param in &def.params {
-                    if let Some(name) = find_name_in_pattern(param, line, col) {
+                    if let Some(name) = find_name_in_pattern(param, offset) {
                         return Some(name);
                     }
                 }
-                if let Some(name) = find_name_in_expr(&def.body, line, col) {
+                if let Some(name) = find_name_in_expr(&def.body, offset) {
                     return Some(name);
                 }
             }
             ast::Declaration::Entry(entry) => {
                 for param in &entry.params {
-                    if let Some(name) = find_name_in_pattern(param, line, col) {
+                    if let Some(name) = find_name_in_pattern(param, offset) {
                         return Some(name);
                     }
                 }
-                if let Some(name) = find_name_in_expr(&entry.body, line, col) {
+                if let Some(name) = find_name_in_expr(&entry.body, offset) {
                     return Some(name);
                 }
             }
@@ -934,19 +965,15 @@ fn find_name_at_position(
     None
 }
 
-fn find_name_in_pattern<A>(
-    pat: &ast::Pattern<ast::TypedTree, A>,
-    line: usize,
-    col: usize,
-) -> Option<String> {
-    if !pat.h.span.contains(line, col) {
+fn find_name_in_pattern<A>(pat: &ast::Pattern<ast::TypedTree, A>, offset: u32) -> Option<String> {
+    if !pat.h.span.contains(offset) {
         return None;
     }
     match &pat.kind {
         ast::PatternKind::Name(name) => Some(name.source_name().to_owned()),
         ast::PatternKind::Tuple(pats) => {
             for p in pats {
-                if let Some(name) = find_name_in_pattern(p, line, col) {
+                if let Some(name) = find_name_in_pattern(p, offset) {
                     return Some(name);
                 }
             }
@@ -954,7 +981,7 @@ fn find_name_in_pattern<A>(
         }
         ast::PatternKind::Constructor(_, pats) => {
             for p in pats {
-                if let Some(name) = find_name_in_pattern(p, line, col) {
+                if let Some(name) = find_name_in_pattern(p, offset) {
                     return Some(name);
                 }
             }
@@ -964,129 +991,129 @@ fn find_name_in_pattern<A>(
     }
 }
 
-fn find_name_in_expr(expr: &ast::Expression<ast::TypedTree>, line: usize, col: usize) -> Option<String> {
-    if !expr.h.span.contains(line, col) {
+fn find_name_in_expr(expr: &ast::Expression<ast::TypedTree>, offset: u32) -> Option<String> {
+    if !expr.h.span.contains(offset) {
         return None;
     }
 
     use ast::ExprKind::*;
     match &expr.kind {
         Identifier(identifier) => {
-            if expr.h.span.contains(line, col) {
+            if expr.h.span.contains(offset) {
                 return Some(identifier.source.name.clone());
             }
         }
         Application(func, args) => {
-            if let Some(name) = find_name_in_expr(func, line, col) {
+            if let Some(name) = find_name_in_expr(func, offset) {
                 return Some(name);
             }
             for arg in args {
-                if let Some(name) = find_name_in_expr(arg, line, col) {
+                if let Some(name) = find_name_in_expr(arg, offset) {
                     return Some(name);
                 }
             }
         }
         Lambda(lambda) => {
             for param in &lambda.params {
-                if let Some(name) = find_name_in_pattern(param, line, col) {
+                if let Some(name) = find_name_in_pattern(param, offset) {
                     return Some(name);
                 }
             }
-            return find_name_in_expr(&lambda.body, line, col);
+            return find_name_in_expr(&lambda.body, offset);
         }
         LetIn(let_in) => {
-            if let Some(name) = find_name_in_pattern(&let_in.pattern, line, col) {
+            if let Some(name) = find_name_in_pattern(&let_in.pattern, offset) {
                 return Some(name);
             }
-            if let Some(name) = find_name_in_expr(&let_in.value, line, col) {
+            if let Some(name) = find_name_in_expr(&let_in.value, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(&let_in.body, line, col);
+            return find_name_in_expr(&let_in.body, offset);
         }
         If(if_expr) => {
-            if let Some(name) = find_name_in_expr(&if_expr.condition, line, col) {
+            if let Some(name) = find_name_in_expr(&if_expr.condition, offset) {
                 return Some(name);
             }
-            if let Some(name) = find_name_in_expr(&if_expr.then_branch, line, col) {
+            if let Some(name) = find_name_in_expr(&if_expr.then_branch, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(&if_expr.else_branch, line, col);
+            return find_name_in_expr(&if_expr.else_branch, offset);
         }
         BinaryOp(_, lhs, rhs) => {
-            if let Some(name) = find_name_in_expr(lhs, line, col) {
+            if let Some(name) = find_name_in_expr(lhs, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(rhs, line, col);
+            return find_name_in_expr(rhs, offset);
         }
         UnaryOp(_, operand) => {
-            return find_name_in_expr(operand, line, col);
+            return find_name_in_expr(operand, offset);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
-                if let Some(name) = find_name_in_expr(elem, line, col) {
+                if let Some(name) = find_name_in_expr(elem, offset) {
                     return Some(name);
                 }
             }
         }
         Constructor(_, args) => {
             for arg in args {
-                if let Some(name) = find_name_in_expr(arg, line, col) {
+                if let Some(name) = find_name_in_expr(arg, offset) {
                     return Some(name);
                 }
             }
         }
         ArrayIndex(arr, idx) => {
-            if let Some(name) = find_name_in_expr(arr, line, col) {
+            if let Some(name) = find_name_in_expr(arr, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(idx, line, col);
+            return find_name_in_expr(idx, offset);
         }
         ArrayWith {
             array, index, value, ..
         } => {
-            if let Some(name) = find_name_in_expr(array, line, col) {
+            if let Some(name) = find_name_in_expr(array, offset) {
                 return Some(name);
             }
-            if let Some(name) = find_name_in_expr(index, line, col) {
+            if let Some(name) = find_name_in_expr(index, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(value, line, col);
+            return find_name_in_expr(value, offset);
         }
         VecWith { target, value, .. } => {
-            if let Some(name) = find_name_in_expr(target, line, col) {
+            if let Some(name) = find_name_in_expr(target, offset) {
                 return Some(name);
             }
-            return find_name_in_expr(value, line, col);
+            return find_name_in_expr(value, offset);
         }
         FieldAccess(base, _) => {
-            return find_name_in_expr(base, line, col);
+            return find_name_in_expr(base, offset);
         }
         Loop(loop_expr) => {
-            if let Some(name) = find_name_in_pattern(&loop_expr.pattern, line, col) {
+            if let Some(name) = find_name_in_pattern(&loop_expr.pattern, offset) {
                 return Some(name);
             }
             if let Some(init) = &loop_expr.init {
-                if let Some(name) = find_name_in_expr(init, line, col) {
+                if let Some(name) = find_name_in_expr(init, offset) {
                     return Some(name);
                 }
             }
-            return find_name_in_expr(&loop_expr.body, line, col);
+            return find_name_in_expr(&loop_expr.body, offset);
         }
         Match(match_expr) => {
-            if let Some(name) = find_name_in_expr(&match_expr.scrutinee, line, col) {
+            if let Some(name) = find_name_in_expr(&match_expr.scrutinee, offset) {
                 return Some(name);
             }
             for case in &match_expr.cases {
-                if let Some(name) = find_name_in_pattern(&case.pattern, line, col) {
+                if let Some(name) = find_name_in_pattern(&case.pattern, offset) {
                     return Some(name);
                 }
-                if let Some(name) = find_name_in_expr(&case.body, line, col) {
+                if let Some(name) = find_name_in_expr(&case.body, offset) {
                     return Some(name);
                 }
             }
         }
         TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            return find_name_in_expr(inner, line, col);
+            return find_name_in_expr(inner, offset);
         }
         _ => {}
     }
@@ -1251,7 +1278,7 @@ fn collect_refs_in_expr(expr: &ast::Expression<ast::TypedTree>, target: &str, re
 }
 
 /// Find the definition site of an identifier at the given position
-fn find_definition(ast: &wyn_core::types::run::TypeChecked, line: usize, col: usize) -> Option<Span> {
+fn find_definition(ast: &wyn_core::types::run::TypeChecked, offset: u32) -> Option<Span> {
     let bindings: Vec<(String, Span)> = Vec::new();
 
     for decl in &ast.declarations {
@@ -1265,8 +1292,7 @@ fn find_definition(ast: &wyn_core::types::run::TypeChecked, line: usize, col: us
 
                 if let Some(span) = find_definition_in_expr(
                     &def.body,
-                    line,
-                    col,
+                    offset,
                     &mut bindings.iter().chain(param_bindings.iter()).cloned().collect(),
                 ) {
                     return Some(span);
@@ -1281,8 +1307,7 @@ fn find_definition(ast: &wyn_core::types::run::TypeChecked, line: usize, col: us
 
                 if let Some(span) = find_definition_in_expr(
                     &entry.body,
-                    line,
-                    col,
+                    offset,
                     &mut bindings.iter().chain(param_bindings.iter()).cloned().collect(),
                 ) {
                     return Some(span);
@@ -1296,19 +1321,18 @@ fn find_definition(ast: &wyn_core::types::run::TypeChecked, line: usize, col: us
 
 fn find_definition_in_expr(
     expr: &ast::Expression<ast::TypedTree>,
-    line: usize,
-    col: usize,
+    offset: u32,
     bindings: &mut Vec<(String, Span)>,
 ) -> Option<Span> {
     let span = expr.h.span;
-    if !span.contains(line, col) {
+    if !span.contains(offset) {
         return None;
     }
 
     use ast::ExprKind::*;
     match &expr.kind {
         Identifier(identifier) => {
-            if span.contains(line, col) && span.size() < 100 {
+            if span.contains(offset) && span.size() < 100 {
                 for (bound_name, bound_span) in bindings.iter().rev() {
                     if bound_name == &identifier.source.name {
                         return Some(*bound_span);
@@ -1324,12 +1348,12 @@ fn find_definition_in_expr(
                     bindings.push((name, param.h.span));
                 }
             }
-            let result = find_definition_in_expr(&lambda.body, line, col, bindings);
+            let result = find_definition_in_expr(&lambda.body, offset, bindings);
             bindings.truncate(saved_len);
             result
         }
         LetIn(let_in) => {
-            if let Some(span) = find_definition_in_expr(&let_in.value, line, col, bindings) {
+            if let Some(span) = find_definition_in_expr(&let_in.value, offset, bindings) {
                 return Some(span);
             }
 
@@ -1337,30 +1361,30 @@ fn find_definition_in_expr(
             for name in let_in.pattern.collect_names() {
                 bindings.push((name, let_in.pattern.h.span));
             }
-            let result = find_definition_in_expr(&let_in.body, line, col, bindings);
+            let result = find_definition_in_expr(&let_in.body, offset, bindings);
             bindings.truncate(saved_len);
             result
         }
         Application(func, args) => {
-            if let Some(s) = find_definition_in_expr(func, line, col, bindings) {
+            if let Some(s) = find_definition_in_expr(func, offset, bindings) {
                 return Some(s);
             }
             for arg in args {
-                if let Some(s) = find_definition_in_expr(arg, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(arg, offset, bindings) {
                     return Some(s);
                 }
             }
             None
         }
-        If(if_expr) => find_definition_in_expr(&if_expr.condition, line, col, bindings)
-            .or_else(|| find_definition_in_expr(&if_expr.then_branch, line, col, bindings))
-            .or_else(|| find_definition_in_expr(&if_expr.else_branch, line, col, bindings)),
-        BinaryOp(_, lhs, rhs) => find_definition_in_expr(lhs, line, col, bindings)
-            .or_else(|| find_definition_in_expr(rhs, line, col, bindings)),
-        UnaryOp(_, operand) => find_definition_in_expr(operand, line, col, bindings),
+        If(if_expr) => find_definition_in_expr(&if_expr.condition, offset, bindings)
+            .or_else(|| find_definition_in_expr(&if_expr.then_branch, offset, bindings))
+            .or_else(|| find_definition_in_expr(&if_expr.else_branch, offset, bindings)),
+        BinaryOp(_, lhs, rhs) => find_definition_in_expr(lhs, offset, bindings)
+            .or_else(|| find_definition_in_expr(rhs, offset, bindings)),
+        UnaryOp(_, operand) => find_definition_in_expr(operand, offset, bindings),
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
             for elem in elems {
-                if let Some(s) = find_definition_in_expr(elem, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(elem, offset, bindings) {
                     return Some(s);
                 }
             }
@@ -1368,47 +1392,47 @@ fn find_definition_in_expr(
         }
         Constructor(_, args) => {
             for arg in args {
-                if let Some(s) = find_definition_in_expr(arg, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(arg, offset, bindings) {
                     return Some(s);
                 }
             }
             None
         }
-        ArrayIndex(arr, idx) => find_definition_in_expr(arr, line, col, bindings)
-            .or_else(|| find_definition_in_expr(idx, line, col, bindings)),
+        ArrayIndex(arr, idx) => find_definition_in_expr(arr, offset, bindings)
+            .or_else(|| find_definition_in_expr(idx, offset, bindings)),
         ArrayWith {
             array, index, value, ..
-        } => find_definition_in_expr(array, line, col, bindings)
-            .or_else(|| find_definition_in_expr(index, line, col, bindings))
-            .or_else(|| find_definition_in_expr(value, line, col, bindings)),
-        VecWith { target, value, .. } => find_definition_in_expr(target, line, col, bindings)
-            .or_else(|| find_definition_in_expr(value, line, col, bindings)),
-        FieldAccess(base, _) => find_definition_in_expr(base, line, col, bindings),
+        } => find_definition_in_expr(array, offset, bindings)
+            .or_else(|| find_definition_in_expr(index, offset, bindings))
+            .or_else(|| find_definition_in_expr(value, offset, bindings)),
+        VecWith { target, value, .. } => find_definition_in_expr(target, offset, bindings)
+            .or_else(|| find_definition_in_expr(value, offset, bindings)),
+        FieldAccess(base, _) => find_definition_in_expr(base, offset, bindings),
         Loop(loop_expr) => {
             let saved_len = bindings.len();
             for name in loop_expr.pattern.collect_names() {
                 bindings.push((name, loop_expr.pattern.h.span));
             }
             if let Some(init) = &loop_expr.init {
-                if let Some(s) = find_definition_in_expr(init, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(init, offset, bindings) {
                     bindings.truncate(saved_len);
                     return Some(s);
                 }
             }
-            let result = find_definition_in_expr(&loop_expr.body, line, col, bindings);
+            let result = find_definition_in_expr(&loop_expr.body, offset, bindings);
             bindings.truncate(saved_len);
             result
         }
         RecordLiteral(fields) => {
             for (_, value) in fields {
-                if let Some(s) = find_definition_in_expr(value, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(value, offset, bindings) {
                     return Some(s);
                 }
             }
             None
         }
         Match(match_expr) => {
-            if let Some(s) = find_definition_in_expr(&match_expr.scrutinee, line, col, bindings) {
+            if let Some(s) = find_definition_in_expr(&match_expr.scrutinee, offset, bindings) {
                 return Some(s);
             }
             for case in &match_expr.cases {
@@ -1416,7 +1440,7 @@ fn find_definition_in_expr(
                 for name in case.pattern.collect_names() {
                     bindings.push((name, case.pattern.h.span));
                 }
-                if let Some(s) = find_definition_in_expr(&case.body, line, col, bindings) {
+                if let Some(s) = find_definition_in_expr(&case.body, offset, bindings) {
                     bindings.truncate(saved_len);
                     return Some(s);
                 }
@@ -1425,20 +1449,16 @@ fn find_definition_in_expr(
             None
         }
         TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            find_definition_in_expr(inner, line, col, bindings)
+            find_definition_in_expr(inner, offset, bindings)
         }
-        Range(range_expr) => find_definition_in_expr(&range_expr.start, line, col, bindings)
+        Range(range_expr) => find_definition_in_expr(&range_expr.start, offset, bindings)
+            .or_else(|| range_expr.step.as_ref().and_then(|s| find_definition_in_expr(s, offset, bindings)))
+            .or_else(|| find_definition_in_expr(&range_expr.end, offset, bindings)),
+        Slice(slice_expr) => find_definition_in_expr(&slice_expr.array, offset, bindings)
             .or_else(|| {
-                range_expr.step.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings))
+                slice_expr.start.as_ref().and_then(|s| find_definition_in_expr(s, offset, bindings))
             })
-            .or_else(|| find_definition_in_expr(&range_expr.end, line, col, bindings)),
-        Slice(slice_expr) => find_definition_in_expr(&slice_expr.array, line, col, bindings)
-            .or_else(|| {
-                slice_expr.start.as_ref().and_then(|s| find_definition_in_expr(s, line, col, bindings))
-            })
-            .or_else(|| {
-                slice_expr.end.as_ref().and_then(|e| find_definition_in_expr(e, line, col, bindings))
-            }),
+            .or_else(|| slice_expr.end.as_ref().and_then(|e| find_definition_in_expr(e, offset, bindings))),
         _ => None,
     }
 }
@@ -1446,25 +1466,14 @@ fn find_definition_in_expr(
 /// Convert an AST declaration to a DocumentSymbol
 #[allow(deprecated)]
 fn declaration_to_symbol(
+    text: &str,
     decl: &ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
 ) -> Option<DocumentSymbol> {
-    fn span_to_range(span: Span) -> Range {
-        Range {
-            start: Position {
-                line: span.start_line.saturating_sub(1) as u32,
-                character: span.start_col.saturating_sub(1) as u32,
-            },
-            end: Position {
-                line: span.end_line.saturating_sub(1) as u32,
-                character: span.end_col.saturating_sub(1) as u32,
-            },
-        }
-    }
-
     match decl {
         ast::Declaration::Decl(def) => {
             let span = def.body.h.span;
-            let range = span_to_range(span);
+            let range = span_to_range(text, span)?;
+            let selection_range = span_to_range(text, def.name_span)?;
             Some(DocumentSymbol {
                 name: def.name.clone(),
                 detail: Some(
@@ -1474,13 +1483,14 @@ fn declaration_to_symbol(
                 tags: None,
                 deprecated: None,
                 range,
-                selection_range: range,
+                selection_range,
                 children: None,
             })
         }
         ast::Declaration::Entry(entry) => {
             let span = entry.body.h.span;
-            let range = span_to_range(span);
+            let range = span_to_range(text, span)?;
+            let selection_range = span_to_range(text, entry.name_span)?;
             let kind_str = match entry.data.source.source.syntax.entry_kind {
                 interface::EntryKind::Vertex => "vertex",
                 interface::EntryKind::Root => "pipeline",
@@ -1494,7 +1504,7 @@ fn declaration_to_symbol(
                 tags: None,
                 deprecated: None,
                 range,
-                selection_range: range,
+                selection_range,
                 children: None,
             })
         }
@@ -1558,7 +1568,7 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
 }
 
 fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
-    let tokens = match lexer::tokenize(text) {
+    let tokens = match lexer::tokenize(ModuleId::from(0), text) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
@@ -1572,10 +1582,15 @@ fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
             continue;
         };
 
-        // Span is 1-based; LSP is 0-based
-        let line = lt.span.start_line.saturating_sub(1) as u32;
-        let start = lt.span.start_col.saturating_sub(1) as u32;
-        let length = (lt.span.end_col - lt.span.start_col) as u32;
+        let Some(range) = span_to_range(text, lt.span) else {
+            continue;
+        };
+        if range.start.line != range.end.line {
+            continue;
+        }
+        let line = range.start.line;
+        let start = range.start.character;
+        let length = range.end.character.saturating_sub(start);
 
         let delta_line = line - prev_line;
         let delta_start = if delta_line == 0 { start - prev_start } else { start };
@@ -1595,6 +1610,10 @@ fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
     result
 }
 
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;
+
 #[tokio::main]
 async fn main() {
     if std::env::args().any(|a| a == "--verbose" || a == "-v") {
@@ -1602,9 +1621,11 @@ async fn main() {
         verbose!("[wyn-analyzer] verbose mode enabled");
     }
 
-    // Pre-initialize the prelude cache before starting the server
-    // so any errors are caught early
-    let _ = get_prelude();
+    // Pre-initialize the compiler's prelude cache before serving requests.
+    if let Err(error) = initialize_frontend() {
+        eprintln!("failed to initialize Wyn compiler: {error}");
+        return;
+    }
     verbose!("[wyn-analyzer] prelude cached");
 
     let stdin = tokio::io::stdin();

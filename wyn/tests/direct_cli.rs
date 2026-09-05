@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const GRAPHICS_SOURCE: &str = r#"
 def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
@@ -15,9 +17,15 @@ entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =
 "#;
 
 fn temp_case(extension: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let unique = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos();
-    let directory = std::env::temp_dir().join(format!("wyn_direct_{}_{}", std::process::id(), unique));
-    fs::create_dir_all(&directory).expect("create test directory");
+    let directory = loop {
+        let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!("wyn_direct_{}_{sequence}", std::process::id()));
+        match fs::create_dir(&directory) {
+            Ok(()) => break directory,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create test directory: {error}"),
+        }
+    };
     let source = directory.join("direct.wyn");
     let output = directory.join(format!("direct.{extension}"));
     fs::write(&source, GRAPHICS_SOURCE).expect("write test source");
@@ -26,7 +34,7 @@ fn temp_case(extension: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 fn compile(source: &PathBuf, output: &PathBuf, target: &str, direct_flag: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_wyn"))
-        .arg("compile")
+        .arg("build")
         .arg(source)
         .arg("--graphics")
         .arg("--target")

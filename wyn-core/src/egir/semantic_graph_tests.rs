@@ -180,7 +180,7 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
     let function = Func::<Semantic>::new(
         region,
         "malformed_screma".to_string(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         by_value_function_result::<WynLanguage>(result_type),

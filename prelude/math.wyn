@@ -258,13 +258,13 @@ module type real = {
   -- Calling from a vertex or compute entry is undefined behaviour;
   -- the value comes from comparing the result of the surrounding
   -- expression across a 2×2 fragment quad.
-  sig dFdx(x: t) t
+  sig d_fdx(x: t) t
 
   -- | Screen-space derivative along y. **Fragment-stage only**, same
-  -- caveats as `dFdx`.
-  sig dFdy(x: t) t
+  -- caveats as `d_fdx`.
+  sig d_fdy(x: t) t
 
-  -- | `abs(dFdx) + abs(dFdy)` — the standard antialiasing edge-width
+  -- | `abs(d_fdx) + abs(d_fdy)` — the standard antialiasing edge-width
   -- estimate. **Fragment-stage only.**
   sig fwidth(x: t) t
 }

@@ -7,21 +7,21 @@
 -- Exercises filter piped into a size-polymorphic helper and same-frame
 -- array flow from ordinary computation into fragment processing.
 ---- The initial particle state is generated in Wyn. Each particle index seeds
--- an independent random-access stream from `lib/rng`; frame zero maps those
+-- an independent random-access stream from `wyn/rng`; frame zero maps those
 -- draws into a starting position + velocity. Later frames consume the
 -- previous position buffer supplied by viz's feedback pair.
 --
 -- Run (the explicit config path is needed because this example writes the
 -- compiled shader to a different directory than its sidecar):
 --
---   wyn compile testfiles\playground\particles.wyn ^
+--   wyn build testfiles\playground\particles.wyn ^
 --     -o C:\Users\<you>\AppData\Local\Temp\p.spv
 --   extra\viz\target\release\viz.exe pipeline ^
 --     C:\Users\<you>\AppData\Local\Temp\p.spv ^
 --     --config testfiles\playground\particles.viz.json ^
 --     --size 512x512
 
-import "../../lib/rng"
+import "pkg:rng"
 
 def N:i32 = 512
 def CLUMPF:f32 = 0.1
@@ -70,17 +70,17 @@ def wrap(coord: f32, vel: f32) f32 = (coord + UPDFACTOR * vel + f32(RES)) % f32(
 -- both `vec4f32`) into a row-major framebuffer index.
 def pixel_index(p: vec4f32) i32 = i32(p.y) * RES + i32(p.x)
 
-def sim(prev_pos: []vec4f32, iFrame: u32) []vec4f32 =
+def sim(prev_pos: []vec4f32, frame: u32) []vec4f32 =
   let new_pos =
-    if iFrame < 2u32 then
+    if frame < 2u32 then
       map(initial_particle, 0i32..<N)
     else
-      let prev_pos = prev_pos[0..N] in
+      let previous_positions = prev_pos[0..N] in
       let accelerated =
         map(|elem:vec4f32|
-              let deltav = clump(elem, prev_pos) + align(elem, prev_pos) + separation(elem, prev_pos) in
+              let deltav = clump(elem, previous_positions) + align(elem, previous_positions) + separation(elem, previous_positions) in
               @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
-            prev_pos)
+            previous_positions)
       in
       map(|upd:vec4f32| @[wrap(upd.x, upd.z), wrap(upd.y, upd.w), upd.z, upd.w],
           accelerated) in
@@ -92,8 +92,8 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   let y = if vid == 0 then -1.0 else if vid == 1 then -1.0 else 3.0 in
   vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
 
-def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
-  let target = pixel_index(fragCoord) in
+def main_image(positions: []vec4f32, frag_coord: vec4f32) vec4f32 =
+  let target = pixel_index(frag_coord) in
   let hits = map(
     |p: vec4f32| if pixel_index(p) == target then 1.0 else 0.0,
     positions[0..N]) in
@@ -102,10 +102,10 @@ def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
 
 entry particles(
     prev_pos: []vec4f32,
-    iFrame: u32,
+    frame: u32,
     screen: render_target<vec4f32>)
     ([]vec4f32, render_target<vec4f32>) =
-  let next = sim(prev_pos, iFrame) in
+  let next = sim(prev_pos, frame) in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in

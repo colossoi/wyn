@@ -12,7 +12,7 @@
 -- particles' paths accumulate into the dense, hair-like curves the original
 -- draws. Particles respawn at a fresh random spot when they age out or leave
 -- the frame, so coverage keeps building. The field `noise()` is 4-octave fbm
--- (Processing's default), supplied here by `lib/noise.wyn`'s `fbm_perlin`.
+-- (Processing's default), supplied here by `wyn/noise`'s `fbm_perlin`.
 --
 -- This is the real technique, not a per-pixel approximation: a state
 -- feedback loop (`tick`) + a scatter rasterizer (`rasterize`) + a display
@@ -36,13 +36,13 @@
 -- express yet.
 --
 -- Run (canvas is RES x RES = 720 x 720; size the window to match):
---   cargo run --bin wyn -- compile testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
+--   cargo run --bin wyn -- build testfiles/playground/perlin_fields.wyn -o /tmp/pf.spv
 --   (cd extra/viz && cargo run -- pipeline /tmp/pf.spv \
 --       --config ../../testfiles/playground/perlin_fields.viz.json \
 --       --size 720x720)
 
-import "../../lib/noise"
-import "../../lib/rng"
+import "pkg:noise"
+import "pkg:rng"
 
 open f32
 
@@ -66,7 +66,7 @@ def TWO_PI: f32 = 6.28318530718
 def FIELD_SEED: u32 = 1337
 
 ------------------------------------------------------------
--- rng helpers (lib/rng.wyn fasthash) — uniform f32 in [0, 1).
+-- rng helpers (`wyn/rng` fasthash) — uniform f32 in [0, 1).
 ------------------------------------------------------------
 
 def rand01(key: u32, pos: u32) f32 =
@@ -132,9 +132,9 @@ def select_variant(keyboard: []u32) i32 =
 
 def tick(prev: []vec4f32,
          keyboard: []u32,
-         iTime: f32,
-         iFrame: u32) []vec4f32 =
-  if iTime < 0.1 then
+         time: f32,
+         frame: u32) []vec4f32 =
+  if time < 0.1 then
     -- Stagger initial ages so particles don't all respawn in lockstep.
     map(|i: i32|
           let s = spawn(i, 11u32) in
@@ -143,7 +143,7 @@ def tick(prev: []vec4f32,
   else
     let variant = select_variant(keyboard) in
     let ps = prev[0..N] in
-    map(|i: i32| step_particle(ps[i], i, iFrame, variant, iTime), 0i32 ..< N)
+    map(|i: i32| step_particle(ps[i], i, frame, variant, time), 0i32 ..< N)
 
 ------------------------------------------------------------
 -- rasterize: scatter one tinted texel per particle into the persistent
@@ -169,9 +169,9 @@ def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
   let y = if vid == 0i32 then -1.0 else if vid == 1i32 then -1.0 else 3.0 in
   vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
 
-def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
-  let x = clampi(i32.f32(fragCoord.x)) in
-  let y = clampi(i32.f32(fragCoord.y)) in
+def main_image(positions: []vec4f32, frag_coord: vec4f32) vec4f32 =
+  let x = clampi(i32.f32(frag_coord.x)) in
+  let y = clampi(i32.f32(frag_coord.y)) in
   let colors = map(
     |p: vec4f32|
       if clampi(i32.f32(p.x)) == x && clampi(i32.f32(p.y)) == y
@@ -184,11 +184,11 @@ def main_image(positions: []vec4f32, fragCoord: vec4f32) vec4f32 =
 entry perlin_fields(
     prev: []vec4f32,
     keyboard: []u32,
-    iTime: f32,
-    iFrame: u32,
+    time: f32,
+    frame: u32,
     screen: render_target<vec4f32>)
     ([]vec4f32, render_target<vec4f32>) =
-  let next = tick(prev, keyboard, iTime, iFrame) in
+  let next = tick(prev, keyboard, time, frame) in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     vertex_main) in

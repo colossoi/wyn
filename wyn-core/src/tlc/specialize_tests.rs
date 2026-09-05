@@ -59,6 +59,7 @@ fn test_specialize_sign_f32() {
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: test_sym,
+            package: None,
             ty: f32_ty.clone(),
             body: sign_call,
             meta: DefMeta::Function,
@@ -147,6 +148,7 @@ fn test_specialize_min_i32() {
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: test_sym,
+            package: None,
             ty: i32_ty.clone(),
             body: min_a_b,
             meta: DefMeta::Function,

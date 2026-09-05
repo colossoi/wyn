@@ -6,7 +6,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
-use wyn_core::{CodegenTarget, CompilerOptions, LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
+use wyn_core::pipeline_descriptor::PipelineDescriptor;
+use wyn_core::{
+    CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, LoweringProfile, ParsedModules,
+    PipelineTopologyPolicy, SchedulePolicy,
+};
+use wyn_module_graph::{PackagePlan, SourceGraph};
+use wyn_package_manager::{
+    find_build_input, prepare_package, prepare_standalone, BuildInput, PreparationError,
+};
 
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -16,6 +24,41 @@ enum Target {
     Spirv,
     /// WGSL source code (WebGPU shading language)
     Wgsl,
+}
+
+impl Target {
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Spirv => "spv",
+            Self::Wgsl => "wgsl",
+        }
+    }
+}
+
+struct CompileOptions {
+    target: Target,
+    direct: bool,
+    wgsl_emulate_u64: bool,
+    fill_holes: bool,
+    output_tlc: Option<PathBuf>,
+    output_mir: Option<PathBuf>,
+    verbose: bool,
+}
+
+struct Compilation {
+    code: CompiledCode,
+    pipeline: PipelineDescriptor,
+    auxiliary: Vec<TextArtifact>,
+}
+
+enum CompiledCode {
+    Spirv(Vec<u32>),
+    Wgsl(String),
+}
+
+struct TextArtifact {
+    path: PathBuf,
+    contents: String,
 }
 
 /// Times the execution of a closure and prints the elapsed time if verbose.
@@ -39,18 +82,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile one or more source files to SPIR-V or WGSL
-    Compile {
-        /// Input source file(s). When multiple files are given, each
-        /// is compiled in turn within a single process — useful for
-        /// batch compilation and profiling.
-        #[arg(value_name = "FILE", required = true)]
-        inputs: Vec<PathBuf>,
+    /// Build a source program or local package as SPIR-V or WGSL
+    Build {
+        /// Input source file or package directory
+        #[arg(value_name = "INPUT")]
+        input: PathBuf,
 
-        /// Output file, or an existing directory to write
-        /// <input-stem>.<ext> into. Omitted: each output is written
-        /// next to its input. A non-directory path is only valid with
-        /// a single input.
+        /// Output file, or an existing directory in which to write it
         #[arg(short, long, value_name = "FILE|DIR")]
         output: Option<PathBuf>,
 
@@ -95,10 +133,10 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Validate a source file without generating output
+    /// Validate a source file or local package without generating output
     Check {
-        /// Input source file
-        #[arg(value_name = "FILE")]
+        /// Input source file or package directory
+        #[arg(value_name = "INPUT")]
         input: PathBuf,
 
         /// Enable the unified graphics pipeline vocabulary.
@@ -119,6 +157,15 @@ enum DriverError {
     #[error("Compilation error: {0}")]
     CompilationError(#[from] wyn_core::error::CompilerError),
 
+    #[error(transparent)]
+    LoadModules(#[from] LoadModulesError),
+
+    #[error("{0}")]
+    Compilation(#[from] CompilationFailure),
+
+    #[error("{0}")]
+    PackagePreparation(#[from] PreparationError),
+
     #[error("Pipeline descriptor serialization error: {0}")]
     DescriptorSerialization(#[from] serde_json::Error),
 
@@ -132,58 +179,83 @@ enum DriverError {
     InvalidOption(String),
 }
 
-struct FrontendFile {
-    program: wyn_core::ast_type_holes::HolesResolved,
+fn retain_source<T>(
+    result: wyn_core::error::Result<T>,
+    source_graph: &SourceGraph,
+) -> Result<T, DriverError> {
+    result.map_err(|error| CompilationFailure::new(error, source_graph.clone()).into())
 }
 
-fn type_check_frontend_file(
+fn normalize_input(input: &Path) -> Result<PathBuf, DriverError> {
+    let input = input.canonicalize()?;
+    if input.is_dir() || input.extension().and_then(|extension| extension.to_str()) == Some("wyn") {
+        return Ok(input);
+    }
+    Err(DriverError::InvalidOption(format!(
+        "input `{}` must be a package directory or `.wyn` source file",
+        input.display()
+    )))
+}
+
+fn output_path(input: &Path, output: Option<PathBuf>, target: Target) -> Result<PathBuf, DriverError> {
+    match output {
+        Some(directory) if directory.is_dir() => {
+            let Some(stem) = input.file_stem().and_then(|stem| stem.to_str()) else {
+                return Err(DriverError::InvalidOption(format!(
+                    "input `{}` has no UTF-8 file stem",
+                    input.display()
+                )));
+            };
+            Ok(directory.join(format!("{stem}.{}", target.extension())))
+        }
+        Some(path) => Ok(path),
+        None => {
+            let mut path = input.to_path_buf();
+            path.set_extension(target.extension());
+            Ok(path)
+        }
+    }
+}
+
+fn type_check_input(
     input: &Path,
     reject_holes: bool,
     graphics: bool,
     verbose: bool,
-) -> Result<FrontendFile, DriverError> {
-    let source = fs::read_to_string(input)?;
-    let (node_counter, module_manager) = time("frontend", verbose, || {
-        wyn_core::init_compiler_with_options(CompilerOptions { graphics })
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
+    let input = normalize_input(input)?;
+    let package_plan = match find_build_input(&input)? {
+        BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
+        BuildInput::Standalone(source) => prepare_standalone(source)?,
+    };
+    type_check_package_plan(package_plan, reject_holes, graphics, verbose)
+}
+
+fn type_check_package_plan(
+    plan: PackagePlan,
+    reject_holes: bool,
+    graphics: bool,
+    verbose: bool,
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
+    let modules = time("load_modules", verbose, || {
+        ParsedModules::load(plan, CompilerOptions { graphics })
     })?;
-    let program = time("parse", verbose, || {
-        wyn_core::parser::parse(&source, node_counter, module_manager)
-    })?;
-    // Resolve `import "..."` against the entry file's directory so
-    // user code can split across files. Imports are looked up
-    // relative to the file containing the import statement.
-    let base_dir = input.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-    let program = time("resolve_imports", verbose, || {
-        wyn_core::resolve_imports::resolve_imports(program, &base_dir)
-    })?;
-    let program = time("elaborate_modules", verbose, || {
-        wyn_core::elaborate_modules::elaborate_modules(program)
-    })?;
-    let program = time("resolve_names", verbose, || {
-        wyn_core::name_resolution::resolve_names(program)
-    });
-    let program = time("resolve_resources", verbose, || {
-        wyn_core::resolve_resources::resolve_resources(program)
-    })?;
-    let program = time("fold_ast_constants", verbose, || {
-        wyn_core::ast_const_fold::fold_constants(program)
-    });
-    let program = time("resolve_type_placeholders", verbose, || {
-        wyn_core::resolve_placeholders::resolve_type_placeholders(program)
-    });
-    let program = time("resolve_opens", verbose, || {
-        wyn_core::resolve_opens::resolve_opens(program)
-    })?;
-    let program = time("type_check", verbose, || {
-        wyn_core::types::run::type_check(program)
-    })?;
+    finish_type_check(modules, reject_holes, verbose)
+}
+
+fn finish_type_check(
+    modules: ParsedModules,
+    reject_holes: bool,
+    verbose: bool,
+) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
+    let program = time("type_check", verbose, || modules.type_check())?;
 
     for warning in &program.global_context.warnings {
-        eprintln!(
-            "{}: warning: {}",
-            warning.span(),
-            warning.message(&wyn_core::types::format_type)
-        );
+        let message = warning.message(&wyn_core::types::format_type);
+        match program.source_graph().display_location(*warning.span()) {
+            Ok(location) => eprintln!("{location}: warning: {message}"),
+            Err(_) => eprintln!("warning: {message}"),
+        }
     }
     let program = if reject_holes {
         wyn_core::ast_type_holes::reject_type_holes(program)?
@@ -191,7 +263,7 @@ fn type_check_frontend_file(
         wyn_core::ast_type_holes::fill_type_holes(program)?
     };
 
-    Ok(FrontendFile { program })
+    Ok(program)
 }
 
 fn main() -> ExitCode {
@@ -224,6 +296,10 @@ fn main() -> ExitCode {
             }
             ExitCode::from(1)
         }
+        Err(DriverError::Compilation(failure)) => {
+            eprintln!("{failure}");
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(1)
@@ -233,8 +309,8 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), DriverError> {
     match cli.command {
-        Commands::Compile {
-            inputs,
+        Commands::Build {
+            input,
             output,
             target,
             output_tlc,
@@ -244,70 +320,27 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             wgsl_emulate_u64,
             fill_holes,
             verbose,
-        } => {
-            if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
-                return Err(DriverError::InvalidOption(
-                    "--wgsl-emulate-u64 requires --target wgsl".to_string(),
-                ));
-            }
-            // Output handling:
-            //   omitted            → each output written next to its input
-            //   existing directory → DIR/<input-stem>.<ext> per file
-            //   regular file path  → only valid with a single input
-            let out_dir: Option<PathBuf> = match &output {
-                Some(p) if p.is_dir() => Some(p.clone()),
-                Some(p) if inputs.len() > 1 => {
-                    eprintln!(
-                        "error: --output must be an existing directory when compiling multiple files (got {})",
-                        p.display()
-                    );
-                    std::process::exit(1);
-                }
-                _ => None,
-            };
-            for (i, input) in inputs.iter().enumerate() {
-                let per_output = if let Some(dir) = &out_dir {
-                    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                    let ext = match target {
-                        Target::Spirv => "spv",
-                        Target::Wgsl => "wgsl",
-                    };
-                    Some(dir.join(format!("{stem}.{ext}")))
-                } else if inputs.len() == 1 {
-                    output.clone()
-                } else {
-                    None
-                };
-                if verbose && inputs.len() > 1 {
-                    eprintln!("[{}/{}] {}", i + 1, inputs.len(), input.display());
-                }
-                compile_file(
-                    input.clone(),
-                    per_output,
-                    target,
-                    output_tlc.clone(),
-                    output_mir.clone(),
-                    graphics,
-                    direct,
-                    wgsl_emulate_u64,
-                    fill_holes,
-                    verbose,
-                )?;
-            }
-        }
+        } => build(
+            input,
+            output,
+            target,
+            output_tlc,
+            output_mir,
+            graphics,
+            direct,
+            wgsl_emulate_u64,
+            fill_holes,
+            verbose,
+        ),
         Commands::Check {
             input,
             graphics,
             verbose,
-        } => {
-            check_file(input, graphics, verbose)?;
-        }
+        } => check(input, graphics, verbose),
     }
-
-    Ok(())
 }
 
-fn compile_file(
+fn build(
     input: PathBuf,
     output: Option<PathBuf>,
     target: Target,
@@ -319,40 +352,108 @@ fn compile_file(
     fill_holes: bool,
     verbose: bool,
 ) -> Result<(), DriverError> {
+    if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
+        return Err(DriverError::InvalidOption(
+            "--wgsl-emulate-u64 requires --target wgsl".to_string(),
+        ));
+    }
+
     if verbose {
-        info!("Compiling {}...", input.display());
+        info!("Building {}...", input.display());
     }
 
     // Wall-clock start for the always-printed timing summary below.
-    let compile_start = Instant::now();
+    let build_start = Instant::now();
 
-    let FrontendFile { program } = type_check_frontend_file(&input, !fill_holes, graphics, verbose)?;
-
-    let program = time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program))?;
-
-    // Output TLC if requested (before optimization)
-    if let Some(ref tlc_path) = output_tlc {
-        fs::write(tlc_path, format!("{program}"))?;
-        if verbose {
-            info!("Wrote TLC to {}", tlc_path.display());
-        }
-    }
-
-    let program = time("pin_entry_buffers", verbose, || {
-        wyn_core::tlc::pin_entry_buffers(program)
+    let normalized_input = normalize_input(&input)?;
+    let output_path = output_path(&normalized_input, output, target)?;
+    let package_plan = match find_build_input(&normalized_input)? {
+        BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
+        BuildInput::Standalone(source) => prepare_standalone(source)?,
+    };
+    let parsed_modules = time("load_modules", verbose, || {
+        ParsedModules::load(package_plan, CompilerOptions { graphics })
     })?;
-    let program = time("validate_ownership", verbose, || {
-        wyn_core::tlc::validate_ownership(program)
-    })?;
+    let compilation = compile(
+        parsed_modules,
+        CompileOptions {
+            target,
+            direct,
+            wgsl_emulate_u64,
+            fill_holes,
+            output_tlc,
+            output_mir,
+            verbose,
+        },
+    )?;
+    write_artifacts(&output_path, compilation, verbose)?;
+
+    // Always-on wall-clock summary (per-pass breakdown is available via
+    // `-v`). Printed to stderr so it doesn't pollute any piped output.
+    eprintln!(
+        "Built {} → {} in {:.2}s",
+        input.display(),
+        output_path.display(),
+        build_start.elapsed().as_secs_f64()
+    );
+
+    Ok(())
+}
+
+fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilation, DriverError> {
+    let CompileOptions {
+        target,
+        direct,
+        wgsl_emulate_u64,
+        fill_holes,
+        output_tlc,
+        output_mir,
+        verbose,
+    } = options;
+    let program = finish_type_check(modules, !fill_holes, verbose)?;
+    let source_graph = program.source_graph().clone();
+
+    let program = retain_source(
+        time("to_tlc", verbose, || wyn_core::tlc::lower_from_ast(program)),
+        &source_graph,
+    )?;
+    let mut auxiliary = Vec::new();
+    let program = retain_source(
+        time("validate_ownership", verbose, || {
+            wyn_core::tlc::validate_ownership(program)
+        }),
+        &source_graph,
+    )?;
     let program = time("tlc_partial_eval", verbose, || {
         wyn_core::tlc::partial_eval(program)
     });
+    let program = retain_source(
+        time("extract_stages", verbose, || {
+            wyn_core::tlc::extract_stages(program)
+        }),
+        &source_graph,
+    )?;
+    let program = retain_source(
+        time("pin_entry_buffers", verbose, || {
+            wyn_core::tlc::pin_entry_buffers(program)
+        }),
+        &source_graph,
+    )?;
+    if let Some(path) = output_tlc {
+        auxiliary.push(TextArtifact {
+            path,
+            contents: format!("{program}"),
+        });
+    }
     let program = time("normalize_soacs", verbose, || {
         wyn_core::tlc::normalize_soacs(program)
     });
-    let program = time("tlc_monomorphize", verbose, || {
-        wyn_core::tlc::monomorphize(program)
-    })?;
+    let program = retain_source(
+        time("tlc_monomorphize", verbose, || {
+            wyn_core::tlc::monomorphize(program)
+        }),
+        &source_graph,
+    )?;
     let program = time("tlc_rep_specialize", verbose, || {
         wyn_core::tlc::rep_specialize(program)
     });
@@ -399,9 +500,12 @@ fn compile_file(
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)
     });
-    let program = time("egir_optimize_semantic_operations", verbose, || {
-        wyn_core::egir::optimize_semantic_operations(program)
-    })?;
+    let program = retain_source(
+        time("egir_optimize_semantic_operations", verbose, || {
+            wyn_core::egir::optimize_semantic_operations(program)
+        }),
+        &source_graph,
+    )?;
     let profile = if direct {
         LoweringProfile::with_topology(
             match target {
@@ -431,43 +535,22 @@ fn compile_file(
         wyn_core::lower_egir_to_ssa(program)
     })?;
 
-    // Dump MIR if requested
-    if let Some(ref path) = output_mir {
-        fs::write(path, wyn_core::ssa::print::format_program(&ssa))?;
-        if verbose {
-            info!("Wrote MIR to {}", path.display());
-        }
+    if let Some(path) = output_mir {
+        auxiliary.push(TextArtifact {
+            path,
+            contents: wyn_core::ssa::print::format_program(&ssa),
+        });
     }
 
     let soac_lowered = ssa;
 
-    // Output path (default: input name with the target's extension).
-    let output_path = output.unwrap_or_else(|| {
-        let mut path = input.clone();
-        path.set_extension(match target {
-            Target::Spirv => "spv",
-            Target::Wgsl => "wgsl",
-        });
-        path
-    });
-
-    let pipeline = match target {
+    let (code, pipeline) = match target {
         Target::Spirv => {
-            let lowered = time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered))?;
-
-            // Write SPIR-V binary
-            let mut file = fs::File::create(&output_path)?;
-            let spirv_len = lowered.spirv.len();
-            for word in &lowered.spirv {
-                file.write_all(&word.to_le_bytes())?;
-            }
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
-                info!("Generated {} words of SPIR-V", spirv_len);
-            }
-
-            lowered.pipeline
+            let lowered = retain_source(
+                time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered)),
+                &source_graph,
+            )?;
+            (CompiledCode::Spirv(lowered.spirv), lowered.pipeline)
         }
         Target::Wgsl => {
             let options = if wgsl_emulate_u64 {
@@ -475,54 +558,85 @@ fn compile_file(
             } else {
                 wyn_core::wgsl::WgslOptions::default()
             };
-            let lowered = time("wgsl_lower", verbose, || {
-                wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
-            })?;
+            let lowered = retain_source(
+                time("wgsl_lower", verbose, || {
+                    wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
+                }),
+                &source_graph,
+            )?;
 
-            fs::write(&output_path, &lowered.wgsl)?;
-
-            if verbose {
-                info!("Successfully compiled to {}", output_path.display());
-            }
-
-            lowered.pipeline
+            (CompiledCode::Wgsl(lowered.wgsl), lowered.pipeline)
         }
     };
 
+    Ok(Compilation {
+        code,
+        pipeline,
+        auxiliary,
+    })
+}
+
+fn write_artifacts(output_path: &Path, compilation: Compilation, verbose: bool) -> Result<(), DriverError> {
+    let Compilation {
+        code,
+        pipeline,
+        auxiliary,
+    } = compilation;
+
+    match code {
+        CompiledCode::Spirv(words) => {
+            let mut file = fs::File::create(output_path)?;
+            for word in &words {
+                file.write_all(&word.to_le_bytes())?;
+            }
+            if verbose {
+                info!(
+                    "Wrote {} words of SPIR-V to {}",
+                    words.len(),
+                    output_path.display()
+                );
+            }
+        }
+        CompiledCode::Wgsl(source) => {
+            fs::write(output_path, source)?;
+            if verbose {
+                info!("Wrote WGSL to {}", output_path.display());
+            }
+        }
+    }
+
+    for artifact in auxiliary {
+        fs::write(&artifact.path, artifact.contents)?;
+        if verbose {
+            info!("Wrote compiler output to {}", artifact.path.display());
+        }
+    }
+
     // Both executable backends share the same planned runtime contract.
     if !pipeline.pipelines.is_empty() {
-        let descriptor_path = {
-            let mut p = output_path.clone();
-            p.set_extension("json");
-            p
-        };
+        let mut descriptor_path = output_path.to_owned();
+        descriptor_path.set_extension("json");
         fs::write(&descriptor_path, serde_json::to_string_pretty(&pipeline)?)?;
         if verbose {
             info!("Wrote pipeline descriptor to {}", descriptor_path.display());
         }
     }
 
-    // Always-on wall-clock summary (per-pass breakdown is available via
-    // `-v`). Printed to stderr so it doesn't pollute any piped output.
-    eprintln!(
-        "Compiled {} → {} in {:.2}s",
-        input.display(),
-        output_path.display(),
-        compile_start.elapsed().as_secs_f64()
-    );
-
     Ok(())
 }
 
-fn check_file(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
+fn check(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
     if verbose {
         info!("Checking {}...", input.display());
     }
 
-    let FrontendFile { program } = type_check_frontend_file(&input, true, graphics, verbose)?;
-    let program = wyn_core::tlc::lower_from_ast(program)?;
-    let program = wyn_core::tlc::pin_entry_buffers(program)?;
-    wyn_core::tlc::validate_ownership(program)?;
+    let program = type_check_input(&input, true, graphics, verbose)?;
+    let source_graph = program.source_graph().clone();
+    let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
+    let program = retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;
+    let program = wyn_core::tlc::partial_eval(program);
+    let program = retain_source(wyn_core::tlc::extract_stages(program), &source_graph)?;
+    retain_source(wyn_core::tlc::pin_entry_buffers(program), &source_graph)?;
 
     if verbose {
         info!("✓ {} is valid", input.display());

@@ -1,0 +1,7 @@
+manifest-version = 1
+
+[package]
+name = "wyn/rng"
+version = "v0.1.0"
+wyn = "v0.1.0"
+library = "src/lib.wyn"

@@ -40,10 +40,13 @@ pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<Hole
     if !holes.is_empty() {
         let mut message = String::from("type hole(s) in program:\n");
         for (ty, span) in holes {
+            let location = program
+                .source_graph()
+                .display_location(*span)
+                .map(|location| location.to_string())
+                .unwrap_or_else(|_| "generated source".to_string());
             message.push_str(&format!(
-                "  at {}:{} — inferred `{}`\n",
-                span.start_line,
-                span.start_col,
+                "  at {location} — inferred `{}`\n",
                 types::format_type(ty),
             ));
         }
@@ -249,9 +252,8 @@ fn default_error(
     reason: &str,
 ) -> ast::ExprKind<ast::HolesResolvedTree> {
     errors.push(format!(
-        "--fill-holes: at {}:{}: {} (type: {:?})",
-        header.span.start_line,
-        header.span.start_col,
+        "--fill-holes: at {}: {} (type: {:?})",
+        header.span,
         reason,
         scheme_type(&header.ty)
     ));

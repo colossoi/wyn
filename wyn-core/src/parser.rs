@@ -3,51 +3,38 @@ use crate::error::Result;
 use crate::interface::{Attribute, EntryKind, EntryOutputDecl};
 use crate::lexer;
 use crate::lexer::{LocatedToken, Token};
-use crate::module_manager;
 use crate::op;
 use crate::types;
 use crate::LookupMap;
 use crate::{bail_parse_at, err_parse, err_parse_at};
 use log::trace;
 use std::sync::OnceLock;
+use wyn_base::IdSource;
+use wyn_module_graph::{ImportSiteId, ModuleId, TextRange};
 
 mod module;
 mod pattern;
 #[cfg(test)]
 mod tests;
 
-pub type ParsedFamily = AstFamily<
-    SourceTree,
-    DefinitionSyntax,
-    EntrySyntax,
-    Attribute,
-    ExternSyntax,
-    ParsedFrontend<NestedDeclaration>,
->;
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedFile {
+    pub(crate) declarations: Vec<Declaration<ParsedFamily>>,
+    pub(crate) imports: Vec<SourceImport>,
+}
 
-/// AST produced directly by parsing.
-#[derive(Debug, Clone, Copy)]
-pub enum ParsedTag {}
-pub type Parsed = Program<ParsedTag, ParsedFamily, module_manager::ModuleManager>;
-
-/// Parse source into the first phase-typed AST while transferring ownership of
-/// the sole node allocator and module state into the resulting program.
-pub fn parse(
+pub(crate) fn parse_file(
+    module: ModuleId,
     source: &str,
-    mut node_ids: NodeCounter,
-    module_manager: module_manager::ModuleManager,
-) -> Result<Parsed> {
-    let tokens = lexer::tokenize(source).map_err(|error| err_parse!("{}", error))?;
-    let graphics = module_manager.options().graphics;
-    let declarations = {
-        let mut parser = Parser::with_graphics(tokens, &mut node_ids, graphics);
-        parser.parse()?
-    };
-    Ok(Program {
+    node_ids: &mut NodeCounter,
+    graphics: bool,
+) -> Result<ParsedFile> {
+    let tokens = lexer::tokenize(module, source).map_err(|error| err_parse!("{}", error))?;
+    let mut parser = Parser::with_graphics(module, tokens, node_ids, graphics);
+    let declarations = parser.parse()?;
+    Ok(ParsedFile {
         declarations,
-        node_ids,
-        global_context: module_manager,
-        state: std::marker::PhantomData,
+        imports: parser.imports,
     })
 }
 
@@ -89,27 +76,37 @@ fn suffix_to_type(suffix: &str) -> Type {
     Type::Constructed(type_name, vec![])
 }
 
-pub struct Parser<'a> {
+pub(crate) struct Parser<'a> {
+    module: ModuleId,
     tokens: Vec<LocatedToken>,
     current: usize,
     node_counter: &'a mut NodeCounter,
+    import_sites: IdSource<ImportSiteId>,
+    imports: Vec<SourceImport>,
     graphics: bool,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
-        Self::with_graphics(tokens, node_counter, true)
+    #[cfg(test)]
+    pub(crate) fn new(tokens: Vec<LocatedToken>, node_counter: &'a mut NodeCounter) -> Self {
+        let module =
+            tokens.first().and_then(|token| token.span.module()).unwrap_or_else(|| ModuleId::from(0));
+        Self::with_graphics(module, tokens, node_counter, true)
     }
 
-    pub fn with_graphics(
+    pub(crate) fn with_graphics(
+        module: ModuleId,
         tokens: Vec<LocatedToken>,
         node_counter: &'a mut NodeCounter,
         graphics: bool,
     ) -> Self {
         Parser {
+            module,
             tokens,
             current: 0,
             node_counter,
+            import_sites: IdSource::new(),
+            imports: Vec::new(),
             graphics,
         }
     }
@@ -125,12 +122,11 @@ impl<'a> Parser<'a> {
         }
         match self.tokens.last() {
             Some(last) => Span::new(
-                last.span.end_line,
-                last.span.end_col,
-                last.span.end_line,
-                last.span.end_col,
+                self.module,
+                TextRange::new(last.span.range().end(), last.span.range().end())
+                    .unwrap_or_else(|error| panic!("invalid end-of-file span: {error}")),
             ),
-            None => Span::new(0, 0, 0, 0),
+            None => self.start_of_file_span(),
         }
     }
 
@@ -142,11 +138,18 @@ impl<'a> Parser<'a> {
             // so this index is always in-bounds.
             self.tokens[self.current - 1].span
         } else {
-            Span::new(0, 0, 0, 0)
+            self.start_of_file_span()
         }
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {
+    fn start_of_file_span(&self) -> Span {
+        Span::new(
+            self.module,
+            TextRange::new(0, 0).unwrap_or_else(|error| panic!("invalid start-of-file span: {error}")),
+        )
+    }
+
+    pub(crate) fn parse(&mut self) -> Result<Vec<Declaration<ParsedFamily>>> {
         let mut declarations = Vec::new();
 
         while !self.is_at_end() {
@@ -201,9 +204,8 @@ impl<'a> Parser<'a> {
                 Ok(Declaration::Frontend(ParsedFrontend::Open(mod_exp)))
             }
             Some(Token::Import) => {
-                self.advance();
-                let path = self.expect_string_literal()?;
-                Ok(Declaration::Frontend(ParsedFrontend::Import(path)))
+                let import = self.parse_source_import()?;
+                Ok(Declaration::Frontend(ParsedFrontend::Import(import)))
             }
             Some(Token::Extern) => self.parse_extern_decl(attributes),
             Some(Token::Resource) => Err(err_parse_at!(
@@ -229,7 +231,7 @@ impl<'a> Parser<'a> {
                 ParsedFrontend::Module(decl) => NestedDeclaration::Module(decl),
                 ParsedFrontend::ModuleTypeBind(decl) => NestedDeclaration::ModuleTypeBind(decl),
                 ParsedFrontend::Open(expression) => NestedDeclaration::Open(expression),
-                ParsedFrontend::Import(path) => NestedDeclaration::Import(path),
+                ParsedFrontend::Import(import) => NestedDeclaration::Import(import),
                 ParsedFrontend::Resource(decl) => NestedDeclaration::Resource(decl),
             },
         })
@@ -244,6 +246,20 @@ impl<'a> Parser<'a> {
             }
             _ => Err(err_parse!("Expected string literal")),
         }
+    }
+
+    fn parse_source_import(&mut self) -> Result<SourceImport> {
+        let start = self.current_span();
+        self.expect(Token::Import)?;
+        let path = self.expect_string_literal()?;
+        let span = start.merge(&self.previous_span());
+        let import = SourceImport {
+            site: self.import_sites.next_id(),
+            path,
+            span,
+        };
+        self.imports.push(import.clone());
+        Ok(import)
     }
 
     fn parse_decl(
@@ -1159,6 +1175,21 @@ impl<'a> Parser<'a> {
                 self.advance();
                 return Ok((ty.clone(), Diet::Leaf(false)));
             }
+            if self.graphics {
+                let graphics_alias = match name_str.as_str() {
+                    "viewport" => Some(types::viewport()),
+                    "scissor" => Some(types::scissor()),
+                    "raster_state" => Some(types::raster_state()),
+                    "depth_test" => Some(types::depth_test()),
+                    "blend_mode" => Some(types::blend_mode()),
+                    "fragment_state" => Some(types::fragment_state()),
+                    _ => None,
+                };
+                if let Some(ty) = graphics_alias {
+                    self.advance();
+                    return Ok((ty, Diet::Leaf(false)));
+                }
+            }
         }
 
         match self.peek() {
@@ -1173,12 +1204,9 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_lowercase) => {
                 let type_name = name.clone();
                 self.advance();
+                let qualified = self.finish_qualified_identifier(type_name)?;
 
-                // Check for qualified type name (module.typename)
-                if self.check(&Token::Dot) {
-                    self.advance(); // consume '.'
-                    let inner_name = self.expect_identifier()?;
-                    let qualified = format!("{}.{}", type_name, inner_name);
+                if qualified.contains('.') {
                     return Ok((
                         Type::Constructed(TypeName::Named(qualified), vec![]),
                         Diet::Leaf(false),
@@ -1186,7 +1214,7 @@ impl<'a> Parser<'a> {
                 }
 
                 // Check if this is a builtin primitive type
-                let type_name_variant = match type_name.as_str() {
+                let type_name_variant = match qualified.as_str() {
                     // Floating point types
                     "f16" => TypeName::Float(16),
                     "f32" => TypeName::Float(32),
@@ -1225,7 +1253,7 @@ impl<'a> Parser<'a> {
                         ));
                     }
                     // User-defined type alias or unrecognized type
-                    _ => TypeName::Named(type_name),
+                    _ => TypeName::Named(qualified),
                 };
                 Ok((Type::Constructed(type_name_variant, vec![]), Diet::Leaf(false)))
             }
@@ -1278,12 +1306,9 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) if name.chars().next().is_some_and(char::is_uppercase) => {
                 let name = name.clone();
                 self.advance();
+                let qualified = self.finish_qualified_identifier(name)?;
 
-                // Check for qualified type (e.g., R.t for functor param module member)
-                if self.check(&Token::Dot) {
-                    self.advance();
-                    let member = self.expect_identifier()?;
-                    let qualified = format!("{}.{}", name, member);
+                if qualified.contains('.') {
                     return Ok((
                         Type::Constructed(TypeName::Named(qualified), vec![]),
                         Diet::Leaf(false),
@@ -1294,7 +1319,7 @@ impl<'a> Parser<'a> {
                 // (e.g. `T`, `UV`). Sum types use `#name` constructors and
                 // dispatch via the Token::Constructor arm below.
                 Ok((
-                    Type::Constructed(TypeName::UserVar(name), vec![]),
+                    Type::Constructed(TypeName::UserVar(qualified), vec![]),
                     Diet::Leaf(false),
                 ))
             }
@@ -2585,6 +2610,20 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(name)) => Ok(name.clone()),
             _ => Err(err_parse_at!(span, "Expected identifier")),
         }
+    }
+
+    fn expect_qualified_identifier(&mut self) -> Result<String> {
+        let name = self.expect_identifier()?;
+        self.finish_qualified_identifier(name)
+    }
+
+    fn finish_qualified_identifier(&mut self, mut name: String) -> Result<String> {
+        while self.check(&Token::Dot) {
+            self.advance();
+            name.push('.');
+            name.push_str(&self.expect_identifier()?);
+        }
+        Ok(name)
     }
 
     /// Like `expect_identifier`, but also accepts integer literals for tuple

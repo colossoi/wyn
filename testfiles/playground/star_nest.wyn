@@ -25,13 +25,6 @@ def saturation: f32  = 0.850
 ------------------------------------------------------------
 -- Full-screen triangle vertex shader
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- 2×2 rotation matrix.
@@ -64,21 +57,23 @@ def fractal_iter(p0: vec3f32) (vec3f32, f32) =
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan NDC
-  let fc = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   -- UV and ray direction
-  let uv_raw = fc / iResolution.xy - @[0.5, 0.5] in
-  let uv     = @[uv_raw.x, uv_raw.y * iResolution.y / iResolution.x] in
+  let uv_raw = fc / resolution.xy - @[0.5, 0.5] in
+  let uv     = @[uv_raw.x, uv_raw.y * resolution.y / resolution.x] in
   let dir0   = @[uv.x * zoom, uv.y * zoom, 1.0] in
 
   -- Time
-  let time = iTime * speed + 0.25 in
+  let animation_time = time * speed + 0.25 in
 
   -- Mouse-controlled rotations
-  let a1   = 0.5 + iMouse.x / iResolution.x * 2.0 in
-  let a2   = 0.8 + iMouse.y / iResolution.y * 2.0 in
+  let a1   = 0.5 + mouse.x / resolution.x * 2.0 in
+  let a2   = 0.8 + mouse.y / resolution.y * 2.0 in
   let rot1 = rot2(a1) in
   let rot2m = rot2(a2) in
 
@@ -88,7 +83,7 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: 
 
   -- Ray origin
   let from0 = @[1.0, 0.5, 0.5] in
-  let from1 = from0 + @[time * 2.0, time, 0.0 - 2.0] in
+  let from1 = from0 + @[animation_time * 2.0, animation_time, 0.0 - 2.0] in
   let from2 = from1 with .xz *= rot1 in
   let from  = from2 with .xy *= rot2m in
 
@@ -202,12 +197,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: 
 -- 	fragColor = vec4(v*.01,1.);
 --
 -- }
-
-entry star_nest(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

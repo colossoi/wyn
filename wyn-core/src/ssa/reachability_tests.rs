@@ -39,7 +39,7 @@ fn function(id: FunctionId, name: &str, references: &[Definition]) -> Function {
         id,
         name: name.into(),
         body: body(references),
-        span: Span::dummy(),
+        span: Span::generated(),
         linkage_name: None,
     }
 }
@@ -65,7 +65,7 @@ fn entry(references: &[Definition]) -> EntryPoint {
         outputs: vec![],
         storage_bindings: vec![],
         pipeline_storage_accesses: LookupMap::new(),
-        span: Span::dummy(),
+        span: Span::generated(),
     }
 }
 

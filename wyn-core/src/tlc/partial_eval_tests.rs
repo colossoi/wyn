@@ -5,7 +5,7 @@ use crate::ast::{BinaryOp, Span, TypeName};
 use crate::builtins;
 use crate::op::BinaryOperator;
 use crate::tlc;
-use crate::tlc::context::RewriteGlobal;
+use crate::tlc::context::TransformedGlobal;
 use crate::tlc::data::{Empty, PolymorphicDefinition};
 use crate::tlc::ownership::OwnershipValidated;
 use crate::tlc::test_support::TestBuilder;
@@ -24,7 +24,7 @@ fn input_ae(boxed: Box<Term<Empty, Empty>>) -> tlc::ArrayExpr<Empty, Empty> {
     }
 }
 fn make_span() -> Span {
-    Span::dummy()
+    Span::generated()
 }
 
 fn make_program(
@@ -36,6 +36,7 @@ fn make_program(
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: name_sym,
+            package: None,
             ty: body.ty.clone(),
             body,
             meta: DefMeta::Function,
@@ -45,12 +46,12 @@ fn make_program(
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     )
 }
 
-fn rewrite_global() -> RewriteGlobal {
-    RewriteGlobal {
+fn transformed_global() -> TransformedGlobal {
+    TransformedGlobal {
         known_defs: Default::default(),
         auto_storage_binding_ids: Default::default(),
     }
@@ -265,6 +266,7 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: test_sym,
+            package: None,
             ty: lambda_ty,
             body: lambda,
             meta: DefMeta::Function,
@@ -274,7 +276,7 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let program = partial_eval(program);
@@ -540,6 +542,7 @@ fn test_function_inlining() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: foo_sym,
+                package: None,
                 ty: foo_body.ty.clone(),
                 body: foo_body,
                 meta: DefMeta::Function,
@@ -550,6 +553,7 @@ fn test_function_inlining() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: bar_sym,
+                package: None,
                 ty: int_ty.clone(),
                 body: bar_body,
                 meta: DefMeta::Function,
@@ -560,7 +564,7 @@ fn test_function_inlining() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -658,6 +662,7 @@ fn test_function_alias_inlining() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: g_sym,
+                package: None,
                 ty: g_body.ty.clone(),
                 body: g_body,
                 meta: DefMeta::Function,
@@ -668,6 +673,7 @@ fn test_function_alias_inlining() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: main_sym,
+                package: None,
                 ty: int_ty(),
                 body: main_body,
                 meta: DefMeta::Function,
@@ -678,7 +684,7 @@ fn test_function_alias_inlining() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -780,6 +786,7 @@ fn test_function_alias_partial_application() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: g_sym,
+                package: None,
                 ty: g_body.ty.clone(),
                 body: g_body,
                 meta: DefMeta::Function,
@@ -790,6 +797,7 @@ fn test_function_alias_partial_application() {
             Def {
                 data: PolymorphicDefinition { scheme: None },
                 name: main_sym,
+                package: None,
                 ty: int_ty(),
                 body: main_body,
                 meta: DefMeta::Function,
@@ -800,7 +808,7 @@ fn test_function_alias_partial_application() {
         ],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);
@@ -874,6 +882,7 @@ fn test_intrinsic_alias_inlining() {
         vec![Def {
             data: PolymorphicDefinition { scheme: None },
             name: main_sym,
+            package: None,
             ty: float_ty.clone(),
             body: main_body,
             meta: DefMeta::Function,
@@ -883,7 +892,7 @@ fn test_intrinsic_alias_inlining() {
         }],
         symbols,
         term_ids,
-        rewrite_global(),
+        transformed_global(),
     );
 
     let result = partial_eval(program);

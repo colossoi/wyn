@@ -114,6 +114,7 @@ fn attach_entry_bounds(
     let Def {
         data: (),
         name,
+        package,
         ty,
         body,
         meta,
@@ -137,6 +138,7 @@ fn attach_entry_bounds(
     Def {
         data: (),
         name,
+        package,
         ty,
         body,
         meta,

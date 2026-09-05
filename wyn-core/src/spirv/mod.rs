@@ -568,7 +568,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             &mut constructor,
             &constant.body,
             false,
-            Span::new(0, 0, 0, 0),
+            Span::generated(),
             param_ids,
             LookupMap::new(),
             first_code_block,

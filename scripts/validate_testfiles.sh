@@ -61,6 +61,15 @@ fi
 FAIL=0
 PASS=0
 SKIP=0
+PLAYGROUND_HEADER="scripts/playground_image_header.wyn"
+PREPARED_SOURCE=""
+
+cleanup_prepared_source() {
+    if [ -n "$PREPARED_SOURCE" ]; then
+        rm -f "$PREPARED_SOURCE"
+    fi
+}
+trap cleanup_prepared_source EXIT
 
 # Files directly in testfiles/ (compiler-feature tests) and
 # testfiles/playground/ (visual shader demos / shadertoy ports).
@@ -69,6 +78,19 @@ SKIP=0
 # added explicitly.
 for f in testfiles/*.wyn testfiles/playground/*.wyn; do
     base=$(basename "$f" .wyn)
+    compile_source="$f"
+
+    # Bare playground image shaders intentionally omit their fullscreen
+    # pipeline. Recreate the source the web playground compiles by prepending
+    # its shared image header. Explicit compute/feedback pipelines retain an
+    # entry declaration and compile unchanged.
+    if [[ "$f" == testfiles/playground/* ]] && ! grep -q '^entry ' "$f"; then
+        PREPARED_SOURCE="testfiles/playground/.validate-${base}-$$.wyn"
+        { cat "$PLAYGROUND_HEADER"; printf '\n'; cat "$f"; } > "$PREPARED_SOURCE"
+        compile_source="$PREPARED_SOURCE"
+    else
+        PREPARED_SOURCE=""
+    fi
 
     if [ "$MODE" = "wgsl" ]; then
         # WGSL mode: compile + validate via viz (naga in-process).
@@ -85,12 +107,16 @@ for f in testfiles/*.wyn testfiles/playground/*.wyn; do
         out_path="${OUT_DIR}/${base}.wgsl"
         printf "Compiling %s → WGSL... " "$f"
 
-        if ! compile_err=$("$WYN_BIN" compile "$f" --graphics -t wgsl -o "$out_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" build "$compile_source" --graphics -t wgsl -o "$out_path" 2>&1); then
+            cleanup_prepared_source
+            PREPARED_SOURCE=""
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))
             continue
         fi
+        cleanup_prepared_source
+        PREPARED_SOURCE=""
 
         printf "validating... "
 
@@ -114,12 +140,16 @@ for f in testfiles/*.wyn testfiles/playground/*.wyn; do
         spv_path="${OUT_DIR}/${base}.spv"
         printf "Compiling %s... " "$f"
 
-        if ! compile_err=$("$WYN_BIN" compile "$f" --graphics -o "$spv_path" 2>&1); then
+        if ! compile_err=$("$WYN_BIN" build "$compile_source" --graphics -o "$spv_path" 2>&1); then
+            cleanup_prepared_source
+            PREPARED_SOURCE=""
             echo "COMPILE FAILED"
             echo "$compile_err"
             FAIL=$((FAIL + 1))
             continue
         fi
+        cleanup_prepared_source
+        PREPARED_SOURCE=""
 
         printf "validating... "
 

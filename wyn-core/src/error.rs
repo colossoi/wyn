@@ -1,5 +1,11 @@
-use crate::ast::Span;
+use std::error::Error as StdError;
+use std::fmt;
+use std::sync::Arc;
+
 use thiserror::Error;
+use wyn_module_graph::{BuildFailure, LocalSourceError, SourceGraph};
+
+use crate::ast::Span;
 
 #[derive(Debug, Error)]
 pub enum CompilerError {
@@ -63,6 +69,66 @@ impl CompilerError {
             | Self::SpirvBuilderError(_)
             | Self::Internal(_) => None,
         }
+    }
+}
+
+/// Failure while initializing and loading the parsed source-module closure.
+#[derive(Debug, Error)]
+pub enum LoadModulesError {
+    #[error("failed to initialize the compiler prelude: {0}")]
+    Prelude(#[source] CompilerError),
+
+    #[error(transparent)]
+    Modules(#[from] BuildFailure<CompilerError, LocalSourceError>),
+}
+
+/// A compiler error together with the source graph needed to render its span
+/// without relying on filesystem paths or session-local IDs.
+#[derive(Debug)]
+pub struct CompilationFailure {
+    error: CompilerError,
+    source_graph: Arc<SourceGraph>,
+}
+
+impl CompilationFailure {
+    /// Attach source provenance to an error from any compiler phase.
+    pub fn new(error: CompilerError, source_graph: impl Into<Arc<SourceGraph>>) -> Self {
+        Self {
+            error,
+            source_graph: source_graph.into(),
+        }
+    }
+
+    /// The structured compiler error that stopped the frontend.
+    pub const fn error(&self) -> &CompilerError {
+        &self.error
+    }
+
+    /// Physical source, package, and import provenance for the failed build.
+    pub fn source_graph(&self) -> &SourceGraph {
+        self.source_graph.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_error(self) -> CompilerError {
+        self.error
+    }
+}
+
+impl fmt::Display for CompilationFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(span) = self.error.span() {
+            if let Ok(location) = self.source_graph.display_location(span) {
+                write!(formatter, "{location}: ")?;
+            }
+        }
+        fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl StdError for CompilationFailure {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.error)
     }
 }
 

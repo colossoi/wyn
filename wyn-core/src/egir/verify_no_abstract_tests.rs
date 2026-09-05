@@ -49,7 +49,7 @@ fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName
         id: FunctionId::from_index(0),
         name: "f".into(),
         body: builder.finish_unchecked(),
-        span: ast::Span::dummy(),
+        span: ast::Span::generated(),
         linkage_name: None,
     }
 }
@@ -68,7 +68,7 @@ fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) 
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
         pipeline_storage_accesses: LookupMap::new(),
-        span: ast::Span::dummy(),
+        span: ast::Span::generated(),
     }
 }
 

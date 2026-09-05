@@ -37,9 +37,10 @@ fn compile_to_tlc(source: &str) -> tlc::stage::SoaNormalized {
     let type_checked = compile_thru_frontend(source).expect("type_check");
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     let program = tlc::validate_ownership(program).expect("validate_ownership");
     let program = tlc::partial_eval(program);
+    let program = tlc::extract_stages(program).expect("extract_stages");
+    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     tlc::normalize_soacs(program)
 }
 
@@ -143,19 +144,19 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, SymbolId, Symbo
     let var_a = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(a_sym)),
     };
     let body_zero = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let let_term = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Let {
             name: b_sym,
             name_ty: unique_arr_ty.clone(),
@@ -173,13 +174,14 @@ fn synth_program_with_alias_let() -> (tlc::stage::SoaNormalized, SymbolId, Symbo
     let lambda_term = Term {
         id: ids.next_id(),
         ty: Type::Constructed(TypeName::Arrow, vec![unique_arr_ty, i32_ty]),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Lambda(lambda),
     };
 
     let def = Def {
         data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
+        package: None,
         ty: lambda_term.ty.clone(),
         body: lambda_term,
         meta: DefMeta::Function,
@@ -551,7 +553,6 @@ fn has_use_after_move(source: &str) -> bool {
     let type_checked = compile_thru_frontend(source).expect("type_check");
     let program = ast_type_holes::reject_type_holes(type_checked).expect("type holes");
     let program = tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
     super::check(&program).is_err()
 }
 
@@ -1672,19 +1673,19 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     let var_grid = Term {
         id: ids.next_id(),
         ty: unique_outer_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(grid_sym)),
     };
     let zero_idx = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let index_call = Term {
         id: ids.next_id(),
         ty: inner_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Index {
             array: Box::new(var_grid),
             index: Box::new(zero_idx),
@@ -1695,7 +1696,7 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     let var_with = Term {
         id: ids.next_id(),
         ty: with_fn_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Builtin {
             id: array_with_id,
             overload_idx: 0,
@@ -1704,19 +1705,19 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     let zero_with_idx = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let val_99 = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("99".to_string()),
     };
     let with_call = Term {
         id: ids.next_id(),
         ty: inner_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::App {
             func: Box::new(var_with),
             args: vec![index_call, zero_with_idx, val_99],
@@ -1736,12 +1737,13 @@ fn synth_program_with_with_through_index() -> tlc::stage::SoaNormalized {
     let lambda_term = Term {
         id: ids.next_id(),
         ty: f_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Lambda(lambda),
     };
     let f_def = Def {
         data: tlc::data::PolymorphicDefinition { scheme: None },
         name: f_sym,
+        package: None,
         ty: f_ty,
         body: lambda_term,
         meta: DefMeta::Function,
@@ -1856,7 +1858,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let consume_body = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let consume_lam = Lambda {
@@ -1867,12 +1869,13 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let consume_lam_term = Term {
         id: ids.next_id(),
         ty: consume_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Lambda(consume_lam),
     };
     let consume_def = Def {
         data: (),
         name: consume_sym,
+        package: None,
         ty: consume_ty.clone(),
         body: consume_lam_term,
         meta: DefMeta::Function,
@@ -1884,19 +1887,19 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let var_consume = Term {
         id: ids.next_id(),
         ty: consume_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(consume_sym)),
     };
     let var_cap = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(cap_sym)),
     };
     let consume_call = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::App {
             func: Box::new(var_consume),
             args: vec![var_cap],
@@ -1906,7 +1909,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let var_outer = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(outer_sym)),
     };
 
@@ -1919,13 +1922,13 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let zero_lit = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let one_lit = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("1".to_string()),
     };
     let range_input = tlc::ArrayExpr::Range {
@@ -1947,7 +1950,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
                 types::no_buffer(),
             ],
         ),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
@@ -1963,13 +1966,13 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let inner_let_body = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let inner_let = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Let {
             name: f_sym,
             name_ty: Type::Constructed(
@@ -1989,14 +1992,14 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
         Term {
             id: ids.next_id(),
             ty: Type::Constructed(TypeName::Int(32), vec![]),
-            span: Span::dummy(),
+            span: Span::generated(),
             kind: TermKind::IntLit(n.to_string()),
         }
     }
     let arr_lit = Term {
         id: ids.next_id(),
         ty: unique_arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::ArrayExpr(tlc::ArrayExpr::Literal(vec![
             int_lit(&mut ids, "1"),
             int_lit(&mut ids, "2"),
@@ -2007,7 +2010,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let outer_let = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Let {
             name: outer_sym,
             name_ty: unique_arr_ty.clone(),
@@ -2019,6 +2022,7 @@ fn synth_program_with_populated_soac_captures() -> tlc::stage::GeneratedLambdasF
     let main_def = Def {
         data: (),
         name: main_sym,
+        package: None,
         ty: i32_ty.clone(),
         body: outer_let,
         meta: DefMeta::Function,
@@ -2093,7 +2097,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let var_outer = Term {
         id: ids.next_id(),
         ty: arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Var(VarRef::Symbol(outer_sym)),
     };
     let capture_term_id = var_outer.id;
@@ -2101,7 +2105,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let body_zero = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
 
@@ -2114,13 +2118,13 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let zero_lit = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let one_lit = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("1".to_string()),
     };
     let range_input = tlc::ArrayExpr::Range {
@@ -2132,7 +2136,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let map_term = Term {
         id: ids.next_id(),
         ty: arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Soac(SoacOp::Map {
             lam: SoacBody {
                 lam: lambda,
@@ -2148,13 +2152,13 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let zero_body = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::IntLit("0".to_string()),
     };
     let inner_let = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Let {
             name: f_sym,
             name_ty: arr_ty.clone(),
@@ -2167,14 +2171,14 @@ fn soac_capture_term_is_analyzed_for_liveness() {
         Term {
             id: ids.next_id(),
             ty: Type::Constructed(TypeName::Int(32), vec![]),
-            span: Span::dummy(),
+            span: Span::generated(),
             kind: TermKind::IntLit(n.to_string()),
         }
     }
     let arr_lit = Term {
         id: ids.next_id(),
         ty: arr_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::ArrayExpr(tlc::ArrayExpr::Literal(vec![
             int_lit(&mut ids, "1"),
             int_lit(&mut ids, "2"),
@@ -2185,7 +2189,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let outer_let = Term {
         id: ids.next_id(),
         ty: i32_ty.clone(),
-        span: Span::dummy(),
+        span: Span::generated(),
         kind: TermKind::Let {
             name: outer_sym,
             name_ty: arr_ty.clone(),
@@ -2197,6 +2201,7 @@ fn soac_capture_term_is_analyzed_for_liveness() {
     let main_def = Def {
         data: (),
         name: main_sym,
+        package: None,
         ty: i32_ty.clone(),
         body: outer_let,
         meta: DefMeta::Function,

@@ -3,8 +3,8 @@
 use crate::ast;
 use crate::error;
 use crate::interface;
-use crate::module_manager;
 use crate::resolve_imports;
+use crate::semantic_modules;
 
 pub type ModulesElaboratedFamily = ast::AstFamily<
     ast::SourceTree,
@@ -21,9 +21,9 @@ pub type ModulesElaboratedFamily = ast::AstFamily<
 #[derive(Debug, Clone, Copy)]
 pub enum ModulesElaboratedTag {}
 pub type ModulesElaborated =
-    ast::Program<ModulesElaboratedTag, ModulesElaboratedFamily, module_manager::ModuleManager>;
+    ast::Program<ModulesElaboratedTag, ModulesElaboratedFamily, semantic_modules::SemanticModules>;
 
-/// Elaborate modules into `module_manager` and remove module declarations
+/// Elaborate modules into semantic state and remove module declarations.
 /// from the ordinary program tree.
 pub fn elaborate_modules(program: resolve_imports::ImportsResolved) -> error::Result<ModulesElaborated> {
     program.try_rebuild(|declarations, mut global_context, node_ids| {

@@ -1,0 +1,10 @@
+manifest-version = 1
+
+[package]
+name = "test/version-mismatch-app"
+version = "v1.0.0"
+wyn = "v0.1.0"
+library = "src/main.wyn"
+
+[dependencies]
+example = { package = "test/version-mismatch-dependency", version = "v1.1.0", path = "../deps/example" }

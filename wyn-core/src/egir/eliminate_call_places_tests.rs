@@ -30,7 +30,7 @@ fn leaves_effectful_value_only_calls_for_ssa_elaboration() {
     let callee = Func::<Physical>::new(
         region,
         "effectful_value_only".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(ty.clone()),
@@ -98,7 +98,7 @@ fn eliminates_internal_calls_with_place_arguments() {
     let callee = Func::<Physical>::new(
         region,
         "place_reader".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(ty.clone()),

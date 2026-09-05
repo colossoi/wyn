@@ -66,7 +66,7 @@ fn affine_program() -> (FunctionId, Segmented) {
     let function = Func::<Semantic>::new(
         region,
         "affine_compose".to_string(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         result_abi,

@@ -100,7 +100,7 @@ fn mixed_callee() -> Func<Physical> {
     Func::<Physical>::new(
         region,
         "mixed".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         by_value_function_result::<WynLanguage>(ty),
@@ -128,7 +128,7 @@ fn mixed_callee_without_invariant_subexpression() -> Func<Physical> {
     Func::<Physical>::new(
         region,
         "mixed".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params,
         by_value_function_result::<WynLanguage>(ty),
@@ -261,7 +261,7 @@ fn inlines_fixed_array_parameters_outside_loops() {
     let callee = Func::<Physical>::new(
         region,
         "fixed_array_element".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(scalar.clone()),
@@ -346,7 +346,7 @@ fn inlines_fixed_array_parameters_through_a_selection_cfg() {
     let callee = Func::<Physical>::new(
         region,
         "conditional_fixed_array_element".into(),
-        Span::dummy(),
+        Span::generated(),
         None,
         params.clone(),
         by_value_function_result::<WynLanguage>(scalar.clone()),

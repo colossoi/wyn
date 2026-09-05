@@ -8,19 +8,12 @@ open f32
 ------------------------------------------------------------
 -- Vertex shader: full-screen triangle
 ------------------------------------------------------------
-def verts: [3]vec4f32 =
-  [@[-1.0, -1.0, 0.0, 1.0],
-   @[3.0, -1.0, 0.0, 1.0],
-   @[-1.0, 3.0, 0.0, 1.0]]
-
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
 
 ------------------------------------------------------------
 -- Rotation matrix from angle (mat2(cos(angle + vec4(0, 33, 11, 0))))
 ------------------------------------------------------------
 
-def rotMat(angle: f32) mat2f32 =
+def rot_mat(angle: f32) mat2f32 =
   let c0 = cos(angle) in
   let c1 = cos((angle + 33.0)) in
   let c2 = cos((angle + 11.0)) in
@@ -30,15 +23,15 @@ def rotMat(angle: f32) mat2f32 =
 -- Channel ray march (direct port of macro A(C, Z))
 ------------------------------------------------------------
 
-def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: f32, iResolution: vec3f32) f32 =
-  let r = iResolution in
-  let rx = rotMat(mx) in
-  let ry = rotMat(my) in
-  let marchResult = loop (i, d, accum) = (0, 0.0, 0.0) while i < 80 do
+def trace_simple(frag_coord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: f32, resolution: vec3f32) f32 =
+  let r = resolution in
+  let rx = rot_mat(mx) in
+  let ry = rot_mat(my) in
+  let march_result = loop (i, d, accum) = (0, 0.0, 0.0) while i < 80 do
     let fi = f32.i32(i) in
 
-    let p_x = (fragCoord.x + fragCoord.x - r.x) / r.y * d in
-    let p_y = (fragCoord.y + fragCoord.y - r.y) / r.y * d in
+    let p_x = (frag_coord.x + frag_coord.x - r.x) / r.y * d in
+    let p_y = (frag_coord.y + frag_coord.y - r.y) / r.y * d in
     let p_z = d - 8.0 in
 
     if abs(p_x) > 5.0 then (80, d, accum)
@@ -67,7 +60,7 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
       let a = fract((sin((dot(g, @[43.7, 78.2, 123.4]))) * 127.1)) * 6.28 in
 
       -- Menger fractal
-      let mengerResult = loop (k, e, sc) = (0, 1.0, 2.0) while k < 3 do
+      let menger_result = loop (k, e, sc) = (0, 1.0, 2.0) while k < 3 do
         let gk = @[abs((fract((p3_x * sc)) * 2.0 - 1.0)),
                    abs((fract((p3_y * sc)) * 2.0 - 1.0)),
                    abs((fract((p3_z * sc)) * 2.0 - 1.0))] in
@@ -78,34 +71,36 @@ def traceSimple(fragCoord: vec2f32, mx: f32, my: f32, z_offset: f32, use_mouse: 
       let c = max(max(max(abs(p3_x), abs(p3_y)), abs(p3_z)),
                       (dot(@[abs(p3_x), abs(p3_y), abs(p3_z)], @[0.577, 0.577, 0.577]) * 0.9)) - 3.0 in
 
-      let s = 0.01 + 0.15 * abs((max(max(c, (mengerResult.1 - 0.1)), (abs(sin(c)) - 0.3)) + z_offset * 0.02 - fi / 130.0)) in
+      let s = 0.01 + 0.15 * abs((max(max(c, (menger_result.1 - 0.1)), (abs(sin(c)) - 0.3)) + z_offset * 0.02 - fi / 130.0)) in
       let sf = smoothstep(0.02, 0.01, s) in
 
       let contrib = 1.6 / s * (0.5 + 0.5 * sin((fi * 0.3 + z_offset * 5.0)) + sf * 4.0 * h * sin((a + fi * 0.4 + z_offset * 5.0))) in
 
       (i + 1, d + s, accum + contrib)
-  in marchResult.2
+  in march_result.2
 
 ------------------------------------------------------------
 -- Fragment shader
 ------------------------------------------------------------
 
-def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: vec4f32) vec4f32 =
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
   -- Flip Y for Vulkan
-  let coord = @[fragCoord.x, iResolution.y - fragCoord.y] in
+  let coord = @[frag_coord.x, resolution.y - frag_coord.y] in
 
   -- Mouse or time-based rotation
-  let use_mouse = if iMouse.z > 0.0 then 1.0 else 0.0 in
+  let use_mouse = if mouse.z > 0.0 then 1.0 else 0.0 in
   let m = if use_mouse > 0.5 then
-    @[(iMouse.x / iResolution.x - 0.5) * 6.28, (iMouse.y / iResolution.y - 0.5) * 6.28]
+    @[(mouse.x / resolution.x - 0.5) * 6.28, (mouse.y / resolution.y - 0.5) * 6.28]
   else
-    @[iTime / 2.0, iTime / 2.0]
+    @[time / 2.0, time / 2.0]
   in
 
   -- Trace each color channel with chromatic aberration offset
-  let r_val = traceSimple(coord, m.x, m.y, (0.0 - 1.0), use_mouse, iResolution) in
-  let g_val = traceSimple(coord, m.x, m.y, 0.0, use_mouse, iResolution) in
-  let b_val = traceSimple(coord, m.x, m.y, 1.0, use_mouse, iResolution) in
+  let r_val = trace_simple(coord, m.x, m.y, (0.0 - 1.0), use_mouse, resolution) in
+  let g_val = trace_simple(coord, m.x, m.y, 0.0, use_mouse, resolution) in
+  let b_val = trace_simple(coord, m.x, m.y, 1.0, use_mouse, resolution) in
 
   -- Apply tanh tonemapping: tanh(O * O / 1e7)
   let scale = 1.0 / 10000000.0 in
@@ -161,12 +156,3 @@ def fragment_main(iResolution: vec3f32, iTime: f32, iMouse: vec4f32, fragCoord: 
 --     A(r, -1.)A(g, 0.)A(b, 1.)
 --     O = tanh(O * O / 1e7);
 -- }
-
-entry holodice(
-    iResolution: vec3f32, iTime: f32, iMouse: vec4f32,
-    screen: render_target<vec4f32>) render_target<vec4f32> =
-  let covered = rasterize_triangles(
-    direct_draw(3u32, 1u32),
-    vertex_main) in
-  shade(screen, covered,
-    |fragment| fragment_main(iResolution, iTime, iMouse, fragment.position))

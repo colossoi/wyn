@@ -1,0 +1,3 @@
+module Example = import "pkg:example"
+
+entry alternate(value: i32) i32 = Example.add_one(value)

@@ -1,6 +1,6 @@
 @echo off
 REM Profile the wyn compiler with samply by compiling every testfile in
-REM one process. Multi-input mode (`wyn compile a.wyn b.wyn ...`) means a
+REM one process. Multi-input mode (`wyn build a.wyn b.wyn ...`) means a
 REM single binary invocation walks the full corpus, giving samply a long,
 REM diverse run to sample from — no per-iteration startup noise, no
 REM single-file overfitting.
@@ -80,7 +80,7 @@ if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 echo Profiling compile of every testfile (output -^> %OUTDIR%)...
 REM `-v` prints `[i/n] path` before each file so a mid-batch compile
 REM failure is immediately attributable to the file that triggered it.
-samply record -- "%BINARY%" compile --graphics -v !FILES! -o "%OUTDIR%"
+samply record -- "%BINARY%" build --graphics -v !FILES! -o "%OUTDIR%"
 
 set EXITCODE=%errorlevel%
 popd
