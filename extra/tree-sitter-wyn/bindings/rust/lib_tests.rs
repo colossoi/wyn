@@ -78,6 +78,56 @@ fn test_parse_lambda() {
 }
 
 #[test]
+fn test_parse_custom_operator_definition() {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).expect("Error loading Wyn grammar");
+
+    let source = "def (+^)((a: i32, b: i32), (c: i32, d: i32)) = (a + c, b + d)";
+    let tree = parser.parse(source, None).unwrap();
+    let root = tree.root_node();
+
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    let declaration = root.named_child(0).expect("expected a declaration");
+    let name = declaration.child_by_field_name("name").expect("expected an operator name");
+    assert_eq!(name.kind(), "operator_name");
+    assert_eq!(name.utf8_text(source.as_bytes()).unwrap(), "(+^)");
+}
+
+#[test]
+fn test_with_value_contains_the_full_binary_expression() {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).expect("Error loading Wyn grammar");
+
+    let source = "def modify(a: []i32, i: i32, x: i32) []i32 = a with [i] = a[i] + x";
+    let tree = parser.parse(source, None).unwrap();
+    let root = tree.root_node();
+
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    let declaration = root.named_child(0).expect("expected a declaration");
+    let body = declaration.child_by_field_name("body").expect("expected a definition body");
+    assert_eq!(body.kind(), "array_with", "{}", body.to_sexp());
+    let value = body.child_by_field_name("value").expect("expected an update value");
+    assert_eq!(value.kind(), "binary_expression", "{}", body.to_sexp());
+}
+
+#[test]
+fn test_with_updates_remain_left_associative() {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).expect("Error loading Wyn grammar");
+
+    let source = "def update(a: []i32, i: i32, j: i32, x: i32, y: i32) []i32 = a with [i] = x with [j] = y";
+    let tree = parser.parse(source, None).unwrap();
+    let root = tree.root_node();
+
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    let declaration = root.named_child(0).expect("expected a declaration");
+    let body = declaration.child_by_field_name("body").expect("expected a definition body");
+    assert_eq!(body.kind(), "array_with", "{}", body.to_sexp());
+    let array = body.child_by_field_name("array").expect("expected an updated array");
+    assert_eq!(array.kind(), "array_with", "{}", body.to_sexp());
+}
+
+#[test]
 fn parse_all_repository_testfiles() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let Some(repository_root) = manifest_dir.ancestors().nth(2) else {

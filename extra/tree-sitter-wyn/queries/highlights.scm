@@ -111,8 +111,6 @@
   (identifier) @type.parameter)
 
 [
-  (param type: (identifier) @type)
-  (param type: (qualified_name) @type)
   (entry_param type: (identifier) @type)
   (entry_param type: (qualified_name) @type)
   (extern_param type: (identifier) @type)
@@ -199,7 +197,11 @@
   name: (identifier) @variable)
 
 (param
-  name: (identifier) @variable.parameter)
+  (identifier) @variable.parameter)
+
+(param
+  (typed_pattern
+    pattern: (identifier) @variable.parameter))
 
 (entry_param
   name: (identifier) @variable.parameter)

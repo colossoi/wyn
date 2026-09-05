@@ -343,13 +343,9 @@ module.exports = grammar({
       ')',
     ),
 
-    // Entry params: identifier with required type annotation (see SPECIFICATION.md)
-    // Note: def params may have optional type annotation
-    param: $ => seq(
-      optional($.attribute),
-      field('name', $.identifier),
-      optional(seq(':', field('type', $._type))),
-    ),
+    // Ordinary function parameters are patterns; unlike entry parameters,
+    // they may destructure tuples, records, vectors, and constructors.
+    param: $ => $._pattern,
 
     entry_params: $ => seq(
       '(',
@@ -557,10 +553,10 @@ module.exports = grammar({
 
     // `arr with [i] = v` — produces a copy of `arr` with element `i`
     // set to `v`. Left-associative chains: `a with [i]=x with [j]=y`
-    // parses as `(a with [i]=x) with [j]=y`. Precedence sits above
+    // parses as `(a with [i]=x) with [j]=y`. Precedence sits below
     // binary operators so `a with [i] = b + c` reads as
     // `a with [i] = (b + c)`.
-    array_with: $ => prec.left(10, seq(
+    array_with: $ => prec.left(PREC.ASSIGN, seq(
       field('array', $._expression),
       'with',
       '[',
@@ -572,7 +568,7 @@ module.exports = grammar({
 
     // Vector swizzle update, including the compound forms accepted by the
     // hand-written parser: `v with .xy = rhs` and `v with .xy *= rhs`.
-    vec_with: $ => prec.left(10, seq(
+    vec_with: $ => prec.left(PREC.ASSIGN, seq(
       field('vector', $._expression),
       'with',
       '.',
@@ -584,7 +580,7 @@ module.exports = grammar({
 
     // Record updates omit the leading dot and may select a nested field:
     // `record with outer.inner = value`.
-    record_with: $ => prec.left(10, seq(
+    record_with: $ => prec.left(PREC.ASSIGN, seq(
       field('record', $._expression),
       'with',
       field('field', $.identifier),
@@ -1015,13 +1011,7 @@ module.exports = grammar({
 
     operator_name: $ => seq('(', $._operator, ')'),
 
-    _operator: $ => choice(
-      '+', '-', '*', '/', '%', '**', '//', '%%',
-      '==', '!=', '<', '<=', '>', '>=',
-      '&&', '||', '!',
-      '&', '^', '<<', '>>', '>>>',
-      '|>',
-    ),
+    _operator: $ => token(/[+\-*\/%=!><&^|]+/),
 
     // ============================================
     // Comments

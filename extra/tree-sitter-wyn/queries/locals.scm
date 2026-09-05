@@ -56,7 +56,11 @@
   name: (identifier) @local.definition)
 
 (param
-  name: (identifier) @local.definition)
+  (identifier) @local.definition)
+
+(param
+  (typed_pattern
+    pattern: (identifier) @local.definition))
 
 (entry_param
   name: (identifier) @local.definition)
