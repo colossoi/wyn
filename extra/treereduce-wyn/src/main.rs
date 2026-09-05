@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -53,6 +54,13 @@ enum OnParseError {
     Error,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum Comments {
+    #[default]
+    Remove,
+    Keep,
+}
+
 /// Fast, syntax-aware test-case reducer for Wyn.
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -64,6 +72,10 @@ struct Args {
     /// Behavior when the initial source has Tree-sitter parse errors.
     #[arg(long, value_enum, default_value_t)]
     on_parse_error: OnParseError,
+
+    /// Remove all comments before reduction, or preserve every comment.
+    #[arg(long, value_enum, default_value_t)]
+    comments: Comments,
 
     /// Number of parallel interestingness checks used by treereduce.
     #[arg(short, long, default_value_t = default_jobs())]
@@ -103,11 +115,21 @@ struct Args {
     interesting_stderr: Option<String>,
 
     /// Regex on stdout that overrides an interesting result.
-    #[arg(long, value_name = "REGEX", help_heading = "Interestingness check options")]
+    #[arg(
+        long,
+        value_name = "REGEX",
+        requires = "interesting_stdout",
+        help_heading = "Interestingness check options"
+    )]
     uninteresting_stdout: Option<String>,
 
     /// Regex on stderr that overrides an interesting result.
-    #[arg(long, value_name = "REGEX", help_heading = "Interestingness check options")]
+    #[arg(
+        long,
+        value_name = "REGEX",
+        requires = "interesting_stderr",
+        help_heading = "Interestingness check options"
+    )]
     uninteresting_stderr: Option<String>,
 
     /// Do not verify that the initial test case is interesting.
@@ -115,11 +137,19 @@ struct Args {
     no_verify: bool,
 
     /// Inherit stdout from the interestingness check.
-    #[arg(long, help_heading = "Interestingness check options")]
+    #[arg(
+        long,
+        conflicts_with_all = ["interesting_stdout", "uninteresting_stdout"],
+        help_heading = "Interestingness check options"
+    )]
     inherit_stdout: bool,
 
     /// Inherit stderr from the interestingness check.
-    #[arg(long, help_heading = "Interestingness check options")]
+    #[arg(
+        long,
+        conflicts_with_all = ["interesting_stderr", "uninteresting_stderr"],
+        help_heading = "Interestingness check options"
+    )]
     inherit_stderr: bool,
 
     /// Directory in which to place temporary @@ files.
@@ -180,6 +210,51 @@ struct StructuralStats {
     accepted: usize,
 }
 
+#[derive(Clone, Debug)]
+struct PreserveComments<C> {
+    inner: C,
+    comments: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+enum PreserveCommentsState<S> {
+    Rejected,
+    Inner(S),
+}
+
+impl<C: Check> Check for PreserveComments<C> {
+    type State = PreserveCommentsState<C::State>;
+
+    fn start(&self, source: &[u8]) -> io::Result<Self::State> {
+        if has_exact_comments(source, &self.comments) {
+            self.inner.start(source).map(PreserveCommentsState::Inner)
+        } else {
+            Ok(PreserveCommentsState::Rejected)
+        }
+    }
+
+    fn cancel(&self, state: Self::State) -> io::Result<()> {
+        match state {
+            PreserveCommentsState::Rejected => Ok(()),
+            PreserveCommentsState::Inner(state) => self.inner.cancel(state),
+        }
+    }
+
+    fn try_wait(&self, state: &mut Self::State) -> io::Result<Option<bool>> {
+        match state {
+            PreserveCommentsState::Rejected => Ok(Some(false)),
+            PreserveCommentsState::Inner(state) => self.inner.try_wait(state),
+        }
+    }
+
+    fn wait(&self, state: Self::State) -> io::Result<bool> {
+        match state {
+            PreserveCommentsState::Rejected => Ok(false),
+            PreserveCommentsState::Inner(state) => self.inner.wait(state),
+        }
+    }
+}
+
 fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
@@ -199,7 +274,29 @@ fn main() -> Result<()> {
     let initial_size = source.len();
     let initial_tree = parse(&language, &source)?;
     handle_initial_parse_errors(&args, &initial_tree)?;
+    let comments = collect_comments(&initial_tree, &source);
+    let preserved_comments = match args.comments {
+        Comments::Remove => {
+            let comments_size: usize = comments.iter().map(Vec::len).sum();
+            remove_comments(&initial_tree, &mut source);
+            if args.verbose > 0 {
+                eprintln!(
+                    "removed {} comments before reduction (-{comments_size} bytes)",
+                    comments.len()
+                );
+            }
+            Vec::new()
+        }
+        Comments::Keep => comments,
+    };
+    let check = PreserveComments {
+        inner: check,
+        comments: preserved_comments,
+    };
 
+    if args.verbose > 0 {
+        eprintln!("verifying initial test case ({} bytes)", source.len());
+    }
     if !args.no_verify && !check.interesting(&source)? {
         bail!("initial test case is not interesting");
     }
@@ -231,11 +328,26 @@ fn main() -> Result<()> {
         passes_done += 1;
         let pass_start_size = source.len();
 
+        if args.verbose > 0 {
+            eprintln!("outer pass {passes_done}: structural reduction ({pass_start_size} bytes)");
+        }
         let (next, stats) = structural_reduce(&language, source, &check, args.verbose)?;
         source = next;
         structural_stats.attempts += stats.attempts;
         structural_stats.accepted += stats.accepted;
 
+        if args.verbose > 0 {
+            eprintln!(
+                "outer pass {passes_done}: structural reduction finished ({} bytes, {}/{} accepted)",
+                source.len(),
+                stats.accepted,
+                stats.attempts
+            );
+            eprintln!(
+                "outer pass {passes_done}: generic reduction ({} bytes)",
+                source.len()
+            );
+        }
         source = generic_pass(
             &language,
             &node_types,
@@ -258,6 +370,19 @@ fn main() -> Result<()> {
         // the fixpoint behavior users expect.
         if source.len() == pass_start_size {
             break;
+        }
+    }
+
+    let compacted = collapse_blank_lines(&source);
+    if compacted.len() < source.len() {
+        let reduction = source.len() - compacted.len();
+        if check.interesting(&compacted)? {
+            if args.verbose > 0 {
+                eprintln!("collapsed repeated blank lines (-{reduction} bytes)");
+            }
+            source = compacted;
+        } else if args.verbose > 0 {
+            eprintln!("kept blank lines because collapsing them made the test uninteresting");
         }
     }
 
@@ -322,6 +447,56 @@ fn read_source(args: &Args) -> Result<Vec<u8>> {
     Ok(source)
 }
 
+fn comment_ranges(tree: &Tree) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "comment" {
+            ranges.push((node.start_byte(), node.end_byte()));
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
+fn collect_comments(tree: &Tree, source: &[u8]) -> Vec<Vec<u8>> {
+    comment_ranges(tree).into_iter().map(|(start, end)| source[start..end].to_vec()).collect()
+}
+
+fn remove_comments(tree: &Tree, source: &mut Vec<u8>) {
+    for (start, end) in comment_ranges(tree).into_iter().rev() {
+        source.drain(start..end);
+    }
+}
+
+fn has_exact_comments(source: &[u8], expected: &[Vec<u8>]) -> bool {
+    let language: Language = tree_sitter_wyn::LANGUAGE.into();
+    parse(&language, source).map(|tree| collect_comments(&tree, source) == expected).unwrap_or(false)
+}
+
+fn collapse_blank_lines(source: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut in_blank_run = false;
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        let content = line.strip_suffix(b"\n").unwrap_or(line);
+        let content = content.strip_suffix(b"\r").unwrap_or(content);
+        let blank = content.iter().all(|byte| matches!(byte, b' ' | b'\t'));
+        if blank {
+            if !in_blank_run && line.ends_with(b"\n") {
+                output.push(b'\n');
+            }
+            in_blank_run = true;
+        } else {
+            output.extend_from_slice(line);
+            in_blank_run = false;
+        }
+    }
+    output
+}
+
 fn write_output(output: &str, source: &[u8]) -> Result<()> {
     if output == "-" {
         io::stdout().lock().write_all(source)?;
@@ -356,16 +531,19 @@ fn hole_replacements() -> HashMap<&'static str, &'static [&'static str]> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn generic_pass(
+fn generic_pass<C>(
     language: &Language,
     node_types: &NodeTypes,
     source: Vec<u8>,
-    check: &CmdCheck,
+    check: &C,
     jobs: usize,
     min_reduction: usize,
     delete_non_optional: bool,
     replacements: HashMap<&'static str, &'static [&'static str]>,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+where
+    C: Check + Clone + Debug + Send + Sync + 'static,
+{
     let tree = parse(language, &source)?;
     let config = Config {
         check: check.clone(),
@@ -808,5 +986,86 @@ mod tests {
         assert!(concrete.iter().any(|candidate| candidate == "def f = 0"));
         assert!(concrete.iter().any(|candidate| candidate == "def f = 1"));
         assert_eq!(holes["binary_expression"], ["???"]);
+    }
+
+    #[test]
+    fn removes_all_comments_before_reduction() {
+        let mut source = b"-- first\ndef f(x:f32) f32 = x -- second\n".to_vec();
+        let tree = parse(&language(), &source).unwrap();
+        remove_comments(&tree, &mut source);
+        assert_eq!(source, b"\ndef f(x:f32) f32 = x \n");
+    }
+
+    #[test]
+    fn preserve_comments_check_rejects_comment_deletion() {
+        let check = PreserveComments {
+            inner: Contains(b"bug"),
+            comments: vec![b"-- keep one".to_vec(), b"-- keep two".to_vec()],
+        };
+        assert!(check.interesting(b"-- keep one\nbug\n-- keep two").unwrap());
+        assert!(!check.interesting(b"-- keep one\nbug").unwrap());
+    }
+
+    #[test]
+    fn collapses_whitespace_only_line_runs() {
+        let source = b"def f = 0\n   \n\t\n\n-- comment\n\n\n";
+        assert_eq!(collapse_blank_lines(source), b"def f = 0\n\n-- comment\n\n");
+    }
+
+    #[test]
+    fn uninteresting_stdout_requires_stdout_capture() {
+        let error = Args::try_parse_from(["treereduce-wyn", "--uninteresting-stdout", "BLOCK", "true"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+        Args::try_parse_from([
+            "treereduce-wyn",
+            "--interesting-stdout",
+            "BUG",
+            "--uninteresting-stdout",
+            "BLOCK",
+            "true",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn uninteresting_stderr_requires_stderr_capture() {
+        let error = Args::try_parse_from(["treereduce-wyn", "--uninteresting-stderr", "BLOCK", "true"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+        Args::try_parse_from([
+            "treereduce-wyn",
+            "--interesting-stderr",
+            "BUG",
+            "--uninteresting-stderr",
+            "BLOCK",
+            "true",
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn inherited_output_cannot_also_be_matched() {
+        let stdout_error = Args::try_parse_from([
+            "treereduce-wyn",
+            "--inherit-stdout",
+            "--interesting-stdout",
+            "BUG",
+            "true",
+        ])
+        .unwrap_err();
+        assert_eq!(stdout_error.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let stderr_error = Args::try_parse_from([
+            "treereduce-wyn",
+            "--inherit-stderr",
+            "--interesting-stderr",
+            "BUG",
+            "true",
+        ])
+        .unwrap_err();
+        assert_eq!(stderr_error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
