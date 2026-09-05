@@ -3842,6 +3842,14 @@ fn nested_type_applications_parse_without_spacing_closes() {
 }
 
 #[test]
+fn applied_type_alias_parses_as_array_element() {
+    parse_ok(
+        "type vector<[n], A> = [n]A\n\
+         type matrix<[n], [m]> = [n]vector<[m], i32>",
+    );
+}
+
+#[test]
 fn spellable_raster_type_parses() {
     let program = parse_ok("def pass<V>(stream: raster<V>) raster<V> = stream");
     let ast::Declaration::Decl(decl) = &program.declarations[0] else {

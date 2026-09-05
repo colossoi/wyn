@@ -1136,7 +1136,7 @@ impl<'a> Parser<'a> {
             // Check for empty brackets [] - unsized array with unknown address space
             if self.check(&Token::RightBracket) {
                 self.advance();
-                let (elem_type, elem_diet) = self.parse_array_or_base_type()?;
+                let (elem_type, elem_diet) = self.parse_type_application()?;
                 return Ok(build(
                     elem_type,
                     elem_diet,
@@ -1149,7 +1149,7 @@ impl<'a> Parser<'a> {
                 let size = usize::try_from(n).map_err(|_| err_parse!("Invalid array size"))?;
                 self.advance();
                 self.expect(Token::RightBracket)?;
-                let (elem_type, elem_diet) = self.parse_array_or_base_type()?; // Allow nested arrays
+                let (elem_type, elem_diet) = self.parse_type_application()?; // Allow nested arrays and applied aliases
                 Ok(build(
                     elem_type,
                     elem_diet,
@@ -1160,7 +1160,7 @@ impl<'a> Parser<'a> {
                 let size_var = name.clone();
                 self.advance();
                 self.expect(Token::RightBracket)?;
-                let (elem_type, elem_diet) = self.parse_array_or_base_type()?;
+                let (elem_type, elem_diet) = self.parse_type_application()?;
                 Ok(build(elem_type, elem_diet, types::size_var(size_var)))
             } else {
                 Err(err_parse!("Expected size literal or variable in array type"))
