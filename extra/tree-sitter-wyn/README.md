@@ -26,6 +26,16 @@ npm run parse -- ../../testfiles/open_module_demo.wyn
 npm run test
 ```
 
+From the repository root, parse every `.wyn` file under `testfiles/` using
+the committed generated parser:
+
+```sh
+scripts/test-tree-sitter-testfiles.sh
+```
+
+This repository-wide check uses Cargo and does not require Node.js. It does
+not regenerate `src/parser.c`; use `npm run generate` after grammar changes.
+
 ## Helix setup
 
 Helix reads language definitions from `languages.toml`. The file can live in

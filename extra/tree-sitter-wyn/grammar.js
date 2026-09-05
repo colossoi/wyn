@@ -44,8 +44,9 @@ module.exports = grammar({
   word: $ => $.identifier,
 
   conflicts: $ => [
-    [$.identifier, $.qualified_name],
     [$.existential_type, $.function_type],
+    [$.size_argument, $._literal],
+    [$.size_argument, $._primary_expression],
     [$.binary_expression],
   ],
 
@@ -139,7 +140,6 @@ module.exports = grammar({
       field('name', $.identifier),
       optional($.generic_params),
       $.entry_params,
-      optional($.attribute),  // Return type attribute
       field('return_type', $._type),  // Required
       '=',
       field('body', $._expression),
@@ -513,10 +513,10 @@ module.exports = grammar({
       repeat(seq('|', $.sum_variant)),
     )),
 
-    sum_variant: $ => seq(
+    sum_variant: $ => prec.right(seq(
       field('constructor', $.constructor),
       optional(seq('(', commaSep($._type), ')')),
-    ),
+    )),
 
     function_type: $ => prec.right(seq(
       field('param', choice($._type, $.named_parameter_type)),
@@ -543,6 +543,8 @@ module.exports = grammar({
       $.match_expression,
       $.lambda_expression,
       $.array_with,
+      $.vec_with,
+      $.record_with,
       $.binary_expression,
       $.unary_expression,
       $.field_expression,
@@ -564,6 +566,29 @@ module.exports = grammar({
       '[',
       field('index', $._expression),
       ']',
+      '=',
+      field('value', $._expression),
+    )),
+
+    // Vector swizzle update, including the compound forms accepted by the
+    // hand-written parser: `v with .xy = rhs` and `v with .xy *= rhs`.
+    vec_with: $ => prec.left(10, seq(
+      field('vector', $._expression),
+      'with',
+      '.',
+      field('swizzle', $.identifier),
+      optional(field('operator', choice('*', '+', '-', '/'))),
+      '=',
+      field('value', $._expression),
+    )),
+
+    // Record updates omit the leading dot and may select a nested field:
+    // `record with outer.inner = value`.
+    record_with: $ => prec.left(10, seq(
+      field('record', $._expression),
+      'with',
+      field('field', $.identifier),
+      repeat(seq('.', field('field', $.identifier))),
       '=',
       field('value', $._expression),
     )),
@@ -780,11 +805,11 @@ module.exports = grammar({
 
     _primary_expression: $ => choice(
       $.identifier,
-      $.qualified_name,
       $.constructor_expression,
       $._literal,
       $.array_literal,
       $.vec_literal,
+      $.unit_expression,
       $.tuple_expression,
       $.record_expression,
       $.type_hole,
@@ -805,6 +830,8 @@ module.exports = grammar({
       ']',
     ),
 
+    unit_expression: $ => prec(1, seq('(', ')')),
+
     tuple_expression: $ => seq(
       '(',
       $._expression,
@@ -813,10 +840,12 @@ module.exports = grammar({
       ')',
     ),
 
-    constructor_expression: $ => seq(
+    // Prefer consuming a following parenthesized payload here instead of
+    // treating a bare constructor as the callee of an ordinary call.
+    constructor_expression: $ => prec.right(PREC.CALL + 1, seq(
       field('constructor', $.constructor),
       optional(seq('(', commaSep($._expression), ')')),
-    ),
+    )),
 
     record_expression: $ => seq(
       '{',
@@ -908,10 +937,10 @@ module.exports = grammar({
 
     // Anonymous-sum constructors are `#`-prefixed and take an optional
     // parenthesized payload in expressions, patterns, and types.
-    constructor_pattern: $ => seq(
+    constructor_pattern: $ => prec.right(seq(
       field('constructor', $.constructor),
       optional(seq('(', commaSep($._pattern), ')')),
-    ),
+    )),
 
     negative_literal_pattern: $ => seq('-', choice($.integer_literal, $.float_literal)),
 
@@ -936,6 +965,7 @@ module.exports = grammar({
       // positional: compute(1, 1, 1), builtin(position)
       $.integer_literal,
       $.identifier,
+      $.string_literal,
     ),
 
     // ============================================

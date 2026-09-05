@@ -194,9 +194,6 @@
 (call_expression
   function: (identifier) @function.call)
 
-(call_expression
-  function: (qualified_name) @function.call)
-
 ; Variables and Parameters
 (let_declaration
   name: (identifier) @variable)
@@ -260,7 +257,6 @@
 
 ; Special
 (type_hole) @constant.builtin
-"$" @operator
 
 ; Record fields
 (record_field
@@ -271,3 +267,9 @@
 
 (field_expression
   field: (identifier) @variable.other.member)
+
+; The hand-written parser treats module-looking calls such as `vec.abs(x)`
+; as ordinary postfix field access followed by a call.
+(call_expression
+  function: (field_expression
+    field: (identifier) @function.call))
