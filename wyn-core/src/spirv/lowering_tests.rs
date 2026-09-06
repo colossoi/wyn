@@ -465,6 +465,52 @@ entry fragment_main(_p: vec4f32)
     );
 }
 
+#[test]
+fn entry_point_interfaces_are_unique_when_storage_input_and_output_alias() {
+    use crate::LookupSet;
+    use wspirv::dr::Operand;
+
+    let spirv = compile_to_spirv(
+        r#"
+type painted = { values: []f32 }
+
+def triangle_vertex(vertex: vertex_invocation) =
+  vertex_output(
+    @[1.0, 1.0, 0.0, 1.0],
+    ())
+
+def resolve(p: painted, _fragment: fragment_invocation<()>) =
+  let value = 0.0 in
+  @[value, value, value, 1.0]
+
+entry reproduce(values: []f32, surface: render_target<vec4f32>)
+    ([]f32, render_target<vec4f32>) =
+  let values_next = map(|i| 1.0, iota(0))
+  let painted_scene = { values = values }
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32), triangle_vertex)
+  let surface1 = shade(surface, raster, resolve(painted_scene, _)) in
+  (values_next, surface1)
+"#,
+    )
+    .expect("record-array graphics program should compile");
+
+    let module = wspirv::dr::load_words(&spirv).expect("backend emitted parseable SPIR-V");
+    for entry in &module.entry_points {
+        let interface_ids = entry.operands.iter().skip(3).filter_map(|operand| match operand {
+            Operand::IdRef(id) => Some(*id),
+            _ => None,
+        });
+        let mut seen = LookupSet::new();
+        for interface_id in interface_ids {
+            assert!(
+                seen.insert(interface_id),
+                "OpEntryPoint contains duplicate interface %{interface_id}"
+            );
+        }
+    }
+}
+
 /// `scatter` into a `#[storage]` framebuffer lowers end-to-end: the full
 /// `SoacKind::Scatter` → `SoacOp::Scatter` → `EgirSoac::Hist` →
 /// `build_scatter_loop` path emits indexed `OpStore`s into the destination

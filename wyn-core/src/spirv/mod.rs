@@ -647,6 +647,11 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
                     }
                 }
             }
+            // An in-place storage result can resolve to the same module variable
+            // as one of the entry inputs. Keep the first occurrence so every
+            // OpEntryPoint interface id is unique, as required by SPIR-V 1.4+.
+            let mut seen_interfaces = LookupSet::new();
+            interfaces.retain(|var_id| seen_interfaces.insert(*var_id));
             constructor.builder.entry_point(*model, func_id, name, interfaces);
 
             // Add execution modes
