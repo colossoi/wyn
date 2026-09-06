@@ -54,13 +54,6 @@ enum OnParseError {
     Error,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, ValueEnum)]
-enum Comments {
-    #[default]
-    Remove,
-    Keep,
-}
-
 /// Fast, syntax-aware test-case reducer for Wyn.
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -72,10 +65,6 @@ struct Args {
     /// Behavior when the initial source has Tree-sitter parse errors.
     #[arg(long, value_enum, default_value_t)]
     on_parse_error: OnParseError,
-
-    /// Remove all comments before reduction, or preserve every comment.
-    #[arg(long, value_enum, default_value_t)]
-    comments: Comments,
 
     /// Number of parallel interestingness checks used by treereduce.
     #[arg(short, long, default_value_t = default_jobs())]
@@ -210,51 +199,6 @@ struct StructuralStats {
     accepted: usize,
 }
 
-#[derive(Clone, Debug)]
-struct PreserveComments<C> {
-    inner: C,
-    comments: Vec<Vec<u8>>,
-}
-
-#[derive(Debug)]
-enum PreserveCommentsState<S> {
-    Rejected,
-    Inner(S),
-}
-
-impl<C: Check> Check for PreserveComments<C> {
-    type State = PreserveCommentsState<C::State>;
-
-    fn start(&self, source: &[u8]) -> io::Result<Self::State> {
-        if has_exact_comments(source, &self.comments) {
-            self.inner.start(source).map(PreserveCommentsState::Inner)
-        } else {
-            Ok(PreserveCommentsState::Rejected)
-        }
-    }
-
-    fn cancel(&self, state: Self::State) -> io::Result<()> {
-        match state {
-            PreserveCommentsState::Rejected => Ok(()),
-            PreserveCommentsState::Inner(state) => self.inner.cancel(state),
-        }
-    }
-
-    fn try_wait(&self, state: &mut Self::State) -> io::Result<Option<bool>> {
-        match state {
-            PreserveCommentsState::Rejected => Ok(Some(false)),
-            PreserveCommentsState::Inner(state) => self.inner.try_wait(state),
-        }
-    }
-
-    fn wait(&self, state: Self::State) -> io::Result<bool> {
-        match state {
-            PreserveCommentsState::Rejected => Ok(false),
-            PreserveCommentsState::Inner(state) => self.inner.wait(state),
-        }
-    }
-}
-
 fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
@@ -274,26 +218,23 @@ fn main() -> Result<()> {
     let initial_size = source.len();
     let initial_tree = parse(&language, &source)?;
     handle_initial_parse_errors(&args, &initial_tree)?;
-    let comments = collect_comments(&initial_tree, &source);
-    let preserved_comments = match args.comments {
-        Comments::Remove => {
-            let comments_size: usize = comments.iter().map(Vec::len).sum();
-            remove_comments(&initial_tree, &mut source);
-            if args.verbose > 0 {
-                eprintln!(
-                    "removed {} comments before reduction (-{comments_size} bytes)",
-                    comments.len()
-                );
-            }
-            Vec::new()
-        }
-        Comments::Keep => comments,
-    };
-    let check = PreserveComments {
-        inner: check,
-        comments: preserved_comments,
-    };
+    let (comments_count, comments_size) = remove_comments(&initial_tree, &mut source);
+    if args.verbose > 0 && comments_count > 0 {
+        eprintln!("removed {comments_count} comments before reduction (-{comments_size} bytes)");
+    }
+    reduce(&args, &language, source, initial_size, check)
+}
 
+fn reduce<C>(
+    args: &Args,
+    language: &Language,
+    mut source: Vec<u8>,
+    initial_size: usize,
+    check: C,
+) -> Result<()>
+where
+    C: Check + Clone + Debug + Send + Sync + 'static,
+{
     if args.verbose > 0 {
         eprintln!("verifying initial test case ({} bytes)", source.len());
     }
@@ -331,7 +272,7 @@ fn main() -> Result<()> {
         if args.verbose > 0 {
             eprintln!("outer pass {passes_done}: structural reduction ({pass_start_size} bytes)");
         }
-        let (next, stats) = structural_reduce(&language, source, &check, args.verbose)?;
+        let (next, stats) = structural_reduce(language, source, &check, args.jobs, args.verbose)?;
         source = next;
         structural_stats.attempts += stats.attempts;
         structural_stats.accepted += stats.accepted;
@@ -349,7 +290,7 @@ fn main() -> Result<()> {
             );
         }
         source = generic_pass(
-            &language,
+            language,
             &node_types,
             source,
             &check,
@@ -462,19 +403,14 @@ fn comment_ranges(tree: &Tree) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn collect_comments(tree: &Tree, source: &[u8]) -> Vec<Vec<u8>> {
-    comment_ranges(tree).into_iter().map(|(start, end)| source[start..end].to_vec()).collect()
-}
-
-fn remove_comments(tree: &Tree, source: &mut Vec<u8>) {
-    for (start, end) in comment_ranges(tree).into_iter().rev() {
+fn remove_comments(tree: &Tree, source: &mut Vec<u8>) -> (usize, usize) {
+    let ranges = comment_ranges(tree);
+    let count = ranges.len();
+    let size = ranges.iter().map(|(start, end)| end - start).sum();
+    for (start, end) in ranges.into_iter().rev() {
         source.drain(start..end);
     }
-}
-
-fn has_exact_comments(source: &[u8], expected: &[Vec<u8>]) -> bool {
-    let language: Language = tree_sitter_wyn::LANGUAGE.into();
-    parse(&language, source).map(|tree| collect_comments(&tree, source) == expected).unwrap_or(false)
+    (count, size)
 }
 
 fn collapse_blank_lines(source: &[u8]) -> Vec<u8> {
@@ -564,6 +500,7 @@ fn structural_reduce<C: Check>(
     language: &Language,
     mut source: Vec<u8>,
     check: &C,
+    jobs: usize,
     verbose: u8,
 ) -> Result<(Vec<u8>, StructuralStats)> {
     let mut stats = StructuralStats::default();
@@ -571,22 +508,66 @@ fn structural_reduce<C: Check>(
         let tree = parse(language, &source)?;
         let candidates = collect_candidates(&tree, &source);
         let mut accepted = false;
-        for candidate in candidates {
-            stats.attempts += 1;
-            let next = apply_candidate(&source, &candidate);
-            if check.interesting(&next)? {
-                if verbose > 1 {
-                    eprintln!(
-                        "accepted {} at {}..{} (-{} bytes)",
-                        candidate.description,
-                        candidate.start,
-                        candidate.end,
-                        candidate.reduction()
-                    );
+        let mut candidates = candidates.into_iter();
+        let jobs = jobs.max(1);
+        loop {
+            // Candidates are ordered by reduction size, then source position.
+            // Start one ordered window concurrently and consume results in
+            // that same order, so parallelism cannot change which edit wins.
+            let batch: Vec<_> = candidates.by_ref().take(jobs).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let mut pending = Vec::with_capacity(batch.len());
+            for candidate in batch {
+                let next = apply_candidate(&source, &candidate);
+                let state = match check.start(&next) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        for (_, _, state) in pending {
+                            let _ = check.cancel(state);
+                        }
+                        return Err(error.into());
+                    }
+                };
+                stats.attempts += 1;
+                pending.push((candidate, next, state));
+            }
+
+            let mut pending = pending.into_iter();
+            while let Some((candidate, next, state)) = pending.next() {
+                let interesting = match check.wait(state) {
+                    Ok(interesting) => interesting,
+                    Err(error) => {
+                        for (_, _, state) in pending {
+                            let _ = check.cancel(state);
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if interesting {
+                    for (_, _, state) in pending {
+                        // These are speculative checks whose answers can no
+                        // longer affect the selected candidate. Cancellation
+                        // failure must not discard an accepted reduction.
+                        let _ = check.cancel(state);
+                    }
+                    if verbose > 1 {
+                        eprintln!(
+                            "accepted {} at {}..{} (-{} bytes)",
+                            candidate.description,
+                            candidate.start,
+                            candidate.end,
+                            candidate.reduction()
+                        );
+                    }
+                    source = next;
+                    stats.accepted += 1;
+                    accepted = true;
+                    break;
                 }
-                source = next;
-                stats.accepted += 1;
-                accepted = true;
+            }
+            if accepted {
                 break;
             }
         }
@@ -931,9 +912,17 @@ mod tests {
     #[test]
     fn promotes_interesting_branch_out_of_if_expression() {
         let source = b"def main = if true then bug() else other()".to_vec();
-        let (reduced, stats) = structural_reduce(&language(), source, &Contains(b"bug()"), 0).unwrap();
+        let (reduced, stats) = structural_reduce(&language(), source, &Contains(b"bug()"), 1, 0).unwrap();
         assert_eq!(String::from_utf8(reduced).unwrap(), "def main = bug()");
         assert!(stats.accepted > 0);
+    }
+
+    #[test]
+    fn parallel_structural_reduction_preserves_candidate_order() {
+        let source = b"def main = if true then bug() else other()".to_vec();
+        let sequential = structural_reduce(&language(), source.clone(), &Contains(b"bug()"), 1, 0).unwrap();
+        let parallel = structural_reduce(&language(), source, &Contains(b"bug()"), 4, 0).unwrap();
+        assert_eq!(parallel.0, sequential.0);
     }
 
     #[test]
@@ -992,18 +981,8 @@ mod tests {
     fn removes_all_comments_before_reduction() {
         let mut source = b"-- first\ndef f(x:f32) f32 = x -- second\n".to_vec();
         let tree = parse(&language(), &source).unwrap();
-        remove_comments(&tree, &mut source);
+        assert_eq!(remove_comments(&tree, &mut source), (2, 17));
         assert_eq!(source, b"\ndef f(x:f32) f32 = x \n");
-    }
-
-    #[test]
-    fn preserve_comments_check_rejects_comment_deletion() {
-        let check = PreserveComments {
-            inner: Contains(b"bug"),
-            comments: vec![b"-- keep one".to_vec(), b"-- keep two".to_vec()],
-        };
-        assert!(check.interesting(b"-- keep one\nbug\n-- keep two").unwrap());
-        assert!(!check.interesting(b"-- keep one\nbug").unwrap());
     }
 
     #[test]
