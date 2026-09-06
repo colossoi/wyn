@@ -2801,6 +2801,25 @@ fn spirv_has_builtin(words: &[u32], builtin: spirv::BuiltIn) -> bool {
     false
 }
 
+fn spirv_decoration_targets(words: &[u32], decoration: spirv::Decoration) -> Vec<u32> {
+    let mut targets = Vec::new();
+    let mut index = 5usize;
+    while index < words.len() {
+        let instruction = words[index];
+        let word_count = (instruction >> 16) as usize;
+        let opcode = instruction & 0xffff;
+        if opcode == spirv::Op::Decorate as u32 && word_count >= 3 && words[index + 2] == decoration as u32
+        {
+            targets.push(words[index + 1]);
+        }
+        if word_count == 0 {
+            break;
+        }
+        index += word_count;
+    }
+    targets
+}
+
 fn spirv_has_capability(words: &[u32], capability: spirv::Capability) -> bool {
     let mut index = 5usize;
     while index < words.len() {
@@ -3510,6 +3529,47 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
         }
     );
 }
+
+#[test]
+fn unified_root_marks_integer_vertex_fragment_varyings_flat_in_spirv() {
+    let lowered = compile_thru_spirv(
+        r#"
+type varying = { instance: u32 }
+
+def vertex_main(vertex: vertex_invocation) vertex<varying> =
+  vertex_output(
+    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    else @[-1.0, 3.0, 0.0, 1.0],
+    { instance = vertex.instance_index })
+
+def fragment_main(fragment: fragment_invocation<varying>) vec4f32 =
+  let value = f32(fragment.value.instance) in
+  @[value, value, value, 1.0]
+
+entry reproduce(surface: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32), vertex_main)
+  in shade(surface, raster, fragment_main)
+"#,
+    )
+    .expect("integer varying lowers through the graphics pipeline");
+    assert_naga_accepts_spirv(&lowered.spirv);
+
+    let flat_targets = spirv_decoration_targets(&lowered.spirv, spirv::Decoration::Flat);
+    assert_eq!(
+        flat_targets.len(),
+        2,
+        "the vertex output and matching fragment input must both be Flat"
+    );
+
+    let location_targets = spirv_decoration_targets(&lowered.spirv, spirv::Decoration::Location);
+    assert!(
+        flat_targets.iter().all(|target| location_targets.contains(target)),
+        "Flat must decorate location-based varyings, not integer built-ins"
+    );
+}
+
 #[test]
 fn unified_root_normalizes_ordinary_value_bindings_before_planning() {
     let lowered = compile_thru_spirv(

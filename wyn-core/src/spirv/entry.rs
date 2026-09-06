@@ -7,6 +7,13 @@ use crate::op;
 use crate::ssa;
 use crate::types;
 
+/// SPIR-V does not permit perspective interpolation for integer fragment
+/// inputs. Apply `Flat` to both ends of an integer scalar/vector varying so
+/// the vertex and fragment interfaces agree.
+fn requires_flat_interpolation(ty: &PolyType<TypeName>) -> bool {
+    types::is_integer_type(ty) || (ty.is_vec() && ty.elem_type().is_some_and(types::is_integer_type))
+}
+
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
     let body = &entry.body;
@@ -336,6 +343,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Input, input_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Input, None);
             constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
+            if matches!(&entry.execution_model, ExecutionModel::Fragment)
+                && requires_flat_interpolation(&input.ty)
+            {
+                constructor.builder.decorate(var_id, spirv::Decoration::Flat, []);
+            }
             if let Some(input_param) = input_param {
                 constructor.env.insert(input_param, var_id);
             }
@@ -382,6 +394,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
             constructor.builder.decorate(var_id, spirv::Decoration::Location, [Operand::LiteralBit32(loc)]);
+            if matches!(&entry.execution_model, ExecutionModel::Vertex)
+                && requires_flat_interpolation(&output.ty)
+            {
+                constructor.builder.decorate(var_id, spirv::Decoration::Flat, []);
+            }
             output_vars.push(var_id);
             interfaces.push(var_id);
         }
