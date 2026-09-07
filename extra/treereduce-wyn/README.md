@@ -50,6 +50,11 @@ standard input instead.
 Always run the predicate manually on the original source and on a known
 negative case before starting a reduction.
 
+At startup, `treereduce-wyn` runs the selected Wyn compiler once with `--help`
+and stops immediately if it cannot be launched or returns an unsuccessful
+status. Select the compiler with `--wyn FILE` or the `WYN` environment variable;
+otherwise the reducer uses `./target/release/wyn`.
+
 ## Recommended workflow
 
 Suppose `bug.wyn` fails with the stable text `STABLE_ERROR_SUBSTRING`.
@@ -168,6 +173,9 @@ interesting by default.
 - `--on-parse-error warn|ignore|error` controls handling of parse errors in the
   original source; the default is `warn`.
 - `--timeout SECONDS` limits each interestingness invocation.
+- `--wyn FILE` selects the compiler used by the startup check and inferred-type
+  probes. `--wyn-check-arg ARG` forwards an option such as `--graphics` to each
+  type-probe invocation of `wyn check`.
 - `--temp-dir DIR` chooses where `@@` files are created.
 - `--min-reduction BYTES` sets the generic pass's minimum accepted shrinkage.
 - `-v`, `-vv`, and `-vvv` progressively increase diagnostic output.
@@ -177,6 +185,17 @@ interesting by default.
   stats output may still be present, so a named output file is usually safer.
 
 Run `treereduce-wyn --help` for the complete option list.
+
+## Why structural reduction can take a while
+
+`outer pass 1: structural reduction` marks the first real reduction phase, not
+a prepass. The reducer orders possible child promotions, list deletions, and
+replacements; tries them in deterministic batches; and rebuilds the syntax tree
+after every accepted edit. An inferred-default candidate first invokes
+`wyn check` on a temporary version containing `???`, then the resulting edit is
+tested by the interestingness command. Many rejected candidates can therefore
+mean many compiler launches before the source size changes. `-vv` reports
+accepted structural edits, while `-v` reports only the phase boundaries.
 
 ## What it can reduce
 

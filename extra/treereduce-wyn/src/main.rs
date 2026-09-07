@@ -66,7 +66,7 @@ struct Args {
     #[arg(short, long, default_value_t = default_jobs())]
     jobs: usize,
 
-    /// Wyn compiler used to infer concrete defaults for expression holes.
+    /// Wyn compiler checked at startup and used to infer expression defaults.
     #[arg(long, value_name = "FILE", help_heading = "Reduction options")]
     wyn: Option<PathBuf>,
 
@@ -305,6 +305,34 @@ impl TypeProbe {
         })
     }
 
+    fn verify_compiler(&self) -> Result<()> {
+        let output = Command::new(&self.wyn).arg("--help").output().with_context(|| {
+            format!(
+                "failed to run Wyn compiler preflight `{} --help`",
+                self.wyn.display()
+            )
+        })?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() };
+        if detail.is_empty() {
+            bail!(
+                "Wyn compiler preflight `{} --help` exited with {}",
+                self.wyn.display(),
+                output.status
+            );
+        }
+        bail!(
+            "Wyn compiler preflight `{} --help` exited with {}: {detail}",
+            self.wyn.display(),
+            output.status
+        )
+    }
+
     fn resolve(&self, source: &[u8], candidate: Candidate) -> Result<Option<Candidate>> {
         // Human-readable diagnostics do not identify holes in a form that is
         // safe to parse when the source already contains another hole.
@@ -424,6 +452,12 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(&args);
 
+    let type_probe = TypeProbe::new(&args)?;
+    if args.verbose > 0 {
+        eprintln!("checking Wyn compiler: {} --help", type_probe.wyn.display());
+    }
+    type_probe.verify_compiler()?;
+
     if let Some(dir) = &args.temp_dir {
         fs::create_dir_all(dir)
             .with_context(|| format!("failed to create temporary directory {}", dir.display()))?;
@@ -444,7 +478,7 @@ fn main() -> Result<()> {
         language: language.clone(),
         reject_errors: !parse(&language, &source)?.root_node().has_error(),
     };
-    reduce(&args, &language, source, initial_size, check)
+    reduce(&args, &language, source, initial_size, check, type_probe)
 }
 
 fn reduce<C>(
@@ -453,6 +487,7 @@ fn reduce<C>(
     mut source: Vec<u8>,
     initial_size: usize,
     check: C,
+    type_probe: TypeProbe,
 ) -> Result<()>
 where
     C: Check + Clone + Debug + Send + Sync + 'static,
@@ -466,7 +501,6 @@ where
 
     let node_types = NodeTypes::new(tree_sitter_wyn::NODE_TYPES)
         .context("failed to read tree-sitter-wyn node-types.json")?;
-    let type_probe = TypeProbe::new(args)?;
     let start = Instant::now();
     let mut structural_stats = StructuralStats::default();
     let mut passes_done = 0;
@@ -1194,11 +1228,23 @@ mod tests {
 
     fn type_probe() -> TypeProbe {
         TypeProbe {
-            wyn: PathBuf::from("false"),
+            wyn: std::env::current_exe().unwrap(),
             check_args: Vec::new(),
             temp_dir: None,
             inferred_type: Regex::new(r"type hole inferred as `([^`]+)`").unwrap(),
         }
+    }
+
+    #[test]
+    fn compiler_preflight_runs_help_and_requires_an_executable() {
+        let mut probe = type_probe();
+        probe.wyn = std::env::current_exe().unwrap();
+        probe.verify_compiler().unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        probe.wyn = temp.path().join("missing-wyn-compiler");
+        let error = probe.verify_compiler().unwrap_err().to_string();
+        assert!(error.contains("failed to run Wyn compiler preflight"));
     }
 
     #[test]
