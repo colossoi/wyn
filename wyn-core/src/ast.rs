@@ -5,7 +5,7 @@ use crate::lexer;
 use crate::name_resolution;
 use crate::op;
 use crate::types;
-use crate::SymbolTable;
+use crate::{LookupMap, LookupSet, SymbolTable};
 pub use spirv;
 pub(crate) mod rebuild;
 
@@ -712,7 +712,10 @@ pub struct TypedGlobal<D, T: TreeFamily> {
     pub support_definitions: Vec<SupportDefinition<D, T>>,
     /// Sole source-binding identity arena, carried into TLC without reallocation.
     pub symbols: SymbolTable,
-    pub warnings: Vec<types::checker::TypeWarning>,
+    pub warnings: Vec<types::FrontendWarning>,
+    /// Source-level constant references erased by early constant folding,
+    /// grouped by the callable that contained each reference.
+    pub folded_constant_uses: LookupMap<SymbolId, LookupSet<SymbolId>>,
     pub builtin_names: Vec<String>,
 }
 

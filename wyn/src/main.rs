@@ -19,6 +19,8 @@ use wyn_package_manager::{
     find_build_input, prepare_package, prepare_standalone, BuildInput, PreparationError,
 };
 
+const DEFAULT_WARNING_LIMIT: usize = 100;
+
 /// Target output format
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum Target {
@@ -45,6 +47,7 @@ struct CompileOptions {
     fill_holes: bool,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
+    warning_limit: usize,
     verbose: bool,
 }
 
@@ -131,6 +134,10 @@ enum Commands {
         #[arg(long)]
         fill_holes: bool,
 
+        /// Maximum number of warnings to print. Use 0 to suppress warnings.
+        #[arg(long, default_value_t = DEFAULT_WARNING_LIMIT, value_name = "N")]
+        max_warnings: usize,
+
         /// Print verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -145,6 +152,10 @@ enum Commands {
         /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
         graphics: bool,
+
+        /// Maximum number of warnings to print. Use 0 to suppress warnings.
+        #[arg(long, default_value_t = DEFAULT_WARNING_LIMIT, value_name = "N")]
+        max_warnings: usize,
 
         /// Print verbose output
         #[arg(short, long)]
@@ -362,6 +373,7 @@ fn type_check_input(
     input: &Path,
     reject_holes: bool,
     graphics: bool,
+    warning_limit: usize,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let input = normalize_input(input)?;
@@ -369,34 +381,31 @@ fn type_check_input(
         BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
         BuildInput::Standalone(source) => prepare_standalone(source)?,
     };
-    type_check_package_plan(package_plan, reject_holes, graphics, verbose)
+    type_check_package_plan(package_plan, reject_holes, graphics, warning_limit, verbose)
 }
 
 fn type_check_package_plan(
     plan: PackagePlan,
     reject_holes: bool,
     graphics: bool,
+    warning_limit: usize,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let modules = time("load_modules", verbose, || {
         ParsedModules::load(plan, CompilerOptions { graphics })
     })?;
-    finish_type_check(modules, reject_holes, verbose)
+    finish_type_check(modules, reject_holes, warning_limit, verbose)
 }
 
 fn finish_type_check(
     modules: ParsedModules,
     reject_holes: bool,
+    warning_limit: usize,
     verbose: bool,
 ) -> Result<wyn_core::ast_type_holes::HolesResolved, DriverError> {
     let program = time("type_check", verbose, || modules.type_check())?;
 
-    for warning in &program.global_context.warnings {
-        let message = warning.message(&wyn_core::types::format_type);
-        let rendered = render_at(&message, program.source_graph(), *warning.span(), true)
-            .unwrap_or_else(|| render_warning_message(&message));
-        eprintln!("{rendered}");
-    }
+    emit_warnings(&program, warning_limit);
     let source_graph = program.source_graph().clone();
     let program = if reject_holes {
         retain_source(
@@ -408,6 +417,36 @@ fn finish_type_check(
     };
 
     Ok(program)
+}
+
+fn emit_warnings(program: &wyn_core::types::run::TypeChecked, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+
+    let mut warnings: Vec<_> = program.global_context.warnings.iter().collect();
+    warnings.sort_by_key(|warning| {
+        let span = *warning.span();
+        (
+            span.module(),
+            span.range().start(),
+            span.range().end(),
+            warning.message(&wyn_core::types::format_type),
+        )
+    });
+    for warning in warnings.iter().take(limit) {
+        let message = warning.message(&wyn_core::types::format_type);
+        let rendered = render_at(&message, program.source_graph(), *warning.span(), true)
+            .unwrap_or_else(|| render_warning_message(&message));
+        eprintln!("{rendered}");
+    }
+    if warnings.len() > limit {
+        eprintln!(
+            "note: {} additional warnings omitted (limit {}; use --max-warnings to show more)",
+            warnings.len() - limit,
+            limit
+        );
+    }
 }
 
 fn main() -> ExitCode {
@@ -468,6 +507,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             direct,
             wgsl_emulate_u64,
             fill_holes,
+            max_warnings,
             verbose,
         } => build(
             input,
@@ -479,13 +519,15 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             direct,
             wgsl_emulate_u64,
             fill_holes,
+            max_warnings,
             verbose,
         ),
         Commands::Check {
             input,
             graphics,
+            max_warnings,
             verbose,
-        } => check(input, graphics, verbose),
+        } => check(input, graphics, max_warnings, verbose),
     }
 }
 
@@ -499,6 +541,7 @@ fn build(
     direct: bool,
     wgsl_emulate_u64: bool,
     fill_holes: bool,
+    warning_limit: usize,
     verbose: bool,
 ) -> Result<(), DriverError> {
     if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
@@ -532,6 +575,7 @@ fn build(
             fill_holes,
             output_tlc,
             output_mir,
+            warning_limit,
             verbose,
         },
     )?;
@@ -557,9 +601,10 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         fill_holes,
         output_tlc,
         output_mir,
+        warning_limit,
         verbose,
     } = options;
-    let program = finish_type_check(modules, !fill_holes, verbose)?;
+    let program = finish_type_check(modules, !fill_holes, warning_limit, verbose)?;
     let source_graph = program.source_graph().clone();
 
     let program = retain_source(
@@ -774,12 +819,12 @@ fn write_artifacts(output_path: &Path, compilation: Compilation, verbose: bool) 
     Ok(())
 }
 
-fn check(input: PathBuf, graphics: bool, verbose: bool) -> Result<(), DriverError> {
+fn check(input: PathBuf, graphics: bool, warning_limit: usize, verbose: bool) -> Result<(), DriverError> {
     if verbose {
         info!("Checking {}...", input.display());
     }
 
-    let program = type_check_input(&input, true, graphics, verbose)?;
+    let program = type_check_input(&input, true, graphics, warning_limit, verbose)?;
     let source_graph = program.source_graph().clone();
     let program = retain_source(wyn_core::tlc::lower_from_ast(program), &source_graph)?;
     let program = retain_source(wyn_core::tlc::validate_ownership(program), &source_graph)?;

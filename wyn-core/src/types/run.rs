@@ -14,7 +14,8 @@ use crate::name_resolution::ResolvedValueRef;
 use crate::resolve_opens;
 use crate::resolve_placeholders;
 use crate::semantic_modules;
-use crate::types::checker::{TypeChecker, TypeWarning};
+use crate::types::checker::TypeChecker;
+use crate::types::FrontendWarning;
 use crate::{CompilerOptions, LookupMap};
 
 pub type TypeCheckedFamily = ast::AstFamily<
@@ -40,11 +41,12 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
         builtins::catalog(),
         options,
     );
-    let checked = program.try_rebuild(|declarations, global_context, _| {
+    let mut checked = program.try_rebuild(|declarations, global_context, _| {
         let resolve_placeholders::PlaceholdersResolvedGlobal {
             semantic_modules,
             context,
             spec_schemes,
+            constant_uses,
         } = global_context;
         let mut checker = TypeChecker::with_context_and_schemes(
             &semantic_modules,
@@ -57,6 +59,8 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
         let schemes = checker.get_function_schemes();
         let builtin_names = checker.builtin_names();
         let warnings: Vec<_> = checker.warnings().to_vec();
+        let folded_constant_uses =
+            super::warnings::resolve_folded_constant_uses(checker.name_resolution(), &constant_uses);
         let name_resolution = checker.name_resolution().clone();
         drop(checker);
 
@@ -66,11 +70,14 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
             type_table,
             schemes,
             warnings,
+            folded_constant_uses,
             builtin_names,
             name_resolution,
         )
     })?;
     super::stage_context::validate(&checked)?;
+    let unused = super::warnings::collect_unused(&checked);
+    checked.global_context.warnings.extend(unused);
     Ok(checked)
 }
 
@@ -79,7 +86,8 @@ fn materialize(
     semantic_modules: semantic_modules::SemanticModules,
     mut type_table: LookupMap<ast::NodeId, ast::TypeScheme>,
     schemes: LookupMap<String, ast::TypeScheme>,
-    warnings: Vec<TypeWarning>,
+    warnings: Vec<FrontendWarning>,
+    folded_constant_uses: LookupMap<crate::SymbolId, crate::LookupSet<crate::SymbolId>>,
     builtin_names: Vec<String>,
     mut name_resolution: name_resolution::NameResolution,
 ) -> Result<(
@@ -146,6 +154,7 @@ fn materialize(
             support_definitions,
             symbols: std::mem::take(&mut name_resolution.symbols),
             warnings,
+            folded_constant_uses,
             builtin_names,
         },
     ))

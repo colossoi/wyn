@@ -9,6 +9,9 @@ pub mod checker;
 pub mod patterns;
 pub mod run;
 mod stage_context;
+mod warnings;
+
+pub use warnings::{FrontendWarning, UnusedBindingKind, UnusedDeclarationKind};
 
 use crate::ast::Span;
 use crate::BindingRef;

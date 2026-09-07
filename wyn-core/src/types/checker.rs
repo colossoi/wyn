@@ -1,4 +1,4 @@
-use super::{SkolemId, Type, TypeExt, TypeName, TypeScheme};
+use super::{FrontendWarning, SkolemId, Type, TypeExt, TypeName, TypeScheme};
 use crate::ast;
 use crate::ast::*;
 use crate::builtins;
@@ -84,34 +84,6 @@ impl TypeVarGenerator for Context<TypeName> {
     }
 }
 
-/// A warning produced during type checking
-#[derive(Debug, Clone)]
-pub enum TypeWarning {
-    /// A type hole was filled with an inferred type
-    TypeHoleFilled {
-        inferred_type: Type,
-        span: Span,
-    },
-}
-
-impl TypeWarning {
-    /// Get the span for this warning
-    pub fn span(&self) -> &Span {
-        match self {
-            TypeWarning::TypeHoleFilled { span, .. } => span,
-        }
-    }
-
-    /// Format the warning as a display message
-    pub fn message(&self, formatter: &dyn Fn(&Type) -> String) -> String {
-        match self {
-            TypeWarning::TypeHoleFilled { inferred_type, .. } => {
-                format!("Hole of type {}", formatter(inferred_type))
-            }
-        }
-    }
-}
-
 /// Per-check resolution context. Names what env stack a lookup sees
 /// and at what precedence. Threaded through the checker as
 /// `current_context` and set at each top-level entry point
@@ -186,7 +158,7 @@ pub struct TypeChecker<'a> {
     record_field_map: LookupMap<(String, String), Type>, // Map (type_name, field_name) -> field_type
     semantic_modules: &'a SemanticModules,
     pub(super) type_table: LookupMap<NodeId, TypeScheme>, // Maps NodeId to type scheme
-    warnings: Vec<TypeWarning>,                           // Collected warnings
+    warnings: Vec<FrontendWarning>,                       // Collected warnings
     type_holes: Vec<(NodeId, Span)>,                      // Track type hole locations for warning emission
     arity_map: LookupMap<String, usize>, // function name -> required arity (number of params)
     /// Names of top-level functions that consume an argument — a consuming
@@ -1169,7 +1141,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Get all warnings collected during type checking
-    pub fn warnings(&self) -> &[TypeWarning] {
+    pub fn warnings(&self) -> &[FrontendWarning] {
         &self.warnings
     }
 
@@ -2017,7 +1989,7 @@ impl<'a> TypeChecker<'a> {
         let holes = self.type_holes.clone();
         for (node_id, span) in holes {
             if let Some(hole_scheme) = self.type_table.get(&node_id) {
-                self.warnings.push(TypeWarning::TypeHoleFilled {
+                self.warnings.push(FrontendWarning::TypeHoleFilled {
                     inferred_type: self.scheme_inner(hole_scheme),
                     span,
                 });

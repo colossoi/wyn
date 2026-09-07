@@ -1,8 +1,8 @@
-use super::TypeWarning;
 use crate::ast;
 use crate::compile_thru_frontend;
 use crate::error::CompilerError;
 use crate::types;
+use crate::types::FrontendWarning;
 use crate::types::{Type, TypeExt, TypeName, TypeScheme};
 
 /// Helper to parse and type check source code, expecting success
@@ -483,7 +483,8 @@ fn check_type_hole(source: &str) -> Type {
     assert_eq!(warnings.len(), 1, "Expected exactly one type hole warning");
 
     match &warnings[0] {
-        TypeWarning::TypeHoleFilled { inferred_type, .. } => inferred_type.clone(),
+        FrontendWarning::TypeHoleFilled { inferred_type, .. } => inferred_type.clone(),
+        warning => panic!("expected a type-hole warning, got {warning:?}"),
     }
 }
 

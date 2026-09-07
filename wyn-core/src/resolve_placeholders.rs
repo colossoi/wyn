@@ -35,6 +35,7 @@ pub struct PlaceholdersResolvedGlobal {
     pub semantic_modules: semantic_modules::SemanticModules,
     pub context: Context<TypeName>,
     pub spec_schemes: LookupMap<String, TypeScheme<TypeName>>,
+    pub(crate) constant_uses: crate::LookupSet<ast_const_fold::FoldedConstantUse>,
 }
 
 /// AST after every placeholder in annotations and module specs has a stable
@@ -49,12 +50,16 @@ pub type TypePlaceholdersResolved = Program<
 
 pub fn resolve_type_placeholders(mut program: ast_const_fold::ConstantsFolded) -> TypePlaceholdersResolved {
     let mut resolver = PlaceholderResolver::new();
-    resolver.resolve(&mut program.global_context, &mut program.declarations);
+    resolver.resolve(
+        &mut program.global_context.semantic_modules,
+        &mut program.declarations,
+    );
     let (context, spec_schemes) = resolver.into_parts();
-    program.map_global_context(|semantic_modules| PlaceholdersResolvedGlobal {
-        semantic_modules,
+    program.map_global_context(|global| PlaceholdersResolvedGlobal {
+        semantic_modules: global.semantic_modules,
         context,
         spec_schemes,
+        constant_uses: global.constant_uses,
     })
 }
 

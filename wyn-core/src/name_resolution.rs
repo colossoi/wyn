@@ -447,6 +447,14 @@ impl NameResolution {
         self.declarations.remove(&(name.to_owned(), span))
     }
 
+    pub(crate) fn declaration_symbol(&self, name: &str, span: ast::Span) -> Option<SymbolId> {
+        self.declarations.get(&(name.to_owned(), span)).map(|declaration| declaration.symbol)
+    }
+
+    pub(crate) fn binding_symbol(&self, node: NodeId, name: &str) -> Option<SymbolId> {
+        self.bindings.get(&(node, name.to_owned())).copied()
+    }
+
     /// Record the type checker's choice of overload index for a Builtin
     /// resolution. No-op for entries not in `values`. Panics if the
     /// resolved entry isn't `Builtin` (the only variant with overloads).

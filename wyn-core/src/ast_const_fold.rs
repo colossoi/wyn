@@ -25,16 +25,40 @@ use crate::interface;
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::resolve_resources;
 use crate::semantic_modules;
-use crate::{LookupMap, NodeCounter};
+use crate::{LookupMap, LookupSet, NodeCounter};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DeclarationBinding {
+    pub name: String,
+    pub span: ast::Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ConstantBinding {
+    Declaration(DeclarationBinding),
+    Pattern {
+        node: ast::NodeId,
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FoldedConstantUse {
+    pub caller: DeclarationBinding,
+    pub target: ConstantBinding,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConstantsFoldedGlobal {
+    pub semantic_modules: semantic_modules::SemanticModules,
+    pub constant_uses: LookupSet<FoldedConstantUse>,
+}
 
 /// AST after early integer constants have been exposed.
 #[derive(Debug, Clone, Copy)]
 pub enum ConstantsFoldedTag {}
-pub type ConstantsFolded = Program<
-    ConstantsFoldedTag,
-    resolve_resources::ResourcesResolvedFamily,
-    semantic_modules::SemanticModules,
->;
+pub type ConstantsFolded =
+    Program<ConstantsFoldedTag, resolve_resources::ResourcesResolvedFamily, ConstantsFoldedGlobal>;
 
 /// AST-level constant folder for integer constants.
 pub struct AstConstFolder {
@@ -43,12 +67,15 @@ pub struct AstConstFolder {
     /// Allocator borrowed from the program while folding. Typed literals add
     /// one inner AST node for their explicit type ascription.
     node_ids: NodeCounter,
+    current_callable: Option<DeclarationBinding>,
+    constant_uses: LookupSet<FoldedConstantUse>,
 }
 
 #[derive(Clone)]
 struct IntegerConstant {
     value: i64,
     ty: Type,
+    binding: Option<ConstantBinding>,
 }
 
 impl AstConstFolder {
@@ -60,6 +87,7 @@ impl AstConstFolder {
             IntegerConstant {
                 value,
                 ty: Self::i32_type(),
+                binding: None,
             },
         );
     }
@@ -76,6 +104,8 @@ impl AstConstFolder {
         Self {
             constants: LookupMap::new(),
             node_ids: NodeCounter::new(),
+            current_callable: None,
+            constant_uses: LookupSet::new(),
         }
     }
 
@@ -93,7 +123,17 @@ impl AstConstFolder {
                 if d.params.is_empty() && d.size_params.is_empty() && d.type_params.is_empty() {
                     if let Some(ty) = Self::integer_constant_type(d.ty.as_ref(), &d.body) {
                         if let Some(value) = self.try_eval_any_integer_const(&d.body) {
-                            self.constants.insert(d.name.clone(), IntegerConstant { value, ty });
+                            self.constants.insert(
+                                d.name.clone(),
+                                IntegerConstant {
+                                    value,
+                                    ty,
+                                    binding: Some(ConstantBinding::Declaration(DeclarationBinding {
+                                        name: d.name.clone(),
+                                        span: d.name_span,
+                                    })),
+                                },
+                            );
                         }
                     }
                 }
@@ -109,6 +149,22 @@ impl AstConstFolder {
     }
 
     fn fold_declaration(&mut self, decl: &mut Declaration<resolve_resources::ResourcesResolvedFamily>) {
+        let caller = match decl {
+            Declaration::Decl(declaration) => Some(DeclarationBinding {
+                name: declaration.name.clone(),
+                span: declaration.name_span,
+            }),
+            Declaration::Entry(entry) => Some(DeclarationBinding {
+                name: entry.name.clone(),
+                span: entry.name_span,
+            }),
+            Declaration::Extern(external) => Some(DeclarationBinding {
+                name: external.name.clone(),
+                span: external.data.span,
+            }),
+            Declaration::Frontend(_) => None,
+        };
+        let previous_caller = std::mem::replace(&mut self.current_callable, caller);
         match decl {
             Declaration::Decl(d) => self.fold_decl(d),
             Declaration::Entry(e) => self.fold_entry_decl(e),
@@ -133,6 +189,7 @@ impl AstConstFolder {
                 ast::ResourcesResolvedFrontend::Open(_) => {}
             },
         }
+        self.current_callable = previous_caller;
     }
 
     fn fold_decl(&mut self, d: &mut Decl) {
@@ -161,18 +218,21 @@ impl AstConstFolder {
     /// Replace named type dimensions with static sizes when they refer to a
     /// known top-level i32 constant. Declaration size parameters and
     /// existential binders take precedence over constants with the same name.
-    fn fold_type(&self, ty: &mut Type, bound_sizes: &[String]) {
+    fn fold_type(&mut self, ty: &mut Type, bound_sizes: &[String]) {
         let Type::Constructed(name, args) = ty else {
             return;
         };
 
         if let TypeName::SizeVar(size_name) = name {
             if !bound_sizes.contains(size_name) {
-                if let Some(size) = self.constants.get(size_name).and_then(|constant| {
+                let constant = self.constants.get(size_name).cloned();
+                if let Some((constant, size)) = constant.and_then(|constant| {
                     Self::is_i32_type(&constant.ty)
-                        .then(|| constant.value)
+                        .then_some(constant.value)
                         .and_then(|value| usize::try_from(value).ok())
+                        .map(|size| (constant, size))
                 }) {
+                    self.record_constant_use(&constant);
                     *name = TypeName::Size(size);
                 }
             }
@@ -204,7 +264,7 @@ impl AstConstFolder {
         }
     }
 
-    fn fold_pattern<A>(&self, pattern: &mut Pattern<ast::SourceTree, A>, bound_sizes: &[String]) {
+    fn fold_pattern<A>(&mut self, pattern: &mut Pattern<ast::SourceTree, A>, bound_sizes: &[String]) {
         match &mut pattern.kind {
             PatternKind::Tuple(patterns)
             | PatternKind::Vec(patterns)
@@ -250,6 +310,7 @@ impl AstConstFolder {
                 // Inline known constants (only for unqualified names)
                 if identifier.qualifiers.is_empty() {
                     if let Some(constant) = self.constants.get(&identifier.name).cloned() {
+                        self.record_constant_use(&constant);
                         expr.kind = self.constant_expr_kind(&constant, &expr.h);
                     }
                 }
@@ -390,8 +451,19 @@ impl AstConstFolder {
         // For simplicity, only handle simple name patterns
         let const_binding = if let ast::PatternKind::Name(name) = &let_in.pattern.kind {
             Self::integer_constant_type(let_in.ty.as_ref(), &let_in.value).and_then(|ty| {
-                self.try_eval_any_integer_const(&let_in.value)
-                    .map(|value| (name.clone(), IntegerConstant { value, ty }))
+                self.try_eval_any_integer_const(&let_in.value).map(|value| {
+                    (
+                        name.clone(),
+                        IntegerConstant {
+                            value,
+                            ty,
+                            binding: Some(ConstantBinding::Pattern {
+                                node: let_in.pattern.h.id,
+                                name: name.clone(),
+                            }),
+                        },
+                    )
+                })
             })
         } else {
             None
@@ -419,6 +491,15 @@ impl AstConstFolder {
         self.fold_expr_scoped(&mut if_expr.condition, bound_sizes);
         self.fold_expr_scoped(&mut if_expr.then_branch, bound_sizes);
         self.fold_expr_scoped(&mut if_expr.else_branch, bound_sizes);
+    }
+
+    fn record_constant_use(&mut self, constant: &IntegerConstant) {
+        if let (Some(caller), Some(target)) = (&self.current_callable, &constant.binding) {
+            self.constant_uses.insert(FoldedConstantUse {
+                caller: caller.clone(),
+                target: target.clone(),
+            });
+        }
     }
 
     fn fold_loop(&mut self, loop_expr: &mut LoopExpr, bound_sizes: &[String]) {
@@ -687,7 +768,10 @@ impl AstConstFolder {
 pub fn fold_constants(mut program: resolve_resources::ResourcesResolved) -> ConstantsFolded {
     let mut folder = AstConstFolder::new();
     folder.fold_program(&mut program);
-    program.retag()
+    program.map_global_context::<ConstantsFoldedTag, _>(|semantic_modules| ConstantsFoldedGlobal {
+        semantic_modules,
+        constant_uses: folder.constant_uses,
+    })
 }
 
 #[cfg(test)]
