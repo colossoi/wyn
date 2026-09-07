@@ -155,9 +155,9 @@ struct Constructor {
     /// the cached id.
     int_pow_functions: LookupMap<bool, spirv::Word>,
 
-    /// Output variables for the current entry point being lowered.
+    /// Output places for the current entry point being lowered.
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
-    current_entry_outputs: Vec<spirv::Word>,
+    current_entry_outputs: Vec<(spirv::Word, spirv::StorageClass)>,
 
     /// buffer_id → (buffer_var, elem_spirv_type). The buffer_id is recovered
     /// from a view's type via `array_view_buffer` → `get_or_assign_buffer_id`.
@@ -580,6 +580,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             &mut constructor,
             &constant.body,
             false,
+            None,
             Span::generated(),
             param_ids,
             LookupMap::new(),
@@ -726,6 +727,7 @@ fn lower_ssa_function(
         constructor,
         body,
         false,
+        None,
         func.span,
         param_ids,
         LookupMap::new(),

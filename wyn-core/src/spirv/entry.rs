@@ -355,12 +355,16 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         }
     }
 
-    // Handle outputs
-    // The SSA output ABI is shared with WGSL, where `sample_mask` is a
-    // scalar `u32`. Vulkan's SPIR-V environment instead requires the
-    // SampleMask interface variable itself to be an array of 32-bit
-    // integers. Keep the logical scalar output and remember which globals
-    // need an element-zero access chain once the entry function is open.
+    // Handle outputs. The SSA output ABI is shared with WGSL, where
+    // `sample_mask` is a scalar `u32`. For SPIR-V, that logical slot is an
+    // internal whole-fragment-discard flag instead of a Vulkan SampleMask
+    // interface variable. This also avoids Naga's Vulkan-array/WebGPU-scalar
+    // SampleMask mismatch.
+    enum EntryOutput {
+        Interface(spirv::Word),
+        FragmentDiscardMask(spirv::Word),
+    }
+
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
@@ -377,19 +381,17 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // Don't add to output_vars - storage buffers are accessed differently
         } else if let Some(IoDecoration::BuiltIn(builtin)) = output.decoration() {
             let output_type = constructor.polytype_to_spirv(&output.ty)?;
-            let interface_type = if builtin == spirv::BuiltIn::SampleMask {
-                let one = constructor.const_u32(1);
-                *constructor.builder.type_array(wspirv::TypeId::new(output_type), one)
-            } else {
-                output_type
-            };
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, interface_type);
+            if builtin == spirv::BuiltIn::SampleMask {
+                if !matches!(&entry.execution_model, ExecutionModel::Fragment) {
+                    bail_spirv!("SampleMask output is only valid for fragment entry points");
+                }
+                output_vars.push(EntryOutput::FragmentDiscardMask(output_type));
+                continue;
+            }
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
             constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(builtin)]);
-            output_vars.push((
-                var_id,
-                (builtin == spirv::BuiltIn::SampleMask).then_some(output_type),
-            ));
+            output_vars.push(EntryOutput::Interface(var_id));
             interfaces.push(var_id);
         } else {
             let output_type = constructor.polytype_to_spirv(&output.ty)?;
@@ -413,7 +415,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             {
                 constructor.builder.decorate(var_id, spirv::Decoration::Flat, []);
             }
-            output_vars.push((var_id, None));
+            output_vars.push(EntryOutput::Interface(var_id));
             interfaces.push(var_id);
         }
     }
@@ -493,21 +495,24 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let (entry_func, _, first_code_block) = constructor.begin_function(None, &param_types, void_type)?;
     constructor.entry_functions.insert(entry.id, entry_func);
 
-    // OutputSlot places retain their logical SSA pointee types. For Vulkan's
-    // array-shaped SampleMask global, expose element zero as that scalar
-    // place so ordinary Store lowering remains type-correct.
-    constructor.current_entry_outputs = output_vars
-        .into_iter()
-        .map(|(var_id, array_element_type)| {
-            let Some(element_type) = array_element_type else {
-                return Ok(var_id);
-            };
-            let element_ptr_type =
-                constructor.get_or_create_ptr_type(spirv::StorageClass::Output, element_type);
-            let zero = constructor.const_u32(0);
-            constructor.builder.access_chain(element_ptr_type, None, var_id, [zero]).map_err(Into::into)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // OutputSlot places retain their logical SSA pointee types. Materialize
+    // the logical sample-mask slot as a local flag initialized to "keep";
+    // ReturnUnit consumes it and conditionally terminates the invocation.
+    let mut fragment_discard_mask = None;
+    for output in output_vars {
+        match output {
+            EntryOutput::Interface(var_id) => {
+                constructor.current_entry_outputs.push((var_id, spirv::StorageClass::Output))
+            }
+            EntryOutput::FragmentDiscardMask(output_type) => {
+                let mask = constructor.declare_variable("_fragment_discard_mask", output_type)?;
+                let keep = constructor.const_u32(u32::MAX);
+                constructor.builder.store(mask, keep, None, [])?;
+                constructor.current_entry_outputs.push((mask, spirv::StorageClass::Function));
+                fragment_discard_mask = Some(mask);
+            }
+        }
+    }
     let mut parameter_places = LookupMap::new();
 
     // Load push constant members via AccessChain from the push constant variable.
@@ -627,6 +632,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         constructor,
         body,
         true,
+        fragment_discard_mask,
         entry.span,
         Vec::new(),
         parameter_places,

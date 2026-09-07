@@ -15,6 +15,9 @@ pub(super) struct LowerCtx<'a, 'b> {
     pub(super) body: &'b FuncBody,
     /// True when lowering an entry point (void function — OpReturnValue is invalid).
     pub(super) is_entry_point: bool,
+    /// Function-local scalar mask used by fragment-output SSA. A zero value
+    /// means the invocation must be discarded at ReturnUnit.
+    pub(super) fragment_discard_mask: Option<spirv::Word>,
     /// Map from SSA ValueId to SPIR-V Word.
     pub(super) value_map: LookupMap<ValueId, spirv::Word>,
     /// Map from SSA BlockId to SPIR-V block label.
@@ -56,6 +59,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         constructor: &'a mut Constructor,
         body: &'b FuncBody,
         is_entry_point: bool,
+        fragment_discard_mask: Option<spirv::Word>,
         func_span: Span,
         param_ids: Vec<spirv::Word>,
         parameter_places: LookupMap<ssa::types::PlaceId, (spirv::Word, spirv::StorageClass)>,
@@ -71,6 +75,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             constructor,
             body,
             is_entry_point,
+            fragment_discard_mask,
             value_map: LookupMap::new(),
             block_map: LookupMap::new(),
             block_indices: LookupMap::new(),
@@ -853,9 +858,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         self.constructor.current_entry_outputs.len()
                     );
                 }
-                let ptr = self.constructor.current_entry_outputs[*index];
+                let (ptr, storage_class) = self.constructor.current_entry_outputs[*index];
                 self.place_ptr_id.insert(*result, ptr);
-                self.place_storage_class.insert(*result, spirv::StorageClass::Output);
+                self.place_storage_class.insert(*result, storage_class);
                 // Void instruction.
                 self.constructor.const_i32(0)
             }
@@ -959,6 +964,27 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             }
 
             Terminator::Return(None) => {
+                if let Some(mask_ptr) = self.fragment_discard_mask {
+                    let mask = self.constructor.builder.load(
+                        self.constructor.u32_type,
+                        None,
+                        mask_ptr,
+                        None,
+                        [],
+                    )?;
+                    let zero = self.constructor.const_u32(0);
+                    let discard =
+                        self.constructor.builder.i_equal(self.constructor.bool_type, None, mask, zero)?;
+                    let kill_block = self.constructor.builder.id();
+                    let return_block = self.constructor.builder.id();
+                    self.constructor
+                        .builder
+                        .selection_merge(return_block, spirv::SelectionControl::NONE)?;
+                    self.constructor.builder.branch_conditional(discard, kill_block, return_block, [])?;
+                    self.begin_block(kill_block)?;
+                    self.constructor.builder.kill()?;
+                    self.begin_block(return_block)?;
+                }
                 self.constructor.builder.ret()?;
             }
 
