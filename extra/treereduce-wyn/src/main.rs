@@ -231,6 +231,57 @@ struct StructuralStats {
     accepted: usize,
 }
 
+#[derive(Clone, Debug)]
+struct SyntaxCheck<C> {
+    inner: C,
+    language: Language,
+    reject_errors: bool,
+}
+
+#[derive(Debug)]
+enum SyntaxCheckState<S> {
+    Rejected,
+    Inner(S),
+}
+
+impl<C: Check> Check for SyntaxCheck<C> {
+    type State = SyntaxCheckState<C::State>;
+
+    fn start(&self, source: &[u8]) -> io::Result<Self::State> {
+        let has_error = self.reject_errors
+            && parse(&self.language, source)
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .root_node()
+                .has_error();
+        if has_error {
+            Ok(SyntaxCheckState::Rejected)
+        } else {
+            self.inner.start(source).map(SyntaxCheckState::Inner)
+        }
+    }
+
+    fn cancel(&self, state: Self::State) -> io::Result<()> {
+        match state {
+            SyntaxCheckState::Rejected => Ok(()),
+            SyntaxCheckState::Inner(state) => self.inner.cancel(state),
+        }
+    }
+
+    fn try_wait(&self, state: &mut Self::State) -> io::Result<Option<bool>> {
+        match state {
+            SyntaxCheckState::Rejected => Ok(Some(false)),
+            SyntaxCheckState::Inner(state) => self.inner.try_wait(state),
+        }
+    }
+
+    fn wait(&self, state: Self::State) -> io::Result<bool> {
+        match state {
+            SyntaxCheckState::Rejected => Ok(false),
+            SyntaxCheckState::Inner(state) => self.inner.wait(state),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct TypeProbe {
     wyn: PathBuf,
@@ -255,16 +306,36 @@ impl TypeProbe {
     }
 
     fn resolve(&self, source: &[u8], candidate: Candidate) -> Result<Option<Candidate>> {
-        if candidate.kind != CandidateKind::InferDefault {
-            return Ok(Some(candidate));
-        }
         // Human-readable diagnostics do not identify holes in a form that is
         // safe to parse when the source already contains another hole.
         if source.windows(HOLE[0].len()).any(|window| window == HOLE[0].as_bytes()) {
-            return Ok(None);
+            return Ok((candidate.kind != CandidateKind::InferDefault).then_some(candidate));
         }
 
-        let hole_source = apply_candidate(source, &candidate);
+        if candidate.kind != CandidateKind::InferDefault {
+            return Ok(Some(candidate));
+        }
+
+        let Some(ty) = self.infer_type(source, candidate.start, candidate.end)? else {
+            return Ok(None);
+        };
+        let Some(replacement) = default_literal(&ty) else {
+            return Ok(None);
+        };
+        if replacement.len() >= candidate.end - candidate.start {
+            return Ok(None);
+        }
+        Ok(Some(Candidate {
+            replacement: replacement.into_bytes(),
+            ..candidate
+        }))
+    }
+
+    fn infer_type(&self, source: &[u8], start: usize, end: usize) -> Result<Option<String>> {
+        let mut hole_source = Vec::with_capacity(source.len() - (end - start) + HOLE[0].len());
+        hole_source.extend_from_slice(&source[..start]);
+        hole_source.extend_from_slice(HOLE[0].as_bytes());
+        hole_source.extend_from_slice(&source[end..]);
         let mut builder = tempfile::Builder::new();
         builder.prefix("treereduce-type-").suffix(".wyn");
         let mut file =
@@ -278,24 +349,11 @@ impl TypeProbe {
             .output()
             .with_context(|| format!("failed to run type probe {}", self.wyn.display()))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let Some(ty) = self
+        Ok(self
             .inferred_type
             .captures(&stderr)
             .and_then(|captures| captures.get(1))
-            .map(|capture| capture.as_str())
-        else {
-            return Ok(None);
-        };
-        let Some(replacement) = default_literal(ty) else {
-            return Ok(None);
-        };
-        if replacement.len() >= candidate.end - candidate.start {
-            return Ok(None);
-        }
-        Ok(Some(Candidate {
-            replacement: replacement.into_bytes(),
-            ..candidate
-        }))
+            .map(|capture| capture.as_str().to_owned()))
     }
 }
 
@@ -381,6 +439,11 @@ fn main() -> Result<()> {
     if args.verbose > 0 && comments_count > 0 {
         eprintln!("removed {comments_count} comments before reduction (-{comments_size} bytes)");
     }
+    let check = SyntaxCheck {
+        inner: check,
+        language: language.clone(),
+        reject_errors: !parse(&language, &source)?.root_node().has_error(),
+    };
     reduce(&args, &language, source, initial_size, check)
 }
 
@@ -812,8 +875,8 @@ fn collect_concrete_replacements(node: Node<'_>, candidates: &mut Vec<Candidate>
 
 fn collect_promotions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Candidate>) {
     match node.kind() {
-        "let_expression" => promote_fields(node, &["value", "body"], source, candidates),
-        "if_expression" => promote_fields(node, &["condition", "then", "else"], source, candidates),
+        "let_expression" => promote_fields(node, &["body"], source, candidates),
+        "if_expression" => promote_fields(node, &["then", "else"], source, candidates),
         "binary_expression" => promote_fields(
             node,
             &["left", "right", "start", "step", "end"],
@@ -843,9 +906,7 @@ fn collect_promotions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Candid
                 }
             }
         }
-        "call_expression" | "array_literal" | "vec_literal" | "tuple_expression" => {
-            promote_direct_expressions(node, source, candidates)
-        }
+        "call_expression" => promote_call_arguments(node, source, candidates),
         "record_expression" => {
             let mut cursor = node.walk();
             for field in node.named_children(&mut cursor) {
@@ -879,6 +940,17 @@ fn promote_direct_expressions(parent: Node<'_>, source: &[u8], candidates: &mut 
     let mut cursor = parent.walk();
     for child in parent.named_children(&mut cursor) {
         if is_expression_kind(child.kind()) {
+            add_promotion(parent, child, source, candidates);
+        }
+    }
+}
+
+fn promote_call_arguments(parent: Node<'_>, source: &[u8], candidates: &mut Vec<Candidate>) {
+    let function_end =
+        parent.child_by_field_name("function").map_or(parent.start_byte(), |function| function.end_byte());
+    let mut cursor = parent.walk();
+    for child in parent.named_children(&mut cursor) {
+        if child.start_byte() >= function_end && is_expression_kind(child.kind()) {
             add_promotion(parent, child, source, candidates);
         }
     }
@@ -1119,6 +1191,70 @@ mod tests {
         let parallel =
             structural_reduce(&language(), source, &Contains(b"bug()"), &type_probe(), 4, 0).unwrap();
         assert_eq!(parallel.0, sequential.0);
+    }
+
+    #[test]
+    fn does_not_promote_elements_out_of_collections() {
+        for source in [
+            b"def f = [x, y]".as_slice(),
+            b"def f = @[x, y]",
+            b"def f = (x, y)",
+        ] {
+            let tree = parse(&language(), source).unwrap();
+            let promoted: Vec<_> = collect_candidates(&tree, source)
+                .iter()
+                .filter(|candidate| candidate.kind == CandidateKind::Promotion)
+                .map(|candidate| apply_candidate(source, candidate))
+                .collect();
+            assert!(!promoted.iter().any(|candidate| candidate == b"def f = x"));
+            assert!(!promoted.iter().any(|candidate| candidate == b"def f = y"));
+        }
+    }
+
+    #[test]
+    fn avoids_low_probability_promotions() {
+        let cases: &[(&[u8], &[&str], &[&str])] = &[
+            (
+                b"def f = let x = scalar in vector",
+                &["def f = vector"],
+                &["def f = scalar"],
+            ),
+            (
+                b"def f = if condition then yes else no",
+                &["def f = yes", "def f = no"],
+                &["def f = condition"],
+            ),
+            (
+                b"def f = normalize(vector)",
+                &["def f = vector"],
+                &["def f = normalize"],
+            ),
+        ];
+        for (source, expected, forbidden) in cases {
+            let tree = parse(&language(), source).unwrap();
+            let promoted: Vec<_> = collect_candidates(&tree, source)
+                .iter()
+                .filter(|candidate| candidate.kind == CandidateKind::Promotion)
+                .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
+                .collect();
+            for candidate in *expected {
+                assert!(promoted.iter().any(|value| value == candidate));
+            }
+            for candidate in *forbidden {
+                assert!(!promoted.iter().any(|value| value == candidate));
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_check_rejects_new_parse_errors() {
+        let check = SyntaxCheck {
+            inner: Contains(b"bug"),
+            language: language(),
+            reject_errors: true,
+        };
+        assert!(check.interesting(b"def f = bug()").unwrap());
+        assert!(!check.interesting(b"def f = (bug()").unwrap());
     }
 
     #[test]
