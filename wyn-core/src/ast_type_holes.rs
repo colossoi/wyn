@@ -33,8 +33,10 @@ pub fn reject_type_holes(program: types::run::TypeChecked) -> error::Result<Hole
         .global_context
         .warnings
         .iter()
-        .map(|warning| match warning {
-            types::checker::TypeWarning::TypeHoleFilled { inferred_type, span } => (inferred_type, span),
+        .filter_map(|warning| match warning {
+            types::FrontendWarning::TypeHoleFilled { inferred_type, span } => Some((inferred_type, span)),
+            types::FrontendWarning::UnusedBinding { .. }
+            | types::FrontendWarning::UnusedDeclaration { .. } => None,
         })
         .collect();
     if !holes.is_empty() {
@@ -100,6 +102,7 @@ fn rebuild(
                 support_definitions,
                 symbols: global_context.symbols,
                 warnings: global_context.warnings,
+                folded_constant_uses: global_context.folded_constant_uses,
                 builtin_names: global_context.builtin_names,
             },
         ))

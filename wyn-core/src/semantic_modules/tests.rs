@@ -86,6 +86,7 @@ fn test_query_f32_sin_from_math_prelude() {
         semantic_modules: manager,
         context,
         spec_schemes,
+        constant_uses: _,
     } = program.global_context;
 
     // Use TypeChecker to get the function type schemes
