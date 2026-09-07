@@ -116,7 +116,7 @@ smallest program that still reproduces the bug. Source:
      cat > "$tmp"
      candidate="$tmp"
    fi
-   output=$("$WYN" compile --fill-holes "$candidate" -o /dev/null 2>&1 || true)
+   output=$("$WYN" build --fill-holes "$candidate" -o /dev/null 2>&1 || true)
    grep -q "STABLE_ERROR_SUBSTRING" <<< "$output"
    ```
    `chmod +x /tmp/interesting.sh`. Always test on the original file
@@ -182,6 +182,8 @@ smallest program that still reproduces the bug. Source:
      rules, or do a manual polish pass to go further.
 
 **See also:**
+- `extra/treereduce-wyn/README.md` — installation, predicate examples,
+  option reference, and troubleshooting.
 - `extra/treereduce-wyn/interesting.sh` — the committed sqrt-panic
   script; good template.
 - Prior reduction results for the sqrt-panic demo and SoA-tuple
