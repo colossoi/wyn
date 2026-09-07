@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -14,11 +15,6 @@ use treereduce::{Check, CmdCheck, Config, NodeTypes, Original};
 const DEFAULT_PASSES: usize = 2;
 const DEFAULT_MIN_REDUCTION: usize = 2;
 
-// These are tried sequentially before the type-hole fallback. Wyn's type
-// checker acts as the oracle: candidates with the wrong type are simply
-// uninteresting. Keeping this pass separate from treereduce prevents `???`
-// from winning a race against a smaller, ordinary Wyn expression.
-const CONCRETE_EXPRESSIONS: &[&str] = &["0", "1", "0.0", "1.0", "false", "true", "()", "[]", "@[]", "{}"];
 const INTEGER_EXPRESSIONS: &[&str] = &["0", "1"];
 const FLOAT_EXPRESSIONS: &[&str] = &["0.0", "1.0"];
 const BOOLEAN_EXPRESSIONS: &[&str] = &["false", "true"];
@@ -69,6 +65,14 @@ struct Args {
     /// Number of parallel interestingness checks used by treereduce.
     #[arg(short, long, default_value_t = default_jobs())]
     jobs: usize,
+
+    /// Wyn compiler used to infer concrete defaults for expression holes.
+    #[arg(long, value_name = "FILE", help_heading = "Reduction options")]
+    wyn: Option<PathBuf>,
+
+    /// Extra argument passed to `wyn check` while inferring hole types.
+    #[arg(long, value_name = "ARG", allow_hyphen_values = true, help_heading = "Reduction options")]
+    wyn_check_arg: Vec<String>,
 
     /// Emit treereduce logs as JSON.
     #[arg(long)]
@@ -179,12 +183,40 @@ struct Args {
     check: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CandidateKind {
+    Promotion,
+    ListDeletion,
+    Concrete,
+    InferDefault,
+}
+
+impl CandidateKind {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Promotion => 0,
+            Self::ListDeletion => 1,
+            Self::Concrete => 2,
+            Self::InferDefault => 3,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Promotion => "child promotion",
+            Self::ListDeletion => "list element deletion",
+            Self::Concrete => "concrete replacement",
+            Self::InferDefault => "inferred default replacement",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct Candidate {
     start: usize,
     end: usize,
     replacement: Vec<u8>,
-    description: &'static str,
+    kind: CandidateKind,
 }
 
 impl Candidate {
@@ -197,6 +229,133 @@ impl Candidate {
 struct StructuralStats {
     attempts: usize,
     accepted: usize,
+}
+
+#[derive(Debug)]
+struct TypeProbe {
+    wyn: PathBuf,
+    check_args: Vec<String>,
+    temp_dir: Option<PathBuf>,
+    inferred_type: Regex,
+}
+
+impl TypeProbe {
+    fn new(args: &Args) -> Result<Self> {
+        let wyn = args
+            .wyn
+            .clone()
+            .or_else(|| std::env::var_os("WYN").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("./target/release/wyn"));
+        Ok(Self {
+            wyn,
+            check_args: args.wyn_check_arg.clone(),
+            temp_dir: args.temp_dir.clone(),
+            inferred_type: Regex::new(r"type hole inferred as `([^`]+)`")?,
+        })
+    }
+
+    fn resolve(&self, source: &[u8], candidate: Candidate) -> Result<Option<Candidate>> {
+        if candidate.kind != CandidateKind::InferDefault {
+            return Ok(Some(candidate));
+        }
+        // Human-readable diagnostics do not identify holes in a form that is
+        // safe to parse when the source already contains another hole.
+        if source.windows(HOLE[0].len()).any(|window| window == HOLE[0].as_bytes()) {
+            return Ok(None);
+        }
+
+        let hole_source = apply_candidate(source, &candidate);
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("treereduce-type-").suffix(".wyn");
+        let mut file =
+            if let Some(dir) = &self.temp_dir { builder.tempfile_in(dir)? } else { builder.tempfile()? };
+        file.write_all(&hole_source)?;
+        file.flush()?;
+        let output = Command::new(&self.wyn)
+            .arg("check")
+            .args(&self.check_args)
+            .arg(file.path())
+            .output()
+            .with_context(|| format!("failed to run type probe {}", self.wyn.display()))?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let Some(ty) = self
+            .inferred_type
+            .captures(&stderr)
+            .and_then(|captures| captures.get(1))
+            .map(|capture| capture.as_str())
+        else {
+            return Ok(None);
+        };
+        let Some(replacement) = default_literal(ty) else {
+            return Ok(None);
+        };
+        if replacement.len() >= candidate.end - candidate.start {
+            return Ok(None);
+        }
+        Ok(Some(Candidate {
+            replacement: replacement.into_bytes(),
+            ..candidate
+        }))
+    }
+}
+
+fn default_literal(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    if ty == "bool" {
+        return Some("false".to_owned());
+    }
+    if ty == "()" {
+        return Some("()".to_owned());
+    }
+    if ty.len() >= 2
+        && matches!(ty.as_bytes()[0], b'i' | b'u')
+        && ty.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return Some("0".to_owned());
+    }
+    if ty.len() >= 2 && ty.starts_with('f') && ty.as_bytes()[1..].iter().all(u8::is_ascii_digit) {
+        return Some("0.0".to_owned());
+    }
+    if let Some(rest) = ty.strip_prefix("vec") {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let size: usize = rest[..digits].parse().ok()?;
+        let element = default_literal(&rest[digits..])?;
+        return Some(format!("@[{}]", vec![element; size].join(", ")));
+    }
+    if ty.starts_with('(') && ty.ends_with(')') {
+        let elements = split_type_list(&ty[1..ty.len() - 1])?;
+        let defaults = elements.into_iter().map(default_literal).collect::<Option<Vec<_>>>()?;
+        return Some(format!("({})", defaults.join(", ")));
+    }
+    if ty.starts_with('[') {
+        let end = ty.find(']')?;
+        let size: usize = ty[1..end].parse().ok()?;
+        let element = default_literal(&ty[end + 1..])?;
+        return Some(format!("[{}]", vec![element; size].join(", ")));
+    }
+    None
+}
+
+fn split_type_list(types: &str) -> Option<Vec<&str>> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, byte) in types.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.checked_sub(1)?,
+            b',' if depth == 0 => {
+                result.push(types[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    result.push(types[start..].trim());
+    Some(result)
 }
 
 fn default_jobs() -> usize {
@@ -244,6 +403,7 @@ where
 
     let node_types = NodeTypes::new(tree_sitter_wyn::NODE_TYPES)
         .context("failed to read tree-sitter-wyn node-types.json")?;
+    let type_probe = TypeProbe::new(args)?;
     let start = Instant::now();
     let mut structural_stats = StructuralStats::default();
     let mut passes_done = 0;
@@ -272,7 +432,8 @@ where
         if args.verbose > 0 {
             eprintln!("outer pass {passes_done}: structural reduction ({pass_start_size} bytes)");
         }
-        let (next, stats) = structural_reduce(language, source, &check, args.jobs, args.verbose)?;
+        let (next, stats) =
+            structural_reduce(language, source, &check, &type_probe, args.jobs, args.verbose)?;
         source = next;
         structural_stats.attempts += stats.attempts;
         structural_stats.accepted += stats.accepted;
@@ -500,6 +661,7 @@ fn structural_reduce<C: Check>(
     language: &Language,
     mut source: Vec<u8>,
     check: &C,
+    type_probe: &TypeProbe,
     jobs: usize,
     verbose: u8,
 ) -> Result<(Vec<u8>, StructuralStats)> {
@@ -520,6 +682,9 @@ fn structural_reduce<C: Check>(
             }
             let mut pending = Vec::with_capacity(batch.len());
             for candidate in batch {
+                let Some(candidate) = type_probe.resolve(&source, candidate)? else {
+                    continue;
+                };
                 let next = apply_candidate(&source, &candidate);
                 let state = match check.start(&next) {
                     Ok(state) => state,
@@ -555,7 +720,7 @@ fn structural_reduce<C: Check>(
                     if verbose > 1 {
                         eprintln!(
                             "accepted {} at {}..{} (-{} bytes)",
-                            candidate.description,
+                            candidate.kind.description(),
                             candidate.start,
                             candidate.end,
                             candidate.reduction()
@@ -604,7 +769,11 @@ fn collect_candidates(tree: &Tree, source: &[u8]) -> Vec<Candidate> {
             && unique.insert((candidate.start, candidate.end, candidate.replacement.clone()))
     });
     candidates.sort_by(|left, right| {
-        right.reduction().cmp(&left.reduction()).then_with(|| left.start.cmp(&right.start))
+        left.kind
+            .priority()
+            .cmp(&right.kind.priority())
+            .then_with(|| right.reduction().cmp(&left.reduction()))
+            .then_with(|| left.start.cmp(&right.start))
     });
     candidates
 }
@@ -614,7 +783,15 @@ fn collect_concrete_replacements(node: Node<'_>, candidates: &mut Vec<Candidate>
         "integer_literal" => INTEGER_EXPRESSIONS,
         "float_literal" => FLOAT_EXPRESSIONS,
         "boolean_literal" => BOOLEAN_EXPRESSIONS,
-        kind if COMPOSITE_EXPRESSION_KINDS.contains(&kind) => CONCRETE_EXPRESSIONS,
+        kind if COMPOSITE_EXPRESSION_KINDS.contains(&kind) => {
+            candidates.push(Candidate {
+                start: node.start_byte(),
+                end: node.end_byte(),
+                replacement: b"???".to_vec(),
+                kind: CandidateKind::InferDefault,
+            });
+            return;
+        }
         "tuple_pattern"
         | "record_pattern"
         | "typed_pattern"
@@ -628,7 +805,7 @@ fn collect_concrete_replacements(node: Node<'_>, candidates: &mut Vec<Candidate>
             start: node.start_byte(),
             end: node.end_byte(),
             replacement: replacement.as_bytes().to_vec(),
-            description: "concrete replacement",
+            kind: CandidateKind::Concrete,
         });
     }
 }
@@ -717,7 +894,7 @@ fn add_promotion(parent: Node<'_>, child: Node<'_>, source: &[u8], candidates: &
             start,
             end,
             replacement: source[child_start..child_end].to_vec(),
-            description: "child promotion",
+            kind: CandidateKind::Promotion,
         });
     }
 }
@@ -761,7 +938,7 @@ fn collect_list_deletions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Ca
                     start: clause.start_byte(),
                     end: clause.end_byte(),
                     replacement: Vec::new(),
-                    description: "case deletion",
+                    kind: CandidateKind::ListDeletion,
                 });
             }
         }
@@ -843,7 +1020,7 @@ fn add_comma_deletions(
             start: elements[0].start_byte(),
             end,
             replacement: Vec::new(),
-            description: "list element deletion",
+            kind: CandidateKind::ListDeletion,
         });
         return;
     }
@@ -866,7 +1043,7 @@ fn add_comma_deletions(
                 start,
                 end,
                 replacement: Vec::new(),
-                description: "list element deletion",
+                kind: CandidateKind::ListDeletion,
             });
         }
     }
@@ -909,10 +1086,20 @@ mod tests {
         tree_sitter_wyn::LANGUAGE.into()
     }
 
+    fn type_probe() -> TypeProbe {
+        TypeProbe {
+            wyn: PathBuf::from("false"),
+            check_args: Vec::new(),
+            temp_dir: None,
+            inferred_type: Regex::new(r"type hole inferred as `([^`]+)`").unwrap(),
+        }
+    }
+
     #[test]
     fn promotes_interesting_branch_out_of_if_expression() {
         let source = b"def main = if true then bug() else other()".to_vec();
-        let (reduced, stats) = structural_reduce(&language(), source, &Contains(b"bug()"), 1, 0).unwrap();
+        let (reduced, stats) =
+            structural_reduce(&language(), source, &Contains(b"bug()"), &type_probe(), 1, 0).unwrap();
         assert_eq!(String::from_utf8(reduced).unwrap(), "def main = bug()");
         assert!(stats.accepted > 0);
     }
@@ -920,8 +1107,17 @@ mod tests {
     #[test]
     fn parallel_structural_reduction_preserves_candidate_order() {
         let source = b"def main = if true then bug() else other()".to_vec();
-        let sequential = structural_reduce(&language(), source.clone(), &Contains(b"bug()"), 1, 0).unwrap();
-        let parallel = structural_reduce(&language(), source, &Contains(b"bug()"), 4, 0).unwrap();
+        let sequential = structural_reduce(
+            &language(),
+            source.clone(),
+            &Contains(b"bug()"),
+            &type_probe(),
+            1,
+            0,
+        )
+        .unwrap();
+        let parallel =
+            structural_reduce(&language(), source, &Contains(b"bug()"), &type_probe(), 4, 0).unwrap();
         assert_eq!(parallel.0, sequential.0);
     }
 
@@ -931,7 +1127,7 @@ mod tests {
         let tree = parse(&language(), source).unwrap();
         let rendered: Vec<_> = collect_candidates(&tree, source)
             .iter()
-            .filter(|candidate| candidate.description == "list element deletion")
+            .filter(|candidate| candidate.kind == CandidateKind::ListDeletion)
             .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
             .collect();
         assert!(rendered.iter().any(|candidate| candidate == "def f(y) = x"));
@@ -944,7 +1140,7 @@ mod tests {
         let tree = parse(&language(), source).unwrap();
         let rendered: Vec<_> = collect_candidates(&tree, source)
             .iter()
-            .filter(|candidate| candidate.description == "list element deletion")
+            .filter(|candidate| candidate.kind == CandidateKind::ListDeletion)
             .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
             .collect();
         assert!(rendered.iter().any(|candidate| candidate == "def f() = 0"));
@@ -956,7 +1152,7 @@ mod tests {
         let tree = parse(&language(), source).unwrap();
         let rendered: Vec<_> = collect_candidates(&tree, source)
             .iter()
-            .filter(|candidate| candidate.description == "list element deletion")
+            .filter(|candidate| candidate.kind == CandidateKind::ListDeletion)
             .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
             .collect();
         assert!(rendered.iter().any(|candidate| candidate == "def f = (1)"));
@@ -968,13 +1164,26 @@ mod tests {
         let tree = parse(&language(), source).unwrap();
         let concrete: Vec<_> = collect_candidates(&tree, source)
             .iter()
-            .filter(|candidate| candidate.description == "concrete replacement")
+            .filter(|candidate| candidate.kind == CandidateKind::Concrete)
             .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
             .collect();
         let holes = hole_replacements();
         assert!(concrete.iter().any(|candidate| candidate == "def f = 0"));
         assert!(concrete.iter().any(|candidate| candidate == "def f = 1"));
         assert_eq!(holes["binary_expression"], ["???"]);
+    }
+
+    #[test]
+    fn renders_defaults_for_compiler_type_names() {
+        assert_eq!(default_literal("i32").as_deref(), Some("0"));
+        assert_eq!(default_literal("f32").as_deref(), Some("0.0"));
+        assert_eq!(default_literal("vec3f32").as_deref(), Some("@[0.0, 0.0, 0.0]"));
+        assert_eq!(
+            default_literal("(bool, vec2i32)").as_deref(),
+            Some("(false, @[0, 0])")
+        );
+        assert_eq!(default_literal("[2]f32").as_deref(), Some("[0.0, 0.0]"));
+        assert_eq!(default_literal("i32 -> i32"), None);
     }
 
     #[test]

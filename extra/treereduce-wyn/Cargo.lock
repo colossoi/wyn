@@ -641,6 +641,7 @@ dependencies = [
  "anyhow",
  "clap",
  "regex",
+ "tempfile",
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-edit",

@@ -147,12 +147,15 @@ smallest program that still reproduces the bug. Source:
    and how many rewrites the table allows.
 
 4. **Iterate on the reduction rules** if the reducer's floor looks too
-   high. The rules live in `extra/treereduce-wyn/src/main.rs`. A sequential
-   structural pass first promotes useful children out of wrappers such as
+   high. The rules live in `extra/treereduce-wyn/src/main.rs`. A parallel,
+   deterministically ordered structural pass first promotes useful children out of wrappers such as
    `if`, `let`, calls, tuples, records, matches, and unary/binary expressions,
-   and removes comma-separated elements while repairing separators. It then
-   tries a concrete palette (`0`, `1`, booleans, unit, and empty collections)
-   before falling back to `???`; patterns may become `_`. The generic
+   and removes comma-separated elements while repairing separators. For other
+   expressions it asks `wyn check` to infer the type of a temporary `???` and
+   tries the corresponding concrete default; `--wyn` selects the compiler and
+   `--wyn-check-arg` forwards options such as `--graphics`. Literal expressions
+   still try their same-type zero/one alternatives, patterns may become `_`,
+   and the generic pass retains `???` as a final fallback. The generic
    tree-reduction pass follows. If you change `grammar.js`, regenerate the
    parser before rebuilding:
    ```bash

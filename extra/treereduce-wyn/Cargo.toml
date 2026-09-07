@@ -10,6 +10,7 @@ keywords = ["program-reducer", "minimization", "test-case-reduction", "wyn"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
+tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tree-sitter = "0.25"
 tree-sitter-edit = "0.4"
