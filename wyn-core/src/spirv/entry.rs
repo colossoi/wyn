@@ -356,6 +356,11 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     }
 
     // Handle outputs
+    // The SSA output ABI is shared with WGSL, where `sample_mask` is a
+    // scalar `u32`. Vulkan's SPIR-V environment instead requires the
+    // SampleMask interface variable itself to be an array of 32-bit
+    // integers. Keep the logical scalar output and remember which globals
+    // need an element-zero access chain once the entry function is open.
     let mut output_vars = Vec::new();
     let mut output_location = 0u32;
     for output in &entry.outputs {
@@ -372,10 +377,19 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             // Don't add to output_vars - storage buffers are accessed differently
         } else if let Some(IoDecoration::BuiltIn(builtin)) = output.decoration() {
             let output_type = constructor.polytype_to_spirv(&output.ty)?;
-            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, output_type);
+            let interface_type = if builtin == spirv::BuiltIn::SampleMask {
+                let one = constructor.const_u32(1);
+                *constructor.builder.type_array(wspirv::TypeId::new(output_type), one)
+            } else {
+                output_type
+            };
+            let ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::Output, interface_type);
             let var_id = constructor.builder.variable(ptr_type, None, spirv::StorageClass::Output, None);
             constructor.builder.decorate(var_id, spirv::Decoration::BuiltIn, [Operand::BuiltIn(builtin)]);
-            output_vars.push(var_id);
+            output_vars.push((
+                var_id,
+                (builtin == spirv::BuiltIn::SampleMask).then_some(output_type),
+            ));
             interfaces.push(var_id);
         } else {
             let output_type = constructor.polytype_to_spirv(&output.ty)?;
@@ -399,7 +413,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
             {
                 constructor.builder.decorate(var_id, spirv::Decoration::Flat, []);
             }
-            output_vars.push(var_id);
+            output_vars.push((var_id, None));
             interfaces.push(var_id);
         }
     }
@@ -473,14 +487,27 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // Store interfaces for entry point declaration
     constructor.entry_point_interfaces.insert(entry.id, interfaces);
 
-    // Set output variables for OutputPtr lowering
-    constructor.current_entry_outputs = output_vars;
-
     // Begin void function for entry point — I/O is via variables, not params.
     let void_type = constructor.void_type;
     let param_types: Vec<spirv::Word> = Vec::new();
     let (entry_func, _, first_code_block) = constructor.begin_function(None, &param_types, void_type)?;
     constructor.entry_functions.insert(entry.id, entry_func);
+
+    // OutputSlot places retain their logical SSA pointee types. For Vulkan's
+    // array-shaped SampleMask global, expose element zero as that scalar
+    // place so ordinary Store lowering remains type-correct.
+    constructor.current_entry_outputs = output_vars
+        .into_iter()
+        .map(|(var_id, array_element_type)| {
+            let Some(element_type) = array_element_type else {
+                return Ok(var_id);
+            };
+            let element_ptr_type =
+                constructor.get_or_create_ptr_type(spirv::StorageClass::Output, element_type);
+            let zero = constructor.const_u32(0);
+            constructor.builder.access_chain(element_ptr_type, None, var_id, [zero]).map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut parameter_places = LookupMap::new();
 
     // Load push constant members via AccessChain from the push constant variable.

@@ -628,7 +628,8 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             // Add storage buffer variables that this entry point declares
             // (via its inputs/outputs). Don't add ALL storage vars — other
             // entry points may have buffers this one doesn't reference.
-            if let Some(entry) = program.entry_points.iter().find(|e| e.id == *entry_id) {
+            let entry = program.entry_points.iter().find(|e| e.id == *entry_id);
+            if let Some(entry) = entry {
                 constructor.select_storage_accesses(&entry.shader_storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
@@ -670,6 +671,20 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             match model {
                 spirv::ExecutionModel::Fragment => {
                     constructor.builder.execution_mode(func_id, spirv::ExecutionMode::OriginUpperLeft, []);
+                    if entry.is_some_and(|entry| {
+                        entry.outputs.iter().any(|output| {
+                            matches!(
+                                output.decoration(),
+                                Some(IoDecoration::BuiltIn(spirv::BuiltIn::FragDepth))
+                            )
+                        })
+                    }) {
+                        constructor.builder.execution_mode(
+                            func_id,
+                            spirv::ExecutionMode::DepthReplacing,
+                            [],
+                        );
+                    }
                 }
                 spirv::ExecutionModel::GLCompute => {
                     if let Some((x, y, z)) = local_size {

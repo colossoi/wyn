@@ -2762,6 +2762,8 @@ entry mixed() ([]i32, []i32) =
     assert!(!compile_thru_spirv(source).expect("mixed map/filter emits SPIR-V").spirv.is_empty());
 }
 
+/// Validate SPIR-V after translation into Naga IR. This is not suitable for
+/// Vulkan's array-shaped SampleMask ABI, which Naga models as a scalar `u32`.
 fn assert_naga_accepts_spirv(words: &[u32]) {
     let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
     let module = naga::front::spv::parse_u8_slice(
@@ -2799,6 +2801,119 @@ fn spirv_has_builtin(words: &[u32], builtin: spirv::BuiltIn) -> bool {
         index += word_count;
     }
     false
+}
+
+fn spirv_has_execution_mode(words: &[u32], mode: spirv::ExecutionMode) -> bool {
+    let mut index = 5usize;
+    while index < words.len() {
+        let instruction = words[index];
+        let word_count = (instruction >> 16) as usize;
+        let opcode = instruction & 0xffff;
+        if opcode == spirv::Op::ExecutionMode as u32 && word_count >= 3 && words[index + 2] == mode as u32 {
+            return true;
+        }
+        if word_count == 0 {
+            break;
+        }
+        index += word_count;
+    }
+    false
+}
+
+/// Vulkan represents SampleMask as an array even though the shared SSA and
+/// WGSL ABIs expose one scalar `u32` mask. Verify both sides of the SPIR-V
+/// adapter: the decorated interface global is `[1]u32`, and stores target its
+/// scalar element zero rather than the array pointer itself.
+fn assert_spirv_sample_mask_output_abi(words: &[u32]) {
+    use std::collections::HashMap;
+    use wspirv::dr::Operand;
+    use wspirv::spirv::{BuiltIn, Decoration, Op, StorageClass};
+
+    let module = wspirv::dr::load_words(words).expect("backend emitted parseable SPIR-V");
+    let definitions = module
+        .types_global_values
+        .iter()
+        .filter_map(|inst| inst.result_id.map(|id| (id, inst)))
+        .collect::<HashMap<_, _>>();
+
+    let sample_mask_var = module
+        .annotations
+        .iter()
+        .find_map(|inst| {
+            (inst.class.opcode == Op::Decorate
+                && inst.operands.get(1) == Some(&Operand::Decoration(Decoration::BuiltIn))
+                && inst.operands.get(2) == Some(&Operand::BuiltIn(BuiltIn::SampleMask)))
+            .then(|| inst.operands[0].unwrap_id_ref())
+        })
+        .expect("SPIR-V declares a SampleMask built-in");
+
+    let variable = definitions[&sample_mask_var];
+    assert_eq!(variable.class.opcode, Op::Variable);
+    assert_eq!(
+        variable.operands.first(),
+        Some(&Operand::StorageClass(StorageClass::Output))
+    );
+
+    let variable_ptr = definitions[&variable.result_type.expect("OpVariable has a pointer type")];
+    assert_eq!(variable_ptr.class.opcode, Op::TypePointer);
+    assert_eq!(
+        variable_ptr.operands.first(),
+        Some(&Operand::StorageClass(StorageClass::Output))
+    );
+    let array_type_id = variable_ptr.operands[1].unwrap_id_ref();
+    let array_type = definitions[&array_type_id];
+    assert_eq!(
+        array_type.class.opcode,
+        Op::TypeArray,
+        "Vulkan SampleMask interface variable must point to an array"
+    );
+
+    let element_type_id = array_type.operands[0].unwrap_id_ref();
+    let element_type = definitions[&element_type_id];
+    assert_eq!(element_type.class.opcode, Op::TypeInt);
+    assert_eq!(
+        element_type.operands.first(),
+        Some(&Operand::LiteralBit32(32)),
+        "Vulkan SampleMask array elements must be 32-bit integers"
+    );
+    let array_length = definitions[&array_type.operands[1].unwrap_id_ref()];
+    assert_eq!(array_length.class.opcode, Op::Constant);
+    assert_eq!(array_length.operands.first(), Some(&Operand::LiteralBit32(1)));
+
+    let function_insts = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .collect::<Vec<_>>();
+    let element_access = function_insts
+        .iter()
+        .copied()
+        .find(|inst| {
+            inst.class.opcode == Op::AccessChain
+                && inst.operands.first() == Some(&Operand::IdRef(sample_mask_var))
+        })
+        .expect("SampleMask scalar output accesses array element zero");
+    let index = definitions[&element_access.operands[1].unwrap_id_ref()];
+    assert_eq!(index.class.opcode, Op::Constant);
+    assert_eq!(index.operands.first(), Some(&Operand::LiteralBit32(0)));
+
+    let element_ptr = definitions[&element_access.result_type.expect("OpAccessChain has a pointer type")];
+    assert_eq!(element_ptr.class.opcode, Op::TypePointer);
+    assert_eq!(
+        element_ptr.operands.first(),
+        Some(&Operand::StorageClass(StorageClass::Output))
+    );
+    assert_eq!(element_ptr.operands[1], Operand::IdRef(element_type_id));
+
+    let element_access_id = element_access.result_id.expect("OpAccessChain has a result id");
+    assert!(
+        function_insts.iter().any(|inst| {
+            inst.class.opcode == Op::Store
+                && inst.operands.first() == Some(&Operand::IdRef(element_access_id))
+        }),
+        "SampleMask store must target the scalar element pointer"
+    );
 }
 
 fn spirv_decoration_targets(words: &[u32], decoration: spirv::Decoration) -> Vec<u32> {
@@ -4566,7 +4681,11 @@ entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
 "#,
     )
     .expect("fragment-output helpers can construct and match their predeclared sum");
-    assert_naga_accepts_spirv(&lowered.spirv);
+    assert_spirv_sample_mask_output_abi(&lowered.spirv);
+    assert!(spirv_has_execution_mode(
+        &lowered.spirv,
+        spirv::ExecutionMode::DepthReplacing
+    ));
 }
 
 #[test]
@@ -4621,7 +4740,6 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
 "#;
     let lowered = compile_thru_spirv(source)
         .expect("fragment_output supports explicit depth and conditional discard");
-    assert_naga_accepts_spirv(&lowered.spirv);
 
     let pipeline_descriptor::Pipeline::Graphics(graphics) = &lowered.pipeline.pipelines[0] else {
         panic!("graphics pipeline")
@@ -4633,6 +4751,11 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
 
     assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::FragDepth));
     assert!(spirv_has_builtin(&lowered.spirv, spirv::BuiltIn::SampleMask));
+    assert_spirv_sample_mask_output_abi(&lowered.spirv);
+    assert!(spirv_has_execution_mode(
+        &lowered.spirv,
+        spirv::ExecutionMode::DepthReplacing
+    ));
 
     let wgsl = lower_ssa_to_wgsl(compile_thru_ssa(source).expect("fragment_output lowers to portable SSA"))
         .expect("fragment_output lowers to WGSL");
