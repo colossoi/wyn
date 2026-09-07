@@ -73,6 +73,13 @@ struct StorageBufferUse {
     writable: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StorageBufferInfo {
+    variable: spirv::Word,
+    /// Explicit std430 element type reached through the block's runtime array.
+    element_type: spirv::Word,
+}
+
 /// - Block management with implicit branch from variables block to code
 /// - Value and type caching
 struct Constructor {
@@ -92,6 +99,10 @@ struct Constructor {
 
     // Top-level polytype → SPIR-V memoization (subsumes type + constant dedup for wyn types)
     polytype_cache: LookupMap<PolyType<TypeName>, spirv::Word>,
+    /// std430 interface representation for logical value types. Composite
+    /// entries use distinct SPIR-V ids so their layout decorations never leak
+    /// into Function/Workgroup values of the same Wyn type.
+    storage_polytype_cache: LookupMap<PolyType<TypeName>, spirv::Word>,
 
     // Interface-block + nested-array lookups stay here for now —
     // they're entangled with the compiler's `PolyType` walks
@@ -105,7 +116,7 @@ struct Constructor {
 
     /// Access-qualified storage-buffer globals. The same descriptor slot can
     /// be writable in a compute prepass and read-only in a graphics entry.
-    storage_buffers: LookupMap<StorageBufferUse, (spirv::Word, spirv::Word, spirv::Word)>,
+    storage_buffers: LookupMap<StorageBufferUse, StorageBufferInfo>,
     current_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     /// Per-entry bindings keyed by the SSA parameter they initialize.
     /// Names are emitted/debug metadata only; they are never identity here.
@@ -181,6 +192,7 @@ impl Constructor {
             env: LookupMap::new(),
             glsl_ext_inst_id,
             polytype_cache: LookupMap::new(),
+            storage_polytype_cache: LookupMap::new(),
             interface_block_cache: LookupMap::new(),
             entry_point_interfaces: LookupMap::new(),
             storage_buffers: LookupMap::new(),
@@ -215,7 +227,7 @@ impl Constructor {
         }
     }
 
-    fn storage_buffer(&self, binding: BindingRef) -> Option<(spirv::Word, spirv::Word, spirv::Word)> {
+    fn storage_buffer(&self, binding: BindingRef) -> Option<StorageBufferInfo> {
         self.storage_buffers.get(&self.storage_use(binding)).copied()
     }
 
@@ -620,18 +632,18 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
                 constructor.select_storage_accesses(&entry.shader_storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
-                        if let Some((var_id, _, _)) = constructor.storage_buffer(br) {
-                            if !interfaces.contains(&var_id) {
-                                interfaces.push(var_id);
+                        if let Some(buffer) = constructor.storage_buffer(br) {
+                            if !interfaces.contains(&buffer.variable) {
+                                interfaces.push(buffer.variable);
                             }
                         }
                     }
                 }
                 for output in &entry.outputs {
                     if let Some(br) = output.storage_binding() {
-                        if let Some((var_id, _, _)) = constructor.storage_buffer(br) {
-                            if !interfaces.contains(&var_id) {
-                                interfaces.push(var_id);
+                        if let Some(buffer) = constructor.storage_buffer(br) {
+                            if !interfaces.contains(&buffer.variable) {
+                                interfaces.push(buffer.variable);
                             }
                         }
                     }
@@ -640,9 +652,9 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
                 // the entry's typed `storage_bindings` list (e.g.
                 // parallelize's partials/result intermediates).
                 for sb in &entry.storage_bindings {
-                    if let Some((var_id, _, _)) = constructor.storage_buffer(sb.binding) {
-                        if !interfaces.contains(&var_id) {
-                            interfaces.push(var_id);
+                    if let Some(buffer) = constructor.storage_buffer(sb.binding) {
+                        if !interfaces.contains(&buffer.variable) {
+                            interfaces.push(buffer.variable);
                         }
                     }
                 }

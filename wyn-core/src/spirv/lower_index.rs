@@ -31,7 +31,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             .ok_or_else(|| err_spirv!("slice_view_to_composite: end must be a constant"))?
             as u32;
 
-        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty)?;
+        let elem_spirv = self.constructor.storage_polytype_to_spirv(elem_ty)?;
         let elem_ptr_type =
             self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
         let zero = self.constructor.const_i32(0);
@@ -47,7 +47,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 [zero, actual_index],
             )?;
             let elem = self.constructor.builder.load(elem_spirv, None, elem_ptr, None, [])?;
-            elements.push(elem);
+            elements.push(self.constructor.convert_storage_value(elem, elem_ty, false)?);
         }
         Ok(self.constructor.builder.composite_construct(result_ty, None, elements)?)
     }
@@ -240,7 +240,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     /// descriptor is a static property of its type — pinned at the entry,
     /// carried by unification through slices, block params, and calls — so it
     /// is read here rather than tracked in a side-map.
-    pub(super) fn view_buffer_var(&mut self, view_ssa: ValueId) -> Result<spirv::Word> {
+    pub(super) fn view_buffer_var(&mut self, view_ssa: ValueId) -> Result<(spirv::Word, spirv::Word)> {
         let ty = self.body.get_value_type(view_ssa).clone();
         let br = types::array_view_buffer(&ty).ok_or_else(|| {
             err_spirv_at!(
@@ -251,7 +251,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             )
         })?;
         let buf_id = self.constructor.get_or_assign_buffer_id(br.set, br.binding);
-        let (buffer_var, _) =
+        let (buffer_var, elem_ty) =
             self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
                 err_spirv_at!(
                     self.blame_span(),
@@ -261,7 +261,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     buf_id
                 )
             })?;
-        Ok(buffer_var)
+        Ok((buffer_var, elem_ty))
     }
 
     pub(super) fn lower_view_index(
@@ -269,14 +269,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         view_ssa: ValueId,
         view_id: spirv::Word,
         index_id: spirv::Word,
-        result_ty: spirv::Word,
+        _result_ty: spirv::Word,
         elem_ty: &PolyType<TypeName>,
     ) -> Result<spirv::Word> {
         let u32_ty = self.constructor.u32_type;
 
         // Buffer-var lookup goes through the type's region, not runtime struct
         // extraction — field 0 of the view is redundant scaffolding.
-        let buffer_var = self.view_buffer_var(view_ssa)?;
+        let (buffer_var, storage_elem_ty) = self.view_buffer_var(view_ssa)?;
         let offset_val = self.constructor.builder.composite_extract(u32_ty, None, view_id, [0u32])?;
 
         // TODO: The view struct stores {u32, u32, u32} but the language uses i32 for
@@ -290,13 +290,13 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             self.constructor.builder.i_add(self.constructor.u32_type, None, offset_val, index_u32)?;
 
         // Access chain directly on the buffer variable
-        let elem_spirv = self.constructor.polytype_to_spirv(elem_ty)?;
         let elem_ptr_type =
-            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
+            self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_elem_ty);
         let zero = self.constructor.const_u32(0);
         let elem_ptr =
             self.constructor.builder.access_chain(elem_ptr_type, None, buffer_var, [zero, final_index])?;
-        Ok(self.constructor.builder.load(result_ty, None, elem_ptr, None, [])?)
+        let loaded = self.constructor.builder.load(storage_elem_ty, None, elem_ptr, None, [])?;
+        self.constructor.convert_storage_value(loaded, elem_ty, false)
     }
 
     /// Lower indexing into a Virtual array ({start, step, len} struct).

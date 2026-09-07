@@ -132,7 +132,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         let view_ssa = value_refs[0]
                             .as_ssa()
                             .ok_or_else(|| err_spirv!("array_with on view must take SSA view value"))?;
-                        let buffer_var = self.view_buffer_var(view_ssa)?;
+                        let (buffer_var, storage_elem_ty) = self.view_buffer_var(view_ssa)?;
                         let u32_ty = self.constructor.u32_type;
                         let base_offset =
                             self.constructor.builder.composite_extract(u32_ty, None, arr, [0u32])?;
@@ -143,10 +143,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             bail_spirv!("malformed view array in array_with: {:?}", arr_ty);
                         };
                         let elem_ty = tensor.elem.clone();
-                        let elem_spirv = self.constructor.polytype_to_spirv(&elem_ty)?;
                         let elem_ptr_type = self
                             .constructor
-                            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_spirv);
+                            .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_elem_ty);
                         let zero = self.constructor.const_u32(0);
                         let elem_ptr = self.constructor.builder.access_chain(
                             elem_ptr_type,
@@ -154,7 +153,8 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             buffer_var,
                             [zero, final_index],
                         )?;
-                        self.constructor.builder.store(elem_ptr, val, None, [])?;
+                        let stored = self.constructor.convert_storage_value(val, &elem_ty, true)?;
+                        self.constructor.builder.store(elem_ptr, stored, None, [])?;
                         return Ok(arr);
                     }
 
@@ -369,7 +369,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             let view_ssa = value_refs[0]
                                 .as_ssa()
                                 .ok_or_else(|| err_spirv!("slice_to_composite view operand must be SSA"))?;
-                            let buffer_var = self.view_buffer_var(view_ssa)?;
+                            let (buffer_var, _) = self.view_buffer_var(view_ssa)?;
                             self.slice_view_to_composite(
                                 arr,
                                 buffer_var,
@@ -409,14 +409,14 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             .get_const_u32_value(arg_ids[1])
                             .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
                     };
-                    let (buffer_var, _, _) =
+                    let buffer =
                         self.constructor.storage_buffer(BindingRef::new(set, binding)).ok_or_else(
                             || err_spirv!("Storage buffer not found for set={}, binding={}", set, binding),
                         )?;
                     let len_u32 = self.constructor.builder.array_length(
                         self.constructor.u32_type,
                         None,
-                        buffer_var,
+                        buffer.variable,
                         0,
                     )?;
                     if result_ty == self.constructor.u32_type {

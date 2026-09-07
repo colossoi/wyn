@@ -14269,6 +14269,84 @@ entry e(o: *[]point) () =
     );
 }
 
+/// Fixed arrays nested in a scalar-prepass tuple need an explicit std430
+/// ArrayStride in storage, but the same logical array also lives in a Function
+/// variable. Those must be distinct SPIR-V type ids: Vulkan rejects either a
+/// missing storage stride or an explicitly-laid-out Function pointee.
+#[test]
+fn storage_tuple_fixed_array_uses_distinct_layout_type() {
+    use std::collections::{HashMap, HashSet};
+    use wspirv::binary::parse_words;
+    use wspirv::dr::{Loader, Operand};
+    use wspirv::spirv::{Decoration, Op, StorageClass};
+
+    let lowered = compile_thru_spirv(
+        r#"
+def fold(head: []f32, events: []vec4f32) =
+  let z = @[0.0, 0.0]
+  let (anchor, dir, last, hd, held, press, emit_count, emitted) =
+    loop _ =
+      (@[0.0, head[1]], z, z, 0.0, 0.0, 0.0, 0, [z])
+    for i < 0 do
+      (@[0.0, 0.0], @[0.0, 0.0], @[0.0, 0.0], 0.0, 0.0, 0.0, 0,
+       [@[0.0, 0.0]])
+  in
+  (hd, emitted)
+
+entry reproduce(points: []vec2f32, items: []vec4f32,
+                head: []f32, events: []vec4f32)
+  ([1]f32, []vec2f32, []vec4f32, [1]f32) =
+  let (state, emitted) = fold(head, events) in
+  ([0.0],
+   map(|i| emitted[i], iota(0)),
+   map(|i| items[i], iota(0)),
+   [0.0])
+"#,
+    )
+    .expect("fixed-array scalar prepass lowers");
+
+    let mut loader = Loader::new();
+    parse_words(&lowered.spirv, &mut loader).expect("parse spirv");
+    let module = loader.module();
+
+    let array_types = module
+        .types_global_values
+        .iter()
+        .filter(|inst| inst.class.opcode == Op::TypeArray)
+        .filter_map(|inst| inst.result_id.map(|id| (id, inst.operands.clone())))
+        .collect::<HashMap<_, _>>();
+    let fixed_array_strides = module
+        .annotations
+        .iter()
+        .filter(|inst| {
+            inst.class.opcode == Op::Decorate
+                && inst.operands[1] == Operand::Decoration(Decoration::ArrayStride)
+        })
+        .filter_map(|inst| {
+            let target = inst.operands[0].unwrap_id_ref();
+            array_types.contains_key(&target).then_some((target, inst.operands[2].unwrap_literal_bit32()))
+        })
+        .collect::<HashMap<_, _>>();
+    assert!(
+        fixed_array_strides.values().any(|&stride| stride == 8),
+        "the storage [1]vec2f32 needs ArrayStride 8; got {fixed_array_strides:?}"
+    );
+
+    let function_pointees = module
+        .types_global_values
+        .iter()
+        .filter(|inst| inst.class.opcode == Op::TypePointer)
+        .filter(|inst| inst.operands.first() == Some(&Operand::StorageClass(StorageClass::Function)))
+        .map(|inst| inst.operands[1].unwrap_id_ref())
+        .collect::<HashSet<_>>();
+    assert!(
+        fixed_array_strides.keys().all(|ty| !function_pointees.contains(ty)),
+        "explicit-layout arrays must not be Function pointees: strides={fixed_array_strides:?}, \
+         function pointees={function_pointees:?}"
+    );
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
 /// The descriptor publishes a uniform block's std140 size and member
 /// layout: record fields under their source names, tuples as `f0..`,
 /// bare scalars/vectors as a single member at offset 0 — the same

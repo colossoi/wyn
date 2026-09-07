@@ -18,9 +18,9 @@ impl Constructor {
             return id;
         }
         let id = self.buffer_vars.len() as u32;
-        let &(buffer_var, elem_ty, _) =
+        let buffer =
             self.storage_buffers.get(&use_key).expect("get_or_assign_buffer_id: storage buffer must exist");
-        self.buffer_vars.push((buffer_var, elem_ty));
+        self.buffer_vars.push((buffer.variable, buffer.element_type));
         self.buffer_id_map.insert(use_key, id);
         id
     }
@@ -99,6 +99,158 @@ impl Constructor {
         *self.builder.uniform_block_type(builder::TypeId::new(value_type))
     }
 
+    /// Produce the explicit std430 representation of a logical Wyn value.
+    /// Composite interface types must have identities distinct from ordinary
+    /// function values because Vulkan restricts their layout decorations to
+    /// interface storage classes.
+    pub(super) fn storage_polytype_to_spirv(&mut self, ty: &PolyType<TypeName>) -> Result<spirv::Word> {
+        if let Some(&cached) = self.storage_polytype_cache.get(ty) {
+            return Ok(cached);
+        }
+        // rspirv structurally interns ordinary aggregate types. Materialize the
+        // undecorated logical tree first, then mint explicit-layout composites
+        // with forced fresh ids below.
+        self.polytype_to_spirv(ty)?;
+
+        let result = match ty {
+            PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), members) => {
+                let Some(layout) = ssa::layout::block_layout(ty, interface::StorageLayout::Std430) else {
+                    return Err(err_spirv!(
+                        "storage buffer element {:?} has no supported std430 struct layout",
+                        ty
+                    ));
+                };
+                let member_types = members
+                    .iter()
+                    .map(|member| self.storage_polytype_to_spirv(member))
+                    .collect::<Result<Vec<_>>>()?;
+                *self.builder.type_buffer_struct(
+                    member_types.into_iter().map(builder::TypeId::new).collect(),
+                    &layout.member_offsets,
+                )
+            }
+            _ if ty.is_array()
+                && ty.array_storage().is_some_and(|storage| {
+                    matches!(
+                        storage.variant,
+                        PolyType::Constructed(TypeName::ArrayVariantComposite, _)
+                    )
+                }) =>
+            {
+                let tensor =
+                    ty.as_tensor().ok_or_else(|| err_spirv!("malformed storage array type: {:?}", ty))?;
+                let mut current = self.storage_polytype_to_spirv(tensor.elem)?;
+                let mut stride = ssa::layout::storage_elem_stride(tensor.elem).ok_or_else(|| {
+                    err_spirv!(
+                        "storage array element has no known std430 size: {:?}",
+                        tensor.elem
+                    )
+                })?;
+                for dim in tensor.dims.iter().rev() {
+                    let PolyType::Constructed(TypeName::Size(count), _) = dim else {
+                        return Err(err_spirv!("storage array dimension is not concrete: {:?}", dim));
+                    };
+                    let count = u32::try_from(*count)
+                        .map_err(|_| err_spirv!("storage array dimension exceeds SPIR-V limits"))?;
+                    let count_id = self.const_u32(count);
+                    current =
+                        *self.builder.type_buffer_array(builder::TypeId::new(current), count_id, stride);
+                    stride = stride
+                        .checked_mul(count)
+                        .ok_or_else(|| err_spirv!("storage array byte size exceeds SPIR-V limits"))?;
+                }
+                current
+            }
+            _ => self.polytype_to_spirv(ty)?,
+        };
+
+        self.storage_polytype_cache.insert(ty.clone(), result);
+        Ok(result)
+    }
+
+    /// Convert between an ordinary function value and its explicit std430
+    /// representation. When `add_decorations` is true, the result uses the
+    /// decorated storage type; otherwise the result uses the undecorated
+    /// logical type.
+    pub(super) fn convert_storage_value(
+        &mut self,
+        value: spirv::Word,
+        ty: &PolyType<TypeName>,
+        add_decorations: bool,
+    ) -> Result<spirv::Word> {
+        let logical_ty = self.polytype_to_spirv(ty)?;
+        let storage_ty = self.storage_polytype_to_spirv(ty)?;
+        if logical_ty == storage_ty {
+            return Ok(value);
+        }
+        let (source_ty, destination_ty) =
+            if add_decorations { (logical_ty, storage_ty) } else { (storage_ty, logical_ty) };
+        match ty {
+            PolyType::Constructed(TypeName::Tuple(_) | TypeName::Record(_), members) => {
+                let mut converted_members = Vec::with_capacity(members.len());
+                for (index, member) in members.iter().enumerate() {
+                    let source_member_ty = if add_decorations {
+                        self.polytype_to_spirv(member)?
+                    } else {
+                        self.storage_polytype_to_spirv(member)?
+                    };
+                    let source_member =
+                        self.builder.composite_extract(source_member_ty, None, value, [index as u32])?;
+                    converted_members.push(self.convert_storage_value(
+                        source_member,
+                        member,
+                        add_decorations,
+                    )?);
+                }
+                Ok(self.builder.composite_construct(destination_ty, None, converted_members)?)
+            }
+            _ if ty.is_array() => {
+                let (count, child_type) = {
+                    let tensor = ty
+                        .as_tensor()
+                        .ok_or_else(|| err_spirv!("malformed storage array type: {:?}", ty))?;
+                    let Some((dim, remaining)) = tensor.dims.split_first() else {
+                        return Err(err_spirv!("storage array has no dimensions: {:?}", ty));
+                    };
+                    let PolyType::Constructed(TypeName::Size(count), _) = dim else {
+                        return Err(err_spirv!("storage array dimension is not concrete: {:?}", dim));
+                    };
+                    let child_type = if remaining.is_empty() {
+                        tensor.elem.clone()
+                    } else {
+                        let storage = ty
+                            .array_storage()
+                            .ok_or_else(|| err_spirv!("storage array metadata is missing: {:?}", ty))?;
+                        let mut args = Vec::with_capacity(remaining.len() + 3);
+                        args.push(tensor.elem.clone());
+                        args.push(storage.variant.clone());
+                        args.extend(remaining.iter().cloned());
+                        args.push(storage.region.clone());
+                        PolyType::Constructed(TypeName::Array, args)
+                    };
+                    (*count, child_type)
+                };
+
+                let source_child_ty = self.get_array_element_type(source_ty)?;
+                let mut converted_elements = Vec::with_capacity(count);
+                for index in 0..count {
+                    let source_element =
+                        self.builder.composite_extract(source_child_ty, None, value, [index as u32])?;
+                    converted_elements.push(self.convert_storage_value(
+                        source_element,
+                        &child_type,
+                        add_decorations,
+                    )?);
+                }
+                Ok(self.builder.composite_construct(destination_ty, None, converted_elements)?)
+            }
+            _ => Err(err_spirv!(
+                "cannot convert {:?} between logical and storage representations",
+                ty
+            )),
+        }
+    }
+
     /// Create a storage buffer variable for compute shaders.
     /// Returns the variable ID. Also registers it in storage_buffers for later lookup.
     /// Idempotent: returns existing variable if already created for this (set, binding).
@@ -114,8 +266,8 @@ impl Constructor {
             writable,
         };
         // Return existing if already created
-        if let Some(&(var_id, _, _)) = self.storage_buffers.get(&use_key) {
-            return Ok(var_id);
+        if let Some(buffer) = self.storage_buffers.get(&use_key) {
+            return Ok(buffer.variable);
         }
         // Storage buffers can be either an array-shaped view (`[]T` → elem is
         // `T`) or a scalar / vec / struct output (e.g. a reduce result, which
@@ -130,7 +282,7 @@ impl Constructor {
         if types::contains_16_bit_scalar(&elem_ty) {
             self.builder.enable_capability(spirv::Capability::StorageBuffer16BitAccess);
         }
-        let elem_spirv = self.polytype_to_spirv(&elem_ty)?;
+        let elem_spirv = self.storage_polytype_to_spirv(&elem_ty)?;
 
         // The std430 array stride is the element size rounded up to the
         // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
@@ -153,34 +305,6 @@ impl Constructor {
                 elem_size.div_ceil(elem_align) * elem_align
             }
         };
-
-        // Ensure nested array types have ArrayStride for buffer layout
-        self.apply_buffer_array_strides(elem_spirv, &elem_ty);
-
-        // If the element type is a tuple/record/struct, add std430 member
-        // offset decorations for the buffer layout. We add them to the elem
-        // type directly since it will be used inside a runtime array in a
-        // storage buffer.
-        let is_struct = matches!(
-            &elem_ty,
-            PolyType::Constructed(TypeName::Tuple(_), _) | PolyType::Constructed(TypeName::Record(_), _)
-        );
-        if is_struct && self.builder.mark_buffer_layout_decorated_once(builder::TypeId::new(elem_spirv)) {
-            let Some(layout) = layout.as_ref() else {
-                return Err(err_spirv!(
-                    "storage buffer element {:?} has no supported std430 struct layout",
-                    elem_ty
-                ));
-            };
-            for (i, &offset) in layout.member_offsets.iter().enumerate() {
-                self.builder.member_decorate(
-                    elem_spirv,
-                    i as u32,
-                    spirv::Decoration::Offset,
-                    [Operand::LiteralBit32(offset)],
-                );
-            }
-        }
 
         // Create runtime array type (cached to avoid duplicate decorations)
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
@@ -207,7 +331,13 @@ impl Constructor {
         }
 
         // Store for later lookup (ptr_type used for StorageView struct construction)
-        self.storage_buffers.insert(use_key, (var_id, block_struct, ptr_type));
+        self.storage_buffers.insert(
+            use_key,
+            StorageBufferInfo {
+                variable: var_id,
+                element_type: elem_spirv,
+            },
+        );
 
         Ok(var_id)
     }

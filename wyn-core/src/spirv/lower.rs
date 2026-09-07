@@ -653,13 +653,27 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             InstKind::Load { place } => {
                 let ptr_id = self.place_ptr(*place)?;
-                self.constructor.builder.load(result_ty, None, ptr_id, None, [])?
+                if self.place_storage_class.get(place) == Some(&spirv::StorageClass::StorageBuffer) {
+                    let elem_ty = self.body.place_elem_ty(*place).clone();
+                    let storage_ty = self.constructor.storage_polytype_to_spirv(&elem_ty)?;
+                    let loaded = self.constructor.builder.load(storage_ty, None, ptr_id, None, [])?;
+                    self.constructor.convert_storage_value(loaded, &elem_ty, false)?
+                } else {
+                    self.constructor.builder.load(result_ty, None, ptr_id, None, [])?
+                }
             }
 
             InstKind::Store { place, value } => {
                 let ptr_id = self.place_ptr(*place)?;
                 let val_id = self.get_value_ref(*value)?;
-                self.constructor.builder.store(ptr_id, val_id, None, [])?;
+                let stored =
+                    if self.place_storage_class.get(place) == Some(&spirv::StorageClass::StorageBuffer) {
+                        let elem_ty = self.body.place_elem_ty(*place).clone();
+                        self.constructor.convert_storage_value(val_id, &elem_ty, true)?
+                    } else {
+                        val_id
+                    };
+                self.constructor.builder.store(ptr_id, stored, None, [])?;
                 // Store doesn't produce a value, but we return dummy
                 self.constructor.const_i32(0)
             }
@@ -778,16 +792,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     return Ok(());
                 }
 
-                let buffer_var = self.view_buffer_var(view_ssa)?;
+                let (buffer_var, storage_elem_ty) = self.view_buffer_var(view_ssa)?;
 
                 let actual_index = self.constructor.builder.i_add(u32_ty, None, base_offset, index_id)?;
                 let zero = self.constructor.const_i32(0);
                 // Infer element SPIR-V type from the place's elem_ty — the
                 // place's type is what `Load` will return / `Store` writes.
-                let place_elem = self.body.place_elem_ty(*result).clone();
-                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem)?;
-                let elem_ptr_type =
-                    self.constructor.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, elem_ty_id);
+                let elem_ptr_type = self
+                    .constructor
+                    .get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, storage_elem_ty);
                 let ptr = self.constructor.builder.access_chain(
                     elem_ptr_type,
                     None,
@@ -808,7 +821,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 let base_ptr = self.place_ptr(*place)?;
                 let index_id = self.get_value_ref(*index)?;
                 let place_elem = self.body.place_elem_ty(*result).clone();
-                let elem_ty_id = self.constructor.polytype_to_spirv(&place_elem)?;
                 let storage_class = self.place_storage_class.get(place).copied().ok_or_else(|| {
                     err_spirv_at!(
                         self.blame_span(),
@@ -816,6 +828,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         place
                     )
                 })?;
+                let elem_ty_id = if storage_class == spirv::StorageClass::StorageBuffer {
+                    self.constructor.storage_polytype_to_spirv(&place_elem)?
+                } else {
+                    self.constructor.polytype_to_spirv(&place_elem)?
+                };
                 let elem_ptr_type = self.constructor.get_or_create_ptr_type(storage_class, elem_ty_id);
                 let ptr =
                     self.constructor.builder.access_chain(elem_ptr_type, None, base_ptr, [index_id])?;

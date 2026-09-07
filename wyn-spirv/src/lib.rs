@@ -134,9 +134,14 @@ pub struct SpirvBuilder {
     // already-resolved SPIR-V components.
     vec_type_cache: HashMap<(TypeId, u32), TypeId>,
     struct_type_cache: HashMap<Vec<TypeId>, TypeId>,
+    // Explicit-layout composites are intentionally distinct from ordinary
+    // function-value types. Vulkan forbids ArrayStride/Offset decorations on
+    // types reached through Function or Workgroup variables.
+    buffer_struct_type_cache: HashMap<(Vec<TypeId>, Vec<u32>), TypeId>,
     ptr_type_cache: HashMap<(spirv::StorageClass, TypeId), TypeId>,
     runtime_array_cache: HashMap<(TypeId, u32), TypeId>, // (elem_type, stride) -> decorated type
     array_type_cache: HashMap<(TypeId, spirv::Word), TypeId>, // (elem_type, length-constant) -> sized array
+    buffer_array_type_cache: HashMap<(TypeId, spirv::Word, u32), TypeId>,
     image_type_cache: HashMap<ImageTypeKey, TypeId>,
     sampled_image_cache: HashMap<TypeId, TypeId>, // image type -> OpTypeSampledImage
     sampler_type: Option<TypeId>,                 // the single OpTypeSampler
@@ -227,9 +232,11 @@ impl SpirvBuilder {
             constant_ids: HashSet::new(),
             vec_type_cache: HashMap::new(),
             struct_type_cache: HashMap::new(),
+            buffer_struct_type_cache: HashMap::new(),
             ptr_type_cache: HashMap::new(),
             runtime_array_cache: HashMap::new(),
             array_type_cache: HashMap::new(),
+            buffer_array_type_cache: HashMap::new(),
             image_type_cache: HashMap::new(),
             sampled_image_cache: HashMap::new(),
             sampler_type: None,
@@ -440,6 +447,30 @@ impl SpirvBuilder {
         ty
     }
 
+    /// Get or create an std430 struct type with explicit member offsets.
+    /// This cache is deliberately disjoint from `type_struct`: the decorated
+    /// type may only be used through interface storage classes.
+    pub fn type_buffer_struct(&mut self, fields: Vec<TypeId>, offsets: &[u32]) -> TypeId {
+        assert_eq!(fields.len(), offsets.len());
+        let key = (fields.clone(), offsets.to_vec());
+        if let Some(&ty) = self.buffer_struct_type_cache.get(&key) {
+            return ty;
+        }
+        let raw_fields = fields.iter().map(|field| **field).collect::<Vec<_>>();
+        let fresh_id = self.inner.id();
+        let ty = TypeId::new(self.inner.type_struct_id(Some(fresh_id), raw_fields));
+        for (member, &offset) in offsets.iter().enumerate() {
+            self.inner.member_decorate(
+                *ty,
+                member as u32,
+                spirv::Decoration::Offset,
+                [rspirv::dr::Operand::LiteralBit32(offset)],
+            );
+        }
+        self.buffer_struct_type_cache.insert(key, ty);
+        ty
+    }
+
     /// Get or create `OpTypePointer storage_class pointee`.
     pub fn type_pointer(&mut self, storage_class: spirv::StorageClass, pointee: TypeId) -> TypeId {
         let key = (storage_class, pointee);
@@ -477,6 +508,26 @@ impl SpirvBuilder {
         }
         let ty = TypeId::new(self.inner.type_array(*elem, length));
         self.array_type_cache.insert(key, ty);
+        ty
+    }
+
+    /// Get or create a sized std430 array carrying `ArrayStride`. This type is
+    /// intentionally distinct from the undecorated array returned by
+    /// `type_array`, even when element and length are identical.
+    pub fn type_buffer_array(&mut self, elem: TypeId, length: spirv::Word, stride: u32) -> TypeId {
+        let key = (elem, length, stride);
+        if let Some(&ty) = self.buffer_array_type_cache.get(&key) {
+            return ty;
+        }
+        let fresh_id = self.inner.id();
+        let ty = TypeId::new(self.inner.type_array_id(Some(fresh_id), *elem, length));
+        self.inner.decorate(
+            *ty,
+            spirv::Decoration::ArrayStride,
+            [rspirv::dr::Operand::LiteralBit32(stride)],
+        );
+        self.array_elem.insert(ty, elem);
+        self.buffer_array_type_cache.insert(key, ty);
         ty
     }
 
