@@ -875,7 +875,13 @@ fn collect_concrete_replacements(node: Node<'_>, candidates: &mut Vec<Candidate>
 
 fn collect_promotions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Candidate>) {
     match node.kind() {
-        "let_expression" => promote_fields(node, &["body"], source, candidates),
+        "let_expression" => {
+            if let Some(body) = node.child_by_field_name("body") {
+                if !let_body_references_bindings(node, body, source) {
+                    add_promotion(node, body, source, candidates);
+                }
+            }
+        }
         "if_expression" => promote_fields(node, &["then", "else"], source, candidates),
         "binary_expression" => promote_fields(
             node,
@@ -925,6 +931,34 @@ fn collect_promotions(node: Node<'_>, source: &[u8], candidates: &mut Vec<Candid
             }
         }
         _ => {}
+    }
+}
+
+fn let_body_references_bindings(let_expression: Node<'_>, body: Node<'_>, source: &[u8]) -> bool {
+    let mut bindings = Vec::new();
+    for field in ["pattern", "name", "params"] {
+        if let Some(node) = let_expression.child_by_field_name(field) {
+            collect_identifiers(node, source, &mut bindings);
+        }
+    }
+    if bindings.is_empty() {
+        return false;
+    }
+
+    let mut references = Vec::new();
+    collect_identifiers(body, source, &mut references);
+    references.iter().any(|reference| bindings.contains(reference))
+}
+
+fn collect_identifiers(node: Node<'_>, source: &[u8], identifiers: &mut Vec<Vec<u8>>) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier" {
+            identifiers.push(source[node.start_byte()..node.end_byte()].to_vec());
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
     }
 }
 
@@ -1243,6 +1277,27 @@ mod tests {
             for candidate in *forbidden {
                 assert!(!promoted.iter().any(|value| value == candidate));
             }
+        }
+    }
+
+    #[test]
+    fn promotes_let_body_only_when_it_does_not_reference_the_binding() {
+        let cases: &[(&[u8], &str, bool)] = &[
+            (b"def f = let x = value in unrelated", "def f = unrelated", true),
+            (b"def f = let x = value in use(x)", "def f = use(x)", false),
+            (b"def f = let (x, y) = pair in x + z", "def f = x + z", false),
+        ];
+        for (source, promoted_body, expected) in cases {
+            let tree = parse(&language(), source).unwrap();
+            let promoted: Vec<_> = collect_candidates(&tree, source)
+                .iter()
+                .filter(|candidate| candidate.kind == CandidateKind::Promotion)
+                .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
+                .collect();
+            assert_eq!(
+                promoted.iter().any(|candidate| candidate == promoted_body),
+                *expected
+            );
         }
     }
 

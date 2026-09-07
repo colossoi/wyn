@@ -151,7 +151,9 @@ smallest program that still reproduces the bug. Source:
    deterministically ordered structural pass first promotes high-value children
    out of wrappers such as `if`, `let`, calls, records, matches, and unary/binary
    expressions. It skips low-probability promotions such as a `let` value, an
-   `if` condition, a called function, or a bare collection element,
+   `if` condition, a called function, or a bare collection element. A `let`
+   body is promoted only when it has no syntactic reference to the removed
+   binding,
    and removes comma-separated elements while repairing separators. For other
    expressions it asks `wyn check` to infer the type of a temporary `???` and
    tries the corresponding concrete default; `--wyn` selects the compiler and
