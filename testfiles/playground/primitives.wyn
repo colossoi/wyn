@@ -11,10 +11,6 @@ open f32
 -- pow: wrapper for ** operator for readability
 def pow(x:f32, n:f32) f32 = x ** n
 
--- mix3v: vector mix with scalar interpolant
-def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 = mix(a, b, t)
-
-
 -- dot2: squared length (dot with self) - not in GLSL
 def dot2<E, T>(v: T) E = dot(v, v)
 
@@ -378,7 +374,7 @@ def render(ro:vec3f32, rd:vec3f32, rdx:vec3f32, rdy:vec3f32) vec3f32 =
 
     -- fog
     let fog = 1.0 - exp(0.0 - 0.0001 * t * t * t) in
-    mix3v(col3, @[0.7, 0.7, 0.9], fog)
+    mix(col3, @[0.7, 0.7, 0.9], fog)
   else col
 
 ------------------------------------------------------------

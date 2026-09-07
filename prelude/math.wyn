@@ -82,12 +82,12 @@ module type numeric = {
   -- backend-defined.
   sig sign(x: t) t
 
-  -- | `clamp(lo, hi, x)` — argument order is *bounds first, value
+  -- | `clamp(x, lo, hi)` — argument order is *value first, bounds
   -- last*. `lo > hi` yields an unspecified result.
   sig clamp(a: t, b: t, c: t) t
 
   -- | The largest representable value. For `real` `t` this is
-  -- `+inf` (so `clamp(_, highest, x)` is a no-op upper bound).
+  -- `+inf` (so `clamp(x, _, highest)` is a no-op upper bound).
   sig highest: t
 
   -- | The smallest representable value. For `real` `t` this is

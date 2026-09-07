@@ -204,12 +204,6 @@ def rotation_euler(a: vec3f32) mat4f32 =
     [0.0f32, 0.0f32, 0.0f32, 1.0f32]
   ]
 
--- Helper functions
-def clamp(x:f32, min:f32, max:f32) f32 =
-  if x < min then min else if x > max then max else x
-
-def mix3v(a:vec3f32, b:vec3f32, t:f32) vec3f32 = mix(a, b, t)
-
 -- Rasterize helpers
 def line(weight:f32, p:vec2f32, p0:vec2f32, p1:vec2f32, w:f32) f32 =
   let d = p1 - p0 in
@@ -241,7 +235,7 @@ def sum_edges(verts: [8]vec3f32, weight: f32, uv: vec2f32, line_width: f32, edge
 
 -- utils
 def mix3(a:vec3f32, b:vec3f32, c:vec3f32, t:f32) vec3f32 =
-  if t > 0.5 then mix3v(b, c, t*2.0 - 1.0) else mix3v(a, b, t*2.0)
+  if t > 0.5 then mix(b, c, t*2.0 - 1.0) else mix(a, b, t*2.0)
 
 def fragment(p:vec3f32, time:f32) vec3f32 =
   let t = sin(p.x*0.8 + time*0.5)*0.5 + 0.5 in
@@ -316,8 +310,8 @@ def main_image(
   let line_width = 0.4 in
   let animation_time = time * 0.31415 in
 
-  let base_col = mix3v(@[0.19, 0.13, 0.10], @[1.0, 1.0, 1.0],
-                         (0.5 * ((magnitude(uv) * 0.5) ** 2.0))) in
+  let base_col = mix(@[0.19, 0.13, 0.10], @[1.0, 1.0, 1.0],
+                     (0.5 * ((magnitude(uv) * 0.5) ** 2.0))) in
   let cam = translation(@[0.0, 0.0, 10.0]) in
 
   -- #define LINEAR_ROTATION
