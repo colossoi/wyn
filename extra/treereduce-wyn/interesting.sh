@@ -2,7 +2,7 @@
 # Interestingness check for the demo bug.
 #
 # treereduce-wyn feeds us the reduced candidate either via stdin or by
-# substituting `@@` with a tempfile path. We run `wyn compile` on the
+# substituting `@@` with a tempfile path. We run `wyn build` on the
 # candidate and exit 0 IFF the compiler still panics with the
 # distinctive demo-bug message — that's how treereduce knows the
 # reduction still triggers the same bug.
@@ -25,7 +25,7 @@ fi
 
 # Run the compiler. We don't care about stdout — only the stderr panic.
 # The sentinel string identifies the *specific* bug we're hunting.
-output=$("$WYN" compile --fill-holes "$candidate" -o /dev/null 2>&1 || true)
+output=$("$WYN" build --fill-holes "$candidate" -o /dev/null 2>&1 || true)
 
 if grep -q "demo-bug: f32.sqrt lowering intentionally broken" <<< "$output"; then
   exit 0
