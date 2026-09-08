@@ -1981,10 +1981,6 @@
         },
         {
           "type": "STRING",
-          "value": "vertex_invocation"
-        },
-        {
-          "type": "STRING",
           "value": "draw"
         }
       ]

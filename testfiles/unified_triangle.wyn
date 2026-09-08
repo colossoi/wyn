@@ -8,8 +8,8 @@ def triangle_position(vertex_index: u32) vec4f32 =
 entry triangle(screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      triangle_position(vertex.vertex_index),
+    |vertex_index, instance_index, draw_index| vertex_output(
+      triangle_position(vertex_index),
       @[1.0, 0.0, 0.0])) in
   shade(screen, covered,
     |fragment| @[fragment.value.x,

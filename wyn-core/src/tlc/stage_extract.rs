@@ -238,7 +238,14 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
         // those helper chains before target_load/target_sample rewriting.
         // Active-call tracking leaves a recursive source edge intact instead
         // of recursing forever.
-        if is_constant || carries_static_resource {
+        // Raster/vertex wrappers must also be exposed transitively: these
+        // opaque values disappear during stage extraction, so leaving a
+        // forwarding helper would leak their types into shader lowering.
+        let carries_stage_result = matches!(
+            replacement.ty,
+            Type::Constructed(TypeName::Raster | TypeName::Vertex, _)
+        );
+        if is_constant || carries_static_resource || carries_stage_result {
             replacement = self.rewrite_owned(replacement);
         }
         self.active.remove(&symbol);
@@ -518,10 +525,10 @@ fn extract_root(
                 }
 
                 let mut vertex_lambda =
-                    callback_lambda(raster_args.get(callback_index)?, "vertex", symbols, term_ids)?;
+                    callback_lambda(raster_args.get(callback_index)?, "vertex", 3, symbols, term_ids)?;
                 let mut fragment_lambda =
-                    callback_lambda(shade_args.last()?, "fragment", symbols, term_ids)?;
-                if vertex_lambda.params.len() != 1 || fragment_lambda.params.len() != 1 {
+                    callback_lambda(shade_args.last()?, "fragment", 1, symbols, term_ids)?;
+                if vertex_lambda.params.len() != 3 || fragment_lambda.params.len() != 1 {
                     return None;
                 }
                 vertex_lambda.body = Box::new(inline_stage_helpers(*vertex_lambda.body, helpers, term_ids));
@@ -643,6 +650,19 @@ fn normalize_root_bindings(
     } = kind
     else {
         return Term { id, ty, span, kind };
+    };
+
+    // Inlining a raster helper can leave administrative argument bindings
+    // around its result. Expose the rasterizer before classifying that result.
+    let rhs = if matches!(name_ty, Type::Constructed(TypeName::Raster, _)) {
+        Box::new(normalize_root_bindings(
+            *rhs,
+            builtins,
+            term_ids,
+            computed_origins,
+        ))
+    } else {
+        rhs
     };
 
     let has_computed_leaves = computed_leaf_types(&name_ty).is_some();
@@ -1065,6 +1085,7 @@ fn builtin_app<'a>(
 fn callback_lambda(
     callback: &Term,
     stage: &str,
+    arity: usize,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Lambda> {
@@ -1074,19 +1095,26 @@ fn callback_lambda(
     let TermKind::Var(VarRef::Symbol(_)) = callback.kind else {
         return None;
     };
-    let Type::Constructed(TypeName::Arrow, args) = &callback.ty else {
-        return None;
-    };
-    let [param_ty, result_ty] = args.as_slice() else {
-        return None;
-    };
-    let param = symbols.alloc(format!("_w_{stage}_callback_argument"));
-    let argument = Term::fresh(
-        term_ids,
-        param_ty.clone(),
-        callback.span,
-        TermKind::Var(VarRef::Symbol(param)),
-    );
+    let mut result_ty = &callback.ty;
+    let mut params = Vec::with_capacity(arity);
+    let mut arguments = Vec::with_capacity(arity);
+    for index in 0..arity {
+        let Type::Constructed(TypeName::Arrow, args) = result_ty else {
+            return None;
+        };
+        let [param_ty, next_ty] = args.as_slice() else {
+            return None;
+        };
+        let param = symbols.alloc(format!("_w_{stage}_callback_argument_{index}"));
+        arguments.push(Term::fresh(
+            term_ids,
+            param_ty.clone(),
+            callback.span,
+            TermKind::Var(VarRef::Symbol(param)),
+        ));
+        params.push((param, param_ty.clone()));
+        result_ty = next_ty;
+    }
     let function = clone_term_with_fresh_ids(callback, term_ids);
     let body = Term::fresh(
         term_ids,
@@ -1094,11 +1122,11 @@ fn callback_lambda(
         callback.span,
         TermKind::App {
             func: Box::new(function),
-            args: vec![argument],
+            args: arguments,
         },
     );
     Some(Lambda {
-        params: vec![(param, param_ty.clone())],
+        params,
         body: Box::new(body),
         ret_ty: result_ty.clone(),
     })
@@ -2474,7 +2502,6 @@ fn build_vertex_stage(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let invocation_symbol = callback.params[0].0;
     let payload_ty = match &callback.ret_ty {
         Type::Constructed(TypeName::Vertex, args) if args.len() == 1 => args[0].clone(),
         _ => return None,
@@ -2491,12 +2518,11 @@ fn build_vertex_stage(
                 .collect(),
         )
     };
-    let used = used_projection_indices(&callback.body, invocation_symbol, 3);
-    let mut mapping = vec![None; 3];
+    let used = captured_symbols(&callback.body, &LookupSet::new(), symbols);
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
-    for (index, used) in used.into_iter().enumerate() {
-        if !used {
+    for (index, (symbol, ty)) in callback.params.iter().enumerate() {
+        if !used.contains(symbol) {
             continue;
         }
         let (name, builtin) = match index {
@@ -2505,13 +2531,10 @@ fn build_vertex_stage(
             2 => ("draw_index", spirv::BuiltIn::DrawIndex),
             _ => unreachable!(),
         };
-        let symbol = symbols.alloc(format!("_w_vertex_{name}"));
-        let ty = u32_ty();
-        mapping[index] = Some(ProjectionReplacement::Symbol(symbol));
-        invocation_params.push((symbol, ty.clone()));
+        invocation_params.push((*symbol, ty.clone()));
         invocation_decls.push(interface_param(
             name,
-            ty,
+            ty.clone(),
             Attribute::BuiltIn(builtin),
             callback.body.span,
         ));
@@ -2533,8 +2556,8 @@ fn build_vertex_stage(
     let mut rewriter = StageBodyRewriter {
         vertex_result_ty: Some(result_ty.clone()),
         term_ids,
-        invocation_symbol,
-        projections: mapping,
+        invocation_symbol: None,
+        projections: Vec::new(),
         vertex_output: Some(builtins.vertex_output),
     };
     body = rewriter.rewrite_owned(body);
@@ -2822,7 +2845,7 @@ fn build_fragment_stage(
     .rewrite_owned(body);
     let mut rewriter = StageBodyRewriter {
         term_ids,
-        invocation_symbol,
+        invocation_symbol: Some(invocation_symbol),
         vertex_result_ty: None,
         projections: mapping,
         vertex_output: None,
@@ -3010,7 +3033,7 @@ enum ProjectionReplacement {
 struct StageBodyRewriter<'a> {
     term_ids: &'a mut TermIdSource,
     vertex_result_ty: Option<Type>,
-    invocation_symbol: SymbolId,
+    invocation_symbol: Option<SymbolId>,
     projections: Vec<Option<ProjectionReplacement>>,
     vertex_output: Option<builtins::BuiltinId>,
 }
@@ -3022,7 +3045,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageBodyRewriter<'_> {
 
     fn rewrite_owned_node(&mut self, mut term: Term) -> (Term, RewriteDecision) {
         if let TermKind::TupleProj { tuple, idx } = &term.kind {
-            if matches!(tuple.kind, TermKind::Var(VarRef::Symbol(found)) if found == self.invocation_symbol)
+            if matches!(tuple.kind, TermKind::Var(VarRef::Symbol(found)) if Some(found) == self.invocation_symbol)
             {
                 if let Some(Some(replacement)) = self.projections.get(*idx).cloned() {
                     match replacement {

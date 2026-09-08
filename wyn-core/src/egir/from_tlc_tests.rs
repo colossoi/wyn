@@ -678,8 +678,8 @@ fn graphics_entry_ret_type_comes_from_inner_body_not_def_ty() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0])) in
   shade(target, covered,
     |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])

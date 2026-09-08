@@ -1,7 +1,7 @@
 -- Minimal render-target smoke test using a vertex callback and a fragment
 -- callback joined by one raster value.
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  let vid = i32(vertex.vertex_index) in
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let vid = i32(vertex_index) in
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[3.0, -1.0, 0.0, 1.0],
                @[-1.0, 3.0, 0.0, 1.0]] in

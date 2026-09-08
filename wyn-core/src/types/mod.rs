@@ -350,7 +350,6 @@ pub enum TypeName {
     /// value constructors or runtime representation.
     Raster,
     /// Platform-supplied indices for one requested vertex. Nullary and opaque.
-    VertexInvocation,
     /// Vertex-stage result carrying clip position plus payload `V`.
     Vertex,
     /// Platform-supplied fragment data carrying interpolated payload `V`.
@@ -435,7 +434,6 @@ impl std::fmt::Display for TypeName {
             TypeName::Sampler => write!(f, "sampler"),
             TypeName::StorageTexture => write!(f, "storage_image"),
             TypeName::Raster => write!(f, "raster"),
-            TypeName::VertexInvocation => write!(f, "vertex_invocation"),
             TypeName::Vertex => write!(f, "vertex"),
             TypeName::FragmentInvocation => write!(f, "fragment_invocation"),
             TypeName::Draw => write!(f, "draw"),
@@ -509,7 +507,6 @@ impl polytype::Name for TypeName {
             TypeName::Sampler => "sampler".to_string(),
             TypeName::StorageTexture => "storage_image".to_string(),
             TypeName::Raster => "raster".to_string(),
-            TypeName::VertexInvocation => "vertex_invocation".to_string(),
             TypeName::Vertex => "vertex".to_string(),
             TypeName::FragmentInvocation => "fragment_invocation".to_string(),
             TypeName::Draw => "draw".to_string(),

@@ -3,8 +3,8 @@ def vertices: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  vertex_output(vertices[i32(vertex.vertex_index)], @[0.0, 0.0])
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  vertex_output(vertices[i32(vertex_index)], @[0.0, 0.0])
 
 def xs: [2]vec2f32 = [@[1.0, 2.0], @[3.0, 4.0]]
 def edges: [2]vec2i32 = [@[0, 1], @[1, 0]]

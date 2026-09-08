@@ -3401,7 +3401,7 @@ entry bad() i32 =
 entry bad_fragment(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
@@ -3423,7 +3423,7 @@ fn stage_invocation_is_rejected_inside_fragment_callbacks() {
 entry bad(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
@@ -3431,7 +3431,7 @@ entry bad(target: render_target<vec4f32>) render_target<vec4f32> =
       let nested_stage = rasterize_points in
       let _ = nested_stage(
         direct_draw(1u32, 1u32),
-        |vertex| vertex_output(
+        |vertex_index, instance_index, draw_index| vertex_output(
           @[0.0, 0.0, 0.0, 1.0],
           fragment.value)) in
       fragment.value)
@@ -3443,14 +3443,49 @@ entry bad(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn rasterization_rejects_non_positional_vertex_callbacks() {
+    for topology in ["triangles", "triangle_strip", "lines", "line_strip", "points"] {
+        for suffix in ["", "_with"] {
+            let state = if suffix.is_empty() {
+                ""
+            } else {
+                "{ viewport = #target, scissor = #target, front_face = #counter_clockwise, cull = #none, fill = #fill },"
+            };
+            for params in [
+                "v: u32",
+                "v: u32, i: u32",
+                "v: u32, i: u32, d: i32",
+                "v: (u32, u32, u32)",
+            ] {
+                let source = format!(
+                    r#"
+entry invalid(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_{topology}{suffix}({state} direct_draw(3u32, 1u32),
+    |{params}| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+  shade(target, covered, |_| @[1.0, 1.0, 1.0, 1.0])
+"#
+                );
+                assert!(try_typecheck_program(&source).is_err(), "accepted {source}");
+            }
+        }
+    }
+}
+
+#[test]
+fn removed_vertex_invocation_is_an_ordinary_type_name() {
+    assert!(try_typecheck_program("def old(v: vertex_invocation) u32 = v.vertex_index").is_err());
+    typecheck_program("type vertex_invocation = u32\nentry identity(v: vertex_invocation) u32 = v");
+}
+
+#[test]
 fn orchestration_helpers_may_forward_vertex_callbacks() {
     typecheck_program(
         r#"
 def invoke(draw_call: draw,
-           callback: vertex_invocation -> vertex<vec4f32>) raster<vec4f32> =
+           callback: u32 -> u32 -> u32 -> vertex<vec4f32>) raster<vec4f32> =
   rasterize_triangles(draw_call, callback)
 
-def vertex_callback = |vertex: vertex_invocation|
+def vertex_callback = |vertex_index: u32, instance_index: u32, draw_index: u32|
   vertex_output(
     @[0.0, 0.0, 0.0, 1.0],
     @[1.0, 1.0, 1.0, 1.0])
@@ -3467,7 +3502,6 @@ entry valid(target: render_target<vec4f32>) render_target<vec4f32> =
 fn invocation_types_cannot_cross_a_root_entry_boundary() {
     for ty in [
         "raster<vec4f32>",
-        "vertex_invocation",
         "vertex<vec4f32>",
         "fragment_invocation<vec4f32>",
         "fragment_output<vec4f32>",
@@ -3549,8 +3583,8 @@ fn unified_root_graphics_program_typechecks() {
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,

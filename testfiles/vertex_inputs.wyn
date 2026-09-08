@@ -2,8 +2,8 @@
 -- those arrays with the invocation value and returns color as its payload.
 
 def vertex_main(positions: []vec3f32, colors: []vec3f32,
-                vertex: vertex_invocation) vertex<vec3f32> =
-  let i = i32(vertex.vertex_index) in
+                vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec3f32> =
+  let i = i32(vertex_index) in
   let position = positions[i] in
   vertex_output(@[position.x, position.y, position.z, 1.0], colors[i])
 
@@ -16,6 +16,6 @@ entry vertex_inputs(
     screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    vertex_main(positions, colors, _)) in
+    vertex_main(positions, colors, _, _, _)) in
   shade(screen, covered,
     |fragment| fragment_main(fragment.value))

@@ -479,7 +479,6 @@ impl<'a> TypeChecker<'a> {
         match ty {
             Type::Constructed(
                 TypeName::Raster
-                | TypeName::VertexInvocation
                 | TypeName::Vertex
                 | TypeName::FragmentInvocation
                 | TypeName::FragmentOutput
@@ -4185,18 +4184,6 @@ impl<'a> TypeChecker<'a> {
 
         // Platform-supplied invocation records are opaque except for their
         // specified read-only fields.
-        if let Type::Constructed(TypeName::VertexInvocation, args) = base_ty {
-            if !args.is_empty() {
-                bail_type_at!(*span, "malformed vertex_invocation type");
-            }
-            return match field {
-                "vertex_index" | "instance_index" | "draw_index" => {
-                    Ok(Type::Constructed(TypeName::UInt(32), vec![]))
-                }
-                _ => bail_type_at!(*span, "vertex_invocation has no field '{}'", field),
-            };
-        }
-
         if let Type::Constructed(TypeName::FragmentInvocation, args) = base_ty {
             let Some(value_ty) = args.first() else {
                 bail_type_at!(*span, "malformed fragment_invocation type");

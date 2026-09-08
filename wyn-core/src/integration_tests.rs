@@ -301,10 +301,10 @@ fn assert_direct_computed_result_descriptor(descriptor: &pipeline_descriptor::Pi
 fn direct_output_shares_an_authored_computed_result_with_fragment_shading() {
     run_with_large_stack(|| {
         let source = r#"
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
   vertex_output(
-    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
     else @[-1.0, 3.0, 0.0, 1.0],
     @[0.0, 0.0])
 
@@ -3572,8 +3572,8 @@ fn unified_root_graphics_program_reaches_tlc() {
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -3602,8 +3602,8 @@ fn unified_root_graphics_program_compiles_through_spirv() {
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_lines(
     direct_draw_from(5u32, 2u32, 7u32, 3u32),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -3644,12 +3644,12 @@ fn unified_root_marks_integer_vertex_fragment_varyings_flat_in_spirv() {
         r#"
 type varying = { instance: u32 }
 
-def vertex_main(vertex: vertex_invocation) vertex<varying> =
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<varying> =
   vertex_output(
-    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
     else @[-1.0, 3.0, 0.0, 1.0],
-    { instance = vertex.instance_index })
+    { instance = instance_index })
 
 def fragment_main(fragment: fragment_invocation<varying>) vec4f32 =
   let value = f32(fragment.value.instance) in
@@ -3687,8 +3687,8 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let draw = direct_draw(vertex_count, 1u32) in
   let covered = rasterize_triangles(
     draw,
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -3725,7 +3725,7 @@ entry render_target_record_helper(scene: render_target<f32>,
     render_target<f32> =
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
   let value = { scene = scene } in
   shade(screen, raster,
     |_| read_scene(value.scene))
@@ -3761,9 +3761,9 @@ entry reproduce(scene: render_target<f32>,
                 surface: render_target<f32>) render_target<f32> =
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       ())) in
   shade(surface, raster, resolve({ scene = scene }, _))
@@ -3809,9 +3809,9 @@ entry reproduce(coords: []vec2i32, scene: render_target<f32>,
     coords)
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       ()))
   let surface1 = shade(
@@ -3853,9 +3853,9 @@ entry reproduce(left: render_target<f32>,
                 surface: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       ())) in
   shade(surface, raster, resolve({ left = left, right = right }, _))
@@ -3903,7 +3903,7 @@ entry unused_render_target_record(
     render_target<f32> =
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
   shade(output, raster,
     |_| let unused = { scene = scene } in 1.0)
 "#,
@@ -3931,8 +3931,8 @@ def PROP_WALLS: i32 = 2632
 entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(WALL_VERTEX_COUNT, u32(PROP_WALLS)),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -3969,8 +3969,8 @@ def INSTANCE_COUNT: i32 = 8 * PER_COURSE + 128 + 8
 entry reproduce(target: render_target<f32>) render_target<f32> =
   let raster = rasterize_triangles(
     direct_draw(3u32, u32(INSTANCE_COUNT)),
-    |vertex| vertex_output(
-      @[f32(vertex.vertex_index), 0.0, 0.0, 1.0], ())) in
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0], ())) in
   shade(target, raster, |fragment| fragment.position.z)
 "#,
     )
@@ -4000,9 +4000,9 @@ entry reproduce(target: render_target<f32>) render_target<f32> =
 fn unified_root_flattens_nested_record_compute_output() {
     let lowered = compile_thru_spirv(
         r#"
-def fullscreen(vertex: vertex_invocation) vertex<()> =
-  let x = if vertex.vertex_index == 2u32 then 3.0 else -1.0
-  let y = if vertex.vertex_index == 1u32 then 3.0 else -1.0 in
+def fullscreen(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<()> =
+  let x = if vertex_index == 2u32 then 3.0 else -1.0
+  let y = if vertex_index == 1u32 then 3.0 else -1.0 in
   vertex_output(@[x, y, 0.0, 1.0], ())
 
 def white(fragment: fragment_invocation<()>) vec4f32 =
@@ -4034,8 +4034,8 @@ entry frame(points: []vec2f32,
   let updated = map(|p: vec2f32| p * 0.5, points) in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex|
-      let p = updated[i32(vertex.vertex_index)] in
+    |vertex_index, instance_index, draw_index|
+      let p = updated[i32(vertex_index)] in
       vertex_output(@[p.x, p.y, 0.0, 1.0], p)) in
   let target' = shade(
     target,
@@ -4074,14 +4074,122 @@ entry frame(points: []vec2f32,
 }
 
 #[test]
+fn rasterization_callbacks_take_three_positional_indices() {
+    use tlc::{TermKind, TermVisitor, WalkDecision};
+    type Term = tlc::Term<tlc::data::ExplicitClosurePayload, tlc::data::ExplicitCapturesPayload>;
+
+    // Each index occupies a different output lane. Checking the lane's symbol
+    // against its declared built-in catches swaps that an index sum would hide.
+    for topology in ["triangles", "triangle_strip", "lines", "line_strip", "points"] {
+        for with_state in [false, true] {
+            let suffix = if with_state { "_with" } else { "" };
+            let state = if with_state {
+                "{ viewport = #target, scissor = #target, front_face = #counter_clockwise, cull = #none, fill = #fill },"
+            } else {
+                ""
+            };
+            for active in [vec![0, 1, 2], vec![0], vec![1], vec![2], vec![]] {
+                let lanes: Vec<_> = ["v", "i", "d"]
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, name)| {
+                            if active.contains(&index) {
+                                format!("f32({name})")
+                            } else {
+                                "0.0".into()
+                            }
+                        },
+                    )
+                    .collect();
+                let source = format!(
+                    r#"
+def output(v: u32, i: u32, d: u32) vertex<()> =
+  vertex_output(@[{x}, {y}, {z}, 1.0], ())
+def forward(v: u32, i: u32, d: u32) vertex<()> = output(v, i, d)
+def invoke(draw_call: draw, callback: u32 -> u32 -> u32 -> vertex<()>) raster<()> =
+  rasterize_{topology}{suffix}({state} draw_call, callback)
+entry indices(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = invoke(direct_draw_from(3u32, 2u32, 7u32, 11u32), forward) in
+  shade(target, covered, |_| @[1.0, 1.0, 1.0, 1.0])
+"#,
+                    x = lanes[0],
+                    y = lanes[1],
+                    z = lanes[2]
+                );
+                let program = compile_thru_tlc(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
+                let definition = program
+                    .defs
+                    .iter()
+                    .find(|definition| {
+                        matches!(
+                            &definition.meta, tlc::DefMeta::EntryPoint(entry)
+                            if entry.declaration.entry_kind == interface::EntryKind::Vertex
+                        )
+                    })
+                    .expect("vertex stage");
+                let tlc::DefMeta::EntryPoint(entry) = &definition.meta else {
+                    unreachable!()
+                };
+                let TermKind::Lambda(lambda) = &definition.body.kind else {
+                    panic!("vertex lambda")
+                };
+                let expected = [
+                    spirv::BuiltIn::VertexIndex,
+                    spirv::BuiltIn::InstanceIndex,
+                    spirv::BuiltIn::DrawIndex,
+                ];
+                assert_eq!(lambda.params.len(), active.len());
+                for (param, &index) in entry.declaration.params.iter().zip(&active) {
+                    assert_eq!(
+                        param.attributes,
+                        vec![interface::Attribute::BuiltIn(expected[index])]
+                    );
+                }
+                let mut checked = false;
+                let mut visitor = |term: &Term| {
+                    if let TermKind::VecLit(lanes) = &term.kind {
+                        assert_eq!(lanes.len(), 4);
+                        for (index, lane) in lanes.iter().take(3).enumerate() {
+                            let mut symbols = Vec::new();
+                            let mut collect = |term: &Term| {
+                                if let TermKind::Var(VarRef::Symbol(symbol)) = term.kind {
+                                    symbols.push(symbol);
+                                }
+                                WalkDecision::Recurse
+                            };
+                            collect.walk(lane);
+                            let expected: Vec<_> = active
+                                .iter()
+                                .position(|&used| used == index)
+                                .map(|position| lambda.params[position].0)
+                                .into_iter()
+                                .collect();
+                            assert_eq!(symbols, expected, "wrong index in lane {index}: {source}");
+                        }
+                        checked = true;
+                    }
+                    WalkDecision::Recurse
+                };
+                visitor.walk(&lambda.body);
+                assert!(checked, "position output must be checked");
+                let lowered =
+                    compile_thru_spirv(&source).expect("positional callbacks lower through SPIR-V");
+                assert_naga_accepts_spirv(&lowered.spirv);
+            }
+        }
+    }
+}
+
+#[test]
 fn unified_invocation_fields_compile_through_spirv() {
     let lowered = compile_thru_spirv(
         r#"
 entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw_from(3u32, 1u32, 0u32, 0u32),
-    |vertex|
-      let index = vertex.vertex_index + vertex.instance_index + vertex.draw_index in
+    |vertex_index, instance_index, draw_index|
+      let index = vertex_index + instance_index + draw_index in
       let x = if index == 0u32 then -1.0 else if index == 1u32 then 3.0 else -1.0 in
       let y = if index == 0u32 then -1.0 else if index == 1u32 then -1.0 else 3.0 in
       vertex_output(@[x, y, 0.0, 1.0], @[x, y])) in
@@ -4116,9 +4224,9 @@ def divergent_color(fragment: fragment_invocation<f32>) vec4f32 =
 entry divergent_fwidth(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex|
-      let x = if vertex.vertex_index == 1u32 then 3.0 else -1.0 in
-      let y = if vertex.vertex_index == 2u32 then 3.0 else -1.0 in
+    |vertex_index, instance_index, draw_index|
+      let x = if vertex_index == 1u32 then 3.0 else -1.0 in
+      let y = if vertex_index == 2u32 then 3.0 else -1.0 in
       vertex_output(@[x, y, 0.0, 1.0], 0.0)) in
   shade(target, covered, divergent_color)
 "#,
@@ -4142,8 +4250,8 @@ entry triangle(points: []vec2f32, scale: f32,
                target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex|
-      let p = points[i32(vertex.vertex_index)] in
+    |vertex_index, instance_index, draw_index|
+      let p = points[i32(vertex_index)] in
       vertex_output(
         @[p.x * scale, p.y * scale, 0.0, 1.0],
         @[1.0, 0.0, 0.0, 1.0])) in
@@ -4180,10 +4288,10 @@ fn unified_graphics_compute_stage_publishes_captured_uniform_read() {
         r#"
 type globals = { value: f32 }
 
-def triangle_vertex(vertex: vertex_invocation) vertex<()> =
+def triangle_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<()> =
   vertex_output(
-    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
     else @[-1.0, 3.0, 0.0, 1.0],
     ())
 
@@ -4232,8 +4340,8 @@ entry textured(tex: texture2d, sampling: sampler,
                target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex|
-      let index = vertex.vertex_index in
+    |vertex_index, instance_index, draw_index|
+      let index = vertex_index in
       let position =
         if index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
         else if index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
@@ -4266,10 +4374,10 @@ entry textured(tex: texture2d, sampling: sampler,
 fn unified_graphics_callbacks_may_call_named_helpers() {
     let lowered = compile_thru_spirv(
         r#"
-def make_vertex(vertex: vertex_invocation) vertex<vec4f32> =
+def make_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec4f32> =
   vertex_output(
-    if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-    else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
     else @[0.0, 0.5, 0.0, 1.0],
     @[0.2, 0.6, 1.0, 1.0])
 
@@ -4289,21 +4397,21 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
 fn unified_root_supports_successive_draws_into_one_target() {
     let lowered = compile_thru_spirv(
         r#"
-def triangle_vertex(offset: f32, vertex: vertex_invocation) vertex<vec4f32> =
-  let x = if vertex.vertex_index == 0u32 then -0.5
-          else if vertex.vertex_index == 1u32 then 0.5
+def triangle_vertex(offset: f32, vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec4f32> =
+  let x = if vertex_index == 0u32 then -0.5
+          else if vertex_index == 1u32 then 0.5
           else 0.0 in
-  let y = if vertex.vertex_index == 2u32 then 0.5 else -0.5 in
+  let y = if vertex_index == 2u32 then 0.5 else -0.5 in
   vertex_output(@[x + offset, y, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])
 
 entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
   let background = rasterize_triangles(
-    direct_draw(3u32, 1u32), triangle_vertex(-0.25, _)) in
+    direct_draw(3u32, 1u32), triangle_vertex(-0.25, _, _, _)) in
   let target1 = shade(
     target, background,
     |fragment| fragment.value * @[0.2, 0.4, 0.8, 1.0]) in
   let foreground = rasterize_triangles(
-    direct_draw(3u32, 1u32), triangle_vertex(0.25, _)) in
+    direct_draw(3u32, 1u32), triangle_vertex(0.25, _, _, _)) in
   shade(
     target1, foreground,
     |fragment| fragment.value * @[0.9, 0.3, 0.1, 1.0])
@@ -4348,7 +4456,7 @@ def pass_raster<V>(covered: raster<V>) raster<V> = covered
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, pass_raster(covered), |fragment| fragment.value)
 "#;
     compile_to_spirv(source).expect("an ordinary helper may transfer a raster value");
@@ -4372,7 +4480,7 @@ entry render_target_filter_helper(source: render_target<f32>) render_target<f32>
     { instances = kept }
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |_| vertex_output(
+    |_, _, _| vertex_output(
       @[f32(length(visible.instances)) * 0.0, 0.0, 0.0, 1.0], ())) in
   shade(source, raster, |_| 1.0)
 "#;
@@ -4390,7 +4498,7 @@ fn unified_root_rejects_reusing_consumed_raster() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   let first = shade(target, covered, |fragment| fragment.value) in
   shade(first, covered, |fragment| fragment.value)
 "#;
@@ -4407,11 +4515,11 @@ fn unified_root_rejects_reusing_consumed_render_target() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let first_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   let first = shade(target, first_raster, |fragment| fragment.value) in
   let second_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   let second = shade(target, second_raster, |fragment| fragment.value) in
   second
 "#;
@@ -4428,7 +4536,7 @@ fn unified_root_rejects_reading_target_from_its_own_fragment_callback() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
     |fragment| target_load(target, @[0, 0], fragment.sample_index))
 "#;
@@ -4448,7 +4556,7 @@ fn unified_root_rejects_discarded_raster() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   target
 "#;
     let error = compile_thru_tlc(source).expect_err("a raster value must not be discarded");
@@ -4468,9 +4576,9 @@ entry postprocess(values: []vec2i32,
     ([]f32, render_target<vec4f32>, render_target<vec4f32>) =
   let scene_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       1.0)) in
   let scene1 = shade(
@@ -4481,9 +4589,9 @@ entry postprocess(values: []vec2i32,
     values) in
   let resolve_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       ())) in
   let surface1 = shade(
@@ -4557,17 +4665,17 @@ entry resolve(sampling: sampler,
     (render_target<vec4f32>, render_target<vec4f32>) =
   let geometry = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       @[0.25, 0.5, 0.75, 1.0])) in
   let scene1 = shade(scene, geometry, |fragment| fragment.value) in
   let fullscreen = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       ())) in
   let surface1 = shade(
@@ -4631,9 +4739,9 @@ entry deferred(coords: []vec2i32,
     ([]f32, render_target<gbuffer>, render_target<vec4f32>) =
   let geometry = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       0.5)) in
   let scene1 = shade(
@@ -4648,9 +4756,9 @@ entry deferred(coords: []vec2i32,
     coords) in
   let fullscreen = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       ())) in
   let surface1 = shade(
@@ -4713,9 +4821,9 @@ def fragment_stage(fragment: fragment_invocation<vec4f32>) fragment_output<vec4f
 entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[1.0, 0.5, 0.25, 1.0])) in
   shade(target, covered, fragment_stage)
@@ -4739,9 +4847,9 @@ entry tuple_color(target: render_target<(u32, vec4f32, vec4f32, f32)>)
     render_target<(u32, vec4f32, vec4f32, f32)> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       (7u32, @[1.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0], 0.5))) in
   shade(target, covered, |fragment| fragment.value)
@@ -4764,9 +4872,9 @@ fn unified_root_supports_explicit_depth_and_conditional_discard() {
 entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[1.0, 0.5, 0.25, 1.0])) in
   shade_with(
@@ -4821,9 +4929,9 @@ fn unified_root_accepts_explicit_fragment_state() {
 entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[1.0, 1.0, 1.0, 1.0])) in
   shade_with(
@@ -4866,9 +4974,9 @@ def opaque_depth: fragment_state = {
 entry reproduce(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[1.0, 0.5, 0.25, 1.0])) in
   shade_with(opaque_depth, target, covered, |fragment| fragment.value)
@@ -4906,8 +5014,8 @@ entry prepare_and_draw<[n]>(values: [n]vec4f32,
   } in
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex|
-      let i = i32(vertex.vertex_index) in
+    |vertex_index, instance_index, draw_index|
+      let i = i32(vertex_index) in
       vertex_output(prepared.positions[i], prepared.colors[i])) in
   let target1 = shade(target, covered, |fragment| fragment.value) in
   (prepared, target1)
@@ -4994,12 +5102,12 @@ entry compact_and_draw(values: []vec4f32,
     } in
   let covered = rasterize_triangles(
     indirect_draw(prepared.commands[0]),
-    |vertex|
-      let p = prepared.instances[i32(vertex.instance_index)] in
-      let x = if vertex.vertex_index == 0u32 then -0.5
-              else if vertex.vertex_index == 1u32 then 0.5
+    |vertex_index, instance_index, draw_index|
+      let p = prepared.instances[i32(instance_index)] in
+      let x = if vertex_index == 0u32 then -0.5
+              else if vertex_index == 1u32 then 0.5
               else 0.0 in
-      let y = if vertex.vertex_index == 2u32 then 0.5 else -0.5 in
+      let y = if vertex_index == 2u32 then 0.5 else -0.5 in
       vertex_output(@[p.x + x, p.y + y, 0.0, 1.0], p)) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -5052,8 +5160,8 @@ entry reproduce(values: []vec4f32,
   } in
   let covered = rasterize_triangles(
     indirect_draw(prepared.command),
-    |vertex|
-      let position = prepared.instances[i32(vertex.instance_index)] in
+    |vertex_index, instance_index, draw_index|
+      let position = prepared.instances[i32(instance_index)] in
       vertex_output(position, position)) in
   shade(target, covered, |fragment| fragment.value)
 "#,
@@ -5108,8 +5216,8 @@ entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
   let (prepared, output) = prepare(values)
   let raster = rasterize_triangles(
     indirect_draw(prepared.draw),
-    |vertex|
-      let position = prepared.values[i32(vertex.instance_index)] in
+    |vertex_index, instance_index, draw_index|
+      let position = prepared.values[i32(instance_index)] in
       vertex_output(position, position))
   let target1 = shade(target, raster, |fragment| fragment.value) in
   (output, target1)
@@ -5166,14 +5274,14 @@ entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
   let (first, second) = prepare(values)
   let raster1 = rasterize_triangles(
     indirect_draw(first.draw),
-    |vertex|
-      let position = first.values[i32(vertex.instance_index)] in
+    |vertex_index, instance_index, draw_index|
+      let position = first.values[i32(instance_index)] in
       vertex_output(position, position))
   let target1 = shade(target, raster1, |fragment| fragment.value)
   let raster2 = rasterize_triangles(
     indirect_draw(second.draw),
-    |vertex|
-      let position = second.values[i32(vertex.instance_index)] in
+    |vertex_index, instance_index, draw_index|
+      let position = second.values[i32(instance_index)] in
       vertex_output(position, position)) in
   shade(target1, raster2, |fragment| fragment.value)
 "#,
@@ -5228,7 +5336,7 @@ entry indexed(indices: [3]u32,
               target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     indexed_draw(indices, 2u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
     )
@@ -5296,11 +5404,11 @@ entry draw_many(indices: [3]u32,
   }] in
   let many = rasterize_triangles(
     indirect_draws(commands),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
   let target1 = shade(target, many, |fragment| fragment.value) in
   let indexed = rasterize_triangles(
     indexed_indirect_draws(indices, indexed_commands),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
   shade(target1, indexed, |fragment| fragment.value)
 "#,
     )
@@ -5352,11 +5460,11 @@ entry indexed_forms(indices: [4]u16,
   }] in
   let direct = rasterize_triangles(
     indexed_draw_from(indices, 3u32, 2u32, 1u32, -1i32, 4u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
   let target1 = shade(target, direct, |fragment| fragment.value) in
   let indirect = rasterize_triangles(
     indexed_indirect_draw(indices, commands[0]),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
   shade(target1, indirect, |fragment| fragment.value)
 "#,
     )
@@ -5407,7 +5515,7 @@ entry draw_dynamic(commands: []draw_command,
                    target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     indirect_draws(commands),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
     )
@@ -5443,7 +5551,7 @@ entry clipped(target: render_target<vec4f32>) render_target<vec4f32> =
       fill = #line
     },
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
+    |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered, |fragment| fragment.value)
 "#,
     )
@@ -6913,7 +7021,7 @@ entry scheduler_resource_cycle(f: vec2f32, history: render_target<f32>)
     { values = map(|i| 0i32, kept) }
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |_| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
   let history' = shade(history, raster, |_| 1.0)
   in (visible.values, history')
 "#,
@@ -9367,9 +9475,9 @@ def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     let covered = rasterize_triangles(
       direct_draw(3u32, 1u32),
-      |vertex| vertex_output(
-        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      |vertex_index, instance_index, draw_index| vertex_output(
+        if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
         else @[-1.0, 3.0, 0.0, 1.0],
         @[0.0, 0.0, 0.0, 0.0])) in
     shade(target, covered, fragment_main)
@@ -9395,9 +9503,9 @@ def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     let covered = rasterize_triangles(
       direct_draw(3u32, 1u32),
-      |vertex| vertex_output(
-        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      |vertex_index, instance_index, draw_index| vertex_output(
+        if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
         else @[-1.0, 3.0, 0.0, 1.0],
         @[0.0, 0.0, 0.0, 0.0])) in
     shade(target, covered, fragment_main)

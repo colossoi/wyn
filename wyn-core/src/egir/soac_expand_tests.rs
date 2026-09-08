@@ -587,9 +587,9 @@ def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     let covered = rasterize_triangles(
       direct_draw(3u32, 1u32),
-      |vertex| vertex_output(
-        if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-        else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+      |vertex_index, instance_index, draw_index| vertex_output(
+        if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+        else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
         else @[-1.0, 3.0, 0.0, 1.0],
         @[0.0, 0.0, 0.0, 0.0])) in
     shade(target, covered, fragment_main)

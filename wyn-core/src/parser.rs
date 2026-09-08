@@ -1246,7 +1246,6 @@ impl<'a> Parser<'a> {
                     "texture2d" => TypeName::Texture2D,
                     "sampler" => TypeName::Sampler,
                     "raster" if self.graphics => TypeName::Raster,
-                    "vertex_invocation" if self.graphics => TypeName::VertexInvocation,
                     "vertex" if self.graphics => TypeName::Vertex,
                     "fragment_invocation" if self.graphics => TypeName::FragmentInvocation,
                     "fragment_output" if self.graphics => TypeName::FragmentOutput,

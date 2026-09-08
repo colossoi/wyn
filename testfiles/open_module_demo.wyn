@@ -5,8 +5,8 @@
 
 open f32
 
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  let vid = vertex.vertex_index in
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let vid = vertex_index in
   let position = if vid == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
     else if vid == 1u32 then @[3.0, -1.0, 0.0, 1.0]
     else @[-1.0, 3.0, 0.0, 1.0] in

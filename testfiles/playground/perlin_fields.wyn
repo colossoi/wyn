@@ -163,8 +163,8 @@ def clampi(v: i32) i32 = if v < 0i32 then 0i32 else if v >= RES then RES - 1i32 
 -- display: sample the canvas at the pixel's flat index.
 ------------------------------------------------------------
 
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  let vid = i32(vertex.vertex_index) in
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let vid = i32(vertex_index) in
   let x = if vid == 0i32 then -1.0 else if vid == 1i32 then 3.0 else -1.0 in
   let y = if vid == 0i32 then -1.0 else if vid == 1i32 then -1.0 else 3.0 in
   vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])

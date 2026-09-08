@@ -388,9 +388,9 @@ fn wgsl_fragment_trivial() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      if vertex.vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
-      else if vertex.vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
+    |vertex_index, instance_index, draw_index| vertex_output(
+      if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
+      else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered, |fragment| @[1.0, 0.5, 0.0, 1.0])
@@ -414,8 +414,8 @@ def verts: [3]vec4f32 =
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
-      verts[i32(vertex.vertex_index)],
+    |vertex_index, instance_index, draw_index| vertex_output(
+      verts[i32(vertex_index)],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered, |fragment| @[1.0, 1.0, 1.0, 1.0])
 "#,
@@ -432,7 +432,7 @@ fn wgsl_vertex_multi_output_struct() {
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0])) in
   shade(target, covered,
@@ -566,7 +566,7 @@ entry frame(i_time: f32,
             target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered, |fragment| @[i_time, 0.0, 0.0, 1.0])
@@ -726,7 +726,7 @@ def brighten(c: vec4f32, amount: f32) vec4f32 =
 entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered,
@@ -1023,7 +1023,7 @@ entry frame(c: block,
             target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
-    |vertex| vertex_output(
+    |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered,

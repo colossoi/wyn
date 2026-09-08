@@ -138,8 +138,8 @@ entry mixed_loop(seed: u32, scale: u32) u32 =
   "egir::erase_resources": {
     before: "CFG skeleton optimized",
     after: "Compile-time resources erased",
-    example: `def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  let vid = i32(vertex.vertex_index) in
+    example: `def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let vid = i32(vertex_index) in
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[3.0, -1.0, 0.0, 1.0],
                @[-1.0, 3.0, 0.0, 1.0]] in

@@ -617,11 +617,11 @@ sub-passes don't pattern-match on args indices directly.
 ```wyn
 -- Render a full-screen triangle through one explicit graphics operation.
 
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
   let verts = [@[-1.0, -1.0, 0.0, 1.0],
                @[ 3.0, -1.0, 0.0, 1.0],
                @[-1.0,  3.0, 0.0, 1.0]] in
-  vertex_output(verts[i32(vertex.vertex_index)], @[0.0, 0.0])
+  vertex_output(verts[i32(vertex_index)], @[0.0, 0.0])
 
 entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
@@ -657,7 +657,7 @@ cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
-`direct_draw`, `rasterize_triangles`, `shade`, `vertex_invocation`, and
+`direct_draw`, `rasterize_triangles`, `shade`, and
 `render_target` are ordinary, unreserved identifiers: user code may define
 them, and otherwise receives the normal undefined-name diagnostic.
 `--direct` is a backend-neutral output policy. It preserves authored graphics
@@ -698,7 +698,7 @@ entry sum_array(data: []f32) f32 =
   reduce(|a: f32, b: f32| a + b, 0.0, data)
 
 -- Graphics uses an orchestration entry plus ordinary callbacks.
-def vs_main(vertex: vertex_invocation) vertex<vec3f32> = ...
+def vs_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec3f32> = ...
 def fs_main(fragment: fragment_invocation<vec3f32>) vec4f32 = ...
 entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vs_main) in

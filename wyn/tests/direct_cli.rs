@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const GRAPHICS_SOURCE: &str = r#"
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
-  let x = if vertex.vertex_index == 0u32 then -1.0 else if vertex.vertex_index == 1u32 then 3.0 else -1.0 in
-  let y = if vertex.vertex_index == 0u32 then -1.0 else if vertex.vertex_index == 1u32 then -1.0 else 3.0 in
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
+  let x = if vertex_index == 0u32 then -1.0 else if vertex_index == 1u32 then 3.0 else -1.0 in
+  let y = if vertex_index == 0u32 then -1.0 else if vertex_index == 1u32 then -1.0 else 3.0 in
   vertex_output(@[x, y, 0.0, 1.0], @[0.0, 0.0])
 
 entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =

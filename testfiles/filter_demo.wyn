@@ -8,7 +8,7 @@ def is_even(x: i32) bool = x % 2 == 0
 def evens(arr: [8]i32) ?k. [k]i32 =
     filter(is_even, arr)
 
-def vertex_main(_vertex: vertex_invocation) vertex<vec2f32> =
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
     let e = evens([1, 2, 3, 4, 5, 6, 7, 8]) in
     vertex_output(@[f32.i32(length(e)), 0.0, 0.0, 1.0], @[0.0, 0.0])
 

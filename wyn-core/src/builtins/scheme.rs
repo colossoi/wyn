@@ -358,10 +358,6 @@ fn draw_ty() -> Type {
     pipeline_ty(TypeName::Draw, vec![])
 }
 
-fn vertex_invocation_ty() -> Type {
-    pipeline_ty(TypeName::VertexInvocation, vec![])
-}
-
 /// u32 -> u32 -> draw ? a direct draw starting at vertex and instance zero.
 pub fn direct_draw_scheme(_ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let u = u32_ty();
@@ -476,11 +472,12 @@ pub fn vertex_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[vec_n(f32_ty(), 4), v], output))
 }
 
-/// forall v. raster_state -> draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
+/// forall v. raster_state -> draw -> (u32 -> u32 -> u32 -> vertex<v>) -> raster<v>.
+/// Callback arguments are vertex_index, instance_index, and draw_index, in that order.
 pub fn rasterize_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let v = ctx.new_variable();
     let callback = arrow_chain(
-        &[vertex_invocation_ty()],
+        &[u32_ty(), u32_ty(), u32_ty()],
         pipeline_ty(TypeName::Vertex, vec![v.clone()]),
     );
     quantify(arrow_chain(
@@ -489,11 +486,12 @@ pub fn rasterize_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     ))
 }
 
-/// forall v. draw -> (vertex_invocation -> vertex<v>) -> raster<v>.
+/// forall v. draw -> (u32 -> u32 -> u32 -> vertex<v>) -> raster<v>.
+/// Callback arguments are vertex_index, instance_index, and draw_index, in that order.
 pub fn rasterize_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let v = ctx.new_variable();
     let callback = arrow_chain(
-        &[vertex_invocation_ty()],
+        &[u32_ty(), u32_ty(), u32_ty()],
         pipeline_ty(TypeName::Vertex, vec![v.clone()]),
     );
     quantify(arrow_chain(

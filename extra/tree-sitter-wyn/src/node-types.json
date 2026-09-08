@@ -10055,10 +10055,6 @@
     "named": false
   },
   {
-    "type": "vertex_invocation",
-    "named": false
-  },
-  {
     "type": "viewport",
     "named": false
   },

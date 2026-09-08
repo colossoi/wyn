@@ -446,7 +446,6 @@ module.exports = grammar({
       'texture2d',
       'sampler',
       'storage_image',
-      'vertex_invocation',
       'draw',
     ),
 

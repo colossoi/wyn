@@ -3864,7 +3864,7 @@ fn spellable_raster_type_parses() {
 #[test]
 fn unified_pipeline_types_are_spellable() {
     parse_ok(
-        "def vertex_help(v: vertex_invocation) vertex<vec4f32> = vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])\n\
+        "def vertex_help(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec4f32> = vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])\n\
          def fragment_help(f: fragment_invocation<vec4f32>) fragment_output<vec4f32> = #color(f.value)\n\
          def target_help(t: render_target<vec4f32>) render_target<vec4f32> = t\n\
          def draw_help(d: draw) draw = d",

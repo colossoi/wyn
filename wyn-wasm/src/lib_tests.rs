@@ -126,10 +126,10 @@ fn interface_surfaces_materialization_storage_bindings() {
 
 fn interface_surfaces_materialization_storage_bindings_impl() {
     let src = r#"
-def vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
   vertex_output(
-    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
-    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    if vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
     else @[-1.0, 3.0, 0.0, 1.0],
     @[0.0, 0.0])
 

@@ -1,7 +1,7 @@
 -- Simple red triangle test
 
-def vertex_main(vertex: vertex_invocation) vertex<vec3f32> =
-  let vertex_index = vertex.vertex_index
+def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec3f32> =
+  let vertex_index = vertex_index
   let position: vec4f32 =
     if vertex_index == 0u32 then @[-0.5, -0.5, 0.0, 1.0]
     else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]

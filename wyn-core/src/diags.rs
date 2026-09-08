@@ -206,7 +206,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
             .first()
             .map(|color| format!("{}<{}>", name, format_type(color)))
             .unwrap_or_else(|| format!("{}<?>", name)),
-        TypeName::VertexInvocation | TypeName::Draw => name.to_string(),
+        TypeName::Draw => name.to_string(),
         TypeName::Skolem(id) => format!("{}", id),
     }
 }

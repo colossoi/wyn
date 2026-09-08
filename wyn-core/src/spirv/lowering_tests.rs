@@ -474,7 +474,7 @@ fn entry_point_interfaces_are_unique_when_storage_input_and_output_alias() {
         r#"
 type painted = { values: []f32 }
 
-def triangle_vertex(vertex: vertex_invocation) =
+def triangle_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) =
   vertex_output(
     @[1.0, 1.0, 0.0, 1.0],
     ())

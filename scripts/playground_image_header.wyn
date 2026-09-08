@@ -6,9 +6,9 @@ def __playground_vertices: [3]vec4f32 =
    @[3.0, -1.0, 0.0, 1.0],
    @[-1.0, 3.0, 0.0, 1.0]]
 
-def __playground_vertex_main(vertex: vertex_invocation) vertex<vec2f32> =
+def __playground_vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
   vertex_output(
-    __playground_vertices[i32(vertex.vertex_index)],
+    __playground_vertices[i32(vertex_index)],
     @[0.0, 0.0])
 
 entry image(
