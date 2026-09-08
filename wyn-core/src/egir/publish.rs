@@ -29,7 +29,7 @@ use crate::{BindingRef, LookupMap, LookupSet};
 
 use crate::egir::program::EntryPublication;
 use crate::flow::ExecutionModel;
-use crate::interface::{IoDecoration, StorageAccess, TextureSource};
+use crate::interface::{EntryInputKind, IoDecoration, StorageAccess, TextureSource};
 use crate::pipeline_descriptor::{
     Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
@@ -61,8 +61,8 @@ pub trait PipelineDescriptorPublish {
         associations: &StageEntryAssociations,
     ) -> Result<(), DescriptorError>;
 
-    /// Record storage-buffer access on the stage that performs it and
-    /// reconcile each pipeline layout from its own stages.
+    /// Record descriptor-binding access on the stage that performs it and
+    /// reconcile each pipeline's storage-buffer access from its own stages.
     fn publish_stage_binding_uses(
         &mut self,
         entries: &[&EntryPublication],
@@ -95,10 +95,18 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
     };
 
     for input in &entry.inputs {
-        let Some(binding) = input.storage_binding() else {
+        let Some(binding) = input.descriptor_binding() else {
             continue;
         };
-        let access = input.storage_access().map_or(Access::ReadOnly, Access::from);
+        let access = match input.kind {
+            EntryInputKind::Storage { access, .. } | EntryInputKind::StorageImage { access, .. } => {
+                Access::from(access)
+            }
+            EntryInputKind::Uniform { .. }
+            | EntryInputKind::Texture { .. }
+            | EntryInputKind::Sampler { .. } => Access::ReadOnly,
+            EntryInputKind::Value { .. } | EntryInputKind::PushConstant { .. } => unreachable!(),
+        };
         record(binding, access);
     }
     for output in &entry.outputs {
@@ -111,6 +119,32 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
         record(declaration.binding, access);
     }
     uses
+}
+
+fn merge_stage_binding_uses(uses: &mut StageBindingUses, declared: StageBindingUses) {
+    for binding in declared.reads {
+        uses.record(binding, Access::ReadOnly);
+    }
+    for binding in declared.writes {
+        uses.record(binding, Access::WriteOnly);
+    }
+}
+
+fn merge_non_storage_buffer_stage_binding_uses(
+    uses: &mut StageBindingUses,
+    declared: StageBindingUses,
+    bindings: &[Binding],
+) {
+    for binding in declared.reads {
+        if !matches!(bindings.get(binding), Some(Binding::StorageBuffer { .. })) {
+            uses.record(binding, Access::ReadOnly);
+        }
+    }
+    for binding in declared.writes {
+        if !matches!(bindings.get(binding), Some(Binding::StorageBuffer { .. })) {
+            uses.record(binding, Access::WriteOnly);
+        }
+    }
 }
 
 fn reconcile_storage_binding_access<'a>(
@@ -143,6 +177,20 @@ fn publish_pipeline_stage_uses(
     let entries = entries_by_id(entries);
     match pipeline {
         Pipeline::Compute(compute) => {
+            for (index, stage) in compute.stages.iter_mut().enumerate() {
+                if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
+                    let declared = entry_stage_binding_uses(entry, &compute.bindings);
+                    // The scheduler's physical resources are authoritative for
+                    // storage-buffer traffic. Other descriptor-backed inputs
+                    // do not participate in that resource graph, so recover
+                    // their stage uses from the emitted entry interface.
+                    merge_non_storage_buffer_stage_binding_uses(
+                        &mut stage.uses,
+                        declared,
+                        &compute.bindings,
+                    );
+                }
+            }
             reconcile_storage_binding_access(
                 &mut compute.bindings,
                 compute.stages.iter().map(|stage| &stage.uses),
@@ -150,9 +198,16 @@ fn publish_pipeline_stage_uses(
         }
         Pipeline::Graphics(graphics) => {
             for (index, stage) in graphics.stages.iter_mut().enumerate() {
-                if stage.uses.is_empty() {
-                    if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
-                        stage.uses = entry_stage_binding_uses(entry, &graphics.bindings);
+                if let Some(entry) = stage_ids.get(index).and_then(|id| entries.get(id).copied()) {
+                    let declared = entry_stage_binding_uses(entry, &graphics.bindings);
+                    if stage.uses.is_empty() {
+                        merge_stage_binding_uses(&mut stage.uses, declared);
+                    } else {
+                        merge_non_storage_buffer_stage_binding_uses(
+                            &mut stage.uses,
+                            declared,
+                            &graphics.bindings,
+                        );
                     }
                 }
             }

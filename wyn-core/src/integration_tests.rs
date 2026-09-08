@@ -4102,6 +4102,54 @@ entry triangle(points: []vec2f32, scale: f32,
 }
 
 #[test]
+fn unified_graphics_compute_stage_publishes_captured_uniform_read() {
+    let lowered = compile_thru_spirv(
+        r#"
+type globals = { value: f32 }
+
+def triangle_vertex(vertex: vertex_invocation) vertex<()> =
+  vertex_output(
+    if vertex.vertex_index == 0u32 then @[-1.0, -1.0, 0.0, 1.0]
+    else if vertex.vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
+    else @[-1.0, 3.0, 0.0, 1.0],
+    ())
+
+entry reproduce(frame: globals, target: render_target<vec4f32>)
+    render_target<vec4f32> =
+  let values = map(|i| f32(i) + frame.value, iota(1i32))
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32), triangle_vertex) in
+  shade(target, covered,
+    |_fragment| @[values[0], values[0], values[0], 1.0])
+"#,
+    )
+    .expect("captured uniform in a generated graphics compute stage lowers");
+
+    let pipeline_descriptor::Pipeline::Compute(compute) = &lowered.pipeline.pipelines[0] else {
+        panic!("the generated value producer must be a compute pipeline");
+    };
+    let frame = compute
+        .bindings
+        .iter()
+        .position(|binding| {
+            matches!(
+                binding,
+                pipeline_descriptor::Binding::Uniform {
+                    set: 0,
+                    binding: 0,
+                    name,
+                    ..
+                } if name == "frame"
+            )
+        })
+        .expect("compute pipeline publishes frame's uniform binding");
+    assert!(
+        compute.stages[0].reads.contains(&frame),
+        "a stage that reads frame.value must publish its uniform binding index"
+    );
+}
+
+#[test]
 fn unified_graphics_supports_structured_varyings_and_sampled_resources() {
     let lowered = compile_thru_spirv(
         r#"
