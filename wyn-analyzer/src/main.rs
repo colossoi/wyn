@@ -2,14 +2,17 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+mod navigation;
+use navigation::Navigation;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use wyn_core::ast::{self, BindingName, Span};
+use wyn_core::ast::{self, Span};
 use wyn_core::interface;
 use wyn_core::lexer;
 use wyn_core::types::{format_scheme, Type, TypeName, TypeScheme};
@@ -43,9 +46,20 @@ macro_rules! verbose {
 struct DocumentState {
     ast: wyn_core::types::run::TypeChecked,
     text: String,
+    roots: HashMap<wyn_module_graph::PackageId, PathBuf>,
 }
 
+#[cfg(test)]
 fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Result<ParsedModules, String> {
+    let (modules, _) = load_editor_graph(file_path, text, &HashMap::new())?;
+    Ok(modules)
+}
+
+fn load_editor_graph(
+    file_path: Option<&Path>,
+    text: &str,
+    buffers: &HashMap<PathBuf, String>,
+) -> std::result::Result<(ParsedModules, HashMap<wyn_module_graph::PackageId, PathBuf>), String> {
     let plan = match file_path {
         Some(file_path) => {
             let input = find_build_input(file_path).map_err(|error| error.to_string())?;
@@ -57,7 +71,9 @@ fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Resul
                     prepare_standalone(source).map_err(|error| error.to_string())?
                 }
             };
-            plan.with_root_source(text).map_err(|error| error.to_string())?
+            let mut buffers = buffers.clone();
+            buffers.insert(normalize_path(file_path), text.to_owned());
+            plan.with_file_sources(&buffers).map_err(|error| error.to_string())?
         }
         None => {
             let root = ModulePath::new(VIRTUAL_ROOT_MODULE).map_err(|error| error.to_string())?;
@@ -66,7 +82,10 @@ fn load_source_graph(file_path: Option<&Path>, text: &str) -> std::result::Resul
             PackagePlan::single_source(identity, root, text)
         }
     };
-    ParsedModules::load(plan, CompilerOptions { graphics: true }).map_err(|error| error.to_string())
+    let roots = plan.source_roots().clone();
+    let modules =
+        ParsedModules::load(plan, CompilerOptions { graphics: true }).map_err(|error| error.to_string())?;
+    Ok((modules, roots))
 }
 
 fn position_to_offset(text: &str, position: Position) -> Option<u32> {
@@ -130,6 +149,7 @@ struct Backend {
     client: Client,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
     document_texts: Arc<RwLock<HashMap<Url, String>>>,
+    workspace_roots: RwLock<Vec<PathBuf>>,
 }
 
 impl Backend {
@@ -138,6 +158,7 @@ impl Backend {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
             document_texts: Arc::new(RwLock::new(HashMap::new())),
+            workspace_roots: RwLock::new(Vec::new()),
         }
     }
 }
@@ -174,6 +195,17 @@ fn update_document_state(
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         verbose!("[wyn-analyzer] initialize request from {:?}", params.root_uri);
+        if let Ok(mut roots) = self.workspace_roots.write() {
+            *roots = params
+                .workspace_folders
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|f| f.uri.to_file_path().ok())
+                .collect();
+            if roots.is_empty() {
+                roots.extend(params.root_uri.and_then(|uri| uri.to_file_path().ok()));
+            }
+        }
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "wyn-analyzer".to_string(),
@@ -253,6 +285,7 @@ impl LanguageServer for Backend {
         if let Ok(mut texts) = self.document_texts.write() {
             texts.remove(&params.text_document.uri);
         }
+        self.refresh_open_documents(Some(&params.text_document.uri)).await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -260,8 +293,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] hover {}:{}", pos.line, pos.character);
 
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|d| d.get(uri));
+        let doc = self.analyze_uri(uri);
 
         if let Some(doc) = doc {
             let Some(offset) = position_to_offset(&doc.text, pos) else {
@@ -301,6 +333,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         verbose!("[wyn-analyzer] completion {}:{}", pos.line, pos.character);
+
+        if let Some(items) = self.module_completions(uri, pos) {
+            return Ok(Some(CompletionResponse::Array(items)));
+        }
 
         // Check if triggered by '.'
         let is_dot_trigger = params
@@ -363,59 +399,77 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] gotoDefinition {}:{}", pos.line, pos.character);
 
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|d| d.get(uri));
-
-        if let Some(doc) = doc {
-            let Some(offset) = position_to_offset(&doc.text, pos) else {
-                return Ok(None);
-            };
-            if let Some(def_span) = find_definition(&doc.ast, offset) {
-                let Some(range) = span_to_range(&doc.text, def_span) else {
-                    return Ok(None);
-                };
-                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: uri.clone(),
-                    range,
-                })));
-            }
-        }
-
-        Ok(None)
+        let Some(doc) = self.analyze_uri(uri) else {
+            return Ok(None);
+        };
+        let Some(offset) = position_to_offset(&doc.text, pos) else {
+            return Ok(None);
+        };
+        let index = Navigation::new(&doc.ast);
+        let target = index
+            .symbol_at(doc.ast.source_graph().root(), offset)
+            .and_then(|symbol| index.definition(symbol))
+            .and_then(|span| doc.location(uri, span));
+        Ok(target.map(GotoDefinitionResponse::Scalar))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
-        let pos = params.text_document_position.position;
-        verbose!("[wyn-analyzer] references {}:{}", pos.line, pos.character);
-
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|d| d.get(uri));
-
-        if let Some(doc) = doc {
-            let Some(offset) = position_to_offset(&doc.text, pos) else {
-                return Ok(None);
+        let Some(doc) = self.analyze_uri(uri) else {
+            return Ok(None);
+        };
+        let Some(offset) = position_to_offset(&doc.text, params.text_document_position.position) else {
+            return Ok(None);
+        };
+        let index = Navigation::new(&doc.ast);
+        let Some(target) = index
+            .symbol_at(doc.ast.source_graph().root(), offset)
+            .and_then(|symbol| index.definition(symbol))
+            .and_then(|span| doc.location(uri, span))
+        else {
+            return Ok(None);
+        };
+        let mut locations = Vec::new();
+        let mut candidates = self.workspace_files(uri);
+        candidates.push(uri.clone());
+        candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        candidates.dedup();
+        for candidate in candidates {
+            let Some(doc) = self.analyze_uri(&candidate) else {
+                continue;
             };
-            // Find the name at cursor position
-            if let Some(name) = find_name_at_position(&doc.ast, offset) {
-                let include_declaration = params.context.include_declaration;
-                let refs = find_all_references(&doc.ast, &name, include_declaration);
-                let locations: Vec<Location> = refs
-                    .into_iter()
-                    .filter_map(|span| {
-                        Some(Location {
-                            uri: uri.clone(),
-                            range: span_to_range(&doc.text, span)?,
-                        })
-                    })
-                    .collect();
-                if !locations.is_empty() {
-                    return Ok(Some(locations));
+            let index = Navigation::new(&doc.ast);
+            for occurrence in &index.occurrences {
+                if occurrence.declaration && !params.context.include_declaration {
+                    continue;
+                }
+                let definition =
+                    index.definition(occurrence.symbol).and_then(|span| doc.location(&candidate, span));
+                if definition.as_ref() == Some(&target) {
+                    if let Some(location) = doc.location(&candidate, occurrence.span) {
+                        locations.push(location);
+                    }
                 }
             }
         }
-
-        Ok(None)
+        locations.sort_by(|a, b| {
+            (
+                a.uri.as_str(),
+                a.range.start.line,
+                a.range.start.character,
+                a.range.end.line,
+                a.range.end.character,
+            )
+                .cmp(&(
+                    b.uri.as_str(),
+                    b.range.start.line,
+                    b.range.start.character,
+                    b.range.end.line,
+                    b.range.end.character,
+                ))
+        });
+        locations.dedup();
+        Ok(Some(locations))
     }
 
     async fn document_symbol(
@@ -424,14 +478,16 @@ impl LanguageServer for Backend {
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         verbose!("[wyn-analyzer] documentSymbol {}", uri);
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|d| d.get(uri));
+        let doc = self.analyze_uri(uri);
 
         if let Some(doc) = doc {
             let symbols: Vec<DocumentSymbol> = doc
                 .ast
                 .declarations
                 .iter()
+                .filter(|declaration| {
+                    declaration_module(declaration) == Some(doc.ast.source_graph().root())
+                })
                 .filter_map(|declaration| declaration_to_symbol(&doc.text, declaration))
                 .collect();
             return Ok(Some(DocumentSymbolResponse::Nested(symbols)));
@@ -445,27 +501,24 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         verbose!("[wyn-analyzer] signatureHelp {}:{}", pos.line, pos.character);
 
-        let docs = self.documents.read().ok();
-        let doc = docs.as_ref().and_then(|d| d.get(uri));
+        let doc = self.analyze_uri(uri);
 
         if let Some(doc) = doc {
             let Some(offset) = position_to_offset(&doc.text, pos) else {
                 return Ok(None);
             };
-            if let Some((func_name, arg_index)) = find_application_context(&doc.ast, offset) {
-                if let Some(scheme) = definition_scheme(&doc.ast, &func_name) {
-                    let label = format!("{}: {}", func_name, format_scheme(scheme));
-                    return Ok(Some(SignatureHelp {
-                        signatures: vec![SignatureInformation {
-                            label,
-                            documentation: None,
-                            parameters: None,
-                            active_parameter: Some(arg_index as u32),
-                        }],
-                        active_signature: Some(0),
+            if let Some((scheme, arg_index)) = find_application_context(&doc.ast, offset) {
+                let label = format_scheme(&scheme);
+                return Ok(Some(SignatureHelp {
+                    signatures: vec![SignatureInformation {
+                        label,
+                        documentation: None,
+                        parameters: None,
                         active_parameter: Some(arg_index as u32),
-                    }));
-                }
+                    }],
+                    active_signature: Some(0),
+                    active_parameter: Some(arg_index as u32),
+                }));
             }
         }
 
@@ -508,14 +561,16 @@ impl Backend {
 
         update_document_state(&self.documents, doc.uri.clone(), state);
 
-        self.client.publish_diagnostics(doc.uri, diagnostics, Some(doc.version)).await;
+        self.client.publish_diagnostics(doc.uri.clone(), diagnostics, Some(doc.version)).await;
+        self.refresh_open_documents(Some(&doc.uri)).await;
     }
 
     fn check_document(&self, uri: &Url, text: &str) -> (Vec<Diagnostic>, Option<DocumentState>) {
         let mut diagnostics = Vec::new();
         let file_path = uri.to_file_path().ok();
 
-        let modules = match load_source_graph(file_path.as_deref(), text) {
+        let buffers = self.buffers();
+        let (modules, roots) = match load_editor_graph(file_path.as_deref(), text, &buffers) {
             Ok(modules) => modules,
             Err(message) => {
                 diagnostics.push(Diagnostic {
@@ -539,6 +594,7 @@ impl Backend {
                 let state = DocumentState {
                     ast: type_checked,
                     text: text.to_owned(),
+                    roots,
                 };
                 (diagnostics, Some(state))
             }
@@ -598,6 +654,9 @@ fn find_node_at_position(
     let mut best: Option<(&TypeScheme, Span)> = None;
 
     for decl in &ast.declarations {
+        if declaration_module(decl) != Some(ast.source_graph().root()) {
+            continue;
+        }
         find_in_declaration(decl, offset, &mut best);
     }
 
@@ -740,8 +799,11 @@ fn find_in_expr<'a>(
 fn find_application_context(
     ast: &wyn_core::types::run::TypeChecked,
     offset: u32,
-) -> Option<(String, usize)> {
+) -> Option<(TypeScheme, usize)> {
     for decl in &ast.declarations {
+        if declaration_module(decl) != Some(ast.source_graph().root()) {
+            continue;
+        }
         match decl {
             ast::Declaration::Decl(def) => {
                 if let Some(result) = find_application_in_expr(&def.body, offset) {
@@ -762,7 +824,7 @@ fn find_application_context(
 fn find_application_in_expr(
     expr: &ast::Expression<ast::TypedTree>,
     offset: u32,
-) -> Option<(String, usize)> {
+) -> Option<(TypeScheme, usize)> {
     let span = expr.h.span;
     if !span.contains(offset) {
         return None;
@@ -776,14 +838,10 @@ fn find_application_in_expr(
                     if let Some(result) = find_application_in_expr(arg, offset) {
                         return Some(result);
                     }
-                    if let Identifier(identifier) = &func.kind {
-                        return Some((identifier.source.name.clone(), i));
-                    }
+                    return Some((func.h.ty.clone(), i));
                 }
             }
-            if let Identifier(identifier) = &func.kind {
-                return Some((identifier.source.name.clone(), args.len()));
-            }
+            return Some((func.h.ty.clone(), args.len().saturating_sub(1)));
         }
         Lambda(lambda) => {
             return find_application_in_expr(&lambda.body, offset);
@@ -933,6 +991,9 @@ fn find_declaration_name_at(
     offset: u32,
 ) -> Option<(String, &'static str)> {
     for decl in &ast.declarations {
+        if declaration_module(decl) != Some(ast.source_graph().root()) {
+            continue;
+        }
         match decl {
             ast::Declaration::Decl(def) => {
                 if def.name_span.contains(offset) {
@@ -956,550 +1017,14 @@ fn find_declaration_name_at(
     None
 }
 
-/// Find the name at cursor position (identifier or declaration name)
-fn find_name_at_position(ast: &wyn_core::types::run::TypeChecked, offset: u32) -> Option<String> {
-    // Check if on a declaration name first
-    if let Some((name, _)) = find_declaration_name_at(ast, offset) {
-        return Some(name);
-    }
-
-    // Check if on an identifier in an expression
-    for decl in &ast.declarations {
-        match decl {
-            ast::Declaration::Decl(def) => {
-                // Check parameters
-                for param in &def.params {
-                    if let Some(name) = find_name_in_pattern(param, offset) {
-                        return Some(name);
-                    }
-                }
-                if let Some(name) = find_name_in_expr(&def.body, offset) {
-                    return Some(name);
-                }
-            }
-            ast::Declaration::Entry(entry) => {
-                for param in &entry.params {
-                    if let Some(name) = find_name_in_pattern(param, offset) {
-                        return Some(name);
-                    }
-                }
-                if let Some(name) = find_name_in_expr(&entry.body, offset) {
-                    return Some(name);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn find_name_in_pattern<A>(pat: &ast::Pattern<ast::TypedTree, A>, offset: u32) -> Option<String> {
-    if !pat.h.span.contains(offset) {
-        return None;
-    }
-    match &pat.kind {
-        ast::PatternKind::Name(name) => Some(name.source_name().to_owned()),
-        ast::PatternKind::Tuple(pats) => {
-            for p in pats {
-                if let Some(name) = find_name_in_pattern(p, offset) {
-                    return Some(name);
-                }
-            }
-            None
-        }
-        ast::PatternKind::Constructor(_, pats) => {
-            for p in pats {
-                if let Some(name) = find_name_in_pattern(p, offset) {
-                    return Some(name);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn find_name_in_expr(expr: &ast::Expression<ast::TypedTree>, offset: u32) -> Option<String> {
-    if !expr.h.span.contains(offset) {
-        return None;
-    }
-
-    use ast::ExprKind::*;
-    match &expr.kind {
-        Identifier(identifier) => {
-            if expr.h.span.contains(offset) {
-                return Some(identifier.source.name.clone());
-            }
-        }
-        Application(func, args) => {
-            if let Some(name) = find_name_in_expr(func, offset) {
-                return Some(name);
-            }
-            for arg in args {
-                if let Some(name) = find_name_in_expr(arg, offset) {
-                    return Some(name);
-                }
-            }
-        }
-        Lambda(lambda) => {
-            for param in &lambda.params {
-                if let Some(name) = find_name_in_pattern(param, offset) {
-                    return Some(name);
-                }
-            }
-            return find_name_in_expr(&lambda.body, offset);
-        }
-        LetIn(let_in) => {
-            if let Some(name) = find_name_in_pattern(&let_in.pattern, offset) {
-                return Some(name);
-            }
-            if let Some(name) = find_name_in_expr(&let_in.value, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(&let_in.body, offset);
-        }
-        If(if_expr) => {
-            if let Some(name) = find_name_in_expr(&if_expr.condition, offset) {
-                return Some(name);
-            }
-            if let Some(name) = find_name_in_expr(&if_expr.then_branch, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(&if_expr.else_branch, offset);
-        }
-        BinaryOp(_, lhs, rhs) => {
-            if let Some(name) = find_name_in_expr(lhs, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(rhs, offset);
-        }
-        UnaryOp(_, operand) => {
-            return find_name_in_expr(operand, offset);
-        }
-        Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
-            for elem in elems {
-                if let Some(name) = find_name_in_expr(elem, offset) {
-                    return Some(name);
-                }
-            }
-        }
-        Constructor(_, args) => {
-            for arg in args {
-                if let Some(name) = find_name_in_expr(arg, offset) {
-                    return Some(name);
-                }
-            }
-        }
-        ArrayIndex(arr, idx) => {
-            if let Some(name) = find_name_in_expr(arr, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(idx, offset);
-        }
-        ArrayWith {
-            array, index, value, ..
-        } => {
-            if let Some(name) = find_name_in_expr(array, offset) {
-                return Some(name);
-            }
-            if let Some(name) = find_name_in_expr(index, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(value, offset);
-        }
-        VecWith { target, value, .. } => {
-            if let Some(name) = find_name_in_expr(target, offset) {
-                return Some(name);
-            }
-            return find_name_in_expr(value, offset);
-        }
-        FieldAccess(base, _) => {
-            return find_name_in_expr(base, offset);
-        }
-        Loop(loop_expr) => {
-            if let Some(name) = find_name_in_pattern(&loop_expr.pattern, offset) {
-                return Some(name);
-            }
-            if let Some(init) = &loop_expr.init {
-                if let Some(name) = find_name_in_expr(init, offset) {
-                    return Some(name);
-                }
-            }
-            return find_name_in_expr(&loop_expr.body, offset);
-        }
-        Match(match_expr) => {
-            if let Some(name) = find_name_in_expr(&match_expr.scrutinee, offset) {
-                return Some(name);
-            }
-            for case in &match_expr.cases {
-                if let Some(name) = find_name_in_pattern(&case.pattern, offset) {
-                    return Some(name);
-                }
-                if let Some(name) = find_name_in_expr(&case.body, offset) {
-                    return Some(name);
-                }
-            }
-        }
-        TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            return find_name_in_expr(inner, offset);
-        }
-        _ => {}
-    }
-    None
-}
-
-/// Find all references to a name in the AST
-fn find_all_references(
-    ast: &wyn_core::types::run::TypeChecked,
-    target_name: &str,
-    include_declaration: bool,
-) -> Vec<Span> {
-    let mut refs = Vec::new();
-
-    for decl in &ast.declarations {
-        match decl {
-            ast::Declaration::Decl(def) => {
-                if def.name == target_name && include_declaration {
-                    refs.push(def.name_span);
-                }
-                // Check parameters
-                for param in &def.params {
-                    collect_refs_in_pattern(param, target_name, &mut refs);
-                }
-                collect_refs_in_expr(&def.body, target_name, &mut refs);
-            }
-            ast::Declaration::Entry(entry) => {
-                if entry.name == target_name && include_declaration {
-                    refs.push(entry.name_span);
-                }
-                for param in &entry.params {
-                    collect_refs_in_pattern(param, target_name, &mut refs);
-                }
-                collect_refs_in_expr(&entry.body, target_name, &mut refs);
-            }
-            _ => {}
-        }
-    }
-
-    refs
-}
-
-fn collect_refs_in_pattern<A>(pat: &ast::Pattern<ast::TypedTree, A>, target: &str, refs: &mut Vec<Span>) {
-    match &pat.kind {
-        ast::PatternKind::Name(name) if name.source_name() == target => {
-            refs.push(pat.h.span);
-        }
-        ast::PatternKind::Tuple(pats) | ast::PatternKind::Constructor(_, pats) => {
-            for p in pats {
-                collect_refs_in_pattern(p, target, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_refs_in_expr(expr: &ast::Expression<ast::TypedTree>, target: &str, refs: &mut Vec<Span>) {
-    use ast::ExprKind::*;
-    match &expr.kind {
-        Identifier(identifier) if identifier.source.name == target => {
-            refs.push(expr.h.span);
-        }
-        Application(func, args) => {
-            collect_refs_in_expr(func, target, refs);
-            for arg in args {
-                collect_refs_in_expr(arg, target, refs);
-            }
-        }
-        Lambda(lambda) => {
-            for param in &lambda.params {
-                collect_refs_in_pattern(param, target, refs);
-            }
-            collect_refs_in_expr(&lambda.body, target, refs);
-        }
-        LetIn(let_in) => {
-            collect_refs_in_pattern(&let_in.pattern, target, refs);
-            collect_refs_in_expr(&let_in.value, target, refs);
-            collect_refs_in_expr(&let_in.body, target, refs);
-        }
-        If(if_expr) => {
-            collect_refs_in_expr(&if_expr.condition, target, refs);
-            collect_refs_in_expr(&if_expr.then_branch, target, refs);
-            collect_refs_in_expr(&if_expr.else_branch, target, refs);
-        }
-        BinaryOp(_, lhs, rhs) => {
-            collect_refs_in_expr(lhs, target, refs);
-            collect_refs_in_expr(rhs, target, refs);
-        }
-        UnaryOp(_, operand) => {
-            collect_refs_in_expr(operand, target, refs);
-        }
-        Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
-            for elem in elems {
-                collect_refs_in_expr(elem, target, refs);
-            }
-        }
-        Constructor(_, args) => {
-            for arg in args {
-                collect_refs_in_expr(arg, target, refs);
-            }
-        }
-        ArrayIndex(arr, idx) => {
-            collect_refs_in_expr(arr, target, refs);
-            collect_refs_in_expr(idx, target, refs);
-        }
-        ArrayWith {
-            array, index, value, ..
-        } => {
-            collect_refs_in_expr(array, target, refs);
-            collect_refs_in_expr(index, target, refs);
-            collect_refs_in_expr(value, target, refs);
-        }
-        VecWith {
-            target: tgt, value, ..
-        } => {
-            collect_refs_in_expr(tgt, target, refs);
-            collect_refs_in_expr(value, target, refs);
-        }
-        FieldAccess(base, _) => {
-            collect_refs_in_expr(base, target, refs);
-        }
-        Loop(loop_expr) => {
-            collect_refs_in_pattern(&loop_expr.pattern, target, refs);
-            if let Some(init) = &loop_expr.init {
-                collect_refs_in_expr(init, target, refs);
-            }
-            collect_refs_in_expr(&loop_expr.body, target, refs);
-        }
-        RecordLiteral(fields) => {
-            for (_, value) in fields {
-                collect_refs_in_expr(value, target, refs);
-            }
-        }
-        Match(match_expr) => {
-            collect_refs_in_expr(&match_expr.scrutinee, target, refs);
-            for case in &match_expr.cases {
-                collect_refs_in_pattern(&case.pattern, target, refs);
-                collect_refs_in_expr(&case.body, target, refs);
-            }
-        }
-        TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            collect_refs_in_expr(inner, target, refs);
-        }
-        Range(range_expr) => {
-            collect_refs_in_expr(&range_expr.start, target, refs);
-            if let Some(step) = &range_expr.step {
-                collect_refs_in_expr(step, target, refs);
-            }
-            collect_refs_in_expr(&range_expr.end, target, refs);
-        }
-        Slice(slice_expr) => {
-            collect_refs_in_expr(&slice_expr.array, target, refs);
-            if let Some(start) = &slice_expr.start {
-                collect_refs_in_expr(start, target, refs);
-            }
-            if let Some(end) = &slice_expr.end {
-                collect_refs_in_expr(end, target, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Find the definition site of an identifier at the given position
-fn find_definition(ast: &wyn_core::types::run::TypeChecked, offset: u32) -> Option<Span> {
-    let bindings: Vec<(String, Span)> = Vec::new();
-
-    for decl in &ast.declarations {
-        match decl {
-            ast::Declaration::Decl(def) => {
-                let param_bindings: Vec<_> = def
-                    .params
-                    .iter()
-                    .flat_map(|p| p.collect_names().into_iter().map(|n| (n, p.h.span)))
-                    .collect();
-
-                if let Some(span) = find_definition_in_expr(
-                    &def.body,
-                    offset,
-                    &mut bindings.iter().chain(param_bindings.iter()).cloned().collect(),
-                ) {
-                    return Some(span);
-                }
-            }
-            ast::Declaration::Entry(entry) => {
-                let param_bindings: Vec<_> = entry
-                    .params
-                    .iter()
-                    .flat_map(|p| p.collect_names().into_iter().map(|n| (n, p.h.span)))
-                    .collect();
-
-                if let Some(span) = find_definition_in_expr(
-                    &entry.body,
-                    offset,
-                    &mut bindings.iter().chain(param_bindings.iter()).cloned().collect(),
-                ) {
-                    return Some(span);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn find_definition_in_expr(
-    expr: &ast::Expression<ast::TypedTree>,
-    offset: u32,
-    bindings: &mut Vec<(String, Span)>,
-) -> Option<Span> {
-    let span = expr.h.span;
-    if !span.contains(offset) {
-        return None;
-    }
-
-    use ast::ExprKind::*;
-    match &expr.kind {
-        Identifier(identifier) => {
-            if span.contains(offset) && span.size() < 100 {
-                for (bound_name, bound_span) in bindings.iter().rev() {
-                    if bound_name == &identifier.source.name {
-                        return Some(*bound_span);
-                    }
-                }
-            }
-            None
-        }
-        Lambda(lambda) => {
-            let saved_len = bindings.len();
-            for param in &lambda.params {
-                for name in param.collect_names() {
-                    bindings.push((name, param.h.span));
-                }
-            }
-            let result = find_definition_in_expr(&lambda.body, offset, bindings);
-            bindings.truncate(saved_len);
-            result
-        }
-        LetIn(let_in) => {
-            if let Some(span) = find_definition_in_expr(&let_in.value, offset, bindings) {
-                return Some(span);
-            }
-
-            let saved_len = bindings.len();
-            for name in let_in.pattern.collect_names() {
-                bindings.push((name, let_in.pattern.h.span));
-            }
-            let result = find_definition_in_expr(&let_in.body, offset, bindings);
-            bindings.truncate(saved_len);
-            result
-        }
-        Application(func, args) => {
-            if let Some(s) = find_definition_in_expr(func, offset, bindings) {
-                return Some(s);
-            }
-            for arg in args {
-                if let Some(s) = find_definition_in_expr(arg, offset, bindings) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        If(if_expr) => find_definition_in_expr(&if_expr.condition, offset, bindings)
-            .or_else(|| find_definition_in_expr(&if_expr.then_branch, offset, bindings))
-            .or_else(|| find_definition_in_expr(&if_expr.else_branch, offset, bindings)),
-        BinaryOp(_, lhs, rhs) => find_definition_in_expr(lhs, offset, bindings)
-            .or_else(|| find_definition_in_expr(rhs, offset, bindings)),
-        UnaryOp(_, operand) => find_definition_in_expr(operand, offset, bindings),
-        Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
-            for elem in elems {
-                if let Some(s) = find_definition_in_expr(elem, offset, bindings) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        Constructor(_, args) => {
-            for arg in args {
-                if let Some(s) = find_definition_in_expr(arg, offset, bindings) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        ArrayIndex(arr, idx) => find_definition_in_expr(arr, offset, bindings)
-            .or_else(|| find_definition_in_expr(idx, offset, bindings)),
-        ArrayWith {
-            array, index, value, ..
-        } => find_definition_in_expr(array, offset, bindings)
-            .or_else(|| find_definition_in_expr(index, offset, bindings))
-            .or_else(|| find_definition_in_expr(value, offset, bindings)),
-        VecWith { target, value, .. } => find_definition_in_expr(target, offset, bindings)
-            .or_else(|| find_definition_in_expr(value, offset, bindings)),
-        FieldAccess(base, _) => find_definition_in_expr(base, offset, bindings),
-        Loop(loop_expr) => {
-            let saved_len = bindings.len();
-            for name in loop_expr.pattern.collect_names() {
-                bindings.push((name, loop_expr.pattern.h.span));
-            }
-            if let Some(init) = &loop_expr.init {
-                if let Some(s) = find_definition_in_expr(init, offset, bindings) {
-                    bindings.truncate(saved_len);
-                    return Some(s);
-                }
-            }
-            let result = find_definition_in_expr(&loop_expr.body, offset, bindings);
-            bindings.truncate(saved_len);
-            result
-        }
-        RecordLiteral(fields) => {
-            for (_, value) in fields {
-                if let Some(s) = find_definition_in_expr(value, offset, bindings) {
-                    return Some(s);
-                }
-            }
-            None
-        }
-        Match(match_expr) => {
-            if let Some(s) = find_definition_in_expr(&match_expr.scrutinee, offset, bindings) {
-                return Some(s);
-            }
-            for case in &match_expr.cases {
-                let saved_len = bindings.len();
-                for name in case.pattern.collect_names() {
-                    bindings.push((name, case.pattern.h.span));
-                }
-                if let Some(s) = find_definition_in_expr(&case.body, offset, bindings) {
-                    bindings.truncate(saved_len);
-                    return Some(s);
-                }
-                bindings.truncate(saved_len);
-            }
-            None
-        }
-        TypeCoercion(inner, _) | TypeAscription(inner, _) => {
-            find_definition_in_expr(inner, offset, bindings)
-        }
-        Range(range_expr) => find_definition_in_expr(&range_expr.start, offset, bindings)
-            .or_else(|| range_expr.step.as_ref().and_then(|s| find_definition_in_expr(s, offset, bindings)))
-            .or_else(|| find_definition_in_expr(&range_expr.end, offset, bindings)),
-        Slice(slice_expr) => find_definition_in_expr(&slice_expr.array, offset, bindings)
-            .or_else(|| {
-                slice_expr.start.as_ref().and_then(|s| find_definition_in_expr(s, offset, bindings))
-            })
-            .or_else(|| slice_expr.end.as_ref().and_then(|e| find_definition_in_expr(e, offset, bindings))),
-        _ => None,
-    }
-}
-
-/// Convert an AST declaration to a DocumentSymbol
-#[allow(deprecated)]
+/// Describe a declaration in the document outline.
 fn declaration_to_symbol(
     text: &str,
     decl: &ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
 ) -> Option<DocumentSymbol> {
     match decl {
         ast::Declaration::Decl(def) => {
-            let span = def.body.h.span;
+            let span = def.name_span.merge(&def.body.h.span);
             let range = span_to_range(text, span)?;
             let selection_range = span_to_range(text, def.name_span)?;
             Some(DocumentSymbol {
@@ -1516,7 +1041,7 @@ fn declaration_to_symbol(
             })
         }
         ast::Declaration::Entry(entry) => {
-            let span = entry.body.h.span;
+            let span = entry.name_span.merge(&entry.body.h.span);
             let range = span_to_range(text, span)?;
             let selection_range = span_to_range(text, entry.name_span)?;
             let kind_str = match entry.data.source.source.syntax.entry_kind {
@@ -1662,4 +1187,206 @@ async fn main() {
 
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| path.to_owned())
+    })
+}
+
+impl DocumentState {
+    fn location(&self, root_uri: &Url, span: Span) -> Option<Location> {
+        let graph = self.ast.source_graph();
+        let module = span.module()?;
+        let key = graph.module(module)?.key();
+        let uri = if let Some(root) = self.roots.get(&key.package()) {
+            Url::from_file_path(normalize_path(&root.join(key.path().as_str()))).ok()?
+        } else if module == graph.root() {
+            root_uri.clone()
+        } else {
+            return None;
+        };
+        Some(Location {
+            uri,
+            range: span_to_range(graph.source(module)?, span)?,
+        })
+    }
+}
+
+impl Backend {
+    fn buffers(&self) -> HashMap<PathBuf, String> {
+        self.document_texts
+            .read()
+            .map(|texts| {
+                texts
+                    .iter()
+                    .filter_map(|(uri, text)| {
+                        Some((normalize_path(&uri.to_file_path().ok()?), text.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn analyze_uri(&self, uri: &Url) -> Option<DocumentState> {
+        let text = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| self.buffers().get(&normalize_path(&path)).cloned())
+            .or_else(|| document_text(&self.document_texts, uri))?;
+        self.check_document(uri, &text).1
+    }
+
+    fn workspace_files(&self, uri: &Url) -> Vec<Url> {
+        fn visit(path: &Path, files: &mut Vec<Url>) {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else { continue };
+                let path = entry.path();
+                if kind.is_dir() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if !name.starts_with('.')
+                        && !matches!(name.as_ref(), "target" | "node_modules" | "vendor")
+                    {
+                        visit(&path, files);
+                    }
+                } else if kind.is_file() && path.extension().is_some_and(|extension| extension == "wyn") {
+                    if let Ok(uri) = Url::from_file_path(normalize_path(&path)) {
+                        files.push(uri);
+                    }
+                }
+            }
+        }
+        let mut roots = self.workspace_roots.read().map(|roots| roots.clone()).unwrap_or_default();
+        if let Ok(path) = uri.to_file_path() {
+            if let Ok(BuildInput::Package { root, .. }) = find_build_input(&path) {
+                roots.push(root);
+            }
+        }
+        roots.sort();
+        roots.dedup();
+        let mut files = Vec::new();
+        for root in roots {
+            visit(&root, &mut files);
+        }
+        if let Ok(texts) = self.document_texts.read() {
+            files.extend(texts.keys().cloned());
+        }
+        files
+    }
+}
+
+impl Backend {
+    fn module_completions(&self, uri: &Url, position: Position) -> Option<Vec<CompletionItem>> {
+        let text = document_text(&self.document_texts, uri)?;
+        let offset = position_to_offset(&text, position)? as usize;
+        let prefix = text[..offset]
+            .rsplit(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == '\''))
+            .next()?;
+        let (namespace, partial) = prefix.rsplit_once('.')?;
+        if namespace.is_empty() {
+            return None;
+        }
+        let doc = self.analyze_uri(uri).or_else(|| {
+            // Keep complete, top-level physical imports while the expression at
+            // the cursor is incomplete. Token matching supports multiline imports
+            // and excludes strings/comments and nested module declarations.
+            let tokens = lexer::tokenize(ModuleId::from(0), &text).ok()?;
+            let mut imports = String::new();
+            let mut depth = 0usize;
+            for (i, token) in tokens.iter().enumerate() {
+                use lexer::Token;
+                match token.token {
+                    Token::LeftBrace => depth += 1,
+                    Token::RightBrace => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                if depth != 0 {
+                    continue;
+                }
+                if let Some([a, b, c, d, e]) = tokens.get(i..i + 5) {
+                    if matches!(
+                        (&a.token, &b.token, &c.token, &d.token, &e.token),
+                        (
+                            Token::Module,
+                            Token::Identifier(_),
+                            Token::Assign,
+                            Token::Import,
+                            Token::StringLiteral(_)
+                        )
+                    ) {
+                        imports.push_str(
+                            &text[a.span.range().start() as usize..e.span.range().end() as usize],
+                        );
+                        imports.push('\n');
+                    }
+                }
+            }
+            if imports.is_empty() {
+                return None;
+            }
+            let path = uri.to_file_path().ok()?;
+            let (modules, roots) = load_editor_graph(Some(&path), &imports, &self.buffers()).ok()?;
+            Some(DocumentState {
+                ast: modules.type_check().ok()?,
+                text: imports,
+                roots,
+            })
+        })?;
+        let mut items: Vec<_> = doc
+            .ast
+            .global_context
+            .support_definitions
+            .iter()
+            .filter(|support| {
+                support.namespace.as_deref() == Some(namespace)
+                    && support.definition.name.starts_with(partial)
+            })
+            .map(|support| CompletionItem {
+                label: support.definition.name.clone(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(format_scheme(&support.definition.data.scheme)),
+                ..Default::default()
+            })
+            .collect();
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        items.dedup_by(|a, b| a.label == b.label);
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
+        }
+    }
+}
+
+impl Backend {
+    async fn refresh_open_documents(&self, except: Option<&Url>) {
+        let texts = self.document_texts.read().map(|texts| texts.clone()).unwrap_or_default();
+        for (uri, text) in texts {
+            if except == Some(&uri) {
+                continue;
+            }
+            let (diagnostics, state) = self.check_document(&uri, &text);
+            update_document_state(&self.documents, uri.clone(), state);
+            self.client.publish_diagnostics(uri, diagnostics, None).await;
+        }
+    }
+}
+
+fn declaration_module(
+    declaration: &ast::Declaration<wyn_core::types::run::TypeCheckedFamily>,
+) -> Option<ModuleId> {
+    match declaration {
+        ast::Declaration::Decl(definition) => definition.name_span.module(),
+        ast::Declaration::Entry(entry) => entry.name_span.module(),
+        ast::Declaration::Extern(external) => external.data.source.syntax.span.module(),
+        ast::Declaration::Frontend(never) => match *never {},
+    }
 }

@@ -61,6 +61,23 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
         let warnings: Vec<_> = checker.warnings().to_vec();
         let folded_constant_uses =
             super::warnings::resolve_folded_constant_uses(checker.name_resolution(), &constant_uses);
+        let folded_constant_references = constant_uses
+            .iter()
+            .filter_map(|usage| {
+                if usage.span.is_generated() {
+                    return None;
+                }
+                let target = match &usage.target {
+                    crate::ast_const_fold::ConstantBinding::Declaration(declaration) => {
+                        checker.name_resolution().declaration_symbol(&declaration.name, declaration.span)
+                    }
+                    crate::ast_const_fold::ConstantBinding::Pattern { node, name } => {
+                        checker.name_resolution().binding_symbol(*node, name)
+                    }
+                }?;
+                Some((target, usage.span))
+            })
+            .collect();
         let name_resolution = checker.name_resolution().clone();
         drop(checker);
 
@@ -71,6 +88,7 @@ pub fn type_check(program: resolve_opens::OpensResolved, options: CompilerOption
             schemes,
             warnings,
             folded_constant_uses,
+            folded_constant_references,
             builtin_names,
             name_resolution,
         )
@@ -88,6 +106,7 @@ fn materialize(
     schemes: LookupMap<String, ast::TypeScheme>,
     warnings: Vec<FrontendWarning>,
     folded_constant_uses: LookupMap<crate::SymbolId, crate::LookupSet<crate::SymbolId>>,
+    folded_constant_references: Vec<(crate::SymbolId, ast::Span)>,
     builtin_names: Vec<String>,
     mut name_resolution: name_resolution::NameResolution,
 ) -> Result<(
@@ -155,6 +174,7 @@ fn materialize(
             symbols: std::mem::take(&mut name_resolution.symbols),
             warnings,
             folded_constant_uses,
+            folded_constant_references,
             builtin_names,
         },
     ))

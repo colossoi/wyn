@@ -46,6 +46,7 @@ pub(crate) enum ConstantBinding {
 pub(crate) struct FoldedConstantUse {
     pub caller: DeclarationBinding,
     pub target: ConstantBinding,
+    pub span: ast::Span,
 }
 
 #[derive(Debug)]
@@ -232,7 +233,7 @@ impl AstConstFolder {
                         .and_then(|value| usize::try_from(value).ok())
                         .map(|size| (constant, size))
                 }) {
-                    self.record_constant_use(&constant);
+                    self.record_constant_use(&constant, ast::Span::generated());
                     *name = TypeName::Size(size);
                 }
             }
@@ -310,7 +311,7 @@ impl AstConstFolder {
                 // Inline known constants (only for unqualified names)
                 if identifier.qualifiers.is_empty() {
                     if let Some(constant) = self.constants.get(&identifier.name).cloned() {
-                        self.record_constant_use(&constant);
+                        self.record_constant_use(&constant, expr.h.span);
                         expr.kind = self.constant_expr_kind(&constant, &expr.h);
                     }
                 }
@@ -493,11 +494,12 @@ impl AstConstFolder {
         self.fold_expr_scoped(&mut if_expr.else_branch, bound_sizes);
     }
 
-    fn record_constant_use(&mut self, constant: &IntegerConstant) {
+    fn record_constant_use(&mut self, constant: &IntegerConstant, span: ast::Span) {
         if let (Some(caller), Some(target)) = (&self.current_callable, &constant.binding) {
             self.constant_uses.insert(FoldedConstantUse {
                 caller: caller.clone(),
                 target: target.clone(),
+                span,
             });
         }
     }

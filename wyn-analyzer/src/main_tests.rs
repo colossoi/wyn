@@ -167,9 +167,85 @@ fn failed_edits_clear_the_last_type_checked_document() {
         DocumentState {
             ast,
             text: source.to_string(),
+            roots: HashMap::new(),
         },
     )]));
 
     update_document_state(&documents, uri.clone(), None);
     assert!(!documents.read().expect("document lock should be available").contains_key(&uri));
+}
+
+#[test]
+fn navigation_distinguishes_shadowed_symbols_and_top_level_functions() {
+    let source = "def first(value: i32) i32 = value\ndef second(value: i32) i32 = first(value)\n";
+    let program = load_source_graph(None, source).unwrap().type_check().unwrap();
+    let index = Navigation::new(&program);
+    let module = program.source_graph().root();
+    let first_param = index.symbol_at(module, source.find("value:").unwrap() as u32).unwrap();
+    let second_param = index.symbol_at(module, source.rfind("value:").unwrap() as u32).unwrap();
+    assert_ne!(first_param, second_param);
+    for symbol in [first_param, second_param] {
+        assert_eq!(
+            index.occurrences.iter().filter(|item| item.symbol == symbol && !item.declaration).count(),
+            1
+        );
+    }
+    let call = index.symbol_at(module, source.rfind("first(").unwrap() as u32).unwrap();
+    assert_eq!(index.definition(call).unwrap().range().start(), 4);
+}
+
+#[test]
+fn navigation_uses_dependency_buffer_and_physical_source_location() {
+    let directory = TestDirectory::new();
+    for name in ["app", "dependency"] {
+        let mut manifest = format!("manifest-version = 1\n[package]\nname = \"test/{name}\"\nversion = \"v1.0.0\"\nwyn = \"v0.1.0\"\nlibrary = \"src/lib.wyn\"\n");
+        if name == "app" {
+            manifest.push_str("[dependencies]\ndep = { package = \"test/dependency\", version = \"v1.0.0\", path = \"../dependency\" }\n");
+        }
+        directory.write(format!("{name}/wyn.toml"), &manifest);
+    }
+    let dependency = directory.write("dependency/src/lib.wyn", "def old(value: i32) i32 = value\n");
+    let source = "module D = import \"pkg:dep\"\nentry main(value: i32) i32 = D.fresh(value)\n";
+    let path = directory.write("app/src/lib.wyn", source);
+    let overlay = "-- 😀 unsaved line\ndef fresh(value: i32) i32 = value\n";
+    let buffers = HashMap::from([(normalize_path(&dependency), overlay.to_owned())]);
+    let (modules, roots) = load_editor_graph(Some(&path), source, &buffers).unwrap();
+    let ast = modules.type_check().unwrap();
+    let index = Navigation::new(&ast);
+    let symbol =
+        index.symbol_at(ast.source_graph().root(), source.find("D.fresh").unwrap() as u32).unwrap();
+    let span = index.definition(symbol).unwrap();
+    let doc = DocumentState {
+        ast,
+        roots,
+        text: source.to_owned(),
+    };
+    let location = doc.location(&Url::from_file_path(path).unwrap(), span).unwrap();
+    assert_eq!(
+        location.uri,
+        Url::from_file_path(normalize_path(&dependency)).unwrap()
+    );
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(1, 4), Position::new(1, 9))
+    );
+}
+
+#[test]
+fn navigation_retains_each_folded_constant_occurrence() {
+    let source = "def amount: i32 = 42\nentry main(value: i32) i32 = value + amount + amount\n";
+    let ast = load_source_graph(None, source).unwrap().type_check().unwrap();
+    let index = Navigation::new(&ast);
+    let module = ast.source_graph().root();
+    let declaration = index.symbol_at(module, source.find("amount").unwrap() as u32).unwrap();
+    let references: Vec<_> =
+        index.occurrences.iter().filter(|item| item.symbol == declaration && !item.declaration).collect();
+    assert_eq!(references.len(), 2);
+    for reference in references {
+        assert_eq!(ast.source_graph().snippet(reference.span).unwrap(), "amount");
+        assert_eq!(
+            index.symbol_at(module, reference.span.range().start()),
+            Some(declaration)
+        );
+    }
 }

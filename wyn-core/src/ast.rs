@@ -716,6 +716,9 @@ pub struct TypedGlobal<D, T: TreeFamily> {
     /// Source-level constant references erased by early constant folding,
     /// grouped by the callable that contained each reference.
     pub folded_constant_uses: LookupMap<SymbolId, LookupSet<SymbolId>>,
+    /// Exact expression occurrences retained for editor navigation after folding.
+    /// Type dimensions have no individual source span and are excluded.
+    pub folded_constant_references: Vec<(SymbolId, Span)>,
     pub builtin_names: Vec<String>,
 }
 

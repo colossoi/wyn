@@ -72,6 +72,11 @@ impl LocalSources {
         }
     }
 
+    /// Materialized package roots, for editor source provenance.
+    pub fn package_roots(&self) -> &HashMap<PackageId, PathBuf> {
+        &self.package_roots
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

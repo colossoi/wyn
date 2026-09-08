@@ -22,6 +22,32 @@ impl<S> PackagePlan<S> {
 }
 
 impl PackagePlan {
+    /// Physical roots retained by tools that need to navigate loaded sources.
+    pub fn source_roots(&self) -> &std::collections::HashMap<crate::PackageId, std::path::PathBuf> {
+        self.sources.package_roots()
+    }
+
+    /// Apply editor buffers to all matching materialized packages.
+    pub fn with_file_sources(
+        mut self,
+        buffers: &std::collections::HashMap<std::path::PathBuf, String>,
+    ) -> Result<Self, crate::LocalSourceError> {
+        let roots = self.sources.package_roots().clone();
+        for (package, root) in roots {
+            for (path, text) in buffers {
+                if let Ok(relative) = path.strip_prefix(&root) {
+                    if let Some(relative) = relative.to_str() {
+                        if let Ok(path) = ModulePath::new(relative) {
+                            self.sources
+                                .add_override(crate::ModuleKey::new(package, path), text.as_str())?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(self)
+    }
+
     /// Construct a complete in-memory plan containing one source module.
     pub fn single_source(
         identity: PackageIdentity,

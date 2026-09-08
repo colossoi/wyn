@@ -103,6 +103,7 @@ fn rebuild(
                 symbols: global_context.symbols,
                 warnings: global_context.warnings,
                 folded_constant_uses: global_context.folded_constant_uses,
+                folded_constant_references: global_context.folded_constant_references,
                 builtin_names: global_context.builtin_names,
             },
         ))
