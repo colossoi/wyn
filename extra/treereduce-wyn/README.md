@@ -206,6 +206,22 @@ also tries concrete replacements such as `0`, `1`, booleans, unit, and empty
 collections before the generic `???` fallback. The predicate/compiler is the
 type-compatibility and bug-preservation oracle for every change.
 
+After an interestingness check accepts a candidate, the reducer also reuses
+unused-code warnings already captured from that exact check. It maps their
+source locations back into the Tree-sitter tree and tries removing unreachable
+definitions, unused parameters, and unused `let` expressions, or shortening an
+unused pattern binding to `_`. These cleanup attempts still pass through the
+interestingness predicate. The reducer never launches `wyn` merely to discover
+warnings.
+
+This optimization is available when the interestingness command exposes Wyn's
+warnings on captured stderr. Direct `wyn` commands are captured automatically;
+commands using `--interesting-stderr` are already captured. A wrapper script
+must relay the compiler diagnostics. `--inherit-stderr` streams rather than
+captures them and therefore disables warning-guided cleanup. Wyn's warning cap
+also applies, so pass a larger `--max-warnings` to the interestingness command
+when reducing a source with many warnings.
+
 ## Limitations and troubleshooting
 
 - Reduction is single-file and syntax-driven. It does not rewrite imported

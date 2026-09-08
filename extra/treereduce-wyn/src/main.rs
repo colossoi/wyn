@@ -4,13 +4,14 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgAction, Parser, ValueEnum};
 use regex::Regex;
 use tree_sitter::{Language, Node, Parser as TreeSitterParser, Tree};
-use treereduce::{Check, CmdCheck, Config, NodeTypes, Original};
+use treereduce::{Check, CmdCheck, CmdCheckState, Config, NodeTypes, Original};
 
 const DEFAULT_PASSES: usize = 2;
 const DEFAULT_MIN_REDUCTION: usize = 2;
@@ -20,6 +21,13 @@ const FLOAT_EXPRESSIONS: &[&str] = &["0.0", "1.0"];
 const BOOLEAN_EXPRESSIONS: &[&str] = &["false", "true"];
 const HOLE: &[&str] = &["???"];
 const WILDCARD: &[&str] = &["_"];
+
+static UNUSED_WARNING_DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^warning: unused (parameter|binding|loop variable|pattern binding|definition|external declaration) `([^`\r\n]+)`[^\r\n]*\r?\n\s*-->\s+.*:(\d+):(\d+)\r?$",
+    )
+    .expect("unused-warning diagnostic regex should compile")
+});
 
 const COMPOSITE_EXPRESSION_KINDS: &[&str] = &[
     "call_expression",
@@ -185,6 +193,7 @@ struct Args {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum CandidateKind {
+    Warning,
     Promotion,
     ListDeletion,
     Concrete,
@@ -194,21 +203,52 @@ enum CandidateKind {
 impl CandidateKind {
     fn priority(self) -> u8 {
         match self {
-            Self::Promotion => 0,
-            Self::ListDeletion => 1,
-            Self::Concrete => 2,
-            Self::InferDefault => 3,
+            Self::Warning => 0,
+            Self::Promotion => 1,
+            Self::ListDeletion => 2,
+            Self::Concrete => 3,
+            Self::InferDefault => 4,
         }
     }
 
     fn description(self) -> &'static str {
         match self {
+            Self::Warning => "unused-warning cleanup",
             Self::Promotion => "child promotion",
             Self::ListDeletion => "list element deletion",
             Self::Concrete => "concrete replacement",
             Self::InferDefault => "inferred default replacement",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum UnusedWarningKind {
+    Parameter,
+    LetBinding,
+    LoopVariable,
+    MatchBinding,
+    Declaration,
+}
+
+impl UnusedWarningKind {
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "parameter" => Some(Self::Parameter),
+            "binding" => Some(Self::LetBinding),
+            "loop variable" => Some(Self::LoopVariable),
+            "pattern binding" => Some(Self::MatchBinding),
+            "definition" | "external declaration" => Some(Self::Declaration),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct UnusedWarning {
+    kind: UnusedWarningKind,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -229,6 +269,78 @@ impl Candidate {
 struct StructuralStats {
     attempts: usize,
     accepted: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WarningStats {
+    attempts: usize,
+    accepted: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AcceptedWarnings(Arc<Mutex<HashMap<Vec<u8>, Vec<UnusedWarning>>>>);
+
+impl AcceptedWarnings {
+    fn record(&self, source: Vec<u8>, diagnostics: &[u8]) -> io::Result<()> {
+        let warnings = parse_unused_warnings(&source, diagnostics);
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("accepted-warning cache lock was poisoned"))?
+            .insert(source, warnings);
+        Ok(())
+    }
+
+    fn take(&self, source: &[u8]) -> io::Result<Option<Vec<UnusedWarning>>> {
+        let mut accepted =
+            self.0.lock().map_err(|_| io::Error::other("accepted-warning cache lock was poisoned"))?;
+        let warnings = accepted.remove(source);
+        // Parallel generic checks may have recorded interesting candidates
+        // that lost the final edit race. Only the final accepted source can
+        // guide the next cleanup step.
+        accepted.clear();
+        Ok(warnings)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ObservedCheck {
+    inner: CmdCheck,
+    accepted: AcceptedWarnings,
+}
+
+#[derive(Debug)]
+struct ObservedCheckState {
+    source: Vec<u8>,
+    inner: CmdCheckState,
+}
+
+impl Check for ObservedCheck {
+    type State = ObservedCheckState;
+
+    fn start(&self, source: &[u8]) -> io::Result<Self::State> {
+        Ok(ObservedCheckState {
+            source: source.to_vec(),
+            inner: self.inner.start(source)?,
+        })
+    }
+
+    fn cancel(&self, state: Self::State) -> io::Result<()> {
+        self.inner.cancel(state.inner)
+    }
+
+    fn try_wait(&self, state: &mut Self::State) -> io::Result<Option<bool>> {
+        // treereduce 0.4.1 does not expose output from try_wait. Its active
+        // reduction paths use wait, where the accepted output is retained.
+        self.inner.try_wait(&mut state.inner)
+    }
+
+    fn wait(&self, state: Self::State) -> io::Result<bool> {
+        let (interesting, _, _, stderr) = self.inner.wait_with_output(state.inner)?;
+        if interesting {
+            self.accepted.record(state.source, &stderr)?;
+        }
+        Ok(interesting)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -463,7 +575,8 @@ fn main() -> Result<()> {
             .with_context(|| format!("failed to create temporary directory {}", dir.display()))?;
     }
 
-    let check = build_check(&args)?;
+    let accepted_warnings = AcceptedWarnings::default();
+    let check = build_check(&args, accepted_warnings.clone())?;
     let language: Language = tree_sitter_wyn::LANGUAGE.into();
     let mut source = read_source(&args)?;
     let initial_size = source.len();
@@ -478,7 +591,15 @@ fn main() -> Result<()> {
         language: language.clone(),
         reject_errors: !parse(&language, &source)?.root_node().has_error(),
     };
-    reduce(&args, &language, source, initial_size, check, type_probe)
+    reduce(
+        &args,
+        &language,
+        source,
+        initial_size,
+        check,
+        type_probe,
+        accepted_warnings,
+    )
 }
 
 fn reduce<C>(
@@ -488,6 +609,7 @@ fn reduce<C>(
     initial_size: usize,
     check: C,
     type_probe: TypeProbe,
+    accepted_warnings: AcceptedWarnings,
 ) -> Result<()>
 where
     C: Check + Clone + Debug + Send + Sync + 'static,
@@ -495,13 +617,21 @@ where
     if args.verbose > 0 {
         eprintln!("verifying initial test case ({} bytes)", source.len());
     }
-    if !args.no_verify && !check.interesting(&source)? {
-        bail!("initial test case is not interesting");
+    let start = Instant::now();
+    let mut warning_stats = WarningStats::default();
+    if !args.no_verify {
+        if !check.interesting(&source)? {
+            bail!("initial test case is not interesting");
+        }
+        let (next, stats) =
+            postprocess_unused_warnings(language, source, &check, &accepted_warnings, args.verbose)?;
+        source = next;
+        warning_stats.attempts += stats.attempts;
+        warning_stats.accepted += stats.accepted;
     }
 
     let node_types = NodeTypes::new(tree_sitter_wyn::NODE_TYPES)
         .context("failed to read tree-sitter-wyn node-types.json")?;
-    let start = Instant::now();
     let mut structural_stats = StructuralStats::default();
     let mut passes_done = 0;
     let max_passes = if args.fast {
@@ -534,6 +664,11 @@ where
         source = next;
         structural_stats.attempts += stats.attempts;
         structural_stats.accepted += stats.accepted;
+        let (next, stats) =
+            postprocess_unused_warnings(language, source, &check, &accepted_warnings, args.verbose)?;
+        source = next;
+        warning_stats.attempts += stats.attempts;
+        warning_stats.accepted += stats.accepted;
 
         if args.verbose > 0 {
             eprintln!(
@@ -557,6 +692,11 @@ where
             args.slow,
             hole_replacements(),
         )?;
+        let (next, stats) =
+            postprocess_unused_warnings(language, source, &check, &accepted_warnings, args.verbose)?;
+        source = next;
+        warning_stats.attempts += stats.attempts;
+        warning_stats.accepted += stats.accepted;
 
         if args.verbose > 0 {
             eprintln!(
@@ -592,6 +732,8 @@ where
         println!("outer passes: {passes_done}");
         println!("structural attempts: {}", structural_stats.attempts);
         println!("structural accepted: {}", structural_stats.accepted);
+        println!("unused-warning attempts: {}", warning_stats.attempts);
+        println!("unused-warning accepted: {}", warning_stats.accepted);
         println!("duration: {:.3}s", start.elapsed().as_secs_f64());
     }
     Ok(())
@@ -613,7 +755,7 @@ fn init_tracing(args: &Args) {
     }
 }
 
-fn build_check(args: &Args) -> Result<CmdCheck> {
+fn build_check(args: &Args, accepted: AcceptedWarnings) -> Result<ObservedCheck> {
     let (cmd, command_args) = args.check.split_first().context("missing interestingness command")?;
     let regex = |value: &Option<String>| -> Result<Option<Regex>> {
         value
@@ -622,19 +764,33 @@ fn build_check(args: &Args) -> Result<CmdCheck> {
             .transpose()
     };
 
-    Ok(CmdCheck::new(
+    let interesting_stderr = regex(&args.interesting_stderr)?;
+    let capture_direct_wyn = !args.inherit_stderr
+        && interesting_stderr.is_none()
+        && PathBuf::from(cmd).file_stem().is_some_and(|name| name.eq_ignore_ascii_case("wyn"));
+    // An impossible selector asks CmdCheck to retain stderr without changing
+    // the interestingness decision. Avoid imposing capture on arbitrary
+    // commands; direct Wyn invocations have capped diagnostic output.
+    let interesting_stderr = if capture_direct_wyn {
+        Some(Regex::new(r"\z.").expect("capture-only regex should compile"))
+    } else {
+        interesting_stderr
+    };
+
+    let inner = CmdCheck::new(
         cmd.clone(),
         command_args.to_vec(),
         args.interesting_exit_code.clone(),
         args.temp_dir.as_ref().map(|path| path.to_string_lossy().into_owned()),
         regex(&args.interesting_stdout)?,
-        regex(&args.interesting_stderr)?,
+        interesting_stderr,
         regex(&args.uninteresting_stdout)?,
         regex(&args.uninteresting_stderr)?,
         args.inherit_stdout,
         args.inherit_stderr,
         args.timeout.map(Duration::from_secs),
-    ))
+    );
+    Ok(ObservedCheck { inner, accepted })
 }
 
 fn read_source(args: &Args) -> Result<Vec<u8>> {
@@ -718,6 +874,215 @@ fn handle_initial_parse_errors(args: &Args, tree: &Tree) -> Result<()> {
         }
         OnParseError::Error => bail!("initial source contains Tree-sitter parse errors"),
     }
+}
+
+fn parse_unused_warnings(source: &[u8], diagnostics: &[u8]) -> Vec<UnusedWarning> {
+    let Ok(source) = std::str::from_utf8(source) else {
+        return Vec::new();
+    };
+    let diagnostics = String::from_utf8_lossy(diagnostics);
+    UNUSED_WARNING_DIAGNOSTIC
+        .captures_iter(&diagnostics)
+        .filter_map(|captures| {
+            let kind = UnusedWarningKind::from_label(captures.get(1)?.as_str())?;
+            let name = captures.get(2)?.as_str();
+            let line = captures.get(3)?.as_str().parse().ok()?;
+            let column = captures.get(4)?.as_str().parse().ok()?;
+            let start = line_column_offset(source, line, column)?;
+            let end = start.checked_add(name.len())?;
+            (source.as_bytes().get(start..end)? == name.as_bytes()).then_some(UnusedWarning {
+                kind,
+                start,
+                end,
+            })
+        })
+        .collect()
+}
+
+fn line_column_offset(source: &str, line: usize, column: usize) -> Option<usize> {
+    let line = line.checked_sub(1)?;
+    let column = column.checked_sub(1)?;
+    let mut line_start = 0;
+    for _ in 0..line {
+        line_start += source.as_bytes().get(line_start..)?.iter().position(|byte| *byte == b'\n')? + 1;
+    }
+    let line_end = source.as_bytes()[line_start..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(source.len(), |offset| line_start + offset);
+    let line_source = &source[line_start..line_end];
+    let column_offset = if column == line_source.chars().count() {
+        line_source.len()
+    } else {
+        line_source.char_indices().nth(column)?.0
+    };
+    Some(line_start + column_offset)
+}
+
+fn postprocess_unused_warnings<C: Check>(
+    language: &Language,
+    mut source: Vec<u8>,
+    check: &C,
+    accepted_warnings: &AcceptedWarnings,
+    verbose: u8,
+) -> Result<(Vec<u8>, WarningStats)> {
+    let mut stats = WarningStats::default();
+    while let Some(warnings) = accepted_warnings.take(&source)? {
+        if warnings.is_empty() {
+            break;
+        }
+        let tree = parse(language, &source)?;
+        let candidates = collect_unused_warning_candidates(&tree, &source, &warnings);
+        if verbose > 1 && !candidates.is_empty() {
+            eprintln!(
+                "trying {} cleanup candidates from {} accepted-check unused warnings",
+                candidates.len(),
+                warnings.len()
+            );
+        }
+
+        let mut reduced = false;
+        for candidate in candidates {
+            let next = apply_candidate(&source, &candidate);
+            stats.attempts += 1;
+            if check.wait(check.start(&next)?)? {
+                if verbose > 1 {
+                    eprintln!(
+                        "accepted {} at {}..{} (-{} bytes)",
+                        candidate.kind.description(),
+                        candidate.start,
+                        candidate.end,
+                        candidate.reduction()
+                    );
+                }
+                source = next;
+                stats.accepted += 1;
+                reduced = true;
+                break;
+            }
+        }
+        if !reduced {
+            break;
+        }
+    }
+    Ok((source, stats))
+}
+
+fn collect_unused_warning_candidates(
+    tree: &Tree,
+    source: &[u8],
+    warnings: &[UnusedWarning],
+) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    for warning in warnings {
+        let Some(node) = tree.root_node().descendant_for_byte_range(warning.start, warning.end) else {
+            continue;
+        };
+        match warning.kind {
+            UnusedWarningKind::Declaration => {
+                if let Some(declaration) =
+                    ancestor_of_kind(node, &["def_declaration", "extern_declaration"])
+                {
+                    let (start, end) = declaration_deletion_range(declaration, source);
+                    candidates.push(Candidate {
+                        start,
+                        end,
+                        replacement: Vec::new(),
+                        kind: CandidateKind::Warning,
+                    });
+                }
+            }
+            UnusedWarningKind::LetBinding => {
+                if let Some(let_expression) = ancestor_of_kind(node, &["let_expression"]) {
+                    if let Some(body) = let_expression.child_by_field_name("body") {
+                        candidates.push(Candidate {
+                            start: let_expression.start_byte(),
+                            end: let_expression.end_byte(),
+                            replacement: source[body.start_byte()..body.end_byte()].to_vec(),
+                            kind: CandidateKind::Warning,
+                        });
+                    }
+                }
+                add_wildcard_candidate(warning, &mut candidates);
+            }
+            UnusedWarningKind::Parameter => {
+                if let Some(candidate) = parameter_deletion_candidate(node, source) {
+                    candidates.push(candidate);
+                }
+                add_wildcard_candidate(warning, &mut candidates);
+            }
+            UnusedWarningKind::LoopVariable | UnusedWarningKind::MatchBinding => {
+                add_wildcard_candidate(warning, &mut candidates);
+            }
+        }
+    }
+
+    let mut unique = HashSet::new();
+    candidates.retain(|candidate| {
+        candidate.end > candidate.start
+            && candidate.replacement.len() < candidate.end - candidate.start
+            && unique.insert((candidate.start, candidate.end, candidate.replacement.clone()))
+    });
+    candidates.sort_by(|left, right| {
+        right.reduction().cmp(&left.reduction()).then_with(|| left.start.cmp(&right.start))
+    });
+    candidates
+}
+
+fn ancestor_of_kind<'tree>(mut node: Node<'tree>, kinds: &[&str]) -> Option<Node<'tree>> {
+    loop {
+        if kinds.contains(&node.kind()) {
+            return Some(node);
+        }
+        node = node.parent()?;
+    }
+}
+
+fn declaration_deletion_range(declaration: Node<'_>, source: &[u8]) -> (usize, usize) {
+    let start = declaration.start_byte();
+    let mut end = declaration.end_byte();
+    while matches!(source.get(end), Some(b' ' | b'\t')) {
+        end += 1;
+    }
+    if source.get(end..end + 2) == Some(b"\r\n") {
+        end += 2;
+    } else if source.get(end) == Some(&b'\n') {
+        end += 1;
+    }
+    (start, end)
+}
+
+fn add_wildcard_candidate(warning: &UnusedWarning, candidates: &mut Vec<Candidate>) {
+    if warning.end - warning.start > WILDCARD[0].len() {
+        candidates.push(Candidate {
+            start: warning.start,
+            end: warning.end,
+            replacement: WILDCARD[0].as_bytes().to_vec(),
+            kind: CandidateKind::Warning,
+        });
+    }
+}
+
+fn parameter_deletion_candidate(node: Node<'_>, source: &[u8]) -> Option<Candidate> {
+    let mut element = node;
+    let container = loop {
+        let parent = element.parent()?;
+        if matches!(parent.kind(), "params" | "entry_params" | "lambda_params") {
+            break parent;
+        }
+        element = parent;
+    };
+    let mut cursor = container.walk();
+    let elements: Vec<_> = container.named_children(&mut cursor).collect();
+    let mut candidates = Vec::new();
+    add_comma_deletions(container, &elements, true, false, source, &mut candidates);
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.start <= element.start_byte() && candidate.end >= element.end_byte())
+        .map(|candidate| Candidate {
+            kind: CandidateKind::Warning,
+            ..candidate
+        })
 }
 
 fn hole_replacements() -> HashMap<&'static str, &'static [&'static str]> {
@@ -1198,6 +1563,7 @@ fn trailing_comma_end(container: Node<'_>, element: Node<'_>, source: &[u8]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
     struct Contains(&'static [u8]);
@@ -1219,6 +1585,40 @@ mod tests {
 
         fn wait(&self, state: Self::State) -> io::Result<bool> {
             Ok(state)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingContains {
+        needle: &'static [u8],
+        accepted: AcceptedWarnings,
+        checks: Arc<AtomicUsize>,
+    }
+
+    impl Check for RecordingContains {
+        type State = Vec<u8>;
+
+        fn start(&self, source: &[u8]) -> io::Result<Self::State> {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            Ok(source.to_vec())
+        }
+
+        fn cancel(&self, _state: Self::State) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn try_wait(&self, state: &mut Self::State) -> io::Result<Option<bool>> {
+            Ok(Some(
+                state.windows(self.needle.len()).any(|window| window == self.needle),
+            ))
+        }
+
+        fn wait(&self, state: Self::State) -> io::Result<bool> {
+            let interesting = state.windows(self.needle.len()).any(|window| window == self.needle);
+            if interesting {
+                self.accepted.record(state, b"")?;
+            }
+            Ok(interesting)
         }
     }
 
@@ -1245,6 +1645,62 @@ mod tests {
         probe.wyn = temp.path().join("missing-wyn-compiler");
         let error = probe.verify_compiler().unwrap_err().to_string();
         assert!(error.contains("failed to run Wyn compiler preflight"));
+    }
+
+    #[test]
+    fn parses_unused_warning_locations_as_utf8_byte_offsets() {
+        let source = "def café = 1\nentry main() i32 = 0\n";
+        let diagnostics = b"warning: unused definition `caf\xC3\xA9` is not reachable from any entry point\n  --> candidate.wyn:1:5\n";
+        assert_eq!(
+            parse_unused_warnings(source.as_bytes(), diagnostics),
+            vec![UnusedWarning {
+                kind: UnusedWarningKind::Declaration,
+                start: 4,
+                end: 9,
+            }]
+        );
+    }
+
+    #[test]
+    fn warning_locations_create_semantic_cleanup_candidates() {
+        let source =
+            b"def dead = 1\nentry main(unused_parameter: i32) i32 = let unused_binding = 2 in ???\n";
+        let diagnostics = b"warning: unused definition `dead` is not reachable from any entry point\n  --> candidate.wyn:1:5\nwarning: unused parameter `unused_parameter`; prefix its name with `_` to silence this warning\n  --> candidate.wyn:2:12\nwarning: unused binding `unused_binding`; prefix its name with `_` to silence this warning\n  --> candidate.wyn:2:45\n";
+        let warnings = parse_unused_warnings(source, diagnostics);
+        assert_eq!(warnings.len(), 3);
+        let tree = parse(&language(), source).unwrap();
+        let rendered: Vec<_> = collect_unused_warning_candidates(&tree, source, &warnings)
+            .iter()
+            .map(|candidate| String::from_utf8(apply_candidate(source, candidate)).unwrap())
+            .collect();
+        assert!(rendered.iter().any(|candidate| candidate
+            == "entry main(unused_parameter: i32) i32 = let unused_binding = 2 in ???\n"));
+        assert!(rendered.iter().any(|candidate| candidate.contains("entry main() i32")));
+        assert!(rendered
+            .iter()
+            .any(|candidate| candidate.contains("entry main(unused_parameter: i32) i32 = ???")));
+    }
+
+    #[test]
+    fn warning_postprocessing_reuses_the_accepted_check_output() {
+        let source = b"def dead = 1\nentry main() i32 = bug()\n".to_vec();
+        let diagnostics = b"warning: unused definition `dead` is not reachable from any entry point\n  --> candidate.wyn:1:5\n";
+        let accepted = AcceptedWarnings::default();
+        accepted.record(source.clone(), diagnostics).unwrap();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let check = RecordingContains {
+            needle: b"bug()",
+            accepted: accepted.clone(),
+            checks: checks.clone(),
+        };
+
+        let (reduced, stats) =
+            postprocess_unused_warnings(&language(), source, &check, &accepted, 0).unwrap();
+
+        assert_eq!(reduced, b"entry main() i32 = bug()\n");
+        assert_eq!(stats.attempts, 1);
+        assert_eq!(stats.accepted, 1);
+        assert_eq!(checks.load(Ordering::Relaxed), 1);
     }
 
     #[test]
