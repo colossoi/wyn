@@ -1,0 +1,31 @@
+-- | Uniform one-dimensional layout: how many equal-size items fit in a
+-- span, and how much clear space remains at its ends.
+module packing = {
+  -- | Count items of extent size that fit in span with gap between them and
+  -- at least end clear at both ends.
+  def fit_count(size: f32, span: f32, gap: f32, end: f32) i32 =
+    let available = span - 2.0f32 * end in
+    if available < size then 0i32
+    else i32.f32(f32.floor((available + gap) / (size + gap)))
+
+  -- | Total extent of n equal-size items and their inner gaps.
+  def run_length(n: i32, size: f32, gap: f32) f32 =
+    if n <= 0i32 then 0.0f32
+    else f32.i32(n) * size + f32.i32(n - 1i32) * gap
+
+  -- | Symmetric layout as (count, actual_clear_at_each_end).
+  def fit(size: f32, span: f32, gap: f32, end: f32) (i32, f32) =
+    let n = fit_count(size, span, gap, end) in
+    let used = run_length(n, size, gap) in
+    (n, (span - used) * 0.5f32)
+
+  -- | Asymmetric minimum margins as (count, actual_lo, actual_hi).
+  def fit_ends(size: f32, span: f32, gap: f32,
+               end_lo: f32, end_hi: f32) (i32, f32, f32) =
+    let available = span - end_lo - end_hi in
+    let n = if available < size then 0i32
+            else i32.f32(f32.floor((available + gap) / (size + gap))) in
+    let used = run_length(n, size, gap) in
+    let slack = (span - used - end_lo - end_hi) * 0.5f32 in
+    (n, end_lo + slack, end_hi + slack)
+}

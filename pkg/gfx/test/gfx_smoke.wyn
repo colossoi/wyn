@@ -1,0 +1,35 @@
+import "../src/lib"
+
+entry gfx_smoke() [12]f32 =
+  let camera_direction = gfx.camera.ray_direction(
+    45.0f32, @[1280.0f32, 720.0f32], @[640.0f32, 360.0f32]) in
+  let orbit: gfx.camera.orbit.state = {
+    target = @[0.0f32, 0.0f32, 0.0f32],
+    azimuth = 0.4f32,
+    elevation = 0.0f32 - 0.3f32,
+    distance = 10.0f32,
+  } in
+  let rotation = gfx.camera.orbit.rotation(orbit.elevation, orbit.azimuth) in
+  let rotated = rotation * @[0.0f32, 0.0f32, 1.0f32] in
+  let eye = gfx.camera.orbit.eye(orbit) in
+  let (origin, direction) = gfx.camera.orbit.ray(camera_direction, orbit) in
+  let projection = gfx.camera.perspective(
+    45.0f32, 1280.0f32 / 720.0f32, 0.1f32, 100.0f32) in
+  let view = gfx.camera.look_at(
+    eye, orbit.target, @[0.0f32, 1.0f32, 0.0f32]) in
+  let clip = gfx.camera.world_to_clip(orbit.target, view, projection) in
+  let ndc_depth = clip.z / clip.w in
+  let linear = gfx.camera.linear_depth(ndc_depth, 0.1f32, 100.0f32) in
+  let reconstructed = gfx.camera.world_position_from_depth(
+    origin, direction, normalize(orbit.target - origin), ndc_depth,
+    0.1f32, 100.0f32) in
+  let visible = if gfx.camera.frustum_contains_sphere(
+    clip, 1.0f32, 45.0f32, 1280.0f32 / 720.0f32, 0.1f32)
+    then 1.0f32 else 0.0f32 in
+  let (right, up, forward) = gfx.transform.yaw_basis(0.5f32) in
+  let local = @[1.0f32, 2.0f32, 3.0f32] in
+  let world = gfx.transform.orient(local, right, up, forward) in
+  let roundtrip = gfx.transform.unorient(world, right, up, forward) in
+  [camera_direction.z, rotated.x, eye.x,
+   origin.x, direction.z, clip.z, linear, reconstructed.x, visible,
+   roundtrip.x, roundtrip.y, roundtrip.z]

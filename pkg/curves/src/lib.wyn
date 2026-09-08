@@ -1,0 +1,79 @@
+-- | Reusable two-dimensional curves, swept ribbons, and streaming polyline
+-- simplification.
+module curves = {
+  def broadcast2(x: f32) vec2f32 = @[x, x]
+  def cross2(a: vec2f32, b: vec2f32) f32 = a.x * b.y - a.y * b.x
+
+  -- | Centripetal Catmull-Rom point at u in [0,1] on p1 -> p2.
+  def catmull_rom(p0: vec2f32, p1: vec2f32,
+                  p2: vec2f32, p3: vec2f32, u: f32) vec2f32 =
+    let t0 = 0.0f32 in
+    let t1 = t0 + f32.max(f32.sqrt(distance(p0, p1)), 1e-4f32) in
+    let t2 = t1 + f32.max(f32.sqrt(distance(p1, p2)), 1e-4f32) in
+    let t3 = t2 + f32.max(f32.sqrt(distance(p2, p3)), 1e-4f32) in
+    let t = mix(t1, t2, u) in
+    let a1 = p0 * broadcast2((t1 - t) / (t1 - t0))
+             + p1 * broadcast2((t - t0) / (t1 - t0)) in
+    let a2 = p1 * broadcast2((t2 - t) / (t2 - t1))
+             + p2 * broadcast2((t - t1) / (t2 - t1)) in
+    let a3 = p2 * broadcast2((t3 - t) / (t3 - t2))
+             + p3 * broadcast2((t - t2) / (t3 - t2)) in
+    let b1 = a1 * broadcast2((t2 - t) / (t2 - t0))
+             + a2 * broadcast2((t - t0) / (t2 - t0)) in
+    let b2 = a2 * broadcast2((t3 - t) / (t3 - t1))
+             + a3 * broadcast2((t - t1) / (t3 - t1)) in
+    b1 * broadcast2((t2 - t) / (t2 - t1))
+      + b2 * broadcast2((t - t1) / (t2 - t1))
+
+  -- | Unit tangent of a centripetal Catmull-Rom span at u.
+  def catmull_rom_tangent(p0: vec2f32, p1: vec2f32,
+                          p2: vec2f32, p3: vec2f32, u: f32) vec2f32 =
+    let epsilon = 0.04f32 in
+    let a = catmull_rom(p0, p1, p2, p3, f32.max(u - epsilon, 0.0f32)) in
+    let b = catmull_rom(p0, p1, p2, p3, f32.min(u + epsilon, 1.0f32)) in
+    let delta = b - a in
+    let length = magnitude(delta) in
+    if length > 1e-6f32 then delta * broadcast2(1.0f32 / length)
+    else @[1.0f32, 0.0f32]
+
+  -- | Triangle-list vertex of the ribbon quad spanning u0..u1. Returns
+  -- (position, side), where side is +1 or -1 at the two ribbon edges.
+  def ribbon_vertex(p0: vec2f32, p1: vec2f32,
+                    p2: vec2f32, p3: vec2f32,
+                    u0: f32, u1: f32, half_width: f32,
+                    vertex: i32) (vec2f32, f32) =
+    let a0 = catmull_rom(p0, p1, p2, p3, u0) in
+    let a1 = catmull_rom(p0, p1, p2, p3, u1) in
+    let tangent0 = catmull_rom_tangent(p0, p1, p2, p3, u0) in
+    let tangent1 = catmull_rom_tangent(p0, p1, p2, p3, u1) in
+    let normal0 = @[0.0f32 - tangent0.y, tangent0.x] in
+    let normal1 = @[0.0f32 - tangent1.y, tangent1.x] in
+    let pa = a0 + normal0 * broadcast2(half_width) in
+    let pb = a0 - normal0 * broadcast2(half_width) in
+    let pc = a1 + normal1 * broadcast2(half_width) in
+    let pd = a1 - normal1 * broadcast2(half_width) in
+    if vertex == 0i32 then (pa, 1.0f32)
+    else if vertex == 1i32 then (pb, 0.0f32 - 1.0f32)
+    else if vertex == 2i32 then (pc, 1.0f32)
+    else if vertex == 3i32 then (pb, 0.0f32 - 1.0f32)
+    else if vertex == 4i32 then (pd, 0.0f32 - 1.0f32)
+    else (pc, 1.0f32)
+
+  -- | Advance one sample through a Reumann-Witkam simplifier. The result is
+  -- (emit, point, anchor, direction, last, have_direction).
+  def reumann_witkam_advance(anchor: vec2f32, direction: vec2f32,
+                             last: vec2f32, have_direction: bool,
+                             sample: vec2f32, corridor: f32,
+                             max_chord: f32)
+    (bool, vec2f32, vec2f32, vec2f32, vec2f32, bool) =
+    if !have_direction then
+      (false, last, anchor, normalize(sample - anchor), sample, true)
+    else
+      let toward = sample - anchor in
+      let leaves = f32.abs(cross2(direction, toward)) > corridor
+                   || magnitude(toward) > max_chord in
+      if leaves then
+        (true, last, last, normalize(sample - last), sample, true)
+      else
+        (false, last, anchor, direction, sample, true)
+}

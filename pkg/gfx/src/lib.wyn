@@ -1,0 +1,126 @@
+-- | Pure camera and coordinate-transform math. This package contains no
+-- resources, entry points, renderer policy, or scene-specific constants.
+module gfx = {
+  -- | Camera rays, view/projection transforms, depth reconstruction, and
+  -- conservative frustum tests. Angles are radians unless named *_degrees.
+  module camera = {
+    -- | Camera-space pinhole ray through a pixel; -Z is forward.
+    def ray_direction(vertical_fov_degrees: f32,
+                      viewport: vec2f32, pixel: vec2f32) vec3f32 =
+      let xy = pixel - viewport * 0.5f32 in
+      let cot_half = f32.tan(
+        f32.radians(90.0f32 - vertical_fov_degrees * 0.5f32)) in
+      let z = viewport.y * 0.5f32 * cot_half in
+      normalize(@[xy.x, xy.y, 0.0f32 - z])
+
+    -- | Orbit-camera state and operations. Applications choose defaults,
+    -- constraints, and input behavior.
+    module orbit = {
+      type state = {
+        target: vec3f32,
+        azimuth: f32,
+        elevation: f32,
+        distance: f32,
+      }
+
+      -- | Column-major orbit rotation for (elevation, azimuth).
+      def rotation(elevation: f32, azimuth: f32) mat3f32 =
+        let c = @[f32.cos(elevation), f32.cos(azimuth)] in
+        let s = @[f32.sin(elevation), f32.sin(azimuth)] in
+        @[[c.y,       0.0f32,       0.0f32 - s.y],
+          [s.y * s.x, c.x,          c.y * s.x],
+          [s.y * c.x, 0.0f32 - s.x, c.y * c.x]]
+
+      -- | World-space eye position for an orbit-camera state.
+      def eye(o: state) vec3f32 =
+        o.target + rotation(o.elevation, o.azimuth)
+                   * @[0.0f32, 0.0f32, o.distance]
+
+      -- | Rotate a camera-space direction into world space and pair it with
+      -- the orbit eye. Use camera.ray_direction to construct a pixel ray.
+      def ray(camera_direction: vec3f32, o: state) (vec3f32, vec3f32) =
+        let camera_rotation = rotation(o.elevation, o.azimuth) in
+        let direction = camera_rotation * camera_direction in
+        (eye(o), direction)
+    }
+
+    -- | Right-handed perspective projection with NDC depth in [0,1].
+    def perspective(vertical_fov_degrees: f32, aspect: f32,
+                    near: f32, far: f32) mat4f32 =
+      let f = 1.0f32 / f32.tan(
+        f32.radians(vertical_fov_degrees) * 0.5f32) in
+      let near_far = 1.0f32 / (near - far) in
+      @[[f / aspect, 0.0f32, 0.0f32,              0.0f32],
+        [0.0f32,    f,        0.0f32,              0.0f32],
+        [0.0f32,    0.0f32,   far * near_far,      0.0f32 - 1.0f32],
+        [0.0f32,    0.0f32,   far * near * near_far, 0.0f32]]
+
+    -- | Right-handed world-to-view matrix looking from eye toward center.
+    def look_at(eye: vec3f32, center: vec3f32, up: vec3f32) mat4f32 =
+      let forward = normalize(center - eye) in
+      let right = normalize(cross(forward, up)) in
+      let camera_up = cross(right, forward) in
+      @[[right.x, camera_up.x, 0.0f32 - forward.x, 0.0f32],
+        [right.y, camera_up.y, 0.0f32 - forward.y, 0.0f32],
+        [right.z, camera_up.z, 0.0f32 - forward.z, 0.0f32],
+        [0.0f32 - dot(right, eye), 0.0f32 - dot(camera_up, eye),
+         dot(forward, eye), 1.0f32]]
+
+    -- | Apply a world-to-view matrix and then a projection matrix.
+    def world_to_clip(position: vec3f32, view: mat4f32,
+                      projection: mat4f32) vec4f32 =
+      projection * (view * @[position.x, position.y, position.z, 1.0f32])
+
+    -- | Positive view-forward distance from NDC depth for perspective().
+    def linear_depth(ndc_depth: f32, near: f32, far: f32) f32 =
+      let near_far = 1.0f32 / (near - far) in
+      let a = far * near_far in
+      let b = far * near * near_far in
+      b / (a + ndc_depth)
+
+    -- | Reconstruct a world position along a ray from NDC depth.
+    def world_position_from_depth(origin: vec3f32, direction: vec3f32,
+                                  camera_forward: vec3f32, ndc_depth: f32,
+                                  near: f32, far: f32) vec3f32 =
+      let t = linear_depth(ndc_depth, near, far)
+              / dot(direction, camera_forward) in
+      origin + direction * t
+
+    -- | Test a clip-space sphere against the view frustum. depth_slop expands
+    -- the near and far comparisons to absorb numeric noise.
+    def frustum_contains_sphere(clip: vec4f32, radius: f32,
+                                vertical_fov_degrees: f32, aspect: f32,
+                                depth_slop: f32) bool =
+      let fy = 1.0f32 / f32.tan(
+        f32.radians(vertical_fov_degrees) * 0.5f32) in
+      let extent_x = clip.w + (fy / aspect) * radius in
+      let extent_y = clip.w + fy * radius in
+      clip.w > 0.0f32
+        && f32.abs(clip.x) < extent_x
+        && f32.abs(clip.y) < extent_y
+        && clip.z > 0.0f32 - depth_slop - radius
+        && clip.z < clip.w + depth_slop
+  }
+
+  -- | Small orthonormal-basis transforms for local/parent-space conversion.
+  module transform = {
+    -- | Orthonormal right/up/forward basis for a yaw about +Y.
+    def yaw_basis(yaw: f32) (vec3f32, vec3f32, vec3f32) =
+      let cosine = f32.cos(yaw) in
+      let sine = f32.sin(yaw) in
+      (@[cosine, 0.0f32, sine], @[0.0f32, 1.0f32, 0.0f32],
+       @[0.0f32 - sine, 0.0f32, cosine])
+
+    -- | Transform a basis-local vector into its parent space.
+    def orient(position: vec3f32, right: vec3f32,
+               up: vec3f32, forward: vec3f32) vec3f32 =
+      @[right.x * position.x + up.x * position.y + forward.x * position.z,
+        right.y * position.x + up.y * position.y + forward.y * position.z,
+        right.z * position.x + up.z * position.y + forward.z * position.z]
+
+    -- | Project a parent-space vector into an orthonormal basis.
+    def unorient(position: vec3f32, right: vec3f32,
+                 up: vec3f32, forward: vec3f32) vec3f32 =
+      @[dot(position, right), dot(position, up), dot(position, forward)]
+  }
+}

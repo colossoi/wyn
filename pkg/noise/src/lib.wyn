@@ -1,10 +1,11 @@
--- | 2D procedural noise on top of any `RANDOM_ACCESS` generator.
+-- | 2D and 3D procedural noise on top of any `RANDOM_ACCESS` generator.
 --
 -- Pick a generator (`fasthash` for graphics-grade speed, `threefry` when
 -- stream-count matters), get a `key` from `G.seed(s)`, then call any of:
 --
 --   * `value2`   — bilinear interpolation of per-cell random values
 --                 (cheapest; blocky character).
+--   * `value3`   — trilinear value noise for volumes and procedural fields.
 --   * `perlin2`  — gradient noise: per-cell unit gradient dotted with the
 --                 offset to the lookup point. The classic.
 --   * `simplex2` — gradient noise on a simplex (triangular) grid; better
@@ -15,8 +16,9 @@
 --                 frequency and decreasing amplitude (fractal Brownian
 --                 motion). One specialised flavor per base noise:
 --                 `fbm_value`, `fbm_perlin`, `fbm_simplex`, `fbm_worley`.
+--                 `fbm_value3` is the 3D value-noise flavor.
 --
--- Output ranges: `value2`, `perlin2`, `simplex2` are normalized to roughly
+-- Output ranges: `value2`, `value3`, `perlin2`, `simplex2` are normalized to roughly
 -- `[-1, 1]`. `worley2` returns raw F1 distance (~`[0, 1.5]`); scale as
 -- needed. `fbm_*` outputs a sum whose range scales with `octaves * |base|`;
 -- divide by `(1 - gain^octaves) / (1 - gain)` to renormalize.
@@ -48,6 +50,17 @@ functor Noise(G: RANDOM_ACCESS) = {
   def cell_f32(k: key, ix: i32, iy: i32) f32 =
     f32.u32(cell_hash(k, ix, iy) >> 8u32) * (1.0f32 / 16777216.0f32)
 
+  -- Hash a 3D integer cell coordinate. Distinct odd constants decorrelate the
+  -- three axes; unsigned wrap is intentional because this is only a hash key.
+  def cell_hash3(k: key, ix: i32, iy: i32, iz: i32) u32 =
+    G.at_u32(k, u32.i32(ix) * 374761393u32
+                + u32.i32(iy) * 668265263u32
+                + u32.i32(iz) * 2246822519u32)
+
+  def cell_f32_3(k: key, ix: i32, iy: i32, iz: i32) f32 =
+    f32.u32(cell_hash3(k, ix, iy, iz) >> 8u32)
+      * (1.0f32 / 16777216.0f32)
+
   -- Cell → unit-length 2D gradient. Random angle on the circle; one hash
   -- per cell.
   def cell_grad2(k: key, ix: i32, iy: i32) vec2f32 =
@@ -75,6 +88,38 @@ functor Noise(G: RANDOM_ACCESS) = {
     let x0 = lerp(v00, v10, u) in
     let x1 = lerp(v01, v11, u) in
     lerp(x0, x1, v)
+
+  ------------------------------------------------------------------
+  -- value3
+  ------------------------------------------------------------------
+
+  -- | 3D value noise: trilinear interpolation of eight random cell corners
+  -- with a quintic fade on each axis. Output: `[-1, 1]`.
+  def value3(k: key, p: vec3f32) f32 =
+    let ix = i32.f32(f32.floor(p.x)) in
+    let iy = i32.f32(f32.floor(p.y)) in
+    let iz = i32.f32(f32.floor(p.z)) in
+    let fx = p.x - f32.i32(ix) in
+    let fy = p.y - f32.i32(iy) in
+    let fz = p.z - f32.i32(iz) in
+    let u = fade5(fx) in
+    let v = fade5(fy) in
+    let w = fade5(fz) in
+    let v000 = cell_f32_3(k, ix,        iy,        iz)        * 2.0f32 - 1.0f32 in
+    let v100 = cell_f32_3(k, ix + 1i32, iy,        iz)        * 2.0f32 - 1.0f32 in
+    let v010 = cell_f32_3(k, ix,        iy + 1i32, iz)        * 2.0f32 - 1.0f32 in
+    let v110 = cell_f32_3(k, ix + 1i32, iy + 1i32, iz)        * 2.0f32 - 1.0f32 in
+    let v001 = cell_f32_3(k, ix,        iy,        iz + 1i32) * 2.0f32 - 1.0f32 in
+    let v101 = cell_f32_3(k, ix + 1i32, iy,        iz + 1i32) * 2.0f32 - 1.0f32 in
+    let v011 = cell_f32_3(k, ix,        iy + 1i32, iz + 1i32) * 2.0f32 - 1.0f32 in
+    let v111 = cell_f32_3(k, ix + 1i32, iy + 1i32, iz + 1i32) * 2.0f32 - 1.0f32 in
+    let x00 = lerp(v000, v100, u) in
+    let x10 = lerp(v010, v110, u) in
+    let x01 = lerp(v001, v101, u) in
+    let x11 = lerp(v011, v111, u) in
+    let y0 = lerp(x00, x10, v) in
+    let y1 = lerp(x01, x11, v) in
+    lerp(y0, y1, w)
 
   ------------------------------------------------------------------
   -- perlin2
@@ -199,11 +244,29 @@ functor Noise(G: RANDOM_ACCESS) = {
             noise(kk, pp) * amp,
           0i32 ..< octaves))
 
+  -- | 3D fractional Brownian motion with the same frequency, amplitude, and
+  -- per-octave key behavior as fbm2.
+  def fbm3(noise: key -> vec3f32 -> f32, k: key, p: vec3f32,
+           octaves: i32, lacunarity: f32, gain: f32) f32 =
+    reduce(
+      |a: f32, b: f32| a + b,
+      0.0f32,
+      map(|i: i32|
+            let frequency = f32.pow(lacunarity, f32.i32(i)) in
+            let amplitude = f32.pow(gain, f32.i32(i)) in
+            let octave_key = G.derive(k, u32.i32(i)) in
+            let point: vec3f32 = @[p.x * frequency,
+                                    p.y * frequency,
+                                    p.z * frequency] in
+            noise(octave_key, point) * amplitude,
+          0i32 ..< octaves))
+
   -- Per-noise convenience wrappers — same signature, fixed base noise.
   def fbm_value  (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(value2,   k, p, octaves, lacunarity, gain)
   def fbm_perlin (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(perlin2,  k, p, octaves, lacunarity, gain)
   def fbm_simplex(k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(simplex2, k, p, octaves, lacunarity, gain)
   def fbm_worley (k: key, p: vec2f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm2(worley2,  k, p, octaves, lacunarity, gain)
+  def fbm_value3 (k: key, p: vec3f32, octaves: i32, lacunarity: f32, gain: f32) f32 = fbm3(value3, k, p, octaves, lacunarity, gain)
 }
 
 -- | The graphics-grade default: noise driven by the fasthash PCG generator.
