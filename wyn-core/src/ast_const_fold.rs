@@ -337,6 +337,8 @@ impl AstConstFolder {
                 }
             }
 
+            ExprKind::Spread(value) => self.fold_expr_scoped(value, bound_sizes),
+
             ExprKind::ArrayLiteral(elements) | ExprKind::VecMatLiteral(elements) => {
                 for elem in elements {
                     self.fold_expr_scoped(elem, bound_sizes);

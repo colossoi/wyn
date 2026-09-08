@@ -156,7 +156,7 @@ fn test_inclusive_range() {
     let source = r#"
 
 entry vertex_main() vec4f32 =
-    let range = 0...3 in
+    let range = 0..=3 in
     @[f32.i32(range[0]), f32.i32(range[1]), f32.i32(range[2]), f32.i32(range[3])]
 "#;
     assert!(

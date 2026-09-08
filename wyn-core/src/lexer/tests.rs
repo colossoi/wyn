@@ -224,7 +224,7 @@ fn test_constructor_names() {
 #[test]
 fn test_new_operators() {
     // Test |>, .., ..., ..<, ..>, |, !, ?, @
-    let input = "|> .. ... ..< ..>";
+    let input = "|> .. ... ..< ..> ..=";
     let tokens = tokens_only(input);
     assert_eq!(
         tokens,
@@ -234,6 +234,7 @@ fn test_new_operators() {
             Token::Ellipsis,
             Token::DotDotLt,
             Token::DotDotGt,
+            Token::DotDotEq,
         ]
     );
 }
@@ -318,7 +319,7 @@ fn test_qualified_names_tokenization() {
 #[test]
 fn test_range_operators_in_context() {
     // Test that range operators work in realistic context
-    let input = "a..b a...b a..<b a..>b";
+    let input = "a..b a..=b a..<b a..>b";
     let tokens = tokens_only(input);
     assert_eq!(
         tokens,
@@ -327,7 +328,7 @@ fn test_range_operators_in_context() {
             Token::DotDot,
             Token::Identifier("b".to_string()),
             Token::Identifier("a".to_string()),
-            Token::Ellipsis,
+            Token::DotDotEq,
             Token::Identifier("b".to_string()),
             Token::Identifier("a".to_string()),
             Token::DotDotLt,

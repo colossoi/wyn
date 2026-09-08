@@ -170,3 +170,23 @@ fn parse_all_repository_testfiles() {
         failures.join("\n"),
     );
 }
+
+#[test]
+fn test_literal_expansion_and_inclusive_range() {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).unwrap();
+    for source in [
+        "let v = @[nrm..., 1.0]",
+        "let v = @[nrm.yx..., nrm.xx...,]",
+        "let v = [nrm..., 1.0]",
+        "let r = 0..=3",
+        "let r = 0..2..=4",
+    ] {
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
+}

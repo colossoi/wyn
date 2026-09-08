@@ -274,6 +274,10 @@ impl AstFormatter {
                 };
                 self.write_line(&qn);
             }
+            ExprKind::Spread(value) => {
+                let text = format!("({})...", self.format_simple_expr(value));
+                self.write_line(&text);
+            }
             ExprKind::ArrayLiteral(elems) => {
                 if elems.is_empty() {
                     self.write_line("[]");
@@ -455,7 +459,7 @@ impl AstFormatter {
                 let start = self.format_simple_expr(&range.start);
                 let end = self.format_simple_expr(&range.end);
                 let op = match range.kind {
-                    RangeKind::Inclusive => "...",
+                    RangeKind::Inclusive => "..=",
                     RangeKind::Exclusive => "..",
                     RangeKind::ExclusiveLt => "..<",
                     RangeKind::ExclusiveGt => "..>",
@@ -533,6 +537,7 @@ impl AstFormatter {
                     self.format_simple_expr(rhs)
                 )
             }
+            ExprKind::Spread(value) => format!("({})...", self.format_simple_expr(value)),
             ExprKind::UnaryOp(op, operand) => {
                 format!("({}{})", op.op, self.format_simple_expr(operand))
             }

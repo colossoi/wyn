@@ -733,17 +733,17 @@ module.exports = grammar({
         field('right', $._expression),
       )),
       // Range operators: `start .. end`, `start ..< end`, `start ..> end`,
-      // `start ... end`, and the three-part `start .. step ..<end` form.
+      // `start ..= end`, and the three-part `start .. step ..<end` form.
       prec.left(PREC.COMPARE, seq(
         field('start', $._expression),
         '..',
         field('step', $._expression),
-        field('end_op', choice('..<', '..>', '...')),
+        field('end_op', choice('..<', '..>', '..=')),
         field('end', $._expression),
       )),
       prec.left(PREC.COMPARE, seq(
         field('left', $._expression),
-        field('operator', choice('..', '..<', '..>', '...')),
+        field('operator', choice('..', '..<', '..>', '..=')),
         field('right', $._expression),
       )),
     ),
@@ -814,15 +814,17 @@ module.exports = grammar({
 
     array_literal: $ => seq(
       '[',
-      commaSep($._expression),
+      commaSep(choice($._expression, $.literal_expansion)),
       ']',
     ),
 
     vec_literal: $ => seq(
       '@[',
-      commaSep($._expression),
+      commaSep(choice($._expression, $.literal_expansion)),
       ']',
     ),
+
+    literal_expansion: $ => seq(field('value', $._expression), '...'),
 
     unit_expression: $ => prec(1, seq('(', ')')),
 

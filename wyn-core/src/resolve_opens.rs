@@ -366,7 +366,7 @@ impl<'a> OpenResolver<'a> {
                 self.resolve_expression(l)?;
                 self.resolve_expression(r)?;
             }
-            ExprKind::UnaryOp(_, op) => {
+            ExprKind::UnaryOp(_, op) | ExprKind::Spread(op) => {
                 self.resolve_expression(op)?;
             }
             ExprKind::ArrayIndex(arr, idx) => {

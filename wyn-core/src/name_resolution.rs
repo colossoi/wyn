@@ -149,7 +149,7 @@ pub fn walk_expr<C: ResolveContext>(
             walk_expr(left, context, scope)?;
             walk_expr(right, context, scope)?;
         }
-        ExprKind::UnaryOp(_, value) => walk_expr(value, context, scope)?,
+        ExprKind::UnaryOp(_, value) | ExprKind::Spread(value) => walk_expr(value, context, scope)?,
         ExprKind::Tuple(values) | ExprKind::ArrayLiteral(values) | ExprKind::VecMatLiteral(values) => {
             for value in values {
                 walk_expr(value, context, scope)?;
@@ -815,7 +815,9 @@ fn assign_expr_symbols<T>(
             assign_expr_symbols(left, scope, nr);
             assign_expr_symbols(right, scope, nr);
         }
-        ExprKind::UnaryOp(_, operand) => assign_expr_symbols(operand, scope, nr),
+        ExprKind::UnaryOp(_, operand) | ExprKind::Spread(operand) => {
+            assign_expr_symbols(operand, scope, nr)
+        }
         ExprKind::Tuple(values) | ExprKind::ArrayLiteral(values) | ExprKind::VecMatLiteral(values) => {
             for value in values {
                 assign_expr_symbols(value, scope, nr);
@@ -1032,7 +1034,9 @@ fn walk_resolution<T>(
             walk_resolution(lhs, catalog, scope, nr);
             walk_resolution(rhs, catalog, scope, nr);
         }
-        ExprKind::UnaryOp(_, operand) => walk_resolution(operand, catalog, scope, nr),
+        ExprKind::UnaryOp(_, operand) | ExprKind::Spread(operand) => {
+            walk_resolution(operand, catalog, scope, nr)
+        }
         ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
             for e in exprs {
                 walk_resolution(e, catalog, scope, nr);

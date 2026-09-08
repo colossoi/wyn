@@ -1439,13 +1439,13 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    // Parse range expressions: a..b, a..<b, a..>b, a...b, a..step..end
+    // Parse range expressions: a..b, a..<b, a..>b, a..=b, a..step..end
     fn parse_range_expression(&mut self) -> Result<Expression> {
         let mut start = self.parse_binary_expression()?;
 
         // Check if we have a range operator
         match self.peek() {
-            Some(Token::DotDot) | Some(Token::DotDotLt) | Some(Token::DotDotGt) | Some(Token::Ellipsis) => {
+            Some(Token::DotDot) | Some(Token::DotDotLt) | Some(Token::DotDotGt) | Some(Token::DotDotEq) => {
                 let start_span = start.h.span;
                 self.advance();
                 let first_op = self.tokens[self.current - 1].token.clone();
@@ -1457,7 +1457,7 @@ impl<'a> Parser<'a> {
 
                     // Check if there's another range operator
                     match self.peek() {
-                        Some(Token::DotDotLt) | Some(Token::DotDotGt) | Some(Token::Ellipsis) => {
+                        Some(Token::DotDotLt) | Some(Token::DotDotGt) | Some(Token::DotDotEq) => {
                             self.advance();
                             let second_op = self.tokens[self.current - 1].token.clone();
                             (Some(Box::new(step_expr)), second_op)
@@ -1487,7 +1487,7 @@ impl<'a> Parser<'a> {
 
                 // Determine range kind
                 let kind = match end_op {
-                    Token::Ellipsis => RangeKind::Inclusive,
+                    Token::DotDotEq => RangeKind::Inclusive,
                     Token::DotDotLt => RangeKind::ExclusiveLt,
                     Token::DotDotGt => RangeKind::ExclusiveGt,
                     Token::DotDot => RangeKind::Exclusive,
@@ -2188,6 +2188,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Expansion is a literal element suffix, never a general postfix operator.
+    fn parse_literal_element(&mut self) -> Result<Expression> {
+        let expr = self.parse_expression()?;
+        if self.check(&Token::Ellipsis) {
+            self.advance();
+            let span = expr.h.span.merge(&self.previous_span());
+            Ok(self.node_counter.mk_node(ExprKind::Spread(Box::new(expr)), span))
+        } else {
+            Ok(expr)
+        }
+    }
+
     fn parse_array_literal(&mut self) -> Result<Expression> {
         trace!("parse_array_literal: next token = {:?}", self.peek());
         // Accept either LeftBracket or LeftBracketSpaced
@@ -2199,8 +2211,9 @@ impl<'a> Parser<'a> {
             _ => bail_parse_at!(self.current_span(), "Expected '['"),
         }
 
-        let elements =
-            self.parse_delimited_list(&Token::RightBracket, true, |parser| parser.parse_expression())?;
+        let elements = self.parse_delimited_list(&Token::RightBracket, true, |parser| {
+            parser.parse_literal_element()
+        })?;
         self.expect(Token::RightBracket)?;
         let end_span = self.previous_span();
         let span = start_span.merge(&end_span);
@@ -2215,8 +2228,9 @@ impl<'a> Parser<'a> {
         let start_span = self.current_span();
         self.expect(Token::AtBracket)?;
 
-        let elements =
-            self.parse_delimited_list(&Token::RightBracket, true, |parser| parser.parse_expression())?;
+        let elements = self.parse_delimited_list(&Token::RightBracket, true, |parser| {
+            parser.parse_literal_element()
+        })?;
         self.expect(Token::RightBracket)?;
         let end_span = self.previous_span();
         let span = start_span.merge(&end_span);

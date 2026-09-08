@@ -403,6 +403,7 @@ fn collect_expression(
         }
         ExprKind::FieldAccess(value, _)
         | ExprKind::UnaryOp(_, value)
+        | ExprKind::Spread(value)
         | ExprKind::TypeAscription(value, _)
         | ExprKind::TypeCoercion(value, _) => collect_expression(value, candidates, references),
         ExprKind::BinaryOp(_, left, right) | ExprKind::ArrayIndex(left, right) => {

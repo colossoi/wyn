@@ -450,6 +450,21 @@ size.
 
 #### Vector Constructors
 
+Within vector and array literals, a vector followed by `...` expands its
+components in order. The source is evaluated once. Expansion accepts all
+fixed-width vector types, including multi-component swizzles; it does not
+accept scalars, arrays, or matrices. The expanded elements must have the
+same type, and a resulting vector must still have 2–4 components.
+
+```wyn
+let normal = @[nrm..., 1.0]      -- nrm.x, nrm.y, nrm.z, 1.0
+let planar = @[nrm.yx..., 1.0]  -- nrm.y, nrm.x, 1.0
+let values = [nrm..., 1.0]      -- array of the same four components
+```
+
+Expansion is only allowed as a direct literal element. Inclusive ranges
+use `a..=b`; `a..b` and `a..<b` remain exclusive.
+
 Vectors are constructed with the `@[...]` literal syntax:
 
 ```wyn
@@ -914,8 +929,8 @@ atom        ::= literal
                 | "{" "}"
                 | "{" field ("," field)* [","] "}"
                 | quals "." "(" exp ")"
-                | "[" exp ("," exp)* [","] "]"
-                | "@[" exp ("," exp)* [","] "]"
+                | "[" literal_element ("," literal_element)* [","] "]"
+                | "@[" literal_element ("," literal_element)* [","] "]"
                 | "(" qualsymbol ")"
                 | "(" exp qualsymbol ")"
                 | "(" qualsymbol exp ")"
@@ -930,7 +945,7 @@ exp         ::= atom
                 | constructor [ "(" exp ("," exp)* [","] ")" ]
                 | exp ":" type
                 | exp ":>" type
-                | exp [ ".." exp ] "..." exp
+                | exp [ ".." exp ] "..=" exp
                 | exp [ ".." exp ] "..<" exp
                 | exp [ ".." exp ] "..>" exp
                 | "if" exp "then" exp "else" exp
@@ -944,6 +959,8 @@ exp         ::= atom
                 | exp "with" fieldid ("." fieldid)* "=" exp
                 | exp "with" "." swizzle assign_op exp
                 | "match" exp ("case" pat "->" exp)+
+
+literal_element ::= exp [ "..." ]
 
 callarg     ::= exp | "_"
 
@@ -1093,7 +1110,7 @@ This holds only if `n` is a variable or constant.
 Create an array containing the indicated elements. Each element must
 have the same type and shape.
 
-#### x..y...z
+#### x..y..=z
 Construct a signed integer array whose first element is `x`, which
 proceeds with a stride of `y-x` until reaching `z` (inclusive). The
 `..y` part may be elided, in which case a stride of 1 is used. All
@@ -1108,7 +1125,7 @@ statically:
 
 - `0..<n` has size `n`
 - `0..1..<n` has size `n`
-- `1..2...n` has size `n`
+- `1..2..=n` has size `n`
 
 #### x..y..<z
 Construct a signed integer array whose first element is `x`, which

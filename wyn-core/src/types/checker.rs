@@ -2598,6 +2598,19 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
+    fn infer_literal_element(&mut self, expr: &Expression) -> Result<(Type, usize)> {
+        let ty = self.infer_expression(expr)?;
+        if matches!(expr.kind, ExprKind::Spread(_)) {
+            let ty = ty.apply(&self.context);
+            Ok((
+                ty.elem_type().expect("checked vector").clone(),
+                ty.vec_size().expect("checked width"),
+            ))
+        } else {
+            Ok((ty, 1))
+        }
+    }
+
     fn infer_expression(&mut self, expr: &Expression) -> Result<Type> {
         let ty = match &expr.kind {
             ExprKind::RecordLiteral(fields) => {
@@ -2642,11 +2655,18 @@ impl<'a> TypeChecker<'a> {
                 debug!("Variable lookup failed for '{}' - not in scope, intrinsics, or prelude", full_name);
                 return Err(err_undef_at!(expr.h.span, "{}", full_name));
             }
+            ExprKind::Spread(value) => {
+                let ty = self.infer_expression(value)?.apply(&self.context);
+                if !ty.is_vec() || ty.vec_size().is_none() {
+                    bail_type_at!(expr.h.span, "Literal expansion requires a fixed-width vector, got {}", self.format_type(&ty));
+                }
+                Ok(ty)
+            }
             ExprKind::ArrayLiteral(elements) => {
                 if elements.is_empty() {
                     Err(err_type_at!(expr.h.span, "Cannot infer type of empty array"))
                 } else {
-                    let first_type = self.infer_expression(&elements[0])?;
+                    let (first_type, mut size) = self.infer_literal_element(&elements[0])?;
 
                     // Futhark restriction: arrays of functions are not permitted
                     // Strip uniqueness to catch Unique(Arrow(...)) as well
@@ -2665,7 +2685,8 @@ impl<'a> TypeChecker<'a> {
                     }
 
                     for elem in &elements[1..] {
-                        let elem_type = self.infer_expression(elem)?;
+                        let (elem_type, width) = self.infer_literal_element(elem)?;
+                        size += width;
                         self.context.unify(&elem_type, &first_type).map_err(|_| {
                             err_type_at!(
                                 elem.h.span,
@@ -2678,7 +2699,7 @@ impl<'a> TypeChecker<'a> {
 
                     // Array literals have concrete sizes: [1, 2, 3] has type [3]i32
                     // Variable sizes require explicit type parameters: def f[n]: [n]i32 = ...
-                    Ok(sized_array(elements.len(), first_type))
+                    Ok(sized_array(size, first_type))
                 }
             }
             ExprKind::VecMatLiteral(elements) => {
@@ -2693,7 +2714,7 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 // Infer type of first element to determine if vector or matrix
-                let first_type = self.infer_expression(&elements[0])?;
+                let (first_type, mut size) = self.infer_literal_element(&elements[0])?;
 
                 // Check if first element is an array (matrix) or scalar (vector)
                 let is_matrix = matches!(
@@ -2703,7 +2724,8 @@ impl<'a> TypeChecker<'a> {
 
                 // Unify all element types
                 for elem in &elements[1..] {
-                    let elem_type = self.infer_expression(elem)?;
+                    let (elem_type, width) = self.infer_literal_element(elem)?;
+                        size += width;
                     self.context.unify(&elem_type, &first_type).map_err(|_| {
                         err_type_at!(
                             elem.h.span,
@@ -2737,7 +2759,6 @@ impl<'a> TypeChecker<'a> {
                     }
                 } else {
                     // Vector literal
-                    let size = elements.len();
                     if !(2..=4).contains(&size) {
                         Err(err_type_at!(
                             expr.h.span,

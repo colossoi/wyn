@@ -698,7 +698,7 @@ impl SemanticModules {
             ExprKind::BinaryOp(_, lhs, rhs) => {
                 Self::expr_uses_intrinsic(lhs) || Self::expr_uses_intrinsic(rhs)
             }
-            ExprKind::UnaryOp(_, operand) => Self::expr_uses_intrinsic(operand),
+            ExprKind::UnaryOp(_, operand) | ExprKind::Spread(operand) => Self::expr_uses_intrinsic(operand),
             ExprKind::Tuple(exprs) | ExprKind::ArrayLiteral(exprs) | ExprKind::VecMatLiteral(exprs) => {
                 exprs.iter().any(Self::expr_uses_intrinsic)
             }

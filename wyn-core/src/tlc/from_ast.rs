@@ -397,10 +397,10 @@ impl<'a> Transformer<'a> {
                 }
             },
 
+            ast::ExprKind::Spread(_) => unreachable!("spread outside literal"),
             ast::ExprKind::ArrayLiteral(elements) => {
                 log::debug!("ArrayLiteral with {} elements", elements.len());
-                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
-                self.mk_array_lit(terms, ty, span)
+                self.transform_literal(elements, ty, span, false)
             }
 
             ast::ExprKind::VecMatLiteral(elements) => {
@@ -416,8 +416,7 @@ impl<'a> Transformer<'a> {
                         return self.build_vec_lit_from_terms(&col_terms, ty, span);
                     }
                 }
-                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
-                self.mk_vec_lit(terms, ty, span)
+                self.transform_literal(elements, ty, span, true)
             }
 
             ast::ExprKind::ArrayIndex(array, index) => {
@@ -671,7 +670,7 @@ impl<'a> Transformer<'a> {
                 //   `a..b`   (Exclusive)   → b - a
                 //   `a..<b`  (ExclusiveLt) → b - a
                 //   `a..>b`  (ExclusiveGt) → a - b   (descending half-open)
-                //   `a...b`  (Inclusive)   → b - a + 1
+                //   `a..=b`  (Inclusive)   → b - a + 1
                 let mut len = match range.kind {
                     ast::RangeKind::Exclusive | ast::RangeKind::ExclusiveLt => {
                         self.build_binop(minus.clone(), end.clone(), start.clone(), elem_ty.clone(), span)
@@ -2130,6 +2129,59 @@ impl<'a> Transformer<'a> {
         )
     }
 
+    fn transform_literal(
+        &mut self,
+        elements: &[ast::Expression<ast::HolesResolvedTree>],
+        ty: Type<TypeName>,
+        span: Span,
+        vector: bool,
+    ) -> Term {
+        let has_spread = elements.iter().any(|e| matches!(e.kind, ast::ExprKind::Spread(_)));
+        let mut bindings = Vec::new();
+        let mut parts = Vec::new();
+        for element in elements {
+            let (source, spread) = match &element.kind {
+                ast::ExprKind::Spread(source) => (source.as_ref(), true),
+                _ => (element, false),
+            };
+            let rhs = self.transform_expr(source);
+            if !has_spread {
+                parts.push(rhs);
+                continue;
+            }
+            let id = self.term_ids.next_id();
+            let name = self.fresh(&format!("_w_literal_{}", id));
+            let var = self.mk_term(rhs.ty.clone(), source.h.span, TermKind::Var(VarRef::Symbol(name)));
+            if spread {
+                let elem_ty = rhs.ty.elem_type().expect("checked vector").clone();
+                for slot in 0..rhs.ty.vec_size().expect("checked width") {
+                    parts.push(self.build_proj(&var, slot, &elem_ty, source.h.span));
+                }
+            } else {
+                parts.push(var);
+            }
+            bindings.push((name, rhs));
+        }
+        let mut body = if vector {
+            self.mk_vec_lit(parts, ty.clone(), span)
+        } else {
+            self.mk_array_lit(parts, ty.clone(), span)
+        };
+        for (name, rhs) in bindings.into_iter().rev() {
+            body = self.mk_term(
+                ty.clone(),
+                span,
+                TermKind::Let {
+                    name,
+                    name_ty: rhs.ty.clone(),
+                    rhs: Box::new(rhs),
+                    body: Box::new(body),
+                },
+            );
+        }
+        body
+    }
+
     /// Transform an expression as a vector, converting ArrayLiteral to a VecLit term.
     fn transform_as_vector(
         &mut self,
@@ -2138,10 +2190,7 @@ impl<'a> Transformer<'a> {
     ) -> Term {
         let span = expr.h.span;
         match &expr.kind {
-            ast::ExprKind::ArrayLiteral(elements) => {
-                let terms: Vec<Term> = elements.iter().map(|e| self.transform_expr(e)).collect();
-                self.mk_vec_lit(terms, vec_ty, span)
-            }
+            ast::ExprKind::ArrayLiteral(elements) => self.transform_literal(elements, vec_ty, span, true),
             _ => self.transform_expr(expr),
         }
     }

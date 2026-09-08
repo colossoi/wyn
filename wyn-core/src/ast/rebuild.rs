@@ -45,6 +45,9 @@ where
         ExprKind::Unit => ExprKind::Unit,
         ExprKind::Identifier(value) => ExprKind::Identifier(identifier(source_header, value)?),
         ExprKind::TypeHole(value) => type_hole(source_header, value)?,
+        ExprKind::Spread(value) => ExprKind::Spread(Box::new(expression(
+            *value, header, identifier, binding, type_hole,
+        )?)),
         ExprKind::ArrayLiteral(values) => ExprKind::ArrayLiteral(
             values
                 .into_iter()

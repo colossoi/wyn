@@ -901,6 +901,8 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
     BoolLiteral(bool),
     Unit,
     Identifier(T::Identifier),
+    /// Vector expansion; only valid as a direct literal element.
+    Spread(Box<Expression<T>>),
     ArrayLiteral(Vec<Expression<T>>),
     VecMatLiteral(Vec<Expression<T>>), // @[...] - vector or matrix literal (type inferred from context)
     ArrayIndex(Box<Expression<T>>, Box<Expression<T>>),
@@ -950,7 +952,7 @@ pub enum ExprKind<T: TreeFamily = SourceTree> {
     /// Sum-type constructor application: `#name arg1 arg2 ...`. With
     /// no args (`#none`), `args` is empty.
     Constructor(String, Vec<Expression<T>>),
-    Range(RangeExpr<T>), // range expressions: a..b, a..<b, a..>b, a...b
+    Range(RangeExpr<T>), // range expressions: a..b, a..<b, a..>b, a..=b
     Slice(SliceExpr<T>), // array slicing: a[i:j:s]
     TypeAscription(Box<Expression<T>>, Type), // exp : type
     TypeCoercion(Box<Expression<T>>, Type), // exp :> type

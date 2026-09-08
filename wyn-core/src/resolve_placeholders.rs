@@ -365,7 +365,7 @@ impl PlaceholderResolver {
                 self.resolve_expression(left);
                 self.resolve_expression(right);
             }
-            ast::ExprKind::UnaryOp(_, operand) => {
+            ast::ExprKind::UnaryOp(_, operand) | ast::ExprKind::Spread(operand) => {
                 self.resolve_expression(operand);
             }
             ast::ExprKind::ArrayIndex(array, index) => {

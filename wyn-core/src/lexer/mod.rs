@@ -165,7 +165,8 @@ pub enum Token {
     DotDot,       // .. for ranges
     DotDotLt,     // ..< for ranges
     DotDotGt,     // ..> for ranges
-    Ellipsis,     // ... for ranges
+    DotDotEq,     // ..= for inclusive ranges
+    Ellipsis,     // ... for literal expansion
     Pipe,         // | for pattern matching
     PipeOp,       // |> for pipe operator
     Star,         // * for uniqueness types (prefix)
@@ -290,6 +291,7 @@ fn parse_operator(input: &str) -> IResult<&str, Token> {
             value(Token::TypeHole, tag("???")),
             // Range operators (must come before ..)
             value(Token::Ellipsis, tag("...")),
+            value(Token::DotDotEq, tag("..=")),
             value(Token::DotDotLt, tag("..<")),
             value(Token::DotDotGt, tag("..>")),
             value(Token::DotDot, tag("..")),

@@ -71,7 +71,7 @@ fn find_ident<'a>(expr: &'a Expression, target: &str) -> &'a Expression {
                 .or_else(|| walk(&i.then_branch, target))
                 .or_else(|| walk(&i.else_branch, target)),
             ExprKind::BinaryOp(_, l, r) => walk(l, target).or_else(|| walk(r, target)),
-            ExprKind::UnaryOp(_, e) => walk(e, target),
+            ExprKind::UnaryOp(_, e) | ExprKind::Spread(e) => walk(e, target),
             ExprKind::Tuple(es) | ExprKind::ArrayLiteral(es) | ExprKind::VecMatLiteral(es) => {
                 for e in es {
                     if let Some(r) = walk(e, target) {

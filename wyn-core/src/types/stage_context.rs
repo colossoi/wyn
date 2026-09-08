@@ -155,6 +155,7 @@ impl<'a> Validator<'a> {
                 self.validate_expression(value, context, bindings)
             }
             ExprKind::UnaryOp(_, operand)
+            | ExprKind::Spread(operand)
             | ExprKind::FieldAccess(operand, _)
             | ExprKind::TypeAscription(operand, _)
             | ExprKind::TypeCoercion(operand, _) => self.validate_expression(operand, context, bindings),

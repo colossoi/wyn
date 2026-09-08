@@ -170,7 +170,7 @@ fn collect_expr(expr: &ast::Expression<ast::TypedTree>, index: &mut Navigation) 
             collect_expr(lhs, index);
             collect_expr(rhs, index);
         }
-        UnaryOp(_, operand) => {
+        UnaryOp(_, operand) | Spread(operand) => {
             collect_expr(operand, index);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {

@@ -840,3 +840,6 @@ pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, B
 
 #[cfg(test)]
 mod host_length_tests;
+
+#[cfg(test)]
+mod literal_expansion_tests;

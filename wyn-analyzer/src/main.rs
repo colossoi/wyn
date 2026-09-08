@@ -721,7 +721,7 @@ fn find_in_expr<'a>(
             find_in_expr(lhs, offset, best);
             find_in_expr(rhs, offset, best);
         }
-        UnaryOp(_, operand) => {
+        UnaryOp(_, operand) | Spread(operand) => {
             find_in_expr(operand, offset, best);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
@@ -867,7 +867,7 @@ fn find_application_in_expr(
             }
             return find_application_in_expr(rhs, offset);
         }
-        UnaryOp(_, operand) => {
+        UnaryOp(_, operand) | Spread(operand) => {
             return find_application_in_expr(operand, offset);
         }
         Tuple(elems) | ArrayLiteral(elems) | VecMatLiteral(elems) => {
@@ -1110,8 +1110,8 @@ fn token_type_index(token: &lexer::Token) -> Option<u32> {
 
         Comment(_) => Some(3), // COMMENT
 
-        BinOp(_) | Arrow | Assign | Pipe | PipeOp | Dot | DotDot | DotDotLt | DotDotGt | Ellipsis
-        | Star | Minus | Bang | TypeCoercion | Backslash => Some(4), // OPERATOR
+        BinOp(_) | Arrow | Assign | Pipe | PipeOp | Dot | DotDot | DotDotLt | DotDotGt | DotDotEq
+        | Ellipsis | Star | Minus | Bang | TypeCoercion | Backslash => Some(4), // OPERATOR
 
         Identifier(_) => Some(5), // VARIABLE
 

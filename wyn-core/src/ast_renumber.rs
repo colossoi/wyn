@@ -37,6 +37,7 @@ pub fn clone_expr_fresh_ids(expr: &Expression, nc: &mut NodeCounter) -> Expressi
         ExprKind::Identifier(identifier) => ExprKind::Identifier(identifier.clone()),
         ExprKind::TypeHole(hole) => ExprKind::TypeHole(*hole),
 
+        ExprKind::Spread(value) => ExprKind::Spread(Box::new(clone_expr_fresh_ids(value, nc))),
         ExprKind::ArrayLiteral(es) => {
             ExprKind::ArrayLiteral(es.iter().map(|e| clone_expr_fresh_ids(e, nc)).collect())
         }
