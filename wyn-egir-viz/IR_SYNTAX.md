@@ -352,6 +352,7 @@ Logical size is one of:
 
 - `fixed_bytes(value: n)`;
 - `like_resource(resource: $r, elem_bytes: n, src_elem_bytes: m)`;
+- `host_expression(count: expression, elem_bytes: n)` for a host-known logical capacity;
 - `same_as_dispatch(elem_bytes: n)`; or
 - `unspecified`.
 

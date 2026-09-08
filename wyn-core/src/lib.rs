@@ -837,3 +837,6 @@ pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, B
         LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Serial),
     )?)?)
 }
+
+#[cfg(test)]
+mod host_length_tests;

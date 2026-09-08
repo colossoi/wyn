@@ -43,6 +43,10 @@ where
             .map(|extent| {
                 Ok(match extent {
                     SegExtent::Fixed(value) => SegExtent::Fixed(value),
+                    SegExtent::Host { node, count } => SegExtent::Host {
+                        node: self.nodes[&node],
+                        count,
+                    },
                     SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
                         node: self.nodes[&node],
                         offset,

@@ -1,0 +1,19 @@
+type frame_globals = { resolution: vec3f32 }
+
+def vertex_main(vertex_index: u32, _instance_index: u32, _draw_index: u32) vertex<()> =
+  let x = if vertex_index == 1u32 then 3.0 else -1.0
+  let y = if vertex_index == 2u32 then 3.0 else -1.0 in
+  vertex_output(@[x, y, 0.0, 1.0], ())
+
+def fragment_main(_value: (), _position: vec4f32, _front_facing: bool,
+                  _primitive_index: u32, _sample_index: u32) f32 = 0.5
+
+entry reproduce(frame: frame_globals, scene: render_target<f32>)
+  ([]f32, render_target<f32>) =
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main)
+  let rendered = shade(scene, triangles, fragment_main)
+  let width = i32(frame.resolution.x)
+  let height = i32(frame.resolution.y)
+  let pixels = map(|i| target_load(rendered, @[i % width, i / width], 0u32),
+                   iota(width * height)) in
+  (pixels, rendered)

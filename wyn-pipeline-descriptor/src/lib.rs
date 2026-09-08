@@ -1490,12 +1490,20 @@ fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {
     }
 }
 
+mod host_expression;
+pub use host_expression::{HostBinary, HostExpression, HostScalar};
+
 /// Compile-time sizing policy for a compiler-managed storage buffer whose
 /// length isn't a host-supplied input. The host runtime resolves this to a
 /// byte size when allocating the buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BufferLen {
+    /// Logical element count evaluated from host uniforms, independent of dispatch.
+    HostExpression {
+        count: HostExpression,
+        elem_bytes: u32,
+    },
     /// Minimum bytes the host must allocate. For an *output* binding this
     /// is the bytes the shader will write (so it's also the maximum
     /// useful size). For an *input* binding it's the bytes the shader
@@ -1515,23 +1523,38 @@ pub enum BufferLen {
         elem_bytes: u32,
         src_elem_bytes: u32,
     },
-    /// One `elem_bytes`-sized element per dispatched thread. A parallel
-    /// `map`/`scan` writes exactly one output element per thread, so its
-    /// output length equals the resolved dispatch thread count — which the
-    /// host computes anyway (it covers buffer inputs, static and dynamic
-    /// ranges uniformly). Byte size = `dispatch_threads * elem_bytes`. The
-    /// thread count isn't a `src_bytes` lookup, so this resolves via
-    /// `dispatch_elem_bytes`, not `resolve_bytes`.
+    /// One element per point in the producer's logical dispatch domain,
+    /// before workgroup rounding. Byte size = `logical_count * elem_bytes`.
+    /// A fixed physical workgroup grid alone cannot resolve this policy.
+    /// The host needs the domain metadata, not the padded invocation count.
+    /// This resolves via `dispatch_elem_bytes`, not `resolve_bytes`;
+    /// host-evaluable output lengths use `HostExpression` directly.
     SameAsDispatch {
         elem_bytes: u32,
     },
 }
 
 impl BufferLen {
+    /// Resolve a logical host expression to bytes before allocating its resource.
+    pub fn resolve_host_bytes(
+        &self,
+        uniform: &impl Fn(u32, u32, u32) -> Option<u32>,
+    ) -> Result<u64, String> {
+        match self {
+            Self::HostExpression { count, elem_bytes } => count
+                .element_count(uniform)?
+                .checked_mul(u64::from(*elem_bytes))
+                .ok_or_else(|| "allocation byte size overflow".into()),
+            Self::Fixed { bytes } => Ok(*bytes),
+            _ => Err("buffer length requires a buffer or dispatch context".into()),
+        }
+    }
+
     /// Resolve to a byte size given a lookup of already-allocated buffers'
     /// byte sizes by (set, binding). Returns `None` if a referenced source
-    /// buffer hasn't been sized yet, or for `SameAsDispatch` (which needs the
-    /// resolved dispatch thread count — see `dispatch_elem_bytes`).
+    /// buffer hasn't been sized yet, or when a separate context is needed:
+    /// `SameAsDispatch` uses `dispatch_elem_bytes`; `HostExpression` uses
+    /// `resolve_host_bytes` with the uniform snapshot.
     pub fn resolve_bytes(&self, src_bytes: impl Fn(u32, u32) -> Option<u64>) -> Option<u64> {
         match self {
             BufferLen::Fixed { bytes } => Some(*bytes),
@@ -1544,7 +1567,7 @@ impl BufferLen {
                 let bytes = src_bytes(*set, *binding)?;
                 Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
             }
-            BufferLen::SameAsDispatch { .. } => None,
+            BufferLen::SameAsDispatch { .. } | BufferLen::HostExpression { .. } => None,
         }
     }
 

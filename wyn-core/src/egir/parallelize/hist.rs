@@ -346,7 +346,7 @@ fn fixed_seg_extent(
         egir::types::SegExtent::ResourceLength { view, .. } => {
             fixed_array_extent(&graph.nodes[view.value()].ty)
         }
-        egir::types::SegExtent::PushConstant { .. } => None,
+        egir::types::SegExtent::Host { .. } | egir::types::SegExtent::PushConstant { .. } => None,
     }
 }
 

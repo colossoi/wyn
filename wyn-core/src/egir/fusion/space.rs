@@ -20,6 +20,7 @@ pub(super) fn seg_space_fusable<R: GraphResource>(a: &SegSpace<R>, b: &SegSpace<
 pub(super) fn seg_extent_fusable<R: GraphResource>(a: &SegExtent<R>, b: &SegExtent<R>) -> bool {
     match (a, b) {
         (SegExtent::Fixed(x), SegExtent::Fixed(y)) => x == y,
+        (SegExtent::Host { count: x, .. }, SegExtent::Host { count: y, .. }) => x == y,
         // The node is a re-interned `FuncParam`; the offset is the host
         // dispatch identity (matches `domain_from_space`).
         (SegExtent::PushConstant { offset: x, .. }, SegExtent::PushConstant { offset: y, .. }) => x == y,

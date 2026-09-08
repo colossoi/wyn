@@ -5,6 +5,7 @@
 //! descriptor selection remains the responsibility of target planning.
 
 mod cost;
+mod host_length;
 mod residency;
 
 pub use residency::resolve_residency;
@@ -103,7 +104,8 @@ pub fn plan_logical_resources_with_policy(
 /// Replace pre-allocation descriptor bindings with target-independent logical
 /// resource identities. This is intentionally the first pass allowed to own
 /// or create resources.
-pub fn allocate_semantic_resources(program: Optimized) -> Result<ResidencyDraft, ConvertError> {
+pub fn allocate_semantic_resources(mut program: Optimized) -> Result<ResidencyDraft, ConvertError> {
+    host_length::retain_output_lengths(&mut program)?;
     let mut builder = ResourceAllocationBuilder::default();
     reserve_host_resources(&program, &mut builder)?;
     lower_host_size_policies(&program, &mut builder)?;
@@ -175,6 +177,12 @@ impl ResourceAllocationBuilder {
 
     fn logical_size(&self, length: Option<&BufferLen>) -> Result<HostSizePolicy, ConvertError> {
         Ok(match length {
+            Some(BufferLen::HostExpression { count, elem_bytes }) => {
+                HostSizePolicy::Known(LogicalSize::HostExpression {
+                    count: count.clone(),
+                    elem_bytes: *elem_bytes,
+                })
+            }
             Some(BufferLen::Fixed { bytes }) => HostSizePolicy::Known(LogicalSize::FixedBytes(*bytes)),
             Some(BufferLen::LikeInput {
                 set,
@@ -653,6 +661,10 @@ fn filter_capacity_buffer_len(
     size: &LogicalSize,
 ) -> Result<Option<BufferLen>, String> {
     Ok(match size {
+        LogicalSize::HostExpression { count, elem_bytes } => Some(BufferLen::HostExpression {
+            count: count.clone(),
+            elem_bytes: *elem_bytes,
+        }),
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
         LogicalSize::LikeResource {
             resource,

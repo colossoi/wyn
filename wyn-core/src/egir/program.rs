@@ -211,6 +211,10 @@ pub struct InputSlotId(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogicalSize {
+    HostExpression {
+        count: pipeline_descriptor::HostExpression,
+        elem_bytes: u32,
+    },
     FixedBytes(u64),
     LikeResource {
         resource: ResourceId,
@@ -243,6 +247,32 @@ impl LogicalSize {
             _ => None,
         }) {
             return Some(Self::FixedBytes(count.saturating_mul(u64::from(elem_bytes))));
+        }
+        if let Some(count) = space
+            .dims()
+            .iter()
+            .try_fold(None, |product, dim| {
+                use pipeline_descriptor::{HostBinary, HostExpression, HostScalar};
+                let value = match dim {
+                    SegExtent::Host { count, .. } => count.clone(),
+                    SegExtent::Fixed(n) => HostExpression::Constant {
+                        scalar: HostScalar::I32,
+                        bits: *n,
+                    },
+                    _ => return None,
+                };
+                Some(Some(match product {
+                    None => value,
+                    Some(left) => HostExpression::Binary {
+                        op: HostBinary::Multiply,
+                        left: Box::new(left),
+                        right: Box::new(value),
+                    },
+                }))
+            })
+            .flatten()
+        {
+            return Some(Self::HostExpression { count, elem_bytes });
         }
         Some(match space.dims() {
             [SegExtent::ResourceLength {
@@ -791,6 +821,10 @@ pub fn buffer_len(
 ) -> Option<pipeline_descriptor::BufferLen> {
     use crate::pipeline_descriptor::BufferLen;
     match size? {
+        LogicalSize::HostExpression { count, elem_bytes } => Some(BufferLen::HostExpression {
+            count: count.clone(),
+            elem_bytes: *elem_bytes,
+        }),
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
         LogicalSize::LikeResource {
             resource,

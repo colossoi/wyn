@@ -62,7 +62,8 @@ interface GraphBinding {
 }
 
 interface GraphSize {
-  variant: "fixed_bytes" | "like_input" | "like_resource" | "same_as_dispatch" | "unspecified";
+  expression?: unknown;
+  variant: "host_expression" | "fixed_bytes" | "like_input" | "like_resource" | "same_as_dispatch" | "unspecified";
   bytes?: number;
   binding?: GraphBinding;
   resource?: string;
@@ -161,7 +162,8 @@ interface GraphSoacState {
 }
 
 interface GraphSegExtent {
-  variant: "fixed" | "push_constant" | "resource_length" | "value";
+  expression?: unknown;
+  variant: "host_expression" | "fixed" | "push_constant" | "resource_length" | "value";
   fixed?: number;
   value?: GraphReference;
   binding?: GraphBinding;
@@ -1011,6 +1013,8 @@ function renderVerticalListRows(
 
 function renderSegExtent(extent: GraphSegExtent, names: Names): string {
   switch (extent.variant) {
+    case "host_expression":
+      return variantTerm("host_expression", [irField("count", literalTerm(JSON.stringify(extent.expression)))]);
     case "fixed":
       return variantTerm("fixed", [irField("value", numberTerm(extent.fixed ?? 0))]);
     case "push_constant":
@@ -1292,6 +1296,8 @@ function renderSize(size: GraphSize): string {
         irField("elem_bytes", numberTerm(size.elem_bytes ?? 0)),
         irField("src_elem_bytes", numberTerm(size.src_elem_bytes ?? 0)),
       ]);
+    case "host_expression":
+      return variantTerm("host_expression", [irField("count", literalTerm(JSON.stringify(size.expression))), irField("elem_bytes", numberTerm(size.elem_bytes ?? 0))]);
     case "same_as_dispatch":
       return variantTerm("same_as_dispatch", [irField("elem_bytes", numberTerm(size.elem_bytes ?? 0))]);
     case "unspecified":

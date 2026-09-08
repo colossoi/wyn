@@ -16,12 +16,10 @@ use wyn_core::egir::types::{
 };
 use wyn_core::error::CompilerError;
 use wyn_core::{
-    initialize_frontend, BindingRef, CompilationFailure, CompilerOptions, FunctionId,
-    LoadModulesError, LoweringProfile, ParsedModules, ResourceAccess,
+    initialize_frontend, BindingRef, CompilationFailure, CompilerOptions, FunctionId, LoadModulesError,
+    LoweringProfile, ParsedModules, ResourceAccess,
 };
-use wyn_module_graph::{
-    BuildError, ModulePath, PackageIdentity, PackagePlan,
-};
+use wyn_module_graph::{BuildError, ModulePath, PackageIdentity, PackagePlan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectPass {
@@ -137,8 +135,7 @@ enum SourceModulesError {
 
 fn single_source_input(source: &str) -> Result<PackagePlan, String> {
     let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
-    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0")
-        .map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("egir-viz/root", "v0.0.0").map_err(|error| error.to_string())?;
     Ok(PackagePlan::single_source(identity, root_path, source))
 }
 
@@ -206,6 +203,8 @@ pub struct GraphBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSize {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<wyn_core::pipeline_descriptor::HostExpression>,
     pub variant: String,
     pub bytes: Option<u64>,
     pub binding: Option<GraphBinding>,
@@ -318,6 +317,8 @@ pub struct GraphSoacState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSegExtent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<wyn_core::pipeline_descriptor::HostExpression>,
     pub variant: String,
     pub fixed: Option<u32>,
     pub value: Option<GraphReference>,
@@ -1094,6 +1095,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
         .iter()
         .map(|extent| match extent {
             SegExtent::Fixed(value) => GraphSegExtent {
+                expression: None,
                 variant: "fixed".to_string(),
                 fixed: Some(*value),
                 value: None,
@@ -1103,6 +1105,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
                 elem_bytes: None,
             },
             SegExtent::PushConstant { node, offset } => GraphSegExtent {
+                expression: None,
                 variant: "push_constant".to_string(),
                 fixed: None,
                 value: Some(value_reference(group, *node)),
@@ -1118,6 +1121,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
             } => {
                 let (binding, resource) = P::graph_resource(resource);
                 GraphSegExtent {
+                    expression: None,
                     variant: "resource_length".to_string(),
                     fixed: None,
                     value: Some(view_reference(group, *view)),
@@ -1127,7 +1131,18 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
                     elem_bytes: Some(*elem_bytes),
                 }
             }
+            SegExtent::Host { node, count } => GraphSegExtent {
+                expression: Some(count.clone()),
+                variant: "host_expression".into(),
+                fixed: None,
+                value: Some(value_reference(group, *node)),
+                binding: None,
+                resource: None,
+                offset: None,
+                elem_bytes: None,
+            },
             SegExtent::Value(value) => GraphSegExtent {
+                expression: None,
                 variant: "value".to_string(),
                 fixed: None,
                 value: Some(value_reference(group, *value)),
@@ -1422,7 +1437,17 @@ fn resource_name(resource: SemanticResourceRef) -> String {
 
 fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
     match size {
+        Some(LogicalSize::HostExpression { count, elem_bytes }) => GraphSize {
+            expression: Some(count.clone()),
+            variant: "host_expression".into(),
+            bytes: None,
+            binding: None,
+            resource: None,
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: None,
+        },
         Some(LogicalSize::FixedBytes(bytes)) => GraphSize {
+            expression: None,
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
             binding: None,
@@ -1435,6 +1460,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             elem_bytes,
             src_elem_bytes,
         }) => GraphSize {
+            expression: None,
             variant: "like_resource".to_string(),
             bytes: None,
             binding: None,
@@ -1443,6 +1469,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             src_elem_bytes: Some(*src_elem_bytes),
         },
         Some(LogicalSize::SameAsDispatch { elem_bytes }) => GraphSize {
+            expression: None,
             variant: "same_as_dispatch".to_string(),
             bytes: None,
             binding: None,
@@ -1451,6 +1478,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             src_elem_bytes: None,
         },
         None => GraphSize {
+            expression: None,
             variant: "unspecified".to_string(),
             bytes: None,
             binding: None,
@@ -1529,7 +1557,17 @@ fn graph_logical_resources(resources: &LogicalResourceArena) -> Vec<GraphResourc
 fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphSize {
     use wyn_core::pipeline_descriptor::BufferLen;
     match length {
+        BufferLen::HostExpression { count, elem_bytes } => GraphSize {
+            expression: Some(count.clone()),
+            variant: "host_expression".into(),
+            bytes: None,
+            binding: None,
+            resource: None,
+            elem_bytes: Some(*elem_bytes),
+            src_elem_bytes: None,
+        },
         BufferLen::Fixed { bytes } => GraphSize {
+            expression: None,
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
             binding: None,
@@ -1543,6 +1581,7 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
             elem_bytes,
             src_elem_bytes,
         } => GraphSize {
+            expression: None,
             variant: "like_input".to_string(),
             bytes: None,
             binding: Some(GraphBinding {
@@ -1554,6 +1593,7 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
             src_elem_bytes: Some(*src_elem_bytes),
         },
         BufferLen::SameAsDispatch { elem_bytes } => GraphSize {
+            expression: None,
             variant: "same_as_dispatch".to_string(),
             bytes: None,
             binding: None,
@@ -1916,6 +1956,7 @@ fn snapshot_physical_program<Tag>(
                     role: storage_role(declaration.role),
                     elem_ty: wyn_core::diags::format_type(&declaration.elem_ty),
                     size: declaration.length.as_ref().map(graph_buffer_len).unwrap_or(GraphSize {
+                        expression: None,
                         variant: "unspecified".to_string(),
                         bytes: None,
                         binding: None,

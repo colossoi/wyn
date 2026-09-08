@@ -52,7 +52,7 @@ pub(super) fn emit_seg_space_dimensions(
             SegExtent::Fixed(count) => {
                 graph.intern_pure(PureOp::Int(count.to_string()), smallvec![], i32_ty.clone(), None)
             }
-            SegExtent::PushConstant { node, .. } => *node,
+            SegExtent::Host { node, .. } | SegExtent::PushConstant { node, .. } => *node,
             SegExtent::Value(node) => {
                 let ty = graph.nodes[*node].ty.clone();
                 if is_plain_array_source(&ty) {

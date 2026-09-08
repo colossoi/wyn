@@ -1847,6 +1847,12 @@ pub enum SideEffectKind<P: Family> {
 /// One concrete dimension of a segmented iteration space.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SegExtent<R> {
+    /// A shader scalar whose logical extent is also evaluable by the host.
+    /// Keep the node for serial execution and the expression for allocation.
+    Host {
+        node: ValueId,
+        count: crate::pipeline_descriptor::HostExpression,
+    },
     Fixed(u32),
     PushConstant {
         node: ValueId,
@@ -1891,7 +1897,9 @@ impl<R> SegSpace<R> {
 
     pub(crate) fn referenced_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
         self.dims.iter().filter_map(|extent| match extent {
-            SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => Some(*node),
+            SegExtent::Host { node, .. }
+            | SegExtent::PushConstant { node, .. }
+            | SegExtent::Value(node) => Some(*node),
             SegExtent::ResourceLength { view, .. } => Some(view.value()),
             SegExtent::Fixed(_) => None,
         })
@@ -1901,7 +1909,9 @@ impl<R> SegSpace<R> {
         self.dims
             .iter_mut()
             .filter_map(|extent| match extent {
-                SegExtent::PushConstant { node, .. } | SegExtent::Value(node) => Some(node),
+                SegExtent::Host { node, .. }
+                | SegExtent::PushConstant { node, .. }
+                | SegExtent::Value(node) => Some(node),
                 SegExtent::ResourceLength { view, .. } => Some(&mut view.0),
                 SegExtent::Fixed(_) => None,
             })
@@ -1915,7 +1925,11 @@ impl<R: Copy> SegSpace<R> {
     pub(crate) fn replace_reference(&mut self, old: ValueId, new: ValueId, resource: R) {
         for extent in &mut self.dims {
             match extent {
-                SegExtent::PushConstant { node, .. } | SegExtent::Value(node) if *node == old => {
+                SegExtent::Host { node, .. }
+                | SegExtent::PushConstant { node, .. }
+                | SegExtent::Value(node)
+                    if *node == old =>
+                {
                     *node = new;
                 }
                 SegExtent::ResourceLength {
