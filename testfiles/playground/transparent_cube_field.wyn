@@ -1,0 +1,77 @@
+-- Transparent Cube Field
+-- Original: "Transparent Cube Field" by Shane
+-- https://www.shadertoy.com/view/ll2SRy
+
+open f32
+
+def hash33(p: vec3f32) vec3f32 =
+  let n = sin(dot(p, @[7.0, 157.0, 113.0])) in
+  @[fract(2097152.0 * n), fract(262144.0 * n), fract(32768.0 * n)]
+
+def cube_field(p: vec3f32) f32 =
+  -- Offset the repeated cubes to break up the grid.
+  let o = hash33(@[floor(p.x), floor(p.y), floor(p.z)]) * 0.2 in
+  let q = p + o in
+  let local = @[fract(q.x) - 0.5, fract(q.y) - 0.5, fract(q.z) - 0.5] in
+  let r = dot(local, local) - 0.21 in
+  max(max(abs(local.x), abs(local.y)), abs(local.z)) * 0.95
+    + r * 0.05 - 0.21
+
+-- Equivalent to GLSL mat2(cs, si, -si, cs) * p.
+def rotate_ray(p: vec2f32, cs: f32, si: f32) vec2f32 =
+  @[cs * p.x - si * p.y, si * p.x + cs * p.y]
+
+def color_pattern(rd: vec3f32, scale: f32) f32 =
+  let a = rd.yzx * scale in
+  let b = rd.zxy * scale in
+  dot(@[sin(a.x + sin(b.x)),
+        sin(a.y + sin(b.y)),
+        sin(a.z + sin(b.z))], @[0.1666, 0.1666, 0.1666])
+
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  -- Match Shadertoy's bottom-left coordinates, as in the reference port.
+  let res = resolution.xy in
+  let coord = @[frag_coord.x, res.y - frag_coord.y] in
+  let uv = (coord - res * 0.5) / res.y in
+  let raw_rd = @[uv.x, uv.y, (1.0 - dot(uv, uv) * 0.5) * 0.5] in
+  let unit_rd = raw_rd / magnitude(raw_rd) in
+  let ro = @[0.0, 0.0, time * 3.0] in
+
+  -- Apply the XZ rotation first, then the XY rotation.
+  let cs = cos(time * 0.375) in
+  let si = sin(time * 0.375) in
+  let rd_xz = unit_rd with .xz = rotate_ray(unit_rd.xz, cs, si) in
+  let rd_xy = rd_xz with .xy = rotate_ray(rd_xz.xy, cs, si) in
+  let jitter = hash33(rd_xy) in
+  let rd = @[rd_xy.x * (0.985 + jitter.x * 0.03),
+             rd_xy.y * (0.985 + jitter.y * 0.03),
+             rd_xy.z * (0.985 + jitter.z * 0.03)] in
+
+  let threshold = 0.035 in
+  -- Every channel accumulates the same value, so one scalar suffices.
+  let result = loop (i, t, layers, accum) = (0, 0.0, 0.0, 0.0)
+    while i < 56 do
+      if layers > 15.0 || accum > 1.0 || t > 10.0 then
+        (56, t, layers, accum)
+      else
+        let d = cube_field(ro + rd * t) in
+        let a = (threshold - abs(d) * 15.0 / 16.0) / threshold in
+        let contribution = if a > 0.0 then
+          a * a * (3.0 - 2.0 * a) / (1.0 + t * t * 0.25) * 0.2
+          else 0.0 in
+        let next_layers = if a > 0.0 then layers + 1.0 else layers in
+        (i + 1, t + max(abs(d) * 0.7, threshold * 1.5),
+         next_layers, accum + contribution)
+  in
+
+  let gray = max(result.3, 0.0) in
+  let col = @[gray, gray, gray] in
+  let orange = @[gray * 1.5, pow(gray, 2.5), pow(gray, 12.0)] in
+  let orange_mix = color_pattern(rd, 8.0) + 0.4 in
+  let warm = col * (1.0 - orange_mix) + orange * orange_mix in
+  let green = @[warm.x * warm.x * 0.85, warm.x, warm.x * warm.x * 0.3] in
+  let green_mix = color_pattern(rd, 4.0) + 0.25 in
+  let final_col = warm * (1.0 - green_mix) + green * green_mix in
+  @[max(final_col.x, 0.0), max(final_col.y, 0.0), max(final_col.z, 0.0), 1.0]
