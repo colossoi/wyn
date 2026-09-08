@@ -134,7 +134,7 @@ def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<
     @[0.0, 0.0])
 
 def fragment_main(iTime: f32,
-                  fragment: fragment_invocation<vec2f32>) vec4f32 =
+                  fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
   let samples = map(|i: i32| f32.cos(iTime + f32.i32(i)), 0..<64) in
   let breath = reduce(|a: f32, b: f32| a + b, 0.0, samples) in
   @[breath, 0.0, 0.0, 1.0]
@@ -142,7 +142,7 @@ def fragment_main(iTime: f32,
 entry image(iTime: f32,
             screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
-  shade(screen, raster, |fragment| fragment_main(iTime, fragment))
+  shade(screen, raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(iTime, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index))
 "#;
     let program = compile_to_ssa(src);
     let iface = program_interface(&program);

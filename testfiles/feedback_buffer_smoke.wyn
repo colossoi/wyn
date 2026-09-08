@@ -25,5 +25,5 @@ entry feedback_buffer_smoke(
   let screen' = shade(
     screen,
     covered,
-    |fragment| frag_main(fragment.position)) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| frag_main(fragment_position)) in
   (next, screen')

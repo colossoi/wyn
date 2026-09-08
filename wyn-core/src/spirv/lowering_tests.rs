@@ -479,7 +479,7 @@ def triangle_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) =
     @[1.0, 1.0, 0.0, 1.0],
     ())
 
-def resolve(p: painted, _fragment: fragment_invocation<()>) =
+def resolve(p: painted, _fragment_value: (), _fragment_position: vec4f32, _fragment_front_facing: bool, _fragment_primitive_index: u32, _fragment_sample_index: u32) =
   let value = 0.0 in
   @[value, value, value, 1.0]
 
@@ -489,7 +489,7 @@ entry reproduce(values: []f32, surface: render_target<vec4f32>)
   let painted_scene = { values = values }
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32), triangle_vertex)
-  let surface1 = shade(surface, raster, resolve(painted_scene, _)) in
+  let surface1 = shade(surface, raster, resolve(painted_scene, _, _, _, _, _)) in
   (values_next, surface1)
 "#,
     )

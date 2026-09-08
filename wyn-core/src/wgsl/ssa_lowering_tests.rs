@@ -393,7 +393,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
       else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment| @[1.0, 0.5, 0.0, 1.0])
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[1.0, 0.5, 0.0, 1.0])
 "#,
     )
     .expect("compile");
@@ -417,7 +417,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       verts[i32(vertex_index)],
       @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment| @[1.0, 1.0, 1.0, 1.0])
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[1.0, 1.0, 1.0, 1.0])
 "#,
     )
     .expect("compile");
@@ -436,7 +436,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0])) in
   shade(target, covered,
-    |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x, fragment_value.y, fragment_value.z, 1.0])
 "#,
     )
     .expect("compile");
@@ -569,7 +569,7 @@ entry frame(i_time: f32,
     |vertex_index, instance_index, draw_index| vertex_output(
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
-  shade(target, covered, |fragment| @[i_time, 0.0, 0.0, 1.0])
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[i_time, 0.0, 0.0, 1.0])
 "#,
     )
     .expect("compile");
@@ -730,7 +730,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered,
-    |fragment| brighten(@[0.1, 0.2, 0.3, 1.0], 0.5))
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| brighten(@[0.1, 0.2, 0.3, 1.0], 0.5))
 "#,
     )
     .expect("compile");
@@ -1027,7 +1027,7 @@ entry frame(c: block,
       @[0.0, 0.0, 0.0, 1.0],
       @[0.0, 0.0, 0.0])) in
   shade(target, covered,
-    |fragment| @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[c.tint.x, c.tint.y, c.radius + c.center.x, 1.0])
 "#,
     )
     .expect("compile");

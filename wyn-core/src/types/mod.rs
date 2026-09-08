@@ -349,11 +349,8 @@ pub enum TypeName {
     /// type. The token is spellable in source as `raster<V>` but has no
     /// value constructors or runtime representation.
     Raster,
-    /// Platform-supplied indices for one requested vertex. Nullary and opaque.
     /// Vertex-stage result carrying clip position plus payload `V`.
     Vertex,
-    /// Platform-supplied fragment data carrying interpolated payload `V`.
-    FragmentInvocation,
     /// Opaque direct, indexed, or indirect draw description.
     Draw,
     /// Opaque render target with color shape `C` and one hidden static
@@ -435,7 +432,6 @@ impl std::fmt::Display for TypeName {
             TypeName::StorageTexture => write!(f, "storage_image"),
             TypeName::Raster => write!(f, "raster"),
             TypeName::Vertex => write!(f, "vertex"),
-            TypeName::FragmentInvocation => write!(f, "fragment_invocation"),
             TypeName::Draw => write!(f, "draw"),
             TypeName::RenderTarget => write!(f, "render_target"),
             TypeName::FragmentOutput => write!(f, "fragment_output"),
@@ -508,7 +504,6 @@ impl polytype::Name for TypeName {
             TypeName::StorageTexture => "storage_image".to_string(),
             TypeName::Raster => "raster".to_string(),
             TypeName::Vertex => "vertex".to_string(),
-            TypeName::FragmentInvocation => "fragment_invocation".to_string(),
             TypeName::Draw => "draw".to_string(),
             TypeName::RenderTarget => "render_target".to_string(),
             TypeName::FragmentOutput => "fragment_output".to_string(),
@@ -1734,10 +1729,7 @@ pub fn format_type(ty: &Type) -> String {
         Type::Constructed(name, args)
             if matches!(
                 name,
-                TypeName::Raster
-                    | TypeName::Vertex
-                    | TypeName::FragmentInvocation
-                    | TypeName::FragmentOutput
+                TypeName::Raster | TypeName::Vertex | TypeName::FragmentOutput
             ) && args.len() == 1 =>
         {
             format!("{}<{}>", name, format_type(&args[0]))

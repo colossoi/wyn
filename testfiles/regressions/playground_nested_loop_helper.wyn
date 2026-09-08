@@ -15,7 +15,7 @@ def sum(ys: [2]vec2f32) f32 =
     (i + 1, acc + ys[edge.x].x)
   in acc
 
-def main_image(fragment: fragment_invocation<vec2f32>) vec4f32 =
+def main_image(fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
   let (_, acc) = loop (i, acc) = (0i32, 0.0f32) while i < 2 do
     let ys = map(|v: vec2f32| v * 2.0, xs) in
     (i + 1, acc + sum(ys))

@@ -868,7 +868,6 @@ impl<'a> Parser<'a> {
                 Type::Constructed(TypeName::Named(_), base_args)
                 | Type::Constructed(TypeName::Raster, base_args)
                 | Type::Constructed(TypeName::Vertex, base_args)
-                | Type::Constructed(TypeName::FragmentInvocation, base_args)
                 | Type::Constructed(TypeName::FragmentOutput, base_args)
                 | Type::Constructed(TypeName::RenderTarget, base_args)
                     if base_args.is_empty() =>
@@ -1247,7 +1246,6 @@ impl<'a> Parser<'a> {
                     "sampler" => TypeName::Sampler,
                     "raster" if self.graphics => TypeName::Raster,
                     "vertex" if self.graphics => TypeName::Vertex,
-                    "fragment_invocation" if self.graphics => TypeName::FragmentInvocation,
                     "fragment_output" if self.graphics => TypeName::FragmentOutput,
                     "draw" if self.graphics => TypeName::Draw,
                     "render_target" if self.graphics => TypeName::RenderTarget,

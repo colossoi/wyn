@@ -314,7 +314,7 @@ entry frame(xs: []f32,
   let mapped = map(|x: f32| x + 1.0, xs) in
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   let screen1 = shade(screen, raster,
-    |fragment| @[mapped[0], fragment.value.x, 0.0, 1.0]) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[mapped[0], fragment_value.x, 0.0, 1.0]) in
   (mapped, screen1)
 "#;
 
@@ -3575,7 +3575,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("unified graphics entry reaches the stage-extraction boundary");
@@ -3605,7 +3605,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("unified graphics entry lowers through stage extraction");
@@ -3651,8 +3651,8 @@ def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<
     else @[-1.0, 3.0, 0.0, 1.0],
     { instance = instance_index })
 
-def fragment_main(fragment: fragment_invocation<varying>) vec4f32 =
-  let value = f32(fragment.value.instance) in
+def fragment_main(fragment_value: varying, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let value = f32(fragment_value.instance) in
   @[value, value, value, 1.0]
 
 entry reproduce(surface: render_target<vec4f32>) render_target<vec4f32> =
@@ -3690,7 +3690,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("ordinary value bindings do not change the root operation plan");
@@ -3728,7 +3728,7 @@ entry render_target_record_helper(scene: render_target<f32>,
     |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
   let value = { scene = scene } in
   shade(screen, raster,
-    |_| read_scene(value.scene))
+    |_, _, _, _, _| read_scene(value.scene))
 "#,
             )
             .expect("a render target retains its identity through a record projection and helper");
@@ -3754,7 +3754,7 @@ def read_scene(value: inputs) f32 =
 def lighting(value: inputs) f32 =
   read_scene(value)
 
-def resolve(value: inputs, fragment: fragment_invocation<()>) f32 =
+def resolve(value: inputs, fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) f32 =
   lighting(value)
 
 entry reproduce(scene: render_target<f32>,
@@ -3766,7 +3766,7 @@ entry reproduce(scene: render_target<f32>,
       else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       ())) in
-  shade(surface, raster, resolve({ scene = scene }, _))
+  shade(surface, raster, resolve({ scene = scene }, _, _, _, _, _))
 "#,
             )
             .expect("a render target remains visible through a record-valued helper chain");
@@ -3789,17 +3789,17 @@ type inputs = {
   work: []f32,
 }
 
-def read_inputs(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
-  let xy = @[i32(fragment.position.x), i32(fragment.position.y)]
+def read_inputs(value: inputs, fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let xy = @[i32(fragment_position.x), i32(fragment_position.y)]
   let original = target_load(value.scene, xy, 0u32)
-  let filtered = value.work[i32(fragment.position.x) % length(value.work)] in
+  let filtered = value.work[i32(fragment_position.x) % length(value.work)] in
   @[original, filtered, 0.0, 1.0]
 
-def lighting(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
-  read_inputs(value, fragment)
+def lighting(value: inputs, fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  read_inputs(value, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index)
 
-def resolve(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
-  lighting(value, fragment)
+def resolve(value: inputs, fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  lighting(value, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index)
 
 entry reproduce(coords: []vec2i32, scene: render_target<f32>,
                 surface: render_target<vec4f32>)
@@ -3816,7 +3816,7 @@ entry reproduce(coords: []vec2i32, scene: render_target<f32>,
       ()))
   let surface1 = shade(
     surface, raster,
-    resolve({ scene = scene, work = work }, _)) in
+    resolve({ scene = scene, work = work }, _, _, _, _, _)) in
   (work, surface1)
 "#,
             )
@@ -3845,7 +3845,7 @@ def read_inputs(value: inputs) vec4f32 =
     0.0,
     1.0]
 
-def resolve(value: inputs, fragment: fragment_invocation<()>) vec4f32 =
+def resolve(value: inputs, fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
   read_inputs(value)
 
 entry reproduce(left: render_target<f32>,
@@ -3858,7 +3858,7 @@ entry reproduce(left: render_target<f32>,
       else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       ())) in
-  shade(surface, raster, resolve({ left = left, right = right }, _))
+  shade(surface, raster, resolve({ left = left, right = right }, _, _, _, _, _))
 "#;
             let lowered = compile_thru_spirv(source)
                 .expect("equal-colored render targets retain separate static identities");
@@ -3905,7 +3905,7 @@ entry unused_render_target_record(
     direct_draw(3u32, 1u32),
     |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
   shade(output, raster,
-    |_| let unused = { scene = scene } in 1.0)
+    |_, _, _, _, _| let unused = { scene = scene } in 1.0)
 "#,
             )
             .expect("an unused record must not retain a render-target stage capture");
@@ -3934,7 +3934,7 @@ entry walls(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("named and cast integer constants are exposed before graphics stage extraction");
@@ -3971,7 +3971,7 @@ entry reproduce(target: render_target<f32>) render_target<f32> =
     direct_draw(3u32, u32(INSTANCE_COUNT)),
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0], ())) in
-  shade(target, raster, |fragment| fragment.position.z)
+  shade(target, raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_position.z)
 "#,
     )
     .expect("partial evaluation resolves float-derived draw counts before stage extraction");
@@ -4005,7 +4005,7 @@ def fullscreen(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<(
   let y = if vertex_index == 1u32 then 3.0 else -1.0 in
   vertex_output(@[x, y, 0.0, 1.0], ())
 
-def white(fragment: fragment_invocation<()>) vec4f32 =
+def white(fragment_value: (), fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
   @[1.0, 1.0, 1.0, 1.0]
 
 entry nested_record_output(values: []f32, target: render_target<vec4f32>)
@@ -4040,8 +4040,8 @@ entry frame(points: []vec2f32,
   let target' = shade(
     target,
     covered,
-    |fragment| @[fragment.value.x,
-                  fragment.value.y,
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x,
+                  fragment_value.y,
                   0.0,
                   1.0]) in
   (updated, target')
@@ -4111,7 +4111,7 @@ def invoke(draw_call: draw, callback: u32 -> u32 -> u32 -> vertex<()>) raster<()
   rasterize_{topology}{suffix}({state} draw_call, callback)
 entry indices(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = invoke(direct_draw_from(3u32, 2u32, 7u32, 11u32), forward) in
-  shade(target, covered, |_| @[1.0, 1.0, 1.0, 1.0])
+  shade(target, covered, |_, _, _, _, _| @[1.0, 1.0, 1.0, 1.0])
 "#,
                     x = lanes[0],
                     y = lanes[1],
@@ -4182,6 +4182,85 @@ entry indices(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 #[test]
+fn shade_callbacks_use_five_positional_arguments() {
+    for with_state in [false, true] {
+        for wrapped_output in [false, true] {
+            let shade = if with_state { "shade_with" } else { "shade" };
+            let state = if with_state {
+                "{ depth_test = #disabled, depth_write = false, blend = #replace, color_write = true },"
+            } else {
+                ""
+            };
+            let result_ty = if wrapped_output { "fragment_output<vec4f32>" } else { "vec4f32" };
+            // Using each input independently detects positional shifts when
+            // preceding arguments are unused, including the two u32 inputs.
+            for (active, expression) in [
+                "v",
+                "p.x",
+                "if f then 1.0 else 0.0",
+                "f32(primitive)",
+                "f32(sample)",
+                "0.0",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let color = format!("@[{expression}, 0.0, 0.0, 1.0]");
+                let output = if wrapped_output { format!("#color({color})") } else { color };
+                let source = format!(
+                    r#"
+def color(_capture: f32, v: f32, p: vec4f32, f: bool, primitive: u32, sample: u32) {result_ty} =
+  {output}
+entry indices(target: render_target<vec4f32>) render_target<vec4f32> =
+  let covered = rasterize_triangles(direct_draw(3u32, 1u32),
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], 0.75)) in
+  {shade}({state} target, covered, color(7.0, _, _, _, _, _))
+"#
+                );
+                let program = compile_thru_tlc(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
+                let entry = program
+                    .defs
+                    .iter()
+                    .find_map(|definition| match &definition.meta {
+                        tlc::DefMeta::EntryPoint(entry)
+                            if entry.declaration.entry_kind == interface::EntryKind::Fragment =>
+                        {
+                            Some(entry)
+                        }
+                        _ => None,
+                    })
+                    .expect("fragment stage");
+                let expected = [
+                    spirv::BuiltIn::FragCoord,
+                    spirv::BuiltIn::FrontFacing,
+                    spirv::BuiltIn::PrimitiveId,
+                    spirv::BuiltIn::SampleId,
+                ];
+                for (index, builtin) in expected.into_iter().enumerate() {
+                    let present =
+                        entry.declaration.params.iter().any(|param| {
+                            param.attributes.contains(&interface::Attribute::BuiltIn(builtin))
+                        });
+                    assert_eq!(
+                        present,
+                        active == index + 1 || (wrapped_output && index == 0),
+                        "{builtin:?}: {source}"
+                    );
+                }
+                let varying = entry
+                    .declaration
+                    .params
+                    .iter()
+                    .any(|param| param.attributes.contains(&interface::Attribute::Varying(0)));
+                assert_eq!(varying, active == 0, "payload: {source}");
+                let lowered = compile_thru_spirv(&source).expect("positional fragment callback lowers");
+                assert_naga_accepts_spirv(&lowered.spirv);
+            }
+        }
+    }
+}
+
+#[test]
 fn unified_invocation_fields_compile_through_spirv() {
     let lowered = compile_thru_spirv(
         r#"
@@ -4194,12 +4273,12 @@ entry fields(target: render_target<vec4f32>) render_target<vec4f32> =
       let y = if index == 0u32 then -1.0 else if index == 1u32 then -1.0 else 3.0 in
       vertex_output(@[x, y, 0.0, 1.0], @[x, y])) in
   shade(target, covered,
-    |fragment|
-      let sample = f32(fragment.sample_index) in
-      let primitive = f32(fragment.primitive_index) in
-      let face = if fragment.front_facing then 1.0 else 0.0 in
-      @[fragment.value.x + fragment.position.x * 0.0,
-        fragment.value.y, primitive + sample, face])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      let sample = f32(fragment_sample_index) in
+      let primitive = f32(fragment_primitive_index) in
+      let face = if fragment_front_facing then 1.0 else 0.0 in
+      @[fragment_value.x + fragment_position.x * 0.0,
+        fragment_value.y, primitive + sample, face])
 "#,
     )
     .expect("all unified invocation fields lower through SPIR-V");
@@ -4216,8 +4295,8 @@ fn nonuniform_fragment_derivative_is_rejected() {
         r#"
 open f32
 
-def divergent_color(fragment: fragment_invocation<f32>) vec4f32 =
-  let x = fragment.position.x in
+def divergent_color(fragment_value: f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let x = fragment_position.x in
   let width = if x > 0.5 then fwidth(x) else 0.0 in
   @[width, 0.0, 0.0, 1.0]
 
@@ -4256,10 +4335,10 @@ entry triangle(points: []vec2f32, scale: f32,
         @[p.x * scale, p.y * scale, 0.0, 1.0],
         @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered,
-    |fragment| @[fragment.value.x * scale,
-                  fragment.value.y,
-                  fragment.value.z,
-                  fragment.value.w])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x * scale,
+                  fragment_value.y,
+                  fragment_value.z,
+                  fragment_value.w])
 "#,
     )
     .expect("unified callback captures receive compiler-assigned interfaces");
@@ -4301,7 +4380,7 @@ entry reproduce(frame: globals, target: render_target<vec4f32>)
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32), triangle_vertex) in
   shade(target, covered,
-    |_fragment| @[values[0], values[0], values[0], 1.0])
+    |_fragment_value, _fragment_position, _fragment_front_facing, _fragment_primitive_index, _fragment_sample_index| @[values[0], values[0], values[0], 1.0])
 "#,
     )
     .expect("captured uniform in a generated graphics compute stage lowers");
@@ -4350,9 +4429,9 @@ entry textured(tex: texture2d, sampling: sampler,
         { uv = position.xy + @[0.5, 0.5],
           tint = @[1.0, 0.8, 0.6, 1.0] })) in
   shade(target, covered,
-    |fragment|
-      texture_sample(tex, sampling, fragment.value.uv, 0.0)
-        * fragment.value.tint)
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      texture_sample(tex, sampling, fragment_value.uv, 0.0)
+        * fragment_value.tint)
 "#,
     )
     .expect("structured varyings and sampled resources lower through unified callbacks");
@@ -4381,8 +4460,8 @@ def make_vertex(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<
     else @[0.0, 0.5, 0.0, 1.0],
     @[0.2, 0.6, 1.0, 1.0])
 
-def make_fragment(fragment: fragment_invocation<vec4f32>) vec4f32 =
-  fragment.value
+def make_fragment(fragment_value: vec4f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  fragment_value
 
 entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(direct_draw(3u32, 1u32), make_vertex) in
@@ -4409,12 +4488,12 @@ entry layered(target: render_target<vec4f32>) render_target<vec4f32> =
     direct_draw(3u32, 1u32), triangle_vertex(-0.25, _, _, _)) in
   let target1 = shade(
     target, background,
-    |fragment| fragment.value * @[0.2, 0.4, 0.8, 1.0]) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value * @[0.2, 0.4, 0.8, 1.0]) in
   let foreground = rasterize_triangles(
     direct_draw(3u32, 1u32), triangle_vertex(0.25, _, _, _)) in
   shade(
     target1, foreground,
-    |fragment| fragment.value * @[0.9, 0.3, 0.1, 1.0])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value * @[0.9, 0.3, 0.1, 1.0])
 "#,
     )
     .expect("successive unified draws lower through stage extraction");
@@ -4457,7 +4536,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  shade(target, pass_raster(covered), |fragment| fragment.value)
+  shade(target, pass_raster(covered), |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#;
     compile_to_spirv(source).expect("an ordinary helper may transfer a raster value");
 }
@@ -4482,7 +4561,7 @@ entry render_target_filter_helper(source: render_target<f32>) render_target<f32>
     direct_draw(3u32, 1u32),
     |_, _, _| vertex_output(
       @[f32(length(visible.instances)) * 0.0, 0.0, 0.0, 1.0], ())) in
-  shade(source, raster, |_| 1.0)
+  shade(source, raster, |_, _, _, _, _| 1.0)
 "#;
             compile_thru_spirv(source)
                 .expect("nested helpers must expose render-target reads before compute-stage extraction");
@@ -4499,8 +4578,8 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  let first = shade(target, covered, |fragment| fragment.value) in
-  shade(first, covered, |fragment| fragment.value)
+  let first = shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
+  shade(first, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#;
     let error = compile_thru_tlc(source).expect_err("a raster value is consumed by shade");
     assert!(
@@ -4516,11 +4595,11 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
   let first_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  let first = shade(target, first_raster, |fragment| fragment.value) in
+  let first = shade(target, first_raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   let second_raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  let second = shade(target, second_raster, |fragment| fragment.value) in
+  let second = shade(target, second_raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   second
 "#;
     let error = compile_thru_tlc(source).expect_err("shade consumes its render target");
@@ -4538,7 +4617,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
-    |fragment| target_load(target, @[0, 0], fragment.sample_index))
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| target_load(target, @[0, 0], fragment_sample_index))
 "#;
     let error =
         compile_thru_tlc(source).expect_err("a fragment callback must not read the target being consumed");
@@ -4583,7 +4662,7 @@ entry postprocess(values: []vec2i32,
       1.0)) in
   let scene1 = shade(
     scene, scene_raster,
-    |fragment| @[fragment.value, 0.0, 0.0, 1.0]) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value, 0.0, 0.0, 1.0]) in
   let adjusted = map(
     |coord: vec2i32| target_load(scene1, coord, 0u32).x * 0.5,
     values) in
@@ -4596,8 +4675,8 @@ entry postprocess(values: []vec2i32,
       ())) in
   let surface1 = shade(
     surface, resolve_raster,
-    |fragment|
-      let gain = adjusted[i32(fragment.position.x) % length(adjusted)] in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      let gain = adjusted[i32(fragment_position.x) % length(adjusted)] in
       @[gain, gain, gain, 1.0]) in
   (adjusted, scene1, surface1)
 "#,
@@ -4670,7 +4749,7 @@ entry resolve(sampling: sampler,
       else if vertex_index == 1u32 then @[3.0, -1.0, 0.0, 1.0]
       else @[-1.0, 3.0, 0.0, 1.0],
       @[0.25, 0.5, 0.75, 1.0])) in
-  let scene1 = shade(scene, geometry, |fragment| fragment.value) in
+  let scene1 = shade(scene, geometry, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   let fullscreen = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(
@@ -4681,10 +4760,10 @@ entry resolve(sampling: sampler,
   let surface1 = shade(
     surface,
     fullscreen,
-    |fragment| target_sample(
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| target_sample(
       scene1,
       sampling,
-      fragment.position.xy / @[640.0, 480.0])) in
+      fragment_position.xy / @[640.0, 480.0])) in
   (scene1, surface1)
 "#,
     )
@@ -4746,10 +4825,10 @@ entry deferred(coords: []vec2i32,
       0.5)) in
   let scene1 = shade(
     scene, geometry,
-    |fragment| {
-      albedo = @[fragment.value, 0.2, 0.1, 1.0],
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| {
+      albedo = @[fragment_value, 0.2, 0.1, 1.0],
       normal = @[0.0, 0.0, 1.0, 0.0],
-      depth = fragment.position.z
+      depth = fragment_position.z
     }) in
   let depths = map(
     |coord: vec2i32| target_load(scene1, coord, 0u32).depth,
@@ -4763,8 +4842,8 @@ entry deferred(coords: []vec2i32,
       ())) in
   let surface1 = shade(
     surface, fullscreen,
-    |fragment|
-      let depth = depths[i32(fragment.position.x) % length(depths)] in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      let depth = depths[i32(fragment_position.x) % length(depths)] in
       @[depth, depth, depth, 1.0]) in
   (depths, scene1, surface1)
 "#,
@@ -4810,12 +4889,12 @@ def normalize_output(output: fragment_output<vec4f32>) fragment_output<vec4f32> 
   case #depth(value, depth) -> #depth(value, depth)
   case #discard -> #discard
 
-def fragment_stage(fragment: fragment_invocation<vec4f32>) fragment_output<vec4f32> =
+def fragment_stage(fragment_value: vec4f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) fragment_output<vec4f32> =
   normalize_output(
-    if fragment.front_facing
+    if fragment_front_facing
     then
       let depth = 0.25 in
-      #depth(fragment.value, depth)
+      #depth(fragment_value, depth)
     else #discard)
 
 entry helper(target: render_target<vec4f32>) render_target<vec4f32> =
@@ -4852,7 +4931,7 @@ entry tuple_color(target: render_target<(u32, vec4f32, vec4f32, f32)>)
       else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       (7u32, @[1.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0], 0.5))) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("a direct tuple color remains an ordinary color result");
@@ -4884,9 +4963,9 @@ entry cutout(target: render_target<vec4f32>) render_target<vec4f32> =
       color_write = true },
     target,
     covered,
-    |fragment|
-      if fragment.front_facing
-      then #depth(fragment.value, 0.25)
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      if fragment_front_facing
+      then #depth(fragment_value, 0.25)
       else #discard)
 "#;
     let lowered = compile_thru_spirv(source)
@@ -4939,7 +5018,7 @@ entry depth_tested(target: render_target<vec4f32>) render_target<vec4f32> =
       depth_write = true,
       blend = #replace,
       color_write = true },
-    target, covered, |fragment| fragment.value)
+    target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("shade_with accepts the specified structural fragment state");
@@ -4979,7 +5058,7 @@ entry reproduce(target: render_target<vec4f32>) render_target<vec4f32> =
       else if vertex_index == 1u32 then @[0.5, -0.5, 0.0, 1.0]
       else @[0.0, 0.5, 0.0, 1.0],
       @[1.0, 0.5, 0.25, 1.0])) in
-  shade_with(opaque_depth, target, covered, |fragment| fragment.value)
+  shade_with(opaque_depth, target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("a named fragment_state supplies context to its sum fields");
@@ -5017,7 +5096,7 @@ entry prepare_and_draw<[n]>(values: [n]vec4f32,
     |vertex_index, instance_index, draw_index|
       let i = i32(vertex_index) in
       vertex_output(prepared.positions[i], prepared.colors[i])) in
-  let target1 = shade(target, covered, |fragment| fragment.value) in
+  let target1 = shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   (prepared, target1)
 "#,
     )
@@ -5109,7 +5188,7 @@ entry compact_and_draw(values: []vec4f32,
               else 0.0 in
       let y = if vertex_index == 2u32 then 0.5 else -0.5 in
       vertex_output(@[p.x + x, p.y + y, 0.0, 1.0], p)) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("a computed command buffer can drive an indirect draw");
@@ -5163,7 +5242,7 @@ entry reproduce(values: []vec4f32,
     |vertex_index, instance_index, draw_index|
       let position = prepared.instances[i32(instance_index)] in
       vertex_output(position, position)) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("a computed scalar command can drive an indirect draw");
@@ -5219,7 +5298,7 @@ entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
     |vertex_index, instance_index, draw_index|
       let position = prepared.values[i32(instance_index)] in
       vertex_output(position, position))
-  let target1 = shade(target, raster, |fragment| fragment.value) in
+  let target1 = shade(target, raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   (output, target1)
 "#,
     )
@@ -5277,13 +5356,13 @@ entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
     |vertex_index, instance_index, draw_index|
       let position = first.values[i32(instance_index)] in
       vertex_output(position, position))
-  let target1 = shade(target, raster1, |fragment| fragment.value)
+  let target1 = shade(target, raster1, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
   let raster2 = rasterize_triangles(
     indirect_draw(second.draw),
     |vertex_index, instance_index, draw_index|
       let position = second.values[i32(instance_index)] in
       vertex_output(position, position)) in
-  shade(target1, raster2, |fragment| fragment.value)
+  shade(target1, raster2, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("distinct projected helper results retain their call-site result type");
@@ -5337,7 +5416,7 @@ entry indexed(indices: [3]u32,
   let covered = rasterize_triangles(
     indexed_draw(indices, 2u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("indexed_draw is accepted by unified roots");
@@ -5405,11 +5484,11 @@ entry draw_many(indices: [3]u32,
   let many = rasterize_triangles(
     indirect_draws(commands),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
-  let target1 = shade(target, many, |fragment| fragment.value) in
+  let target1 = shade(target, many, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   let indexed = rasterize_triangles(
     indexed_indirect_draws(indices, indexed_commands),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
-  shade(target1, indexed, |fragment| fragment.value)
+  shade(target1, indexed, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("plural indirect draw forms are accepted");
@@ -5461,11 +5540,11 @@ entry indexed_forms(indices: [4]u16,
   let direct = rasterize_triangles(
     indexed_draw_from(indices, 3u32, 2u32, 1u32, -1i32, 4u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 0.0, 0.0, 1.0])) in
-  let target1 = shade(target, direct, |fragment| fragment.value) in
+  let target1 = shade(target, direct, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value) in
   let indirect = rasterize_triangles(
     indexed_indirect_draw(indices, commands[0]),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[0.0, 1.0, 0.0, 1.0])) in
-  shade(target1, indirect, |fragment| fragment.value)
+  shade(target1, indirect, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("offset and singular indexed draw forms are accepted");
@@ -5516,7 +5595,7 @@ entry draw_dynamic(commands: []draw_command,
   let covered = rasterize_triangles(
     indirect_draws(commands),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("a runtime-sized command array remains runtime-sized in the descriptor");
@@ -5552,7 +5631,7 @@ entry clipped(target: render_target<vec4f32>) render_target<vec4f32> =
     },
     direct_draw(3u32, 1u32),
     |vertex_index, instance_index, draw_index| vertex_output(@[0.0, 0.0, 0.0, 1.0], @[1.0, 1.0, 1.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     )
     .expect("rasterize_*_with accepts the specified raster state");
@@ -7022,7 +7101,7 @@ entry scheduler_resource_cycle(f: vec2f32, history: render_target<f32>)
   let raster = rasterize_triangles(
     direct_draw(3u32, 1u32),
     |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
-  let history' = shade(history, raster, |_| 1.0)
+  let history' = shade(history, raster, |_, _, _, _, _| 1.0)
   in (visible.values, history')
 "#,
             )
@@ -9467,7 +9546,7 @@ fn test_spirv_map_array_of_mixed_tuple() {
 def build(xs: [8]f32) [8](f32, i32, vec3f32) =
     map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
 
-def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
+def fragment_main(fragment_value: vec4f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]) in
     let (a, _, v) = arr[3] in
     @[a, v.x, v.y, v.z]
@@ -9495,7 +9574,7 @@ fn test_spirv_map_array_of_nested_tuple() {
 def build(xs: [4]f32) [4](f32, [3]f32) =
     map(|x: f32| (x + 1.0, [x, x, x]), xs)
 
-def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
+def fragment_main(fragment_value: vec4f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0]) in
     let (a, inner) = arr[2] in
     @[a, inner[0], inner[1], inner[2]]

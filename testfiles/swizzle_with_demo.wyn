@@ -35,8 +35,8 @@ def transform(dir0: vec3f32, mx: f32, my: f32, rotview1: mat2f32, rotview2: mat2
   d3 with .xz *= rotview1
 
 def fragment_main(resolution: vec3f32, time: f32,
-                  fragment: fragment_invocation<vec2f32>) vec4f32 =
-  let frag_coord = fragment.position
+                  fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let frag_coord = fragment_position
   let coord = @[frag_coord.x, resolution.y - frag_coord.y]
   let uv = @[coord.x / resolution.x - 0.5f32, coord.y / resolution.y - 0.5f32]
   let dir0 = @[uv.x * 0.8f32, uv.y * 0.8f32, 1.0f32]
@@ -57,4 +57,4 @@ entry swizzle_demo(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    fragment_main(resolution, time, _))
+    fragment_main(resolution, time, _, _, _, _, _))

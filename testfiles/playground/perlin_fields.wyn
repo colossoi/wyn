@@ -195,5 +195,5 @@ entry perlin_fields(
   let screen' = shade(
     screen,
     covered,
-    |fragment| main_image(next, fragment.position)) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| main_image(next, fragment_position)) in
   (next, screen')

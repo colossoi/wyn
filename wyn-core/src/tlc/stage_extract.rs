@@ -527,8 +527,8 @@ fn extract_root(
                 let mut vertex_lambda =
                     callback_lambda(raster_args.get(callback_index)?, "vertex", 3, symbols, term_ids)?;
                 let mut fragment_lambda =
-                    callback_lambda(shade_args.last()?, "fragment", 1, symbols, term_ids)?;
-                if vertex_lambda.params.len() != 3 || fragment_lambda.params.len() != 1 {
+                    callback_lambda(shade_args.last()?, "fragment", 5, symbols, term_ids)?;
+                if vertex_lambda.params.len() != 3 || fragment_lambda.params.len() != 5 {
                     return None;
                 }
                 vertex_lambda.body = Box::new(inline_stage_helpers(*vertex_lambda.body, helpers, term_ids));
@@ -2553,12 +2553,10 @@ fn build_vertex_stage(
         texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
-    let mut rewriter = StageBodyRewriter {
-        vertex_result_ty: Some(result_ty.clone()),
+    let mut rewriter = VertexBodyRewriter {
+        vertex_result_ty: result_ty.clone(),
         term_ids,
-        invocation_symbol: None,
-        projections: Vec::new(),
-        vertex_output: Some(builtins.vertex_output),
+        vertex_output: builtins.vertex_output,
     };
     body = rewriter.rewrite_owned(body);
 
@@ -2759,11 +2757,8 @@ fn build_fragment_stage(
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
 ) -> Option<Def<UnpinnedPolymorphic>> {
-    let invocation_symbol = callback.params[0].0;
-    let payload_ty = match &callback.params[0].1 {
-        Type::Constructed(TypeName::FragmentInvocation, args) if args.len() == 1 => args[0].clone(),
-        _ => return None,
-    };
+    let payload_symbol = callback.params[0].0;
+    let payload_ty = callback.params[0].1.clone();
 
     // The flattened representation of fragment_output<C> can coincide with
     // an ordinary tuple color type. The target's C disambiguates the two:
@@ -2774,11 +2769,12 @@ fn build_fragment_stage(
         fragment_output_color_type(&callback.ret_ty).filter(|color| *color == target_color_ty)
     };
     let has_fragment_output = fragment_output.is_some();
-    let mut used = used_projection_indices(&callback.body, invocation_symbol, 5);
+    let referenced = captured_symbols(&callback.body, &LookupSet::new(), symbols);
+    let mut used: Vec<_> = callback.params.iter().map(|(symbol, _)| referenced.contains(symbol)).collect();
     if has_fragment_output {
         used[1] = true;
     }
-    let mut mapping = vec![None; 5];
+    let mut payload_replacement = None;
     let mut invocation_params = Vec::new();
     let mut invocation_decls = Vec::new();
 
@@ -2796,12 +2792,12 @@ fn build_fragment_stage(
             ));
         }
         let mut leaf_symbols = leaf_symbols.into_iter();
-        mapping[0] = Some(ProjectionReplacement::Term(rebuild_varying_value(
+        payload_replacement = Some(rebuild_varying_value(
             &payload_ty,
             &mut leaf_symbols,
             callback.body.span,
             term_ids,
-        )?));
+        )?);
     }
 
     let mut position_symbol = None;
@@ -2816,11 +2812,10 @@ fn build_fragment_stage(
         if !used[index] {
             continue;
         }
-        let symbol = symbols.alloc(format!("_w_fragment_{name}"));
+        let symbol = callback.params[index].0;
         if index == 1 {
             position_symbol = Some(symbol);
         }
-        mapping[index] = Some(ProjectionReplacement::Symbol(symbol));
         invocation_params.push((symbol, ty.clone()));
         invocation_decls.push(interface_param(
             name,
@@ -2831,6 +2826,14 @@ fn build_fragment_stage(
     }
 
     let mut body = clone_term_with_fresh_ids(&callback.body, term_ids);
+    if let Some(payload) = payload_replacement {
+        body = super::subst::substitute_with(
+            body,
+            payload_symbol,
+            &mut |_, ids| clone_term_with_fresh_ids(&payload, ids),
+            term_ids,
+        );
+    }
     let target_origins = target_origins(&body, &target_reads);
     body = ExternalValueRewriter {
         term_ids,
@@ -2843,14 +2846,6 @@ fn build_fragment_stage(
         texture_sample: builtins.texture_sample,
     }
     .rewrite_owned(body);
-    let mut rewriter = StageBodyRewriter {
-        term_ids,
-        invocation_symbol: Some(invocation_symbol),
-        vertex_result_ty: None,
-        projections: mapping,
-        vertex_output: None,
-    };
-    body = rewriter.rewrite_owned(body);
     let (color_ty, body) = if let Some(color_ty) = fragment_output {
         let position_symbol = position_symbol?;
         let position = Term::fresh(
@@ -3008,66 +3003,25 @@ fn interface_param(
     }
 }
 
-fn used_projection_indices(term: &Term, symbol: SymbolId, count: usize) -> Vec<bool> {
-    let mut used = vec![false; count];
-    let mut visitor = |term: &Term| {
-        if let TermKind::TupleProj { tuple, idx } = &term.kind {
-            if matches!(tuple.kind, TermKind::Var(VarRef::Symbol(found)) if found == symbol)
-                && *idx < used.len()
-            {
-                used[*idx] = true;
-            }
-        }
-        WalkDecision::Recurse
-    };
-    visitor.walk(term);
-    used
-}
-
-#[derive(Clone)]
-enum ProjectionReplacement {
-    Symbol(SymbolId),
-    Term(Term),
-}
-
-struct StageBodyRewriter<'a> {
+struct VertexBodyRewriter<'a> {
     term_ids: &'a mut TermIdSource,
-    vertex_result_ty: Option<Type>,
-    invocation_symbol: Option<SymbolId>,
-    projections: Vec<Option<ProjectionReplacement>>,
-    vertex_output: Option<builtins::BuiltinId>,
+    vertex_result_ty: Type,
+    vertex_output: builtins::BuiltinId,
 }
 
-impl TermRewriter<data::Empty, data::Empty> for StageBodyRewriter<'_> {
+impl TermRewriter<data::Empty, data::Empty> for VertexBodyRewriter<'_> {
     fn next_term_id(&mut self) -> super::TermId {
         self.term_ids.next_id()
     }
 
     fn rewrite_owned_node(&mut self, mut term: Term) -> (Term, RewriteDecision) {
-        if let TermKind::TupleProj { tuple, idx } = &term.kind {
-            if matches!(tuple.kind, TermKind::Var(VarRef::Symbol(found)) if Some(found) == self.invocation_symbol)
-            {
-                if let Some(Some(replacement)) = self.projections.get(*idx).cloned() {
-                    match replacement {
-                        ProjectionReplacement::Symbol(symbol) => {
-                            term.kind = TermKind::Var(VarRef::Symbol(symbol));
-                        }
-                        ProjectionReplacement::Term(value) => {
-                            term = clone_term_with_fresh_ids(&value, self.term_ids);
-                        }
-                    }
-                    return (term, RewriteDecision::Changed);
-                }
-            }
-        }
-
-        if let (Some(vertex_output), TermKind::App { func, args }) = (self.vertex_output, &term.kind) {
-            if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if id == vertex_output)
+        if let TermKind::App { func, args } = &term.kind {
+            if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if id == self.vertex_output)
                 && args.len() == 2
             {
                 let mut values = vec![args[0].clone()];
                 flatten_varying_term(args[1].clone(), self.term_ids, &mut values);
-                term.ty = self.vertex_result_ty.clone().expect("vertex output rewrite has a result type");
+                term.ty = self.vertex_result_ty.clone();
                 term.kind = if values.len() == 1 {
                     values.pop().expect("position output").kind
                 } else {
@@ -3079,7 +3033,7 @@ impl TermRewriter<data::Empty, data::Empty> for StageBodyRewriter<'_> {
 
         if let Type::Constructed(TypeName::Vertex, args) = &term.ty {
             if args.len() == 1 {
-                term.ty = self.vertex_result_ty.clone().expect("vertex value rewrite has a result type");
+                term.ty = self.vertex_result_ty.clone();
                 return (term, RewriteDecision::Changed);
             }
         }

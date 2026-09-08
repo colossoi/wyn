@@ -9887,10 +9887,6 @@
     "named": false
   },
   {
-    "type": "fragment_invocation",
-    "named": false
-  },
-  {
     "type": "fragment_output",
     "named": false
   },

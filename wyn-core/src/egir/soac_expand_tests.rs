@@ -579,7 +579,7 @@ fn map_array_of_mixed_tuple_writes_component_places_without_array_flow() {
 def build(xs: [8]f32) [8](f32, i32, vec3f32) =
     map(|x: f32| (x + 1.0, 0, @[x, x, x]), xs)
 
-def fragment_main(fragment: fragment_invocation<vec4f32>) vec4f32 =
+def fragment_main(fragment_value: vec4f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
     let arr = build([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]) in
     let (a, _, v) = arr[3] in
     @[a, v.x, v.y, v.z]

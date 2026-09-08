@@ -193,7 +193,7 @@ fn format_constructed_type(name: &TypeName, args: &[PolyType<TypeName>]) -> Stri
         TypeName::Texture2D => "texture2d".to_string(),
         TypeName::Sampler => "sampler".to_string(),
         TypeName::StorageTexture => "storage_image".to_string(),
-        TypeName::Raster | TypeName::Vertex | TypeName::FragmentInvocation | TypeName::FragmentOutput => {
+        TypeName::Raster | TypeName::Vertex | TypeName::FragmentOutput => {
             if args.len() == 1 {
                 format!("{}<{}>", name, format_type(&args[0]))
             } else {

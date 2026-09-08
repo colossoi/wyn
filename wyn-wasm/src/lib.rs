@@ -747,8 +747,8 @@ def fragment_main(iResolution: vec3f32,
                   iMouse: vec4f32,
                   iDate: vec4f32,
                   iSampleRate: f32,
-                  fragment: fragment_invocation<vec2f32>) vec4f32 =
-  let uv = fragment.position.xy / iResolution.xy in
+                  fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let uv = fragment_position.xy / iResolution.xy in
   let phase = iTime in
   let r = 0.5 + 0.5 * f32.cos(phase + uv.x * 3.0 + 0.0) in
   let g = 0.5 + 0.5 * f32.cos(phase + uv.y * 3.0 + 2.0) in
@@ -767,10 +767,10 @@ entry image(iResolution: vec3f32,
             iSampleRate: f32,
             screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
-  shade(screen, raster, |fragment|
+  shade(screen, raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
     fragment_main(iResolution, iTime, iTimeDelta, iFrameRate, iFrame,
                   iChannelTime, iChannelResolution, iMouse, iDate,
-                  iSampleRate, fragment))
+                  iSampleRate, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index))
 "#
     .to_string()
 }

@@ -3405,10 +3405,10 @@ entry bad_fragment(target: render_target<vec4f32>) render_target<vec4f32> =
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
-    |fragment|
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
       let output = vertex_output in
-      let _ = output(@[0.0, 0.0, 0.0, 1.0], fragment.value) in
-      fragment.value)
+      let _ = output(@[0.0, 0.0, 0.0, 1.0], fragment_value) in
+      fragment_value)
 "#,
     )
     .expect_err("vertex_output in fragment context must be rejected");
@@ -3427,14 +3427,14 @@ entry bad(target: render_target<vec4f32>) render_target<vec4f32> =
       @[0.0, 0.0, 0.0, 1.0],
       @[1.0, 1.0, 1.0, 1.0])) in
   shade(target, covered,
-    |fragment|
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
       let nested_stage = rasterize_points in
       let _ = nested_stage(
         direct_draw(1u32, 1u32),
         |vertex_index, instance_index, draw_index| vertex_output(
           @[0.0, 0.0, 0.0, 1.0],
-          fragment.value)) in
-      fragment.value)
+          fragment_value)) in
+      fragment_value)
 "#,
     )
     .expect_err("a rasterization invocation inside a fragment callback must be rejected");
@@ -3462,7 +3462,7 @@ fn rasterization_rejects_non_positional_vertex_callbacks() {
 entry invalid(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_{topology}{suffix}({state} direct_draw(3u32, 1u32),
     |{params}| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
-  shade(target, covered, |_| @[1.0, 1.0, 1.0, 1.0])
+  shade(target, covered, |_, _, _, _, _| @[1.0, 1.0, 1.0, 1.0])
 "#
                 );
                 assert!(try_typecheck_program(&source).is_err(), "accepted {source}");
@@ -3494,7 +3494,7 @@ entry valid(target: render_target<vec4f32>) render_target<vec4f32> =
   let covered = invoke(
     direct_draw(3u32, 1u32),
     vertex_callback) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     );
 }
@@ -3503,7 +3503,6 @@ fn invocation_types_cannot_cross_a_root_entry_boundary() {
     for ty in [
         "raster<vec4f32>",
         "vertex<vec4f32>",
-        "fragment_invocation<vec4f32>",
         "fragment_output<vec4f32>",
         "draw",
     ] {
@@ -3534,14 +3533,29 @@ fn vertex_payloads_reject_arrays_and_resources() {
 }
 
 #[test]
-fn fragment_invocation_exposes_only_portable_fields() {
-    let error = try_typecheck_program("def bad(f: fragment_invocation<f32>) f32 = f.sample_position.x")
-        .expect_err("sample_position is not a portable fragment invocation field");
-    let message = format!("{:?}", error);
-    assert!(
-        message.contains("has no field 'sample_position'"),
-        "got {message}"
-    );
+fn shade_rejects_incorrect_fragment_callback_arguments() {
+    for params in [
+        "v: f32",
+        "v: f32, p: vec4f32",
+        "v: f32, p: vec4f32, f: bool, primitive: u32",
+        "v: f32, p: vec4f32, f: bool, primitive: i32, sample: u32",
+    ] {
+        let source = format!(
+            r#"
+entry invalid(target: render_target<vec4f32>) render_target<vec4f32> =
+  let raster = rasterize_points(direct_draw(1u32, 1u32),
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], 0.0)) in
+  shade(target, raster, |{params}| @[1.0, 1.0, 1.0, 1.0])
+"#
+        );
+        assert!(try_typecheck_program(&source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn removed_fragment_invocation_is_an_ordinary_type_name() {
+    assert!(try_typecheck_program("def old(f: fragment_invocation<f32>) f32 = f.value").is_err());
+    typecheck_program("type fragment_invocation = u32\nentry identity(v: fragment_invocation) u32 = v");
 }
 #[test]
 fn invocation_values_cannot_be_stored_in_arrays() {
@@ -3586,7 +3600,7 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
     |vertex_index, instance_index, draw_index| vertex_output(
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
-  shade(target, covered, |fragment| fragment.value)
+  shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
 "#,
     );
 }

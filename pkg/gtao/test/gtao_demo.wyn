@@ -99,12 +99,12 @@ def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<
   vertex_output(position,
                 @[position.x * 0.5 + 0.5, position.y * 0.5 + 0.5])
 
-def fragment_main(fragment: fragment_invocation<vec2f32>,
+def fragment_main(fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32,
                   depth: texture2d,
                   resolution: vec3f32,
                   mouse: vec4f32,
                   frame: u32) vec4f32 =
-  let pos = fragment.position in
+  let pos = fragment_position in
   let xy = @[i32(pos.x), i32(pos.y)] in
   let uv = @[pos.x / resolution.x, pos.y / resolution.y] in
   let normal = gtao.compute_viewspace_normal(xy, depth, C) in
@@ -131,5 +131,5 @@ entry gtao_demo(depth: texture2d,
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(
-      fragment, depth, resolution, mouse, frame))
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(
+      fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index, depth, resolution, mouse, frame))

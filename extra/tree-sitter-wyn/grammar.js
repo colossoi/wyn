@@ -453,7 +453,6 @@ module.exports = grammar({
     generic_builtin_type: $ => choice(
       'vertex',
       'raster',
-      'fragment_invocation',
       'fragment_output',
       'render_target',
     ),

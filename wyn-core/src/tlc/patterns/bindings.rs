@@ -319,14 +319,6 @@ impl<'a> Transformer<'a> {
         match ty {
             Type::Constructed(TypeName::Record(fields), _) => fields.iter().position(|f| f == field),
             // Vec swizzle: x=0, y=1, z=2, w=3
-            Type::Constructed(TypeName::FragmentInvocation, _) => match field {
-                "value" => Some(0),
-                "position" => Some(1),
-                "front_facing" => Some(2),
-                "primitive_index" => Some(3),
-                "sample_index" => Some(4),
-                _ => None,
-            },
             Type::Constructed(TypeName::Vec, _) => match field {
                 "x" => Some(0),
                 "y" => Some(1),

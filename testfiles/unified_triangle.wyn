@@ -12,7 +12,7 @@ entry triangle(screen: render_target<vec4f32>) render_target<vec4f32> =
       triangle_position(vertex_index),
       @[1.0, 0.0, 0.0])) in
   shade(screen, covered,
-    |fragment| @[fragment.value.x,
-                  fragment.value.y,
-                  fragment.value.z,
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x,
+                  fragment_value.y,
+                  fragment_value.z,
                   1.0])

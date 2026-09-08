@@ -433,11 +433,7 @@ impl<'a> TypeChecker<'a> {
             Type::Constructed(name, args)
                 if matches!(
                     name,
-                    TypeName::Raster
-                        | TypeName::Vertex
-                        | TypeName::FragmentInvocation
-                        | TypeName::FragmentOutput
-                        | TypeName::RenderTarget
+                    TypeName::Raster | TypeName::Vertex | TypeName::FragmentOutput | TypeName::RenderTarget
                 ) && args.len() == 1 =>
             {
                 format!("{}<{}>", name, self.format_type(&args[0]))
@@ -478,11 +474,7 @@ impl<'a> TypeChecker<'a> {
     fn contains_internal_invocation(ty: &Type) -> bool {
         match ty {
             Type::Constructed(
-                TypeName::Raster
-                | TypeName::Vertex
-                | TypeName::FragmentInvocation
-                | TypeName::FragmentOutput
-                | TypeName::Draw,
+                TypeName::Raster | TypeName::Vertex | TypeName::FragmentOutput | TypeName::Draw,
                 _,
             ) => true,
             Type::Constructed(TypeName::Sum(variants), args) => {
@@ -4180,27 +4172,6 @@ impl<'a> TypeChecker<'a> {
                 field,
                 fields.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
             );
-        }
-
-        // Platform-supplied invocation records are opaque except for their
-        // specified read-only fields.
-        if let Type::Constructed(TypeName::FragmentInvocation, args) = base_ty {
-            let Some(value_ty) = args.first() else {
-                bail_type_at!(*span, "malformed fragment_invocation type");
-            };
-            return match field {
-                "value" => Ok(value_ty.clone()),
-                "position" => Ok(Type::Constructed(
-                    TypeName::Vec,
-                    vec![
-                        Type::Constructed(TypeName::Float(32), vec![]),
-                        Type::Constructed(TypeName::Size(4), vec![]),
-                    ],
-                )),
-                "front_facing" => Ok(Type::Constructed(TypeName::Bool, vec![])),
-                "primitive_index" | "sample_index" => Ok(Type::Constructed(TypeName::UInt(32), vec![])),
-                _ => bail_type_at!(*span, "fragment_invocation has no field '{}'", field),
-            };
         }
 
         // 2. Tuple numeric index (.0, .1, etc.)

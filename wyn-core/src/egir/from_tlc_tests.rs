@@ -682,7 +682,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0])) in
   shade(target, covered,
-    |fragment| @[fragment.value.x, fragment.value.y, fragment.value.z, 1.0])
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_value.x, fragment_value.y, fragment_value.z, 1.0])
 "#;
     let mut tlc_program = tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(src));
 

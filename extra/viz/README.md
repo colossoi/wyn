@@ -53,15 +53,15 @@ the texture binding named `NAME`. The shader side is a plain entry
 parameter — no `resource` declaration:
 
 ```wyn
-def fragment_main(fragment: fragment_invocation<vec2f32>,
+def fragment_main(fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32,
                   input_image: texture2d, samp: sampler) vec4f32 =
-  texture_sample(input_image, samp, fragment.value, 0.0)
+  texture_sample(input_image, samp, fragment_value, 0.0)
 
 entry image(input_image: texture2d, samp: sampler,
             screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   shade(screen, raster,
-    |fragment| fragment_main(fragment, input_image, samp))
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index, input_image, samp))
 ```
 
 ```

@@ -9,7 +9,7 @@ A minimal compiler for a Futhark-like programming language that generates SPIR-V
 - Higher-order functions (map, reduce, zip, etc.)
 - Pattern matching
 - SPIR-V and WGSL code generation for Vulkan/WebGPU shaders
-- Vertex, fragment, and compute shader support
+- Vertex, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index, and compute shader support
 - Vector and matrix types optimized for GPU operations
 - Array operations with size tracking
 - Loop constructs
@@ -626,7 +626,7 @@ def vertex_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<
 entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   shade(screen, raster,
-    |fragment| @[0.529, 0.808, 0.922, 1.0])  -- Sky blue
+    |_, _, _, _, _| @[0.529, 0.808, 0.922, 1.0])  -- Sky blue
 ```
 
 ## Usage
@@ -699,7 +699,7 @@ entry sum_array(data: []f32) f32 =
 
 -- Graphics uses an orchestration entry plus ordinary callbacks.
 def vs_main(vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec3f32> = ...
-def fs_main(fragment: fragment_invocation<vec3f32>) vec4f32 = ...
+def fs_main(fragment_value: vec3f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 = ...
 entry frame(screen: render_target<vec4f32>) render_target<vec4f32> =
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vs_main) in
   shade(screen, raster, fs_main)

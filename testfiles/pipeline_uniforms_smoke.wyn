@@ -18,4 +18,4 @@ entry pipeline_uniforms_smoke(
     direct_draw(3u32, 1u32),
     vertex_main) in
   shade(screen, covered,
-    |fragment| fragment_main(fragment.position, time))
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(fragment_position, time))

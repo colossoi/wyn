@@ -148,7 +148,7 @@ entry mixed_loop(seed: u32, scale: u32) u32 =
 entry resource_handles(screen: render_target<vec4f32>) render_target<vec4f32> =
   let covered = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   shade(screen, covered,
-    |fragment| @[fragment.position.x, fragment.position.y, 0.0, 1.0])`,
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| @[fragment_position.x, fragment_position.y, 0.0, 1.0])`,
   },
 } as const;
 

@@ -22,7 +22,7 @@ def shade_value(t: #left(f32, f32) | #right(f32) | #middle) f32 =
   case #right(z)   -> z * 2.0f32
   case #middle     -> 0.5f32
 
-def fragment_main(fragment: fragment_invocation<vec2f32>) vec4f32 =
+def fragment_main(fragment_value: vec2f32, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
   let r = shade_value(#left(0.25f32, 0.25f32))
   let g = shade_value(#right(0.4f32))
   let b = shade_value(#middle) in

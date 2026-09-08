@@ -196,11 +196,11 @@ def sat_clamp(x: f32) f32 = clamp(x, 0.0, 1.0)
 def sun_view: vec3f32 = @[0.7034, 0.2912, 0.3380]
 def zenith_view: vec3f32 = @[0.0, 0.9636, 0.2667]
 
-def fragment_main(fragment: fragment_invocation<track_varying>) vec4f32 =
-  let n_in = fragment.value.normal in
-  let color = fragment.value.color in
-  let ao = fragment.value.ao in
-  let view_pos = fragment.value.view_position in
+def fragment_main(fragment_value: track_varying, fragment_position: vec4f32, fragment_front_facing: bool, fragment_primitive_index: u32, fragment_sample_index: u32) vec4f32 =
+  let n_in = fragment_value.normal in
+  let color = fragment_value.color in
+  let ao = fragment_value.ao in
+  let view_pos = fragment_value.view_position in
   let n_norm = normalize(n_in) in
 
   -- Diffuse: sun with normalized N, zenith with un-normalized N

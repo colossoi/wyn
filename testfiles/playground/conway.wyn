@@ -90,6 +90,6 @@ entry conway(
   let screen' = shade(
     screen,
     covered,
-    |fragment|
-      display(resolution, width, height, next, fragment.position)) in
+    |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index|
+      display(resolution, width, height, next, fragment_position)) in
   (next, screen')

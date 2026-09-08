@@ -501,26 +501,34 @@ pub fn rasterize_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 /// forall c r v. render_target<c, r> -> raster<v> ->
-/// (fragment_invocation<v> -> c) -> render_target<c>.
+/// (v -> vec4f32 -> bool -> u32 -> u32 -> c) -> render_target<c>.
+/// Callback arguments: value, position, front_facing, primitive_index, sample_index.
 pub fn shade_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let c = ctx.new_variable();
     let v = ctx.new_variable();
     let resource = ctx.new_variable();
     let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone(), resource]);
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
-    let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
+    let callback = arrow_chain(
+        &[v, vec_n(f32_ty(), 4), types::bool_type(), u32_ty(), u32_ty()],
+        c,
+    );
     quantify(arrow_chain(&[target.clone(), raster, callback], target))
 }
 
 /// forall c r v. fragment_state -> render_target<c, r> -> raster<v> ->
-/// (fragment_invocation<v> -> c) -> render_target<c>.
+/// (v -> vec4f32 -> bool -> u32 -> u32 -> c) -> render_target<c>.
+/// Callback arguments: value, position, front_facing, primitive_index, sample_index.
 pub fn shade_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let c = ctx.new_variable();
     let v = ctx.new_variable();
     let resource = ctx.new_variable();
     let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone(), resource]);
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
-    let callback = arrow_chain(&[pipeline_ty(TypeName::FragmentInvocation, vec![v])], c);
+    let callback = arrow_chain(
+        &[v, vec_n(f32_ty(), 4), types::bool_type(), u32_ty(), u32_ty()],
+        c,
+    );
     quantify(arrow_chain(
         &[types::fragment_state(), target.clone(), raster, callback],
         target,
@@ -528,7 +536,8 @@ pub fn shade_with_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
 }
 
 /// forall c r v. render_target<c, r> -> raster<v> ->
-/// (fragment_invocation<v> -> fragment_output<c>) -> render_target<c>.
+/// (v -> vec4f32 -> bool -> u32 -> u32 -> fragment_output<c>) -> render_target<c>.
+/// Callback arguments: value, position, front_facing, primitive_index, sample_index.
 pub fn shade_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let c = ctx.new_variable();
     let v = ctx.new_variable();
@@ -536,14 +545,15 @@ pub fn shade_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone(), resource]);
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(
-        &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
+        &[v, vec_n(f32_ty(), 4), types::bool_type(), u32_ty(), u32_ty()],
         types::fragment_output(c),
     );
     quantify(arrow_chain(&[target.clone(), raster, callback], target))
 }
 
 /// forall c r v. fragment_state -> render_target<c, r> -> raster<v> ->
-/// (fragment_invocation<v> -> fragment_output<c>) -> render_target<c>.
+/// (v -> vec4f32 -> bool -> u32 -> u32 -> fragment_output<c>) -> render_target<c>.
+/// Callback arguments: value, position, front_facing, primitive_index, sample_index.
 pub fn shade_with_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let c = ctx.new_variable();
     let v = ctx.new_variable();
@@ -551,7 +561,7 @@ pub fn shade_with_output_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let target = pipeline_ty(TypeName::RenderTarget, vec![c.clone(), resource]);
     let raster = pipeline_ty(TypeName::Raster, vec![v.clone()]);
     let callback = arrow_chain(
-        &[pipeline_ty(TypeName::FragmentInvocation, vec![v])],
+        &[v, vec_n(f32_ty(), 4), types::bool_type(), u32_ty(), u32_ty()],
         types::fragment_output(c),
     );
     quantify(arrow_chain(
