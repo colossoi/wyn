@@ -35,11 +35,23 @@ pub(crate) struct StorageFunctionVariants {
     fallback_emissions: LookupMap<FunctionId, FunctionEmissionId>,
     entry_emissions: LookupMap<EntryId, LookupMap<FunctionId, FunctionEmissionId>>,
     entry_names: LookupMap<EntryId, LookupMap<FunctionId, String>>,
+    entry_accesses: LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>>,
     module_accesses: LookupMap<BindingRef, ResourceAccess>,
 }
 
 impl StorageFunctionVariants {
     pub(crate) fn new<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Self {
+        Self::new_with_accesses(program, |entry| entry.shader_storage_accesses())
+    }
+
+    pub(crate) fn for_spirv<Tag, GlobalContext>(program: &Program<Tag, GlobalContext>) -> Self {
+        Self::new_with_accesses(program, |entry| entry.spirv_storage_accesses())
+    }
+
+    fn new_with_accesses<Tag, GlobalContext>(
+        program: &Program<Tag, GlobalContext>,
+        accesses_for_entry: impl Fn(&crate::ssa::types::EntryPoint) -> LookupMap<BindingRef, ResourceAccess>,
+    ) -> Self {
         let function_indices = program
             .functions
             .iter()
@@ -74,7 +86,7 @@ impl StorageFunctionVariants {
         let entry_accesses = program
             .entry_points
             .iter()
-            .map(|entry| (entry.id, entry.shader_storage_accesses()))
+            .map(|entry| (entry.id, accesses_for_entry(entry)))
             .collect::<LookupMap<_, _>>();
         let mut module_accesses = LookupMap::new();
         for accesses in entry_accesses.values() {
@@ -176,6 +188,7 @@ impl StorageFunctionVariants {
             fallback_emissions,
             entry_emissions,
             entry_names,
+            entry_accesses,
             module_accesses,
         }
     }
@@ -204,18 +217,11 @@ impl StorageFunctionVariants {
 
     pub(crate) fn accesses_for<'a, Tag, GlobalContext>(
         &'a self,
-        program: &'a Program<Tag, GlobalContext>,
+        _program: &'a Program<Tag, GlobalContext>,
         entry: Option<EntryId>,
     ) -> LookupMap<BindingRef, ResourceAccess> {
         entry
-            .map(|entry_id| {
-                program
-                    .entry_points
-                    .iter()
-                    .find(|entry| entry.id == entry_id)
-                    .expect("emission entry context must be in the program")
-                    .shader_storage_accesses()
-            })
+            .map(|entry_id| self.entry_accesses[&entry_id].clone())
             .unwrap_or_else(|| self.module_accesses.clone())
     }
 }

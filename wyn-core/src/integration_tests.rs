@@ -2721,6 +2721,79 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
     assert_eq!(compute.stages[3].workgroup_size, compute.stages[1].workgroup_size);
 }
 
+/// A scan scratch allocation is `Intermediate` for its pipeline lifetime, but
+/// phase 2 only reads the block sums produced by phase 1. Its SPIR-V entry must
+/// therefore select the `NonWritable` global that matches the stage's exact
+/// descriptor interface, not the writable global used by the producer.
+#[test]
+fn filter_scan_phase2_block_sums_are_nonwritable_in_spirv() {
+    use crate::pipeline_descriptor::{Access, Binding, Pipeline};
+
+    let lowered = compile_thru_spirv(
+        r#"
+entry reproduce() ([]i32, [1]i32) =
+  let live = filter(|i| true, iota(39592i32))
+  let out = map(|i| i * 3i32, live) in
+  (out, [length(live)])
+"#,
+    )
+    .expect("Tinyporto filter/length repro compiles");
+    let compute = lowered
+        .pipeline
+        .pipelines
+        .iter()
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute)
+                if compute
+                    .stages
+                    .iter()
+                    .any(|stage| stage.entry_point.contains("_filter_scan_phase2_scan_sums")) =>
+            {
+                Some(compute)
+            }
+            _ => None,
+        })
+        .expect("filter compute pipeline");
+    let phase2_index = compute
+        .stages
+        .iter()
+        .position(|stage| stage.entry_point.contains("_filter_scan_phase2_scan_sums"))
+        .expect("filter scan phase 2");
+    let phase2 = &compute.stages[phase2_index];
+    let block_sums_index = phase2
+        .reads
+        .iter()
+        .copied()
+        .find(|binding| {
+            !phase2.writes.contains(binding)
+                && compute.stages[..phase2_index].iter().any(|producer| producer.writes.contains(binding))
+        })
+        .expect("phase 2 reads phase 1's block sums");
+    let (set, binding) = match &compute.bindings[block_sums_index] {
+        Binding::StorageBuffer {
+            set,
+            binding,
+            access: Access::ReadWrite,
+            ..
+        } => (*set, *binding),
+        other => panic!("block sums must have pipeline-union read_write access: {other:?}"),
+    };
+    let producer = compute.stages[..phase2_index]
+        .iter()
+        .find(|stage| stage.writes.contains(&block_sums_index))
+        .expect("block-sums producer");
+    assert_eq!(
+        spirv_entry_storage_binding_is_writable(&lowered.spirv, &producer.entry_point, set, binding),
+        Some(true),
+        "producer must select the writable global"
+    );
+    assert_eq!(
+        spirv_entry_storage_binding_is_writable(&lowered.spirv, &phase2.entry_point, set, binding),
+        Some(false),
+        "phase 2 must select the NonWritable global"
+    );
+}
+
 #[test]
 fn mixed_map_filter_outputs_keep_complete_phase_family() {
     use crate::egir::parallelize::OutputRouteProjection;
@@ -11449,10 +11522,9 @@ entry g(xs: []i32) []i32 =
         scan_pipeline.bindings
     );
 
-    // Every entry point sharing this physical pipeline must declare the
-    // pipeline-layout access, not its narrower stage-local use. In particular,
-    // the scan result reader must not select a second `NonWritable` variable
-    // for a slot whose descriptor layout is read_write.
+    // SPIR-V entry interfaces use each physical stage's exact access even
+    // though the descriptor binding records the pipeline-wide union. The
+    // writer and reader therefore select distinct globals for the same slot.
     let gather_index = scan_pipeline
         .bindings
         .iter()
@@ -11472,10 +11544,11 @@ entry g(xs: []i32) []i32 =
         "the regression requires a read-only stage use"
     );
     for stage in users {
+        let expected_writable = stage.writes.contains(&gather_index);
         assert_eq!(
             spirv_entry_storage_binding_is_writable(&lowered.spirv, &stage.entry_point, gather.0, gather.1),
-            Some(true),
-            "entry `{}` must use the pipeline's read_write variable",
+            Some(expected_writable),
+            "entry `{}` must use its stage-exact access variable",
             stage.entry_point
         );
     }

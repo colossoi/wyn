@@ -55,7 +55,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
         state: _,
     } = inner;
     let pipeline = data.pipeline;
-    let pipeline_storage_accesses = pipeline_storage_accesses(&pipeline, &data.stage_entries);
+    let descriptor_storage_accesses = descriptor_storage_accesses(&pipeline, &data.stage_entries);
     let kernel_entries =
         global_context.physical_kernels.kernels().map(|kernel| kernel.entry).collect::<Vec<_>>();
     let functions: Vec<Function> = functions
@@ -82,7 +82,10 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
                 .remove(&entry)
                 .expect("validated physical kernel references its owned body");
             let body = elaborate_one_body(e.graph, &e.params, e.result.ty().clone());
-            let entry_pipeline_accesses = pipeline_storage_accesses.get(&e.id).cloned().unwrap_or_default();
+            let entry_stage_accesses =
+                descriptor_storage_accesses.stage.get(&e.id).cloned().unwrap_or_default();
+            let entry_pipeline_accesses =
+                descriptor_storage_accesses.pipeline.get(&e.id).cloned().unwrap_or_default();
             EntryPoint {
                 id: e.id,
                 name: e.name,
@@ -96,6 +99,7 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
                     .collect(),
                 outputs: e.outputs.into_iter().map(|output| output.inner).collect(),
                 storage_bindings: e.resource_declarations,
+                stage_descriptor_storage_accesses: entry_stage_accesses,
                 pipeline_storage_accesses: entry_pipeline_accesses,
                 span: e.span,
             }
@@ -136,46 +140,85 @@ pub fn elaborate(inner: super::resource_erasure::ResourcesErased) -> ssa::stage:
 /// stages in one pipeline share it even when an individual stage only reads or
 /// only writes the slot. Preserve that separately from per-entry usage before
 /// elaboration consumes the physical program.
-fn pipeline_storage_accesses(
+struct DescriptorStorageAccesses {
+    stage: LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>>,
+    pipeline: LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>>,
+}
+
+fn descriptor_storage_accesses(
     descriptor: &PipelineDescriptor,
     stage_entries: &[Vec<EntryId>],
-) -> LookupMap<EntryId, LookupMap<BindingRef, ResourceAccess>> {
-    use crate::pipeline_descriptor::{Access, Binding, Pipeline};
+) -> DescriptorStorageAccesses {
+    use crate::pipeline_descriptor::{Access, Binding, Pipeline, StageBindingUses};
 
-    let mut entries = LookupMap::new();
+    let mut stage_entries_access = LookupMap::new();
+    let mut pipeline_entries_access = LookupMap::new();
     for (pipeline_index, pipeline) in descriptor.pipelines.iter().enumerate() {
-        let bindings: &[Binding] = match pipeline {
-            Pipeline::Compute(compute) => &compute.bindings,
-            Pipeline::Graphics(graphics) => &graphics.bindings,
+        let (bindings, stages): (&[Binding], Vec<&StageBindingUses>) = match pipeline {
+            Pipeline::Compute(compute) => (
+                &compute.bindings,
+                compute.stages.iter().map(|stage| &stage.uses).collect(),
+            ),
+            Pipeline::Graphics(graphics) => (
+                &graphics.bindings,
+                graphics.stages.iter().map(|stage| &stage.uses).collect(),
+            ),
         };
-        let layout = bindings
-            .iter()
-            .filter_map(|binding| {
-                let Binding::StorageBuffer {
-                    set, binding, access, ..
-                } = binding
-                else {
-                    return None;
-                };
-                let access = match access {
-                    Access::ReadOnly => ResourceAccess::Read,
-                    Access::WriteOnly => ResourceAccess::Write,
-                    Access::ReadWrite => ResourceAccess::ReadWrite,
-                };
-                Some((BindingRef::new(*set, *binding), access))
-            })
-            .collect::<LookupMap<_, _>>();
-        for &entry_id in stage_entries.get(pipeline_index).into_iter().flatten() {
-            let entry = entries.entry(entry_id).or_insert_with(LookupMap::new);
+        let mut layout = LookupMap::new();
+        for binding in bindings {
+            let Binding::StorageBuffer {
+                set, binding, access, ..
+            } = binding
+            else {
+                continue;
+            };
+            let access = match access {
+                Access::ReadOnly => ResourceAccess::Read,
+                Access::WriteOnly => ResourceAccess::Write,
+                Access::ReadWrite => ResourceAccess::ReadWrite,
+            };
+            layout
+                .entry(BindingRef::new(*set, *binding))
+                .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
+                .or_insert(access);
+        }
+        for (stage_index, &entry_id) in stage_entries.get(pipeline_index).into_iter().flatten().enumerate()
+        {
+            let pipeline_entry = pipeline_entries_access.entry(entry_id).or_insert_with(LookupMap::new);
             for (&binding, &access) in &layout {
-                entry
+                pipeline_entry
                     .entry(binding)
+                    .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
+                    .or_insert(access);
+            }
+
+            let Some(stage) = stages.get(stage_index) else {
+                continue;
+            };
+            let stage_entry = stage_entries_access.entry(entry_id).or_insert_with(LookupMap::new);
+            for (binding_index, binding) in bindings.iter().enumerate() {
+                let Binding::StorageBuffer { set, binding, .. } = binding else {
+                    continue;
+                };
+                let reads = stage.reads.contains(&binding_index);
+                let writes = stage.writes.contains(&binding_index);
+                let access = match (reads, writes) {
+                    (true, true) => ResourceAccess::ReadWrite,
+                    (true, false) => ResourceAccess::Read,
+                    (false, true) => ResourceAccess::Write,
+                    (false, false) => continue,
+                };
+                stage_entry
+                    .entry(BindingRef::new(*set, *binding))
                     .and_modify(|current: &mut ResourceAccess| *current = current.merge(access))
                     .or_insert(access);
             }
         }
     }
-    entries
+    DescriptorStorageAccesses {
+        stage: stage_entries_access,
+        pipeline: pipeline_entries_access,
+    }
 }
 
 fn elaborate_extern(declaration: ExternDecl<Type<TypeName>>) -> Function {

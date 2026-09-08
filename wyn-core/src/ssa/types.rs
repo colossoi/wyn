@@ -674,6 +674,11 @@ pub struct EntryPoint {
     /// by `parallelize`). Carried end-to-end so SPIR-V generation has a
     /// single source of truth for each entry's buffer interface.
     pub storage_bindings: Vec<interface::StorageBindingDecl>,
+    /// Exact storage-buffer access published for this physical stage. This is
+    /// authoritative over the broader `StorageRole::Intermediate`, which says
+    /// who owns an allocation but intentionally does not distinguish a stage
+    /// that only reads it from a stage that only writes it.
+    pub stage_descriptor_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     /// Storage access required by the physical pipeline layout containing
     /// this entry. Unlike the entry-local interface above, this is unioned
     /// across every stage that shares the pipeline's binding table.
@@ -723,6 +728,19 @@ impl EntryPoint {
                 .entry(binding)
                 .and_modify(|current| *current = current.merge(access))
                 .or_insert(access);
+        }
+        accesses
+    }
+
+    /// Access each storage-buffer slot exposes from this SPIR-V entry point.
+    /// SPIR-V can bind access-qualified globals to the same descriptor slot in
+    /// disjoint entry-point interfaces, so use the descriptor's exact stage
+    /// access. Directly constructed SSA without descriptor metadata falls back
+    /// to the entry interface above.
+    pub(crate) fn spirv_storage_accesses(&self) -> LookupMap<BindingRef, ResourceAccess> {
+        let mut accesses = self.stage_storage_accesses();
+        for (&binding, &access) in &self.stage_descriptor_storage_accesses {
+            accesses.insert(binding, access);
         }
         accesses
     }

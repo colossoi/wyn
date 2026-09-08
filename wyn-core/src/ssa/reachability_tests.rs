@@ -64,6 +64,7 @@ fn entry(references: &[Definition]) -> EntryPoint {
         parameter_inputs: vec![],
         outputs: vec![],
         storage_bindings: vec![],
+        stage_descriptor_storage_accesses: LookupMap::new(),
         pipeline_storage_accesses: LookupMap::new(),
         span: Span::generated(),
     }

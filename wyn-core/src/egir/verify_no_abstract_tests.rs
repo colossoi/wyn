@@ -67,6 +67,7 @@ fn entry_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) 
         parameter_inputs: Vec::new(),
         outputs: Vec::new(),
         storage_bindings: Vec::new(),
+        stage_descriptor_storage_accesses: LookupMap::new(),
         pipeline_storage_accesses: LookupMap::new(),
         span: ast::Span::generated(),
     }

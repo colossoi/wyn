@@ -103,6 +103,10 @@ impl KernelPlan {
         let input_names = host_resource_names(&program.data.core.resources);
         program.data.core.pipeline.relabel_input_storage_names(&input_names);
         program.data.core.pipeline.rebuild_frame_graph();
+        // `install_phase_shells` replaces authored stages with their physical
+        // phase family. Preserve the matching structural identities for SSA
+        // elaboration; the authored associations no longer line up by index.
+        program.data.core.stage_entries = stage_entries;
         Ok(physical_resources)
     }
 

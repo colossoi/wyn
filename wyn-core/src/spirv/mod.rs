@@ -427,7 +427,7 @@ pub fn lower_ssa_program(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> {
 
 fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> {
     let mut constructor = Constructor::new();
-    let function_variants = StorageFunctionVariants::new(program);
+    let function_variants = StorageFunctionVariants::for_spirv(program);
 
     // Collect entry point info for later
     let mut entry_info: Vec<(EntryId, String, spirv::ExecutionModel, Option<(u32, u32, u32)>)> = Vec::new();
@@ -485,7 +485,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     // buffer-specialized functions (which reference set/binding directly) can
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
-        let accesses = entry.shader_storage_accesses();
+        let accesses = entry.spirv_storage_accesses();
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding() {
                 constructor.create_storage_buffer(&input.ty, br.set, br.binding, true)?;
@@ -505,7 +505,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     // typed list of compiler-introduced bindings (e.g. parallelize's
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
-        let accesses = entry.shader_storage_accesses();
+        let accesses = entry.spirv_storage_accesses();
         for sb in &entry.storage_bindings {
             constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true)?;
             if !accesses[&sb.binding].writes() {
@@ -602,7 +602,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         };
 
         entry_info.push((entry.id, entry.name.clone(), spirv_model, local_size));
-        constructor.select_storage_accesses(&entry.shader_storage_accesses());
+        constructor.select_storage_accesses(&entry.spirv_storage_accesses());
         constructor.select_functions(function_variants.emissions_for_entry(entry.id));
         entry::lower_ssa_entry_point(&mut constructor, entry)?;
     }
@@ -631,7 +631,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             // entry points may have buffers this one doesn't reference.
             let entry = program.entry_points.iter().find(|e| e.id == *entry_id);
             if let Some(entry) = entry {
-                constructor.select_storage_accesses(&entry.shader_storage_accesses());
+                constructor.select_storage_accesses(&entry.spirv_storage_accesses());
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
                         if let Some(buffer) = constructor.storage_buffer(br) {
