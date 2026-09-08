@@ -613,9 +613,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     // For a Bounded base, the underlying value is a struct
                     // `{buffer: [N]T, len: i32}`, so the access chain has to
                     // index member 0 first (constant) before the dynamic
-                    // index reaches the array element. Other variants
-                    // (Composite/View/Virtual) chain directly to the
-                    // element.
+                    // index reaches the array element. Composite arrays
+                    // chain directly to the element. View and Virtual arrays
+                    // retain ordinary indexing instead of DynamicExtract.
                     // A constant base hoisted by `Materialize` lives in a
                     // `Private` global; everything else is a `Function` var.
                     // The access-chain pointer's storage class must match.

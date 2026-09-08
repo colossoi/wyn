@@ -18,7 +18,9 @@
 //! address chain into the backing buffer. Spilling an intermediate row to a
 //! Function-local composite would both lose that chain and copy data that the
 //! source never selected. Only genuinely in-register composites need the
-//! rewrite.
+//! rewrite. Virtual arrays are exempt too: their values are range descriptors,
+//! and ordinary indexing computes an element from the start and step. Spilling
+//! a descriptor does not create an addressable array of its elements.
 
 use smallvec::smallvec;
 use wyn_base::IdSource;
@@ -74,7 +76,10 @@ fn run_one_body<P: Family>(graph: &mut EGraph<P>, effect_ids: &mut IdSource<Effe
             } if node.alias().is_none() && operands.len() == 2 => {
                 let arr = graph.canonical_value(operands[0]);
                 let idx = graph.canonical_value(operands[1]);
-                if is_const_int(graph, idx) || index_spine_reaches_addressable_source(graph, nid) {
+                if is_const_int(graph, idx)
+                    || crate::types::is_virtual_array(&graph.nodes[arr].ty)
+                    || index_spine_reaches_addressable_source(graph, nid)
+                {
                     None
                 } else {
                     Some((nid, arr, idx))

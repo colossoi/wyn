@@ -9618,6 +9618,28 @@ entry main(x: []f32) [4]f32 = f(x[0])
     );
 }
 
+/// Virtual ranges store {start, step, len}, not addressable elements. Dynamic
+/// indexing must use range arithmetic even after map fusion exposes the range.
+#[test]
+fn virtual_range_dynamic_index_in_loop_emits_valid_spirv() {
+    for array in [
+        "iota(2)",
+        "map(|i| i, iota(2))",
+        "map(|i| i + 3, iota(2))",
+        "5..<7",
+        "[0, 1]",
+    ] {
+        let source = format!(
+            "entry reproduce() [1]i32 =
+              let xs = {array}
+              let total = loop total = 0 for i < 2 do total + xs[i] in
+              [total]"
+        );
+        let words = compile_to_spirv(&source).expect("dynamic array indexing should compile");
+        assert_naga_accepts_spirv(&words);
+    }
+}
+
 /// Indexing a materialized array produced inside a loop is a memory read from
 /// a mutable local place.  It must not be treated as an invariant pure
 /// expression and hoisted into the loop preheader, before the inner loop has
