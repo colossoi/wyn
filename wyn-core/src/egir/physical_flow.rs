@@ -16,9 +16,7 @@ use polytype::Type;
 use slotmap::SlotMap;
 use wyn_base::IdSource;
 
-use super::graph_ops::{
-    bind_physical_result_value, detached_alloca, emit_result_to_place, pack_result_references,
-};
+use super::graph_ops::{alloca, bind_physical_result_value, emit_result_to_place, pack_result_references};
 use super::ir::{Language, ResultLeaf};
 use super::program::{PhysicalResourceTable, SemanticResourceRef};
 use super::types::{
@@ -274,9 +272,14 @@ fn build_binding(
                     }
                 }
             } else {
-                let (place, allocation) = detached_alloca(graph, leaf.ty().clone(), effect_ids, None);
-                graph.skeleton.blocks[graph.skeleton.entry].side_effects.insert(0, allocation);
-                place
+                let entry = graph.skeleton.entry;
+                alloca(graph, leaf.ty().clone(), effect_ids, None).insert_at(
+                    &mut graph.skeleton,
+                    super::types::SideEffectSite {
+                        block: entry,
+                        index: 0,
+                    },
+                )
             };
             destinations.push(ResultDestination::Place(PlaceDestination::Fixed(place)));
         } else {

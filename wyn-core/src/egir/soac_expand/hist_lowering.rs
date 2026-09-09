@@ -10,8 +10,8 @@ use super::CallableMap;
 use crate::ast::TypeName;
 use crate::builtins::{self, catalog};
 use crate::egir::graph_ops::{
-    emit_atomic, emit_storage_store, emit_store, emit_view_load, intern_storage_view, intern_u32,
-    pack_result_values, rebind_physical_result, retype_projection_tree,
+    emit_atomic, emit_storage_store, emit_view_load, intern_storage_view, intern_u32, pack_result_values,
+    rebind_physical_result, retype_projection_tree, store,
 };
 use crate::egir::soac::hist;
 use crate::egir::soac::lambda::result_argument_values;
@@ -1021,7 +1021,7 @@ pub(super) fn build_bucket_insert(
     let row = graph.add_view_index_place(destination, *key, row_ty.clone(), None);
     let leaf_ty = row_ty.elem_type().expect("bucket destination must have rank two").clone();
     let place = graph.add_index_place(row, slot, leaf_ty, None);
-    emit_store(graph, write, place, *value, next_effect, None);
+    store(place, *value, next_effect, None).append_to(&mut graph.skeleton, write);
     graph.skeleton.blocks[write].term = SkeletonTerminator::Branch {
         target: work_done,
         args: vec![],

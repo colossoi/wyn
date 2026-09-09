@@ -4,7 +4,9 @@
 //! intern the same set of pure ops (literals, intrinsics, BinOps,
 //! StorageViews) and push the same shapes of side-effects (`Store`,
 //! semantic `Soac` effects). This module owns those primitives so the three
-//! contexts don't drift in their representation.
+//! contexts don't drift in their representation. Side-effect primitives build
+//! [`PendingEffect`] values first; callers then either attach them to a block
+//! or keep the effect unscheduled for a later rewrite/insertion.
 //!
 //! The functions take `Option<Span>` for span attachment; pass
 //! `None` when no source span is available, otherwise the caller's
@@ -37,8 +39,8 @@ use super::types::{
     CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType, Physical,
     PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw,
     ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect,
-    SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, ViewId,
-    WynLanguage, WynSoacPhase,
+    SideEffectKind, SideEffectSite, Skeleton, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
+    ViewId, WynLanguage, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -213,9 +215,9 @@ pub(crate) fn adapt_physical_call_argument(
                 let place = if let Some(place) = addressable_value_place(graph, value, &pointee) {
                     place
                 } else {
-                    let (place, allocation) = detached_alloca(graph, pointee.clone(), effect_ids, span);
+                    let (place, allocation) = alloca(graph, pointee.clone(), effect_ids, span).into_parts();
                     effects.push(allocation);
-                    effects.push(detached_store(place, value, effect_ids, span));
+                    effects.push(store(place, value, effect_ids, span).into_effect());
                     place
                 };
                 OperandRef::View(graph.add_place_view(
@@ -258,9 +260,9 @@ pub(crate) fn adapt_physical_call_argument(
                     ));
                 }
                 let span = graph.nodes[value].span();
-                let (place, allocation) = detached_alloca(graph, actual, effect_ids, span);
+                let (place, allocation) = alloca(graph, actual, effect_ids, span).into_parts();
                 effects.push(allocation);
-                effects.push(detached_store(place, value, effect_ids, span));
+                effects.push(store(place, value, effect_ids, span).into_effect());
                 place
             };
             OperandRef::Place(place)
@@ -304,7 +306,7 @@ fn materialize_fixed_array_argument(
             span,
         );
         let place = graph.add_index_place(source, coordinate, element_ty.clone(), span);
-        let (element, load) = detached_load(graph, place, element_ty.clone(), effect_ids, span);
+        let (element, load) = load(graph, place, element_ty.clone(), effect_ids, span).into_parts();
         elements.push(element);
         loads.push(load);
     }
@@ -534,7 +536,7 @@ pub(crate) fn materialize_place_backed_projections<P: Family>(
                 pending.push(view);
                 view
             } else {
-                let (loaded, effect) = detached_load(graph, element, ty, effect_ids, span);
+                let (loaded, effect) = load(graph, element, ty, effect_ids, span).into_parts();
                 loads.push(effect);
                 loaded
             };
@@ -632,7 +634,7 @@ pub(crate) fn load_result_value<P: Family>(
         ResultDestination::ReturnValue(value) => graph.canonical_value(*value),
         ResultDestination::Place(PlaceDestination::Fixed(place))
         | ResultDestination::Place(PlaceDestination::Bounded { storage: place, .. }) => {
-            emit_load(graph, block, *place, ty.clone(), effect_ids, None)
+            load(graph, *place, ty.clone(), effect_ids, None).append_to(&mut graph.skeleton, block)
         }
     }
 }
@@ -788,7 +790,7 @@ pub(crate) fn bind_result_from_place<P: Family>(
         if WynLanguage::is_materialized_aggregate(leaf.ty()) || WynLanguage::is_view(leaf.ty()) {
             destinations.push(ResultDestination::Place(PlaceDestination::Fixed(place)));
         } else {
-            let (value, effect) = detached_load(graph, place, leaf.ty().clone(), effect_ids, span);
+            let (value, effect) = load(graph, place, leaf.ty().clone(), effect_ids, span).into_parts();
             loads.push(effect);
             destinations.push(ResultDestination::ReturnValue(value));
         }
@@ -1655,47 +1657,74 @@ pub fn intern_chunked_storage_view(
 // Side effects
 // ---------------------------------------------------------------------------
 
+/// A fully constructed side effect that has not yet been scheduled in a
+/// skeleton block. `R` is the operation-specific construction result: a load
+/// value, an allocation place, or an effect token identifying a store.
+#[must_use = "a pending effect must be attached to a block or explicitly unpacked"]
+pub struct PendingEffect<P: Family, R> {
+    result: R,
+    effect: SideEffect<P>,
+}
+
+impl<P: Family, R> PendingEffect<P, R> {
+    fn new(result: R, effect: SideEffect<P>) -> Self {
+        Self { result, effect }
+    }
+
+    /// Inspect the construction result without scheduling the effect.
+    pub fn result(&self) -> &R {
+        &self.result
+    }
+
+    /// Consume the pending operation into its result and unscheduled effect.
+    pub fn into_parts(self) -> (R, SideEffect<P>) {
+        (self.result, self.effect)
+    }
+
+    /// Discard the typed construction result and retain the unscheduled
+    /// effect. This is useful when building an effect prelude.
+    pub fn into_effect(self) -> SideEffect<P> {
+        self.effect
+    }
+
+    /// Append the effect to `block` and return its typed construction result.
+    pub fn append_to(self, skeleton: &mut Skeleton<P>, block: BlockId) -> R {
+        skeleton.blocks[block].side_effects.push(self.effect);
+        self.result
+    }
+
+    /// Insert the effect at an exact skeleton site and return its typed
+    /// construction result.
+    pub fn insert_at(self, skeleton: &mut Skeleton<P>, site: SideEffectSite) -> R {
+        skeleton.blocks[site.block].side_effects.insert(site.index, self.effect);
+        self.result
+    }
+}
+
 pub fn alloc_effect(effect_ids: &mut IdSource<EffectToken>) -> EffectToken {
     effect_ids.next_id()
 }
 
-/// Emit a `Store` side-effect in `block`. `place_nid` must be a place-
-/// producing pure op (`ViewIndex`, `OutputSlot`). Returns the produced
-/// effect-out token.
-pub fn emit_store<P: Family>(
-    graph: &mut EGraph<P>,
-    block: BlockId,
-    place: PlaceId,
-    value_nid: ValueId,
-    effect_ids: &mut IdSource<EffectToken>,
-    span: Option<Span>,
-) -> EffectToken {
-    let effect_in = alloc_effect(effect_ids);
-    let effect_out = alloc_effect(effect_ids);
-    graph.skeleton.blocks[block].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store { place }),
-        operands: smallvec![OperandRef::Value(value_nid)],
-        result: None,
-        effects: Some((effect_in, effect_out)),
-        span,
-    });
-    effect_out
-}
-
-/// Construct a `Store` without choosing its position in a skeleton block.
-pub fn detached_store<P: Family>(
+/// Construct an unscheduled `Store`. `place` must identify an addressable
+/// destination. The pending result is the produced effect-out token.
+pub fn store<P: Family>(
     place: PlaceId,
     value: ValueId,
     effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
-) -> SideEffect<P> {
-    SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Store { place }),
-        operands: smallvec![OperandRef::Value(value)],
-        result: None,
-        effects: Some((alloc_effect(effect_ids), alloc_effect(effect_ids))),
-        span,
-    }
+) -> PendingEffect<P, EffectToken> {
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    PendingEffect::new(
+        effect_out,
+        SideEffect {
+            kind: SideEffectKind::Effect(EffectOp::Store { place }),
+            operands: smallvec![OperandRef::Value(value)],
+            result: None,
+            effects: Some((effect_in, effect_out)),
+            span,
+        },
+    )
 }
 
 /// Emit an atomic integer update through an addressable place. The returned
@@ -1760,7 +1789,7 @@ pub fn emit_storage_store<P: Family>(
 ) -> EffectToken {
     let view = graph.view_id(view_nid);
     let place = graph.add_view_index_place(view, index_nid, elem_ty, span);
-    emit_store(graph, block, place, value_nid, effect_ids, span)
+    store(place, value_nid, effect_ids, span).append_to(&mut graph.skeleton, block)
 }
 
 /// Write one logical result value to a resource-backed destination. Fixed
@@ -1829,18 +1858,25 @@ pub fn emit_resource_write<P: Family<Resource = super::program::SemanticResource
     }
 }
 
-/// Emit a typed `Load` from an addressable place in `block`.
-pub fn emit_load<P: Family>(
+/// Construct an unscheduled typed `Load` from an addressable place.
+pub fn load<P: Family>(
     graph: &mut EGraph<P>,
-    block: BlockId,
     place: PlaceId,
     elem_ty: Type<TypeName>,
     effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
-) -> ValueId {
-    let (result, effect) = detached_load(graph, place, elem_ty, effect_ids, span);
-    graph.skeleton.blocks[block].side_effects.push(effect);
-    result
+) -> PendingEffect<P, ValueId> {
+    let effect_in = alloc_effect(effect_ids);
+    let effect_out = alloc_effect(effect_ids);
+    let result = graph.alloc_side_effect_result(elem_ty);
+    let effect = SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Load { place }),
+        operands: smallvec![],
+        result: Some(graph.value_result(result)),
+        effects: Some((effect_in, effect_out)),
+        span,
+    };
+    PendingEffect::new(result, effect)
 }
 
 #[derive(Clone, Copy)]
@@ -1927,7 +1963,7 @@ pub fn emit_result_to_place<P: Family>(
                     emit_addressable_copy(graph, block, source, destination, ty, effect_ids, span)
                 }
             } else {
-                emit_store(graph, block, destination, value, effect_ids, span);
+                store(destination, value, effect_ids, span).append_to(&mut graph.skeleton, block);
                 Ok(block)
             }
         }
@@ -2142,8 +2178,8 @@ fn emit_addressable_copy<P: Family>(
     let AddressableSource::Place(source) = source else {
         return Err("a view source must be indexed before scalar copy".into());
     };
-    let value = emit_load(graph, block, source, ty.clone(), effect_ids, span);
-    emit_store(graph, block, destination, value, effect_ids, span);
+    let value = load(graph, source, ty.clone(), effect_ids, span).append_to(&mut graph.skeleton, block);
+    store(destination, value, effect_ids, span).append_to(&mut graph.skeleton, block);
     Ok(block)
 }
 
@@ -2160,50 +2196,13 @@ fn index_addressable<P: Family>(
     })
 }
 
-/// Construct a `Load` and its result without choosing its position in a
-/// block. Rewriters use this when a synthesized load must be inserted before
-/// an existing scheduled operation instead of appended to the block tail.
-pub fn detached_load<P: Family>(
-    graph: &mut EGraph<P>,
-    place: PlaceId,
-    elem_ty: Type<TypeName>,
-    effect_ids: &mut IdSource<EffectToken>,
-    span: Option<Span>,
-) -> (ValueId, SideEffect<P>) {
-    let effect_in = alloc_effect(effect_ids);
-    let effect_out = alloc_effect(effect_ids);
-    let result = graph.alloc_side_effect_result(elem_ty);
-    let effect = SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load { place }),
-        operands: smallvec![],
-        result: Some(graph.value_result(result)),
-        effects: Some((effect_in, effect_out)),
-        span,
-    };
-    (result, effect)
-}
-
-/// Emit a function-local allocation and return its addressable place.
-pub fn emit_alloca<P: Family>(
-    graph: &mut EGraph<P>,
-    block: BlockId,
-    elem_ty: Type<TypeName>,
-    effect_ids: &mut IdSource<EffectToken>,
-    span: Option<Span>,
-) -> PlaceId {
-    let (place, effect) = detached_alloca(graph, elem_ty, effect_ids, span);
-    graph.skeleton.blocks[block].side_effects.push(effect);
-    place
-}
-
-/// Construct a function-local allocation without choosing its position in a
-/// block.
-pub fn detached_alloca<P: Family>(
+/// Construct an unscheduled function-local allocation.
+pub fn alloca<P: Family>(
     graph: &mut EGraph<P>,
     elem_ty: Type<TypeName>,
     effect_ids: &mut IdSource<EffectToken>,
     span: Option<Span>,
-) -> (PlaceId, SideEffect<P>) {
+) -> PendingEffect<P, PlaceId> {
     let effect_in = alloc_effect(effect_ids);
     let effect_out = alloc_effect(effect_ids);
     let place = graph.add_alloca_place(
@@ -2221,7 +2220,7 @@ pub fn detached_alloca<P: Family>(
         effects: Some((effect_in, effect_out)),
         span,
     };
-    (place, effect)
+    PendingEffect::new(place, effect)
 }
 
 /// Index into an existing place to produce a
@@ -2252,7 +2251,7 @@ pub fn emit_place_index_store<P: Family>(
     span: Option<Span>,
 ) {
     let elem_place = intern_place_index(graph, parent_place, index_nid, elem_ty, span);
-    let _ = emit_store(graph, block, elem_place, value_nid, effect_ids, span);
+    store(elem_place, value_nid, effect_ids, span).append_to(&mut graph.skeleton, block);
 }
 
 /// Emit `view[index]` as a `ViewIndex` place + `Load` in `block`; returns the
@@ -2268,7 +2267,7 @@ pub fn emit_view_load<P: Family>(
 ) -> ValueId {
     let view = graph.view_id(view_nid);
     let place = graph.add_view_index_place(view, index_nid, elem_ty.clone(), span);
-    emit_load(graph, block, place, elem_ty, effect_ids, span)
+    load(graph, place, elem_ty, effect_ids, span).append_to(&mut graph.skeleton, block)
 }
 
 /// Push a SOAC side effect into `block` with its complete result routes.

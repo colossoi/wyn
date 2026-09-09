@@ -1465,14 +1465,10 @@ impl<'a, 'b> Converter<'a, 'b> {
         }
 
         if let Some(place) = place {
-            Ok(super::graph_ops::emit_load(
-                &mut self.graph,
-                self.current_block,
-                place,
-                final_ty,
-                self.effect_ids,
-                Some(term.span),
-            ))
+            Ok(
+                super::graph_ops::load(&mut self.graph, place, final_ty, self.effect_ids, Some(term.span))
+                    .append_to(&mut self.graph.skeleton, self.current_block),
+            )
         } else {
             Ok(value)
         }
@@ -1924,14 +1920,14 @@ impl<'a, 'b> Converter<'a, 'b> {
         let view_nid = self.emit_storage_view(binding, ty.clone());
         let view = self.graph.view_id(view_nid);
         let place_nid = self.graph.add_view_index_place(view, index_nid, ty.clone(), self.current_span);
-        Ok(super::graph_ops::emit_load(
+        Ok(super::graph_ops::load(
             &mut self.graph,
-            self.current_block,
             place_nid,
             ty.clone(),
             self.effect_ids,
             self.current_span,
-        ))
+        )
+        .append_to(&mut self.graph.skeleton, self.current_block))
     }
 
     fn lower_storage_store(&mut self, args: &[Term]) -> Result<ValueId, ConvertError> {

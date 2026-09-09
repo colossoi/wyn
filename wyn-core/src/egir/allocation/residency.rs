@@ -1319,7 +1319,7 @@ fn rewrite_runtime_array_source(
     let length_view =
         graph_ops::intern_resource_view(&mut entry.graph, handoff.length, u32_ty.clone(), None);
     let (survivor_count, load_effect) =
-        detached_scalar_handoff_load(&mut entry.graph, length_view, &u32_ty, effect_ids);
+        scalar_handoff_load(&mut entry.graph, length_view, &u32_ty, effect_ids).into_parts();
     let zero = graph_ops::intern_u32(&mut entry.graph, 0, None);
     let view = graph_ops::intern_chunked_resource_view(
         &mut entry.graph,
@@ -1474,7 +1474,8 @@ fn configure_materialized_result(
                     output.field
                 )
             })?;
-            emit_scalar_handoff_store(graph, block, output_view, value, &output.elem_ty, effect_ids);
+            scalar_handoff_store(graph, output_view, value, &output.elem_ty, effect_ids)
+                .append_to(&mut graph.skeleton, block);
         }
     }
     Ok(replacements)
@@ -1501,7 +1502,7 @@ fn rewrite_materialized_operation_source(
             .ok_or_else(|| format!("materialized output {} is not one result leaf", output.field))?;
         let value = if output.storage == OutputStorage::Scalar {
             let (loaded, load_effect) =
-                detached_scalar_handoff_load(&mut entry.graph, view, &output.elem_ty, effect_ids);
+                scalar_handoff_load(&mut entry.graph, view, &output.elem_ty, effect_ids).into_parts();
             scalar_effects.push(load_effect);
             loaded
         } else {
@@ -1604,14 +1605,14 @@ fn materialize_stage_prelude(
     for (resource, value) in &handoffs {
         let output_view =
             producer_entry.declare_resource_view(*resource, StorageRole::Output, &value.elem_ty);
-        emit_scalar_handoff_store(
+        scalar_handoff_store(
             &mut producer_entry.graph,
-            result_block,
             output_view,
             value.projected,
             &value.elem_ty,
             &mut global_context.effect_ids,
-        );
+        )
+        .append_to(&mut producer_entry.graph.skeleton, result_block);
     }
     producer_entry.compact_interface();
 
@@ -1620,12 +1621,13 @@ fn materialize_stage_prelude(
     let mut load_effects = Vec::with_capacity(handoffs.len());
     for (resource, value) in &handoffs {
         let view = entry.declare_resource_view(*resource, StorageRole::Input, &value.elem_ty);
-        let (loaded, load_effect) = detached_scalar_handoff_load(
+        let (loaded, load_effect) = scalar_handoff_load(
             &mut entry.graph,
             view,
             &value.elem_ty,
             &mut global_context.effect_ids,
-        );
+        )
+        .into_parts();
         entry.graph.replace_value_references(value.source, loaded);
         loaded_values.push(loaded);
         load_effects.push(load_effect);
@@ -1713,37 +1715,29 @@ fn projected_materialization_entry(
     }
 }
 
-fn emit_scalar_handoff_store(
+fn scalar_handoff_store(
     graph: &mut AllocatedGraph,
-    block: BlockId,
     output_view: ValueId,
     value: ValueId,
     elem_ty: &Type<TypeName>,
     effect_ids: &mut IdSource<EffectToken>,
-) {
+) -> graph_ops::PendingEffect<AllocatedSemantic, EffectToken> {
     let zero = graph_ops::intern_u32(graph, 0, None);
-    graph_ops::emit_storage_store(
-        graph,
-        block,
-        output_view,
-        zero,
-        value,
-        elem_ty.clone(),
-        effect_ids,
-        None,
-    );
+    let view = graph.view_id(output_view);
+    let place = graph.add_view_index_place(view, zero, elem_ty.clone(), None);
+    graph_ops::store(place, value, effect_ids, None)
 }
 
-fn detached_scalar_handoff_load(
+fn scalar_handoff_load(
     graph: &mut AllocatedGraph,
     view: ValueId,
     elem_ty: &Type<TypeName>,
     effect_ids: &mut IdSource<EffectToken>,
-) -> (ValueId, AllocatedSideEffect) {
+) -> graph_ops::PendingEffect<AllocatedSemantic, ValueId> {
     let zero = graph_ops::intern_u32(graph, 0, None);
     let view = graph.view_id(view);
     let place = graph.add_view_index_place(view, zero, elem_ty.clone(), None);
-    graph_ops::detached_load(graph, place, elem_ty.clone(), effect_ids, None)
+    graph_ops::load(graph, place, elem_ty.clone(), effect_ids, None)
 }
 
 fn replace_prelude_effects_with_load(

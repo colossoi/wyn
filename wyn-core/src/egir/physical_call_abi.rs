@@ -8,7 +8,7 @@ use crate::{BindingRef, LookupMap, StableMap};
 use polytype::Type;
 use wyn_base::IdSource;
 
-use super::graph_ops::{adapt_physical_call_argument, detached_alloca, emit_result_to_place};
+use super::graph_ops::{adapt_physical_call_argument, alloca, emit_result_to_place};
 use super::ir::PlaceOp;
 use super::program::{ConstantDef, Func, PhysicalEntry};
 use super::types::{
@@ -269,7 +269,7 @@ fn bind_call_boundary(
 
         let place = match (&routing, source.as_ref()) {
             (CallResultRouting::Allocate, None) => {
-                let (place, effect) = detached_alloca(graph, ty.clone(), effect_ids, None);
+                let (place, effect) = alloca(graph, ty.clone(), effect_ids, None).into_parts();
                 prelude.push(effect);
                 place
             }
@@ -305,7 +305,7 @@ fn bind_call_boundary(
                             place
                         } else {
                             let span = graph.nodes[value].span();
-                            let (place, effect) = detached_alloca(graph, ty.clone(), effect_ids, span);
+                            let (place, effect) = alloca(graph, ty.clone(), effect_ids, span).into_parts();
                             prelude.push(effect);
                             let view_ty = types::view_array_of(ty, types::no_buffer());
                             let view = graph.add_place_view(place, view_ty, span).value();

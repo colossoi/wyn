@@ -5,8 +5,7 @@ use super::CallableMap;
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops::{
-    emit_alloca, emit_load, emit_place_index_store, emit_storage_store, emit_store, intern_storage_view,
-    intern_u32,
+    alloca, emit_place_index_store, emit_storage_store, intern_storage_view, intern_u32, load, store,
 };
 use crate::egir::physical_call_abi::emit_call;
 use crate::egir::program::Func;
@@ -225,16 +224,10 @@ pub(super) fn build_filter_loop(
     let after = replacement.continuation;
     let _replaced_effect = replacement.effect;
     let suffix = graph.skeleton.blocks[after].side_effects.drain(..).collect::<Vec<_>>();
-    let buf_place = emit_alloca(graph, bid, buf_ty.clone(), next_effect, None);
+    let buf_place = alloca(graph, buf_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, bid);
     if *ownership == SoacOwnership::UniqueInput {
-        emit_store(
-            graph,
-            bid,
-            buf_place,
-            filter_primary_input(&spec).0,
-            next_effect,
-            None,
-        );
+        store(buf_place, filter_primary_input(&spec).0, next_effect, None)
+            .append_to(&mut graph.skeleton, bid);
     }
 
     let zero = graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty.clone(), None);
@@ -251,7 +244,7 @@ pub(super) fn build_filter_loop(
         next_effect,
     )?;
 
-    let loaded = emit_load(graph, after, buf_place, buf_ty, next_effect, None);
+    let loaded = load(graph, buf_place, buf_ty, next_effect, None).append_to(&mut graph.skeleton, after);
     graph.skeleton.blocks[after].side_effects.extend(suffix);
     graph.replace_pure_node(spec.result_node, PureOp::Tuple(2), smallvec![loaded, after_count]);
     Ok(())
@@ -571,7 +564,8 @@ pub(super) fn build_filter_scan(
         None,
     );
     let flag_place = graph.add_view_index_place(graph.view_id(flags), global_i, u32_ty.clone(), None);
-    let flag = emit_load(graph, body, flag_place, u32_ty.clone(), next_effect, None);
+    let flag =
+        load(graph, flag_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, body);
     let next = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Add),
         smallvec![acc, flag],
@@ -657,7 +651,8 @@ pub(super) fn build_filter_scatter(
     let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
     let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
     let flag_place = graph.add_view_index_place(graph.view_id(flags), gid, u32_ty.clone(), None);
-    let flag = emit_load(graph, in_range, flag_place, u32_ty.clone(), next_effect, None);
+    let flag =
+        load(graph, flag_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, in_range);
     let one = intern_u32(graph, 1, None);
     let keep = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Equal),
@@ -667,7 +662,8 @@ pub(super) fn build_filter_scatter(
     );
     install_selection(graph, in_range, keep, write, skip, merge);
     let offset_place = graph.add_view_index_place(graph.view_id(offsets), gid, u32_ty.clone(), None);
-    let inclusive = emit_load(graph, write, offset_place, u32_ty.clone(), next_effect, None);
+    let inclusive =
+        load(graph, offset_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, write);
     let output_index = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Subtract),
         smallvec![inclusive, one],
@@ -711,7 +707,8 @@ pub(super) fn build_filter_scatter(
     let len_view = intern_storage_view(graph, len_binding, u32_ty.clone(), None);
     let zero = intern_u32(graph, 0, None);
     let len_place = graph.add_view_index_place(graph.view_id(len_view), zero, u32_ty.clone(), None);
-    let count = emit_load(graph, bid, len_place, u32_ty.clone(), next_effect, None);
+    let count =
+        load(graph, len_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, bid);
     graph.replace_pure_node(
         spec.result_node,
         PureOp::StorageView(op::PureViewSource::Storage(out_binding)),

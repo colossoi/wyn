@@ -183,14 +183,8 @@ impl<'a> EntryBuilder<'a> {
     }
 
     pub fn emit_load(&mut self, place: PlaceId, elem_ty: Type<TypeName>) -> ValueId {
-        graph_ops::emit_load(
-            &mut self.graph,
-            self.current_block,
-            place,
-            elem_ty,
-            self.effect_ids,
-            Some(self.span),
-        )
+        graph_ops::load(&mut self.graph, place, elem_ty, self.effect_ids, Some(self.span))
+            .append_to(&mut self.graph.skeleton, self.current_block)
     }
 
     pub fn build(mut self) -> PlannedEntry {

@@ -5,10 +5,10 @@ use super::loop_builder::{expand_loop, LoopBody, LoopResultBinding, LoopResultSo
 use super::{load_result_arguments, result_is_addressable, value_binding, CallableMap};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
+use crate::egir::graph_ops::{alloca, materialize_place_backed_projections};
 use crate::egir::graph_ops::{
     bind_by_value_result, emit_result_to_indexed_destination, rebind_physical_result,
 };
-use crate::egir::graph_ops::{detached_alloca, materialize_place_backed_projections};
 use crate::egir::physical_call_abi::emit_call;
 use crate::egir::program::Func;
 use crate::egir::soac::lambda::logical_result_fields;
@@ -157,7 +157,7 @@ fn fresh_result_destination(
         );
     }
 
-    let (place, effect) = detached_alloca(graph, result.ty().clone(), next_effect, None);
+    let (place, effect) = alloca(graph, result.ty().clone(), next_effect, None).into_parts();
     prelude.push(effect);
     let view_ty = types::view_array_of(result.ty(), types::no_buffer());
     let view = graph.add_place_view(place, view_ty, None).value();

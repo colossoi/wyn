@@ -4,7 +4,7 @@ use super::{is_plain_array_source, is_view_source, is_virtual_source};
 use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir;
-use crate::egir::graph_ops::{alloc_effect, emit_load, project_value};
+use crate::egir::graph_ops::{alloc_effect, load, project_value};
 use crate::egir::ir::Language;
 use crate::egir::types::{
     as_soa_tuple, soac_element_type, soac_leaf_type, ArrayLayout, EGraph, EffectOp, EffectToken, Physical,
@@ -369,7 +369,7 @@ pub(super) fn emit_read_ranked_coordinates(
             let view_ty = types::view_array_of(leaf_ty, region);
             return graph.add_place_view(place, view_ty, None).value();
         }
-        return emit_load(graph, body, place, leaf_ty.clone(), next_effect, None);
+        return load(graph, place, leaf_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, body);
     }
 
     let mut value = arr_nid;

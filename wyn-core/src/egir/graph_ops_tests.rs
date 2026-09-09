@@ -37,6 +37,48 @@ fn alloca_place(graph: &mut EGraph<Physical>, ty: Type<TypeName>) -> PlaceId {
 }
 
 #[test]
+fn pending_memory_effects_are_scheduled_explicitly() {
+    let mut graph = EGraph::<Physical>::new();
+    let block = graph.skeleton.entry;
+    let ty = u32_ty();
+    let value = graph.intern_constant(ConstantValue::U32(7), ty.clone());
+    let mut effect_ids = IdSource::new();
+
+    let allocation = alloca(&mut graph, ty.clone(), &mut effect_ids, None);
+    let place = *allocation.result();
+    assert!(graph.skeleton.blocks[block].side_effects.is_empty());
+
+    let write = store(place, value, &mut effect_ids, None);
+    let write_token = *write.result();
+    assert_eq!(write.append_to(&mut graph.skeleton, block), write_token);
+    assert_eq!(graph.skeleton.blocks[block].side_effects.len(), 1);
+
+    assert_eq!(
+        allocation.insert_at(&mut graph.skeleton, SideEffectSite { block, index: 0 }),
+        place
+    );
+    let read = load(&mut graph, place, ty, &mut effect_ids, None);
+    let loaded = *read.result();
+    assert_eq!(read.append_to(&mut graph.skeleton, block), loaded);
+
+    let effects = &graph.skeleton.blocks[block].side_effects;
+    assert!(matches!(
+        effects[0].kind(),
+        SideEffectKind::Effect(EffectOp::Alloca { result }) if *result == place
+    ));
+    assert!(matches!(
+        effects[1].kind(),
+        SideEffectKind::Effect(EffectOp::Store { place: destination }) if *destination == place
+    ));
+    assert_eq!(effects[1].effects().map(|(_, output)| output), Some(write_token));
+    assert!(matches!(
+        effects[2].kind(),
+        SideEffectKind::Effect(EffectOp::Load { place: source }) if *source == place
+    ));
+    assert_eq!(effects[2].value_result(), Some(loaded));
+}
+
+#[test]
 fn physical_result_rebinding_replaces_leaves_and_folds_exposed_projections() {
     let mut graph = EGraph::<Physical>::new();
     let scalar = u32_ty();

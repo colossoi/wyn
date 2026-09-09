@@ -1839,14 +1839,10 @@ fn emit_entry_output_writes(
                         access: super::types::PlaceAccess::WriteOnly,
                     },
                 );
-                writers.push(OutputWriter::Effect(super::graph_ops::emit_store(
-                    &mut entry.graph,
-                    route.source.block,
-                    place,
-                    source,
-                    effect_ids,
-                    Some(entry_span),
-                )));
+                writers.push(OutputWriter::Effect(
+                    super::graph_ops::store(place, source, effect_ids, Some(entry_span))
+                        .append_to(&mut entry.graph.skeleton, route.source.block),
+                ));
             }
             let mut seen = HashSet::new();
             writers.retain(|writer| seen.insert(*writer));
