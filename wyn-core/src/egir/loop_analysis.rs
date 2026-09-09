@@ -13,7 +13,7 @@ use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupMap, LookupSet};
 
 use super::ir::Family;
-use super::types::{EGraph, Skeleton, SkeletonTerminator, ValueId, ValueKind};
+use super::types::{EGraph, Skeleton, ValueId, ValueKind};
 
 pub struct LoopAnalysis {
     /// All blocks inside each loop (key = loop header).
@@ -132,24 +132,12 @@ fn collect_loop_body<P: Family>(
     header: BlockId,
     merge: BlockId,
 ) -> LookupSet<BlockId> {
-    let mut body = LookupSet::new();
-    let mut stack = vec![header];
-    while let Some(b) = stack.pop() {
-        if b == merge || !body.insert(b) {
-            continue;
+    wyn_graph::reachable_from_ordered([header], wyn_graph::WalkOrder::DepthFirst, |block, out| {
+        if block != merge {
+            out.extend(skeleton.blocks[block].term.successors());
         }
-        match &skeleton.blocks[b].term {
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-            SkeletonTerminator::Branch { target, .. } => stack.push(*target),
-            SkeletonTerminator::CondBranch {
-                then_target,
-                else_target,
-                ..
-            } => {
-                stack.push(*then_target);
-                stack.push(*else_target);
-            }
-        }
-    }
-    body
+    })
+    .into_iter()
+    .filter(|block| *block != merge)
+    .collect()
 }

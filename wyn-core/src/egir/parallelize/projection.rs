@@ -6,6 +6,7 @@ use crate::egir::{graph_projector, program};
 use crate::interface;
 use crate::types;
 use crate::EntryId;
+use wyn_graph::DisjointSets;
 
 pub(super) struct ProjectionSpec {
     name: String,

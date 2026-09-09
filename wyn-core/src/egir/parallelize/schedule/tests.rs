@@ -149,6 +149,13 @@ fn checked_dependency_insertion_preserves_the_dag() {
 
     plan.add_dependency(first, second).expect("first dependency");
     assert_eq!(
+        plan.add_dependency(first, first),
+        Err(KernelMutationError::DependencyCycle {
+            reader: first,
+            writer: first,
+        })
+    );
+    assert_eq!(
         plan.add_dependency(second, first),
         Err(KernelMutationError::DependencyCycle {
             reader: second,

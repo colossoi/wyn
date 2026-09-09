@@ -6,7 +6,8 @@
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 use thiserror::Error;
@@ -51,6 +52,45 @@ pub enum TopoError<N> {
     Cycle {
         remaining: Vec<N>,
     },
+}
+
+/// Union-find over a fixed, densely indexed universe.
+///
+/// Merging uses component size and representative lookups compress paths.
+/// Indices must be smaller than the length passed to [`DisjointSets::new`].
+#[derive(Clone, Debug)]
+pub struct DisjointSets {
+    links: Vec<isize>,
+}
+
+impl DisjointSets {
+    /// Create `len` singleton sets.
+    pub fn new(len: usize) -> Self {
+        Self { links: vec![-1; len] }
+    }
+
+    /// Return the current representative for `index` and compress its path.
+    pub fn representative(&mut self, index: usize) -> usize {
+        let parent = self.links[index];
+        if parent < 0 {
+            return index;
+        }
+        let root = self.representative(parent as usize);
+        self.links[index] = root as isize;
+        root
+    }
+
+    /// Merge the sets containing `left` and `right`.
+    pub fn merge(&mut self, left: usize, right: usize) {
+        let (left, right) = (self.representative(left), self.representative(right));
+        if left == right {
+            return;
+        }
+        let (larger, smaller) =
+            if self.links[left] <= self.links[right] { (left, right) } else { (right, left) };
+        self.links[larger] += self.links[smaller];
+        self.links[smaller] = larger as isize;
+    }
 }
 
 impl<N> TopoError<N> {
@@ -185,7 +225,9 @@ where
 ///
 /// If `dependencies(a)` includes `b`, then `b` appears before `a` in the
 /// returned order. Dependencies outside the supplied `nodes` universe are
-/// ignored, which makes it convenient to sort an induced subgraph.
+/// ignored, which makes it convenient to sort an induced subgraph. When more
+/// than one node is ready, the node appearing earliest in `nodes` is emitted
+/// first.
 pub fn topo_sort_by_dependencies<N, I, F>(nodes: I, mut dependencies: F) -> Result<Vec<N>, TopoError<N>>
 where
     N: Copy + Eq + Hash,
@@ -426,16 +468,22 @@ where
 {
     // Both maps are keyed by exactly `nodes`. A missed decrement would strand a
     // node and report a cycle that isn't there, so index rather than guard.
-    let mut ready: VecDeque<N> = nodes.iter().copied().filter(|node| remaining[node] == 0).collect();
+    let positions = nodes.iter().enumerate().map(|(index, &node)| (node, index)).collect::<HashMap<_, _>>();
+    let mut ready = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| (remaining[node] == 0).then_some(Reverse(index)))
+        .collect::<BinaryHeap<_>>();
     let mut result = Vec::with_capacity(nodes.len());
 
-    while let Some(node) = ready.pop_front() {
+    while let Some(Reverse(index)) = ready.pop() {
+        let node = nodes[index];
         result.push(node);
         for &next in &dependents[&node] {
             let count = remaining.entry(next).or_default();
             *count -= 1;
             if *count == 0 {
-                ready.push_back(next);
+                ready.push(Reverse(positions[&next]));
             }
         }
     }

@@ -7,7 +7,6 @@
 #![deny(clippy::expect_used, clippy::panic, clippy::unreachable, clippy::unwrap_used)]
 
 use crate::ast;
-use std::collections::VecDeque;
 use wyn_base::IdSource;
 
 use crate::{LookupMap, LookupSet};
@@ -343,26 +342,18 @@ fn structured_inline_summary<P: Family>(
 
     // Acyclicity is a semantic capability boundary independent of structured
     // metadata: malformed or headerless backedges must not enter this path.
-    let mut indegree: LookupMap<BlockId, usize> = blocks.iter().map(|block| (*block, 0)).collect();
+    let mut predecessors: LookupMap<BlockId, Vec<BlockId>> =
+        blocks.iter().map(|block| (*block, Vec::new())).collect();
     for block in &blocks {
         for successor in graph.skeleton.blocks[*block].term.successors() {
-            *indegree.get_mut(&successor)? += 1;
+            predecessors.get_mut(&successor)?.push(*block);
         }
     }
-    let mut ready: VecDeque<BlockId> =
-        blocks.iter().copied().filter(|block| indegree[block] == 0).collect();
-    let mut visited = 0usize;
-    while let Some(block) = ready.pop_front() {
-        visited += 1;
-        for successor in graph.skeleton.blocks[block].term.successors() {
-            let degree = indegree.get_mut(&successor)?;
-            *degree -= 1;
-            if *degree == 0 {
-                ready.push_back(successor);
-            }
-        }
-    }
-    if visited != blocks.len() {
+    if wyn_graph::topo_sort_by_dependencies(blocks.iter().copied(), |block, out| {
+        out.extend(predecessors[&block].iter().copied());
+    })
+    .is_err()
+    {
         return None;
     }
 

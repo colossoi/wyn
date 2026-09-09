@@ -96,6 +96,35 @@ fn dependency_topological_sort_orders_dependencies_first() {
 }
 
 #[test]
+fn dependency_topological_sort_prefers_caller_order_when_nodes_become_ready() {
+    fn deps(node: u8, out: &mut Vec<u8>) {
+        if node == 2 {
+            out.push(0);
+        }
+    }
+
+    // Node 1 is initially ready, but node 2 precedes it in caller order and
+    // becomes ready after node 0 is emitted.
+    let order = match topo_sort_by_dependencies([2, 0, 1], deps) {
+        Ok(order) => order,
+        Err(err) => panic!("dependency graph should be acyclic: {err}"),
+    };
+    assert_eq!(order, vec![0, 2, 1]);
+}
+
+#[test]
+fn disjoint_sets_merge_transitive_components() {
+    let mut sets = DisjointSets::new(5);
+    sets.merge(0, 1);
+    sets.merge(1, 3);
+    sets.merge(2, 4);
+
+    assert_eq!(sets.representative(0), sets.representative(3));
+    assert_eq!(sets.representative(2), sets.representative(4));
+    assert_ne!(sets.representative(0), sets.representative(2));
+}
+
+#[test]
 fn topological_sort_reports_cycle_members() {
     fn deps(node: u8, out: &mut Vec<u8>) {
         match node {

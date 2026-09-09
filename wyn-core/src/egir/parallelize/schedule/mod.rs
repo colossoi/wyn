@@ -21,6 +21,7 @@ use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
 use crate::{BindingRef, EntryId, ResourceId};
+use wyn_graph::DisjointSets;
 use wyn_staged_ir::StageId;
 
 use super::declared_resources;
@@ -445,19 +446,12 @@ impl PhysicalKernelGraph {
     /// Kernel identities in dependency order. Stable schedule order breaks
     /// ties between simultaneously ready kernels.
     pub fn topological_kernel_ids(&self) -> Vec<KernelId> {
-        let mut emitted = HashSet::new();
-        let mut order = Vec::with_capacity(self.kernels.len());
-        while order.len() < self.kernels.len() {
-            let Some(kernel) = self.kernels.iter().find(|kernel| {
-                !emitted.contains(&kernel.id)
-                    && kernel.dependencies.iter().all(|dependency| emitted.contains(dependency))
-            }) else {
-                unreachable!("physical kernel graphs are validated when finalized")
-            };
-            emitted.insert(kernel.id);
-            order.push(kernel.id);
-        }
-        order
+        wyn_graph::topo_sort_by_dependencies(self.kernels.iter().map(|kernel| kernel.id), |id, out| {
+            if let Some(kernel) = self.kernel(id) {
+                out.extend(kernel.dependencies.iter().copied());
+            }
+        })
+        .unwrap_or_else(|_| unreachable!("physical kernel graphs are validated when finalized"))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -494,15 +488,14 @@ impl PhysicalKernelGraph {
                 }
             }
         }
-        let mut emitted = HashSet::new();
-        while emitted.len() < self.kernels.len() {
-            let Some(kernel) = self.kernels.iter().find(|kernel| {
-                !emitted.contains(&kernel.id)
-                    && kernel.dependencies.iter().all(|dependency| emitted.contains(dependency))
-            }) else {
-                return Err("physical kernel dependency graph contains a cycle".into());
-            };
-            emitted.insert(kernel.id);
+        if wyn_graph::topo_sort_by_dependencies(self.kernels.iter().map(|kernel| kernel.id), |id, out| {
+            if let Some(kernel) = self.kernel(id) {
+                out.extend(kernel.dependencies.iter().copied());
+            }
+        })
+        .is_err()
+        {
+            return Err("physical kernel dependency graph contains a cycle".into());
         }
         Ok(())
     }
@@ -1188,21 +1181,9 @@ impl KernelPlan {
     }
 
     fn depends_on(&self, start: KernelId, target: KernelId) -> bool {
-        let mut pending = vec![start];
-        let mut visited = HashSet::new();
-        while let Some(kernel) = pending.pop() {
-            if !visited.insert(kernel) {
-                continue;
-            }
-            let phase = self.phase(kernel);
-            for dependency in &phase.dependencies {
-                if *dependency == target {
-                    return true;
-                }
-                pending.push(*dependency);
-            }
-        }
-        false
+        wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |kernel, out| {
+            out.extend(self.phase(kernel).dependencies.iter().copied());
+        })
     }
 
     fn merge_connected_pipelines(&mut self) -> Result<(), KernelMutationError> {
@@ -1223,7 +1204,7 @@ impl KernelPlan {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
-        let mut pipeline_components = super::DisjointSets::new(self.pipelines.len());
+        let mut pipeline_components = DisjointSets::new(self.pipelines.len());
         for (&phase, &pipeline) in &owner {
             for dependency in &self.phase(phase).dependencies {
                 if let Some(&other) = owner.get(dependency) {
@@ -1486,32 +1467,16 @@ fn topologically_order_phases(
     phases: Vec<KernelId>,
 ) -> Result<Vec<KernelId>, Vec<KernelId>> {
     let phase_ids = phases.iter().copied().collect::<HashSet<_>>();
-    let mut remaining = phases.into_iter().map(Some).collect::<Vec<_>>();
-    let mut emitted = HashSet::new();
-    let mut ordered = Vec::with_capacity(remaining.len());
-    while ordered.len() < remaining.len() {
-        let ready = remaining.iter().position(|candidate| {
-            candidate.as_ref().is_some_and(|phase| {
-                arena[phase.index()]
-                    .dependencies
-                    .iter()
-                    .all(|dependency| !phase_ids.contains(dependency) || emitted.contains(dependency))
-            })
-        });
-        let Some(index) = ready else {
-            // Preserve stable order for the remainder. Validation reports the
-            // actual cycle or unresolved dependency with kernel identities.
-            ordered.extend(remaining.into_iter().flatten());
-            return Err(ordered);
-        };
-        let Some(phase) = remaining[index].take() else {
-            ordered.extend(remaining.into_iter().flatten());
-            return Err(ordered);
-        };
-        emitted.insert(phase);
-        ordered.push(phase);
-    }
-    Ok(ordered)
+    wyn_graph::topo_sort_by_dependencies(phases, |phase, out| {
+        out.extend(
+            arena[phase.index()]
+                .dependencies
+                .iter()
+                .copied()
+                .filter(|dependency| phase_ids.contains(dependency)),
+        );
+    })
+    .map_err(|error| error.remaining().to_vec())
 }
 
 fn merge_bindings(target: &mut Vec<Binding>, source: Vec<Binding>) {

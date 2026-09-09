@@ -131,18 +131,6 @@ fn output_ownership_comes_from_explicit_route_writer() {
 }
 
 #[test]
-fn disjoint_sets_merge_transitive_components() {
-    let mut sets = DisjointSets::new(5);
-    sets.merge(0, 1);
-    sets.merge(1, 3);
-    sets.merge(2, 4);
-
-    assert_eq!(sets.representative(0), sets.representative(3));
-    assert_eq!(sets.representative(2), sets.representative(4));
-    assert_ne!(sets.representative(0), sets.representative(2));
-}
-
-#[test]
 fn reduction_keeps_canonical_operator_lambda_together() {
     let mut graph = EGraph::new();
     let neutral = neutral(&mut graph, 0);

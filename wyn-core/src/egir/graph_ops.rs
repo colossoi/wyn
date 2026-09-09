@@ -1099,18 +1099,13 @@ impl ValueUseIndex {
         successors: &LookupMap<ValueId, Vec<ValueId>>,
         mut visit: impl FnMut(ValueId) -> bool,
     ) -> bool {
-        let mut seen = HashSet::new();
-        let mut pending = vec![source];
-        while let Some(user) = pending.pop() {
-            if !seen.insert(user) {
-                continue;
-            }
-            if visit(user) {
-                return true;
-            }
-            pending.extend(successors.get(&user).into_iter().flatten().copied());
-        }
-        false
+        wyn_graph::find_map_reachable(
+            [source],
+            wyn_graph::WalkOrder::DepthFirst,
+            |user, out| out.extend(successors.get(&user).into_iter().flatten().copied()),
+            |user| visit(user).then_some(()),
+        )
+        .is_some()
     }
 }
 

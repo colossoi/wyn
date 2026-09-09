@@ -52,7 +52,7 @@ use kernel::{
     can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, emit_chunk_arithmetic,
     synthesize_swap_wrapper, synthesize_u32_add_function,
 };
-use model::{CandidateSelection, DisjointSets, ParallelizeError, Result as ParallelizeResult};
+use model::{CandidateSelection, ParallelizeError, Result as ParallelizeResult};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
 use projection::{
     partition_entry_output_domains, project_kernel_body, project_single_effect_body, ProjectionSpec,

@@ -43,16 +43,19 @@ impl KernelPlan {
 }
 
 fn validate_acyclic(phases: &[(KernelId, &KernelPhase)]) -> Result<(), String> {
-    let mut emitted = HashSet::new();
-    while emitted.len() < phases.len() {
-        let ready = phases.iter().find(|(id, phase)| {
-            !emitted.contains(id)
-                && phase.dependencies.iter().all(|dependency| emitted.contains(dependency))
-        });
-        let Some(phase) = ready else {
-            return Err("kernel dependency graph contains a cycle".into());
-        };
-        emitted.insert(phase.0);
+    let phase_ids = phases.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
+    if phases
+        .iter()
+        .flat_map(|(_, phase)| &phase.dependencies)
+        .any(|dependency| !phase_ids.contains(dependency))
+    {
+        return Err("kernel dependency graph references an unknown kernel".into());
     }
-    Ok(())
+    wyn_graph::topo_sort_by_dependencies(phases.iter().map(|(id, _)| *id), |id, out| {
+        if let Some((_, phase)) = phases.iter().find(|(candidate, _)| *candidate == id) {
+            out.extend(phase.dependencies.iter().copied());
+        }
+    })
+    .map(|_| ())
+    .map_err(|_| "kernel dependency graph contains a cycle".into())
 }
