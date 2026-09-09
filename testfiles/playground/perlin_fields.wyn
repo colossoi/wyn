@@ -110,7 +110,7 @@ def step_particle(p: vec4f32, i: i32, frame: u32, variant: i32, t: f32) vec4f32 
   let nage = p.z + 1.0 in
   let inb = npos.x >= 0.0 && npos.x < RESF && npos.y >= 0.0 && npos.y < RESF in
   if nage > LIFETIME || !inb then spawn(i, frame * 40503u32 + 7u32)
-  else @[npos.x, npos.y, nage, p.w]
+  else @[npos..., nage, p.w]
 
 ------------------------------------------------------------
 -- keyboard variant select (Shadertoy 256×3 layout; row 0 = held).
@@ -138,7 +138,7 @@ def tick(prev: []vec4f32,
     -- Stagger initial ages so particles don't all respawn in lockstep.
     map(|i: i32|
           let s = spawn(i, 11u32) in
-          @[s.x, s.y, rand01(fasthash.seed(u32.i32(i) + 99u32), 0u32) * LIFETIME, s.w],
+          @[s.xy..., rand01(fasthash.seed(u32.i32(i) + 99u32), 0u32) * LIFETIME, s.w],
         0i32 ..< N)
   else
     let variant = select_variant(keyboard) in
@@ -155,7 +155,7 @@ def tint(seed: f32) vec4f32 =
   let d = @[0.0, 0.15, 0.35] in
   let kk = TWO_PI * (seed + d) in
   let c = @[0.55, 0.45, 0.4] + @[0.45, 0.4, 0.4] * @[cos(kk.x), cos(kk.y), cos(kk.z)] in
-  @[c.x, c.y, c.z, 1.0]
+  @[c..., 1.0]
 
 def clampi(v: i32) i32 = if v < 0i32 then 0i32 else if v >= RES then RES - 1i32 else v
 

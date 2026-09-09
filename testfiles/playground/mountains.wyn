@@ -121,7 +121,7 @@ def noised(p: vec2f32) vec3f32 =
   let cross_term = u.yx * (va - vb - vc + vd) + @[vb - va, vc - va] in
   let deriv = g_lin + du * cross_term in
 
-  @[value, deriv.x, deriv.y]
+  @[value, deriv...]
 
 ------------------------------------------------------------
 -- Box / ray helpers
@@ -156,7 +156,7 @@ def camera_ray(fov: f32, size: vec2f32, pos: vec2f32) vec3f32 =
   let xy = pos - size * 0.5 in
   let cot_half_fov = tan(radians(90.0 - fov * 0.5)) in
   let z = size.y * 0.5 * cot_half_fov in
-  normalize(@[xy.x, xy.y, 0.0 - z])
+  normalize(@[xy..., 0.0 - z])
 
 -- GLSL mat3, column-major. Outer arrays = columns at SPIR-V emission.
 def camera_rotation(angle: vec2f32) mat3f32 =
@@ -306,7 +306,7 @@ def phacelle_noise(p: vec2f32, norm_dir: vec2f32, freq: f32,
   let interpolated = phase_dir_acc / weight_sum in
   let raw_mag = sqrt(dot(interpolated, interpolated)) in
   let mag = max(1.0 - normalization, raw_mag) in
-  @[interpolated.x / mag, interpolated.y / mag, side_dir.x, side_dir.y]
+  @[interpolated.x / mag, interpolated.y / mag, side_dir...]
 
 ------------------------------------------------------------
 -- Erosion filter utility functions
@@ -398,7 +398,7 @@ def erosion_filter(p: vec2f32, height_and_slope_in: vec3f32, fade_target_in: f32
 
   let ridge_map = ridge_fade_final * (1.0 - ridge_mask_final) in
   let delta = has_final - input_height_and_slope in
-  (@[delta.x, delta.y, delta.z, mag_final], ridge_map)
+  (@[delta..., mag_final], ridge_map)
 
 ------------------------------------------------------------
 -- Heightmap entry helper (Buffer B body)

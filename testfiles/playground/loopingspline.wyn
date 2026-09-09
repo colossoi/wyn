@@ -132,7 +132,7 @@ def main_image(
   let c5 = mix(@[0.0, 0.7, 0.0], c4, smoothstep(0.008, 0.011, magnitude(uv - p_b))) in
   let c  = mix(@[1.0, 1.0, 1.0], c5, smoothstep(0.004, 0.006, magnitude(uv - p_b))) in
 
-  @[c.x, c.y, c.z, 1.0]
+  @[c..., 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out below)

@@ -5,10 +5,10 @@ def vertex_main(positions: []vec3f32, colors: []vec3f32,
                 vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec3f32> =
   let i = i32(vertex_index) in
   let position = positions[i] in
-  vertex_output(@[position.x, position.y, position.z, 1.0], colors[i])
+  vertex_output(@[position..., 1.0], colors[i])
 
 def fragment_main(color: vec3f32) vec4f32 =
-  @[color.x, color.y, color.z, 1.0]
+  @[color..., 1.0]
 
 entry vertex_inputs(
     positions: []vec3f32,

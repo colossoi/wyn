@@ -91,7 +91,7 @@ def main_image(
   -- Ray origin moves along Z with time
   let ro: vec3f32 = @[0.0, 0.0 - 0.2, time * 4.0] in
   -- Ray direction: normalize and apply two slow rotations
-  let ray0: vec3f32 = normalize(@[p.x, p.y, 1.5]) in
+  let ray0: vec3f32 = normalize(@[p..., 1.5]) in
   let ray1 = rot2_xy(ray0, sin(time * 0.03) * 5.0) in
   let ray  = rot2_yz(ray1, sin(time * 0.05) * 0.2) in
   -- Raymarching loop: 99 steps accumulating glow
@@ -112,7 +112,7 @@ def main_image(
   let tint: vec3f32 = @[0.0, 0.2 * abs(sin(time)), 0.5 + sin(time) * 0.2] in
   let col2 = col + tint in
   let alpha = 1.0 - t_final * (0.02 + 0.02 * sin(time)) in
-  @[col2.x, col2.y, col2.z, alpha]
+  @[col2..., alpha]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out below)

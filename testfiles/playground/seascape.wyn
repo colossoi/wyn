@@ -142,8 +142,8 @@ def get_sea_color(p: vec3f32, n: vec3f32, l: vec3f32, eye: vec3f32, dist: vec3f3
 
 def get_normal(p: vec3f32, eps: f32, time: f32) vec3f32 =
   let ny = map_detailed(p, time) in
-  let nx = map_detailed(@[p.x + eps, p.y, p.z], time) - ny in
-  let nz = map_detailed(@[p.x, p.y, p.z + eps], time) - ny in
+  let nx = map_detailed(@[p.x + eps, p.yz...], time) - ny in
+  let nz = map_detailed(@[p.xy..., p.z + eps], time) - ny in
   normalize(@[nx, eps, nz])
 
 -- Height map tracing - returns (t, p)
@@ -179,8 +179,8 @@ def get_pixel(coord: vec2f32, time: f32, resolution: vec3f32, time: f32) vec3f32
   -- Ray setup
   let ang = @[sin(time * 3.0) * 0.1, sin(time) * 0.2 + 0.3, time] in
   let ori = @[0.0, 3.5, time * 5.0] in
-  let dir_base = normalize(@[uv3.x, uv3.y, -2.0]) in
-  let dir_z_adj = @[dir_base.x, dir_base.y, dir_base.z + magnitude(uv3.xy) * 0.14] in
+  let dir_base = normalize(@[uv3..., -2.0]) in
+  let dir_z_adj = @[dir_base.xy..., dir_base.z + magnitude(uv3.xy) * 0.14] in
   let dir_norm = normalize(dir_z_adj) in
   let rot = from_euler(ang) in
   let dir = dir_norm * rot in

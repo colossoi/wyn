@@ -79,10 +79,10 @@ def sim(prev_pos: []vec4f32, frame: u32) []vec4f32 =
       let accelerated =
         map(|elem:vec4f32|
               let deltav = clump(elem, previous_positions) + align(elem, previous_positions) + separation(elem, previous_positions) in
-              @[elem.x, elem.y, elem.z + deltav.x, elem.w + deltav.y],
+              @[elem.xy..., elem.z + deltav.x, elem.w + deltav.y],
             previous_positions)
       in
-      map(|upd:vec4f32| @[wrap(upd.x, upd.z), wrap(upd.y, upd.w), upd.z, upd.w],
+      map(|upd:vec4f32| @[wrap(upd.x, upd.z), wrap(upd.y, upd.w), upd.zw...],
           accelerated) in
   new_pos
 

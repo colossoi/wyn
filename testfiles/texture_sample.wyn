@@ -15,7 +15,7 @@ def vertex_main(positions: []vec2f32,
                 vertex_index: u32, instance_index: u32, draw_index: u32) vertex<vec2f32> =
   let pos = positions[i32(vertex_index)] in
   vertex_output(
-    @[pos.x, pos.y, 0.0, 1.0],
+    @[pos..., 0.0, 1.0],
     @[pos.x * 0.5 + 0.5, pos.y * 0.5 + 0.5])
 
 def fragment_main(uv: vec2f32, tex: texture2d, samp: sampler) vec4f32 =

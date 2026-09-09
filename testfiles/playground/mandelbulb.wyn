@@ -69,9 +69,9 @@ def softshadow(ro: vec3f32, rd: vec3f32, k: f32, time: f32) f32 =
 ------------------------------------------------------------
 def nor(p: vec3f32, time: f32) vec3f32 =
   let e = 0.001 in
-  let dx = (scene(@[p.x + e, p.y, p.z], time)).x - (scene(@[p.x - e, p.y, p.z], time)).x in
+  let dx = (scene(@[p.x + e, p.yz...], time)).x - (scene(@[p.x - e, p.yz...], time)).x in
   let dy = (scene(@[p.x, p.y + e, p.z], time)).x - (scene(@[p.x, p.y - e, p.z], time)).x in
-  let dz = (scene(@[p.x, p.y, p.z + e], time)).x - (scene(@[p.x, p.y, p.z - e], time)).x in
+  let dz = (scene(@[p.xy..., p.z + e], time)).x - (scene(@[p.xy..., p.z - e], time)).x in
   normalize(@[dx, dy, dz])
 
 ------------------------------------------------------------
@@ -193,7 +193,7 @@ def main_image(
   -- smooth bg gradient stops forming visible isocontours.
   let dither = fract(52.9829189 * fract(dot(frag_coord, @[0.06711056, 0.00583715]))) in
   let c4 = c3 + @[dither - 0.5, dither - 0.5, dither - 0.5] * (1.0 / 255.0) in
-  @[c4.x, c4.y, c4.z, 1.0]
+  @[c4..., 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL below (commented out)

@@ -76,7 +76,7 @@ def scene_map(p: vec3f32, time: f32) f32 =
   let pz = mod(p.z, 16.0) - 8.0 in
   let p1: vec3f32 = @[px, py, pz] in
   let pxy2 = pmod(@[p1.x, p1.y], 5.0) in
-  let p2: vec3f32 = @[pxy2.x, pxy2.y, p1.z] in
+  let p2: vec3f32 = @[pxy2..., p1.z] in
   ifs_box(p2, time)
 
 ------------------------------------------------------------
@@ -116,7 +116,7 @@ def main_image(
   in
 
   let col = @[acc * 0.01, acc * 0.011 + acc2 * 0.002, acc * 0.012 + acc2 * 0.005] in
-  @[col.x, col.y, col.z, 1.0 - t * 0.03]
+  @[col..., 1.0 - t * 0.03]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out below)

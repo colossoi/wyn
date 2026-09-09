@@ -221,4 +221,4 @@ def main_image(
   let q = fc / resolution.xy in
   let vig = 0.5 + 0.5 * (16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y)) ** 0.1 in
   let g = vec.pow(vec.clamp(col * vig, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
-  @[g.x, g.y, g.z, 1.0]
+  @[g..., 1.0]

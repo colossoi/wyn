@@ -48,7 +48,7 @@ def main_image(time: f32) vec4f32 =
       let position = translation(instance * 4.0) in
       let matrix = position * shared in
       let transformed: [2]vec4f32 = map(
-        |v: vec3f32| @[v.x, v.y, v.z, 1.0] * matrix,
+        |v: vec3f32| @[v..., 1.0] * matrix,
         points) in
       let projected: [2]vec3f32 = map(
         |v: vec4f32|
@@ -58,7 +58,7 @@ def main_image(time: f32) vec4f32 =
       let total = sum_edges(projected, edges) in
       (i + 1, color + projected[0] * total) in
   let (_, color) = result in
-  @[color.x, color.y, color.z, 1.0]
+  @[color..., 1.0]
 
 entry image(
     time: f32,

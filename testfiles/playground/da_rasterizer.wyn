@@ -330,7 +330,7 @@ def main_image(
       let mat  : mat4f32 = pos * rot_cam in
 
       -- Transform & perspective
-      let v4s : [8]vec4f32 = map(|v:vec3f32| @[v.x, v.y, v.z, 1.0] * mat, cube_corners) in
+      let v4s : [8]vec4f32 = map(|v:vec3f32| @[v..., 1.0] * mat, cube_corners) in
       let verts1 : [8]vec3f32 =
         map(|q:vec4f32|
                   let zinv = 1.0 / q.z in
@@ -362,4 +362,4 @@ def main_image(
       (idx + 1, acc') in
   let (dummy2, c_final) = c_final_result in
 
-  @[c_final.x, c_final.y, c_final.z, 1.0]
+  @[c_final..., 1.0]

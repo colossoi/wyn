@@ -102,9 +102,9 @@ def scene_map(p: vec3f32, jt: f32) (f32, f32) =
 def grad3(p: vec3f32, jt: f32) vec3f32 =
   let e = 0.005 in
   let a = (scene_map(p, jt)).0 in
-  let gx = (scene_map(@[p.x + e, p.y, p.z], jt)).0 - a in
+  let gx = (scene_map(@[p.x + e, p.yz...], jt)).0 - a in
   let gy = (scene_map(@[p.x, p.y + e, p.z], jt)).0 - a in
-  let gz = (scene_map(@[p.x, p.y, p.z + e], jt)).0 - a in
+  let gz = (scene_map(@[p.xy..., p.z + e], jt)).0 - a in
   @[gx / e, gy / e, gz / e]
 
 ------------------------------------------------------------
@@ -213,7 +213,7 @@ def main_image(
   -- Ray origin: scrolling forward at SPEED
   let ro = @[0.0, 1.0, -20000.0 + jt * SPEED] in
   -- Ray direction
-  let rd = normalize(@[uv.x, uv.y, 4.0 / 3.0]) in
+  let rd = normalize(@[uv..., 4.0 / 3.0]) in
 
   -- Intersect terrain
   let (d, edge) = intersect(ro, rd, jt) in

@@ -55,7 +55,7 @@ def fragment_main(resolution: vec3f32, time: f32, frag_coord: vec4f32) vec4f32 =
 
   -- Also exercise mat3 paths
   let rz = rot3z(t)
-  let p3 = @[uv.x, uv.y, 0.0] in
+  let p3 = @[uv..., 0.0] in
 
   -- mat3 * vec3
   let mv3 : vec3f32 = rz * p3 in

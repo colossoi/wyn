@@ -75,9 +75,9 @@ def lookat(dir: vec3f32) mat3f32 =
   let rt = normalize(cross(dir, up)) in
   let up2 = cross(rt, dir) in
   -- Row-major: row0=rt, row1=up2, row2=dir
-  @[[rt.x,  rt.y,  rt.z ],
-    [up2.x, up2.y, up2.z],
-    [dir.x, dir.y, dir.z]]
+  @[[rt...],
+    [up2...],
+    [dir...]]
 
 ------------------------------------------------------------
 -- erot: rotate p around unit axis ax by angle ro
@@ -105,7 +105,7 @@ def icosahedron_verts(p: vec3f32) (vec3f32, vec3f32, vec3f32, vec3f32) =
   let a     = normalize(v2) * vec.sign(p) in
   -- Dodecahedral vertices align to icosahedron face centres.
   let dv0   = @[v0.x, v0.x, v0.x] in
-  let dvn   = @[v0.z, v0.y, v0.x + v0.y] in
+  let dvn   = @[v0.zy..., v0.x + v0.y] in
   let f1    = if dot(ap, dvn - dv0)                       > 0.0 then dvn                       else dv0 in
   let dvn_yzx = @[dvn.y, dvn.z, dvn.x] in
   let f2    = if dot(ap, dvn_yzx - f1)                    > 0.0 then dvn_yzx                   else f1  in
@@ -195,9 +195,9 @@ def de(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, time: f32) (f32, f32, f32,
 def normal(p: vec3f32, hpos: vec3f32, point_dir: vec3f32, time: f32) vec3f32 =
   let eps = 0.005 in
   let (d0, _, _, _) = de(p,                                     hpos, point_dir, time) in
-  let (dx, _, _, _) = de(@[p.x + eps, p.y,       p.z      ], hpos, point_dir, time) in
+  let (dx, _, _, _) = de(@[p.x + eps, p.yz...], hpos, point_dir, time) in
   let (dy, _, _, _) = de(@[p.x,       p.y + eps, p.z      ], hpos, point_dir, time) in
-  let (dz, _, _, _) = de(@[p.x,       p.y,       p.z + eps], hpos, point_dir, time) in
+  let (dz, _, _, _) = de(@[p.xy..., p.z + eps], hpos, point_dir, time) in
   normalize(@[dx - d0, dy - d0, dz - d0])
 
 ------------------------------------------------------------
@@ -316,7 +316,7 @@ def main_image(
   let t_freeze = floor(t / 20.0) * 20.0 + 10.0 in
   let from_freeze = path(t_freeze) in
   let from = if detach
-             then @[from_freeze.x + 2.0, from_freeze.y, from_freeze.z]
+             then @[from_freeze.x + 2.0, from_freeze.yz...]
              else from_base in
 
   let hpos  = path(t + 3.0) in
@@ -331,14 +331,14 @@ def main_image(
   let point_dir  = @[point_xz2.x, point_raw.y, point_xz2.y] in
 
   -- Build ray direction through lookat camera
-  let dir_local = normalize(@[uv.x, uv.y, 0.7]) in
+  let dir_local = normalize(@[uv..., 0.7]) in
   let cam_mat   = lookat(dd) in
   let dir       = dir_local * cam_mat in
 
   -- March and apply warm tint
   let col_raw = march(from, dir, hpos, point_dir, time) in
   let col     = col_raw * @[1.0, 0.9, 0.8] in
-  @[col.x, col.y, col.z, 1.0]
+  @[col..., 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL (commented out below)

@@ -98,12 +98,12 @@ def calc_color(ro: vec3f32, rd: vec3f32, d: f32, len: f32, si: bool, td: f32, re
   let pos = ro + rd * d in
   let a   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos)) in
   let col = get_color(pos, resolution) in
-  let colx = @[col.x, col.y, col.z, a] in
+  let colx = @[col..., a] in
   if si then
     let pos2 = ro + rd * td in
     let ta   = 1.0 - smoothstep(len - 0.15 * 0.5, len + 0.00001, magnitude(pos2)) in
     let col2 = get_color(pos2, resolution) in
-    (colx, @[col2.x, col2.y, col2.z, ta])
+    (colx, @[col2..., ta])
   else
     (colx, @[0.0, 0.0, 0.0, 0.0])
 
@@ -116,7 +116,7 @@ def i_bilinear_patch(ro: vec3f32, rd: vec3f32, ps: vec4f32, ph: vec4f32, sz: f32
   let va = @[0.0, 0.0, ph.x + ph.w - ph.y - ph.z] in
   let vb = @[0.0, ps.w - ps.y, ph.z - ph.x] in
   let vc = @[ps.z - ps.x, 0.0, ph.y - ph.x] in
-  let vd = @[ps.x, ps.y, ph.x] in
+  let vd = @[ps.xy..., ph.x] in
 
   let tmp = 1.0 / (vb.y * vc.x) in
   let d = va.z * tmp in
@@ -197,7 +197,7 @@ def seg_shadow(ro: vec3f32, rd: vec3f32, pa: vec3f32, sh0: f32) f32 =
     let s = @[f32.i32(ii % 2), f32.i32(ii / 2)] in
     let t = dot(s, k4) - k3 in
     if t > 0.0 then
-      let cx = @[clamp(0.0 - rd.x * t, k1, k2), (k5 - k6 * s).x, (k5 - k6 * s).y] in
+      let cx = @[clamp(0.0 - rd.x * t, k1, k2), (k5 - k6 * s)...] in
       min(sh, dot2(cx + rd * t) / (t * t))
     else sh
 
@@ -316,7 +316,7 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, resolut
           let tc   = vec.clamp(tcol * tcol * 2.0, zero4, @[1.0, 1.0, 1.0, 1.0]) in
           let rgb0 = tc.xyz * shad * 1.4 + 3.0 * (tcr * tc.xyz) * clamp(1.0 - (amb0 + dif0), 0.0, 1.0) in
           let rgb1 = vec.clamp(2.0 * rgb0 * rgb0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) in
-          let tvalx = @[rgb1.x, rgb1.y, rgb1.z, min(tc.w, ta)] * min(fade * 5.0, 1.0) in
+          let tvalx = @[rgb1..., min(tc.w, ta)] * min(fade * 5.0, 1.0) in
           let colx2 = colx with [i] = tvalx in
           if si then
             let difs = clamp(dot(normsi, l_dir), 0.0, 1.0) in
@@ -326,7 +326,7 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, resolut
             let tcs   = vec.clamp(tcolsi * tcolsi * 2.0, zero4, @[1.0, 1.0, 1.0, 1.0]) in
             let rgbs0 = tcs.xyz * shads + 3.0 * (tcr * tcs.xyz) * clamp(1.0 - (ambs + difs), 0.0, 1.0) in
             let rgbs1 = vec.clamp(2.0 * rgbs0 * rgbs0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) * min(fadesi * 5.0, 1.0) in
-            let csi2  = colxsi with [i] = @[rgbs1.x, rgbs1.y, rgbs1.z, min(tcs.w, tas)] in
+            let csi2  = colxsi with [i] = @[rgbs1..., min(tcs.w, tas)] in
             (ro2, rd2, dx2, colx2, csi2)
           else
             (ro2, rd2, dx2, colx2, colxsi)
@@ -376,7 +376,7 @@ def insides(ro0: vec3f32, rd0: vec3f32, nor_c: vec3f32, l_dir0: vec3f32, resolut
            else if dxc[2].z > dxc[1].x then colx2[orderc[2]].w else 1.0 in
   let col = mix(mix(colx2[orderc[0]].xyz, colx2[orderc[1]].xyz, a1), colx2[orderc[2]].xyz, a2) in
   let a  = max(max(a0, a1), a2) in
-  (@[col.x, col.y, col.z, a], tout)
+  (@[col..., a], tout)
 
 ------------------------------------------------------------
 -- Fragment shader (mainImage)
@@ -427,9 +427,9 @@ def main_image(
       loop (rd2, accum, ro_refr, colo) = (rd2_0, 1.0, ro, [@[0.0, 0.0, 0.0, 0.0], @[0.0, 0.0, 0.0, 0.0]])
       for j < 2 do
         let coords2 = ro_refr.xy * ni.z + ro_refr.yz * ni.x + ro_refr.zx * ni.y in
-        let eye2 = @[coords2.x, coords2.y, 0.0 - 1.0] in
+        let eye2 = @[coords2..., 0.0 - 1.0] in
         let rd2trans0 = rd2.yzx * ni.x + rd2.zxy * ni.y + rd2.xyz * ni.z in
-        let rd2trans = @[rd2trans0.x, rd2trans0.y, 0.0 - rd2trans0.z] in
+        let rd2trans = @[rd2trans0.xy..., 0.0 - rd2trans0.z] in
         let (internalcol, tb) = insides(eye2, rd2trans, ni, l_dir, resolution) in
         let colo2 = if tb > 0.0 then colo with [j] = @[internalcol.x * accum, internalcol.y * accum, internalcol.z * accum, internalcol.w] else colo in
         if (tb <= 0.0) || (internalcol.w < 1.0) then
@@ -439,7 +439,7 @@ def main_image(
           let rdout = refract(rd2, 0.0 - no2b, IOR) in
           let fresnel2 = R0 + (1.0 - R0) * (1.0 - dot(rdout, no2b)) ** 1.3 in
           let rd2b = reflect(rd2, 0.0 - no2b) in
-          let rout2 = @[rout.x, rout.y, max(rout.z, 0.0 - 0.999)] in
+          let rout2 = @[rout.xy..., max(rout.z, 0.0 - 0.999)] in
           (rd2b, accum * fresnel2, rout2, colo2)
         else (rd2, accum, ro_refr, colo2)
     in
@@ -447,7 +447,7 @@ def main_image(
     let col0 = mix(mix(colo[1].xyz * colo[1].w, colo[0].xyz, colo[0].w) * fadeborders, reflcol, fresnel ** 1.5) in
     let col = vec.clamp(col0, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]) in
     let cineshader_alpha = clamp(0.15 * dot(eye, ro), 0.0, 1.0) in
-    @[col.x, col.y, col.z, cineshader_alpha]
+    @[col..., cineshader_alpha]
   else
     let (bg, _) = background(eye, rd, l_dir) in
-    @[bg.x, bg.y, bg.z, 0.15]
+    @[bg..., 0.15]

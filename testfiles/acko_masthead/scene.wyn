@@ -244,7 +244,7 @@ def fragment_main(fragment_value: track_varying, fragment_position: vec4f32, fra
 
   -- sqrt = pow(x, 1/2): cheap linear→sRGB gamma encoding.
   let out = vec.sqrt(fog_col) in
-  @[out.x, out.y, out.z, 1.0]
+  @[out..., 1.0]
 ------------------------------------------------------------
 -- Root operation
 ------------------------------------------------------------

@@ -187,4 +187,4 @@ def main_image(
       else bg
   in
   let g = vec.pow(vec.clamp(col, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0]), @[0.4545, 0.4545, 0.4545]) in
-  @[g.x, g.y, g.z, 1.0]
+  @[g..., 1.0]

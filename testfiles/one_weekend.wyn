@@ -314,7 +314,7 @@ def fragment_main(resolution: vec3f32, frame: u32, pos_in: vec4f32) vec4f32 =
   -- Select the texel to write, store once at the tail. When converged the
   -- ping-pong still swaps buffers each frame, so carry the finished sum over.
   let texel =
-    if converged then @[sum0.x, sum0.y, sum0.z, count0]
+    if converged then @[sum0..., count0]
     else
       let aspect = resolution.x / resolution.y in
       let base = pcg(gid.x * 1973u32 + gid.y * 9277u32 + frame * 26699u32) in
@@ -329,7 +329,7 @@ def fragment_main(resolution: vec3f32, frame: u32, pos_in: vec4f32) vec4f32 =
           (col + c, s4, k + 1)
       in
       let sum = sum0 + batch.0 in
-      @[sum.x, sum.y, sum.z, count0 + f32(SPP_PER_FRAME)]
+      @[sum..., count0 + f32(SPP_PER_FRAME)]
   in
   let c = texel.xyz * (1.0 / max(texel.w, 1.0)) in
   @[sqrt(c.x), sqrt(c.y), sqrt(c.z), 1.0]

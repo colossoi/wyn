@@ -54,11 +54,11 @@ def raymarch(frag_coord: vec2f32, res: vec2f32, rot_x: mat2f32, rot_y: mat2f32, 
     -- Ray origin with camera path
     let ro_z = time * 0.5 in
     let cam = cam_path(ro_z) in
-    let ro = @[cam.x, cam.y, ro_z] in
+    let ro = @[cam..., ro_z] in
 
     -- Calculate ray direction from screen coordinates
     let rd_xy = @[(frag_coord.x + frag_coord.x - res.x) / res.y, (frag_coord.y + frag_coord.y - res.y) / res.y] in
-    let rd_raw = @[rd_xy.x, rd_xy.y, 1.0] in
+    let rd_raw = @[rd_xy..., 1.0] in
     let rd_len = magnitude(rd_raw) in
     let rd = rd_raw / rd_len in
 

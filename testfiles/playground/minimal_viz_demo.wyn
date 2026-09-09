@@ -4,4 +4,4 @@ def main_image(
     resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
     ) vec4f32 =
   let uv = frag_coord / resolution.xy in
-  @[uv.x, uv.y, 0.25, 1.0]
+  @[uv..., 0.25, 1.0]

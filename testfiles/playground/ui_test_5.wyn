@@ -517,7 +517,7 @@ def thickness_at(time: f32) f32 =
   else max_t
 
 def get_dist(p0: vec3f32, time: f32) f32 =
-  let p  = @[p0.x, p0.y, p0.z + 0.7] in
+  let p  = @[p0.xy..., p0.z + 0.7] in
   let th = thickness_at(time) in
   let xy = p.xy in
   -- Each slab is the intersection of its ring SDF with a thin Z slice.
@@ -582,7 +582,7 @@ def camera_origin(uv: vec2f32, time: f32) vec3f32 =
   let ro0 = @[0.0, 0.0, 0.0 - 2.1] in
   let r1  = rot(radians(yz)) in
   let yz_in = ro0.yz * r1 in
-  let ro1 = @[ro0.x, yz_in.x, yz_in.y] in
+  let ro1 = @[ro0.x, yz_in...] in
   let r2  = rot(radians(sin(time * 0.3) * anim_rxz + og_rxz)) in
   let xz_in = ro1.xz * r2 in
   @[xz_in.x, ro1.y, xz_in.y]
@@ -607,7 +607,7 @@ def main_image(
   let col2  = vec.pow(col1, @[0.9545, 0.9545, 0.9545]) in
   let ui_d  = overlay_ui(uv, time) in
   let col3  = mix(col2, @[1.0, 1.0, 1.0], smooth_aa(ui_d, 0.0, resolution)) in
-  @[col3.x, col3.y, col3.z, 1.0]
+  @[col3..., 1.0]
 
 ------------------------------------------------------------
 -- Original GLSL below (commented out)
