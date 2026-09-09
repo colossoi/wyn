@@ -84,15 +84,32 @@ fn dispatch_len_serde_round_trip() {
 
 #[test]
 fn buffer_len_serde_round_trip() {
-    let len = BufferLen::LikeInput {
-        set: 0,
-        binding: 2,
-        elem_bytes: 4,
-        src_elem_bytes: 16,
-    };
-    let json = serde_json::to_string(&len).unwrap();
-    assert!(json.contains("\"like_input\""), "got: {json}");
-    assert_eq!(serde_json::from_str::<BufferLen>(&json).unwrap(), len);
+    for len in [
+        BufferLen::LikeInput {
+            set: 0,
+            binding: 2,
+            elem_bytes: 4,
+            src_elem_bytes: 16,
+        },
+        BufferLen::HostProvided {
+            inputs: vec![HostSizeInput {
+                name: "frame_resolution_x".into(),
+                set: 0,
+                binding: 0,
+                offset: 16,
+                scalar: HostSizeScalar::F32,
+            }],
+            elem_bytes: 4,
+        },
+    ] {
+        let json = serde_json::to_string(&len).unwrap();
+        if matches!(len, BufferLen::HostProvided { .. }) {
+            assert!(json.contains("\"kind\":\"host_provided\""), "got: {json}");
+            assert!(json.contains("\"name\":\"frame_resolution_x\""), "got: {json}");
+            assert!(!json.contains("expression"), "got: {json}");
+        }
+        assert_eq!(serde_json::from_str::<BufferLen>(&json).unwrap(), len);
+    }
 }
 
 #[test]

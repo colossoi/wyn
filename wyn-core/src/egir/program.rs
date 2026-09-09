@@ -21,7 +21,7 @@ use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types::TypeExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::{Deref, Index};
 use wyn_staged_ir::{StagedIr, StagedIrBuilder};
 
@@ -211,8 +211,8 @@ pub struct InputSlotId(pub usize);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogicalSize {
-    HostExpression {
-        count: pipeline_descriptor::HostExpression,
+    HostProvided {
+        inputs: Vec<pipeline_descriptor::HostSizeInput>,
         elem_bytes: u32,
     },
     FixedBytes(u64),
@@ -248,31 +248,21 @@ impl LogicalSize {
         }) {
             return Some(Self::FixedBytes(count.saturating_mul(u64::from(elem_bytes))));
         }
-        if let Some(count) = space
-            .dims()
-            .iter()
-            .try_fold(None, |product, dim| {
-                use pipeline_descriptor::{HostBinary, HostExpression, HostScalar};
-                let value = match dim {
-                    SegExtent::Host { count, .. } => count.clone(),
-                    SegExtent::Fixed(n) => HostExpression::Constant {
-                        scalar: HostScalar::I32,
-                        bits: *n,
-                    },
-                    _ => return None,
-                };
-                Some(Some(match product {
-                    None => value,
-                    Some(left) => HostExpression::Binary {
-                        op: HostBinary::Multiply,
-                        left: Box::new(left),
-                        right: Box::new(value),
-                    },
-                }))
-            })
-            .flatten()
-        {
-            return Some(Self::HostExpression { count, elem_bytes });
+        if let Some(inputs) = space.dims().iter().try_fold(BTreeSet::new(), |mut inputs, dim| match dim {
+            SegExtent::HostProvided {
+                inputs: dimension_inputs,
+                ..
+            } => {
+                inputs.extend(dimension_inputs.iter().cloned());
+                Some(inputs)
+            }
+            SegExtent::Fixed(_) => Some(inputs),
+            _ => None,
+        }) {
+            return Some(Self::HostProvided {
+                inputs: inputs.into_iter().collect(),
+                elem_bytes,
+            });
         }
         Some(match space.dims() {
             [SegExtent::ResourceLength {
@@ -821,8 +811,8 @@ pub fn buffer_len(
 ) -> Option<pipeline_descriptor::BufferLen> {
     use crate::pipeline_descriptor::BufferLen;
     match size? {
-        LogicalSize::HostExpression { count, elem_bytes } => Some(BufferLen::HostExpression {
-            count: count.clone(),
+        LogicalSize::HostProvided { inputs, elem_bytes } => Some(BufferLen::HostProvided {
+            inputs: inputs.clone(),
             elem_bytes: *elem_bytes,
         }),
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),

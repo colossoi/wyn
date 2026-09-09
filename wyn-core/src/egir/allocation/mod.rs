@@ -177,9 +177,9 @@ impl ResourceAllocationBuilder {
 
     fn logical_size(&self, length: Option<&BufferLen>) -> Result<HostSizePolicy, ConvertError> {
         Ok(match length {
-            Some(BufferLen::HostExpression { count, elem_bytes }) => {
-                HostSizePolicy::Known(LogicalSize::HostExpression {
-                    count: count.clone(),
+            Some(BufferLen::HostProvided { inputs, elem_bytes }) => {
+                HostSizePolicy::Known(LogicalSize::HostProvided {
+                    inputs: inputs.clone(),
                     elem_bytes: *elem_bytes,
                 })
             }
@@ -661,8 +661,8 @@ fn filter_capacity_buffer_len(
     size: &LogicalSize,
 ) -> Result<Option<BufferLen>, String> {
     Ok(match size {
-        LogicalSize::HostExpression { count, elem_bytes } => Some(BufferLen::HostExpression {
-            count: count.clone(),
+        LogicalSize::HostProvided { inputs, elem_bytes } => Some(BufferLen::HostProvided {
+            inputs: inputs.clone(),
             elem_bytes: *elem_bytes,
         }),
         LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),

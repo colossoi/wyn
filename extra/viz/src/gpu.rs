@@ -313,6 +313,7 @@ pub fn create_binding_buffers(
     dispatch: Option<&DispatchSize>,
     pc_bytes: &[u8],
     parameter_bytes: &ParameterBlockBytes,
+    storage_bytes: &HashMap<String, u64>,
     verbose: bool,
 ) -> Result<StorageBuffers> {
     let mut buffers = HashMap::new();
@@ -405,7 +406,20 @@ pub fn create_binding_buffers(
             // A `SameAsDispatch` output holds one element per dispatched thread,
             // so its size needs the resolved dispatch — one workgroup's worth of
             // padding over the exact length, which is harmless slack.
-            let byte_size = if let Some(elem_bytes) = len.dispatch_elem_bytes() {
+            let byte_size = if matches!(len, wyn_pipeline_descriptor::BufferLen::HostProvided { .. }) {
+                storage_bytes
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "cannot size buffer '{}': its descriptor requires a host-provided \
+                         capacity; pass --storage-bytes {}:BYTES",
+                            name,
+                            name
+                        )
+                    })?
+                    .max(4)
+            } else if let Some(elem_bytes) = len.dispatch_elem_bytes() {
                 let dispatch = dispatch.ok_or_else(|| {
                     anyhow!(
                         "cannot size dispatch-length buffer '{}': no dispatch in scope",
@@ -1467,9 +1481,9 @@ pub struct FeedbackBufferResource {
 /// host-buffer or input-buffer byte-size pool (which isn't materialised
 /// yet at this point in startup): `BufferLen::Fixed` and
 /// `BufferLen::SameAsDispatch` (resolved via the owning compute
-/// pipeline's `dispatch_size`). `BufferLen::LikeInput` errors with a
-/// clean message — wire the necessary input-byte-size lookup if a real
-/// workload needs it.
+/// pipeline's `dispatch_size`). `BufferLen::LikeInput` and
+/// `BufferLen::HostProvided` error with clean messages because neither can be
+/// resolved from the descriptor alone at this point in startup.
 pub fn create_feedback_buffers(
     device: &wgpu::Device,
     descriptor: &PipelineDescriptor,
@@ -1554,6 +1568,16 @@ pub fn create_feedback_buffers(
                     "feedback buffer pair write side '{}' ({}, {}) uses `LikeInput` \
                      sizing; not supported yet — declare a `Fixed` or `SameAsDispatch` \
                      length, or wire input-byte-size lookup into create_feedback_buffers",
+                    name,
+                    write_key.0,
+                    write_key.1,
+                ));
+            }
+            wyn_pipeline_descriptor::BufferLen::HostProvided { .. } => {
+                return Err(anyhow!(
+                    "feedback buffer pair write side '{}' ({}, {}) has host-provided \
+                     capacity; configure an explicit byte capacity for both ping-pong \
+                     buffers before creating feedback resources",
                     name,
                     write_key.0,
                     write_key.1,

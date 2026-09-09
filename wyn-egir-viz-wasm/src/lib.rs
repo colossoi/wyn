@@ -204,7 +204,7 @@ pub struct GraphBinding {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSize {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expression: Option<wyn_core::pipeline_descriptor::HostExpression>,
+    pub inputs: Option<Vec<wyn_core::pipeline_descriptor::HostSizeInput>>,
     pub variant: String,
     pub bytes: Option<u64>,
     pub binding: Option<GraphBinding>,
@@ -318,7 +318,7 @@ pub struct GraphSoacState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphSegExtent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expression: Option<wyn_core::pipeline_descriptor::HostExpression>,
+    pub inputs: Option<Vec<wyn_core::pipeline_descriptor::HostSizeInput>>,
     pub variant: String,
     pub fixed: Option<u32>,
     pub value: Option<GraphReference>,
@@ -1095,7 +1095,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
         .iter()
         .map(|extent| match extent {
             SegExtent::Fixed(value) => GraphSegExtent {
-                expression: None,
+                inputs: None,
                 variant: "fixed".to_string(),
                 fixed: Some(*value),
                 value: None,
@@ -1105,7 +1105,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
                 elem_bytes: None,
             },
             SegExtent::PushConstant { node, offset } => GraphSegExtent {
-                expression: None,
+                inputs: None,
                 variant: "push_constant".to_string(),
                 fixed: None,
                 value: Some(value_reference(group, *node)),
@@ -1121,7 +1121,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
             } => {
                 let (binding, resource) = P::graph_resource(resource);
                 GraphSegExtent {
-                    expression: None,
+                    inputs: None,
                     variant: "resource_length".to_string(),
                     fixed: None,
                     value: Some(view_reference(group, *view)),
@@ -1131,9 +1131,9 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
                     elem_bytes: Some(*elem_bytes),
                 }
             }
-            SegExtent::Host { node, count } => GraphSegExtent {
-                expression: Some(count.clone()),
-                variant: "host_expression".into(),
+            SegExtent::HostProvided { node, inputs } => GraphSegExtent {
+                inputs: Some(inputs.clone()),
+                variant: "host_provided".into(),
                 fixed: None,
                 value: Some(value_reference(group, *node)),
                 binding: None,
@@ -1142,7 +1142,7 @@ fn graph_seg_space<P: SnapshotPhase>(group: &str, space: &SegSpace<P::Resource>)
                 elem_bytes: None,
             },
             SegExtent::Value(value) => GraphSegExtent {
-                expression: None,
+                inputs: None,
                 variant: "value".to_string(),
                 fixed: None,
                 value: Some(value_reference(group, *value)),
@@ -1437,9 +1437,9 @@ fn resource_name(resource: SemanticResourceRef) -> String {
 
 fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
     match size {
-        Some(LogicalSize::HostExpression { count, elem_bytes }) => GraphSize {
-            expression: Some(count.clone()),
-            variant: "host_expression".into(),
+        Some(LogicalSize::HostProvided { inputs, elem_bytes }) => GraphSize {
+            inputs: Some(inputs.clone()),
+            variant: "host_provided".into(),
             bytes: None,
             binding: None,
             resource: None,
@@ -1447,7 +1447,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             src_elem_bytes: None,
         },
         Some(LogicalSize::FixedBytes(bytes)) => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
             binding: None,
@@ -1460,7 +1460,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             elem_bytes,
             src_elem_bytes,
         }) => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "like_resource".to_string(),
             bytes: None,
             binding: None,
@@ -1469,7 +1469,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             src_elem_bytes: Some(*src_elem_bytes),
         },
         Some(LogicalSize::SameAsDispatch { elem_bytes }) => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "same_as_dispatch".to_string(),
             bytes: None,
             binding: None,
@@ -1478,7 +1478,7 @@ fn graph_logical_size(size: Option<&LogicalSize>) -> GraphSize {
             src_elem_bytes: None,
         },
         None => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "unspecified".to_string(),
             bytes: None,
             binding: None,
@@ -1557,9 +1557,9 @@ fn graph_logical_resources(resources: &LogicalResourceArena) -> Vec<GraphResourc
 fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphSize {
     use wyn_core::pipeline_descriptor::BufferLen;
     match length {
-        BufferLen::HostExpression { count, elem_bytes } => GraphSize {
-            expression: Some(count.clone()),
-            variant: "host_expression".into(),
+        BufferLen::HostProvided { inputs, elem_bytes } => GraphSize {
+            inputs: Some(inputs.clone()),
+            variant: "host_provided".into(),
             bytes: None,
             binding: None,
             resource: None,
@@ -1567,7 +1567,7 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
             src_elem_bytes: None,
         },
         BufferLen::Fixed { bytes } => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "fixed_bytes".to_string(),
             bytes: Some(*bytes),
             binding: None,
@@ -1581,7 +1581,7 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
             elem_bytes,
             src_elem_bytes,
         } => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "like_input".to_string(),
             bytes: None,
             binding: Some(GraphBinding {
@@ -1593,7 +1593,7 @@ fn graph_buffer_len(length: &wyn_core::pipeline_descriptor::BufferLen) -> GraphS
             src_elem_bytes: Some(*src_elem_bytes),
         },
         BufferLen::SameAsDispatch { elem_bytes } => GraphSize {
-            expression: None,
+            inputs: None,
             variant: "same_as_dispatch".to_string(),
             bytes: None,
             binding: None,
@@ -1956,7 +1956,7 @@ fn snapshot_physical_program<Tag>(
                     role: storage_role(declaration.role),
                     elem_ty: wyn_core::diags::format_type(&declaration.elem_ty),
                     size: declaration.length.as_ref().map(graph_buffer_len).unwrap_or(GraphSize {
-                        expression: None,
+                        inputs: None,
                         variant: "unspecified".to_string(),
                         bytes: None,
                         binding: None,

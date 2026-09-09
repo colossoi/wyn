@@ -118,6 +118,8 @@ impl std::fmt::Display for FramebufferFormat {
 ///       2. otherwise the descriptor's `length: Fixed { bytes }`.
 ///     Both present → must agree. Neither present → error pointing at
 ///     `--storage-bytes`.
+///   * `--storage-bytes NAME:BYTES` without an init spec allocates a
+///     zero-initialized host-provided buffer of that capacity.
 fn resolve_buffer_inits(
     desc: &PipelineDescriptor,
     inits: &HashMap<String, crate::gpu::BufferInitSpec>,
@@ -201,6 +203,30 @@ fn resolve_buffer_inits(
             }
         };
         out.insert(name.clone(), crate::gpu::BufferInit { bytes, spec });
+    }
+
+    // An explicit capacity is sufficient for an output/scratch buffer; zero
+    // initialization is the least surprising default when no init spec was
+    // requested separately.
+    for (name, &bytes) in storage_bytes {
+        if out.contains_key(name) {
+            continue;
+        }
+        if let Some(&desc_bytes) = descriptor_bytes.get(name.as_str()) {
+            if desc_bytes != bytes {
+                return Err(anyhow!(
+                    "--storage-bytes {name}:{bytes} disagrees with the descriptor's \
+                     length:{{fixed,bytes:{desc_bytes}}} on binding `{name}`"
+                ));
+            }
+        }
+        out.insert(
+            name.clone(),
+            crate::gpu::BufferInit {
+                bytes,
+                spec: crate::gpu::BufferInitSpec::Zero,
+            },
+        );
     }
     Ok(out)
 }
@@ -411,6 +437,7 @@ pub async fn run_pipeline(
                     &inputs,
                     &outputs,
                     push_constants,
+                    &interactive_opts.storage_bytes,
                     verbose,
                 )
                 .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
@@ -573,6 +600,7 @@ fn run_compute(
     inputs: &HashMap<String, PathBuf>,
     outputs: &HashMap<String, PathBuf>,
     push_constants: &[PushConstantSpec],
+    storage_bytes: &HashMap<String, u64>,
     verbose: bool,
 ) -> Result<()> {
     if verbose {
@@ -610,6 +638,7 @@ fn run_compute(
         dispatch_hint,
         &pc_bytes,
         &parameter_bytes,
+        storage_bytes,
         verbose,
     )?;
     let (layouts, bind_groups) = build_bind_groups(device, &mp.bindings, &buffers)?;
@@ -826,5 +855,37 @@ mod tests {
         }];
         let error = resolve_feedback_specs(&descriptor, &specs).unwrap_err();
         assert!(error.to_string().contains("Recompile the shader"));
+    }
+
+    #[test]
+    fn storage_bytes_fulfills_host_provided_capacity_without_an_init_flag() {
+        let mut descriptor = feedback_descriptor();
+        let Pipeline::Compute(compute) = &mut descriptor.pipelines[0] else {
+            unreachable!()
+        };
+        let Binding::StorageBuffer { length, .. } = &mut compute.bindings[1] else {
+            unreachable!()
+        };
+        *length = Some(BufferLen::HostProvided {
+            inputs: Vec::new(),
+            elem_bytes: 4,
+        });
+
+        let storage_bytes = HashMap::from([("compiler_generated_output_name".to_string(), 4096)]);
+        let resolved = resolve_buffer_inits(
+            &descriptor,
+            &HashMap::new(),
+            &storage_bytes,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved["compiler_generated_output_name"],
+            crate::gpu::BufferInit {
+                bytes: 4096,
+                spec: crate::gpu::BufferInitSpec::Zero,
+            }
+        );
     }
 }

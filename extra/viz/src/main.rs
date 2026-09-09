@@ -149,9 +149,9 @@ enum Command {
         #[arg(long = "buffer-init", value_name = "NAME:SPEC", verbatim_doc_comment)]
         buffer_inits: Vec<String>,
         /// Declare the byte size for a storage buffer whose descriptor
-        /// `length` is `null` (the compiler couldn't infer it).
-        /// Repeatable. Pairs with `--buffer-init NAME:SPEC` (or any
-        /// other consumer that needs to know the allocation size).
+        /// `length` is `host_provided` or `null`. Repeatable. The buffer
+        /// is zero-initialized unless `--buffer-init NAME:SPEC` supplies
+        /// a different initialization policy.
         ///
         /// Format: `NAME:BYTES`. Example: `fb:4194304` (a 512x512x16
         /// `vec4f32` framebuffer).

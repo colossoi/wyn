@@ -1,19 +1,21 @@
-//! Preserve host-known logical array lengths on output resources before scheduling.
-//! This follows semantic spaces, never physical workgroup counts.
+//! Preserve logical array lengths whose allocation capacity must be supplied
+//! by the host. This follows semantic spaces, never physical workgroup counts.
+
+use std::collections::BTreeSet;
+
+use super::super::graph_ops;
 use super::super::program::Entry;
 use super::super::types::{EGraph, PureOp, SegExtent, ValueKind};
 use super::*;
-use crate::builtins::lowering::PrimOp;
-use crate::builtins::{by_id, BuiltinLowering};
 use crate::interface::StorageLayout;
-use crate::op::BinaryOperator;
-use crate::pipeline_descriptor::{HostBinary, HostExpression, HostScalar};
+use crate::pipeline_descriptor::{HostSizeInput, HostSizeScalar};
 use crate::ssa;
 
 pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), ConvertError> {
     for entry in &mut program.entry_points {
-        let mut lengths = HashMap::new();
+        let mut lengths: HashMap<_, (BTreeSet<HostSizeInput>, u32)> = HashMap::new();
         let mut host_extents = HashMap::new();
+
         for block in entry.graph.skeleton.blocks.values() {
             for effect in &block.side_effects {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -25,20 +27,42 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                 else {
                     continue;
                 };
+
                 for dim in space.dims() {
                     if let SegExtent::Value(node) = dim {
-                        if let Some(count) = expression(&entry.graph, entry, *node, 0) {
-                            host_extents.insert(*node, count);
+                        let extent_node = *node;
+                        let canonical = entry.graph.canonical_value(extent_node);
+                        if scalar(entry.graph.nodes[canonical].ty()).is_some() {
+                            host_extents
+                                .insert(extent_node, host_dependencies(&entry.graph, entry, extent_node));
                         }
                     }
                 }
-                // Array-valued extents carry view provenance, resolved by existing
-                // residency rules. Only scalar lengths are host expressions.
-                if space.dims().iter().any(|d| matches!(d, SegExtent::Value(node) if scalar(entry.graph.nodes[entry.graph.canonical_value(*node)].ty()).is_none())) { continue; }
-                // Fixed and resource-backed domains retain their existing policies.
-                if !space.dims().iter().any(|d| matches!(d, SegExtent::Value(_))) {
+
+                // Array-valued extents carry view provenance and are resolved by
+                // the existing residency rules. Scalar values may use arbitrary
+                // shader computation, so the host must provide their capacity.
+                if !space.dims().iter().any(
+                    |dim| matches!(dim, SegExtent::Value(node) if scalar(entry.graph.nodes[entry.graph.canonical_value(*node)].ty()).is_some()),
+                ) {
                     continue;
                 }
+                if space.dims().iter().any(
+                    |dim| matches!(dim, SegExtent::Value(node) if scalar(entry.graph.nodes[entry.graph.canonical_value(*node)].ty()).is_none()),
+                ) {
+                    continue;
+                }
+
+                let inputs = space
+                    .dims()
+                    .iter()
+                    .filter_map(|dim| match dim {
+                        SegExtent::Value(node) => Some(host_dependencies(&entry.graph, entry, *node)),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<BTreeSet<_>>();
+
                 for slot in output_slots {
                     let output = &entry.outputs[slot.0];
                     let EntryOutputKind::Storage {
@@ -48,35 +72,21 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                     else {
                         continue;
                     };
-                    let count = space.dims().iter().try_fold(None, |count, extent| {
-                        let dim = match extent {
-                            SegExtent::Fixed(n) => Some(HostExpression::Constant { scalar: HostScalar::I32, bits: *n }),
-                            SegExtent::Value(node) => expression(&entry.graph, entry, *node, 0),
-                            _ => None,
-                        }?;
-                        Some(Some(match count {
-                            None => dim,
-                            Some(left) => HostExpression::Binary { op: HostBinary::Multiply, left: Box::new(left), right: Box::new(dim) },
-                        }))
-                    }).flatten().ok_or_else(|| ConvertError::GraphError(format!(
-                        "output {} of {} has a logical length that cannot be evaluated from host uniforms; use a fixed or input-derived capacity", slot.0, entry.name)))?;
-                    let policy = BufferLen::HostExpression {
-                        count,
-                        elem_bytes: *elem_bytes,
-                    };
-                    if let Some(previous) = lengths.insert(slot.0, policy.clone()) {
-                        if previous != policy {
-                            return Err(ConvertError::GraphError(format!(
-                                "output {} of {} has conflicting logical lengths",
-                                slot.0, entry.name
-                            )));
-                        }
+                    let (known_inputs, known_elem_bytes) =
+                        lengths.entry(slot.0).or_insert_with(|| (BTreeSet::new(), *elem_bytes));
+                    if *known_elem_bytes != *elem_bytes {
+                        return Err(ConvertError::GraphError(format!(
+                            "output {} of {} has conflicting storage strides",
+                            slot.0, entry.name
+                        )));
                     }
+                    known_inputs.extend(inputs.iter().cloned());
                 }
             }
         }
-        // Compiler-created materializations use the same logical expression as
-        // public outputs through LogicalSize::for_space.
+
+        // Compiler-created materializations carry the same host-provided
+        // dependency metadata through LogicalSize::for_space.
         for block in entry.graph.skeleton.blocks.values_mut() {
             for effect in &mut block.side_effects {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
@@ -90,113 +100,63 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                     .into_dims()
                     .into_iter()
                     .map(|dim| match dim {
-                        SegExtent::Value(node) if host_extents.contains_key(&node) => SegExtent::Host {
-                            node,
-                            count: host_extents[&node].clone(),
-                        },
+                        SegExtent::Value(node) if host_extents.contains_key(&node) => {
+                            SegExtent::HostProvided {
+                                node,
+                                inputs: host_extents[&node].clone(),
+                            }
+                        }
                         other => other,
                     })
                     .collect();
                 *space = super::super::types::SegSpace::from_dims(dims).expect("nonempty space");
             }
         }
-        for (slot, length) in lengths {
-            if let EntryOutputKind::Storage { length: policy, .. } = &mut entry.outputs[slot].kind {
-                *policy = Some(length);
+
+        for (slot, (inputs, elem_bytes)) in lengths {
+            if let EntryOutputKind::Storage { length, .. } = &mut entry.outputs[slot].kind {
+                *length = Some(BufferLen::HostProvided {
+                    inputs: inputs.into_iter().collect(),
+                    elem_bytes,
+                });
             }
         }
     }
     Ok(())
 }
 
-fn scalar(ty: &Type<TypeName>) -> Option<HostScalar> {
+fn scalar(ty: &Type<TypeName>) -> Option<HostSizeScalar> {
     match ty {
-        Type::Constructed(TypeName::Int(32), _) => Some(HostScalar::I32),
-        Type::Constructed(TypeName::UInt(32), _) => Some(HostScalar::U32),
-        Type::Constructed(TypeName::Float(32), _) => Some(HostScalar::F32),
+        Type::Constructed(TypeName::Int(32), _) => Some(HostSizeScalar::I32),
+        Type::Constructed(TypeName::UInt(32), _) => Some(HostSizeScalar::U32),
+        Type::Constructed(TypeName::Float(32), _) => Some(HostSizeScalar::F32),
         _ => None,
     }
 }
 
-fn expression(
+fn host_dependencies(
     graph: &EGraph<Semantic>,
     entry: &Entry<Semantic>,
     node: ValueId,
-    depth: usize,
-) -> Option<HostExpression> {
-    if depth > 128 {
-        return None;
-    }
-    let node = graph.canonical_value(node);
-    let ty = scalar(graph.nodes[node].ty())?;
-    if let Some((binding, offset)) = uniform_location(graph, entry, node, 0) {
-        return Some(HostExpression::Uniform {
-            set: binding.set,
-            binding: binding.binding,
-            offset,
-            scalar: ty,
-        });
-    }
-    let ValueKind::Pure { op, operands } = graph.nodes[node].kind() else {
-        return None;
-    };
-    let recurse = |n| expression(graph, entry, n, depth + 1);
-    let binary = |op| {
-        let [a, b] = operands.as_slice() else { return None };
-        Some(HostExpression::Binary {
-            op,
-            left: Box::new(recurse(*a)?),
-            right: Box::new(recurse(*b)?),
+) -> Vec<HostSizeInput> {
+    graph_ops::value_producer_closure(graph, [node])
+        .nodes
+        .into_iter()
+        .filter_map(|dependency| {
+            let dependency = graph.canonical_value(dependency);
+            let scalar = scalar(graph.nodes[dependency].ty())?;
+            let (binding, offset, name) = uniform_location(graph, entry, dependency, 0)?;
+            Some(HostSizeInput {
+                name,
+                set: binding.set,
+                binding: binding.binding,
+                offset,
+                scalar,
+            })
         })
-    };
-    match op {
-        PureOp::Int(n) => Some(HostExpression::Constant {
-            scalar: ty,
-            bits: n.parse::<i32>().ok()? as u32,
-        }),
-        PureOp::Uint(n) => Some(HostExpression::Constant {
-            scalar: ty,
-            bits: n.parse().ok()?,
-        }),
-        PureOp::Float(n) => Some(HostExpression::Constant {
-            scalar: ty,
-            bits: n.parse::<f32>().ok()?.to_bits(),
-        }),
-        PureOp::BinOp(op) => binary(match op {
-            BinaryOperator::Add => HostBinary::Add,
-            BinaryOperator::Subtract => HostBinary::Subtract,
-            BinaryOperator::Multiply => HostBinary::Multiply,
-            BinaryOperator::Divide => HostBinary::Divide,
-            BinaryOperator::Remainder => HostBinary::Remainder,
-            _ => return None,
-        }),
-        PureOp::Intrinsic { id, overload_idx } => {
-            match &by_id(*id).overloads().get(*overload_idx)?.lowering {
-                BuiltinLowering::PrimOp(op) => match op {
-                    PrimOp::FPToSI | PrimOp::FPToUI | PrimOp::SIToFP | PrimOp::UIToFP | PrimOp::Bitcast => {
-                        let [value] = operands.as_slice() else { return None };
-                        // Numeric i32/u32 casts reinterpret bits. Float bitcasts are not numeric casts.
-                        let from = scalar(graph.nodes[*value].ty())?;
-                        if *op == PrimOp::Bitcast && (from == HostScalar::F32) != (ty == HostScalar::F32) {
-                            return None;
-                        }
-                        Some(HostExpression::Convert {
-                            to: ty,
-                            value: Box::new(recurse(*value)?),
-                        })
-                    }
-                    PrimOp::IAdd | PrimOp::FAdd => binary(HostBinary::Add),
-                    PrimOp::ISub | PrimOp::FSub => binary(HostBinary::Subtract),
-                    PrimOp::IMul | PrimOp::FMul => binary(HostBinary::Multiply),
-                    PrimOp::SDiv | PrimOp::UDiv | PrimOp::FDiv => binary(HostBinary::Divide),
-                    PrimOp::SRem | PrimOp::UMod | PrimOp::FRem => binary(HostBinary::Remainder),
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn uniform_location(
@@ -204,7 +164,7 @@ fn uniform_location(
     entry: &Entry<Semantic>,
     node: ValueId,
     depth: usize,
-) -> Option<(BindingRef, u32)> {
+) -> Option<(BindingRef, u32, String)> {
     if depth > 128 {
         return None;
     }
@@ -218,14 +178,16 @@ fn uniform_location(
             let EntryInputKind::Uniform { binding } = entry.inputs.get(slot.0)?.kind else {
                 return None;
             };
-            Some((binding, 0))
+            Some((binding, 0, entry.inputs.get(slot.0)?.name.clone()))
         }
         ValueKind::Pure {
             op: PureOp::Project { index },
             operands,
         } => {
-            let [base] = operands.as_slice() else { return None };
-            let (binding, offset) = uniform_location(graph, entry, *base, depth + 1)?;
+            let [base] = operands.as_slice() else {
+                return None;
+            };
+            let (binding, offset, name) = uniform_location(graph, entry, *base, depth + 1)?;
             let ty = graph.nodes[graph.canonical_value(*base)].ty();
             let field_offset = if ty.is_vec() {
                 u32::try_from(*index).ok()?.checked_mul(ssa::layout::type_byte_size(ty.elem_type()?)?)?
@@ -234,7 +196,16 @@ fn uniform_location(
                     .member_offsets
                     .get(*index as usize)?
             };
-            Some((binding, offset.checked_add(field_offset)?))
+            let field = match ty {
+                Type::Constructed(TypeName::Record(fields), _) => fields.0.get(*index as usize)?.clone(),
+                _ if ty.is_vec() => ["x", "y", "z", "w"].get(*index as usize)?.to_string(),
+                _ => index.to_string(),
+            };
+            Some((
+                binding,
+                offset.checked_add(field_offset)?,
+                format!("{name}_{field}"),
+            ))
         }
         ValueKind::Pure {
             op: PureOp::DynamicExtract | PureOp::Index,
@@ -254,11 +225,13 @@ fn uniform_location(
             else {
                 return None;
             };
-            let (binding, offset) = uniform_location(graph, entry, *base, depth + 1)?;
+            let (binding, offset, name) = uniform_location(graph, entry, *base, depth + 1)?;
+            let index = index.parse::<usize>().ok()?;
             let stride = ssa::layout::type_byte_size(ty.elem_type()?)?;
             Some((
                 binding,
-                offset.checked_add(index.parse::<u32>().ok()?.checked_mul(stride)?)?,
+                offset.checked_add(u32::try_from(index).ok()?.checked_mul(stride)?)?,
+                format!("{name}_{}", ["x", "y", "z", "w"].get(index)?),
             ))
         }
         _ => None,

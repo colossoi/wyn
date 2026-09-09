@@ -43,9 +43,9 @@ where
             .map(|extent| {
                 Ok(match extent {
                     SegExtent::Fixed(value) => SegExtent::Fixed(value),
-                    SegExtent::Host { node, count } => SegExtent::Host {
+                    SegExtent::HostProvided { node, inputs } => SegExtent::HostProvided {
                         node: self.nodes[&node],
-                        count,
+                        inputs,
                     },
                     SegExtent::PushConstant { node, offset } => SegExtent::PushConstant {
                         node: self.nodes[&node],

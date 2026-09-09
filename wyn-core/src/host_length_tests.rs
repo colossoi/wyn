@@ -1,4 +1,7 @@
-use crate::pipeline_descriptor::{Binding, BufferLen, BufferUsage, DispatchSize, Pipeline};
+use crate::pipeline_descriptor::{
+    Binding, BufferLen, BufferUsage, DispatchSize, HostSizeInput, HostSizeScalar, Pipeline,
+};
+
 const SOURCE: &str = include_str!("../../testfiles/regressions/uniform_output_size.wyn");
 
 fn output_length(source: &str, serial: bool) -> BufferLen {
@@ -9,8 +12,8 @@ fn output_length(source: &str, serial: bool) -> BufferLen {
         .pipeline
         .pipelines
         .iter()
-        .find_map(|p| match p {
-            Pipeline::Compute(p) => Some(p),
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(pipeline) => Some(pipeline),
             _ => None,
         })
         .unwrap();
@@ -19,14 +22,14 @@ fn output_length(source: &str, serial: bool) -> BufferLen {
             compute
                 .stages
                 .iter()
-                .all(|s| matches!(s.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1, .. })),
-            "allocation must not require parallelizing the physical stage"
+                .all(|stage| matches!(stage.dispatch_size, DispatchSize::Fixed { x: 1, y: 1, z: 1, .. })),
+            "host-provided capacity must not require parallelizing the physical stage"
         );
     }
-    let len = compute
+    let length = compute
         .bindings
         .iter()
-        .find_map(|b| match b {
+        .find_map(|binding| match binding {
             Binding::StorageBuffer {
                 usage: BufferUsage::Output,
                 length,
@@ -35,48 +38,39 @@ fn output_length(source: &str, serial: bool) -> BufferLen {
             _ => None,
         })
         .expect("output length");
-    // Exercise the actual public descriptor round trip.
-    serde_json::from_str(&serde_json::to_string(&len).unwrap()).unwrap()
+    serde_json::from_str(&serde_json::to_string(&length).unwrap()).unwrap()
+}
+
+fn assert_frame_inputs(inputs: &[HostSizeInput], x_offset: u32, y_offset: u32) {
+    assert_eq!(
+        inputs,
+        [
+            HostSizeInput {
+                name: "frame_resolution_x".into(),
+                set: 0,
+                binding: 0,
+                offset: x_offset,
+                scalar: HostSizeScalar::F32,
+            },
+            HostSizeInput {
+                name: "frame_resolution_y".into(),
+                set: 0,
+                binding: 0,
+                offset: y_offset,
+                scalar: HostSizeScalar::F32,
+            },
+        ]
+    );
 }
 
 #[test]
-fn uniform_output_capacity_is_independent_of_dispatch() {
+fn uniform_output_capacity_is_host_provided_and_independent_of_dispatch() {
     for serial in [false, true] {
-        let length = output_length(SOURCE, serial);
-        assert!(matches!(length, BufferLen::HostExpression { elem_bytes: 4, .. }));
-        for (w, h) in [
-            (64.0f32, 32.0f32),
-            (17.9, 9.8),
-            (1.0, 1.0),
-            (0.0, 32.0),
-            (128.0, 65.0),
-        ] {
-            assert_eq!(
-                length
-                    .resolve_host_bytes(&|set, binding, offset| match (set, binding, offset) {
-                        (0, 0, 0) => Some(w.to_bits()),
-                        (0, 0, 4) => Some(h.to_bits()),
-                        _ => None,
-                    })
-                    .unwrap(),
-                4 * (w as i32 as u64) * (h as i32 as u64)
-            );
-        }
-        assert!(length.resolve_host_bytes(&|_, _, _| None).is_err());
-        for (w, h) in [
-            (-1.0f32, 2.0f32),
-            (f32::NAN, 2.0),
-            (f32::INFINITY, 2.0),
-            (65536.0, 65536.0),
-        ] {
-            assert!(length
-                .resolve_host_bytes(&|_, _, offset| Some(if offset == 0 {
-                    w.to_bits()
-                } else {
-                    h.to_bits()
-                }))
-                .is_err());
-        }
+        let BufferLen::HostProvided { inputs, elem_bytes } = output_length(SOURCE, serial) else {
+            panic!("uniform-derived output must have host-provided capacity");
+        };
+        assert_eq!(elem_bytes, 4);
+        assert_frame_inputs(&inputs, 0, 4);
     }
 }
 
@@ -89,14 +83,14 @@ fn fixed_output_capacity_control() {
         .pipeline
         .pipelines
         .iter()
-        .find_map(|p| match p {
-            Pipeline::Compute(p) => Some(p),
+        .find_map(|pipeline| match pipeline {
+            Pipeline::Compute(pipeline) => Some(pipeline),
             _ => None,
         })
         .unwrap();
     assert!(
-        compute.stages.iter().any(|s| matches!(
-            s.dispatch_size,
+        compute.stages.iter().any(|stage| matches!(
+            stage.dispatch_size,
             DispatchSize::DerivedFrom {
                 len: crate::pipeline_descriptor::DispatchLen::Fixed { count: 2048 },
                 ..
@@ -107,7 +101,7 @@ fn fixed_output_capacity_control() {
     let output = compute
         .bindings
         .iter()
-        .find_map(|b| match b {
+        .find_map(|binding| match binding {
             Binding::StorageBuffer {
                 usage: BufferUsage::Output,
                 length,
@@ -123,60 +117,45 @@ fn fixed_output_capacity_control() {
 }
 
 #[test]
-fn uniform_output_capacity_uses_abi_offsets_and_arithmetic() {
-    let source =
-        SOURCE.replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }").replace(
-            "width * height",
-            "((width + 7i32) / 8i32) * ((height + 7i32) / 8i32)",
-        );
-    let length = output_length(&source, false);
-    assert_eq!(
-        length
-            .resolve_host_bytes(&|_, _, offset| match offset {
-                16 => Some(65.0f32.to_bits()),
-                20 => Some(33.0f32.to_bits()),
-                _ => None,
-            })
-            .unwrap(),
-        4 * 9 * 5
-    );
+fn host_provided_capacity_reports_abi_inputs_for_arbitrary_calculation() {
+    let source = SOURCE
+        .replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }")
+        .replace("width * height", "if width > height then width else height");
+    let BufferLen::HostProvided { inputs, elem_bytes } = output_length(&source, false) else {
+        panic!("conditional output length must have host-provided capacity");
+    };
+    assert_eq!(elem_bytes, 4);
+    assert_frame_inputs(&inputs, 16, 20);
 }
 
 #[test]
-fn unsupported_output_length_has_an_allocation_diagnostic() {
+fn gpu_derived_output_length_is_host_provided_without_a_formula() {
     let source = SOURCE.replace("width * height", "i32(target_load(rendered, @[0i32,0i32],0u32))");
-    let error =
-        crate::compile_thru_spirv(&source).err().expect("unsupported length diagnostic").to_string();
-    assert!(
-        error.contains("logical length") && error.contains("host uniforms"),
-        "{error}"
-    );
+    let BufferLen::HostProvided { inputs, elem_bytes } = output_length(&source, false) else {
+        panic!("GPU-derived output length must have host-provided capacity");
+    };
+    assert_eq!(elem_bytes, 4);
+    assert!(inputs.is_empty());
 }
 
 #[test]
-fn uniform_output_capacity_respects_storage_stride_and_wgsl() {
+fn host_provided_capacity_respects_storage_stride_and_wgsl() {
     let source = SOURCE.replace("([]f32,", "([]vec3f32,").replace(
         "target_load(rendered, @[i % width, i / width], 0u32)",
         "@[f32(i), 0.0, 0.0]",
     );
-    let length = output_length(&source, false);
-    assert!(matches!(length, BufferLen::HostExpression { elem_bytes: 16, .. }));
-    assert_eq!(
-        length
-            .resolve_host_bytes(&|_, _, offset| Some(if offset == 0 {
-                17.0f32.to_bits()
-            } else {
-                9.0f32.to_bits()
-            }))
-            .unwrap(),
-        16 * 17 * 9
-    );
+    let BufferLen::HostProvided { inputs, elem_bytes } = output_length(&source, false) else {
+        panic!("uniform-derived output must have host-provided capacity");
+    };
+    assert_eq!(elem_bytes, 16);
+    assert_frame_inputs(&inputs, 0, 4);
+
     let lowered = crate::lower_ssa_to_wgsl_with_pipeline(crate::compile_thru_ssa(SOURCE).unwrap()).unwrap();
-    assert!(lowered.pipeline.pipelines.iter().any(|p| match p {
-        Pipeline::Compute(p) => p.bindings.iter().any(|b| matches!(
-            b,
+    assert!(lowered.pipeline.pipelines.iter().any(|pipeline| match pipeline {
+        Pipeline::Compute(pipeline) => pipeline.bindings.iter().any(|binding| matches!(
+            binding,
             Binding::StorageBuffer {
-                length: Some(BufferLen::HostExpression { elem_bytes: 4, .. }),
+                length: Some(BufferLen::HostProvided { elem_bytes: 4, .. }),
                 ..
             }
         )),

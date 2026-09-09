@@ -1490,18 +1490,41 @@ fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {
     }
 }
 
-mod host_expression;
-pub use host_expression::{HostBinary, HostExpression, HostScalar};
+/// Scalar type of a host-visible value that may influence a host-provided
+/// buffer capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSizeScalar {
+    I32,
+    U32,
+    F32,
+}
 
-/// Compile-time sizing policy for a compiler-managed storage buffer whose
-/// length isn't a host-supplied input. The host runtime resolves this to a
-/// byte size when allocating the buffer.
+/// One host-visible scalar value that may influence a host-provided buffer
+/// capacity. This is dependency metadata, not a formula: the host application
+/// remains responsible for choosing the allocation size.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct HostSizeInput {
+    pub name: String,
+    pub set: u32,
+    pub binding: u32,
+    pub offset: u32,
+    #[serde(rename = "type")]
+    pub scalar: HostSizeScalar,
+}
+
+/// Allocation policy for a storage buffer. Some policies are resolved from
+/// descriptor metadata; `HostProvided` is an explicit request for the host
+/// application to supply a byte capacity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BufferLen {
-    /// Logical element count evaluated from host uniforms, independent of dispatch.
-    HostExpression {
-        count: HostExpression,
+    /// The host application must provide the allocation capacity. `inputs`
+    /// identifies host-visible scalar values that may influence the logical
+    /// length, but deliberately does not encode the size calculation.
+    HostProvided {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<HostSizeInput>,
         elem_bytes: u32,
     },
     /// Minimum bytes the host must allocate. For an *output* binding this
@@ -1527,34 +1550,18 @@ pub enum BufferLen {
     /// before workgroup rounding. Byte size = `logical_count * elem_bytes`.
     /// A fixed physical workgroup grid alone cannot resolve this policy.
     /// The host needs the domain metadata, not the padded invocation count.
-    /// This resolves via `dispatch_elem_bytes`, not `resolve_bytes`;
-    /// host-evaluable output lengths use `HostExpression` directly.
+    /// This resolves via `dispatch_elem_bytes`, not `resolve_bytes`.
     SameAsDispatch {
         elem_bytes: u32,
     },
 }
 
 impl BufferLen {
-    /// Resolve a logical host expression to bytes before allocating its resource.
-    pub fn resolve_host_bytes(
-        &self,
-        uniform: &impl Fn(u32, u32, u32) -> Option<u32>,
-    ) -> Result<u64, String> {
-        match self {
-            Self::HostExpression { count, elem_bytes } => count
-                .element_count(uniform)?
-                .checked_mul(u64::from(*elem_bytes))
-                .ok_or_else(|| "allocation byte size overflow".into()),
-            Self::Fixed { bytes } => Ok(*bytes),
-            _ => Err("buffer length requires a buffer or dispatch context".into()),
-        }
-    }
-
     /// Resolve to a byte size given a lookup of already-allocated buffers'
     /// byte sizes by (set, binding). Returns `None` if a referenced source
     /// buffer hasn't been sized yet, or when a separate context is needed:
-    /// `SameAsDispatch` uses `dispatch_elem_bytes`; `HostExpression` uses
-    /// `resolve_host_bytes` with the uniform snapshot.
+    /// `SameAsDispatch` uses `dispatch_elem_bytes`; `HostProvided` requires an
+    /// explicit capacity from the host application.
     pub fn resolve_bytes(&self, src_bytes: impl Fn(u32, u32) -> Option<u64>) -> Option<u64> {
         match self {
             BufferLen::Fixed { bytes } => Some(*bytes),
@@ -1567,7 +1574,7 @@ impl BufferLen {
                 let bytes = src_bytes(*set, *binding)?;
                 Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
             }
-            BufferLen::SameAsDispatch { .. } | BufferLen::HostExpression { .. } => None,
+            BufferLen::SameAsDispatch { .. } | BufferLen::HostProvided { .. } => None,
         }
     }
 
