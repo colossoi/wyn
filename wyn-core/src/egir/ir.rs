@@ -1891,6 +1891,32 @@ impl<R> SegSpace<R> {
         &self.dims
     }
 
+    /// Host-evaluable logical element count shared by capacity and dispatch.
+    pub(crate) fn host_element_count(&self) -> Option<crate::pipeline_descriptor::HostExpression> {
+        use crate::pipeline_descriptor::{HostBinary, HostExpression, HostScalar};
+        self.dims
+            .iter()
+            .try_fold(None, |product, dim| {
+                let value = match dim {
+                    SegExtent::Host { count, .. } => count.clone(),
+                    SegExtent::Fixed(n) => HostExpression::Constant {
+                        scalar: HostScalar::I32,
+                        bits: *n,
+                    },
+                    _ => return None,
+                };
+                Some(Some(match product {
+                    None => value,
+                    Some(left) => HostExpression::Binary {
+                        op: HostBinary::Multiply,
+                        left: Box::new(left),
+                        right: Box::new(value),
+                    },
+                }))
+            })
+            .flatten()
+    }
+
     pub(crate) fn into_dims(self) -> Vec<SegExtent<R>> {
         self.dims
     }

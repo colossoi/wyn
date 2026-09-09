@@ -1465,6 +1465,9 @@ pub(super) fn domain_from_space(
         })?;
         return Some(KernelDomain::Elements(DispatchLen::Fixed { count }));
     }
+    if let Some(count) = space.host_element_count() {
+        return Some(KernelDomain::Elements(DispatchLen::HostExpression { count }));
+    }
     match space.dims() {
         [SegExtent::PushConstant { offset, .. }] => {
             Some(KernelDomain::Elements(DispatchLen::PushConstant {

@@ -30,7 +30,13 @@ enum DynamicUniform {
     Frame,
 }
 
-fn dynamic_uniform(name: &str) -> Option<DynamicUniform> {
+fn dynamic_uniform(
+    name: &str,
+    members: &[wyn_pipeline_descriptor::UniformMember],
+) -> Option<DynamicUniform> {
+    if members.iter().any(|member| member.name != name) {
+        return None;
+    }
     match name {
         "iResolution" | "resolution" => Some(DynamicUniform::Resolution),
         "iTime" | "time" => Some(DynamicUniform::Time),
@@ -140,11 +146,38 @@ pub fn build_test_pattern_uniforms(
 /// added by the caller (it's not a uniform).
 #[allow(clippy::type_complexity)]
 pub struct PipelineUniforms {
-    pub resolution: Option<wgpu::Buffer>,
-    pub time: Option<wgpu::Buffer>,
-    pub mouse: Option<wgpu::Buffer>,
-    pub frame: Option<wgpu::Buffer>,
+    dynamic: std::collections::HashMap<(u32, u32), DynamicUniform>,
     pub by_set_binding: std::collections::HashMap<(u32, u32), wgpu::Buffer>,
+}
+
+impl PipelineUniforms {
+    /// Upload dynamic values and retain identical bytes for host expressions.
+    pub fn update(
+        &self,
+        queue: &wgpu::Queue,
+        snapshot: &mut crate::gpu::ParameterBlockBytes,
+        resolution: [f32; 3],
+        time: f32,
+        mouse: [f32; 4],
+        frame: u32,
+    ) {
+        for (key, kind) in &self.dynamic {
+            let words = match kind {
+                DynamicUniform::Resolution => [
+                    resolution[0].to_bits(),
+                    resolution[1].to_bits(),
+                    resolution[2].to_bits(),
+                    0,
+                ],
+                DynamicUniform::Time => [time.to_bits(), 0, 0, 0],
+                DynamicUniform::Mouse => mouse.map(f32::to_bits),
+                DynamicUniform::Frame => [frame, 0, 0, 0],
+            };
+            let bytes = bytemuck::cast_slice(&words);
+            queue.write_buffer(&self.by_set_binding[key], 0, bytes);
+            snapshot.insert(*key, bytes.to_vec());
+        }
+    }
 }
 
 /// Allocate Shadertoy-style uniform buffers for every recognized name
@@ -166,10 +199,7 @@ pub fn build_pipeline_uniforms(
     use std::collections::HashMap;
     use wyn_pipeline_descriptor::Binding;
 
-    let mut resolution: Option<wgpu::Buffer> = None;
-    let mut time: Option<wgpu::Buffer> = None;
-    let mut mouse: Option<wgpu::Buffer> = None;
-    let mut frame: Option<wgpu::Buffer> = None;
+    let mut dynamic_slots = HashMap::new();
     let mut by_set_binding: HashMap<(u32, u32), wgpu::Buffer> = HashMap::new();
 
     for b in all_uniform_bindings {
@@ -178,7 +208,7 @@ pub fn build_pipeline_uniforms(
             binding,
             name,
             size,
-            ..
+            members,
         } = b
         else {
             continue;
@@ -188,7 +218,7 @@ pub fn build_pipeline_uniforms(
         if by_set_binding.contains_key(&(*set, *binding)) {
             continue;
         }
-        let dynamic = dynamic_uniform(name);
+        let dynamic = dynamic_uniform(name, members);
         let (size_bytes, label) = match dynamic {
             Some(DynamicUniform::Resolution) => (
                 std::mem::size_of::<ResolutionUniform>() as u64,
@@ -230,26 +260,14 @@ pub fn build_pipeline_uniforms(
             mapped_at_creation: false,
         });
 
-        // Cloning a wgpu::Buffer is a refcount bump, so the lookup map
-        // and the typed Option both hold valid handles to the same GPU
-        // resource.
-        by_set_binding.insert((*set, *binding), buffer.clone());
-        match dynamic {
-            Some(DynamicUniform::Resolution) => resolution = Some(buffer),
-            Some(DynamicUniform::Time) => time = Some(buffer),
-            Some(DynamicUniform::Mouse) => mouse = Some(buffer),
-            Some(DynamicUniform::Frame) => frame = Some(buffer),
-            // User block uniforms live only in by_set_binding; their
-            // content is zeroed at creation and written by --uniform.
-            None => {}
+        by_set_binding.insert((*set, *binding), buffer);
+        if let Some(kind) = dynamic {
+            dynamic_slots.insert((*set, *binding), kind);
         }
     }
 
     Ok(PipelineUniforms {
-        resolution,
-        time,
-        mouse,
-        frame,
+        dynamic: dynamic_slots,
         by_set_binding,
     })
 }

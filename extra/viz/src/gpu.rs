@@ -231,6 +231,13 @@ pub async fn create_headless_device(verbose: bool) -> Result<(Device, Queue)> {
     Ok(ctx.into_device_queue())
 }
 
+/// Read the exact 32-bit ABI word used by allocation and dispatch expressions.
+pub(crate) fn host_word(bytes: &ParameterBlockBytes, set: u32, binding: u32, offset: u32) -> Option<u32> {
+    let start = usize::try_from(offset).ok()?;
+    let word = bytes.get(&(set, binding))?.get(start..start.checked_add(4)?)?;
+    Some(u32::from_le_bytes(word.try_into().ok()?))
+}
+
 /// Pack CLI scalar values into the read-only storage parameter blocks emitted
 /// by the WGSL backend. Members retain their source names, so the existing
 /// `--push-constant name:type=value` spelling works for both native SPIR-V
@@ -413,12 +420,16 @@ pub fn create_binding_buffers(
                     )
                 })?;
                 let (groups, _, _) =
-                    resolve_dispatch_size_with_parameters(dispatch, &buffers, pc_bytes, parameter_bytes);
+                    resolve_dispatch_size_with_parameters(dispatch, &buffers, pc_bytes, parameter_bytes)?;
                 let wg = match dispatch {
                     DispatchSize::DerivedFrom { workgroup_size, .. } => *workgroup_size,
                     DispatchSize::Fixed { .. } => 1,
                 };
-                ((groups * wg) as u64 * elem_bytes as u64).max(4)
+                (u64::from(groups) * u64::from(wg) * u64::from(elem_bytes)).max(4)
+            } else if matches!(len, wyn_pipeline_descriptor::BufferLen::HostExpression { .. }) {
+                len.resolve_host_bytes(&|s, b, o| host_word(parameter_bytes, s, b, o))
+                    .map_err(anyhow::Error::msg)?
+                    .max(4)
             } else {
                 len.resolve_bytes(|s, bnd| byte_sizes.get(&(s, bnd)).copied())
                     .ok_or_else(|| {
@@ -529,25 +540,17 @@ pub fn build_bind_groups(
 
 /// Compute dispatch dimensions from a DispatchSize spec.
 ///
-/// For 1D-shaped sources (`InputBinding`, `Fixed`, `PushConstant`)
+/// For 1D-shaped sources (including `HostExpression`)
 /// returns `(workgroup_count_x, 1, 1)`. For `StorageImage` returns a
 /// 2D shape `(width/wg_x, height/wg_y, 1)` sized from the
 /// storage-texture pool. Compute entries whose primary output is a
 /// storage image rely on this 2D path.
-pub fn resolve_dispatch_size(
-    dispatch: &DispatchSize,
-    buffers: &StorageBuffers,
-    pc_bytes: &[u8],
-) -> (u32, u32, u32) {
-    resolve_dispatch_size_with_parameters(dispatch, buffers, pc_bytes, &ParameterBlockBytes::new())
-}
-
 pub fn resolve_dispatch_size_with_parameters(
     dispatch: &DispatchSize,
     buffers: &StorageBuffers,
     pc_bytes: &[u8],
     parameter_bytes: &ParameterBlockBytes,
-) -> (u32, u32, u32) {
+) -> Result<(u32, u32, u32)> {
     // For the 1D-style sources, the pipeline workgroup_size triple
     // doesn't matter — only the x dim (carried inside `DerivedFrom`)
     // is consulted. The `StorageImage` source ignores this wrapper
@@ -562,8 +565,8 @@ pub fn resolve_dispatch_size_with_parameters(
     )
 }
 
-/// Like `resolve_dispatch_size` but knows how to size a `StorageImage`
-/// dispatch from the storage-texture pool. The headless `pipeline`
+/// Resolve dispatch with storage-image dimensions as well as host parameter bytes.
+/// Storage-image dimensions come from the texture pool. The headless `pipeline`
 /// path passes an empty pool; the interactive path passes its
 /// `storage_textures` map.
 ///
@@ -579,8 +582,8 @@ pub fn resolve_dispatch_size_with_textures(
     pc_bytes: &[u8],
     parameter_bytes: &ParameterBlockBytes,
     storage_textures: &HashMap<(u32, u32), StorageTextureResource>,
-) -> (u32, u32, u32) {
-    match dispatch {
+) -> Result<(u32, u32, u32)> {
+    Ok(match dispatch {
         DispatchSize::Fixed { x, y, z, .. } => (*x, *y, *z),
         DispatchSize::DerivedFrom { len, workgroup_size } => {
             let wg_x = (*workgroup_size).max(1);
@@ -607,17 +610,17 @@ pub fn resolve_dispatch_size_with_textures(
                     }
                 }
                 _ => {
-                    let elements = resolve_dispatch_len(len, buffers, pc_bytes, parameter_bytes);
+                    let elements = resolve_dispatch_len(len, buffers, pc_bytes, parameter_bytes)?;
                     (elements.div_ceil(wg_x), 1, 1)
                 }
             }
         }
-    }
+    })
 }
 
 /// Resolve a `DerivedFrom` dispatch's iteration count from its `DispatchLen`
-/// source: a buffer's element count, a compile-time constant, or a scalar read
-/// from the host-populated parameter bytes. WGSL describes the latter as a
+/// source: a buffer's element count, a constant, a scalar parameter, or a
+/// checked host expression evaluated against the uploaded uniform bytes. WGSL describes the latter as a
 /// storage-buffer member; SPIR-V describes it as a push constant.
 ///
 /// `StorageImage` is handled by `resolve_dispatch_size_with_textures`
@@ -627,8 +630,8 @@ fn resolve_dispatch_len(
     buffers: &StorageBuffers,
     pc_bytes: &[u8],
     parameter_bytes: &ParameterBlockBytes,
-) -> u32 {
-    match len {
+) -> Result<u32> {
+    Ok(match len {
         DispatchLen::InputBinding {
             set,
             binding,
@@ -637,6 +640,11 @@ fn resolve_dispatch_len(
             buffers.get(&(*set, *binding)).map(|(_, size)| (*size / *elem_bytes as u64) as u32).unwrap_or(0)
         }
         DispatchLen::Fixed { count } => *count,
+        DispatchLen::HostExpression { count } => u32::try_from(
+            count
+                .element_count(&|set, binding, offset| host_word(parameter_bytes, set, binding, offset))
+                .map_err(|error| anyhow!("cannot resolve dispatch length: {error}"))?,
+        )?,
         DispatchLen::PushConstant { offset } => {
             let o = *offset as usize;
             pc_bytes.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).unwrap_or(0)
@@ -650,7 +658,7 @@ fn resolve_dispatch_len(
                 .unwrap_or(0)
         }
         DispatchLen::StorageImage { .. } => 1,
-    }
+    })
 }
 
 /// Read back a GPU buffer to CPU as f32 data.
@@ -1415,6 +1423,31 @@ pub fn create_host_buffers(
                 continue;
             }
 
+            if let Binding::StorageBuffer {
+                length: Some(length @ wyn_pipeline_descriptor::BufferLen::HostExpression { .. }),
+                ..
+            } = b
+            {
+                let size = length
+                    .resolve_host_bytes(&|s, b, o| host_word(parameter_bytes, s, b, o))
+                    .map_err(anyhow::Error::msg)?
+                    .max(4);
+                let buffer = device.create_buffer(&BufferDescriptor {
+                    label: Some(name),
+                    size,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                out.insert(
+                    key,
+                    HostBufferResource {
+                        buffer,
+                        kind: HostBufferKind::FileLoaded,
+                    },
+                );
+                continue;
+            }
+
             // No host pattern recognized; try `<storage_dir>/<name>.bin`
             // if the caller supplied a storage dir.
             let Some(dir) = storage_dir else {
@@ -1463,11 +1496,8 @@ pub struct FeedbackBufferResource {
 /// feedback spec. The byte size comes from the WRITE side's
 /// `Binding::StorageBuffer.length` policy in the descriptor.
 ///
-/// Phase 1 supports the two length policies that don't need the
-/// host-buffer or input-buffer byte-size pool (which isn't materialised
-/// yet at this point in startup): `BufferLen::Fixed` and
-/// `BufferLen::SameAsDispatch` (resolved via the owning compute
-/// pipeline's `dispatch_size`). `BufferLen::LikeInput` errors with a
+/// Fixed and host-expression lengths are resolved directly; dispatch lengths
+/// use the owning compute stage. `BufferLen::LikeInput` errors with a
 /// clean message — wire the necessary input-byte-size lookup if a real
 /// workload needs it.
 pub fn create_feedback_buffers(
@@ -1475,6 +1505,7 @@ pub fn create_feedback_buffers(
     descriptor: &PipelineDescriptor,
     buffer_feedback_pairs: &[FeedbackPair],
     dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
+    parameter_bytes: &ParameterBlockBytes,
 ) -> Result<HashMap<(u32, u32), FeedbackBufferResource>> {
     let mut out: HashMap<(u32, u32), FeedbackBufferResource> = HashMap::new();
     for pair in buffer_feedback_pairs {
@@ -1539,11 +1570,20 @@ pub fn create_feedback_buffers(
 
         let byte_size: u64 = match &length {
             wyn_pipeline_descriptor::BufferLen::Fixed { bytes } => *bytes,
+            wyn_pipeline_descriptor::BufferLen::HostExpression { .. } => length
+                .resolve_host_bytes(&|s, b, o| host_word(parameter_bytes, s, b, o))
+                .map_err(anyhow::Error::msg)?
+                .max(4),
             wyn_pipeline_descriptor::BufferLen::SameAsDispatch { elem_bytes } => {
                 let threads = if let Some(&(x, y, z)) = dispatch_overrides.get(&stage.entry_point) {
                     x as u64 * y as u64 * z as u64
                 } else {
-                    let (gx, gy, gz) = resolve_dispatch_size(&stage.dispatch_size, &HashMap::new(), &[]);
+                    let (gx, gy, gz) = resolve_dispatch_size_with_parameters(
+                        &stage.dispatch_size,
+                        &HashMap::new(),
+                        &[],
+                        parameter_bytes,
+                    )?;
                     let (wx, wy, wz) = stage.workgroup_size;
                     gx as u64 * gy as u64 * gz as u64 * wx as u64 * wy as u64 * wz as u64
                 };

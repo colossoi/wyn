@@ -1,7 +1,11 @@
-//! Host-known scalar expressions used for logical buffer capacities.
+//! Host-known scalar expressions used for logical buffer capacities and dispatch domains.
 //! Integer arithmetic is checked: values that overflow the shader's scalar
 //! width are rejected, never widened into a different shader computation.
 use serde::{Deserialize, Serialize};
+
+mod text;
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,14 +27,14 @@ pub enum HostBinary {
 
 /// Leaves identify ABI bytes, not application names. Float literals use their
 /// IEEE bits so the descriptor round-trips exactly (including signed zero).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostExpression {
     Constant {
         scalar: HostScalar,
         bits: u32,
     },
     Uniform {
+        name: String,
         set: u32,
         binding: u32,
         offset: u32,
@@ -62,6 +66,7 @@ impl HostExpression {
                 binding,
                 offset,
                 scalar,
+                ..
             } => (
                 *scalar,
                 uniform(*set, *binding, *offset)
@@ -78,7 +83,7 @@ impl HostExpression {
                             (0.0, u32::MAX as f64)
                         };
                         if !n.is_finite() || n < min || n > max {
-                            return Err("allocation expression float conversion is out of range".into());
+                            return Err("host expression float conversion is out of range".into());
                         }
                         if *to == I32 {
                             (n as i32) as u32
@@ -96,10 +101,10 @@ impl HostExpression {
                 let (ty, a) = left.evaluate(uniform)?;
                 let (other, b) = right.evaluate(uniform)?;
                 if ty != other {
-                    return Err("allocation expression operand types differ".into());
+                    return Err("host expression operand types differ".into());
                 }
                 use HostBinary::*;
-                let overflow = || "allocation expression overflows or divides by zero".to_owned();
+                let overflow = || "host expression overflows or divides by zero".to_owned();
                 let bits = match ty {
                     I32 => {
                         let (a, b) = (a as i32, b as i32);
@@ -130,7 +135,7 @@ impl HostExpression {
                             Remainder => a % b,
                         };
                         if !n.is_finite() {
-                            return Err("non-finite allocation expression".into());
+                            return Err("non-finite host expression".into());
                         }
                         n.to_bits()
                     }
@@ -145,8 +150,8 @@ impl HostExpression {
         match ty {
             HostScalar::U32 => Ok(u64::from(bits)),
             HostScalar::I32 if bits as i32 >= 0 => Ok(u64::from(bits)),
-            HostScalar::I32 => Err("negative allocation length".into()),
-            HostScalar::F32 => Err("allocation length must be an integer".into()),
+            HostScalar::I32 => Err("negative host element count".into()),
+            HostScalar::F32 => Err("host element count must be an integer".into()),
         }
     }
 }

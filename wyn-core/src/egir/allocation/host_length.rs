@@ -129,8 +129,9 @@ fn expression(
     }
     let node = graph.canonical_value(node);
     let ty = scalar(graph.nodes[node].ty())?;
-    if let Some((binding, offset)) = uniform_location(graph, entry, node, 0) {
+    if let Some((binding, offset, name)) = uniform_location(graph, entry, node, 0) {
         return Some(HostExpression::Uniform {
+            name,
             set: binding.set,
             binding: binding.binding,
             offset,
@@ -204,7 +205,7 @@ fn uniform_location(
     entry: &Entry<Semantic>,
     node: ValueId,
     depth: usize,
-) -> Option<(BindingRef, u32)> {
+) -> Option<(BindingRef, u32, String)> {
     if depth > 128 {
         return None;
     }
@@ -218,14 +219,14 @@ fn uniform_location(
             let EntryInputKind::Uniform { binding } = entry.inputs.get(slot.0)?.kind else {
                 return None;
             };
-            Some((binding, 0))
+            Some((binding, 0, entry.inputs.get(slot.0)?.name.clone()))
         }
         ValueKind::Pure {
             op: PureOp::Project { index },
             operands,
         } => {
             let [base] = operands.as_slice() else { return None };
-            let (binding, offset) = uniform_location(graph, entry, *base, depth + 1)?;
+            let (binding, offset, name) = uniform_location(graph, entry, *base, depth + 1)?;
             let ty = graph.nodes[graph.canonical_value(*base)].ty();
             let field_offset = if ty.is_vec() {
                 u32::try_from(*index).ok()?.checked_mul(ssa::layout::type_byte_size(ty.elem_type()?)?)?
@@ -234,7 +235,16 @@ fn uniform_location(
                     .member_offsets
                     .get(*index as usize)?
             };
-            Some((binding, offset.checked_add(field_offset)?))
+            let field = match ty {
+                Type::Constructed(TypeName::Record(fields), _) => fields.0.get(*index as usize)?.clone(),
+                _ if ty.is_vec() => ["x", "y", "z", "w"].get(*index as usize)?.to_string(),
+                _ => index.to_string(),
+            };
+            Some((
+                binding,
+                offset.checked_add(field_offset)?,
+                format!("{name}_{field}"),
+            ))
         }
         ValueKind::Pure {
             op: PureOp::DynamicExtract | PureOp::Index,
@@ -254,11 +264,15 @@ fn uniform_location(
             else {
                 return None;
             };
-            let (binding, offset) = uniform_location(graph, entry, *base, depth + 1)?;
+            let (binding, offset, name) = uniform_location(graph, entry, *base, depth + 1)?;
             let stride = ssa::layout::type_byte_size(ty.elem_type()?)?;
             Some((
                 binding,
                 offset.checked_add(index.parse::<u32>().ok()?.checked_mul(stride)?)?,
+                format!(
+                    "{name}_{}",
+                    ["x", "y", "z", "w"].get(index.parse::<usize>().ok()?)?
+                ),
             ))
         }
         _ => None,

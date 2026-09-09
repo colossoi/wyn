@@ -65,6 +65,15 @@ fn dispatch_len_serde_round_trip() {
             elem_bytes: 4,
         },
         DispatchLen::Fixed { count: 6144 },
+        DispatchLen::HostExpression {
+            count: HostExpression::Uniform {
+                name: "count".into(),
+                set: 0,
+                binding: 3,
+                offset: 16,
+                scalar: HostScalar::I32,
+            },
+        },
         DispatchLen::PushConstant { offset: 8 },
         DispatchLen::StorageBuffer {
             set: 1,

@@ -647,7 +647,7 @@ fn run_compute(
             &buffers,
             &pc_bytes,
             &parameter_bytes,
-        );
+        )?;
         if verbose {
             println!(
                 "Stage {} ({}): dispatch {} x {} x {}",

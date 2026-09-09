@@ -28,7 +28,7 @@ use winit::window::{Window, WindowAttributes};
 
 use crate::gpu::{self, DeviceRequest, GpuContext};
 use render::DEPTH_FORMAT;
-use uniforms::{MouseUniform, ResolutionUniform};
+use uniforms::ResolutionUniform;
 
 use wyn_pipeline_descriptor::{DrawCall, PipelineDescriptor};
 
@@ -208,6 +208,7 @@ struct PipelineComputeStage {
     /// wgpu's contiguous-sets requirement.
     bind_groups_by_set: [Vec<Option<BindGroup>>; 2],
     workgroups: (u32, u32, u32),
+    host_dispatch: Option<wyn_pipeline_descriptor::DispatchSize>,
     push_constants: Vec<u8>,
     label: String,
 }
@@ -229,12 +230,9 @@ struct PipelineState {
     vertex_buffers: Vec<wgpu::Buffer>,
     /// Optional `(buffer, index_count)` for indexed draws.
     index_buffer: Option<(wgpu::Buffer, u32)>,
-    // Shadertoy-style uniform buffers, populated per frame when the
-    // graphics pipeline declares the matching uniform binding.
-    resolution_buffer: Option<wgpu::Buffer>,
-    time_buffer: Option<wgpu::Buffer>,
-    mouse_buffer: Option<wgpu::Buffer>,
-    frame_buffer: Option<wgpu::Buffer>,
+    uniforms: uniforms::PipelineUniforms,
+    parameter_bytes: gpu::ParameterBlockBytes,
+    host_capacities: Vec<(wyn_pipeline_descriptor::BufferLen, u64)>,
     /// Host-uploaded textures, written each frame from CPU state. Today
     /// the only entry is the Shadertoy keyboard texture (256×3 R8Unorm),
     /// allocated when the descriptor declares a Texture binding named
@@ -497,12 +495,6 @@ impl State {
             Some((config.width, config.height)),
             &texture_feedback_pairs,
         );
-        let feedback_buffers = gpu::create_feedback_buffers(
-            &device,
-            &spec.descriptor,
-            buffer_feedback_pairs,
-            &spec.dispatch_overrides,
-        )?;
         let host_textures =
             gpu::create_host_textures(&device, &queue, &spec.descriptor, &storage_textures, &spec.images);
         let mut parameter_bytes = gpu::ParameterBlockBytes::new();
@@ -524,6 +516,99 @@ impl State {
                 }
             }
         }
+        // Phase 4: Shadertoy/playground uniforms (iResolution/resolution,
+        // iTime/time, iMouse/mouse, iFrame/frame). One buffer per
+        // `(set, binding)` declared by any pipeline (graphics OR compute);
+        // same-slot declarations across pipelines reuse the same physical
+        // buffer. The per-frame render path writes their values.
+        let all_uniform_bindings: Vec<wyn_pipeline_descriptor::Binding> = spec
+            .descriptor
+            .pipelines
+            .iter()
+            .flat_map(|p| match p {
+                DescPipeline::Compute(cp) => cp.bindings.iter().cloned().collect::<Vec<_>>(),
+                DescPipeline::Graphics(gp) => gp.bindings.iter().cloned().collect(),
+            })
+            .collect();
+        let uniforms = uniforms::build_pipeline_uniforms(&device, &all_uniform_bindings)
+            .context("build_pipeline_uniforms")?;
+
+        for binding in &all_uniform_bindings {
+            if let wyn_pipeline_descriptor::Binding::Uniform { set, binding, .. } = binding {
+                let buffer = &uniforms.by_set_binding[&(*set, *binding)];
+                parameter_bytes.entry((*set, *binding)).or_insert_with(|| vec![0; buffer.size() as usize]);
+            }
+        }
+
+        // `--uniform NAME.MEMBER:TYPE=VALUE`: write user-supplied block
+        // member values once, placed by the descriptor's published
+        // member layout (the block buffers were zero-initialized above).
+        for spec_value in &spec.uniform_values {
+            let (set, binding, offset, size) = all_uniform_bindings
+                .iter()
+                .find_map(|b| {
+                    let wyn_pipeline_descriptor::Binding::Uniform {
+                        set,
+                        binding,
+                        name,
+                        size,
+                        members,
+                    } = b
+                    else {
+                        return None;
+                    };
+                    if *name != spec_value.name {
+                        return None;
+                    }
+                    match &spec_value.member {
+                        Some(member) => members
+                            .iter()
+                            .find(|m| m.name == *member)
+                            .map(|m| (*set, *binding, m.offset, m.size)),
+                        None => Some((*set, *binding, 0, *size)),
+                    }
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--uniform {}{}: no matching uniform member in the descriptor",
+                        spec_value.name,
+                        spec_value.member.as_ref().map(|m| format!(".{m}")).unwrap_or_default()
+                    )
+                })?;
+            if spec_value.data.len() as u32 != size {
+                return Err(anyhow::anyhow!(
+                    "--uniform {}: value is {} bytes but the member is {} bytes",
+                    spec_value.name,
+                    spec_value.data.len(),
+                    size
+                ));
+            }
+            let buffer = uniforms.by_set_binding.get(&(set, binding)).ok_or_else(|| {
+                anyhow::anyhow!("--uniform {}: uniform buffer was not allocated", spec_value.name)
+            })?;
+            queue.write_buffer(buffer, offset as u64, &spec_value.data);
+            let data = parameter_bytes.get_mut(&(set, binding)).expect("uniform snapshot");
+            let start = offset as usize;
+            data.get_mut(start..start + spec_value.data.len())
+                .ok_or_else(|| anyhow!("uniform member exceeds its block"))?
+                .copy_from_slice(&spec_value.data);
+        }
+
+        uniforms.update(
+            &queue,
+            &mut parameter_bytes,
+            [config.width as f32, config.height as f32, 1.0],
+            0.0,
+            [0.0; 4],
+            0,
+        );
+        let feedback_buffers = gpu::create_feedback_buffers(
+            &device,
+            &spec.descriptor,
+            buffer_feedback_pairs,
+            &spec.dispatch_overrides,
+            &parameter_bytes,
+        )?;
         let host_buffers = gpu::create_host_buffers(
             &device,
             &queue,
@@ -662,72 +747,6 @@ impl State {
             None
         };
         let samplers = gpu::create_samplers(&device, &spec.descriptor);
-        // Phase 4: Shadertoy/playground uniforms (iResolution/resolution,
-        // iTime/time, iMouse/mouse, iFrame/frame). One buffer per
-        // `(set, binding)` declared by any pipeline (graphics OR compute);
-        // same-slot declarations across pipelines reuse the same physical
-        // buffer. The per-frame render path writes their values.
-        let all_uniform_bindings: Vec<wyn_pipeline_descriptor::Binding> = spec
-            .descriptor
-            .pipelines
-            .iter()
-            .flat_map(|p| match p {
-                DescPipeline::Compute(cp) => cp.bindings.iter().cloned().collect::<Vec<_>>(),
-                DescPipeline::Graphics(gp) => gp.bindings.iter().cloned().collect(),
-            })
-            .collect();
-        let uniforms = uniforms::build_pipeline_uniforms(&device, &all_uniform_bindings)
-            .context("build_pipeline_uniforms")?;
-
-        // `--uniform NAME.MEMBER:TYPE=VALUE`: write user-supplied block
-        // member values once, placed by the descriptor's published
-        // member layout (the block buffers were zero-initialized above).
-        for spec_value in &spec.uniform_values {
-            let (set, binding, offset, size) = all_uniform_bindings
-                .iter()
-                .find_map(|b| {
-                    let wyn_pipeline_descriptor::Binding::Uniform {
-                        set,
-                        binding,
-                        name,
-                        size,
-                        members,
-                    } = b
-                    else {
-                        return None;
-                    };
-                    if *name != spec_value.name {
-                        return None;
-                    }
-                    match &spec_value.member {
-                        Some(member) => members
-                            .iter()
-                            .find(|m| m.name == *member)
-                            .map(|m| (*set, *binding, m.offset, m.size)),
-                        None => Some((*set, *binding, 0, *size)),
-                    }
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "--uniform {}{}: no matching uniform member in the descriptor",
-                        spec_value.name,
-                        spec_value.member.as_ref().map(|m| format!(".{m}")).unwrap_or_default()
-                    )
-                })?;
-            if spec_value.data.len() as u32 != size {
-                return Err(anyhow::anyhow!(
-                    "--uniform {}: value is {} bytes but the member is {} bytes",
-                    spec_value.name,
-                    spec_value.data.len(),
-                    size
-                ));
-            }
-            let buffer = uniforms.by_set_binding.get(&(set, binding)).ok_or_else(|| {
-                anyhow::anyhow!("--uniform {}: uniform buffer was not allocated", spec_value.name)
-            })?;
-            queue.write_buffer(buffer, offset as u64, &spec_value.data);
-        }
-
         // Load the SPIR-V or WGSL module once; both compute and graphics
         // pipelines reuse it.
         let module = crate::spirv::load_shader_module(&device, &spec.shader_path)
@@ -749,6 +768,8 @@ impl State {
             if let Some(res) = feedback_buffers.get(&(pair.write_set, pair.write_binding)) {
                 let buf = &res.buffers[0];
                 dispatch_buffer_sizes.insert((pair.read_set, pair.read_binding), (buf.clone(), buf.size()));
+                dispatch_buffer_sizes
+                    .insert((pair.write_set, pair.write_binding), (buf.clone(), buf.size()));
             }
         }
         for ((set, binding), res) in &host_buffers {
@@ -869,7 +890,7 @@ impl State {
                         &[],
                         &parameter_bytes,
                         &storage_textures,
-                    )
+                    )?
                 };
                 if verbose {
                     eprintln!(
@@ -884,6 +905,15 @@ impl State {
                     pipeline: compute_pipeline,
                     bind_groups_by_set: stage_bgs,
                     workgroups,
+                    host_dispatch: (!spec.dispatch_overrides.contains_key(&stage.entry_point)
+                        && matches!(
+                            stage.dispatch_size,
+                            wyn_pipeline_descriptor::DispatchSize::DerivedFrom {
+                                len: wyn_pipeline_descriptor::DispatchLen::HostExpression { .. },
+                                ..
+                            }
+                        ))
+                    .then(|| stage.dispatch_size.clone()),
                     push_constants: Vec::new(),
                     label: format!("compute.{}", stage.entry_point),
                 });
@@ -1028,6 +1058,22 @@ impl State {
             }
         };
 
+        let host_capacities = all_uniform_bindings
+            .iter()
+            .filter_map(|binding| {
+                if let wyn_pipeline_descriptor::Binding::StorageBuffer {
+                    set,
+                    binding,
+                    length: Some(length @ wyn_pipeline_descriptor::BufferLen::HostExpression { .. }),
+                    ..
+                } = binding
+                {
+                    dispatch_buffer_sizes.get(&(*set, *binding)).map(|(_, bytes)| (length.clone(), *bytes))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let state = PipelineState {
             compute_stages,
             render_pipeline,
@@ -1037,10 +1083,9 @@ impl State {
             indirect_buffer,
             vertex_buffers: vertex_buffer_pack.buffers,
             index_buffer,
-            resolution_buffer: uniforms.resolution,
-            time_buffer: uniforms.time,
-            mouse_buffer: uniforms.mouse,
-            frame_buffer: uniforms.frame,
+            uniforms,
+            parameter_bytes,
+            host_capacities,
             host_textures,
             host_buffers,
             _storage_buffers: HashMap::new(),
@@ -1162,7 +1207,8 @@ impl State {
                         self.mouse_pressed,
                         &self.keyboard,
                         &mut encoder,
-                    ),
+                    )
+                    .unwrap_or_else(|error| eprintln!("[viz pipeline] {error:#}")),
                 }
                 // Clear the "pressed this frame" row of the keyboard
                 // state — every press lives for exactly one frame in
@@ -1479,7 +1525,7 @@ fn render_pipeline(
     mouse_pressed: bool,
     keyboard: &[u8; 256 * 3],
     encoder: &mut wgpu::CommandEncoder,
-) {
+) -> Result<()> {
     // Push host-uploaded textures (currently: keyboard) up to the
     // GPU before the frame's compute + render passes consume them.
     for ((_, _), res) in &state.host_textures {
@@ -1526,39 +1572,29 @@ fn render_pipeline(
             gpu::HostBufferKind::FileLoaded | gpu::HostBufferKind::Parameter => {}
         }
     }
-    // Update Shadertoy-style uniforms when the graphics pipeline asked
-    // for them. Each is independently optional; the constructor sets
-    // the `Option` based on the descriptor.
-    if let Some(ref buf) = state.resolution_buffer {
-        let u = ResolutionUniform {
-            resolution: [config.width as f32, config.height as f32, 1.0],
-            _pad: 0.0,
-        };
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
-    }
-    if let Some(ref buf) = state.time_buffer {
-        // iTime/time is padded to 16 bytes (`min_binding_size` on most
-        // adapters); write a vec4 with `[t, 0, 0, 0]`.
-        let t = start_time.elapsed().as_secs_f32();
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[t, 0.0, 0.0, 0.0]));
-    }
-    if let Some(ref buf) = state.mouse_buffer {
-        let u = MouseUniform {
-            mouse: [
-                mouse_pos[0],
-                mouse_pos[1],
-                if mouse_pressed { mouse_click_pos[0] } else { 0.0 },
-                if mouse_pressed { mouse_click_pos[1] } else { 0.0 },
-            ],
-        };
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
-    }
-    if let Some(ref buf) = state.frame_buffer {
-        let u = uniforms::FrameUniform {
-            frame: frame_count,
-            _pad: [0; 3],
-        };
-        queue.write_buffer(buf, 0, bytemuck::cast_slice(&[u]));
+    let mut parameter_bytes = state.parameter_bytes.clone();
+    state.uniforms.update(
+        queue,
+        &mut parameter_bytes,
+        [config.width as f32, config.height as f32, 1.0],
+        start_time.elapsed().as_secs_f32(),
+        [
+            mouse_pos[0],
+            mouse_pos[1],
+            if mouse_pressed { mouse_click_pos[0] } else { 0.0 },
+            if mouse_pressed { mouse_click_pos[1] } else { 0.0 },
+        ],
+        frame_count,
+    );
+    for (length, capacity) in &state.host_capacities {
+        let required = length
+            .resolve_host_bytes(&|s, b, o| gpu::host_word(&parameter_bytes, s, b, o))
+            .map_err(anyhow::Error::msg)?;
+        if required > *capacity {
+            return Err(anyhow!(
+                "uniform-derived output requires {required} bytes, but only {capacity} are allocated"
+            ));
+        }
     }
 
     // Pick the bind-group parity for this frame. Phase 6: compute and
@@ -1581,7 +1617,15 @@ fn render_pipeline(
         if !stage.push_constants.is_empty() {
             cpass.set_push_constants(0, &stage.push_constants);
         }
-        let (x, y, z) = stage.workgroups;
+        let (x, y, z) = match &stage.host_dispatch {
+            Some(dispatch) => gpu::resolve_dispatch_size_with_parameters(
+                dispatch,
+                &HashMap::new(),
+                &[],
+                &parameter_bytes,
+            )?,
+            None => stage.workgroups,
+        };
         cpass.dispatch_workgroups(x, y, z);
     }
 
@@ -1651,6 +1695,7 @@ fn render_pipeline(
             unreachable!("unsupported descriptor draw rejected during pipeline construction")
         }
     }
+    Ok(())
 }
 
 pub struct App {

@@ -248,30 +248,7 @@ impl LogicalSize {
         }) {
             return Some(Self::FixedBytes(count.saturating_mul(u64::from(elem_bytes))));
         }
-        if let Some(count) = space
-            .dims()
-            .iter()
-            .try_fold(None, |product, dim| {
-                use pipeline_descriptor::{HostBinary, HostExpression, HostScalar};
-                let value = match dim {
-                    SegExtent::Host { count, .. } => count.clone(),
-                    SegExtent::Fixed(n) => HostExpression::Constant {
-                        scalar: HostScalar::I32,
-                        bits: *n,
-                    },
-                    _ => return None,
-                };
-                Some(Some(match product {
-                    None => value,
-                    Some(left) => HostExpression::Binary {
-                        op: HostBinary::Multiply,
-                        left: Box::new(left),
-                        right: Box::new(value),
-                    },
-                }))
-            })
-            .flatten()
-        {
+        if let Some(count) = space.host_element_count() {
             return Some(Self::HostExpression { count, elem_bytes });
         }
         Some(match space.dims() {

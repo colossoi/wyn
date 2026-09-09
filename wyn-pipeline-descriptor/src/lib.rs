@@ -721,6 +721,12 @@ pub enum DispatchLen {
     Fixed {
         count: u32,
     },
+    /// A host-evaluable logical iteration count, including uniform-derived map
+    /// domains. Evaluate against the same uniform bytes uploaded to the shader.
+    HostExpression {
+        #[serde(flatten)]
+        count: HostExpression,
+    },
     /// A runtime count read from a scalar push-constant — e.g. `map(f,
     /// iota(n))` where `n` is an entry parameter. The host reads the u32 at
     /// `offset` in the push-constant block.
@@ -1501,6 +1507,7 @@ pub use host_expression::{HostBinary, HostExpression, HostScalar};
 pub enum BufferLen {
     /// Logical element count evaluated from host uniforms, independent of dispatch.
     HostExpression {
+        #[serde(flatten)]
         count: HostExpression,
         elem_bytes: u32,
     },
