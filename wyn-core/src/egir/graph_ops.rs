@@ -2338,24 +2338,15 @@ pub fn extract_array_range_operands<P: Family>(
 /// phase2 needs a fresh copy of phase1's NE since EGraph ValueNodeIds don't
 /// cross entries.
 ///
-/// Only pure nodes and constants are cloned; encountering a
-/// `SideEffectResult` or a `BlockParam` returns `Err` because those
-/// reference cross-block / cross-effect data that doesn't translate.
+/// Constants, pure nodes, and place-free calls are cloned; encountering a
+/// `SideEffectResult` or a `BlockParam` returns `Err` because those reference
+/// cross-block / cross-effect data that doesn't translate.
 pub fn clone_pure_subgraph<P: Family>(
     src: &EGraph<P>,
     dst: &mut EGraph<P>,
     root: ValueId,
 ) -> Result<ValueId, String> {
-    let mut memo: LookupMap<ValueId, ValueId> = LookupMap::new();
-    clone_value_subgraph(
-        src,
-        dst,
-        root,
-        &mut memo,
-        ConstantCopy::Intern,
-        false,
-        PureCopy::Preserve,
-    )
+    GraphCopier::new(src, dst, GraphCopyPolicy::pure_subgraph()).clone_value(root)
 }
 
 /// Clone an addressable place and the pure value/place dependencies that
@@ -2365,65 +2356,7 @@ pub fn clone_place_subgraph<P: Family>(
     dst: &mut EGraph<P>,
     root: PlaceId,
 ) -> Result<PlaceId, String> {
-    fn clone_place<P: Family>(
-        src: &EGraph<P>,
-        dst: &mut EGraph<P>,
-        source: PlaceId,
-        values: &mut LookupMap<ValueId, ValueId>,
-        places: &mut LookupMap<PlaceId, PlaceId>,
-    ) -> Result<PlaceId, String> {
-        if let Some(&target) = places.get(&source) {
-            return Ok(target);
-        }
-        let place = src
-            .places
-            .get(source)
-            .ok_or_else(|| format!("clone_place_subgraph: missing place {source:?}"))?
-            .clone();
-        let ty = place.ty().clone();
-        let span = place.span();
-        let clone_value = |value, dst: &mut EGraph<P>, values: &mut LookupMap<ValueId, ValueId>| {
-            clone_value_subgraph(
-                src,
-                dst,
-                value,
-                values,
-                ConstantCopy::Intern,
-                false,
-                PureCopy::Preserve,
-            )
-        };
-        let target = match place.op() {
-            PlaceOp::Parameter { parameter } => dst.add_place_parameter(*parameter, ty),
-            PlaceOp::View { view } => {
-                let view = clone_value(view.value(), dst, values)?;
-                dst.add_view_place(dst.view_id(view), ty.pointee, ty.access, span)
-            }
-            PlaceOp::AllocaResult => dst.add_alloca_place(ty, span),
-            PlaceOp::Index { base, index } => {
-                let base = clone_place(src, dst, *base, values, places)?;
-                let index = clone_value(*index, dst, values)?;
-                dst.add_index_place(base, index, ty.pointee, span)
-            }
-            PlaceOp::Slice { base, start, length } => {
-                let base = clone_place(src, dst, *base, values, places)?;
-                let start = clone_value(*start, dst, values)?;
-                let length = clone_value(*length, dst, values)?;
-                dst.add_slice_place(base, start, length, ty.pointee, span)
-            }
-            PlaceOp::ViewIndex { view, index } => {
-                let view = clone_value(view.value(), dst, values)?;
-                let index = clone_value(*index, dst, values)?;
-                let view = dst.view_id(view);
-                dst.add_view_index_place(view, index, ty.pointee, span)
-            }
-            PlaceOp::OutputSlot { index } => dst.add_output_place(*index, ty),
-        };
-        places.insert(source, target);
-        Ok(target)
-    }
-
-    clone_place(src, dst, root, &mut LookupMap::new(), &mut LookupMap::new())
+    GraphCopier::new(src, dst, GraphCopyPolicy::pure_subgraph()).clone_place(root)
 }
 
 /// Clone one typed boundary operand without collapsing its value, view, or
@@ -2433,14 +2366,7 @@ pub fn clone_operand_subgraph<P: Family>(
     dst: &mut EGraph<P>,
     operand: OperandRef,
 ) -> Result<OperandRef, String> {
-    Ok(match operand {
-        OperandRef::Value(value) => OperandRef::Value(clone_pure_subgraph(src, dst, value)?),
-        OperandRef::View(view) => {
-            let value = clone_pure_subgraph(src, dst, view.value())?;
-            OperandRef::View(dst.view_id(value))
-        }
-        OperandRef::Place(place) => OperandRef::Place(clone_place_subgraph(src, dst, place)?),
-    })
+    GraphCopier::new(src, dst, GraphCopyPolicy::pure_subgraph()).clone_operand(operand)
 }
 
 /// Clone a pure subgraph of `src` into `dst`, but substitute the given `src`
@@ -2454,16 +2380,9 @@ pub fn clone_pure_subgraph_substituting<P: Family>(
     root: ValueId,
     subs: &[(ValueId, ValueId)],
 ) -> Result<ValueId, String> {
-    let mut memo: LookupMap<ValueId, ValueId> = subs.iter().copied().collect();
-    clone_value_subgraph(
-        src,
-        dst,
-        root,
-        &mut memo,
-        ConstantCopy::Intern,
-        false,
-        PureCopy::Preserve,
-    )
+    let mut copier = GraphCopier::new(src, dst, GraphCopyPolicy::pure_subgraph());
+    copier.values.extend(subs.iter().copied());
+    copier.clone_value(root)
 }
 
 #[derive(Clone, Copy)]
@@ -2489,278 +2408,84 @@ pub(crate) fn clone_value_subgraph<P: Family>(
     allow_unions: bool,
     pure: PureCopy,
 ) -> Result<ValueId, String> {
-    clone_value_subgraph_inner(src, dst, nid, memo, constants, allow_unions, pure)
+    let policy = GraphCopyPolicy::subgraph(constants, allow_unions, pure);
+    let mut copier = GraphCopier::new(src, dst, policy);
+    copier.values = std::mem::take(memo);
+    let result = copier.clone_value(nid);
+    *memo = std::mem::take(&mut copier.values);
+    result
 }
 
-fn clone_value_subgraph_inner<P: Family>(
-    src: &EGraph<P>,
-    dst: &mut EGraph<P>,
-    nid: ValueId,
-    memo: &mut LookupMap<ValueId, ValueId>,
+#[derive(Clone, Copy)]
+struct GraphCopyPolicy<'a> {
     constants: ConstantCopy,
     allow_unions: bool,
     pure: PureCopy,
-) -> Result<ValueId, String> {
-    if let Some(&existing) = memo.get(&nid) {
-        return Ok(existing);
-    }
-    let canonical = src.canonical_value(nid);
-    if canonical != nid {
-        let target = clone_value_subgraph_inner(src, dst, canonical, memo, constants, allow_unions, pure)?;
-        memo.insert(nid, target);
-        return Ok(target);
-    }
-    let source = src.nodes.get(nid).ok_or_else(|| format!("clone_value_subgraph: missing node {nid:?}"))?;
-    let ty = source.ty.clone();
-    let new_nid = match &source.kind {
-        ValueKind::Constant(c) => match constants {
-            ConstantCopy::Intern => dst.intern_constant(*c, ty),
-            ConstantCopy::PreserveIdentity => {
-                let target = dst.nodes.insert(Value {
-                    kind: ValueKind::Constant(*c),
-                    ty,
-                    span: source.span,
-                    alias: None,
-                    result_origins: Vec::new(),
-                });
-                target
-            }
-        },
-        ValueKind::Pure { op, operands, .. } => {
-            let new_ops: SmallVec<[ValueId; 4]> = operands
-                .iter()
-                .map(|&operand| {
-                    clone_value_subgraph_inner(src, dst, operand, memo, constants, allow_unions, pure)
-                })
-                .collect::<Result<_, _>>()?;
-            if matches!(pure, PureCopy::Fold) {
-                if let Some(folded) = dst.try_algebraic_fold(op, &new_ops, &ty) {
-                    folded
-                } else {
-                    dst.intern_pure(op.clone(), new_ops, ty, source.span)
-                }
-            } else {
-                dst.intern_pure(op.clone(), new_ops, ty, source.span)
-            }
-        }
-        ValueKind::Union { left, right } if allow_unions => {
-            let left = clone_value_subgraph_inner(src, dst, *left, memo, constants, allow_unions, pure)?;
-            let right = clone_value_subgraph_inner(src, dst, *right, memo, constants, allow_unions, pure)?;
-            dst.add_union(left, right)
-        }
-        ValueKind::CallResult { call, .. } => {
-            let source_call = src.call(*call).clone();
-            if !source_call.result().places().is_empty() {
-                return Err("clone call requires explicit destination-place substitutions".into());
-            }
-            let arguments = source_call
-                .argument_bindings()
-                .iter()
-                .map(|argument| match argument.operand() {
-                    OperandRef::Value(value) => {
-                        clone_value_subgraph_inner(src, dst, value, memo, constants, allow_unions, pure)
-                            .map(|value| (argument.parameter(), OperandRef::Value(value)))
-                    }
-                    OperandRef::View(view) => clone_value_subgraph_inner(
-                        src,
-                        dst,
-                        view.value(),
-                        memo,
-                        constants,
-                        allow_unions,
-                        pure,
-                    )
-                    .map(|value| (argument.parameter(), OperandRef::View(dst.view_id(value)))),
-                    OperandRef::Place(_) => {
-                        Err("clone call requires explicit place-argument substitutions".into())
-                    }
-                })
-                .collect::<Result<StableMap<_, _>, String>>()?;
-            let (_, _, mappings) = dst.add_projected_call(
-                &source_call,
-                arguments,
-                |source_result| {
-                    let source = &src.nodes[source_result];
-                    let ValueKind::CallResult { slot, .. } = source.kind() else {
-                        unreachable!("call result binding contains a non-call value")
-                    };
-                    (*slot, source.ty().clone(), source.span())
-                },
-                |_| unreachable!("place-backed call was rejected before cloning"),
-            )?;
-            for (source, target) in mappings {
-                memo.insert(source, target);
-            }
-            memo[&nid]
-        }
-        other => {
-            let producer = src.side_effect_index().site(nid).map(|site| {
-                format!(
-                    " produced by {:?}",
-                    src.skeleton.blocks[site.block].side_effects[site.index].kind
-                )
-            });
-            return Err(format!(
-                "clone_value_subgraph cannot copy {nid:?} ({ty:?}): {other:?}{}",
-                producer.unwrap_or_default()
-            ));
-        }
-    };
-    let origins = source
-        .result_origins()
-        .iter()
-        .cloned()
-        .map(|origin| {
-            origin.try_map(
-                &mut |ty| Ok::<_, String>(ty),
-                &mut |value| {
-                    clone_value_subgraph_inner(src, dst, value, memo, constants, allow_unions, pure)
-                },
-                &mut |_| Err("clone result origin requires explicit place substitutions".into()),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    dst.nodes[new_nid].result_origins = origins;
-    memo.insert(nid, new_nid);
-    Ok(new_nid)
+    arguments: Option<&'a [CallArgument]>,
+    copy_result_origins: bool,
+    normalize_value_operands: bool,
 }
 
-pub(crate) struct ClonedBody {
-    pub entry: BlockId,
-    pub returns: Vec<(BlockId, ResultBinding<Type<TypeName>>)>,
-    pub node_count: usize,
-    pub block_count: usize,
-}
-
-/// Clone a complete reachable function body into another graph while binding
-/// its physical parameters to one fully applied call boundary. Values, places,
-/// calls, effects, block parameters, aliases, and structured control metadata
-/// are remapped together; callers only orchestrate where the cloned entry and
-/// returns splice into their surrounding CFG.
-pub(crate) fn clone_body_substituting<P: Family>(
-    source: &EGraph<P>,
-    target: &mut EGraph<P>,
-    arguments: &[CallArgument],
-    place_bindings: &[(PlaceId, PlaceId)],
-    effect_ids: &mut IdSource<EffectToken>,
-) -> Result<ClonedBody, String> {
-    let blocks = wyn_graph::reachable_from_ordered(
-        [source.skeleton.entry],
-        wyn_graph::WalkOrder::DepthFirst,
-        |block, out| out.extend(source.skeleton.blocks[block].term.successors()),
-    );
-    let mut cloner = BodyCloner {
-        source,
-        target,
-        arguments,
-        values: LookupMap::new(),
-        places: place_bindings.iter().copied().collect(),
-        bound_places: place_bindings.iter().map(|(source, _)| *source).collect(),
-        calls: LookupMap::new(),
-        blocks: LookupMap::new(),
-        effects: LookupMap::new(),
-        effect_ids,
-    };
-
-    for source_block in &blocks {
-        cloner.blocks.insert(*source_block, cloner.target.skeleton.create_block());
+impl GraphCopyPolicy<'static> {
+    fn pure_subgraph() -> Self {
+        Self::subgraph(ConstantCopy::Intern, false, PureCopy::Preserve)
     }
-    for source_block in &blocks {
-        let target_block = cloner.blocks[source_block];
-        for parameter in &source.skeleton.blocks[*source_block].params {
-            let source_value = parameter.value();
-            let target_value =
-                cloner.target.add_block_param(target_block, source.nodes[source_value].ty.clone());
-            cloner.values.insert(source_value, target_value);
+
+    fn subgraph(constants: ConstantCopy, allow_unions: bool, pure: PureCopy) -> Self {
+        Self {
+            constants,
+            allow_unions,
+            pure,
+            arguments: None,
+            copy_result_origins: true,
+            normalize_value_operands: false,
         }
     }
-
-    let mut returns = Vec::new();
-    for source_block in &blocks {
-        let target_block = cloner.blocks[source_block];
-        for effect in &source.skeleton.blocks[*source_block].side_effects {
-            if let Some(effect) = cloner.clone_effect(effect)? {
-                cloner.target.skeleton.blocks[target_block].side_effects.push(effect);
-            }
-        }
-
-        let term = match &source.skeleton.blocks[*source_block].term {
-            SkeletonTerminator::Return(Some(result)) => {
-                let result = cloner.clone_result(result)?;
-                returns.push((target_block, result.clone()));
-                SkeletonTerminator::Return(Some(result))
-            }
-            SkeletonTerminator::Return(None) => SkeletonTerminator::Return(None),
-            SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
-                target: cloner.blocks[target],
-                args: args
-                    .iter()
-                    .map(|value| {
-                        cloner.clone_value(value.value()).map(|value| cloner.target.admit_flow_value(value))
-                    })
-                    .collect::<Result<_, _>>()?,
-            },
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => SkeletonTerminator::CondBranch {
-                cond: cloner.clone_value(*cond)?,
-                then_target: cloner.blocks[then_target],
-                then_args: then_args
-                    .iter()
-                    .map(|value| {
-                        cloner.clone_value(value.value()).map(|value| cloner.target.admit_flow_value(value))
-                    })
-                    .collect::<Result<_, _>>()?,
-                else_target: cloner.blocks[else_target],
-                else_args: else_args
-                    .iter()
-                    .map(|value| {
-                        cloner.clone_value(value.value()).map(|value| cloner.target.admit_flow_value(value))
-                    })
-                    .collect::<Result<_, _>>()?,
-            },
-            SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
-        };
-        cloner.target.skeleton.blocks[target_block].term = term;
-        cloner.target.skeleton.blocks[target_block].control_header = source.skeleton.blocks[*source_block]
-            .control_header
-            .as_ref()
-            .map(|header| header.remap(&|block| cloner.blocks[&block]));
-    }
-
-    let entry = cloner.blocks[&source.skeleton.entry];
-    let node_count = cloner.values.len();
-    cloner.target.verify_hash_cons()?;
-    cloner.target.skeleton.verify_branch_arities()?;
-    Ok(ClonedBody {
-        entry,
-        returns,
-        node_count,
-        block_count: blocks.len(),
-    })
 }
 
-struct BodyCloner<'a, P: Family> {
+impl<'a> GraphCopyPolicy<'a> {
+    fn body(arguments: &'a [CallArgument]) -> Self {
+        Self {
+            constants: ConstantCopy::Intern,
+            allow_unions: true,
+            pure: PureCopy::Fold,
+            arguments: Some(arguments),
+            // Whole-body copying historically rebuilt result bindings but did
+            // not copy the auxiliary origins attached to individual values.
+            copy_result_origins: false,
+            normalize_value_operands: true,
+        }
+    }
+}
+
+/// Stateful copier for the value/place/call portion shared by rooted DAG copies
+/// and whole-body copies. CFG and effect traversal live in [`BodyCopier`]. This
+/// copier stays within one `Family`; cross-family resource mapping remains the
+/// responsibility of `GraphPhaseRemap`.
+struct GraphCopier<'a, P: Family> {
     source: &'a EGraph<P>,
     target: &'a mut EGraph<P>,
-    arguments: &'a [CallArgument],
+    policy: GraphCopyPolicy<'a>,
     values: LookupMap<ValueId, ValueId>,
     places: LookupMap<PlaceId, PlaceId>,
-    bound_places: HashSet<PlaceId>,
     calls: LookupMap<CallSiteId, CallSiteId>,
-    blocks: LookupMap<BlockId, BlockId>,
-    effects: LookupMap<EffectToken, EffectToken>,
-    effect_ids: &'a mut IdSource<EffectToken>,
 }
 
-impl<P: Family> BodyCloner<'_, P> {
+impl<'a, P: Family> GraphCopier<'a, P> {
+    fn new(source: &'a EGraph<P>, target: &'a mut EGraph<P>, policy: GraphCopyPolicy<'a>) -> Self {
+        Self {
+            source,
+            target,
+            policy,
+            values: LookupMap::new(),
+            places: LookupMap::new(),
+            calls: LookupMap::new(),
+        }
+    }
+
     fn clone_value(&mut self, source: ValueId) -> Result<ValueId, String> {
-        if let Some(target) = self.values.get(&source) {
-            return Ok(*target);
+        if let Some(&target) = self.values.get(&source) {
+            return Ok(target);
         }
         let canonical = self.source.canonical_value(source);
         if canonical != source {
@@ -2772,84 +2497,115 @@ impl<P: Family> BodyCloner<'_, P> {
             .source
             .nodes
             .get(source)
-            .ok_or_else(|| format!("body clone references missing value {source:?}"))?;
+            .ok_or_else(|| format!("graph copy references missing value {source:?}"))?;
+        let ty = definition.ty.clone();
         let target = match &definition.kind {
             ValueKind::FuncParam { parameter } => {
-                let Some(value) = self
-                    .arguments
+                let Some(arguments) = self.policy.arguments else {
+                    return Err(self.unsupported_value(source, &ty, &definition.kind));
+                };
+                arguments
                     .iter()
                     .find(|argument| argument.parameter() == *parameter)
                     .and_then(|argument| argument.value())
-                else {
-                    return Err(format!(
-                        "body clone parameter {parameter:?} requires a value or view argument",
-                    ));
-                };
-                value
+                    .ok_or_else(|| {
+                        format!("body clone parameter {parameter:?} requires a value or view argument")
+                    })?
             }
-            ValueKind::BlockParam { .. } => *self
-                .values
-                .get(&source)
-                .ok_or_else(|| format!("body clone omitted block parameter {source:?}"))?,
-            ValueKind::Constant(value) => self.target.intern_constant(value.clone(), definition.ty.clone()),
+            ValueKind::BlockParam { .. } => {
+                return Err(if self.policy.arguments.is_some() {
+                    format!("body clone omitted block parameter {source:?}")
+                } else {
+                    self.unsupported_value(source, &ty, &definition.kind)
+                });
+            }
+            ValueKind::Constant(value) => match self.policy.constants {
+                ConstantCopy::Intern => self.target.intern_constant(*value, ty),
+                ConstantCopy::PreserveIdentity => self.target.nodes.insert(Value {
+                    kind: ValueKind::Constant(*value),
+                    ty,
+                    span: definition.span,
+                    alias: None,
+                    result_origins: Vec::new(),
+                }),
+            },
             ValueKind::Pure { op, operands } => {
                 let operands = operands
                     .iter()
                     .map(|value| self.clone_value(*value))
                     .collect::<Result<SmallVec<[ValueId; 4]>, _>>()?;
-                self.target.try_algebraic_fold(op, &operands, &definition.ty).unwrap_or_else(|| {
-                    self.target.intern_pure(op.clone(), operands, definition.ty.clone(), definition.span)
-                })
+                if matches!(self.policy.pure, PureCopy::Fold) {
+                    self.target.try_algebraic_fold(op, &operands, &ty).unwrap_or_else(|| {
+                        self.target.intern_pure(op.clone(), operands, ty, definition.span)
+                    })
+                } else {
+                    self.target.intern_pure(op.clone(), operands, ty, definition.span)
+                }
             }
-            ValueKind::Union { left, right } => {
+            ValueKind::Union { left, right } if self.policy.allow_unions => {
                 let left = self.clone_value(*left)?;
                 let right = self.clone_value(*right)?;
                 self.target.add_union(left, right)
             }
-            ValueKind::SideEffectResult => self.target.alloc_side_effect_result(definition.ty.clone()),
+            ValueKind::SideEffectResult if self.policy.arguments.is_some() => {
+                self.target.alloc_side_effect_result(ty)
+            }
             ValueKind::CallResult { call, .. } => {
                 self.clone_call(*call)?;
                 *self
                     .values
                     .get(&source)
-                    .ok_or_else(|| format!("body clone omitted call result {source:?}"))?
+                    .ok_or_else(|| format!("graph copy omitted call result {source:?}"))?
             }
-            ValueKind::PlaceLength { place } => {
+            ValueKind::PlaceLength { place } if self.policy.arguments.is_some() => {
                 let place = self.clone_place(*place)?;
-                self.target.add_place_length(place, definition.ty.clone(), definition.span)
+                self.target.add_place_length(place, ty, definition.span)
             }
-            ValueKind::PlaceView { place } => {
+            ValueKind::PlaceView { place } if self.policy.arguments.is_some() => {
                 let place = self.clone_place(*place)?;
-                self.target.add_place_view(place, definition.ty.clone(), definition.span).value()
+                self.target.add_place_view(place, ty, definition.span).value()
             }
+            other => return Err(self.unsupported_value(source, &ty, other)),
         };
+        if self.policy.copy_result_origins {
+            let origins = definition
+                .result_origins()
+                .iter()
+                .cloned()
+                .map(|origin| {
+                    origin.try_map(
+                        &mut |ty| Ok::<_, String>(ty),
+                        &mut |value| self.clone_value(value),
+                        &mut |_| Err("clone result origin requires explicit place substitutions".into()),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            self.target.nodes[target].result_origins = origins;
+        }
         self.values.insert(source, target);
         Ok(target)
     }
 
     fn clone_place(&mut self, source: PlaceId) -> Result<PlaceId, String> {
-        if let Some(target) = self.places.get(&source) {
-            return Ok(*target);
+        if let Some(&target) = self.places.get(&source) {
+            return Ok(target);
         }
         let definition = self
             .source
             .places()
             .get(source)
-            .ok_or_else(|| format!("body clone references missing place {source:?}"))?;
+            .ok_or_else(|| format!("graph copy references missing place {source:?}"))?;
         let target = match definition.op() {
-            PlaceOp::Parameter { parameter } => {
-                let Some(place) = self
-                    .arguments
+            PlaceOp::Parameter { parameter } => match self.policy.arguments {
+                Some(arguments) => arguments
                     .iter()
                     .find(|argument| argument.parameter() == *parameter)
                     .and_then(|argument| argument.place())
-                else {
-                    return Err(format!(
-                        "body clone parameter {parameter:?} requires a place argument",
-                    ));
-                };
-                place
-            }
+                    .ok_or_else(|| {
+                        format!("body clone parameter {parameter:?} requires a place argument")
+                    })?,
+                None => self.target.add_place_parameter(*parameter, definition.ty().clone()),
+            },
             PlaceOp::View { view } => {
                 let view = self.clone_value(view.value())?;
                 self.target.add_view_place(
@@ -2899,7 +2655,11 @@ impl<P: Family> BodyCloner<'_, P> {
         Ok(match source {
             OperandRef::Value(value) => {
                 let value = self.clone_value(value)?;
-                self.target.operand_ref(value)
+                if self.policy.normalize_value_operands {
+                    self.target.operand_ref(value)
+                } else {
+                    OperandRef::Value(value)
+                }
             }
             OperandRef::View(view) => {
                 let value = self.clone_value(view.value())?;
@@ -2910,17 +2670,23 @@ impl<P: Family> BodyCloner<'_, P> {
     }
 
     fn clone_call(&mut self, source: CallSiteId) -> Result<CallSiteId, String> {
-        if let Some(target) = self.calls.get(&source) {
-            return Ok(*target);
+        if let Some(&target) = self.calls.get(&source) {
+            return Ok(target);
         }
         let call = self.source.call(source).clone();
+        if self.policy.arguments.is_none() && !call.result().places().is_empty() {
+            return Err("clone call requires explicit destination-place substitutions".into());
+        }
         let arguments = call
             .argument_bindings()
             .iter()
             .map(|argument| {
+                if self.policy.arguments.is_none() && matches!(argument.operand(), OperandRef::Place(_)) {
+                    return Err("clone call requires explicit place-argument substitutions".into());
+                }
                 self.clone_operand(argument.operand()).map(|operand| (argument.parameter(), operand))
             })
-            .collect::<Result<StableMap<_, _>, _>>()?;
+            .collect::<Result<StableMap<_, _>, String>>()?;
         for place in call.result().places() {
             self.clone_place(place)?;
         }
@@ -2957,6 +2723,160 @@ impl<P: Family> BodyCloner<'_, P> {
         Ok(source.clone().map(|ty| ty, |value| values[&value], |place| places[&place]))
     }
 
+    fn unsupported_value(
+        &self,
+        source: ValueId,
+        ty: &Type<TypeName>,
+        kind: &ValueKind<P::Resource, WynLanguage>,
+    ) -> String {
+        let producer = self.source.side_effect_index().site(source).map(|site| {
+            format!(
+                " produced by {:?}",
+                self.source.skeleton.blocks[site.block].side_effects[site.index].kind
+            )
+        });
+        format!(
+            "clone_value_subgraph cannot copy {source:?} ({ty:?}): {kind:?}{}",
+            producer.unwrap_or_default()
+        )
+    }
+}
+
+pub(crate) struct ClonedBody {
+    pub entry: BlockId,
+    pub returns: Vec<(BlockId, ResultBinding<Type<TypeName>>)>,
+    pub node_count: usize,
+    pub block_count: usize,
+}
+
+/// Clone a complete reachable function body into another graph while binding
+/// its physical parameters to one fully applied call boundary. Values, places,
+/// calls, effects, block parameters, aliases, and structured control metadata
+/// are remapped together; callers only orchestrate where the cloned entry and
+/// returns splice into their surrounding CFG.
+pub(crate) fn clone_body_substituting<P: Family>(
+    source: &EGraph<P>,
+    target: &mut EGraph<P>,
+    arguments: &[CallArgument],
+    place_bindings: &[(PlaceId, PlaceId)],
+    effect_ids: &mut IdSource<EffectToken>,
+) -> Result<ClonedBody, String> {
+    let blocks = wyn_graph::reachable_from_ordered(
+        [source.skeleton.entry],
+        wyn_graph::WalkOrder::DepthFirst,
+        |block, out| out.extend(source.skeleton.blocks[block].term.successors()),
+    );
+    let mut graph = GraphCopier::new(source, target, GraphCopyPolicy::body(arguments));
+    graph.places.extend(place_bindings.iter().copied());
+    let mut cloner = BodyCopier {
+        graph,
+        bound_places: place_bindings.iter().map(|(source, _)| *source).collect(),
+        blocks: LookupMap::new(),
+        effects: LookupMap::new(),
+        effect_ids,
+    };
+
+    for source_block in &blocks {
+        cloner.blocks.insert(*source_block, cloner.graph.target.skeleton.create_block());
+    }
+    for source_block in &blocks {
+        let target_block = cloner.blocks[source_block];
+        for parameter in &source.skeleton.blocks[*source_block].params {
+            let source_value = parameter.value();
+            let target_value =
+                cloner.graph.target.add_block_param(target_block, source.nodes[source_value].ty.clone());
+            cloner.graph.values.insert(source_value, target_value);
+        }
+    }
+
+    let mut returns = Vec::new();
+    for source_block in &blocks {
+        let target_block = cloner.blocks[source_block];
+        for effect in &source.skeleton.blocks[*source_block].side_effects {
+            if let Some(effect) = cloner.clone_effect(effect)? {
+                cloner.graph.target.skeleton.blocks[target_block].side_effects.push(effect);
+            }
+        }
+
+        let term = match &source.skeleton.blocks[*source_block].term {
+            SkeletonTerminator::Return(Some(result)) => {
+                let result = cloner.graph.clone_result(result)?;
+                returns.push((target_block, result.clone()));
+                SkeletonTerminator::Return(Some(result))
+            }
+            SkeletonTerminator::Return(None) => SkeletonTerminator::Return(None),
+            SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
+                target: cloner.blocks[target],
+                args: args
+                    .iter()
+                    .map(|value| {
+                        cloner
+                            .graph
+                            .clone_value(value.value())
+                            .map(|value| cloner.graph.target.admit_flow_value(value))
+                    })
+                    .collect::<Result<_, _>>()?,
+            },
+            SkeletonTerminator::CondBranch {
+                cond,
+                then_target,
+                then_args,
+                else_target,
+                else_args,
+            } => SkeletonTerminator::CondBranch {
+                cond: cloner.graph.clone_value(*cond)?,
+                then_target: cloner.blocks[then_target],
+                then_args: then_args
+                    .iter()
+                    .map(|value| {
+                        cloner
+                            .graph
+                            .clone_value(value.value())
+                            .map(|value| cloner.graph.target.admit_flow_value(value))
+                    })
+                    .collect::<Result<_, _>>()?,
+                else_target: cloner.blocks[else_target],
+                else_args: else_args
+                    .iter()
+                    .map(|value| {
+                        cloner
+                            .graph
+                            .clone_value(value.value())
+                            .map(|value| cloner.graph.target.admit_flow_value(value))
+                    })
+                    .collect::<Result<_, _>>()?,
+            },
+            SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
+        };
+        cloner.graph.target.skeleton.blocks[target_block].term = term;
+        cloner.graph.target.skeleton.blocks[target_block].control_header = source.skeleton.blocks
+            [*source_block]
+            .control_header
+            .as_ref()
+            .map(|header| header.remap(&|block| cloner.blocks[&block]));
+    }
+
+    let entry = cloner.blocks[&source.skeleton.entry];
+    let node_count = cloner.graph.values.len();
+    cloner.graph.target.verify_hash_cons()?;
+    cloner.graph.target.skeleton.verify_branch_arities()?;
+    Ok(ClonedBody {
+        entry,
+        returns,
+        node_count,
+        block_count: blocks.len(),
+    })
+}
+
+struct BodyCopier<'a, P: Family> {
+    graph: GraphCopier<'a, P>,
+    bound_places: HashSet<PlaceId>,
+    blocks: LookupMap<BlockId, BlockId>,
+    effects: LookupMap<EffectToken, EffectToken>,
+    effect_ids: &'a mut IdSource<EffectToken>,
+}
+
+impl<P: Family> BodyCopier<'_, P> {
     fn clone_effect(&mut self, source: &SideEffect<P>) -> Result<Option<SideEffect<P>>, String> {
         if matches!(source.kind(), SideEffectKind::Soac(_)) {
             return Err("body clone requires SOAC expansion before effectful inlining".into());
@@ -2970,28 +2890,28 @@ impl<P: Family> BodyCloner<'_, P> {
         let operands = source
             .operands()
             .iter()
-            .map(|operand| self.clone_operand(*operand))
+            .map(|operand| self.graph.clone_operand(*operand))
             .collect::<Result<SmallVec<[OperandRef; 4]>, _>>()?;
-        let result = source.result().map(|result| self.clone_result(result)).transpose()?;
+        let result = source.result().map(|result| self.graph.clone_result(result)).transpose()?;
         let SideEffectKind::Effect(operation) = source.kind() else {
             unreachable!()
         };
         let operation = match operation {
             EffectOp::Call { site } => EffectOp::Call {
-                site: self.clone_call(*site)?,
+                site: self.graph.clone_call(*site)?,
             },
             EffectOp::Op { tag } => EffectOp::Op { tag: tag.clone() },
             EffectOp::Alloca { result } => EffectOp::Alloca {
-                result: self.clone_place(*result)?,
+                result: self.graph.clone_place(*result)?,
             },
             EffectOp::Load { place } => EffectOp::Load {
-                place: self.clone_place(*place)?,
+                place: self.graph.clone_place(*place)?,
             },
             EffectOp::Store { place } => EffectOp::Store {
-                place: self.clone_place(*place)?,
+                place: self.graph.clone_place(*place)?,
             },
             EffectOp::Atomic { place, op } => EffectOp::Atomic {
-                place: self.clone_place(*place)?,
+                place: self.graph.clone_place(*place)?,
                 op: *op,
             },
             EffectOp::ControlBarrier => EffectOp::ControlBarrier,
