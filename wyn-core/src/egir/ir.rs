@@ -574,7 +574,14 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: Clone,
         P: Clone,
     {
-        self.destination_leaves_with_paths().into_iter().map(|(_, leaf)| leaf).collect()
+        let mut leaves = Vec::with_capacity(self.destination_count());
+        self.for_each_destination(|ty, destination| {
+            leaves.push(ResultLeaf {
+                ty: ty.clone(),
+                destination: destination.clone(),
+            });
+        });
+        leaves
     }
 
     /// Physical destination leaves paired with their logical product path.
@@ -816,43 +823,21 @@ impl<Ty> ResultBinding<Ty> {
     }
 
     pub fn replace_value(&mut self, old: ValueId, new: ValueId) {
-        fn walk<Ty>(node: &mut ResultNode<Ty, ValueId, PlaceId>, old: ValueId, new: ValueId) {
-            match node {
-                ResultNode::Product { fields, .. } => {
-                    for field in fields {
-                        walk(field, old, new);
-                    }
+        self.for_each_destination_mut(|_, destination| {
+            if let ResultDestination::ReturnValue(value) = destination {
+                if *value == old {
+                    *value = new;
                 }
-                ResultNode::Leaf(ResultLeaf {
-                    destination: ResultDestination::ReturnValue(value),
-                    ..
-                }) if *value == old => *value = new,
-                ResultNode::Leaf(_) => {}
             }
-        }
-
-        walk(&mut self.root, old, new);
+        });
     }
 
     pub fn replace_value_with_place(&mut self, old: ValueId, place: PlaceId) {
-        fn walk<Ty>(node: &mut ResultNode<Ty, ValueId, PlaceId>, old: ValueId, place: PlaceId) {
-            match node {
-                ResultNode::Product { fields, .. } => {
-                    for field in fields {
-                        walk(field, old, place);
-                    }
-                }
-                ResultNode::Leaf(leaf) => {
-                    if let ResultDestination::ReturnValue(value) = &mut leaf.destination {
-                        if *value == old {
-                            leaf.destination = ResultDestination::Place(PlaceDestination::Fixed(place));
-                        }
-                    }
-                }
+        self.for_each_destination_mut(|_, destination| {
+            if matches!(destination, ResultDestination::ReturnValue(value) if *value == old) {
+                *destination = ResultDestination::Place(PlaceDestination::Fixed(place));
             }
-        }
-
-        walk(&mut self.root, old, place);
+        });
     }
 
     pub fn replace_place(&mut self, old: PlaceId, new: PlaceId) {
