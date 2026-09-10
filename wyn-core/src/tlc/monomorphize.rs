@@ -8,7 +8,7 @@
 //! **Representation variants.** Type substitution replaces type variables but
 //! deliberately preserves `ArrayVariantAbstract`. It is a first-class
 //! representation-polymorphic variant, not a placeholder. EGIR lowering
-//! chooses the concrete representation, and `egir::verify_no_abstract` guards
+//! chooses the concrete representation, and `ssa::backend_validation` guards
 //! the backend boundary.
 
 use super::data::Empty;

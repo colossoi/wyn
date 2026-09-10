@@ -13415,7 +13415,7 @@ fn f16_vector_types_compile_to_spirv() {
 // static-capacity inputs and View for runtime-sized ones; the consumer
 // can be a size-polymorphic helper that gets specialized against the
 // `Abstract` representation in TLC and resolved at the producer edge in
-// EGIR. The backend-boundary verifier (`egir::verify_no_abstract`)
+// EGIR. The backend-boundary verifier (`ssa::backend_validation`)
 // rejects any residual `Array[_, Abstract, _, _]`.
 //
 // These pin the canonical patterns; `filter_into_reduce_*` covers fusion shape

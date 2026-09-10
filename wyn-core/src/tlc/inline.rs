@@ -525,7 +525,7 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
 /// (e.g. `[]T` is `Array[T, Abstract, Skolem, …]`); the arg at the call site
 /// has the concrete instantiation. Using the arg type avoids dragging the
 /// Abstract array variant into post-inline let chains where it would later
-/// hit `egir::verify_no_abstract` at backend lowering.
+/// hit `ssa::backend_validation` at backend lowering.
 ///
 /// Special case: when the arg is a bare `Var(SymbolId)` reference (i.e. the
 /// caller is passing an in-scope binding straight through), we substitute

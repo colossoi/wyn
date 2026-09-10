@@ -50,7 +50,6 @@ pub(crate) mod structured_cfg;
 // lifting and residency currently use only a subset of the recorded facts.
 #[allow(dead_code)]
 pub(crate) mod stage_variance;
-pub mod verify_no_abstract;
 pub(crate) mod verify_physical;
 
 pub use allocation::{

@@ -23,7 +23,7 @@
 //! fix, rather than burying the problem in the backend.
 //!
 //! Plumbed in `lib.rs` between SSA construction and SPIR-V emission
-//! (`ssa::prepare_spirv`), right after `verify_no_abstract::verify_no_abstract_types`.
+//! (`ssa::prepare_spirv`), right after `ssa::backend_validation::verify_no_abstract_types`.
 
 use crate::ast::TypeName;
 use crate::error::{CompilerError, Result};

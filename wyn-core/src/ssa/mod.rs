@@ -13,10 +13,12 @@
 //!   concrete `FuncBody = Function<InstKind, Type>` instantiation.
 //! - `builder`: `FuncBuilder` that EGIR's `elaborate` uses to materialize SSA.
 //! - `reachability`: whole-module function and constant definition pruning.
+//! - `backend_validation`: Concrete type representation checks for backend emission.
 //! - `layout`: Type byte-size helpers for SPIR-V memory operations.
 //! - `print`: Debug formatter for SSA bodies.
 
 pub mod addressable_constants;
+pub mod backend_validation;
 pub mod builder;
 pub mod framework;
 pub mod layout;
@@ -26,7 +28,6 @@ pub(crate) mod storage_function_variants;
 pub mod types;
 pub mod uses;
 
-use crate::egir;
 use crate::err_spirv;
 use crate::error;
 use crate::spirv;
@@ -57,7 +58,7 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
         ));
     }
     eliminate_dead_values(&mut program);
-    egir::verify_no_abstract::verify_no_abstract_types(&program)?;
+    backend_validation::verify_no_abstract_types(&program)?;
     spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
 }
@@ -72,7 +73,7 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
     }
     promote_addressable_constants(&mut program);
     eliminate_dead_values(&mut program);
-    egir::verify_no_abstract::verify_no_abstract_types(&program)?;
+    backend_validation::verify_no_abstract_types(&program)?;
     Ok(program.retag())
 }
 

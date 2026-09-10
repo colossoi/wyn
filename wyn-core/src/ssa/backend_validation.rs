@@ -72,7 +72,7 @@ fn check_ty(ty: &Type<TypeName>, location: &str) -> Result<()> {
                  lowering at {}: {:?}. This means a call edge passed a filter-like SOAC's \
                  result to a non-inlined size-polymorphic consumer; the consumer needs to be \
                  either inlined or per-representation specialized at the call edge (see \
-                 `egir/verify_no_abstract.rs` for context).",
+                 `ssa/backend_validation.rs` for context).",
                 location, ty
             ),
             None,
@@ -92,5 +92,5 @@ fn contains_abstract(ty: &Type<TypeName>) -> bool {
 }
 
 #[cfg(test)]
-#[path = "verify_no_abstract_tests.rs"]
+#[path = "backend_validation_tests.rs"]
 mod tests;

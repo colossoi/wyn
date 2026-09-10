@@ -382,14 +382,20 @@ The physical order is also enforced by typestate:
 |-----------------------|-------------------|-------------|
 | Physical EGIR `ResourcesErased` -> SSA `Elaborated` | `elaborate` | Demand-elaborate the validated physical program to SSA while retaining its published schedule and descriptor |
 | `Elaborated` -> `Reachable` | `filter_reachable` | Remove final SSA functions and constants not reachable from an entry point |
-| `Reachable` -> `SpirvReady` | `eliminate_dead_values`, `verify_no_abstract_types`, `verify_buffer_layouts` | Remove dead SSA values, validate abstract types and buffer layouts, and record SPIR-V readiness in the typestate |
-| `Reachable` -> `WgslReady` | `promote_addressable_constants`, `eliminate_dead_values`, `verify_no_abstract_types` | Move constants whose addresses are taken into functions, remove dead SSA values, validate abstract types, and record WGSL readiness in the typestate |
+| `Reachable` -> `SpirvReady` | `eliminate_dead_values`, `backend_validation::verify_no_abstract_types`, `verify_buffer_layouts` | Remove dead SSA values, validate abstract types and buffer layouts, and record SPIR-V readiness in the typestate |
+| `Reachable` -> `WgslReady` | `promote_addressable_constants`, `eliminate_dead_values`, `backend_validation::verify_no_abstract_types` | Move constants whose addresses are taken into functions, remove dead SSA values, validate abstract types, and record WGSL readiness in the typestate |
 | Backend-ready -> emitted module | `lower_ssa_program` \| `wgsl::lower` | Emit SPIR-V words or WGSL source from the selected backend-ready SSA checkpoint |
 
 SSA is intentionally minimal: optimization and canonicalization live in EGIR;
 SSA performs only final definition reachability and target validation. A
 generic CFG-with-block-params representation is provided in
 `ssa::framework`; the concrete instantiation lives in `ssa::types`.
+
+`ssa::backend_validation::verify_no_abstract_types` rejects abstract array
+variants in function, entry-point, and constant bodies, including parameter,
+return, value, and place element types. Both backend preparation paths run
+this check because the generic IR structures do not enforce concrete backend
+type representations.
 
 Key properties:
 - CFG with basic blocks and block parameters (not phi nodes).

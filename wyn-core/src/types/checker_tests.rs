@@ -3035,7 +3035,7 @@ def test: i32 = add_first([1, 2, 3], [4, 5])
 // passing to a size-poly helper). The previous Composite pinning froze
 // the consumer signature against Composite before the producer's
 // representation existed — see issues/slice-view-provenance.md and
-// `egir::verify_no_abstract`.
+// `ssa::backend_validation`.
 
 #[test]
 fn filter_result_typechecks_in_let_binding() {

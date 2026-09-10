@@ -1700,7 +1700,7 @@ impl<'a> TypeChecker<'a> {
         // producer's EGIR lowering in `egir/from_tlc.rs`. Pinning
         // Composite here would freeze the consumer's signature before
         // the producer's representation exists — see
-        // `egir::verify_no_abstract` for the backend-boundary invariant.
+        // `ssa::backend_validation` for the backend-boundary invariant.
         let (a, n, s) = (self.fresh_var(), self.fresh_var(), self.fresh_var());
         let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
         let pred_ty = Type::arrow(Self::var(a), bool_ty);

@@ -302,7 +302,7 @@ pub enum TypeName {
     /// lowering dispatches on the producer's chosen concrete variant.
     /// Survives `apply_subst` in monomorphize and helper signatures.
     /// No `Array[_, Abstract, _, _]` may reach SPIR-V or WGSL emission;
-    /// `egir::verify_no_abstract` enforces this at the backend boundary.
+    /// `ssa::backend_validation` enforces this at the backend boundary.
     ArrayVariantAbstract,
     /// Array variant placeholder. Replaced with type variable before type checking.
     /// Entry point params are constrained to Storage, others remain polymorphic.
