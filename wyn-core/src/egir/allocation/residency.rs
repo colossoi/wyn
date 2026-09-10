@@ -353,7 +353,7 @@ fn plan_scalar_result_handoff(
     dependencies: &SemanticGraph,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let uses = graph_ops::ValueUseIndex::build(&entry.graph);
+        let uses = graph_ops::SliceFacts::build(&entry.graph);
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
                 let Some(result) = effect.result.as_ref() else {
@@ -477,7 +477,7 @@ fn scalar_result_requires_handoff(
     result: &ResultBinding<Type<TypeName>>,
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
-    uses: &graph_ops::ValueUseIndex,
+    uses: &graph_ops::SliceFacts,
 ) -> bool {
     if !op.form.post.result_types.is_empty()
         || !op.is_reduce()
@@ -487,15 +487,14 @@ fn scalar_result_requires_handoff(
     {
         return false;
     }
-    cloneable_operation_dependencies(entry, op, site)
-        .is_some_and(|dependencies| invocation_invariant(entry, site.block, &dependencies))
+    cloneable_operation_dependencies(entry, op, site).is_some_and(|_| invocation_invariant(entry, uses))
 }
 
 fn cloneable_operation_dependencies(
     entry: &AllocatedEntry,
     op: &screma::Op<AllocatedSemantic>,
     site: SideEffectSite,
-) -> Option<HashSet<usize>> {
+) -> Option<super::super::slice::LiveSlice> {
     let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
         return None;
     };
@@ -508,13 +507,31 @@ fn cloneable_operation_dependencies(
                     .filter_map(|output| output.resource)
                     .any(|output| output == resource.resource)
         });
-    let dependencies = dependency_effects(&entry.graph, site)?;
-    let upstream =
-        dependencies.iter().copied().filter(|index| *index != site.index).collect::<HashSet<_>>();
-    if !cloneable || !dependencies_are_cloneable(&entry.graph, site.block, &upstream) {
+    let facts = graph_ops::SliceFacts::build(&entry.graph);
+    let slice = facts
+        .select(
+            [],
+            [site],
+            [],
+            |node| match node {
+                wyn_slice::Node::Operation(producer) => producer.block == site.block,
+                wyn_slice::Node::Value(_) => true,
+            },
+            |_| false,
+            &[],
+        )
+        .ok()?;
+    if !cloneable || !slice.operations().iter().filter(|producer| **producer != site).all(|producer| {
+        matches!(&entry.graph.skeleton.effect(*producer).kind,
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+                if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
+                    if output_slots.is_empty()
+                        && op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
+                        && resources.iter().all(|resource| resource.access == ResourceAccess::Read)))
+    }) {
         return None;
     }
-    Some(dependencies)
+    Some(slice)
 }
 
 fn array_result_residency(
@@ -606,7 +623,7 @@ fn plan_parallel_prelude(
             let projector = GraphProjector::new(&entry.graph);
             if !source_is_observed_only_by_consumers_or_outputs(
                 entry,
-                projector.use_index(),
+                projector.facts(),
                 prelude.root,
                 &consumer_site_set,
             ) {
@@ -622,7 +639,7 @@ fn plan_parallel_prelude(
             ) else {
                 continue;
             };
-            let Some(outputs) = stage_prelude_outputs(entry, [prelude.root], &recipe) else {
+            let Some(outputs) = stage_prelude_outputs(entry, &recipe) else {
                 continue;
             };
             let Some(analysis) = super::cost::analyze_prelude(program, entry, &recipe) else {
@@ -665,7 +682,7 @@ fn plan_direct_stage_prelude(program: &ResidencyDraft) -> Option<StagePreludePla
         ) else {
             continue;
         };
-        let Some(outputs) = stage_prelude_outputs(entry, frontier, &recipe) else {
+        let Some(outputs) = stage_prelude_outputs(entry, &recipe) else {
             continue;
         };
         let Some(analysis) = super::cost::analyze_prelude(program, entry, &recipe) else {
@@ -779,14 +796,10 @@ fn direct_stage_value_is_liftable(
 /// source effects.
 fn stage_prelude_outputs(
     entry: &AllocatedEntry,
-    roots: impl IntoIterator<Item = ValueId>,
     recipe: &ProjectedValueRecipe<SemanticResourceRef>,
 ) -> Option<Vec<StagePreludeOutput>> {
-    let mut sources = roots.into_iter().collect::<Vec<_>>();
-    sources.extend(recipe.live_outs());
-    let mut seen = HashSet::new();
-    sources.retain(|source| seen.insert(*source));
-    let mut outputs = Vec::with_capacity(sources.len());
+    let mut outputs = Vec::new();
+    let sources = recipe.projection.output_sources();
     for source in sources {
         let elem_ty = entry.graph.nodes[source].ty.clone();
         let stride = ssa::layout::storage_elem_stride(&elem_ty)?;
@@ -875,7 +888,7 @@ fn supports_parallel_prefix_consumer(entry: &AllocatedEntry, site: SideEffectSit
 
 fn source_is_observed_only_by_consumers_or_outputs(
     entry: &AllocatedEntry,
-    uses: &graph_ops::ValueUseIndex,
+    uses: &graph_ops::SliceFacts,
     root: ValueId,
     consumers: &HashSet<SideEffectSite>,
 ) -> bool {
@@ -963,29 +976,26 @@ fn has_matching_consumer(
     })
 }
 
-fn scalar_result_is_used(
-    uses: &graph_ops::ValueUseIndex,
-    result: ValueId,
-    producer: SideEffectSite,
-) -> bool {
+fn scalar_result_is_used(uses: &graph_ops::SliceFacts, result: ValueId, producer: SideEffectSite) -> bool {
     let observers = uses.value_observers(result);
     observers.effect_sites().any(|site| site != producer) || observers.terminator_blocks().next().is_some()
 }
 
-fn invocation_invariant(entry: &AllocatedEntry, block_id: BlockId, effects: &HashSet<usize>) -> bool {
+fn invocation_invariant(entry: &AllocatedEntry, facts: &graph_ops::SliceFacts) -> bool {
     let Ok(dependence) = StageDependenceAnalysis::for_entry(entry) else {
         return false;
     };
-    let block = &entry.graph.skeleton.blocks[block_id];
-    let mut roots = Vec::new();
-    for &index in effects {
-        roots.extend(graph_ops::effect_value_inputs(
-            &entry.graph,
-            &block.side_effects[index],
-        ));
-    }
-    let reachable = graph_ops::execution_value_producer_closure(&entry.graph, roots).nodes;
-    reachable.into_iter().all(|node| {
+    let Ok(slice) = facts.select(
+        graph_ops::execution_value_roots(&entry.graph),
+        [],
+        [],
+        |_| true,
+        |_| false,
+        &[],
+    ) else {
+        return false;
+    };
+    slice.values().iter().copied().all(|node| {
         let Some(ValueKind::FuncParam { parameter }) = entry.graph.nodes.get(node).map(|node| &node.kind)
         else {
             return true;
@@ -995,23 +1005,6 @@ fn invocation_invariant(entry: &AllocatedEntry, block_id: BlockId, effects: &Has
                 .params()
                 .abi_position(*parameter)
                 .is_some_and(|position| super::cost::entry_parameter_is_scalar_relocatable(entry, position))
-    })
-}
-
-fn dependencies_are_cloneable(graph: &AllocatedGraph, block_id: BlockId, effects: &HashSet<usize>) -> bool {
-    let block = &graph.skeleton.blocks[block_id];
-    effects.iter().all(|&index| {
-        matches!(
-            &block.side_effects[index].kind,
-            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
-                if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
-                    if output_slots.is_empty()
-                        && op
-                            .result_state
-                            .iter()
-                            .all(|result| result.ownership == types::SoacOwnership::Fresh)
-                        && resources.iter().all(|resource| resource.access == ResourceAccess::Read))
-        )
     })
 }
 
@@ -1342,9 +1335,7 @@ fn rewrite_runtime_array_source(
     entry.graph.replace_value_references(result, view);
     entry.graph.retype_node(result, handoff.result_ty.clone());
     for route in entry.routes_mut() {
-        if route.source.value == result {
-            route.source.value = view;
-        }
+        route.replace_values(&[(result, view)]);
     }
     let block = &mut entry.graph.skeleton.blocks[source_site.block];
     block.side_effects.remove(source_site.index);
@@ -1523,12 +1514,10 @@ fn rewrite_materialized_operation_source(
         let value_ty = entry.graph.nodes[value].ty.clone();
         entry.graph.retype_node(source, value_ty);
     }
+    let route_replacements =
+        replacements.iter().map(|(source, value, _)| (*source, *value)).collect::<Vec<_>>();
     for route in entry.routes_mut() {
-        if let Some((_, value, _)) =
-            replacements.iter().find(|(source, _, _)| *source == route.source.value)
-        {
-            route.source.value = *value;
-        }
+        route.replace_values(&route_replacements);
     }
     entry.graph.skeleton.blocks[block_id].side_effects.remove(effect_index);
     for (offset, effect) in scalar_effects.into_iter().enumerate() {
@@ -1552,8 +1541,15 @@ fn materialize_stage_prelude(
     recipe: ProjectedValueRecipe<SemanticResourceRef>,
     outputs: Vec<StagePreludeOutput>,
 ) -> Result<ResidencyDraft, String> {
-    if outputs.is_empty() {
-        return Ok(program);
+    let required = recipe.projection.output_sources().collect::<HashSet<_>>();
+    if outputs.len() != required.len()
+        || outputs.iter().any(|output| {
+            !required.contains(&output.source)
+                || recipe.projection.node(output.source) != Some(output.projected)
+        })
+        || outputs.iter().map(|output| output.source).collect::<HashSet<_>>() != required
+    {
+        return Err("stage prelude requires a handoff for every slice output".into());
     }
     let Program {
         functions,
@@ -1628,6 +1624,9 @@ fn materialize_stage_prelude(
         )
         .into_parts();
         entry.graph.replace_value_references(value.source, loaded);
+        for route in entry.routes_mut() {
+            route.replace_values(&[(value.source, loaded)]);
+        }
         loaded_values.push(loaded);
         load_effects.push(load_effect);
     }
@@ -1828,21 +1827,18 @@ fn output_specs(
 }
 
 fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[ValueId]) {
-    let mut sites = Vec::<SideEffectSite>::new();
-    for (block_id, block) in &graph.skeleton.blocks {
-        for (index, effect) in block.side_effects.iter().enumerate() {
-            if matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
-                && graph_ops::effect_value_inputs(graph, effect)
-                    .into_iter()
-                    .any(|node| values.iter().any(|value| graph_ops::value_depends_on(graph, node, *value)))
-            {
-                sites.push(SideEffectSite {
-                    block: block_id,
-                    index,
-                });
-            }
-        }
-    }
+    let sites = {
+        let facts = graph_ops::SliceFacts::build(graph);
+        values
+            .iter()
+            .flat_map(|value| facts.value_observers(*value).effect_sites().collect::<Vec<_>>())
+            .filter(|site| {
+                matches!(&graph.skeleton.effect(*site).kind,
+                SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+                    if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
+            })
+            .collect::<HashSet<_>>()
+    };
     for site in sites {
         let reads = {
             let effect = graph.skeleton.effect(site);
@@ -1868,19 +1864,6 @@ fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[Value
         }
         resources.sort_by_key(|access| access.resource);
     }
-}
-
-/// Return the transitive semantic producer closure needed to compute one
-/// effect.  Materialization is an entry prepass, so an internal producer chain
-/// must move with the multi-consumer map instead of leaving dangling Project
-/// nodes in the cloned graph.
-fn dependency_effects(graph: &AllocatedGraph, root: SideEffectSite) -> Option<HashSet<usize>> {
-    let effect = graph.skeleton.get_effect(root)?;
-    let closure = graph_ops::value_producer_closure(graph, graph_ops::effect_value_inputs(graph, effect));
-    if closure.effects.iter().any(|site| site.block != root.block) {
-        return None;
-    }
-    Some(closure.effects.into_iter().map(|site| site.index).chain([root.index]).collect())
 }
 
 fn retarget_input_metadata(

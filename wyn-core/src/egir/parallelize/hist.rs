@@ -116,7 +116,7 @@ pub(super) fn analyze_hist_candidate(
             }
             let resources_for = |node| {
                 let closure = egir::graph_ops::value_producer_closure(graph, [node]);
-                entry.resources_referenced_by_nodes(graph, closure.nodes)
+                entry.resources_referenced_by_nodes(graph, closure.values().iter().copied())
             };
             let resource_for = |node| {
                 let resources = resources_for(node);

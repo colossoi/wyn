@@ -140,8 +140,9 @@ fn host_dependencies(
     node: ValueId,
 ) -> Vec<HostSizeInput> {
     graph_ops::value_producer_closure(graph, [node])
-        .nodes
-        .into_iter()
+        .values()
+        .iter()
+        .copied()
         .filter_map(|dependency| {
             let dependency = graph.canonical_value(dependency);
             let scalar = scalar(graph.nodes[dependency].ty())?;

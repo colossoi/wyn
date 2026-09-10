@@ -1,3 +1,4 @@
+use super::super::types::Semantic;
 use super::*;
 use crate::ast::TypeName;
 use crate::egir::types::{EffectOp, EffectToken, OperandRef, SkeletonTerminator};
@@ -247,7 +248,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     let closure = value_producer_closure(&graph, [tail]);
 
     assert_eq!(
-        closure.effects,
+        *closure.operations(),
         HashSet::from([SideEffectSite {
             block: entry,
             index: 0,
@@ -255,12 +256,12 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
     );
     for expected in [tail, merged, current, next, one, cond, produced, source] {
         assert!(
-            closure.nodes.contains(&expected),
+            closure.values().contains(&expected),
             "producer closure omitted {expected:?}"
         );
     }
 
-    let uses = ValueUseIndex::build(&graph);
+    let uses = SliceFacts::build(&graph);
     let pure = uses.pure_observers(source);
     assert_eq!(
         pure.effect_sites().collect::<HashSet<_>>(),

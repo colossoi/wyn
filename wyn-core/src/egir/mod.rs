@@ -42,6 +42,7 @@ pub(crate) mod pipeline_seed;
 pub mod reify;
 pub(crate) mod semantic_graph;
 pub mod semantic_opt;
+pub(crate) mod slice;
 pub mod stage_lift;
 pub(crate) mod structured_cfg;
 // Keep the complete query surface available to later scheduling consumers;

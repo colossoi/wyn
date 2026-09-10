@@ -10,22 +10,22 @@ use std::collections::{HashMap, HashSet};
 use crate::flow::{BlockId, ControlHeader};
 use crate::{BindingRef, StableMap};
 
-use super::graph_ops::ValueUseIndex;
 use super::ir::RealizedOutputRoute;
 use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 use super::program::OutputWriter;
+use super::slice::{LiveSlice, SliceFacts};
 use super::types::{
-    EGraph, EffectToken, GraphResource, Semantic, SideEffect, SideEffectIndex, SideEffectSite,
-    SkeletonTerminator, ValueId, ValueKind,
+    EGraph, EffectToken, GraphResource, Semantic, SideEffect, SideEffectSite, SkeletonTerminator, ValueId,
+    ValueKind,
 };
+use wyn_slice::{Node, Observer};
 pub struct GraphProjection<R: GraphResource = BindingRef> {
     pub graph: EGraph<Semantic<R>>,
     nodes: HashMap<ValueId, ValueId>,
     places: HashMap<PlaceId, PlaceId>,
     blocks: HashMap<BlockId, BlockId>,
     effects: HashSet<EffectToken>,
-    source_effects: HashSet<SideEffectSite>,
-    source_values: HashSet<ValueId>,
+    slice: LiveSlice,
     effect_sites: HashMap<SideEffectSite, SideEffectSite>,
     detached_output_block: Option<BlockId>,
 }
@@ -37,7 +37,6 @@ pub struct ProjectedValueRecipe<R: GraphResource = BindingRef> {
     pub values: Vec<ValueId>,
     pub result_block: BlockId,
     pub source: ValueRecipeSource,
-    live_outs: Vec<ValueId>,
 }
 
 /// How a projected value recipe is removed from its source entry after its
@@ -57,7 +56,7 @@ impl<R: GraphResource> ProjectedValueRecipe<R> {
     /// this recipe is detached. The requested values themselves are not
     /// included.
     pub fn live_outs(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.live_outs.iter().copied()
+        self.projection.slice.live_outs().iter().copied()
     }
 }
 
@@ -90,15 +89,19 @@ impl<R: GraphResource> GraphProjection<R> {
         self.blocks.get(&source).copied()
     }
 
+    pub fn output_sources(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.slice.outputs().copied()
+    }
+
     pub fn source_effects(&self) -> &HashSet<SideEffectSite> {
-        &self.source_effects
+        self.slice.operations()
     }
 
     /// Source values retained by this projection. The projector owns this
     /// reachability decision; consumers should not rediscover it by walking
     /// the completed graph.
     pub fn source_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.source_values.iter().copied()
+        self.slice.values().iter().copied()
     }
 
     pub fn effect_site(&self, source: SideEffectSite) -> Option<SideEffectSite> {
@@ -160,8 +163,7 @@ pub(crate) fn remap_output_routes(
 
 pub struct GraphProjector<'a, R: GraphResource = BindingRef> {
     source: &'a EGraph<Semantic<R>>,
-    uses: ValueUseIndex,
-    effects: SideEffectIndex,
+    facts: SliceFacts,
 }
 
 #[derive(Clone, Copy)]
@@ -186,17 +188,10 @@ enum ProjectionMode {
 }
 
 #[derive(Clone)]
-struct ProjectionSelection {
+pub(super) struct ProjectionPlan {
     blocks: HashSet<BlockId>,
-    effects: HashSet<SideEffectSite>,
-    values: HashSet<ValueId>,
+    slice: LiveSlice,
 }
-
-/// Checked source identities for a pure structured projection. This contains
-/// no graph and allocates no target identities. It is valid for the unchanged
-/// source snapshot from which it was selected.
-#[derive(Clone)]
-pub(super) struct ValueFlowSelection(ProjectionSelection);
 
 struct ProjectionShell<R: GraphResource> {
     graph: EGraph<Semantic<R>>,
@@ -204,19 +199,19 @@ struct ProjectionShell<R: GraphResource> {
     nodes: HashMap<ValueId, ValueId>,
     places: HashMap<PlaceId, PlaceId>,
     calls: HashMap<CallSiteId, CallSiteId>,
+    approved: HashSet<ValueId>,
 }
 
 impl<'a, R: GraphResource> GraphProjector<'a, R> {
     pub fn new(source: &'a EGraph<Semantic<R>>) -> Self {
         Self {
             source,
-            uses: ValueUseIndex::build(source),
-            effects: SideEffectIndex::build(source),
+            facts: SliceFacts::build(source),
         }
     }
 
-    pub(crate) fn use_index(&self) -> &ValueUseIndex {
-        &self.uses
+    pub(crate) fn facts(&self) -> &SliceFacts {
+        &self.facts
     }
 
     pub fn all(&self) -> Result<GraphProjection<R>, String> {
@@ -237,7 +232,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
     }
 
     /// Check selected pure values and their structured control dependencies.
-    pub(super) fn select_value_flow(&self, values: Vec<ValueId>) -> Result<ValueFlowSelection, String> {
+    pub(super) fn select_value_flow(&self, values: Vec<ValueId>) -> Result<ProjectionPlan, String> {
         if values.is_empty() {
             return Err("value-flow projection requires at least one result".into());
         }
@@ -245,33 +240,14 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             return Err("value-flow projection requires an effect-free graph".into());
         }
         self.source.skeleton.verify_branch_arities()?;
-        let selection = self.select_projection(HashSet::new(), values, ProjectionMode::ValueFlow)?;
-        for value in &selection.values {
-            let definition = self
-                .source
-                .nodes
-                .get(*value)
-                .ok_or_else(|| format!("projection references missing value {value:?}"))?;
-            if let ValueKind::BlockParam { block, .. } = definition.kind() {
-                if !self.source.skeleton.blocks[*block]
-                    .params
-                    .iter()
-                    .any(|parameter| parameter.value() == *value)
-                {
-                    return Err("projection references an absent block parameter".into());
-                }
-            }
-        }
-        Ok(ValueFlowSelection(selection))
+        let selection =
+            self.select_projection_inputs(HashSet::new(), values, ProjectionMode::ValueFlow, [], &[])?;
+        Ok(selection)
     }
 
     /// Factor pure parameter projections out of an already checked selection.
     /// This preserves exact tuple-field dependencies at a callable boundary.
-    pub(super) fn value_flow_inputs(
-        &self,
-        selection: &ValueFlowSelection,
-        roots: &[ValueId],
-    ) -> Vec<ValueId> {
+    pub(super) fn value_flow_inputs(&self, selection: &ProjectionPlan, roots: &[ValueId]) -> Vec<ValueId> {
         fn path<R: GraphResource>(graph: &EGraph<Semantic<R>>, value: ValueId) -> bool {
             let node = &graph.nodes[value];
             if let Some(alias) = node.alias {
@@ -287,77 +263,53 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             }
         }
         let paths = selection
-            .0
-            .values
+            .slice
+            .values()
             .iter()
             .copied()
             .filter(|value| path(self.source, *value))
             .collect::<HashSet<_>>();
         let mut inputs =
             roots.iter().copied().filter(|value| paths.contains(value)).collect::<HashSet<_>>();
-        for value in &selection.0.values {
+        for value in selection.slice.values() {
             if !paths.contains(value) {
                 inputs.extend(
-                    self.source
-                        .value_dependencies(*value)
-                        .into_iter()
-                        .filter(|value| paths.contains(value)),
+                    self.facts.graph.inputs(Node::Value(*value)).filter(|value| paths.contains(value)),
                 );
             }
         }
-        for block in &selection.0.blocks {
+        for block in &selection.blocks {
             if let SkeletonTerminator::CondBranch { cond, .. } = &self.source.skeleton.blocks[*block].term {
                 if paths.contains(cond) {
                     inputs.insert(*cond);
                 }
             }
         }
-        // A whole parameter demand subsumes projections of that parameter.
+        for &site in selection.slice.operations() {
+            inputs.extend(
+                self.facts.graph.inputs(Node::Operation(site)).filter(|value| paths.contains(value)),
+            );
+        }
         let selected = inputs.clone();
         inputs.retain(|value| {
-            let mut current = *value;
-            while let Some(next) =
-                self.source.nodes[current].alias.or_else(|| match self.source.nodes[current].kind() {
-                    ValueKind::Pure {
-                        op: super::types::PureOp::Project { .. },
-                        operands,
-                    } => operands.first().copied(),
-                    _ => None,
-                })
-            {
-                if selected.contains(&next) {
-                    return false;
-                }
-                current = next;
-            }
-            true
+            !selected.iter().any(|ancestor| ancestor != value && self.facts.pure_reaches(*ancestor, *value))
         });
         self.source.nodes.keys().filter(|value| inputs.contains(value)).collect()
     }
 
     pub(super) fn emit_value_flow(
         &self,
-        selection: &ValueFlowSelection,
+        selection: &ProjectionPlan,
         inputs: &[(ValueId, super::types::ParameterId)],
     ) -> Result<GraphProjection<R>, String> {
-        let mut selection = selection.0.clone();
-        // Ancestors of the factored inputs are supplied by the caller. The
-        // checked CFG/value selection is otherwise unchanged.
-        for (input, _) in inputs {
-            let mut current = *input;
-            while let Some(next) =
-                self.source.nodes[current].alias.or_else(|| match self.source.nodes[current].kind() {
-                    ValueKind::Pure {
-                        op: super::types::PureOp::Project { .. },
-                        operands,
-                    } => operands.first().copied(),
-                    _ => None,
-                })
-            {
-                selection.values.remove(&next);
-                current = next;
-            }
-        }
+        let checked = &selection.slice;
+        let selection = self.select_projection_inputs(
+            HashSet::new(),
+            checked.requested().iter().copied().collect(),
+            ProjectionMode::ValueFlow,
+            inputs.iter().map(|(value, _)| *value),
+            &[],
+        )?;
         self.emit_selection_inputs(selection, ProjectionMode::ValueFlow, inputs)
     }
 
@@ -437,20 +389,25 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 },
             )
         };
-        let projection = self.project(HashSet::new(), vec![value], mode)?;
+        let selection = self.select_projection_inputs(
+            HashSet::new(),
+            vec![value],
+            mode,
+            [],
+            &retained_values.into_iter().collect::<Vec<_>>(),
+        )?;
+        let projection = self.emit_selection_inputs(selection, mode, &[])?;
         let projected = projection
             .node(value)
             .ok_or_else(|| "captured value projection omitted its root".to_string())?;
         let result_block = projection
             .block(consumer.block)
             .ok_or_else(|| "captured value projection omitted its result block".to_string())?;
-        let live_outs = self.recipe_live_outs(&[value], &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
             values: vec![projected],
             result_block,
             source,
-            live_outs,
         })
     }
 
@@ -496,11 +453,15 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         if requested.is_empty() {
             return Err("entry value recipe requires at least one value".into());
         }
-        let projection = self.project(
+        let mode = ProjectionMode::EntryRecipe { effect_limit: None };
+        let selection = self.select_projection_inputs(
             HashSet::new(),
             requested.clone(),
-            ProjectionMode::EntryRecipe { effect_limit: None },
+            mode,
+            [],
+            &retained_values.into_iter().collect::<Vec<_>>(),
         )?;
+        let projection = self.emit_selection_inputs(selection, mode, &[])?;
         let projected = requested
             .iter()
             .map(|value| {
@@ -513,67 +474,12 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             .block(self.source.skeleton.entry)
             .ok_or_else(|| "entry value projection omitted its result block".to_string())?;
         let source = ValueRecipeSource::EntryBlock;
-        let live_outs = self.recipe_live_outs(&requested, &projection, source, retained_values);
         Ok(ProjectedValueRecipe {
             projection,
             values: projected,
             result_block,
             source,
-            live_outs,
         })
-    }
-
-    fn recipe_live_outs(
-        &self,
-        roots: &[ValueId],
-        projection: &GraphProjection<R>,
-        source: ValueRecipeSource,
-        retained_values: impl IntoIterator<Item = ValueId>,
-    ) -> Vec<ValueId> {
-        let retained_values = retained_values.into_iter().collect::<Vec<_>>();
-        let retained_terminators = self.retained_recipe_terminators(source);
-        let producer_effects = projection.source_effects();
-        let mut candidates = producer_effects
-            .iter()
-            .filter_map(|site| self.source.effect_result_binding(self.source.skeleton.effect(*site)))
-            .flat_map(|result| result.values())
-            .collect::<Vec<_>>();
-        candidates.extend(self.source.skeleton.blocks.iter().flat_map(|(_, block)| {
-            block
-                .params
-                .iter()
-                .map(|value| value.value())
-                .filter(|value| !roots.contains(value) && projection.node(*value).is_some())
-        }));
-        candidates.sort_unstable();
-        candidates.dedup();
-        candidates.retain(|candidate| {
-            if roots.contains(candidate) || projection.node(*candidate).is_none() {
-                return false;
-            }
-            let observers = self.uses.pure_observers(*candidate);
-            observers.effect_sites().any(|site| !producer_effects.contains(&site))
-                || observers.terminator_blocks().any(|block| retained_terminators.contains(&block))
-                || retained_values.iter().any(|value| self.uses.pure_reaches(*candidate, *value))
-        });
-        candidates
-    }
-
-    fn retained_recipe_terminators(&self, source: ValueRecipeSource) -> HashSet<BlockId> {
-        match source {
-            ValueRecipeSource::EntryBlock => self.source.skeleton.blocks.keys().collect(),
-            ValueRecipeSource::StructuredPrefix { continuation } => {
-                let mut retained = HashSet::new();
-                let mut pending = vec![continuation];
-                while let Some(block) = pending.pop() {
-                    if !retained.insert(block) {
-                        continue;
-                    }
-                    pending.extend(self.source.skeleton.blocks[block].term.successors());
-                }
-                retained
-            }
-        }
     }
 
     pub fn selected_with_values(
@@ -605,19 +511,19 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         roots: &HashSet<SideEffectSite>,
         extra_values: &[ValueId],
     ) -> Result<Option<BlockId>, String> {
-        let mut selected = roots.clone();
-        let mut values = extra_values.to_vec();
-        for site in roots {
-            values.extend(super::graph_ops::effect_value_inputs(
-                self.source,
-                self.effect_at(*site)?,
-            ));
-        }
-        let values = self.close_producers(&mut selected, &mut values, &self.effects)?;
-        let mut blocks = selected.iter().map(|site| site.block);
+        let slice = self.facts.select(
+            extra_values.iter().copied(),
+            roots.iter().copied(),
+            [],
+            |_| true,
+            |_| false,
+            &[],
+        )?;
+        let mut blocks = slice.operations().iter().map(|site| site.block);
         let block = blocks.next().unwrap_or(self.source.skeleton.entry);
         Ok((blocks.all(|other| other == block)
-            && values
+            && slice
+                .values()
                 .iter()
                 .all(|node| !matches!(&self.source.nodes[*node].kind, ValueKind::BlockParam { .. })))
         .then_some(block))
@@ -629,31 +535,17 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         extra_values: Vec<ValueId>,
         mode: ProjectionMode,
     ) -> Result<GraphProjection<R>, String> {
-        let selection = self.select_projection(selected, extra_values, mode)?;
-        self.emit_selection(selection, mode)
-    }
-
-    fn emit_selection(
-        &self,
-        selection: ProjectionSelection,
-        mode: ProjectionMode,
-    ) -> Result<GraphProjection<R>, String> {
+        let selection = self.select_projection_inputs(selected, extra_values, mode, [], &[])?;
         self.emit_selection_inputs(selection, mode, &[])
     }
 
     fn emit_selection_inputs(
         &self,
-        selection: ProjectionSelection,
+        selection: ProjectionPlan,
         mode: ProjectionMode,
         inputs: &[(ValueId, super::types::ParameterId)],
     ) -> Result<GraphProjection<R>, String> {
-        let mut shell_selection = selection.clone();
-        if !inputs.is_empty() {
-            shell_selection
-                .values
-                .retain(|value| !matches!(self.source.nodes[*value].kind(), ValueKind::FuncParam { .. }));
-        }
-        let mut shell = self.projection_shell(mode, &shell_selection)?;
+        let mut shell = self.projection_shell(mode, &selection, inputs)?;
         for (source, parameter) in inputs {
             let abi = super::ir::callable_parameter::<R, super::types::WynLanguage>(
                 String::new(),
@@ -666,7 +558,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 .ok_or("projection input is not a value")?;
             shell.nodes.insert(*source, target);
         }
-        for value in &selection.values {
+        for value in selection.slice.values() {
             self.prepare_value(*value, &mut shell)?;
         }
         let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
@@ -692,8 +584,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             places: shell.places,
             blocks: shell.blocks,
             effects,
-            source_effects: selection.effects,
-            source_values: selection.values,
+            slice: selection.slice,
             effect_sites,
             detached_output_block,
         })
@@ -702,6 +593,9 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
     fn prepare_value(&self, source: ValueId, shell: &mut ProjectionShell<R>) -> Result<ValueId, String> {
         if let Some(&target) = shell.nodes.get(&source) {
             return Ok(target);
+        }
+        if !shell.approved.contains(&source) {
+            return Err(format!("projection requested unapproved value {source:?}"));
         }
         let node = self
             .source
@@ -718,16 +612,11 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             shell.nodes.insert(source, target);
             return Ok(target);
         }
+        for input in self.facts.graph.inputs(Node::Value(source)) {
+            self.prepare_value(input, shell)?;
+        }
         match node.kind() {
-            ValueKind::Pure { operands, .. } => {
-                for operand in operands {
-                    self.prepare_value(*operand, shell)?;
-                }
-            }
-            ValueKind::Union { left, right } => {
-                self.prepare_value(*left, shell)?;
-                self.prepare_value(*right, shell)?;
-            }
+            ValueKind::Pure { .. } | ValueKind::Union { .. } => {}
             ValueKind::CallResult { call, .. } => {
                 self.prepare_call(*call, shell)?;
                 return shell
@@ -886,90 +775,72 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         Ok(target)
     }
 
-    fn select_projection(
+    fn select_projection_inputs(
         &self,
         mut selected: HashSet<SideEffectSite>,
-        extra_values: Vec<ValueId>,
+        values: Vec<ValueId>,
         mode: ProjectionMode,
-    ) -> Result<ProjectionSelection, String> {
+        supplied: impl IntoIterator<Item = ValueId>,
+        external: &[ValueId],
+    ) -> Result<ProjectionPlan, String> {
         let blocks = self.projected_blocks(mode)?;
+        let allowed = self.allowed_effects(mode, &blocks);
+        if let ProjectionMode::StructuredPrefix { continuation, .. } = mode {
+            selected.extend(allowed.iter().filter(|site| site.block != continuation).copied());
+        }
+        let mut demands = self.projected_terminator_values(mode, &blocks);
         if matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component) {
-            let control_values =
-                blocks.iter().filter_map(|block| match &self.source.skeleton.blocks[*block].term {
+            demands.extend(blocks.iter().filter_map(
+                |block| match &self.source.skeleton.blocks[*block].term {
                     SkeletonTerminator::CondBranch { cond, .. } => Some(*cond),
                     _ => None,
-                });
-            let effect_inputs = selected.iter().flat_map(|site| {
-                super::graph_ops::effect_value_inputs(self.source, self.source.skeleton.effect(*site))
-            });
-            let closure = super::graph_ops::value_producer_closure(
-                self.source,
-                extra_values.into_iter().chain(control_values).chain(effect_inputs),
-            );
-            if matches!(mode, ProjectionMode::ValueFlow) && !closure.effects.is_empty() {
-                return Err("value-flow projection depends on an effect".into());
-            }
-            let call_effects = closure
-                .nodes
-                .iter()
-                .filter_map(|value| match self.source.nodes[*value].kind() {
-                    ValueKind::CallResult { call, .. } => Some(
-                        self.effects
-                            .call_site(*call)
-                            .ok_or_else(|| format!("call {call:?} has no explicit skeleton site")),
-                    ),
-                    _ => None,
-                })
-                .collect::<Result<HashSet<_>, _>>()?;
-            if matches!(mode, ProjectionMode::ValueFlow)
-                && call_effects.iter().any(|site| !self.is_pure_call_site(*site))
-            {
-                return Err("value-flow projection depends on an effectful call".into());
-            }
-            let mut effects = closure.effects;
-            effects.extend(selected);
-            effects.extend(call_effects);
-            return Ok(ProjectionSelection {
-                blocks,
-                effects,
-                values: closure.nodes,
-            });
-        }
-        let allowed_effects = self.allowed_effects(mode, &blocks);
-        if let ProjectionMode::StructuredPrefix { continuation, .. } = mode {
-            selected.extend(allowed_effects.iter().filter(|site| site.block != continuation).copied());
-        }
-        let mut roots = self.projected_terminator_values(mode, &blocks);
-        roots.extend(extra_values);
-        for site in selected.clone() {
-            roots.extend(super::graph_ops::effect_value_inputs(
-                self.source,
-                self.effect_at(site)?,
+                },
             ));
         }
-        let values = self.close_producers(&mut selected, &mut roots, &self.effects)?;
-        if selected.iter().any(|site| !allowed_effects.contains(site)) {
-            return Err("value recipe depends on an effect outside its prefix boundary".into());
-        }
-        if values.iter().any(|node| match &self.source.nodes[*node].kind {
-            ValueKind::BlockParam { block, .. } => {
-                !blocks.contains(block) || matches!(mode, ProjectionMode::DetachedRecipe { .. })
+        let retained = match mode {
+            ProjectionMode::StructuredPrefix { continuation, .. } => {
+                wyn_graph::reachable_set([continuation], wyn_graph::WalkOrder::DepthFirst, |block, out| {
+                    out.extend(self.source.skeleton.blocks[block].term.successors())
+                })
             }
-            _ => false,
-        }) {
-            return Err("value recipe depends on a block parameter outside its prefix boundary".into());
-        }
-        Ok(ProjectionSelection {
-            blocks,
-            effects: selected,
+            ProjectionMode::EntryRecipe { .. } | ProjectionMode::DetachedRecipe { .. } => {
+                self.source.skeleton.blocks.keys().collect()
+            }
+            _ => HashSet::new(),
+        };
+        let slice = self.facts.select_with_demands(
             values,
-        })
+            selected,
+            demands,
+            supplied,
+            |node| match node {
+                Node::Operation(site) => allowed.contains(&site),
+                Node::Value(value) => match self.source.nodes[value].kind() {
+                    ValueKind::BlockParam { block, .. } => {
+                        blocks.contains(block) && !matches!(mode, ProjectionMode::DetachedRecipe { .. })
+                    }
+                    _ => true,
+                },
+            },
+            |observer| match observer {
+                Observer::Operation(_) => true,
+                Observer::Terminator(block) => retained.contains(&block),
+            },
+            external,
+        )?;
+        if matches!(mode, ProjectionMode::ValueFlow)
+            && slice.operations().iter().any(|site| !self.is_pure_call_site(*site))
+        {
+            return Err("value-flow projection depends on an effect".into());
+        }
+        Ok(ProjectionPlan { blocks, slice })
     }
 
     fn projection_shell(
         &self,
         mode: ProjectionMode,
-        selection: &ProjectionSelection,
+        selection: &ProjectionPlan,
+        inputs: &[(ValueId, super::types::ParameterId)],
     ) -> Result<ProjectionShell<R>, String> {
         let mut graph = EGraph::new();
         let source_entry = match mode {
@@ -986,8 +857,9 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         let mut nodes = HashMap::new();
         for (source_id, node) in &self.source.nodes {
             if let ValueKind::FuncParam { parameter } = &node.kind {
-                if matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
-                    && !selection.values.contains(&source_id)
+                if inputs.iter().any(|(input, _)| *input == source_id)
+                    || (matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
+                        && !selection.slice.values().contains(&source_id))
                 {
                     continue;
                 }
@@ -1013,7 +885,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             self.clone_live_block_params(
                 &selection.blocks,
                 matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
-                    .then_some(&selection.values),
+                    .then_some(selection.slice.values()),
                 &mut graph,
                 &blocks,
                 &mut nodes,
@@ -1025,8 +897,24 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             nodes,
             places,
             calls: HashMap::new(),
+            approved: selection
+                .slice
+                .values()
+                .iter()
+                .copied()
+                .chain(
+                    selection
+                        .slice
+                        .operations()
+                        .iter()
+                        .filter_map(|site| {
+                            self.source.effect_result_binding(self.source.skeleton.effect(*site))
+                        })
+                        .flat_map(|result| result.values()),
+                )
+                .collect(),
         };
-        for site in &selection.effects {
+        for site in selection.slice.operations() {
             if let Some(result) = self.effect_at(*site)?.result.as_ref() {
                 for source in result.values() {
                     if shell.nodes.contains_key(&source) {
@@ -1077,7 +965,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
 
     fn clone_effects(
         &self,
-        selection: &ProjectionSelection,
+        selection: &ProjectionPlan,
         shell: &mut ProjectionShell<R>,
     ) -> Result<(HashSet<EffectToken>, HashMap<SideEffectSite, SideEffectSite>), String> {
         let mut effects = HashSet::new();
@@ -1087,7 +975,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 continue;
             };
             for (index, effect) in body.side_effects.iter().enumerate() {
-                if !selection.effects.contains(&SideEffectSite {
+                if !selection.slice.operations().contains(&SideEffectSite {
                     block: source_block,
                     index,
                 }) {
@@ -1102,9 +990,6 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                     index: shell.graph.skeleton.blocks[target_block].side_effects.len(),
                 };
                 effect_sites.insert(source_site, target_site);
-                for value in super::graph_ops::effect_value_inputs(self.source, effect) {
-                    self.prepare_value(value, shell)?;
-                }
                 for operand in effect.operands() {
                     if let OperandRef::Place(place) = *operand {
                         self.prepare_place(place, shell)?;
@@ -1285,7 +1170,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             if !blocks.insert(block) || block == continuation {
                 continue;
             }
-            pending.extend(terminator_targets(&self.source.skeleton.blocks[block].term));
+            pending.extend(self.source.skeleton.blocks[block].term.successors());
         }
         if !blocks.contains(&continuation) {
             return Err("structured prefix continuation is unreachable".into());
@@ -1298,7 +1183,9 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 if reaches_continuation.contains(&block) {
                     continue;
                 }
-                if terminator_targets(&self.source.skeleton.blocks[block].term)
+                if self.source.skeleton.blocks[block]
+                    .term
+                    .successors()
                     .iter()
                     .any(|target| reaches_continuation.contains(target))
                 {
@@ -1410,77 +1297,6 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             .skeleton
             .get_effect(site)
             .is_some_and(|effect| !self.source.effect_requires_ordering(effect))
-    }
-
-    fn close_producers(
-        &self,
-        selected: &mut HashSet<SideEffectSite>,
-        values: &mut Vec<ValueId>,
-        producers: &SideEffectIndex,
-    ) -> Result<HashSet<ValueId>, String> {
-        let mut seen = HashSet::new();
-        while let Some(value) = values.pop() {
-            if !seen.insert(value) {
-                continue;
-            }
-            let node = self
-                .source
-                .nodes
-                .get(value)
-                .ok_or_else(|| format!("graph projection references missing node {value:?}"))?;
-            if let Some(alias) = node.alias() {
-                values.push(alias);
-                continue;
-            }
-            if let Some(field) = super::graph_ops::projected_tuple_field(self.source, value) {
-                values.push(field);
-                continue;
-            }
-            match &node.kind {
-                ValueKind::Pure { operands, .. } => values.extend(operands.iter().copied()),
-                ValueKind::Union { left, right } => values.extend([*left, *right]),
-                ValueKind::SideEffectResult => {
-                    let site = producers
-                        .site(value)
-                        .ok_or_else(|| format!("side-effect result {value:?} has no producer"))?;
-                    if selected.insert(site) {
-                        values.extend(super::graph_ops::effect_value_inputs(
-                            self.source,
-                            self.effect_at(site)?,
-                        ));
-                    }
-                }
-                ValueKind::CallResult { call, .. } => {
-                    values.extend(self.source.call_value_dependencies(*call));
-                    let site = producers
-                        .call_site(*call)
-                        .ok_or_else(|| format!("call {call:?} has no explicit skeleton site"))?;
-                    if selected.insert(site) {
-                        values.extend(super::graph_ops::effect_value_inputs(
-                            self.source,
-                            self.effect_at(site)?,
-                        ));
-                    }
-                }
-                ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
-                    values.extend(self.source.place_value_dependencies(*place));
-                }
-                ValueKind::FuncParam { .. } | ValueKind::BlockParam { .. } | ValueKind::Constant(_) => {}
-            }
-        }
-        Ok(seen)
-    }
-}
-
-fn terminator_targets(term: &SkeletonTerminator) -> Vec<BlockId> {
-    match term {
-        SkeletonTerminator::Branch { target, .. } => vec![*target],
-        SkeletonTerminator::CondBranch {
-            then_target,
-            else_target,
-            ..
-        } => vec![*then_target, *else_target],
-        SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => Vec::new(),
     }
 }
 

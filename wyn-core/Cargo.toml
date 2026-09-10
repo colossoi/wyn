@@ -21,6 +21,7 @@ serde_json = "1.0"
 wyn-base = { path = "../wyn-base" }
 wyn-pipeline-descriptor = { path = "../wyn-pipeline-descriptor" }
 wyn-graph = { path = "../wyn-graph" }
+wyn-slice = { path = "../wyn-slice" }
 wyn-fusion = { path = "../wyn-fusion" }
 wyn-kernel-graph = { path = "../wyn-kernel-graph" }
 wyn-module-graph = { path = "../wyn-module-graph" }

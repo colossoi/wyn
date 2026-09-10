@@ -1982,6 +1982,7 @@ dependencies = [
  "wyn-kernel-graph",
  "wyn-module-graph",
  "wyn-pipeline-descriptor",
+ "wyn-slice",
  "wyn-spirv",
  "wyn-staged-ir",
 ]
@@ -2046,6 +2047,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "wyn-slice"
+version = "0.1.0"
+dependencies = [
+ "wyn-graph",
 ]
 
 [[package]]

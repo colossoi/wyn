@@ -3030,7 +3030,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
                 block.side_effects.iter().any(|effect| {
                     effect.result.as_ref().is_some_and(|result| {
-                        result.values().iter().any(|value| producers.nodes.contains(value))
+                        result.values().iter().any(|value| producers.values().contains(value))
                     }) && matches!(effect.kind, SideEffectKind::Soac(_))
                 })
             });
@@ -3052,7 +3052,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             .zip(input_dimensions)
             .map(|((node, array), dimensions)| {
                 let producers = super::graph_ops::value_producer_closure(&self.graph, [*node]);
-                let storage_type = producers.nodes.iter().find_map(|producer| {
+                let storage_type = producers.values().iter().find_map(|producer| {
                     matches!(
                         self.graph.nodes[*producer].kind,
                         ValueKind::Pure {

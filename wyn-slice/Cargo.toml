@@ -1,0 +1,9 @@
+[package]
+name = "wyn-slice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wyn-graph = { path = "../wyn-graph" }

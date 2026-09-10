@@ -435,6 +435,7 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     let recipe = GraphProjector::new(&graph)
         .entry_values_recipe([first, second, first])
         .expect("multi-value entry recipe");
+    assert_eq!(recipe.projection.slice.inputs(), &HashSet::from([parameter]));
 
     assert_eq!(
         recipe.values,
@@ -567,7 +568,7 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
         }]));
     assert!(matches!(
         projection,
-        Err(error) if error.contains("block parameter")
+        Err(error) if error.contains("OutsideRegion")
     ));
 }
 
@@ -728,4 +729,93 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
         .skeleton
         .verify_branch_arities()
         .expect("value-flow projection keeps branch lanes aligned");
+}
+
+#[test]
+fn sibling_bindings_are_allocated_without_demanding_unused_outputs() {
+    let mut graph = EGraph::<Semantic>::new();
+    let block = graph.skeleton.entry;
+    let first = graph.alloc_side_effect_result(u32_ty());
+    let sibling = graph.alloc_side_effect_result(u32_ty());
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![u32_ty(), u32_ty()]);
+    let result = ResultBinding::product(
+        tuple_ty,
+        vec![graph.value_result(first), graph.value_result(sibling)],
+    );
+    graph.skeleton.blocks[block].side_effects.push(SideEffect::new(
+        SideEffectKind::Effect(EffectOp::Op {
+            tag: PureOp::Materialize,
+        }),
+        smallvec![],
+        Some(result),
+        None,
+        None,
+    ));
+    let unused = graph.intern_pure(
+        PureOp::BinOp(op::BinaryOperator::Add),
+        smallvec![sibling, sibling],
+        u32_ty(),
+        None,
+    );
+    let recipe = GraphProjector::new(&graph).entry_value_recipe(first).unwrap();
+    assert!(recipe.projection.node(sibling).is_some());
+    assert!(recipe.live_outs().next().is_none());
+    assert!(!recipe.projection.source_nodes().any(|value| value == sibling));
+    assert!(recipe.projection.node(unused).is_none());
+    graph.skeleton.blocks[block].term = SkeletonTerminator::Return(Some(graph.value_result(sibling)));
+    let recipe = GraphProjector::new(&graph).entry_value_recipe(first).unwrap();
+    assert_eq!(recipe.live_outs().collect::<Vec<_>>(), vec![sibling]);
+    assert_eq!(
+        recipe.projection.output_sources().collect::<Vec<_>>(),
+        vec![first, sibling]
+    );
+}
+
+#[test]
+fn factored_tuple_inputs_recompute_precise_closure() {
+    let mut graph = EGraph::<Semantic>::new();
+    let tuple_ty = Type::Constructed(TypeName::Tuple(2), vec![u32_ty(), u32_ty()]);
+    let abi = super::super::ir::callable_parameter::<BindingRef, super::super::types::WynLanguage>(
+        String::new(),
+        tuple_ty,
+    );
+    let mut parameters = slotmap::SlotMap::<super::super::types::ParameterId, ()>::with_key();
+    let parameter_id = parameters.insert(());
+    let input_id = parameters.insert(());
+    let parameter = graph.add_parameter(parameter_id, abi.representation()).value().unwrap();
+    let first = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![parameter], u32_ty(), None);
+    let second = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![parameter], u32_ty(), None);
+    let root = graph.intern_pure(
+        PureOp::BinOp(op::BinaryOperator::Add),
+        smallvec![first, first],
+        u32_ty(),
+        None,
+    );
+    let projector = GraphProjector::new(&graph);
+    let selected = projector.select_value_flow(vec![root]).unwrap();
+    assert_eq!(projector.value_flow_inputs(&selected, &[root]), vec![first]);
+    let projection = projector.emit_value_flow(&selected, &[(first, input_id)]).unwrap();
+    assert!(projection.node(root).is_some());
+    assert!(projection.node(first).is_some());
+    assert!(projection.node(parameter).is_none());
+    assert!(projection.node(second).is_none());
+}
+
+#[test]
+fn unused_projection_with_a_removed_base_does_not_poison_selection() {
+    let mut graph = EGraph::<Semantic>::new();
+    let live = graph.intern_constant(ConstantValue::U32(1), u32_ty());
+    let tuple = graph.intern_pure(
+        PureOp::Tuple(1),
+        smallvec![live],
+        Type::Constructed(TypeName::Tuple(1), vec![u32_ty()]),
+        None,
+    );
+    let unused = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![tuple], u32_ty(), None);
+    graph.nodes.remove(tuple);
+    let facts = SliceFacts::build(&graph);
+    let slice = facts.select([live], [], [], |_| true, |_| true, &[]).unwrap();
+    assert_eq!(slice.values(), &HashSet::from([live]));
+    assert!(slice.live_outs().is_empty());
+    assert!(facts.select([unused], [], [], |_| true, |_| true, &[]).is_err());
 }

@@ -1005,7 +1005,8 @@ impl AllocatedEntry {
                 OutputWriter::Effect(_) => None,
             }));
         }
-        let reachable = super::graph_ops::execution_value_producer_closure(&self.graph, roots).nodes;
+        let reachable = super::graph_ops::execution_value_producer_closure(&self.graph, roots);
+        let reachable = reachable.values();
         let mut reachable_resources =
             self.resources_referenced_by_nodes(&self.graph, reachable.iter().copied());
         for (_, block) in &self.graph.skeleton.blocks {

@@ -185,7 +185,7 @@ pub(super) fn analyze_reduction_routing(
         let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
         let mut accumulator_dependencies = Vec::new();
         for (field, result) in results.iter().enumerate() {
-            if result.values().iter().any(|result| producers.nodes.contains(result)) {
+            if result.values().iter().any(|result| producers.values().contains(result)) {
                 let accumulator = *field_accumulators.get(field)?;
                 accumulator_dependencies.push(accumulator);
             }

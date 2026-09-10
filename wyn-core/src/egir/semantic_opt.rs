@@ -243,62 +243,47 @@ fn dead_seg_ops_in_graph<R: GraphResource>(
     graph: &EGraph<Semantic<R>>,
     external_roots: impl IntoIterator<Item = ValueId>,
 ) -> DeadGraphPatch {
-    // Live values are those reachable from an observable root.  Looking at
-    // children of every interned node is too conservative: dead Project nodes
-    // remain in an e-graph and would otherwise keep their producer alive.
-    let mut roots = external_roots.into_iter().collect::<Vec<_>>();
-    for (_, block) in &graph.skeleton.blocks {
-        for effect in &block.side_effects {
-            roots.extend(super::graph_ops::effect_value_inputs(graph, effect));
-        }
-        roots.extend(block.term.referenced_nodes());
-    }
-
-    let used = wyn_graph::reachable_set(roots, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-        if let Some(definition) = graph.nodes.get(node) {
-            out.extend(definition.kind.children());
-        }
+    let observable = |effect: &super::types::SideEffect<Semantic<R>>| match &effect.kind {
+        SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
+            screma::SemanticState::Segmented {
+                resources,
+                output_slots,
+                ..
+            } => !output_slots.is_empty() || resources.iter().any(|r| r.access != ResourceAccess::Read),
+            screma::SemanticState::Serial => true,
+        },
+        _ => true,
+    };
+    let demands = graph.skeleton.blocks.iter().flat_map(|(block, body)| {
+        body.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
+            observable(effect).then_some(super::types::SideEffectSite { block, index })
+        })
     });
-    let mut patch = LookupMap::new();
-    for (block_id, block) in &graph.skeleton.blocks {
-        let dead = block
-            .side_effects
-            .iter()
-            .enumerate()
-            .filter_map(|(index, effect)| {
-                let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-                    return None;
-                };
-                // A Seg with no resource write and no output routing is observable
-                // only through its result. Filter/Hist/Screma may write in ways not
-                // summarized here, so keep them conservatively.
-                let observable = match soac {
-                    Soac::Screma(op) => match op.semantic_state() {
-                        screma::SemanticState::Segmented {
-                            resources,
-                            output_slots,
-                            ..
-                        } => {
-                            !output_slots.is_empty()
-                                || resources.iter().any(|r| r.access != ResourceAccess::Read)
-                        }
-                        screma::SemanticState::Serial => true,
-                    },
-                    _ => true,
-                };
-                (!observable
-                    && effect
-                        .result
-                        .as_ref()
-                        .is_none_or(|result| result.values().iter().all(|value| !used.contains(value))))
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        if !dead.is_empty() {
-            patch.insert(block_id, dead);
-        }
-    }
-    patch
+    let facts = super::slice::SliceFacts::build(graph);
+    let slice = facts
+        .select_with_demands(
+            external_roots,
+            demands,
+            graph.skeleton.blocks.values().flat_map(|block| block.term.referenced_nodes()),
+            [],
+            |_| true,
+            |_| false,
+            &[],
+        )
+        .expect("DCE requires valid EGIR");
+    graph
+        .skeleton
+        .blocks
+        .iter()
+        .filter_map(|(block, body)| {
+            let dead: Vec<_> = (0..body.side_effects.len())
+                .filter(|index| {
+                    !slice.operations().contains(&super::types::SideEffectSite { block, index: *index })
+                })
+                .collect();
+            (!dead.is_empty()).then_some((block, dead))
+        })
+        .collect()
 }
 
 pub(super) fn eliminate_dead_seg_ops_in_graph<R: GraphResource>(

@@ -69,8 +69,9 @@ pub(crate) fn analyze_prelude(
     let graph = &recipe.projection.graph;
     let dependence =
         super::super::stage_variance::StageDependenceAnalysis::for_entry_graph(entry, graph).ok()?;
-    let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied()).nodes;
-    for node in reachable {
+    let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied());
+    let reachable = reachable.values();
+    for &node in reachable {
         if let ValueKind::FuncParam { parameter } = &graph.nodes[node].kind {
             if !dependence.dependence(node).is_stage_invariant()
                 || entry

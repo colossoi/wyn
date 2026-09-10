@@ -4,8 +4,8 @@ use super::{
     SemanticOpId, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId,
 };
 use crate::egir::ir::{BodySite, ResultDestination};
+use crate::egir::types::PureOp;
 use crate::egir::types::{CallEffects, EffectOp, ResultBinding, ValueKind};
-use crate::egir::types::{FlowValueId, PureOp, SkeletonTerminator};
 use crate::types::TypeExt;
 use crate::{LookupMap, SortedSet, StableMap};
 use wyn_fusion::{Builder, Error, GroupId, OrderingReason, PortId};
@@ -196,33 +196,11 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
             let port = self.port((body, block), graph, value, &producers, &results)?;
             self.builder.observe(port)?;
         }
-        let mut incoming = LookupMap::<ValueId, Vec<PortId>>::new();
-        for (block, contents) in &graph.skeleton.blocks {
-            let mut record = |target, args: &[FlowValueId], condition: Option<ValueId>| {
-                for (param, arg) in graph.skeleton.blocks[target].params.iter().zip(args) {
-                    let inputs = incoming.entry(param.value()).or_default();
-                    inputs.push(self.ports[&((body, block), arg.value())]);
-                    inputs.extend(condition.map(|value| self.ports[&((body, block), value)]));
-                }
-            };
-            match &contents.term {
-                SkeletonTerminator::Branch { target, args } => record(*target, args, None),
-                SkeletonTerminator::CondBranch {
-                    cond,
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                } => {
-                    record(*then_target, then_args, Some(*cond));
-                    record(*else_target, else_args, Some(*cond));
-                }
-                _ => {}
-            }
-        }
+        let incoming = crate::egir::slice::incoming_arguments(graph);
         for (&(scope, value), &port) in &self.ports {
             if scope.0 == body {
                 if let Some(inputs) = incoming.get(&value) {
+                    let inputs = inputs.iter().map(|(block, value)| self.ports[&((body, *block), *value)]);
                     self.external.entry(port).or_default().extend(inputs);
                 }
             }
@@ -271,7 +249,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
                 ValueKind::BlockParam { .. } | ValueKind::FuncParam { .. } | ValueKind::Constant(_) => {
                     vec![]
                 }
-                _ => graph.value_dependencies(value),
+                _ => crate::egir::slice::value_inputs(graph, value),
             }
             .into_iter()
             .map(|value| self.port(scope, graph, value, producers, results))

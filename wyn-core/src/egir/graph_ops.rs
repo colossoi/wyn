@@ -36,11 +36,10 @@ use crate::BindingRef;
 
 use super::ir::{CallArgument, Family, Language, PlaceOp, ResultTree, Value};
 use super::types::{
-    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, GraphResource, OperandRef, OperandType, Physical,
-    PlaceAccess, PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, Raw,
-    ResourceAccess, ResultBinding, ResultDestination, SegBody, SegResourceAccess, Semantic, SideEffect,
-    SideEffectKind, SideEffectSite, Skeleton, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
-    ViewId, WynLanguage, WynSoacPhase,
+    CallSiteId, EGraph, EffectOp, EffectToken, FuncParam, OperandRef, OperandType, Physical, PlaceAccess,
+    PlaceDestination, PlaceId, PlaceRegion, PlaceType, PureOp, PureViewSource, ResourceAccess,
+    ResultBinding, ResultDestination, SegResourceAccess, SideEffect, SideEffectKind, SideEffectSite,
+    Skeleton, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind, ViewId, WynLanguage, WynSoacPhase,
 };
 
 #[cfg(test)]
@@ -917,305 +916,16 @@ pub fn rebind_result_projection_references<P: Family>(
     Ok(())
 }
 
-/// Phase-specific SOAC metadata that contributes to a produced value.
-///
-/// Raw SOACs have captures and operator seeds but no resolved segmented
-/// iteration space. Semantic SOACs additionally expose their resolved space.
-pub(crate) trait ValueProducerPhase: Family {
-    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId>;
+pub(crate) use super::slice::{effect_value_inputs, projected_tuple_field, SliceFacts, ValueProducerPhase};
 
-    fn effect_value_inputs(graph: &EGraph<Self>, effect: &SideEffect<Self>) -> Vec<ValueId> {
-        let mut values = graph.effect_boundary_value_dependencies(effect);
-        values.extend(Self::effect_metadata_inputs(effect));
-        values
-    }
-}
-
-impl<R: GraphResource> ValueProducerPhase for Raw<R> {
-    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
-        let mut nodes = Vec::new();
-        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-            return nodes;
-        };
-        nodes.extend(soac.seg_bodies().into_iter().flat_map(SegBody::capture_values));
-        if let Soac::Screma(op) = soac {
-            nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
-            nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
-        }
-        nodes
-    }
-}
-
-impl<R: GraphResource> ValueProducerPhase for Semantic<R> {
-    fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
-        effect.semantic_metadata_inputs()
-    }
-}
-
-pub(crate) fn effect_value_inputs<P: ValueProducerPhase>(
-    graph: &EGraph<P>,
-    effect: &SideEffect<P>,
-) -> Vec<ValueId> {
-    P::effect_value_inputs(graph, effect)
-}
-
-/// The complete value-producing closure behind one or more EGIR values.
-///
-/// `ValueKind::children` covers floating pure expressions, but intentionally has
-/// no edges for effect results or block parameters.  Analyses that need the
-/// actual producer must also follow an effect result to its anchored effect and
-/// a block parameter to every incoming CFG argument.  Keeping both visited
-/// sets makes loop-carried values finite even though those additional edges can
-/// form cycles.
-#[derive(Debug, Default)]
-pub(crate) struct ValueProducerClosure {
-    pub(crate) nodes: HashSet<ValueId>,
-    pub(crate) effects: HashSet<SideEffectSite>,
-}
-
-impl ValueProducerClosure {
-    pub(crate) fn contains_node(&self, node: ValueId) -> bool {
-        self.nodes.contains(&node)
-    }
-}
-
-/// Executable graph locations whose values depend on a source value.
-///
-/// Locations are stable only for the graph snapshot used to build the
-/// corresponding [`ValueUseIndex`].
-#[derive(Debug, Default)]
-pub(crate) struct ValueObservers {
-    effects: HashSet<SideEffectSite>,
-    terminators: HashSet<BlockId>,
-}
-
-impl ValueObservers {
-    pub(crate) fn effect_sites(&self) -> impl Iterator<Item = SideEffectSite> + '_ {
-        self.effects.iter().copied()
-    }
-
-    pub(crate) fn terminator_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
-        self.terminators.iter().copied()
-    }
-}
-
-/// Reverse value-flow and executable-use index for one immutable graph
-/// snapshot.
-///
-/// Pure successors follow only floating pure/union operands. Value successors
-/// additionally cross side-effect results and CFG block arguments, mirroring
-/// [`value_producer_closure`] in the opposite direction. This lets passes ask
-/// centralized observer and liveness questions instead of repeatedly scanning
-/// every effect and terminator with a producer-reachability query.
-///
-/// Rebuild the index after inserting, removing, reordering, or rewriting graph
-/// structure. In particular, the [`SideEffectSite`] values it returns must not
-/// survive a skeleton mutation.
-pub(crate) struct ValueUseIndex {
-    pure_successors: LookupMap<ValueId, Vec<ValueId>>,
-    value_successors: LookupMap<ValueId, Vec<ValueId>>,
-    effect_observers: LookupMap<ValueId, Vec<SideEffectSite>>,
-    terminator_observers: LookupMap<ValueId, Vec<BlockId>>,
-}
-
-impl ValueUseIndex {
-    pub(crate) fn build<P: ValueProducerPhase>(graph: &EGraph<P>) -> Self {
-        let mut index = Self {
-            pure_successors: LookupMap::new(),
-            value_successors: LookupMap::new(),
-            effect_observers: LookupMap::new(),
-            terminator_observers: LookupMap::new(),
-        };
-
-        for (user, definition) in &graph.nodes {
-            for source in definition.kind.children() {
-                index.pure_successors.entry(source).or_default().push(user);
-                index.value_successors.entry(source).or_default().push(user);
-            }
-        }
-
-        for (block, body) in &graph.skeleton.blocks {
-            for (effect_index, effect) in body.side_effects.iter().enumerate() {
-                let site = SideEffectSite {
-                    block,
-                    index: effect_index,
-                };
-                for source in P::effect_value_inputs(graph, effect) {
-                    index.effect_observers.entry(source).or_default().push(site);
-                    if let Some(result) = graph.effect_result_binding(effect) {
-                        for result in result.values() {
-                            index.value_successors.entry(source).or_default().push(result);
-                        }
-                    }
-                }
-            }
-            for source in body.term.referenced_nodes() {
-                index.terminator_observers.entry(source).or_default().push(block);
-            }
-            index_block_argument_successors(graph, &mut index.value_successors, &body.term);
-        }
-
-        index
-    }
-
-    /// Effects and terminators reached through floating pure/union users.
-    pub(crate) fn pure_observers(&self, source: ValueId) -> ValueObservers {
-        self.observers(source, &self.pure_successors)
-    }
-
-    /// Effects and terminators reached through complete value flow, including
-    /// effect results and incoming CFG block arguments.
-    pub(crate) fn value_observers(&self, source: ValueId) -> ValueObservers {
-        self.observers(source, &self.value_successors)
-    }
-
-    /// Whether `user` consumes `source` through floating pure/union nodes.
-    pub(crate) fn pure_reaches(&self, source: ValueId, user: ValueId) -> bool {
-        self.reaches(source, user, &self.pure_successors)
-    }
-
-    fn observers(&self, source: ValueId, successors: &LookupMap<ValueId, Vec<ValueId>>) -> ValueObservers {
-        let mut observers = ValueObservers::default();
-        self.walk_users(source, successors, |user| {
-            observers.effects.extend(self.effect_observers.get(&user).into_iter().flatten().copied());
-            observers
-                .terminators
-                .extend(self.terminator_observers.get(&user).into_iter().flatten().copied());
-            false
-        });
-        observers
-    }
-
-    fn reaches(
-        &self,
-        source: ValueId,
-        target: ValueId,
-        successors: &LookupMap<ValueId, Vec<ValueId>>,
-    ) -> bool {
-        self.walk_users(source, successors, |user| user == target)
-    }
-
-    fn walk_users(
-        &self,
-        source: ValueId,
-        successors: &LookupMap<ValueId, Vec<ValueId>>,
-        mut visit: impl FnMut(ValueId) -> bool,
-    ) -> bool {
-        wyn_graph::find_map_reachable(
-            [source],
-            wyn_graph::WalkOrder::DepthFirst,
-            |user, out| out.extend(successors.get(&user).into_iter().flatten().copied()),
-            |user| visit(user).then_some(()),
-        )
-        .is_some()
-    }
-}
-
-fn index_block_argument_successors<P: Family>(
-    graph: &EGraph<P>,
-    successors: &mut LookupMap<ValueId, Vec<ValueId>>,
-    term: &SkeletonTerminator,
-) {
-    let mut add_edge = |target: BlockId, args: &[super::types::FlowValueId], condition: Option<ValueId>| {
-        let Some(target_block) = graph.skeleton.blocks.get(target) else {
-            return;
-        };
-        for (&argument, &parameter) in args.iter().zip(&target_block.params) {
-            successors.entry(argument.value()).or_default().push(parameter.value());
-            if let Some(condition) = condition {
-                successors.entry(condition).or_default().push(parameter.value());
-            }
-        }
-    };
-    match term {
-        SkeletonTerminator::Branch { target, args } => add_edge(*target, args, None),
-        SkeletonTerminator::CondBranch {
-            cond,
-            then_target,
-            then_args,
-            else_target,
-            else_args,
-        } => {
-            add_edge(*then_target, then_args, Some(*cond));
-            add_edge(*else_target, else_args, Some(*cond));
-        }
-        SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-    }
-}
-
-/// Follow pure tails, value-producing effects, and CFG block arguments to the
-/// values that can contribute to `roots`.
 pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
     graph: &EGraph<P>,
     roots: impl IntoIterator<Item = ValueId>,
-) -> ValueProducerClosure {
-    let producer_index = graph.side_effect_index();
-    let mut closure = ValueProducerClosure::default();
-    let mut pending = roots.into_iter().collect::<Vec<_>>();
-
-    while let Some(node) = pending.pop() {
-        if !closure.nodes.insert(node) {
-            continue;
-        }
-        let Some(definition) = graph.nodes.get(node) else {
-            continue;
-        };
-        if let Some(alias) = definition.alias {
-            pending.push(alias);
-            continue;
-        }
-        if let Some(field) = projected_tuple_field(graph, node) {
-            pending.push(field);
-            continue;
-        }
-        match &definition.kind {
-            ValueKind::Pure { operands, .. } => pending.extend(operands.iter().copied()),
-            ValueKind::Union { left, right } => pending.extend([*left, *right]),
-            ValueKind::BlockParam { block, index } => {
-                extend_incoming_block_args(graph, *block, *index, &mut pending);
-            }
-            ValueKind::SideEffectResult => {
-                let Some(site) = producer_index.site(node) else {
-                    continue;
-                };
-                if closure.effects.insert(site) {
-                    pending.extend(P::effect_value_inputs(graph, graph.skeleton.effect(site)));
-                }
-            }
-            ValueKind::CallResult { call, .. } => {
-                pending.extend(graph.call(*call).arguments().filter_map(|argument| argument.value()));
-            }
-            ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => {
-                pending.extend(graph.place_value_dependencies(*place));
-            }
-            ValueKind::FuncParam { .. } | ValueKind::Constant(_) => {}
-        }
-    }
-
-    closure
-}
-
-/// Return the selected field when a projection is applied directly to a
-/// structural tuple. Pure value-flow consumers need only that field.
-pub(crate) fn projected_tuple_field<P: Family>(graph: &EGraph<P>, node: ValueId) -> Option<ValueId> {
-    let ValueKind::Pure {
-        op: PureOp::Project { index },
-        operands,
-    } = graph.nodes.get(node)?.kind()
-    else {
-        return None;
-    };
-    let [tuple] = operands.as_slice() else {
-        return None;
-    };
-    let ValueKind::Pure {
-        op: PureOp::Tuple(arity),
-        operands: fields,
-    } = graph.nodes.get(*tuple)?.kind()
-    else {
-        return None;
-    };
-    (*arity == fields.len()).then(|| fields.get(*index as usize).copied()).flatten()
+) -> super::slice::LiveSlice {
+    let facts = SliceFacts::build(graph);
+    facts
+        .select(roots, [], [], |_| true, |_| false, &[])
+        .expect("value producer closure requires valid EGIR")
 }
 
 /// Follow every value used by executable graph structure, together with
@@ -1225,7 +935,7 @@ pub(crate) fn projected_tuple_field<P: Family>(graph: &EGraph<P>, node: ValueId)
 pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
     graph: &EGraph<P>,
     result_roots: impl IntoIterator<Item = ValueId>,
-) -> ValueProducerClosure {
+) -> super::slice::LiveSlice {
     value_producer_closure(
         graph,
         execution_value_roots(graph).into_iter().chain(result_roots),
@@ -1284,16 +994,6 @@ pub(crate) fn pure_depends_on<P: Family>(graph: &EGraph<P>, root: ValueId, targe
     })
 }
 
-/// Whether the complete value-producing closure behind `root` contains
-/// `target`, crossing effect results and incoming block arguments as needed.
-pub(crate) fn value_depends_on<P: ValueProducerPhase>(
-    graph: &EGraph<P>,
-    root: ValueId,
-    target: ValueId,
-) -> bool {
-    value_producer_closure(graph, [root]).contains_node(target)
-}
-
 /// Maximal movable values at the boundary of executable graph structure.
 ///
 /// A value belongs to the frontier when it is movable and is either used
@@ -1336,8 +1036,9 @@ where
     P::Resource: Copy + Eq + std::hash::Hash + Ord,
 {
     let resources = value_producer_closure(graph, roots)
-        .nodes
-        .into_iter()
+        .values()
+        .iter()
+        .copied()
         .filter_map(|node| extract_storage_view_source(graph, node))
         .collect::<HashSet<_>>();
     let mut resources = resources
@@ -1373,46 +1074,6 @@ where
         }
     }
     writers
-}
-
-fn extend_incoming_block_args<P: Family>(
-    graph: &EGraph<P>,
-    target: BlockId,
-    index: usize,
-    pending: &mut Vec<ValueId>,
-) {
-    for (_, predecessor) in &graph.skeleton.blocks {
-        match &predecessor.term {
-            SkeletonTerminator::Branch {
-                target: branch_target,
-                args,
-            } if *branch_target == target => {
-                pending.extend(args.get(index).map(|argument| argument.value()));
-            }
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                let mut reaches_target = false;
-                if *then_target == target {
-                    pending.extend(then_args.get(index).map(|argument| argument.value()));
-                    reaches_target = true;
-                }
-                if *else_target == target {
-                    pending.extend(else_args.get(index).map(|argument| argument.value()));
-                    reaches_target = true;
-                }
-                if reaches_target {
-                    pending.push(*cond);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 //! Source projection analysis and emission. Planning retains checked selections only.
 use crate::ast::{Span, TypeName};
-use crate::egir::graph_projector::{GraphProjector, ValueFlowSelection};
+use crate::egir::graph_projector::{GraphProjector, ProjectionPlan};
 use crate::egir::ir::CallArgument;
 use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
 use crate::egir::soac::{lambda as lambda_ops, screma};
@@ -54,7 +54,7 @@ struct RegionProjection {
     region: FunctionId,
     roots: Vec<ValueId>,
     result_types: Vec<Type<TypeName>>,
-    selection: ValueFlowSelection,
+    selection: ProjectionPlan,
     arguments: Vec<(ValueId, ProjectedValue)>,
 }
 

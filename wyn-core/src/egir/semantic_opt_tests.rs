@@ -8,8 +8,7 @@ use crate::FunctionId;
 use polytype::Type;
 use smallvec::smallvec;
 
-#[test]
-fn unreachable_project_does_not_keep_dead_segop_alive() {
+fn dead_producer_graph() -> EGraph<Semantic> {
     let mut graph = EGraph::<Semantic>::new();
     let int = Type::Constructed(TypeName::Int(32), vec![]);
     let tuple = Type::Constructed(TypeName::Tuple(1), vec![int.clone()]);
@@ -50,6 +49,57 @@ fn unreachable_project_does_not_keep_dead_segop_alive() {
         effects: None,
         span: None,
     });
+    graph
+}
+
+#[test]
+fn unreachable_project_does_not_keep_dead_segop_alive() {
+    let mut graph = dead_producer_graph();
     assert!(eliminate_dead_seg_ops_in_graph(&mut graph, []));
     assert!(graph.skeleton.blocks[graph.skeleton.entry].side_effects.is_empty());
+}
+
+#[test]
+fn dead_producer_chain_disappears_in_one_application() {
+    let mut graph = dead_producer_graph();
+    let block = graph.skeleton.entry;
+    let first = graph.skeleton.blocks[block].side_effects[0].clone();
+    let first_value = first.result.as_ref().unwrap().values()[0];
+    let second_value = graph.alloc_side_effect_result(graph.nodes[first_value].ty.clone());
+    let mut second = first;
+    second.result = Some(graph.value_result(second_value));
+    second.operands.push(crate::egir::types::OperandRef::Value(first_value));
+    graph.skeleton.blocks[block].side_effects.push(second);
+    assert!(dead_seg_ops_in_graph(&graph, [second_value]).is_empty());
+    assert!(eliminate_dead_seg_ops_in_graph(&mut graph, []));
+    assert!(graph.skeleton.blocks[block].side_effects.is_empty());
+}
+
+#[test]
+fn tuple_projection_keeps_only_the_observed_producer() {
+    let mut graph = dead_producer_graph();
+    let block = graph.skeleton.entry;
+    let first_effect = graph.skeleton.blocks[block].side_effects[0].clone();
+    let first = first_effect.result.as_ref().unwrap().values()[0];
+    let second = graph.alloc_side_effect_result(graph.nodes[first].ty.clone());
+    let mut second_effect = first_effect;
+    second_effect.result = Some(graph.value_result(second));
+    graph.skeleton.blocks[block].side_effects.push(second_effect);
+    let ty = graph.nodes[first].ty.clone();
+    let tuple = graph.intern_pure(
+        PureOp::Tuple(2),
+        smallvec![first, second],
+        Type::Constructed(TypeName::Tuple(2), vec![ty.clone(), ty.clone()]),
+        None,
+    );
+    let projected = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![tuple], ty, None);
+    let facts = super::super::slice::SliceFacts::build(&graph);
+    assert!(!facts.pure_reaches(first, projected));
+    assert!(facts.pure_reaches(second, projected));
+    assert!(eliminate_dead_seg_ops_in_graph(&mut graph, [projected]));
+    assert_eq!(graph.skeleton.blocks[block].side_effects.len(), 1);
+    assert_eq!(
+        graph.skeleton.blocks[block].side_effects[0].result.as_ref().unwrap().values(),
+        vec![second]
+    );
 }
