@@ -3825,69 +3825,6 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         id
     }
 
-    /// Remove parameter slots from a block and from every incoming branch.
-    ///
-    /// Removed parameter nodes remain in the node sea so a caller can alias
-    /// their uses before a later cleanup. Surviving parameter nodes are
-    /// renumbered to match their new positions in the block parameter list.
-    /// Returns the removed nodes in ascending order of their former slots.
-    pub fn remove_block_param_slots(&mut self, block: BlockId, slots: &SortedSet<usize>) -> Vec<ValueId> {
-        let param_count = self.skeleton.blocks[block].params.len();
-        assert!(
-            slots.iter().all(|&slot| slot < param_count),
-            "block parameter slot out of bounds"
-        );
-
-        let removed = slots.iter().map(|&slot| self.skeleton.blocks[block].params[slot].value()).collect();
-
-        for &slot in slots.iter().rev() {
-            self.skeleton.blocks[block].params.remove(slot);
-        }
-
-        for (_, predecessor) in self.skeleton.blocks.iter_mut() {
-            match &mut predecessor.term {
-                flow::Terminator::Branch { target, args } if *target == block => {
-                    for &slot in slots.iter().rev() {
-                        args.remove(slot);
-                    }
-                }
-                flow::Terminator::CondBranch {
-                    then_target,
-                    then_args,
-                    else_target,
-                    else_args,
-                    ..
-                } => {
-                    if *then_target == block {
-                        for &slot in slots.iter().rev() {
-                            then_args.remove(slot);
-                        }
-                    }
-                    if *else_target == block {
-                        for &slot in slots.iter().rev() {
-                            else_args.remove(slot);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let surviving_params = self.skeleton.blocks[block].params.clone();
-        for (index, param) in surviving_params.into_iter().enumerate() {
-            let param = param.value();
-            match &mut self.nodes[param].kind {
-                ValueKind::BlockParam {
-                    block: owner,
-                    index: old_index,
-                } if *owner == block => *old_index = index,
-                _ => panic!("block parameter list contains a mismatched node"),
-            }
-        }
-
-        removed
-    }
-
     /// Intern a constant, deduplicating.
     pub fn intern_constant(&mut self, c: Lang::Const, ty: Lang::Ty) -> ValueId {
         if let Some(&existing) = self.const_cache.get(&c) {

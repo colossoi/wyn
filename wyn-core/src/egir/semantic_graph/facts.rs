@@ -196,12 +196,20 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
             let port = self.port((body, block), graph, value, &producers, &results)?;
             self.builder.observe(port)?;
         }
-        let incoming = crate::egir::slice::incoming_arguments(graph);
+        let interfaces = crate::egir::block_interface::extract(graph).map_err(|_| Error::Port)?;
         for (&(scope, value), &port) in &self.ports {
             if scope.0 == body {
-                if let Some(inputs) = incoming.get(&value) {
-                    let inputs = inputs.iter().map(|(block, value)| self.ports[&((body, *block), *value)]);
-                    self.external.entry(port).or_default().extend(inputs);
+                if let ValueKind::BlockParam { block, index } = graph.nodes[value].kind() {
+                    if let Some(interface) = interfaces.get(block).filter(|interface| {
+                        interface
+                            .columns()
+                            .get(*index)
+                            .is_some_and(|column| column.parameter().value() == value)
+                    }) {
+                        let inputs = crate::egir::block_interface::dependencies(interface, *index)
+                            .map(|(block, value)| self.ports[&((body, block), value)]);
+                        self.external.entry(port).or_default().extend(inputs);
+                    }
                 }
             }
         }

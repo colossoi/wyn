@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "wyn-base",
+    "wyn-block-interface",
     "wyn-core",
     "wyn-diagnostics",
     "wyn",

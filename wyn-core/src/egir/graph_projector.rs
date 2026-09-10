@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use crate::flow::{BlockId, ControlHeader};
 use crate::{BindingRef, StableMap};
 
+use super::block_interface::BlockInterfaces;
 use super::ir::RealizedOutputRoute;
 use super::ir::{CallSiteId, FlowValueId, OperandRef, PlaceId, PlaceOp, ResultBinding};
 use super::program::OutputWriter;
@@ -191,6 +192,7 @@ enum ProjectionMode {
 pub(super) struct ProjectionPlan {
     blocks: HashSet<BlockId>,
     slice: LiveSlice,
+    interfaces: BlockInterfaces,
 }
 
 struct ProjectionShell<R: GraphResource> {
@@ -562,7 +564,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             self.prepare_value(*value, &mut shell)?;
         }
         let (effects, effect_sites) = self.clone_effects(&selection, &mut shell)?;
-        self.project_terminators(mode, &selection.blocks, &mut shell)?;
+        self.project_terminators(mode, &selection, &mut shell)?;
         if matches!(
             mode,
             ProjectionMode::EntryRecipe { .. } | ProjectionMode::DetachedRecipe { .. }
@@ -833,7 +835,29 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         {
             return Err("value-flow projection depends on an effect".into());
         }
-        Ok(ProjectionPlan { blocks, slice })
+        let interfaces = self
+            .facts
+            .interfaces
+            .iter()
+            .filter(|(block, _)| blocks.contains(block))
+            .map(|(&block, interface)| {
+                let slots = interface.columns().iter().enumerate().filter_map(|(slot, column)| {
+                    (!matches!(mode, ProjectionMode::DetachedRecipe { .. })
+                        && (!matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
+                            || slice.values().contains(&column.parameter().value())))
+                    .then_some(slot)
+                });
+                interface
+                    .select(slots)
+                    .map(|selected| (block, selected))
+                    .map_err(|error| format!("invalid projected interface {block:?}: {error:?}"))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(ProjectionPlan {
+            blocks,
+            slice,
+            interfaces,
+        })
     }
 
     fn projection_shell(
@@ -881,15 +905,16 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 places.insert(source_id, target);
             }
         }
-        if !matches!(mode, ProjectionMode::DetachedRecipe { .. }) {
-            self.clone_live_block_params(
-                &selection.blocks,
-                matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
-                    .then_some(selection.slice.values()),
-                &mut graph,
-                &blocks,
-                &mut nodes,
-            );
+        for source_block in self.source.skeleton.blocks.keys() {
+            let Some(interface) = selection.interfaces.get(&source_block) else {
+                continue;
+            };
+            for source_param in interface.parameters() {
+                let source_value = source_param.value();
+                let target = graph
+                    .add_block_param(blocks[&source_block], self.source.nodes[source_value].ty.clone());
+                nodes.insert(source_value, target);
+            }
         }
         let mut shell = ProjectionShell {
             graph,
@@ -933,34 +958,6 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             }
         }
         Ok(shell)
-    }
-
-    fn clone_live_block_params(
-        &self,
-        projected_blocks: &HashSet<BlockId>,
-        retained_values: Option<&HashSet<ValueId>>,
-        graph: &mut EGraph<Semantic<R>>,
-        blocks: &HashMap<BlockId, BlockId>,
-        nodes: &mut HashMap<ValueId, ValueId>,
-    ) {
-        // The skeleton parameter list is authoritative. CFG cleanup leaves
-        // eliminated BlockParam definitions in the sea; iterating the sea
-        // would therefore resurrect parameters absent from the live skeleton.
-        for (source_block, source_body) in &self.source.skeleton.blocks {
-            if !projected_blocks.contains(&source_block) {
-                continue;
-            }
-            let target_block = blocks[&source_block];
-            for source_param in source_body.params.iter().copied() {
-                let source_value = source_param.value();
-                if retained_values.is_some_and(|values| !values.contains(&source_value)) {
-                    continue;
-                }
-                let target =
-                    graph.add_block_param(target_block, self.source.nodes[source_value].ty.clone());
-                nodes.insert(source_value, target);
-            }
-        }
     }
 
     fn clone_effects(
@@ -1066,85 +1063,48 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
     fn project_terminators(
         &self,
         mode: ProjectionMode,
-        projected_blocks: &HashSet<BlockId>,
+        selection: &ProjectionPlan,
         shell: &mut ProjectionShell<R>,
     ) -> Result<(), String> {
-        for source_block in projected_blocks {
-            let target_block = shell.blocks[source_block];
-            if matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component) {
-                shell.graph.skeleton.blocks[target_block].term =
-                    self.project_value_flow_terminator(*source_block, shell)?;
-                continue;
+        let mut terms = selection
+            .blocks
+            .iter()
+            .map(|&block| (block, self.source.skeleton.blocks[block].term.clone()))
+            .collect::<HashMap<_, _>>();
+        for interface in selection.interfaces.values() {
+            for (edge, arguments) in interface.rows() {
+                if let Some(term) = terms.get_mut(&edge.source()) {
+                    *edge.arguments_mut(term) = arguments;
+                }
+            }
+        }
+        for (source_block, mut term) in terms {
+            let target_block = shell.blocks[&source_block];
+            if matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component)
+                && matches!(term, SkeletonTerminator::Return(_))
+            {
+                term = SkeletonTerminator::Return(None);
             }
             let is_recipe_exit = matches!(
                 mode,
                 ProjectionMode::EntryRecipe { .. }
-                    if *source_block == self.source.skeleton.entry
+                    if source_block == self.source.skeleton.entry
             ) || matches!(
                 mode,
                 ProjectionMode::DetachedRecipe { block }
-                    if *source_block == block
+                    if source_block == block
             ) || matches!(
                 mode,
                 ProjectionMode::StructuredPrefix { continuation, .. }
-                    if *source_block == continuation
+                    if source_block == continuation
             );
             shell.graph.skeleton.blocks[target_block].term = if is_recipe_exit {
                 SkeletonTerminator::Return(None)
             } else {
-                remap_terminator(
-                    &self.source.skeleton.blocks[*source_block].term,
-                    &shell.nodes,
-                    &shell.places,
-                    &shell.blocks,
-                )?
+                remap_terminator(&term, &shell.nodes, &shell.places, &shell.blocks)?
             };
         }
         Ok(())
-    }
-
-    fn project_value_flow_terminator(
-        &self,
-        source_block: BlockId,
-        shell: &ProjectionShell<R>,
-    ) -> Result<SkeletonTerminator, String> {
-        let map_node = |source: ValueId| {
-            shell
-                .nodes
-                .get(&source)
-                .copied()
-                .ok_or_else(|| format!("value-flow projection omitted control value {source:?}"))
-        };
-        let map_args = |target: BlockId, args: &[FlowValueId]| {
-            self.source.skeleton.blocks[target]
-                .params
-                .iter()
-                .zip(args)
-                .filter(|(parameter, _)| shell.nodes.contains_key(&parameter.value()))
-                .map(|(_, argument)| argument.try_remap(&map_node))
-                .collect::<Result<Vec<_>, _>>()
-        };
-        Ok(match &self.source.skeleton.blocks[source_block].term {
-            SkeletonTerminator::Branch { target, args } => SkeletonTerminator::Branch {
-                target: shell.blocks[target],
-                args: map_args(*target, args)?,
-            },
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => SkeletonTerminator::CondBranch {
-                cond: map_node(*cond)?,
-                then_target: shell.blocks[then_target],
-                then_args: map_args(*then_target, then_args)?,
-                else_target: shell.blocks[else_target],
-                else_args: map_args(*else_target, else_args)?,
-            },
-            SkeletonTerminator::Return(_) => SkeletonTerminator::Return(None),
-            SkeletonTerminator::Unreachable => SkeletonTerminator::Unreachable,
-        })
     }
 
     fn projected_blocks(&self, mode: ProjectionMode) -> Result<HashSet<BlockId>, String> {
@@ -1337,7 +1297,12 @@ fn remap_terminator(
                 },
             )
         },
-        &mut |target| Ok(blocks[&target]),
+        &mut |target| {
+            blocks
+                .get(&target)
+                .copied()
+                .ok_or_else(|| format!("graph projection omitted target block {target:?}"))
+        },
     )
 }
 

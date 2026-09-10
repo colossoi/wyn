@@ -190,6 +190,43 @@ fn block_parameters_include_incoming_control_variance() {
 }
 
 #[test]
+fn same_target_arms_preserve_control_dependence_for_equal_and_unequal_arguments() {
+    let mut graph = EGraph::<Semantic>::new();
+    let entry = graph.skeleton.entry;
+    let merge = graph.skeleton.create_block();
+    let parameters = semantic_params([("condition", Type::Constructed(TypeName::Bool, vec![]))]);
+    let condition = graph.add_test_value_parameter(
+        parameters.ids().next().unwrap(),
+        Type::Constructed(TypeName::Bool, vec![]),
+    );
+    let one = graph.intern_constant(ConstantValue::U32(1), u32_ty());
+    let two = graph.intern_constant(ConstantValue::U32(2), u32_ty());
+    let selected = graph.add_block_param(merge, u32_ty());
+    let seeds = parameter_dependences(
+        &parameters,
+        [StageDependence::from_source(
+            Uniformity::InvocationVarying,
+            DependenceSource::StageInput,
+        )],
+    );
+    for otherwise in [one, two] {
+        graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+            cond: condition,
+            then_target: merge,
+            then_args: graph.admit_flow_values([one]),
+            else_target: merge,
+            else_args: graph.admit_flow_values([otherwise]),
+        };
+        let analysis = StageDependenceAnalysis::for_graph(&graph, &seeds).unwrap();
+        assert_eq!(
+            analysis.dependence(selected).uniformity(),
+            Uniformity::InvocationVarying
+        );
+        assert!(analysis.dependence(selected).depends_on(DependenceSource::StageInput));
+    }
+}
+
+#[test]
 fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
     let ty = u32_ty();
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);

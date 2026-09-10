@@ -732,6 +732,44 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
 }
 
 #[test]
+fn column_projection_keeps_distinct_arms_and_rejects_incomplete_remapping() {
+    let mut graph = EGraph::<Semantic>::new();
+    let entry = graph.skeleton.entry;
+    let merge = graph.skeleton.create_block();
+    let condition = graph.add_block_param(entry, bool_ty());
+    let left = graph.add_block_param(entry, u32_ty());
+    let right = graph.add_block_param(entry, u32_ty());
+    let discarded = graph.add_block_param(merge, u32_ty());
+    let selected = graph.add_block_param(merge, u32_ty());
+    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+        cond: condition,
+        then_target: merge,
+        then_args: graph.admit_flow_values([left, left]),
+        else_target: merge,
+        else_args: graph.admit_flow_values([left, right]),
+    };
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
+    let before = crate::egir::block_interface::extract(&graph).unwrap();
+    let projector = GraphProjector::new(&graph);
+    let selection = projector.select_value_flow(vec![selected]).unwrap();
+    let mut shell = projector.projection_shell(ProjectionMode::ValueFlow, &selection, &[]).unwrap();
+    shell.nodes.remove(&right);
+    assert!(projector.project_terminators(ProjectionMode::ValueFlow, &selection, &mut shell).is_err());
+    assert_eq!(crate::egir::block_interface::extract(&graph).unwrap(), before);
+    let projected = projector.emit_value_flow(&selection, &[]).unwrap();
+    assert!(projected.node(discarded).is_none());
+    let target = projected.block(merge).unwrap();
+    let interface = crate::egir::block_interface::extract(&projected.graph).unwrap();
+    let column = &interface[&target].columns()[0];
+    assert_eq!(column.parameter().value(), projected.node(selected).unwrap());
+    assert_eq!(
+        column.arguments().iter().map(|arg| arg.value()).collect::<Vec<_>>(),
+        [projected.node(left).unwrap(), projected.node(right).unwrap()]
+    );
+    assert_eq!(column.common_argument(), None);
+}
+
+#[test]
 fn sibling_bindings_are_allocated_without_demanding_unused_outputs() {
     let mut graph = EGraph::<Semantic>::new();
     let block = graph.skeleton.entry;

@@ -451,76 +451,102 @@ fn physicalization_constructs_conditional_array_merge_with_a_fixed_place() {
     use crate::ssa::types::ConstantValue;
     use smallvec::smallvec;
 
-    let mut graph = EGraph::<Scheduled>::new();
-    let entry = graph.skeleton.entry;
-    let then_block = graph.skeleton.create_block();
-    let else_block = graph.skeleton.create_block();
-    let merge = graph.skeleton.create_block();
-    let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
-    let array_ty = Type::Constructed(
-        TypeName::Array,
-        vec![
-            i32_ty.clone(),
-            crate::types::array_variant_composite(),
-            Type::Constructed(TypeName::Size(1), vec![]),
-            crate::types::no_buffer(),
-        ],
-    );
-    let condition = graph.intern_constant(
-        ConstantValue::Bool(true),
-        Type::Constructed(TypeName::Bool, vec![]),
-    );
-    let one = graph.intern_constant(ConstantValue::I32(1), i32_ty.clone());
-    let two = graph.intern_constant(ConstantValue::I32(2), i32_ty);
-    let then_value = graph.intern_pure(
-        egir::types::PureOp::ArrayLit(1),
-        smallvec![one],
-        array_ty.clone(),
-        None,
-    );
-    let else_value = graph.intern_pure(
-        egir::types::PureOp::ArrayLit(1),
-        smallvec![two],
-        array_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
-        cond: condition,
-        then_target: then_block,
-        then_args: vec![],
-        else_target: else_block,
-        else_args: vec![],
-    };
-    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
-        target: merge,
-        args: graph.admit_flow_values([then_value]),
-    };
-    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
-        target: merge,
-        args: graph.admit_flow_values([else_value]),
-    };
-    let merged = graph.add_block_param(merge, array_ty);
-    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(merged)));
+    for same_target in [false, true] {
+        let mut graph = EGraph::<Scheduled>::new();
+        let entry = graph.skeleton.entry;
+        let then_block = graph.skeleton.create_block();
+        let else_block = graph.skeleton.create_block();
+        let merge = graph.skeleton.create_block();
+        let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
+        let array_ty = Type::Constructed(
+            TypeName::Array,
+            vec![
+                i32_ty.clone(),
+                crate::types::array_variant_composite(),
+                Type::Constructed(TypeName::Size(1), vec![]),
+                crate::types::no_buffer(),
+            ],
+        );
+        let condition = graph.intern_constant(
+            ConstantValue::Bool(true),
+            Type::Constructed(TypeName::Bool, vec![]),
+        );
+        let one = graph.intern_constant(ConstantValue::I32(1), i32_ty.clone());
+        let two = graph.intern_constant(ConstantValue::I32(2), i32_ty);
+        let then_value = graph.intern_pure(
+            egir::types::PureOp::ArrayLit(1),
+            smallvec![one],
+            array_ty.clone(),
+            None,
+        );
+        let else_value = graph.intern_pure(
+            egir::types::PureOp::ArrayLit(1),
+            smallvec![two],
+            array_ty.clone(),
+            None,
+        );
+        graph.skeleton.blocks[entry].term = SkeletonTerminator::CondBranch {
+            cond: condition,
+            then_target: if same_target { merge } else { then_block },
+            then_args: if same_target { graph.admit_flow_values([then_value]) } else { vec![] },
+            else_target: if same_target { merge } else { else_block },
+            else_args: if same_target { graph.admit_flow_values([else_value]) } else { vec![] },
+        };
+        if !same_target {
+            graph.skeleton.blocks[then_block].term = SkeletonTerminator::Branch {
+                target: merge,
+                args: graph.admit_flow_values([then_value]),
+            };
+            graph.skeleton.blocks[else_block].term = SkeletonTerminator::Branch {
+                target: merge,
+                args: graph.admit_flow_values([else_value]),
+            };
+        }
+        let merged = graph.add_block_param(merge, array_ty.clone());
+        let exit = graph.skeleton.create_block();
+        let forwarded = graph.add_block_param(exit, array_ty);
+        graph.skeleton.blocks[merge].term = SkeletonTerminator::Branch {
+            target: exit,
+            args: graph.admit_flow_values([merged]),
+        };
+        graph.skeleton.blocks[exit].term = SkeletonTerminator::Return(Some(graph.value_result(forwarded)));
 
-    let table = PhysicalResourceTable::allocate(&LogicalResourceArena::default(), &mut IdSource::new());
-    let (physical, _, _) = physicalize_graph_resources(graph, &table, &mut IdSource::new())
-        .expect("conditional graph should physicalize");
+        let table = PhysicalResourceTable::allocate(&LogicalResourceArena::default(), &mut IdSource::new());
+        let (physical, _, _) = physicalize_graph_resources(graph, &table, &mut IdSource::new())
+            .expect("conditional graph should physicalize");
 
-    assert!(physical.skeleton.blocks.values().all(|block| {
-        block.params.iter().all(|parameter| {
-            !WynLanguage::contains_materialized_flow(physical.value(parameter.value()).ty())
-        })
-    }));
-    assert!(physical.skeleton.blocks.values().any(|block| {
-        block.side_effects.iter().any(|effect| {
-            matches!(
-                effect.kind,
-                SideEffectKind::<Physical>::Effect(EffectOp::Alloca { .. })
-            )
-        })
-    }));
+        assert!(physical.skeleton.blocks.values().all(|block| {
+            block.params.iter().all(|parameter| {
+                !WynLanguage::contains_materialized_flow(physical.value(parameter.value()).ty())
+            })
+        }));
+        let effects =
+            physical.skeleton.blocks.values().flat_map(|block| &block.side_effects).collect::<Vec<_>>();
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect.kind,
+                    SideEffectKind::<Physical>::Effect(EffectOp::Alloca { .. })
+                ))
+                .count(),
+            1,
+            "the forwarding merge reuses the incoming place"
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(
+                    effect.kind,
+                    SideEffectKind::<Physical>::Effect(EffectOp::Store { .. })
+                ))
+                .count(),
+            2,
+            "each arm transfers its own array into the merge place"
+        );
+        physical.skeleton.verify_branch_arities().unwrap();
+    }
 }
-
 #[test]
 fn physical_entry_parameters_select_value_view_and_place_channels() {
     let scalar = Type::Constructed(TypeName::Int(32), vec![]);

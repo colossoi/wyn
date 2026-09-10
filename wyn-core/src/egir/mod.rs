@@ -11,6 +11,7 @@
 //! extraction): <https://cfallin.org/blog/2026/04/09/aegraph/>.
 
 pub mod allocation;
+pub(crate) mod block_interface;
 pub mod elaborate;
 pub(crate) mod eliminate_call_places;
 mod extract;

@@ -5,7 +5,6 @@ use crate::interface;
 use crate::op;
 use crate::EntryId;
 use crate::FunctionId;
-use crate::SortedSet;
 
 fn i32_ty() -> Type<TypeName> {
     Type::Constructed(TypeName::Int(32), vec![])
@@ -141,8 +140,10 @@ fn removing_block_param_slots_updates_incoming_edges_and_indices() {
             args: graph.admit_flow_values([args[6], args[7], args[8]]),
         };
 
-    let slots = [2, 0, 2].into_iter().collect::<SortedSet<_>>();
-    let removed = graph.remove_block_param_slots(target, &slots);
+    let removed = super::super::block_interface::select_columns(&mut graph, |block, interface| {
+        Ok(if block == target { vec![1] } else { (0..interface.columns().len()).collect() })
+    })
+    .unwrap();
 
     assert_eq!(removed, [first, third]);
     assert_eq!(graph.skeleton.blocks[target].params[0].value(), second);

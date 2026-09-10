@@ -13,7 +13,7 @@ use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::LookupMap;
 use polytype::Type;
-use slotmap::SlotMap;
+
 use wyn_base::IdSource;
 
 use super::graph_ops::{alloca, bind_physical_result_value, emit_result_to_place, pack_result_references};
@@ -22,7 +22,7 @@ use super::program::{PhysicalResourceTable, SemanticResourceRef};
 use super::types::{
     EGraph, EffectOp, EffectToken, FlowValueId, FunctionResult, GraphPhaseRemap, Physical,
     PlaceDestination, PlaceId, PureOp, ResultBinding, ResultDestination, Scheduled, SideEffect,
-    SideEffectKind, SkeletonBlock, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
+    SideEffectKind, SkeletonTerminator, ValueId, ValueKind, WynLanguage,
 };
 
 /// One logical result tree together with its representation at a physical
@@ -304,8 +304,6 @@ pub(crate) fn type_contains_materialized_flow(ty: &Type<TypeName>) -> bool {
     WynLanguage::product_fields(ty).is_some_and(|fields| fields.iter().any(type_contains_materialized_flow))
 }
 
-type ScheduledBlock = SkeletonBlock<Scheduled, WynLanguage>;
-
 /// Construct Physical EGIR directly from Scheduled EGIR. Logical block
 /// parameters are consumed as merge declarations: the target graph receives
 /// only scalar/view parameters and fixed places, and every target edge is
@@ -322,8 +320,8 @@ pub(crate) fn construct_physical_graph(
     ),
     String,
 > {
+    let interfaces = super::block_interface::extract(&source)?;
     let mut remap = GraphPhaseRemap::<Scheduled, Physical>::new(source);
-    let incoming = collect_incoming_arguments(&remap.source.skeleton.blocks)?;
     let mut merges = LookupMap::new();
     let mut physical_parameters = LookupMap::<ValueId, PhysicalFlowBinding>::new();
     {
@@ -332,24 +330,22 @@ pub(crate) fn construct_physical_graph(
         let node_map = &mut remap.nodes;
         for (source_block, block) in &source.skeleton.blocks {
             let target_block = remap.blocks[&source_block];
-            let declarations = block
-                .params
+            let interface = &interfaces[&source_block];
+            let declarations = interface
+                .columns()
                 .iter()
                 .enumerate()
-                .map(|(slot, parameter)| {
-                    let source_parameter = parameter.value();
+                .map(|(slot, column)| {
+                    let source_parameter = column.parameter().value();
                     let ty = source.nodes[source_parameter].ty().clone();
                     if type_contains_materialized_flow(&ty)
-                        && incoming
-                            .get(&source_block)
-                            .and_then(|slots| slots.get(slot))
-                            .is_none_or(Vec::is_empty)
+                        && interface.edges().is_empty()
                     {
                         return Err(format!(
                             "logical materialized block parameter {slot} in {source_block:?} has no incoming edge"
                         ));
                     }
-                    let reuse = common_incoming_parameter(&incoming, source_block, slot)
+                    let reuse = column.common_argument().map(|argument| argument.value())
                         .and_then(|source| physical_parameters.get(&source))
                         .map(|binding| binding.physical.clone());
                     Ok((super::types::by_value_function_result::<WynLanguage>(ty), reuse))
@@ -464,66 +460,6 @@ pub(crate) fn construct_physical_graph(
 
     remap.target.canonicalize_boundary_operands();
     Ok(remap.finish())
-}
-
-fn collect_incoming_arguments(
-    blocks: &SlotMap<BlockId, ScheduledBlock>,
-) -> Result<LookupMap<BlockId, Vec<Vec<ValueId>>>, String> {
-    let mut incoming = blocks
-        .iter()
-        .map(|(block, contents)| (block, vec![Vec::new(); contents.params.len()]))
-        .collect::<LookupMap<_, _>>();
-    for (source, block) in blocks {
-        match &block.term {
-            SkeletonTerminator::Branch { target, args } => {
-                record_incoming(&mut incoming, source, *target, args)?;
-            }
-            SkeletonTerminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                record_incoming(&mut incoming, source, *then_target, then_args)?;
-                record_incoming(&mut incoming, source, *else_target, else_args)?;
-            }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
-    }
-    Ok(incoming)
-}
-
-fn record_incoming(
-    incoming: &mut LookupMap<BlockId, Vec<Vec<ValueId>>>,
-    source: BlockId,
-    target: BlockId,
-    arguments: &[FlowValueId],
-) -> Result<(), String> {
-    let slots = incoming
-        .get_mut(&target)
-        .ok_or_else(|| format!("physical construction found unknown branch target {target:?}"))?;
-    if slots.len() != arguments.len() {
-        return Err(format!(
-            "physical construction found branch {source:?} -> {target:?} with {} arguments for {} parameters",
-            arguments.len(),
-            slots.len()
-        ));
-    }
-    for (slot, argument) in slots.iter_mut().zip(arguments) {
-        slot.push(argument.value());
-    }
-    Ok(())
-}
-
-fn common_incoming_parameter(
-    incoming: &LookupMap<BlockId, Vec<Vec<ValueId>>>,
-    block: BlockId,
-    slot: usize,
-) -> Option<ValueId> {
-    let values = incoming.get(&block)?.get(slot)?;
-    let first = *values.first()?;
-    values.iter().all(|value| *value == first).then_some(first)
 }
 
 fn physicalize_result_binding(

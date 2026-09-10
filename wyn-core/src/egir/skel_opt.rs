@@ -29,7 +29,7 @@ pub enum SkeletonOptimizedTag {}
 pub type SkeletonOptimized = super::program::PhysicalProgram<SkeletonOptimizedTag>;
 
 use crate::flow::BlockId;
-use crate::{LookupMap, LookupSet, SortedSet};
+use crate::{LookupMap, LookupSet};
 
 use crate::ssa::types::ConstantValue;
 
@@ -178,112 +178,30 @@ fn remove_unreachable_blocks<P: Family>(graph: &mut EGraph<P>) -> bool {
 /// dedup'd structurally-equal subtrees; mixing CFG rewriting with
 /// e-graph equivalence reasoning is where subtle bugs live.
 fn eliminate_redundant_params<P: Family>(graph: &mut EGraph<P>) -> LookupMap<ValueId, ValueId> {
-    use smallvec::SmallVec;
-
-    // incoming[B][i] = every distinct ValueId passed into B.params[i] by
-    // some predecessor branch terminator. We only need to know "is the
-    // set of size 1?", so track up to two distinct values.
-    let mut incoming: LookupMap<BlockId, Vec<SmallVec<[ValueId; 2]>>> = LookupMap::new();
-    for (bid, block) in &graph.skeleton.blocks {
-        let mut per_param = Vec::with_capacity(block.params.len());
-        per_param.resize(block.params.len(), SmallVec::<[ValueId; 2]>::new());
-        incoming.insert(bid, per_param);
-    }
-
-    let collect = |target: BlockId,
-                   args: &[super::types::FlowValueId],
-                   incoming: &mut LookupMap<BlockId, Vec<SmallVec<[ValueId; 2]>>>| {
-        let slots = incoming.get_mut(&target).expect("target in skeleton");
-        debug_assert_eq!(
-            slots.len(),
-            args.len(),
-            "arity mismatch at branch to {:?}",
-            target
-        );
-        for (i, arg) in args.iter().enumerate() {
-            let arg = arg.value();
-            if !slots[i].contains(&arg) && slots[i].len() < 2 {
-                slots[i].push(arg);
-            }
-        }
-    };
-
-    for (_bid, block) in &graph.skeleton.blocks {
-        match &block.term {
-            SkeletonTerminator::Branch { target, args } => collect(*target, args, &mut incoming),
-            SkeletonTerminator::CondBranch {
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-                ..
-            } => {
-                collect(*then_target, then_args, &mut incoming);
-                collect(*else_target, else_args, &mut incoming);
-            }
-            SkeletonTerminator::Return(_) | SkeletonTerminator::Unreachable => {}
-        }
-    }
-
-    // Determine which params are redundant. Skip the entry block: it has
-    // no predecessors and its params (when present) come from the source
-    // function params, not from a branch.
     let entry = graph.skeleton.entry;
-    let mut redundant: LookupMap<BlockId, Vec<(usize, ValueId)>> = LookupMap::new();
-    let mut aliases: LookupMap<ValueId, ValueId> = LookupMap::new();
-    for (bid, block) in &graph.skeleton.blocks {
-        if bid == entry {
-            continue;
-        }
-        let slots = incoming.get(&bid).expect("slots initialized");
-        for (i, param) in block.params.iter().enumerate() {
-            // slots[i].len() meanings:
-            //   0 = this block is unreachable (no predecessor terminator
-            //       branches here). Branch-folding in the same fixpoint
-            //       loop can newly make blocks unreachable, so this is
-            //       a legitimate state, not an invariant violation. Leave
-            //       the param alone; elaborate's domtree walk won't visit
-            //       unreachable blocks anyway.
-            //   1 = every predecessor passes the same value → redundancy
-            //       candidate.
-            //   2 = multiple distinct incoming values → real phi.
-            if slots[i].len() != 1 {
-                continue;
-            }
-            let x = slots[i][0];
-            if x == param.value() {
-                // Self-referential (e.g., a block that branches to
-                // itself as its only predecessor and feeds its own param
-                // back). Not a valid redundancy.
-                continue;
-            }
-            redundant.entry(bid).or_default().push((i, param.value()));
-            aliases.insert(param.value(), x);
-        }
-    }
-
-    // Apply removals while keeping each block's parameter list and every
-    // incoming branch's argument list in sync.
-    if redundant.is_empty() {
-        return aliases;
-    }
-
-    for (bid, slots) in &redundant {
-        let slots = slots.iter().map(|(index, _)| *index).collect::<SortedSet<_>>();
-        graph.remove_block_param_slots(*bid, &slots);
-    }
-
-    // Invariant 1 from the plan: every branch's arg count must equal its
-    // target block's param count. This is the exact class of bug that
-    // the descending-index sweep is designed to preserve; assert it.
-    debug_assert!(
-        graph.skeleton.verify_branch_arities().is_ok(),
-        "branch/param arity mismatch after eliminate_redundant_params"
-    );
-
+    let mut aliases = LookupMap::new();
+    super::block_interface::select_columns(graph, |block, interface| {
+        Ok(interface
+            .columns()
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, column)| {
+                let parameter = column.parameter().value();
+                if block != entry {
+                    if let Some(value) = column.common_argument().map(|argument| argument.value()) {
+                        if value != parameter {
+                            aliases.insert(parameter, value);
+                            return None;
+                        }
+                    }
+                }
+                Some(slot)
+            })
+            .collect())
+    })
+    .expect("valid skeleton interfaces");
     aliases
 }
-
 /// Insert every entry from `new_aliases` into `aliases`, and partially
 /// forward existing alias targets through one hop of the new map.
 ///

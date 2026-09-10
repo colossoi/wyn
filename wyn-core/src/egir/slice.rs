@@ -1,17 +1,18 @@
 //! Dependency incidences for an unchanged EGIR snapshot.
+use super::block_interface::{self, BlockInterfaces};
 use super::types::{
     CallEffects, EGraph, EffectOp, Family, GraphResource, OperandRef, PureOp, Raw, SegBody, Semantic,
-    SideEffect, SideEffectKind, SideEffectSite, SkeletonTerminator, Soac, SoacEffect, ValueId, ValueKind,
-    WynSoacPhase,
+    SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId, ValueKind, WynSoacPhase,
 };
 use crate::flow::BlockId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use wyn_slice::{Definition, Graph, Node, Observer};
 
 pub(crate) type LiveSlice = wyn_slice::LiveSlice<ValueId, SideEffectSite>;
 
 pub(crate) struct SliceFacts {
     pub graph: Graph<ValueId, SideEffectSite, BlockId>,
+    pub interfaces: BlockInterfaces,
     inputs: HashSet<ValueId>,
 }
 
@@ -32,13 +33,7 @@ impl ValueObservers {
 impl SliceFacts {
     pub fn build<P: ValueProducerPhase>(graph: &EGraph<P>) -> Self {
         let producers = graph.side_effect_index();
-        let incoming = incoming_arguments(graph);
-        let parameters = graph
-            .skeleton
-            .blocks
-            .values()
-            .flat_map(|block| block.params.iter().map(|param| param.value()))
-            .collect::<HashSet<_>>();
+        let interfaces = block_interface::extract(graph).expect("valid block interfaces for slicing");
         let mut inputs = HashSet::new();
         let values = graph
             .nodes
@@ -50,15 +45,20 @@ impl SliceFacts {
                     } else {
                         match node.kind() {
                             ValueKind::FuncParam { .. } => Definition::Input,
-                            ValueKind::BlockParam { .. } => {
-                                if !parameters.contains(&value) {
-                                    return None;
-                                }
-                                match incoming.get(&value) {
-                                    Some(incoming) => {
-                                        Definition::Flow(incoming.iter().map(|(_, value)| *value).collect())
-                                    }
-                                    None => Definition::Input,
+                            ValueKind::BlockParam { block, index } => {
+                                let interface = interfaces.get(block)?;
+                                interface
+                                    .columns()
+                                    .get(*index)
+                                    .filter(|column| column.parameter().value() == value)?;
+                                if interface.edges().is_empty() {
+                                    Definition::Input
+                                } else {
+                                    Definition::Flow(
+                                        block_interface::dependencies(interface, *index)
+                                            .map(|(_, value)| value)
+                                            .collect(),
+                                    )
                                 }
                             }
                             ValueKind::SideEffectResult => Definition::Produced(producers.site(value)?),
@@ -89,6 +89,7 @@ impl SliceFacts {
             .map(|(block, body)| (block, body.term.referenced_nodes().into_vec()));
         Self {
             graph: Graph::new(values, operations, observers),
+            interfaces,
             inputs,
         }
     }
@@ -155,36 +156,6 @@ pub(crate) fn value_inputs<P: Family>(graph: &EGraph<P>, value: ValueId) -> Vec<
     } else {
         graph.value_dependencies(value)
     }
-}
-
-pub(crate) fn incoming_arguments<P: Family>(
-    graph: &EGraph<P>,
-) -> HashMap<ValueId, Vec<(BlockId, ValueId)>> {
-    let mut incoming = HashMap::<_, Vec<_>>::new();
-    for (block, body) in &graph.skeleton.blocks {
-        let mut record = |target, args: &[super::types::FlowValueId], condition: Option<ValueId>| {
-            for (param, arg) in graph.skeleton.blocks[target].params.iter().zip(args) {
-                let inputs = incoming.entry(param.value()).or_default();
-                inputs.push((block, arg.value()));
-                inputs.extend(condition.map(|value| (block, value)));
-            }
-        };
-        match &body.term {
-            SkeletonTerminator::Branch { target, args } => record(*target, args, None),
-            SkeletonTerminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => {
-                record(*then_target, then_args, Some(*cond));
-                record(*else_target, else_args, Some(*cond));
-            }
-            _ => {}
-        }
-    }
-    incoming
 }
 
 /// Phase-specific SOAC metadata that contributes to a produced value.

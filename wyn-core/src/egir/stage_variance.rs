@@ -13,13 +13,12 @@
 use smallvec::SmallVec;
 
 use crate::builtins::catalog;
-use crate::flow::{BlockId, Terminator};
+use crate::flow::BlockId;
 use crate::interface::{EntryInputKind, IoDecoration};
 use crate::{FunctionId, LookupMap, LookupSet};
 
 use super::ir::{
-    CallEffects, CallSiteId, EffectOp, Family, FlowValueId, OperandRef, ParameterId, Parameters,
-    SideEffectKind,
+    CallEffects, CallSiteId, EffectOp, Family, OperandRef, ParameterId, Parameters, SideEffectKind,
 };
 use super::loop_analysis::LoopAnalysis;
 use super::program::Entry;
@@ -158,13 +157,6 @@ pub(crate) struct StageDependenceAnalysis {
     values: LookupMap<ValueId, StageDependence>,
 }
 
-#[derive(Clone, Copy)]
-struct IncomingValue {
-    source: BlockId,
-    condition: Option<ValueId>,
-    value: ValueId,
-}
-
 pub(crate) fn bind_parameter_dependences<R, Ty>(
     parameters: &Parameters<R, Ty>,
     dependences: &[StageDependence],
@@ -182,7 +174,7 @@ impl StageDependenceAnalysis {
         graph: &EGraph<P>,
         parameter_dependences: &LookupMap<ParameterId, StageDependence>,
     ) -> Result<Self, String> {
-        let (incoming_blocks, incoming_values) = collect_incoming(graph)?;
+        let interfaces = super::block_interface::extract(graph)?;
         let block_loop_dependencies = block_loop_dependencies(graph);
         let effect_blocks = graph
             .skeleton
@@ -243,14 +235,19 @@ impl StageDependenceAnalysis {
         loop {
             let mut changed = false;
 
-            for block in graph.skeleton.blocks.keys() {
+            for (&block, interface) in &interfaces {
                 if block == graph.skeleton.entry {
                     continue;
                 }
-                let next = match incoming_blocks.get(&block) {
-                    Some(edges) if !edges.is_empty() => {
-                        edges.iter().fold(StageDependence::constant(), |dependence, (source, condition)| {
-                            dependence.join(&edge_dependence(&block_controls, &values, *source, *condition))
+                let next = match interface.edges() {
+                    edges if !edges.is_empty() => {
+                        edges.iter().fold(StageDependence::constant(), |dependence, edge| {
+                            dependence.join(&edge_dependence(
+                                &block_controls,
+                                &values,
+                                edge.source(),
+                                edge.condition(),
+                            ))
                         })
                     }
                     _ => unknown_dependence(),
@@ -267,20 +264,29 @@ impl StageDependenceAnalysis {
                     ValueKind::SideEffectResult => {
                         side_effect_dependence(node, &effect_blocks, &block_loop_dependencies)
                     }
-                    ValueKind::BlockParam { block, .. } => {
-                        let incoming = match incoming_values.get(&node) {
-                            Some(incoming) if !incoming.is_empty() => {
-                                incoming.iter().fold(StageDependence::constant(), |dependence, incoming| {
-                                    dependence.join(&value_dependence(&values, incoming.value)).join(
+                    ValueKind::BlockParam { block, index } => {
+                        let incoming = match interfaces.get(block).and_then(|interface| {
+                            interface
+                                .columns()
+                                .get(*index)
+                                .filter(|column| {
+                                    column.parameter().value() == node && !interface.edges().is_empty()
+                                })
+                                .map(|column| interface.edges().iter().zip(column.arguments()))
+                        }) {
+                            Some(incoming) => incoming.fold(
+                                StageDependence::constant(),
+                                |dependence, (edge, argument)| {
+                                    dependence.join(&value_dependence(&values, argument.value())).join(
                                         &edge_dependence(
                                             &block_controls,
                                             &values,
-                                            incoming.source,
-                                            incoming.condition,
+                                            edge.source(),
+                                            edge.condition(),
                                         ),
                                     )
-                                })
-                            }
+                                },
+                            ),
                             _ => unknown_dependence(),
                         };
                         incoming.with_loop_dependencies(
@@ -582,94 +588,4 @@ fn block_loop_dependencies<P: Family>(graph: &EGraph<P>) -> LookupMap<BlockId, L
             (block, dependencies)
         })
         .collect()
-}
-
-type IncomingBlocks = LookupMap<BlockId, Vec<(BlockId, Option<ValueId>)>>;
-type IncomingValues = LookupMap<ValueId, Vec<IncomingValue>>;
-
-fn collect_incoming<P: Family>(graph: &EGraph<P>) -> Result<(IncomingBlocks, IncomingValues), String> {
-    let mut incoming_blocks = LookupMap::new();
-    let mut incoming_values = LookupMap::new();
-    let mut seen_edges = LookupSet::new();
-
-    for (source, block) in &graph.skeleton.blocks {
-        match &block.term {
-            Terminator::Branch { target, args } => record_edge(
-                graph,
-                &mut incoming_blocks,
-                &mut incoming_values,
-                &mut seen_edges,
-                source,
-                *target,
-                None,
-                args,
-            )?,
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => {
-                record_edge(
-                    graph,
-                    &mut incoming_blocks,
-                    &mut incoming_values,
-                    &mut seen_edges,
-                    source,
-                    *then_target,
-                    Some(*cond),
-                    then_args,
-                )?;
-                record_edge(
-                    graph,
-                    &mut incoming_blocks,
-                    &mut incoming_values,
-                    &mut seen_edges,
-                    source,
-                    *else_target,
-                    Some(*cond),
-                    else_args,
-                )?;
-            }
-            Terminator::Return(_) | Terminator::Unreachable => {}
-        }
-    }
-
-    Ok((incoming_blocks, incoming_values))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_edge<P: Family>(
-    graph: &EGraph<P>,
-    incoming_blocks: &mut IncomingBlocks,
-    incoming_values: &mut IncomingValues,
-    seen_edges: &mut LookupSet<(BlockId, BlockId, Option<ValueId>)>,
-    source: BlockId,
-    target: BlockId,
-    condition: Option<ValueId>,
-    args: &[FlowValueId],
-) -> Result<(), String> {
-    let target_block =
-        graph.skeleton.blocks.get(target).ok_or_else(|| {
-            format!("stage-dependence analysis found an unknown branch target {target:?}")
-        })?;
-    if target_block.params.len() != args.len() {
-        return Err(format!(
-            "stage-dependence analysis found branch {source:?} -> {target:?} with {} arguments for {} parameters",
-            args.len(),
-            target_block.params.len()
-        ));
-    }
-    if seen_edges.insert((source, target, condition)) {
-        incoming_blocks.entry(target).or_insert_with(Vec::new).push((source, condition));
-    }
-    for (&parameter, &value) in target_block.params.iter().zip(args) {
-        incoming_values.entry(parameter.value()).or_insert_with(Vec::new).push(IncomingValue {
-            source,
-            condition,
-            value: value.value(),
-        });
-    }
-    Ok(())
 }
