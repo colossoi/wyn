@@ -1,5 +1,6 @@
 use super::*;
 use crate::ast::{Span, TypeName};
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::graph_projector::GraphProjector;
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::stage_variance::StageDependenceAnalysis;
@@ -91,7 +92,7 @@ fn stage_invariance_and_scalar_relocation_legality_remain_separate() {
         graph,
     );
 
-    let dependence = StageDependenceAnalysis::for_entry(&entry).unwrap();
+    let dependence = StageDependenceAnalysis::for_entry(&entry, &GraphAnalysis::new(&entry.graph)).unwrap();
     assert!(params.iter().all(|parameter| dependence.dependence(*parameter).is_stage_invariant()));
     assert!(entry_parameter_is_scalar_relocatable(&entry, 0));
     assert!(entry_parameter_is_scalar_relocatable(&entry, 1));
@@ -145,7 +146,7 @@ fn structured_storage_prefix_requires_materialization() {
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -155,7 +156,7 @@ fn structured_storage_prefix_requires_materialization() {
         )
         .expect("structured storage recipe");
     assert_eq!(
-        prelude_materialization_policy(&recipe),
+        prelude_materialization_policy(&recipe, &GraphAnalysis::new(&recipe.projection.graph)),
         PreludeMaterializationPolicy::Required
     );
 }

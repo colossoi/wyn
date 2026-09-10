@@ -15,13 +15,14 @@ use crate::types::TypeExt;
 /// resources keep the operation on the serial fallback.
 pub(super) fn cloneable_capture_inputs(
     entry: &egir::program::PlannedEntry,
+    analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
     captures: &[OperandRef],
 ) -> Option<Vec<SemanticResourceDecl>> {
     let values = captures.iter().map(|capture| capture.value()).collect::<Option<Vec<_>>>()?;
     if values.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
         return None;
     }
-    graph_ops::read_storage_resources(&entry.graph, values)
+    graph_ops::read_storage_resources(analysis, values)
         .into_iter()
         .map(|access| {
             entry

@@ -13,6 +13,7 @@ use crate::ssa;
 
 pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), ConvertError> {
     for entry in &mut program.entry_points {
+        let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
         let mut lengths: HashMap<_, (BTreeSet<HostSizeInput>, u32)> = HashMap::new();
         let mut host_extents = HashMap::new();
 
@@ -34,7 +35,7 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                         let canonical = entry.graph.canonical_value(extent_node);
                         if scalar(entry.graph.nodes[canonical].ty()).is_some() {
                             host_extents
-                                .insert(extent_node, host_dependencies(&entry.graph, entry, extent_node));
+                                .insert(extent_node, host_dependencies(&analysis, entry, extent_node));
                         }
                     }
                 }
@@ -57,7 +58,7 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                     .dims()
                     .iter()
                     .filter_map(|dim| match dim {
-                        SegExtent::Value(node) => Some(host_dependencies(&entry.graph, entry, *node)),
+                        SegExtent::Value(node) => Some(host_dependencies(&analysis, entry, *node)),
                         _ => None,
                     })
                     .flatten()
@@ -135,11 +136,12 @@ fn scalar(ty: &Type<TypeName>) -> Option<HostSizeScalar> {
 }
 
 fn host_dependencies(
-    graph: &EGraph<Semantic>,
+    analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
     entry: &Entry<Semantic>,
     node: ValueId,
 ) -> Vec<HostSizeInput> {
-    graph_ops::value_producer_closure(graph, [node])
+    let graph = analysis.graph();
+    graph_ops::value_producer_closure(analysis, [node])
         .values()
         .iter()
         .copied()

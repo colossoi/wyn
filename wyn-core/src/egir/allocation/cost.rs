@@ -67,9 +67,10 @@ pub(crate) fn analyze_prelude(
     recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
 ) -> Option<PreludeAnalysis> {
     let graph = &recipe.projection.graph;
+    let analysis = graph_ops::GraphAnalysis::new(graph);
     let dependence =
-        super::super::stage_variance::StageDependenceAnalysis::for_entry_graph(entry, graph).ok()?;
-    let reachable = graph_ops::execution_value_producer_closure(graph, recipe.values.iter().copied());
+        super::super::stage_variance::StageDependenceAnalysis::for_entry(entry, &analysis).ok()?;
+    let reachable = graph_ops::execution_value_producer_closure(&analysis, recipe.values.iter().copied());
     let reachable = reachable.values();
     for &node in reachable {
         if let ValueKind::FuncParam { parameter } = &graph.nodes[node].kind {
@@ -96,12 +97,13 @@ pub(crate) fn analyze_prelude(
     Some(PreludeAnalysis {
         cost,
         output_count: (recipe.values.len() + recipe.live_outs().count()) as u64,
-        policy: prelude_materialization_policy(recipe),
+        policy: prelude_materialization_policy(recipe, &analysis),
     })
 }
 
 fn prelude_materialization_policy(
     recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
+    analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
 ) -> PreludeMaterializationPolicy {
     let structured = matches!(
         &recipe.source,
@@ -112,7 +114,7 @@ fn prelude_materialization_policy(
             |effect| {
                 matches!(effect.kind, SideEffectKind::Effect(EffectOp::Load { .. }))
                     && !graph_ops::read_storage_resources(
-                        &recipe.projection.graph,
+                        analysis,
                         graph_ops::effect_value_inputs(&recipe.projection.graph, effect),
                     )
                     .is_empty()

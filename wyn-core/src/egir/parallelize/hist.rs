@@ -19,7 +19,7 @@ use crate::op::BinaryOperator;
 use crate::ssa::types::{AtomicOp, ConstantValue};
 use crate::types::TypeExt;
 use crate::ResourceId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::model::{ParallelizeError, Result as ParallelizeResult};
 use super::planning::LocatedHist;
@@ -114,8 +114,9 @@ pub(super) fn analyze_hist_candidate(
             if bucket_count == 0 || operation.shape.len() != 1 || operation.destinations.len() != 1 {
                 return None;
             }
+            let analysis = egir::analysis::GraphAnalysis::new(graph);
             let resources_for = |node| {
-                let closure = egir::graph_ops::value_producer_closure(graph, [node]);
+                let closure = egir::graph_ops::value_producer_closure(&analysis, [node]);
                 entry.resources_referenced_by_nodes(graph, closure.values().iter().copied())
             };
             let resource_for = |node| {
@@ -133,6 +134,7 @@ pub(super) fn analyze_hist_candidate(
                 .chain(captures.iter().copied())
                 .flat_map(resources_for)
                 .collect();
+            let public_results = public_result_resources(entry, analysis.producers(), located.site);
             return Some(HistCandidate::Bucket(BucketCandidate {
                 site: located.site,
                 owner: located.owner,
@@ -140,8 +142,8 @@ pub(super) fn analyze_hist_candidate(
                 bucket_count,
                 destination: resource_for(operation.destinations[0].value())?,
                 input_resources,
-                counts: public_result_resource(entry, located.site, results.counts),
-                overflow: public_result_resource(entry, located.site, results.overflow),
+                counts: public_results.get(&results.counts.0).copied().flatten(),
+                overflow: public_results.get(&results.overflow.0).copied().flatten(),
             }));
         }
     }
@@ -159,35 +161,36 @@ pub(super) fn analyze_hist_candidate(
     }))
 }
 
-fn public_result_resource(
+fn public_result_resources(
     entry: &egir::program::PlannedEntry,
+    effects: &egir::types::SideEffectIndex,
     site: egir::types::SideEffectSite,
-    result: hist::HistResultId,
-) -> Option<ResourceId> {
-    let effects = entry.graph.side_effect_index();
-    let resources = entry
-        .outputs
-        .iter()
-        .filter_map(|output| {
-            let resource = output.resource?.0;
-            output
-                .routes
-                .iter()
-                .any(|route| {
-                    effects.effect_result_field(&entry.graph, route.source.value).is_some_and(
-                        |(_, representative, field)| {
-                            field == result.0 && effects.site(representative) == Some(site)
-                        },
-                    )
-                })
-                .then_some(resource)
-        })
-        .collect::<HashSet<_>>();
-    let mut resources = resources.into_iter();
-    let resource = resources.next()?;
-    resources.next().is_none().then_some(resource)
+) -> HashMap<usize, Option<ResourceId>> {
+    let mut resources = HashMap::new();
+    for output in &entry.outputs {
+        let Some(resource) = output.resource.map(|resource| resource.0) else {
+            continue;
+        };
+        for route in &output.routes {
+            let Some((_, representative, field)) =
+                effects.effect_result_field(&entry.graph, route.source.value)
+            else {
+                continue;
+            };
+            if effects.site(representative) == Some(site) {
+                resources
+                    .entry(field)
+                    .and_modify(|known| {
+                        if *known != Some(resource) {
+                            *known = None;
+                        }
+                    })
+                    .or_insert(Some(resource));
+            }
+        }
+    }
+    resources
 }
-
 fn analyze_operation(
     program: &ResourcesAllocated,
     graph: &egir::types::EGraph<Semantic>,

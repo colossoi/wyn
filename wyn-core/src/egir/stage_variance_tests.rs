@@ -1,4 +1,5 @@
 use super::*;
+use crate::egir::analysis::GraphAnalysis;
 use crate::flow;
 use crate::op;
 use crate::types;
@@ -35,6 +36,44 @@ fn parameter_dependences(
     dependences: impl IntoIterator<Item = StageDependence>,
 ) -> LookupMap<ParameterId, StageDependence> {
     params.ids().zip(dependences).collect()
+}
+
+#[test]
+fn shared_graph_facts_keep_parameter_seed_results_separate() {
+    let params = semantic_params([("capture", u32_ty())]);
+    let mut graph = EGraph::<Semantic>::new();
+    let capture = graph.add_test_value_parameter(params.ids().next().unwrap(), u32_ty());
+    let value = graph.intern_pure(
+        PureOp::BinOp(op::BinaryOperator::Add),
+        smallvec![capture, capture],
+        u32_ty(),
+        None,
+    );
+    let facts = GraphAnalysis::new(&graph);
+    let constant = StageDependenceAnalysis::for_graph(
+        &facts,
+        &parameter_dependences(&params, [StageDependence::constant()]),
+    )
+    .unwrap();
+    let varying = StageDependenceAnalysis::for_graph(
+        &facts,
+        &parameter_dependences(
+            &params,
+            [StageDependence::from_source(
+                Uniformity::InvocationVarying,
+                DependenceSource::RepeatedRegionInput,
+            )],
+        ),
+    )
+    .unwrap();
+    let missing = StageDependenceAnalysis::for_graph(&facts, &LookupMap::new()).unwrap();
+    assert!(constant.dependence(value).is_compile_time_constant());
+    assert_eq!(
+        varying.dependence(value).uniformity(),
+        Uniformity::InvocationVarying
+    );
+    assert!(varying.dependence(value).depends_on(DependenceSource::RepeatedRegionInput));
+    assert!(missing.dependence(value).depends_on(DependenceSource::Unknown));
 }
 
 #[test]
@@ -106,7 +145,7 @@ fn entry_uniforms_seed_invariance_and_calls_report_mixed_arguments() {
         graph,
     );
 
-    let analysis = StageDependenceAnalysis::for_entry(&entry).unwrap();
+    let analysis = StageDependenceAnalysis::for_entry(&entry, &GraphAnalysis::new(&entry.graph)).unwrap();
     assert_eq!(
         analysis.dependence(uniform).uniformity(),
         Uniformity::StageUniform
@@ -171,7 +210,7 @@ fn block_parameters_include_incoming_control_variance() {
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
 
     let analysis = StageDependenceAnalysis::for_graph(
-        &graph,
+        &GraphAnalysis::new(&graph),
         &parameter_dependences(
             &params,
             [StageDependence::from_source(
@@ -217,7 +256,7 @@ fn same_target_arms_preserve_control_dependence_for_equal_and_unequal_arguments(
             else_target: merge,
             else_args: graph.admit_flow_values([otherwise]),
         };
-        let analysis = StageDependenceAnalysis::for_graph(&graph, &seeds).unwrap();
+        let analysis = StageDependenceAnalysis::for_graph(&GraphAnalysis::new(&graph), &seeds).unwrap();
         assert_eq!(
             analysis.dependence(selected).uniformity(),
             Uniformity::InvocationVarying
@@ -265,7 +304,8 @@ fn invariant_loop_carried_values_converge_through_the_cfg_cycle() {
         merge: exit,
         continue_block: header,
     });
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &LookupMap::new()).unwrap();
+    let analysis =
+        StageDependenceAnalysis::for_graph(&GraphAnalysis::new(&graph), &LookupMap::new()).unwrap();
     for value in [current, next, result] {
         assert!(analysis.dependence(value).is_stage_invariant());
         assert!(!analysis.dependence(value).is_loop_invariant(header));
@@ -286,7 +326,7 @@ fn storage_provenance_is_independent_of_index_uniformity() {
     let uniform_load = graph.intern_pure(PureOp::Index, smallvec![storage, zero], ty.clone(), None);
     let varying_load = graph.intern_pure(PureOp::Index, smallvec![storage, varying_index], ty, None);
     let analysis = StageDependenceAnalysis::for_graph(
-        &graph,
+        &GraphAnalysis::new(&graph),
         &parameter_dependences(
             &params,
             [
@@ -334,7 +374,8 @@ fn invocation_intrinsics_are_varying_without_operands() {
         None,
     );
 
-    let analysis = StageDependenceAnalysis::for_graph(&graph, &LookupMap::new()).unwrap();
+    let analysis =
+        StageDependenceAnalysis::for_graph(&GraphAnalysis::new(&graph), &LookupMap::new()).unwrap();
     assert_eq!(
         analysis.dependence(thread_id).uniformity(),
         Uniformity::InvocationVarying
@@ -390,7 +431,7 @@ fn repeated_region_captures_are_analyzed_per_use() {
     let varying_capture =
         enclosing_graph.add_test_value_parameter(enclosing_params.ids().next().unwrap(), ty);
     let enclosing = StageDependenceAnalysis::for_graph(
-        &enclosing_graph,
+        &GraphAnalysis::new(&enclosing_graph),
         &parameter_dependences(
             &enclosing_params,
             [StageDependence::from_source(

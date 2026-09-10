@@ -495,7 +495,9 @@ pub(super) fn analyze_scan_candidate(
         .chain(reductions.iter().map(|reduction| &reduction.operator))
         .flat_map(|operator| operator.captures().iter().copied())
         .collect::<Vec<_>>();
-    let Some(operator_capture_inputs) = cloneable_capture_inputs(entry, &operator_captures) else {
+    let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
+    let Some(operator_capture_inputs) = cloneable_capture_inputs(entry, &analysis, &operator_captures)
+    else {
         return Ok(None);
     };
 
@@ -572,6 +574,7 @@ pub(super) fn analyze_scan_candidate(
     }
     let Some(reduction_routing) = super::reduce::analyze_reduction_routing(
         entry,
+        &analysis,
         located.op,
         &results[..reduction_results],
         resources,

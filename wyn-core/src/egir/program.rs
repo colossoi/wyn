@@ -6,6 +6,7 @@
 //! by those states.
 
 use crate::builtins;
+use crate::egir::analysis::GraphAnalysis;
 use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::LoweringProfile;
@@ -896,6 +897,7 @@ impl AllocatedEntry {
     /// do not need to rediscover that boundary from the projected graph.
     pub(crate) fn resources_referenced_by_projection(
         &self,
+        analysis: &GraphAnalysis<'_, Semantic<SemanticResourceRef>>,
         projection: &super::graph_projector::GraphProjection<SemanticResourceRef>,
     ) -> HashSet<ResourceId> {
         let mut resources = self.resources_referenced_by_nodes(&self.graph, projection.source_nodes());
@@ -907,7 +909,7 @@ impl AllocatedEntry {
                 }
             }
             resources.extend(
-                super::semantic_graph::read_resources(&self.graph, effect)
+                super::semantic_graph::read_resources(analysis, effect)
                     .into_iter()
                     .map(|access| access.resource.0),
             );
@@ -985,27 +987,9 @@ impl AllocatedEntry {
     /// Remove entry parameters and input resource declarations that the graph
     /// and output routes cannot observe.
     pub(crate) fn compact_interface(&mut self) {
-        let mut roots = self
-            .graph
-            .skeleton
-            .blocks
-            .iter()
-            .flat_map(|(_, block)| {
-                block
-                    .side_effects
-                    .iter()
-                    .flat_map(|effect| super::graph_ops::effect_value_inputs(&self.graph, effect))
-                    .chain(block.term.referenced_nodes())
-            })
-            .collect::<Vec<_>>();
-        for route in self.routes() {
-            roots.push(route.source.value);
-            roots.extend(route.writers.iter().filter_map(|writer| match writer {
-                OutputWriter::Value(value) => Some(*value),
-                OutputWriter::Effect(_) => None,
-            }));
-        }
-        let reachable = super::graph_ops::execution_value_producer_closure(&self.graph, roots);
+        let roots = self.routes().flat_map(RealizedOutputRoute::referenced_values);
+        let reachable =
+            super::graph_ops::execution_value_producer_closure(&GraphAnalysis::new(&self.graph), roots);
         let reachable = reachable.values();
         let mut reachable_resources =
             self.resources_referenced_by_nodes(&self.graph, reachable.iter().copied());
@@ -1032,6 +1016,8 @@ impl AllocatedEntry {
         }
         self.retain_parameter_indices(&kept_indices);
 
+        let analysis = GraphAnalysis::new(&self.graph);
+
         let mut used_resources = self
             .inputs
             .iter()
@@ -1041,7 +1027,7 @@ impl AllocatedEntry {
         for (_, block) in &self.graph.skeleton.blocks {
             for effect in &block.side_effects {
                 used_resources.extend(
-                    super::semantic_graph::read_resources(&self.graph, effect)
+                    super::semantic_graph::read_resources(&analysis, effect)
                         .into_iter()
                         .map(|access| access.resource.0),
                 );
@@ -1218,7 +1204,7 @@ impl AllocatedEntry {
 
 impl PlannedEntry {
     pub fn project(entry: &AllocatedEntry) -> Result<Self, String> {
-        let projection = super::graph_projector::GraphProjector::new(&entry.graph)
+        let projection = super::graph_projector::GraphProjector::new(&GraphAnalysis::new(&entry.graph))
             .all_with_values(entry.routes().map(|route| route.source.value).collect())
             .map_err(|error| format!("could not project semantic entry '{}': {error}", entry.name))?;
         Self::from_projection(

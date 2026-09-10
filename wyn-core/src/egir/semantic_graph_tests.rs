@@ -228,7 +228,13 @@ fn shared_facts_preserve_cross_block_observers_without_contraction_edges() {
     let consumer = egir.skeleton.blocks[entry].side_effects.pop().unwrap();
     egir.skeleton.blocks[next].side_effects.push(consumer);
     let mut facts = Facts::new();
-    facts.add_body(BodySite::Entry(0), &egir, []).unwrap();
+    facts
+        .add_body(
+            BodySite::Entry(0),
+            &crate::egir::analysis::GraphAnalysis::new(&egir),
+            [],
+        )
+        .unwrap();
     let groups = facts.operations.keys().copied().collect::<Vec<_>>();
     let producer = facts.builder.outputs(groups[0]).unwrap()[0];
     let input = facts.ports[&((BodySite::Entry(0), next), a)];
@@ -251,8 +257,20 @@ fn shared_facts_qualify_capture_sources_by_body() {
     append_capturing_map(&mut first, 0, vec![value]);
     append_capturing_map(&mut second, 1, vec![value]);
     let mut facts = Facts::new();
-    facts.add_body(BodySite::Entry(0), &first, []).unwrap();
-    facts.add_body(BodySite::Entry(1), &second, []).unwrap();
+    facts
+        .add_body(
+            BodySite::Entry(0),
+            &crate::egir::analysis::GraphAnalysis::new(&first),
+            [],
+        )
+        .unwrap();
+    facts
+        .add_body(
+            BodySite::Entry(1),
+            &crate::egir::analysis::GraphAnalysis::new(&second),
+            [],
+        )
+        .unwrap();
     let graph = SemanticGraph::from_facts(facts);
     for index in 0..2 {
         let source = SourceValue {
@@ -276,7 +294,13 @@ entry repeated(xs: [4]i32) [4]i32 =
     let tlc = crate::tlc::infer_input_slice_bounds(crate::compile_thru_tlc(source).unwrap());
     let program = egir::reify_soacs(crate::to_egraph(tlc).unwrap());
     let mut facts = Facts::new();
-    facts.add_body(BodySite::Entry(0), &program.entry_points[0].graph, []).unwrap();
+    facts
+        .add_body(
+            BodySite::Entry(0),
+            &crate::egir::analysis::GraphAnalysis::new(&program.entry_points[0].graph),
+            [],
+        )
+        .unwrap();
     let groups = facts.operations.keys().copied().collect::<Vec<_>>();
     let graph = facts.builder.clone().finish(groups.iter().map(|id| (*id, ()))).unwrap();
     assert!(graph.order().is_ok());

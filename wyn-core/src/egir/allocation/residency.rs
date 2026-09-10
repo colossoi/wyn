@@ -16,6 +16,7 @@ use wyn_base::IdSource;
 
 use polytype::Type;
 
+use super::super::analysis::GraphAnalysis;
 use super::super::from_tlc::ConvertError;
 use super::super::graph_ops;
 use super::super::graph_projector::{
@@ -51,6 +52,31 @@ type AllocatedSemantic = SemanticFamily<SemanticResourceRef>;
 type AllocatedGraph = EGraph<AllocatedSemantic>;
 type AllocatedSideEffect = SideEffect<AllocatedSemantic>;
 
+/// One read phase. Callable structure may be shared here; dependence seeds
+/// and results remain specific to each entry or callable use.
+fn residency_facts(program: &ResidencyDraft) -> (Vec<GraphAnalysis<'_, AllocatedSemantic>>, SemanticGraph) {
+    let entries =
+        program.entry_points.iter().map(|entry| GraphAnalysis::new(&entry.graph)).collect::<Vec<_>>();
+    let functions = program
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                BodySite::Function(function.region),
+                GraphAnalysis::new(&function.graph),
+            )
+        })
+        .collect::<Vec<_>>();
+    let dependencies = SemanticGraph::for_bodies(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, analysis)| (BodySite::Entry(index), analysis))
+            .chain(functions.iter().map(|(body, analysis)| (*body, analysis))),
+    );
+    (entries, dependencies)
+}
+
 enum OperationMaterializationPlan {
     FixedOperation {
         entry: usize,
@@ -71,16 +97,12 @@ enum OperationMaterializationPlan {
     },
 }
 
-enum StagePreludeCandidate {
-    ParallelPrelude(StagePreludePlan),
-    DirectStagePrelude(StagePreludePlan),
-}
-
 struct StagePreludePlan {
     entry: usize,
     insertion_site: Option<SideEffectSite>,
     recipe: ProjectedValueRecipe<SemanticResourceRef>,
     outputs: Vec<StagePreludeOutput>,
+    producer_resources: HashSet<ResourceId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +126,7 @@ struct ProjectedOperation {
     projected_site: SideEffectSite,
     projection: GraphProjection<SemanticResourceRef>,
     space: SegSpace<SemanticResourceRef>,
+    producer_resources: HashSet<ResourceId>,
 }
 
 struct RuntimeArrayHandoff {
@@ -194,24 +217,49 @@ pub(super) fn resolve_residency_with_policy(
     topology: PipelineTopologyPolicy,
 ) -> Result<ResidencyDraft, ConvertError> {
     loop {
-        // Required operation-result handoffs are a normalization phase, not a
-        // failed attempt whose fallback is speculative prelude extraction.
-        program = normalize_operation_result_residency(program, topology)?;
-
+        // Required handoffs take priority over optional preludes. Every rewrite
+        // restarts this read phase with fresh facts for the new graph.
+        let (analyses, dependencies) = residency_facts(&program);
+        let operation = match plan_operation_result(&program, &dependencies, &analyses)
+            .map_err(ConvertError::Internal)?
+        {
+            Some(plan) => Some(plan),
+            None => plan_scalar_result_handoff(&program, &dependencies, &analyses)
+                .map_err(ConvertError::Internal)?,
+        };
+        if let Some(plan) = operation {
+            if topology == PipelineTopologyPolicy::AuthoredOnly {
+                return Err(ConvertError::PipelineTopology(
+                    "authored-only lowering cannot represent an operation result that requires a compiler-created stage or handoff resource".into(),
+                ));
+            }
+            program = match plan {
+                OperationMaterializationPlan::FixedOperation {
+                    entry,
+                    kind,
+                    operation,
+                    outputs,
+                } => materialize_operation_result(program, entry, kind, operation, outputs),
+                OperationMaterializationPlan::RuntimeArray {
+                    entry,
+                    operation,
+                    backing,
+                    length,
+                    elem_ty,
+                    result_ty,
+                    size,
+                } => materialize_runtime_array_result(
+                    program, entry, operation, backing, length, elem_ty, result_ty, size,
+                ),
+            }
+            .map_err(ConvertError::Internal)?;
+            continue;
+        }
         if topology == PipelineTopologyPolicy::AuthoredOnly {
             break;
         }
-
-        // Prelude extraction is a separate, cost-driven phase. Its rewrite
-        // changes the graph, so restart required-residency normalization
-        // before considering another profitable prelude.
-        let dependencies = SemanticGraph::for_program(&program);
-        let Some(candidate) = select_stage_prelude_candidate(&program, &dependencies) else {
+        let Some(plan) = select_stage_prelude_candidate(&program, &dependencies, &analyses) else {
             break;
-        };
-        let plan = match candidate {
-            StagePreludeCandidate::ParallelPrelude(plan)
-            | StagePreludeCandidate::DirectStagePrelude(plan) => plan,
         };
         program = materialize_stage_prelude(
             program,
@@ -219,79 +267,25 @@ pub(super) fn resolve_residency_with_policy(
             plan.insertion_site,
             plan.recipe,
             plan.outputs,
+            plan.producer_resources,
         )
         .map_err(ConvertError::Internal)?;
     }
     Ok(program)
 }
-
-fn normalize_operation_result_residency(
-    mut program: ResidencyDraft,
-    topology: PipelineTopologyPolicy,
-) -> Result<ResidencyDraft, ConvertError> {
-    loop {
-        // Every rewrite can change both operation dependencies and which
-        // runtime-composite arrays need storage, so neither analysis may be
-        // reused across iterations.
-        let dependencies = SemanticGraph::for_program(&program);
-
-        let plan = if let Some(plan) =
-            plan_operation_result(&program, &dependencies).map_err(ConvertError::Internal)?
-        {
-            plan
-        } else if let Some(plan) =
-            plan_scalar_result_handoff(&program, &dependencies).map_err(ConvertError::Internal)?
-        {
-            plan
-        } else {
-            return Ok(program);
-        };
-        if topology == PipelineTopologyPolicy::AuthoredOnly {
-            return Err(ConvertError::PipelineTopology(
-                "authored-only lowering cannot represent an operation result that requires a compiler-created stage or handoff resource"
-                    .into(),
-            ));
-        }
-        program = match plan {
-            OperationMaterializationPlan::FixedOperation {
-                entry,
-                kind,
-                operation,
-                outputs,
-            } => materialize_operation_result(program, entry, kind, operation, outputs)
-                .map_err(ConvertError::Internal)?,
-            OperationMaterializationPlan::RuntimeArray {
-                entry,
-                operation,
-                backing,
-                length,
-                elem_ty,
-                result_ty,
-                size,
-            } => materialize_runtime_array_result(
-                program, entry, operation, backing, length, elem_ty, result_ty, size,
-            )
-            .map_err(ConvertError::Internal)?,
-        };
-    }
-}
-
 fn select_stage_prelude_candidate(
     program: &ResidencyDraft,
     dependencies: &SemanticGraph,
-) -> Option<StagePreludeCandidate> {
-    if let Some(plan) = plan_parallel_prelude(program, dependencies) {
-        return Some(StagePreludeCandidate::ParallelPrelude(plan));
-    }
-    if let Some(plan) = plan_direct_stage_prelude(program) {
-        return Some(StagePreludeCandidate::DirectStagePrelude(plan));
-    }
-    None
+    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
+) -> Option<StagePreludePlan> {
+    plan_parallel_prelude(program, dependencies, analyses)
+        .or_else(|| plan_direct_stage_prelude(program, analyses))
 }
 
 fn plan_operation_result(
     program: &ResidencyDraft,
     dependencies: &SemanticGraph,
+    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         for (block_id, block) in &entry.graph.skeleton.blocks {
@@ -310,18 +304,26 @@ fn plan_operation_result(
                 };
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
-                        let Some(kind) = operation_result_residency(
-                            entry,
-                            op,
+                        if op.form.post.result_types.is_empty() {
+                            continue;
+                        }
+                        let Some(kind) = array_result_residency(
                             result,
-                            source_site,
                             semantic_consumers,
                             dependencies.array_residency_demands.contains(&id),
                         ) else {
                             continue;
                         };
-                        let Some(plan) =
-                            operation_result_plan(entry_index, entry, op, result, id, source_site, kind)?
+                        let Some(plan) = operation_result_plan(
+                            entry_index,
+                            entry,
+                            &analyses[entry_index],
+                            op,
+                            result,
+                            id,
+                            source_site,
+                            kind,
+                        )?
                         else {
                             continue;
                         };
@@ -331,6 +333,7 @@ fn plan_operation_result(
                         if let Some(plan) = filter_runtime_array_plan(
                             entry_index,
                             entry,
+                            &analyses[entry_index],
                             op,
                             result,
                             id,
@@ -351,9 +354,11 @@ fn plan_operation_result(
 fn plan_scalar_result_handoff(
     program: &ResidencyDraft,
     dependencies: &SemanticGraph,
+    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let uses = graph_ops::SliceFacts::build(&entry.graph);
+        let analysis = &analyses[entry_index];
+        let invariant = std::cell::OnceCell::new();
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
                 let Some(result) = effect.result.as_ref() else {
@@ -372,17 +377,19 @@ fn plan_scalar_result_handoff(
                 };
                 if !scalar_result_requires_handoff(
                     entry,
+                    analysis,
+                    &invariant,
                     op,
                     result,
                     source_site,
                     Some(&semantic_consumers),
-                    &uses,
                 ) {
                     continue;
                 }
                 let Some(plan) = operation_result_plan(
                     entry_index,
                     entry,
+                    analysis,
                     op,
                     result,
                     id,
@@ -402,6 +409,7 @@ fn plan_scalar_result_handoff(
 fn filter_runtime_array_plan(
     entry_index: usize,
     entry: &AllocatedEntry,
+    analysis: &GraphAnalysis<'_, AllocatedSemantic>,
     op: &filter::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
@@ -421,7 +429,7 @@ fn filter_runtime_array_plan(
     }
     let elem_ty = op.body.output_element_type().clone();
     let result_ty = result.ty().clone();
-    let projection = GraphProjector::new(&entry.graph)
+    let projection = GraphProjector::new(analysis)
         .selected_operation_recipe(HashSet::from([source_site]))
         .map_err(|error| format!("could not project runtime-array producer {producer:?}: {error}"))?;
     let projected_site = projection
@@ -439,6 +447,7 @@ fn filter_runtime_array_plan(
             producer,
             source_site,
             projected_site,
+            producer_resources: entry.resources_referenced_by_projection(analysis, &projection),
             projection,
             space: space.clone(),
         },
@@ -456,86 +465,27 @@ fn filter_runtime_array_plan(
     }))
 }
 
-fn operation_result_residency(
-    entry: &AllocatedEntry,
-    op: &screma::Op<AllocatedSemantic>,
-    result: &ResultBinding<Type<TypeName>>,
-    site: SideEffectSite,
-    consumers: Option<&HashSet<SemanticOpId>>,
-    requires_array_storage: bool,
-) -> Option<FixedMaterializationKind> {
-    if op.form.post.result_types.is_empty() {
-        return None;
-    }
-    cloneable_operation_dependencies(entry, op, site)?;
-    array_result_residency(entry, result, consumers, requires_array_storage)
-}
-
 fn scalar_result_requires_handoff(
     entry: &AllocatedEntry,
+    analysis: &GraphAnalysis<'_, AllocatedSemantic>,
+    invariant: &std::cell::OnceCell<bool>,
     op: &screma::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     site: SideEffectSite,
     consumers: Option<&HashSet<SemanticOpId>>,
-    uses: &graph_ops::SliceFacts,
 ) -> bool {
     if !op.form.post.result_types.is_empty()
         || !op.is_reduce()
         || op.form.reductions.len() != 1
         || !(has_segmented_screma_consumer(entry, consumers) || !entry.execution_model.is_compute())
-        || !result.single_value().is_some_and(|value| scalar_result_is_used(uses, value, site))
+        || !result.single_value().is_some_and(|value| scalar_result_is_used(analysis.slice(), value, site))
     {
         return false;
     }
-    cloneable_operation_dependencies(entry, op, site).is_some_and(|_| invocation_invariant(entry, uses))
-}
-
-fn cloneable_operation_dependencies(
-    entry: &AllocatedEntry,
-    op: &screma::Op<AllocatedSemantic>,
-    site: SideEffectSite,
-) -> Option<super::super::slice::LiveSlice> {
-    let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
-        return None;
-    };
-    let cloneable = op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
-        && resources.iter().all(|resource| {
-            resource.access == ResourceAccess::Read
-                || entry
-                    .outputs
-                    .iter()
-                    .filter_map(|output| output.resource)
-                    .any(|output| output == resource.resource)
-        });
-    let facts = graph_ops::SliceFacts::build(&entry.graph);
-    let slice = facts
-        .select(
-            [],
-            [site],
-            [],
-            |node| match node {
-                wyn_slice::Node::Operation(producer) => producer.block == site.block,
-                wyn_slice::Node::Value(_) => true,
-            },
-            |_| false,
-            &[],
-        )
-        .ok()?;
-    if !cloneable || !slice.operations().iter().filter(|producer| **producer != site).all(|producer| {
-        matches!(&entry.graph.skeleton.effect(*producer).kind,
-            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
-                if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
-                    if output_slots.is_empty()
-                        && op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
-                        && resources.iter().all(|resource| resource.access == ResourceAccess::Read)))
-    }) {
-        return None;
-    }
-    Some(slice)
+    *invariant.get_or_init(|| invocation_invariant(entry, analysis))
 }
 
 fn array_result_residency(
-    _entry: &AllocatedEntry,
     result: &ResultBinding<Type<TypeName>>,
     consumers: Option<&HashSet<SemanticOpId>>,
     requires_array_storage: bool,
@@ -552,17 +502,30 @@ fn array_result_residency(
 fn operation_result_plan(
     entry_index: usize,
     entry: &AllocatedEntry,
+    analysis: &GraphAnalysis<'_, AllocatedSemantic>,
     op: &screma::Op<AllocatedSemantic>,
     result: &ResultBinding<Type<TypeName>>,
     producer: SemanticOpId,
     source_site: SideEffectSite,
     kind: FixedMaterializationKind,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
-    let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
-        return Err(format!("materialization producer {producer:?} is not segmented"));
+    let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state() else {
+        return Ok(None);
     };
+    if !op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
+        || !resources.iter().all(|resource| {
+            resource.access == ResourceAccess::Read
+                || entry
+                    .outputs
+                    .iter()
+                    .filter_map(|output| output.resource)
+                    .any(|output| output == resource.resource)
+        })
+    {
+        return Ok(None);
+    }
     let projection =
-        match GraphProjector::new(&entry.graph).selected_operation_recipe(HashSet::from([source_site])) {
+        match GraphProjector::new(analysis).selected_operation_recipe(HashSet::from([source_site])) {
             Ok(projection) => projection,
             Err(_) => {
                 // Projection feasibility is part of the materialization policy:
@@ -571,6 +534,18 @@ fn operation_result_plan(
                 return Ok(None);
             }
         };
+    // Projection already checked the complete producer closure, block-parameter
+    // boundary, and retained observers. Apply cloneability to that selection.
+    if !projection.source_effects().iter().filter(|site| **site != source_site).all(|site| {
+        matches!(&entry.graph.skeleton.effect(*site).kind,
+            SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
+                if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
+                    if output_slots.is_empty()
+                        && op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
+                        && resources.iter().all(|resource| resource.access == ResourceAccess::Read)))
+    }) {
+        return Ok(None);
+    }
     let output_specs = output_specs(result, kind, space, op)
         .ok_or_else(|| format!("materialization producer {producer:?} has an unsupported output layout"))?;
     let projected_result = projection
@@ -588,6 +563,7 @@ fn operation_result_plan(
             producer,
             source_site,
             projected_site,
+            producer_resources: entry.resources_referenced_by_projection(analysis, &projection),
             projection,
             space: space.clone(),
         },
@@ -598,6 +574,7 @@ fn operation_result_plan(
 fn plan_parallel_prelude(
     program: &ResidencyDraft,
     dependencies: &SemanticGraph,
+    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
 ) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         for prelude in parallel_preludes(entry, dependencies, BodySite::Entry(entry_index)) {
@@ -620,10 +597,10 @@ fn plan_parallel_prelude(
                 continue;
             }
             let consumer_site_set = consumer_sites.iter().copied().collect::<HashSet<_>>();
-            let projector = GraphProjector::new(&entry.graph);
+            let projector = GraphProjector::new(&analyses[entry_index]);
             if !source_is_observed_only_by_consumers_or_outputs(
                 entry,
-                projector.facts(),
+                analyses[entry_index].slice(),
                 prelude.root,
                 &consumer_site_set,
             ) {
@@ -652,6 +629,8 @@ fn plan_parallel_prelude(
             return Some(StagePreludePlan {
                 entry: entry_index,
                 insertion_site: Some(insertion_site),
+                producer_resources: entry
+                    .resources_referenced_by_projection(&analyses[entry_index], &recipe.projection),
                 recipe,
                 outputs,
             });
@@ -665,9 +644,12 @@ fn plan_parallel_prelude(
 /// uniform work clears the singleton-launch overhead.
 const DIRECT_STAGE_INVOCATION_FALLBACK: u64 = 64;
 
-fn plan_direct_stage_prelude(program: &ResidencyDraft) -> Option<StagePreludePlan> {
+fn plan_direct_stage_prelude(
+    program: &ResidencyDraft,
+    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
+) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let Ok(analysis) = StageDependenceAnalysis::for_entry(entry) else {
+        let Ok(analysis) = StageDependenceAnalysis::for_entry(entry, &analyses[entry_index]) else {
             continue;
         };
         let frontier = graph_ops::maximal_execution_frontier(&entry.graph, |node| {
@@ -676,10 +658,12 @@ fn plan_direct_stage_prelude(program: &ResidencyDraft) -> Option<StagePreludePla
         if frontier.is_empty() {
             continue;
         }
-        let Ok(recipe) = GraphProjector::new(&entry.graph).entry_values_recipe_with_retained_values(
-            frontier.iter().copied(),
-            entry.routes().map(|route| route.source.value),
-        ) else {
+        let Ok(recipe) = GraphProjector::new(&analyses[entry_index])
+            .entry_values_recipe_with_retained_values(
+                frontier.iter().copied(),
+                entry.routes().map(|route| route.source.value),
+            )
+        else {
             continue;
         };
         let Some(outputs) = stage_prelude_outputs(entry, &recipe) else {
@@ -694,6 +678,8 @@ fn plan_direct_stage_prelude(program: &ResidencyDraft) -> Option<StagePreludePla
         return Some(StagePreludePlan {
             entry: entry_index,
             insertion_site: None,
+            producer_resources: entry
+                .resources_referenced_by_projection(&analyses[entry_index], &recipe.projection),
             recipe,
             outputs,
         });
@@ -981,11 +967,11 @@ fn scalar_result_is_used(uses: &graph_ops::SliceFacts, result: ValueId, producer
     observers.effect_sites().any(|site| site != producer) || observers.terminator_blocks().next().is_some()
 }
 
-fn invocation_invariant(entry: &AllocatedEntry, facts: &graph_ops::SliceFacts) -> bool {
-    let Ok(dependence) = StageDependenceAnalysis::for_entry(entry) else {
+fn invocation_invariant(entry: &AllocatedEntry, analysis: &GraphAnalysis<'_, AllocatedSemantic>) -> bool {
+    let Ok(dependence) = StageDependenceAnalysis::for_entry(entry, analysis) else {
         return false;
     };
-    let Ok(slice) = facts.select(
+    let Ok(slice) = analysis.slice().select(
         graph_ops::execution_value_roots(&entry.graph),
         [],
         [],
@@ -1030,6 +1016,7 @@ fn materialize_operation_result(
         producer: producer_id,
         source_site,
         projected_site,
+        producer_resources,
         projection,
         space,
     } = operation;
@@ -1047,7 +1034,6 @@ fn materialize_operation_result(
         .collect::<Vec<_>>();
     let source_output_resources =
         entry.outputs.iter().filter_map(|output| output.resource.map(|resource| resource.0)).collect();
-    let producer_resources = entry.resources_referenced_by_projection(&projection);
     let producer_storage = entry.resource_declarations_for(&producer_resources);
     let execution_model = match &entry.execution_model {
         ExecutionModel::Compute { local_size } => ExecutionModel::Compute {
@@ -1179,13 +1165,13 @@ fn materialize_runtime_array_result(
         producer: producer_id,
         source_site,
         projected_site,
+        producer_resources,
         projection,
         space,
     } = operation;
     let stage_number = data.stages.stage_count();
     let entry = &entry_points[entry_index];
     let consumer_stage = data.stage_ids[&entry.id];
-    let producer_resources = entry.resources_referenced_by_projection(&projection);
     let producer_storage = entry.resource_declarations_for(&producer_resources);
     let execution_model = match &entry.execution_model {
         ExecutionModel::Compute { local_size } => ExecutionModel::Compute {
@@ -1540,6 +1526,7 @@ fn materialize_stage_prelude(
     insertion_site: Option<SideEffectSite>,
     recipe: ProjectedValueRecipe<SemanticResourceRef>,
     outputs: Vec<StagePreludeOutput>,
+    producer_resources: HashSet<ResourceId>,
 ) -> Result<ResidencyDraft, String> {
     let required = recipe.projection.output_sources().collect::<HashSet<_>>();
     if outputs.len() != required.len()
@@ -1571,7 +1558,6 @@ fn materialize_stage_prelude(
     let producer_effects = projection.source_effects().clone();
     let producer_entry = {
         let entry = &entry_points[entry_index];
-        let producer_resources = entry.resources_referenced_by_projection(&projection);
         projected_materialization_entry(
             &mut data.core.identities,
             stage_number,
@@ -1827,23 +1813,28 @@ fn output_specs(
 }
 
 fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[ValueId]) {
-    let sites = {
-        let facts = graph_ops::SliceFacts::build(graph);
-        values
+    let updates = {
+        let analysis = GraphAnalysis::new(graph);
+        let sites = values
             .iter()
-            .flat_map(|value| facts.value_observers(*value).effect_sites().collect::<Vec<_>>())
+            .flat_map(|value| analysis.slice().value_observers(*value).effect_sites().collect::<Vec<_>>())
             .filter(|site| {
                 matches!(&graph.skeleton.effect(*site).kind,
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
                     if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
             })
-            .collect::<HashSet<_>>()
+            .collect::<HashSet<_>>();
+        sites
+            .into_iter()
+            .map(|site| {
+                (
+                    site,
+                    super::super::semantic_graph::read_resources(&analysis, graph.skeleton.effect(site)),
+                )
+            })
+            .collect::<Vec<_>>()
     };
-    for site in sites {
-        let reads = {
-            let effect = graph.skeleton.effect(site);
-            super::super::semantic_graph::read_resources(graph, effect)
-        };
+    for (site, reads) in updates {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) =
             &mut graph.skeleton.effect_mut(site).kind
         else {

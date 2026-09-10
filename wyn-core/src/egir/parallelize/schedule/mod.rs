@@ -804,61 +804,49 @@ impl ScheduleBuilder {
         Ok(())
     }
 
-    fn resource_kernels(
-        &self,
-        stage: StageId,
-        resource: ResourceId,
-        writes: bool,
-        membership: &HashMap<KernelId, StageId>,
-    ) -> Vec<KernelId> {
-        self.catalog
-            .iter()
-            .filter_map(|(&id, kernel)| {
-                (membership[&id] == stage
-                    && kernel.resources.iter().any(|access| {
-                        access.resource == resource
-                            && if writes { access.access.writes() } else { access.access.reads() }
-                    }))
-                .then_some(id)
-            })
-            .collect()
-    }
-
     pub(super) fn finish(
         mut self,
         stages: &StagedProgram,
         serial: bool,
     ) -> Result<KernelPlan, KernelMutationError> {
         // All stages are bound before projecting resident flows onto kernels.
-        let membership = self
-            .catalog
-            .keys()
-            .map(|&id| {
-                (
-                    id,
-                    self.topology.stage_of(id).unwrap_or_else(|| unreachable!("bound kernel")),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let mut readers = HashMap::<_, Vec<_>>::new();
+        let mut writers = HashMap::<_, Vec<_>>::new();
+        for (&id, kernel) in &self.catalog {
+            let stage = self.topology.stage_of(id).unwrap_or_else(|| unreachable!("bound kernel"));
+            for access in &kernel.resources {
+                for (index, includes) in [
+                    (&mut readers, access.access.reads()),
+                    (&mut writers, access.access.writes()),
+                ] {
+                    if includes {
+                        let kernels = index.entry((stage, access.resource)).or_default();
+                        // Catalog order preserves deterministic edges; repeated
+                        // declarations still identify each kernel only once.
+                        if kernels.last() != Some(&id) {
+                            kernels.push(id);
+                        }
+                    }
+                }
+            }
+        }
         for (_, flow) in stages.flows() {
             let producer = flow.producer();
             for &consumer in flow.consumers() {
                 let mut surviving = false;
                 for resource in [Some(flow.storage().data), flow.storage().length].into_iter().flatten() {
-                    let readers = self.resource_kernels(consumer, resource, false, &membership);
-                    if readers.is_empty() {
+                    let Some(readers) = readers.get(&(consumer, resource)) else {
                         continue;
-                    }
+                    };
                     surviving = true;
-                    let writers = self.resource_kernels(producer, resource, true, &membership);
-                    if writers.is_empty() {
+                    let Some(writers) = writers.get(&(producer, resource)) else {
                         return Err(format!(
                             "flow producer {producer:?} does not declare a writer for {resource:?}"
                         )
                         .into());
-                    }
-                    for reader in readers {
-                        for &writer in &writers {
+                    };
+                    for &reader in readers {
+                        for &writer in writers {
                             if writer != reader {
                                 self.topology.connect_resource(resource, writer, reader)?;
                             }

@@ -67,9 +67,10 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
     pub fn add_body(
         &mut self,
         body: BodySite,
-        graph: &EGraph<Semantic<R>>,
+        analysis: &crate::egir::analysis::GraphAnalysis<'_, Semantic<R>>,
         observers: impl IntoIterator<Item = (crate::flow::BlockId, ValueId)>,
     ) -> Result<(), Error> {
+        let graph = analysis.graph();
         let mut producers = LookupMap::new();
         let mut results = Vec::new();
         let mut groups = Vec::new();
@@ -126,7 +127,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
                         site: SideEffectSite { block, index },
                         semantic_id: effect.kind.soac_id().copied(),
                         captures,
-                        resources: resources(graph, effect),
+                        resources: resources(analysis, effect),
                     },
                 );
                 groups.push(group);
@@ -196,7 +197,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
             let port = self.port((body, block), graph, value, &producers, &results)?;
             self.builder.observe(port)?;
         }
-        let interfaces = crate::egir::block_interface::extract(graph).map_err(|_| Error::Port)?;
+        let interfaces = analysis.interfaces().map_err(|_| Error::Port)?;
         for (&(scope, value), &port) in &self.ports {
             if scope.0 == body {
                 if let ValueKind::BlockParam { block, index } = graph.nodes[value].kind() {
@@ -292,17 +293,18 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
 }
 
 fn resources<R: GraphResource + Copy + Ord>(
-    graph: &EGraph<Semantic<R>>,
+    analysis: &crate::egir::analysis::GraphAnalysis<'_, Semantic<R>>,
     effect: &super::SideEffect<Semantic<R>>,
 ) -> Vec<SegResourceAccess<R>> {
+    let graph = analysis.graph();
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
             screma::SemanticState::Segmented { resources, .. } => resources.clone(),
-            screma::SemanticState::Serial => read_resources(graph, effect),
+            screma::SemanticState::Serial => read_resources(analysis, effect),
         },
         SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => op.state.resources.clone(),
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
-            let mut resources = read_resources(graph, effect);
+            let mut resources = read_resources(analysis, effect);
             for destination in op
                 .form
                 .operations
@@ -321,6 +323,6 @@ fn resources<R: GraphResource + Copy + Ord>(
             }
             resources
         }
-        SideEffectKind::Effect(_) => read_resources(graph, effect),
+        SideEffectKind::Effect(_) => read_resources(analysis, effect),
     }
 }

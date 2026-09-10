@@ -1,6 +1,7 @@
 use super::*;
 use crate::ast::TypeName;
 use crate::egir;
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
 use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacEffect, SoacInputType, SoacOwnership};
@@ -93,7 +94,8 @@ fn tuple_projection_keeps_only_the_observed_producer() {
         None,
     );
     let projected = graph.intern_pure(PureOp::Project { index: 1 }, smallvec![tuple], ty, None);
-    let facts = super::super::slice::SliceFacts::build(&graph);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let facts = graph_analysis.slice();
     assert!(!facts.pure_reaches(first, projected));
     assert!(facts.pure_reaches(second, projected));
     assert!(eliminate_dead_seg_ops_in_graph(&mut graph, [projected]));

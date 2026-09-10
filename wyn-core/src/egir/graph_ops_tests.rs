@@ -1,6 +1,7 @@
 use super::super::types::Semantic;
 use super::*;
 use crate::ast::TypeName;
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::types::{EffectOp, EffectToken, OperandRef, SkeletonTerminator};
 use crate::op;
 use crate::ssa::types::ConstantValue;
@@ -245,7 +246,8 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         None,
     );
 
-    let closure = value_producer_closure(&graph, [tail]);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let closure = value_producer_closure(&graph_analysis, [tail]);
 
     assert_eq!(
         *closure.operations(),
@@ -261,7 +263,7 @@ fn value_producer_closure_crosses_effects_block_params_and_loop_cycles() {
         );
     }
 
-    let uses = SliceFacts::build(&graph);
+    let uses = graph_analysis.slice();
     let pure = uses.pure_observers(source);
     assert_eq!(
         pure.effect_sites().collect::<HashSet<_>>(),

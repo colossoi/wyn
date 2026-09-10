@@ -1,5 +1,6 @@
 use super::*;
 use crate::ast::TypeName;
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::types::{
     EffectOp, EffectToken, OperandRef, PlaceAccess, PlaceId, PlaceRegion, PlaceType, PureOp, SideEffectKind,
 };
@@ -117,7 +118,7 @@ fn selected_projection_remaps_cfg_aliases_and_value_producers() {
     graph.nodes[produced].alias = Some(alias);
     graph.nodes[unrelated].alias = Some(alias);
 
-    let projected = GraphProjector::new(&graph)
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph))
         .selected(HashSet::from([SideEffectSite {
             block: body,
             index: 0,
@@ -165,7 +166,7 @@ fn complete_projection_remaps_loop_headers_and_parameters() {
         merge: exit,
         continue_block: header,
     });
-    let projected = GraphProjector::new(&graph).all().expect("complete projection");
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph)).all().expect("complete projection");
     assert_eq!(projected.graph.skeleton.blocks.len(), 3);
     assert_eq!(
         projected.graph.skeleton.blocks[projected.block(header).unwrap()].params.len(),
@@ -237,7 +238,7 @@ fn captured_value_recipe_projects_a_structured_loop_prefix() {
         continue_block: body,
     });
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -297,7 +298,7 @@ fn captured_value_recipe_projects_a_structured_selection_prefix() {
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[entry].control_header = Some(ControlHeader::Selection { merge: continuation });
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -357,7 +358,7 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
     graph.skeleton.blocks[then_block].term = SkeletonTerminator::Return(None);
     graph.skeleton.blocks[else_block].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
             boundary,
             SideEffectSite {
@@ -398,7 +399,8 @@ fn entry_recipe_reports_selected_effect_result_used_by_external_value() {
         u32_ty(),
         None,
     );
-    let projector = GraphProjector::new(&graph);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let projector = GraphProjector::new(&graph_analysis);
 
     let internal_only = projector.entry_value_recipe(root).expect("entry value recipe");
     assert!(internal_only.live_outs().next().is_none());
@@ -432,7 +434,7 @@ fn entry_recipe_projects_multiple_requested_values_as_one_component() {
     );
     graph.skeleton.blocks[entry].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .entry_values_recipe([first, second, first])
         .expect("multi-value entry recipe");
     assert_eq!(recipe.projection.slice.inputs(), &HashSet::from([parameter]));
@@ -480,7 +482,7 @@ fn structured_value_recipe_leaves_independent_continuation_effect_in_source() {
     graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let recipe = GraphProjector::new(&graph)
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
             result,
             SideEffectSite {
@@ -523,7 +525,7 @@ fn selected_operation_recipe_detaches_an_independent_continuation_effect() {
     graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph)
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph))
         .selected_operation_recipe(HashSet::from([SideEffectSite {
             block: continuation,
             index: 0,
@@ -562,10 +564,12 @@ fn selected_operation_recipe_rejects_a_continuation_parameter_dependency() {
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
     let projection =
-        GraphProjector::new(&graph).selected_operation_recipe(HashSet::from([SideEffectSite {
-            block: continuation,
-            index: 0,
-        }]));
+        GraphProjector::new(&GraphAnalysis::new(&graph)).selected_operation_recipe(HashSet::from([
+            SideEffectSite {
+                block: continuation,
+                index: 0,
+            },
+        ]));
     assert!(matches!(
         projection,
         Err(error) if error.contains("OutsideRegion")
@@ -594,7 +598,7 @@ fn selected_component_detaches_an_independent_continuation_value() {
     graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph)
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph))
         .selected_component_with_values(
             HashSet::from([SideEffectSite {
                 block: continuation,
@@ -634,7 +638,7 @@ fn selected_component_retains_cfg_for_a_continuation_parameter_dependency() {
     graph.skeleton.blocks[continuation].side_effects.push(effect);
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected = GraphProjector::new(&graph)
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph))
         .selected_component_with_values(
             HashSet::from([SideEffectSite {
                 block: continuation,
@@ -666,8 +670,9 @@ fn projection_does_not_resurrect_eliminated_block_parameters() {
     };
     graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
 
-    let projected =
-        GraphProjector::new(&graph).all().expect("projection with an eliminated historical parameter");
+    let projected = GraphProjector::new(&GraphAnalysis::new(&graph))
+        .all()
+        .expect("projection with an eliminated historical parameter");
     assert!(projected.node(eliminated).is_none());
     assert!(projected.graph.skeleton.blocks[projected.block(continuation).unwrap()].params.is_empty());
     projected
@@ -712,7 +717,8 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
 
     let projected = {
-        let projector = GraphProjector::new(&graph);
+        let graph_analysis = GraphAnalysis::new(&graph);
+        let projector = GraphProjector::new(&graph_analysis);
         let selection = projector.select_value_flow(vec![selected]).expect("select pure values");
         projector.emit_value_flow(&selection, &[]).expect("pure value-flow projection")
     };
@@ -750,7 +756,8 @@ fn column_projection_keeps_distinct_arms_and_rejects_incomplete_remapping() {
     };
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
     let before = crate::egir::block_interface::extract(&graph).unwrap();
-    let projector = GraphProjector::new(&graph);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let projector = GraphProjector::new(&graph_analysis);
     let selection = projector.select_value_flow(vec![selected]).unwrap();
     let mut shell = projector.projection_shell(ProjectionMode::ValueFlow, &selection, &[]).unwrap();
     shell.nodes.remove(&right);
@@ -795,13 +802,13 @@ fn sibling_bindings_are_allocated_without_demanding_unused_outputs() {
         u32_ty(),
         None,
     );
-    let recipe = GraphProjector::new(&graph).entry_value_recipe(first).unwrap();
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph)).entry_value_recipe(first).unwrap();
     assert!(recipe.projection.node(sibling).is_some());
     assert!(recipe.live_outs().next().is_none());
     assert!(!recipe.projection.source_nodes().any(|value| value == sibling));
     assert!(recipe.projection.node(unused).is_none());
     graph.skeleton.blocks[block].term = SkeletonTerminator::Return(Some(graph.value_result(sibling)));
-    let recipe = GraphProjector::new(&graph).entry_value_recipe(first).unwrap();
+    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph)).entry_value_recipe(first).unwrap();
     assert_eq!(recipe.live_outs().collect::<Vec<_>>(), vec![sibling]);
     assert_eq!(
         recipe.projection.output_sources().collect::<Vec<_>>(),
@@ -829,7 +836,8 @@ fn factored_tuple_inputs_recompute_precise_closure() {
         u32_ty(),
         None,
     );
-    let projector = GraphProjector::new(&graph);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let projector = GraphProjector::new(&graph_analysis);
     let selected = projector.select_value_flow(vec![root]).unwrap();
     assert_eq!(projector.value_flow_inputs(&selected, &[root]), vec![first]);
     let projection = projector.emit_value_flow(&selected, &[(first, input_id)]).unwrap();
@@ -851,7 +859,8 @@ fn unused_projection_with_a_removed_base_does_not_poison_selection() {
     );
     let unused = graph.intern_pure(PureOp::Project { index: 0 }, smallvec![tuple], u32_ty(), None);
     graph.nodes.remove(tuple);
-    let facts = SliceFacts::build(&graph);
+    let graph_analysis = GraphAnalysis::new(&graph);
+    let facts = graph_analysis.slice();
     let slice = facts.select([live], [], [], |_| true, |_| true, &[]).unwrap();
     assert_eq!(slice.values(), &HashSet::from([live]));
     assert!(slice.live_outs().is_empty());

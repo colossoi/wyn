@@ -7,6 +7,7 @@
 //! one aggregate capture. Existing scalar residency decides whether that
 //! capture is profitable and legal to materialize in a singleton prepass.
 
+use crate::egir::analysis::GraphAnalysis;
 use crate::ssa;
 use crate::types;
 use polytype::Type;
@@ -174,8 +175,8 @@ fn apply_direct_entry_calls(program: Segmented, patch: DirectEntryCallsPatch) ->
 
 fn find_next_candidate(program: &Segmented) -> Result<Option<(SegBodySite, StageLiftCandidate)>> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let enclosing =
-            StageDependenceAnalysis::for_entry(entry).map_err(|reason| StageLiftError::Analysis {
+        let enclosing = StageDependenceAnalysis::for_entry(entry, &GraphAnalysis::new(&entry.graph))
+            .map_err(|reason| StageLiftError::Analysis {
                 scope: entry.name.clone(),
                 reason,
             })?;
@@ -226,12 +227,11 @@ fn prepare_lift(
     let bound_dependences =
         super::stage_variance::bind_parameter_dependences(&function.params, &parameter_dependences);
     let analysis =
-        StageDependenceAnalysis::for_graph(&function.graph, &bound_dependences).map_err(|reason| {
-            StageLiftError::Analysis {
+        StageDependenceAnalysis::for_graph(&GraphAnalysis::new(&function.graph), &bound_dependences)
+            .map_err(|reason| StageLiftError::Analysis {
                 scope: function.name.clone(),
                 reason,
-            }
-        })?;
+            })?;
     let leading = function.params.len().saturating_sub(body.captures.len());
     let capture_parameters = function.params.ids().skip(leading).collect::<LookupSet<_>>();
     let frontier = invariant_frontier(
@@ -274,12 +274,12 @@ fn inline_mixed_calls_in_graph(
     let mut node_budget = 0;
     while node_budget < MAX_INLINED_NODES {
         let analysis =
-            StageDependenceAnalysis::for_graph(graph, parameter_dependences).map_err(|reason| {
-                StageLiftError::Analysis {
+            StageDependenceAnalysis::for_graph(&GraphAnalysis::new(graph), parameter_dependences).map_err(
+                |reason| StageLiftError::Analysis {
                     scope: scope.to_string(),
                     reason,
-                }
-            })?;
+                },
+            )?;
         let remaining = MAX_INLINED_NODES - node_budget;
         let candidate = graph_ops::reachable_execution_values(graph).into_iter().find_map(|node| {
             let call = analysis.call_arguments(graph, node)?;

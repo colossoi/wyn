@@ -1,5 +1,6 @@
 //! Dependency incidences for an unchanged EGIR snapshot.
-use super::block_interface::{self, BlockInterfaces};
+use super::analysis::GraphAnalysis;
+use super::block_interface;
 use super::types::{
     CallEffects, EGraph, EffectOp, Family, GraphResource, OperandRef, PureOp, Raw, SegBody, Semantic,
     SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId, ValueKind, WynSoacPhase,
@@ -12,7 +13,6 @@ pub(crate) type LiveSlice = wyn_slice::LiveSlice<ValueId, SideEffectSite>;
 
 pub(crate) struct SliceFacts {
     pub graph: Graph<ValueId, SideEffectSite, BlockId>,
-    pub interfaces: BlockInterfaces,
     inputs: HashSet<ValueId>,
 }
 
@@ -31,9 +31,10 @@ impl ValueObservers {
 }
 
 impl SliceFacts {
-    pub fn build<P: ValueProducerPhase>(graph: &EGraph<P>) -> Self {
-        let producers = graph.side_effect_index();
-        let interfaces = block_interface::extract(graph).expect("valid block interfaces for slicing");
+    pub(super) fn build<P: ValueProducerPhase>(analysis: &GraphAnalysis<'_, P>) -> Self {
+        let graph = analysis.graph();
+        let producers = analysis.producers();
+        let interfaces = analysis.interfaces().expect("valid block interfaces for slicing");
         let mut inputs = HashSet::new();
         let values = graph
             .nodes
@@ -89,7 +90,6 @@ impl SliceFacts {
             .map(|(block, body)| (block, body.term.referenced_nodes().into_vec()));
         Self {
             graph: Graph::new(values, operations, observers),
-            interfaces,
             inputs,
         }
     }

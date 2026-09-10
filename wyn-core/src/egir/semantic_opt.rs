@@ -37,6 +37,7 @@ use super::soac::screma;
 use super::types::{
     EGraph, GraphResource, ResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
 };
+use crate::egir::analysis::GraphAnalysis;
 use crate::error::CompilerError;
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -259,7 +260,8 @@ fn dead_seg_ops_in_graph<R: GraphResource>(
             observable(effect).then_some(super::types::SideEffectSite { block, index })
         })
     });
-    let facts = super::slice::SliceFacts::build(graph);
+    let graph_analysis = GraphAnalysis::new(graph);
+    let facts = graph_analysis.slice();
     let slice = facts
         .select_with_demands(
             external_roots,

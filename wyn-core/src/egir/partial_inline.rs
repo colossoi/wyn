@@ -24,7 +24,7 @@ use crate::LookupMap;
 
 use super::inlining;
 use super::ir::Language;
-use super::loop_analysis::{LoopAnalysis, LoopInvariance};
+use super::loop_analysis::LoopInvariance;
 use super::program::Func;
 use super::types::{EGraph, Physical, ValueId, ValueKind};
 
@@ -253,7 +253,8 @@ fn find_candidate(
         }
     }
 
-    let loops = LoopAnalysis::build(&graph.skeleton);
+    let analysis = super::analysis::GraphAnalysis::new(graph);
+    let loops = analysis.loops();
 
     // Iterate in skeleton order for deterministic code growth. Recompute after
     // every inline: the clone can reveal another mixed call, or can make an
@@ -262,7 +263,7 @@ fn find_candidate(
         if !loops.is_header(header) {
             continue;
         }
-        let mut invariance = LoopInvariance::new(graph, &loops, header);
+        let mut invariance = LoopInvariance::new(&analysis, header);
         for (block_id, block) in &graph.skeleton.blocks {
             if !loops.is_in_loop(block_id, header) {
                 continue;

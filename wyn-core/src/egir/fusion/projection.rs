@@ -1,5 +1,6 @@
 //! Source projection analysis and emission. Planning retains checked selections only.
 use crate::ast::{Span, TypeName};
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::graph_projector::{GraphProjector, ProjectionPlan};
 use crate::egir::ir::CallArgument;
 use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
@@ -241,8 +242,10 @@ impl ProjectionBuilder<'_> {
         result_types: &[Type<TypeName>],
         arguments: &StableMap<ParameterId, ProjectedValueId>,
     ) -> Option<Vec<ProjectedValueId>> {
-        let selection = GraphProjector::new(&function.graph).select_value_flow(roots.to_vec()).ok()?;
-        let inputs = GraphProjector::new(&function.graph).value_flow_inputs(&selection, roots);
+        let analysis = GraphAnalysis::new(&function.graph);
+        let projector = GraphProjector::new(&analysis);
+        let selection = projector.select_value_flow(roots.to_vec()).ok()?;
+        let inputs = projector.value_flow_inputs(&selection, roots);
         let mut memo = LookupMap::new();
         let arguments = inputs
             .into_iter()
@@ -677,8 +680,9 @@ impl ProjectionEmitter<'_, '_> {
         let params = lambda_ops::named_parameters(&types, "selected");
         let inputs =
             projected.arguments.iter().map(|(value, _)| *value).zip(params.ids()).collect::<Vec<_>>();
-        let projection =
-            GraphProjector::new(&function.graph).emit_value_flow(&projected.selection, &inputs).ok()?;
+        let projection = GraphProjector::new(&GraphAnalysis::new(&function.graph))
+            .emit_value_flow(&projected.selection, &inputs)
+            .ok()?;
         let projected_results =
             projected.roots.iter().map(|root| projection.node(*root)).collect::<Option<Vec<_>>>()?;
         let projected_return_block = projection.block(source_return_block)?;

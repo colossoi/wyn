@@ -126,6 +126,7 @@ impl ReduceCandidate {
 
 fn analyze_reduction_operators(
     entry: &egir::program::PlannedEntry,
+    analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
     op: &screma::Op<Semantic>,
 ) -> Option<Vec<ReductionAccumulator>> {
     op.form
@@ -137,7 +138,7 @@ fn analyze_reduction_operators(
                 return None;
             }
             let combine_captures = reduction.operator.captures().to_vec();
-            let capture_inputs = cloneable_capture_inputs(entry, &combine_captures)?;
+            let capture_inputs = cloneable_capture_inputs(entry, analysis, &combine_captures)?;
             let component_types = reduction.operator.result_types.clone();
             let scratch_type = lambda_ops::result_type(&component_types);
             if ssa::layout::type_byte_size(&scratch_type).is_none() {
@@ -158,6 +159,7 @@ fn analyze_reduction_operators(
 
 pub(super) fn analyze_reduction_routing(
     entry: &egir::program::PlannedEntry,
+    analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
     op: &screma::Op<Semantic>,
     results: &[ResultBinding<Type<TypeName>>],
     resources: &egir::program::LogicalResourceArena,
@@ -170,6 +172,8 @@ pub(super) fn analyze_reduction_routing(
         .flat_map(|(accumulator, reduction)| std::iter::repeat_n(accumulator, reduction.neutral.len()))
         .collect::<Vec<_>>();
     let mut stores = Vec::new();
+    let result_values = results.iter().map(ResultBinding::values).collect::<Vec<_>>();
+    let supplied = result_values.iter().flatten().copied().collect::<Vec<_>>();
     for (resource, route) in entry.resource_routes() {
         let resource = resource.0;
         entry
@@ -182,10 +186,10 @@ pub(super) fn analyze_reduction_routing(
             resources[resource].size()?.clone(),
         );
         let value = route.source.value;
-        let producers = graph_ops::value_producer_closure(&entry.graph, [value]);
+        let producers = graph_ops::value_producer_closure(analysis, [value]);
         let mut accumulator_dependencies = Vec::new();
-        for (field, result) in results.iter().enumerate() {
-            if result.values().iter().any(|result| producers.values().contains(result)) {
+        for (field, values) in result_values.iter().enumerate() {
+            if values.iter().any(|result| producers.values().contains(result)) {
                 let accumulator = *field_accumulators.get(field)?;
                 accumulator_dependencies.push(accumulator);
             }
@@ -195,11 +199,7 @@ pub(super) fn analyze_reduction_routing(
         if accumulator_dependencies.is_empty() {
             continue;
         }
-        if !can_clone_pure_subgraph(
-            &entry.graph,
-            value,
-            &results.iter().flat_map(ResultBinding::values).collect::<Vec<_>>(),
-        ) {
+        if !can_clone_pure_subgraph(&entry.graph, value, &supplied) {
             return None;
         }
         stores.push(RoutedReductionStore {
@@ -223,8 +223,9 @@ fn analyze_reduction_accumulators(
     results: &[ResultBinding<Type<TypeName>>],
     resources: &egir::program::LogicalResourceArena,
 ) -> Option<Vec<ReductionAccumulator>> {
-    let mut accumulators = analyze_reduction_operators(entry, op)?;
-    let routing = analyze_reduction_routing(entry, op, results, resources)?;
+    let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
+    let mut accumulators = analyze_reduction_operators(entry, &analysis, op)?;
+    let routing = analyze_reduction_routing(entry, &analysis, op, results, resources)?;
     for store in routing.stores {
         let [accumulator] = store.accumulators.as_slice() else {
             // Independent reduce combine phases cannot jointly rebuild one store.

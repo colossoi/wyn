@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::egir;
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::{graph_projector, program};
 use crate::interface;
 use crate::types;
@@ -73,7 +74,7 @@ pub(super) fn project_kernel_body(
         .map(|route| route.source.value)
         .chain(internal_results.iter().map(|result| result.route.source.value))
         .collect();
-    let projection = graph_projector::GraphProjector::new(&source.graph)
+    let projection = graph_projector::GraphProjector::new(&GraphAnalysis::new(&source.graph))
         .all_with_values(route_values)
         .map_err(|error| {
             format!(
@@ -100,6 +101,7 @@ pub(super) fn project_kernel_body(
 
 fn project_kernel_body_effects(
     source: &program::PlannedEntry,
+    analysis: &GraphAnalysis<'_, Semantic>,
     id: EntryId,
     selected: HashSet<SideEffectSite>,
     spec: ProjectionSpec,
@@ -118,7 +120,7 @@ fn project_kernel_body_effects(
         .map(|route| route.source.value)
         .chain(internal_results.iter().map(|result| result.route.source.value))
         .collect();
-    let projection = graph_projector::GraphProjector::new(&source.graph)
+    let projection = graph_projector::GraphProjector::new(analysis)
         .selected_component_with_values(selected, route_values)
         .map_err(|error| {
             format!(
@@ -131,7 +133,7 @@ fn project_kernel_body_effects(
         .iter()
         .filter_map(|source| Some((*source, projection.effect_site(*source)?)))
         .collect();
-    let mut retained_resources = source.resources_referenced_by_projection(&projection);
+    let mut retained_resources = source.resources_referenced_by_projection(analysis, &projection);
     retained_resources
         .extend(outputs.iter().filter_map(|output| output.resource).map(|resource| resource.0));
     let retained_parameters =
@@ -167,7 +169,8 @@ pub(super) fn project_single_effect_body(
     site: SideEffectSite,
     spec: ProjectionSpec,
 ) -> Result<program::PlannedEntry, String> {
-    let (entry, _) = project_kernel_body_effects(source, id, HashSet::from([site]), spec)?;
+    let analysis = GraphAnalysis::new(&source.graph);
+    let (entry, _) = project_kernel_body_effects(source, &analysis, id, HashSet::from([site]), spec)?;
     Ok(entry)
 }
 
@@ -180,7 +183,7 @@ pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &S
     }
     let value_writers = effect.result_values();
     let effect_writer = effect.effects.map(|(_, output)| OutputWriter::Effect(output));
-    let mut slots = entry
+    entry
         .outputs
         .iter()
         .enumerate()
@@ -191,10 +194,7 @@ pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &S
             })
         })
         .map(|(slot, _)| slot)
-        .collect::<Vec<_>>();
-    slots.sort_unstable();
-    slots.dedup();
-    slots
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,31 +333,26 @@ impl OutputPartition {
             unrouted_host,
         })
     }
-
-    fn claim_unrouted_effects(&mut self, entry: &program::PlannedEntry) {
-        for (block_id, block) in &entry.graph.skeleton.blocks {
-            for (index, effect) in block.side_effects.iter().enumerate() {
-                if side_effect_output_slots(entry, effect).is_empty() && requires_unrouted_owner(effect) {
-                    self.effect_groups.insert(
-                        SideEffectSite {
-                            block: block_id,
-                            index,
-                        },
-                        self.unrouted_host,
-                    );
-                }
-            }
-        }
-    }
 }
 
-fn output_producers(entry: &program::PlannedEntry) -> Result<Vec<OutputProducer>, String> {
+fn output_partition(entry: &program::PlannedEntry) -> Result<Option<OutputPartition>, String> {
     let output_count = entry.outputs.len();
+    if output_count <= 1 {
+        return Ok(None);
+    }
     let mut producers = Vec::new();
+    let mut unrouted = Vec::new();
     for (block_id, block) in &entry.graph.skeleton.blocks {
         for (index, effect) in block.side_effects.iter().enumerate() {
+            let site = SideEffectSite {
+                block: block_id,
+                index,
+            };
             let slots = side_effect_output_slots(entry, effect);
             let Some(first_slot) = slots.first().copied() else {
+                if requires_unrouted_owner(effect) {
+                    unrouted.push(site);
+                }
                 continue;
             };
             if slots.iter().any(|slot| *slot >= output_count) {
@@ -367,34 +362,23 @@ fn output_producers(entry: &program::PlannedEntry) -> Result<Vec<OutputProducer>
                 ));
             }
             producers.push(OutputProducer {
-                site: SideEffectSite {
-                    block: block_id,
-                    index,
-                },
+                site,
                 slots,
                 first_slot,
                 domain: output_execution_domain(effect),
             });
         }
     }
-    Ok(producers)
-}
-
-fn output_partition(entry: &program::PlannedEntry) -> Result<Option<OutputPartition>, String> {
-    if entry.outputs.len() <= 1 {
-        return Ok(None);
-    }
-
-    let producers = output_producers(entry)?;
-    let Some(mut partition) = OutputPartition::from_producers(entry.outputs.len(), producers) else {
+    let Some(mut partition) = OutputPartition::from_producers(output_count, producers) else {
         return Ok(None);
     };
-    partition.claim_unrouted_effects(entry);
+    partition.effect_groups.extend(unrouted.into_iter().map(|site| (site, partition.unrouted_host)));
     Ok(Some(partition))
 }
 
 fn project_output_group(
     entry: &program::PlannedEntry,
+    analysis: &GraphAnalysis<'_, Semantic>,
     group: &OutputGroup,
     effect_groups: &LookupMap<SideEffectSite, usize>,
     name: String,
@@ -429,7 +413,7 @@ fn project_output_group(
         result: entry.result().clone(),
     };
 
-    let (entry, effect_sites) = project_kernel_body_effects(entry, entry.id, selected, spec)?;
+    let (entry, effect_sites) = project_kernel_body_effects(entry, analysis, entry.id, selected, spec)?;
     Ok(SplitEntry {
         entry,
         semantic_slots: group.slots.clone(),
@@ -456,12 +440,20 @@ pub(super) fn partition_entry_output_domains(
         ..
     } = partition;
 
-    let primary = project_output_group(entry, &primary_group, &effect_groups, entry.name.clone())?;
+    let analysis = GraphAnalysis::new(&entry.graph);
+    let primary = project_output_group(
+        entry,
+        &analysis,
+        &primary_group,
+        &effect_groups,
+        entry.name.clone(),
+    )?;
     let siblings = sibling_groups
         .iter()
         .map(|group| {
             project_output_group(
                 entry,
+                &analysis,
                 group,
                 &effect_groups,
                 format!("{}_dispatch_{}", entry.name, group.first_slot),

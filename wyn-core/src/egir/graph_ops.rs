@@ -916,14 +916,15 @@ pub fn rebind_result_projection_references<P: Family>(
     Ok(())
 }
 
+pub(crate) use super::analysis::GraphAnalysis;
 pub(crate) use super::slice::{effect_value_inputs, projected_tuple_field, SliceFacts, ValueProducerPhase};
 
 pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
-    graph: &EGraph<P>,
+    analysis: &GraphAnalysis<'_, P>,
     roots: impl IntoIterator<Item = ValueId>,
 ) -> super::slice::LiveSlice {
-    let facts = SliceFacts::build(graph);
-    facts
+    analysis
+        .slice()
         .select(roots, [], [], |_| true, |_| false, &[])
         .expect("value producer closure requires valid EGIR")
 }
@@ -933,12 +934,12 @@ pub(crate) fn value_producer_closure<P: ValueProducerPhase>(
 /// analyses of a projected recipe: block effects and terminators are executed,
 /// while projection-preserved but unused metadata is not.
 pub(crate) fn execution_value_producer_closure<P: ValueProducerPhase>(
-    graph: &EGraph<P>,
+    analysis: &GraphAnalysis<'_, P>,
     result_roots: impl IntoIterator<Item = ValueId>,
 ) -> super::slice::LiveSlice {
     value_producer_closure(
-        graph,
-        execution_value_roots(graph).into_iter().chain(result_roots),
+        analysis,
+        execution_value_roots(analysis.graph()).into_iter().chain(result_roots),
     )
 }
 
@@ -1028,14 +1029,15 @@ pub(crate) fn maximal_execution_frontier<P: ValueProducerPhase>(
 
 /// Storage resources read by the complete producer closure behind `roots`.
 pub(crate) fn read_storage_resources<P>(
-    graph: &EGraph<P>,
+    analysis: &GraphAnalysis<'_, P>,
     roots: impl IntoIterator<Item = ValueId>,
 ) -> Vec<SegResourceAccess<P::Resource>>
 where
     P: ValueProducerPhase,
     P::Resource: Copy + Eq + std::hash::Hash + Ord,
 {
-    let resources = value_producer_closure(graph, roots)
+    let graph = analysis.graph();
+    let resources = value_producer_closure(analysis, roots)
         .values()
         .iter()
         .copied()
@@ -1054,12 +1056,15 @@ where
 
 /// Index effectful SOAC writers by the logical resources named by their
 /// explicit destination views.
-pub(crate) fn resource_effect_writers<P>(graph: &EGraph<P>) -> LookupMap<P::Resource, Vec<EffectToken>>
+pub(crate) fn resource_effect_writers<P>(
+    analysis: &GraphAnalysis<'_, P>,
+) -> LookupMap<P::Resource, Vec<EffectToken>>
 where
     P: ValueProducerPhase + super::types::WynSoacPhase,
     P::Resource: Copy + Eq + std::hash::Hash + Ord,
 {
     let mut writers = LookupMap::<_, Vec<_>>::new();
+    let graph = analysis.graph();
     for block in graph.skeleton.blocks.values() {
         for effect in &block.side_effects {
             let SideEffectKind::Soac(super::types::SoacEffect(_, soac)) = &effect.kind else {
@@ -1068,7 +1073,7 @@ where
             let Some((_, effect_out)) = effect.effects() else {
                 continue;
             };
-            for access in read_storage_resources(graph, soac.written_views().map(ViewId::value)) {
+            for access in read_storage_resources(analysis, soac.written_views().map(ViewId::value)) {
                 writers.entry(access.resource).or_default().push(effect_out);
             }
         }

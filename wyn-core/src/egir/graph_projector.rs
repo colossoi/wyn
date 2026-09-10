@@ -164,7 +164,8 @@ pub(crate) fn remap_output_routes(
 
 pub struct GraphProjector<'a, R: GraphResource = BindingRef> {
     source: &'a EGraph<Semantic<R>>,
-    facts: SliceFacts,
+    facts: &'a SliceFacts,
+    interfaces: &'a BlockInterfaces,
 }
 
 #[derive(Clone, Copy)]
@@ -205,15 +206,12 @@ struct ProjectionShell<R: GraphResource> {
 }
 
 impl<'a, R: GraphResource> GraphProjector<'a, R> {
-    pub fn new(source: &'a EGraph<Semantic<R>>) -> Self {
+    pub fn new(analysis: &'a super::analysis::GraphAnalysis<'_, Semantic<R>>) -> Self {
         Self {
-            source,
-            facts: SliceFacts::build(source),
+            source: analysis.graph(),
+            facts: analysis.slice(),
+            interfaces: analysis.interfaces().expect("valid block interfaces for projection"),
         }
-    }
-
-    pub(crate) fn facts(&self) -> &SliceFacts {
-        &self.facts
     }
 
     pub fn all(&self) -> Result<GraphProjection<R>, String> {
@@ -836,7 +834,6 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             return Err("value-flow projection depends on an effect".into());
         }
         let interfaces = self
-            .facts
             .interfaces
             .iter()
             .filter(|(block, _)| blocks.contains(block))

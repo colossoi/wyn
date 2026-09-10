@@ -12,17 +12,19 @@
 use crate::flow::{BlockId, ControlHeader};
 use crate::{LookupMap, LookupSet};
 
+use super::analysis::GraphAnalysis;
 use super::ir::Family;
-use super::types::{EGraph, Skeleton, ValueId, ValueKind};
+use super::types::{Skeleton, ValueId, ValueKind};
 
 pub struct LoopAnalysis {
-    /// All blocks inside each loop (key = loop header).
-    bodies: LookupMap<BlockId, LookupSet<BlockId>>,
+    /// All loop headers containing each block, including a header's own loop.
+    containing: LookupMap<BlockId, LookupSet<BlockId>>,
 }
 
 impl LoopAnalysis {
     pub fn build<P: Family>(skeleton: &Skeleton<P>) -> Self {
-        let mut bodies: LookupMap<BlockId, LookupSet<BlockId>> = LookupMap::new();
+        let mut containing =
+            skeleton.blocks.keys().map(|block| (block, LookupSet::new())).collect::<LookupMap<_, _>>();
 
         // Collect every header and DFS its body, stopping at `merge`.
         for (header, block) in &skeleton.blocks {
@@ -34,18 +36,24 @@ impl LoopAnalysis {
                 ControlHeader::Selection { .. } => continue,
             };
             let body = collect_loop_body(skeleton, header, merge);
-            bodies.insert(header, body);
+            for &block in &body {
+                containing.entry(block).or_default().insert(header);
+            }
         }
 
-        LoopAnalysis { bodies }
+        LoopAnalysis { containing }
+    }
+
+    pub fn dependencies(&self, block: BlockId) -> Option<&LookupSet<BlockId>> {
+        self.containing.get(&block)
     }
 
     pub fn is_header(&self, b: BlockId) -> bool {
-        self.bodies.contains_key(&b)
+        self.is_in_loop(b, b)
     }
 
     pub fn is_in_loop(&self, b: BlockId, header: BlockId) -> bool {
-        self.bodies.get(&header).is_some_and(|s| s.contains(&b))
+        self.containing.get(&b).is_some_and(|headers| headers.contains(&header))
     }
 
     /// A value defined in `block` is invariant with respect to `header` when
@@ -70,30 +78,16 @@ impl LoopAnalysis {
 /// effect values use their defining block; pure values recursively require
 /// every operand to be invariant.
 pub struct LoopInvariance<'a, P: Family> {
-    graph: &'a EGraph<P>,
-    loops: &'a LoopAnalysis,
+    analysis: &'a GraphAnalysis<'a, P>,
     header: BlockId,
-    effect_blocks: LookupMap<ValueId, BlockId>,
     memo: LookupMap<ValueId, bool>,
 }
 
 impl<'a, P: Family> LoopInvariance<'a, P> {
-    pub fn new(graph: &'a EGraph<P>, loops: &'a LoopAnalysis, header: BlockId) -> Self {
-        let mut effect_blocks = LookupMap::new();
-        for (block, body) in &graph.skeleton.blocks {
-            for effect in &body.side_effects {
-                if let Some(result) = &effect.result {
-                    for value in result.values() {
-                        effect_blocks.insert(value, block);
-                    }
-                }
-            }
-        }
+    pub fn new(analysis: &'a GraphAnalysis<'a, P>, header: BlockId) -> Self {
         Self {
-            graph,
-            loops,
+            analysis,
             header,
-            effect_blocks,
             memo: LookupMap::new(),
         }
     }
@@ -102,19 +96,23 @@ impl<'a, P: Family> LoopInvariance<'a, P> {
         if let Some(value) = self.memo.get(&node) {
             return *value;
         }
-        let invariant = match self.graph.nodes[node].kind.clone() {
+        let invariant = match self.analysis.graph().nodes[node].kind.clone() {
             ValueKind::Constant(_) | ValueKind::FuncParam { .. } => true,
             ValueKind::CallResult { .. } => true,
             ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => self
-                .graph
+                .analysis
+                .graph()
                 .place_value_dependencies(place)
                 .into_iter()
                 .all(|operand| self.is_invariant(operand)),
-            ValueKind::BlockParam { block, .. } => self.loops.block_is_invariant(block, self.header),
+            ValueKind::BlockParam { block, .. } => {
+                self.analysis.loops().block_is_invariant(block, self.header)
+            }
             ValueKind::SideEffectResult => self
-                .effect_blocks
-                .get(&node)
-                .is_some_and(|block| self.loops.block_is_invariant(*block, self.header)),
+                .analysis
+                .producers()
+                .site(node)
+                .is_some_and(|site| self.analysis.loops().block_is_invariant(site.block, self.header)),
             ValueKind::Pure { operands, .. } => operands.iter().all(|operand| self.is_invariant(*operand)),
             // Extraction may select either branch, so both alternatives must
             // be invariant before the union is safe to classify as invariant.

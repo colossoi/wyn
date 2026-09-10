@@ -1,4 +1,5 @@
 use super::*;
+use crate::egir::analysis::GraphAnalysis;
 use crate::types;
 
 use crate::ast::{Span, TypeName};
@@ -114,7 +115,7 @@ fn analyze_enclosing(
     params: &Parameters<BindingRef, Type<TypeName>>,
 ) -> StageDependenceAnalysis {
     StageDependenceAnalysis::for_graph(
-        graph,
+        &GraphAnalysis::new(graph),
         &params
             .ids()
             .zip([StageDependence::from_source(

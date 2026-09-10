@@ -158,8 +158,7 @@ fn reify_func(function: Func<Raw>, semantic_ids: &mut SemanticOpIdSource) -> Fun
 }
 
 fn reify_entry(mut entry: RawEntry, semantic_ids: &mut SemanticOpIdSource) -> Entry<Semantic> {
-    link_output_producers(&mut entry);
-    let mut facts = entry_facts(&entry);
+    let mut facts = entry_facts(&mut entry);
     match entry.try_map_phase(|block, index, (), soac| {
         let facts = facts.remove(&(block, index)).expect("every raw SOAC must have semantic facts");
         let id = semantic_ids.next_id();
@@ -240,19 +239,35 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
 mod tests;
 
 fn function_facts(graph: &EGraph<Raw>) -> HashMap<(BlockId, usize), Facts> {
+    let analysis = graph_ops::GraphAnalysis::new(graph);
+    let analysis = &analysis;
     graph
         .skeleton
         .blocks
         .iter()
         .flat_map(|(block, contents)| {
             contents.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
-                semantic_facts(graph, None, effect).map(|facts| ((block, index), facts))
+                semantic_facts(analysis, None, effect).map(|facts| ((block, index), facts))
             })
         })
         .collect()
 }
 
-fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
+fn entry_facts(entry: &mut RawEntry) -> HashMap<(BlockId, usize), Facts> {
+    let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
+    let analysis = &analysis;
+    let resource_writers = graph_ops::resource_effect_writers(analysis);
+    for output in &mut entry.outputs {
+        for route in &mut output.routes {
+            let mut writers = source_value_writers(analysis, &resource_writers, route.source.value);
+            writers.push(OutputWriter::Value(route.source.value));
+            let mut seen = LookupSet::new();
+            writers.retain(|writer| seen.insert(*writer));
+            route.writers = writers;
+        }
+    }
+
+    let entry = &*entry;
     entry
         .graph
         .skeleton
@@ -260,17 +275,18 @@ fn entry_facts(entry: &RawEntry) -> HashMap<(BlockId, usize), Facts> {
         .iter()
         .flat_map(|(block, contents)| {
             contents.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
-                semantic_facts(&entry.graph, Some(entry), effect).map(|facts| ((block, index), facts))
+                semantic_facts(analysis, Some(entry), effect).map(|facts| ((block, index), facts))
             })
         })
         .collect()
 }
 
 fn semantic_facts(
-    graph: &EGraph<Raw>,
+    analysis: &graph_ops::GraphAnalysis<'_, Raw>,
     entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
 ) -> Option<Facts> {
+    let graph = analysis.graph();
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
         return None;
     };
@@ -285,7 +301,7 @@ fn semantic_facts(
         _ => Vec::new(),
     };
     let resources = if matches!(soac, Soac::Screma(_) | Soac::Filter(_)) {
-        semantic_resources(graph, entry, effect, &output_slots)
+        semantic_resources(analysis, entry, effect, &output_slots)
     } else {
         Vec::new()
     };
@@ -462,28 +478,13 @@ fn direct_output_slots(entry: &RawEntry, effect: &SideEffect<Raw>) -> Vec<Output
 /// them. This is intentionally private to the raw-to-semantic boundary: route
 /// construction belongs to conversion, while producer discovery requires the
 /// complete graph and is consumed immediately by reification, fusion, and DCE.
-fn link_output_producers(entry: &mut RawEntry) {
-    let graph = &entry.graph;
-    let effect_index = graph.side_effect_index();
-    let resource_writers = graph_ops::resource_effect_writers(graph);
-    for output in &mut entry.outputs {
-        for route in &mut output.routes {
-            let mut writers =
-                source_value_writers(graph, &effect_index, &resource_writers, route.source.value);
-            writers.push(OutputWriter::Value(route.source.value));
-            let mut seen = LookupSet::new();
-            writers.retain(|writer| seen.insert(*writer));
-            route.writers = writers;
-        }
-    }
-}
-
 fn source_value_writers(
-    graph: &EGraph<Raw>,
-    effect_index: &super::types::SideEffectIndex,
+    analysis: &graph_ops::GraphAnalysis<'_, Raw>,
     resource_writers: &LookupMap<BindingRef, Vec<EffectToken>>,
     source: ValueId,
 ) -> Vec<OutputWriter> {
+    let graph = analysis.graph();
+    let effect_index = analysis.producers();
     let mut writers = Vec::new();
     wyn_graph::for_each_reachable(
         [source],
@@ -503,7 +504,7 @@ fn source_value_writers(
         },
     );
     writers.extend(
-        graph_ops::read_storage_resources(graph, [source])
+        graph_ops::read_storage_resources(analysis, [source])
             .into_iter()
             .filter_map(|access| resource_writers.get(&access.resource))
             .flatten()
@@ -514,12 +515,12 @@ fn source_value_writers(
 }
 
 fn semantic_resources(
-    graph: &EGraph<Raw>,
+    analysis: &graph_ops::GraphAnalysis<'_, Raw>,
     entry: Option<&RawEntry>,
     effect: &SideEffect<Raw>,
     output_slots: &[OutputSlotId],
 ) -> Vec<SegResourceAccess<BindingRef>> {
-    let mut accesses = read_resources(graph, effect)
+    let mut accesses = graph_ops::read_storage_resources(analysis, referenced_nodes(effect))
         .into_iter()
         .map(|resource| (resource.resource, resource.access))
         .collect::<HashMap<_, _>>();
@@ -539,10 +540,6 @@ fn semantic_resources(
         .collect::<Vec<_>>();
     resources.sort_by_key(|resource| resource.resource);
     resources
-}
-
-fn read_resources(graph: &EGraph<Raw>, effect: &SideEffect<Raw>) -> Vec<SegResourceAccess<BindingRef>> {
-    graph_ops::read_storage_resources(graph, referenced_nodes(effect))
 }
 
 fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<ValueId> {

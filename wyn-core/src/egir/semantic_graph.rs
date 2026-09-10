@@ -5,6 +5,7 @@
 mod facts;
 pub(crate) use facts::{Facts, Incidence, ScopeKey, SourceValue};
 
+use super::analysis::GraphAnalysis;
 use super::ir::BodySite;
 use crate::{LookupMap, SortedSet, StableMap};
 use std::collections::HashSet;
@@ -19,13 +20,13 @@ use super::types::{
 };
 
 pub(crate) fn read_resources<R>(
-    graph: &EGraph<Semantic<R>>,
+    analysis: &GraphAnalysis<'_, Semantic<R>>,
     se: &SideEffect<Semantic<R>>,
 ) -> Vec<SegResourceAccess<R>>
 where
     R: GraphResource + Copy + Ord,
 {
-    graph_ops::read_storage_resources(graph, graph_ops::effect_value_inputs(graph, se))
+    graph_ops::read_storage_resources(analysis, graph_ops::effect_value_inputs(analysis.graph(), se))
 }
 
 /// Validate the semantic boundary before any target-aware scheduling occurs.
@@ -200,29 +201,16 @@ pub struct SemanticGraph {
 impl SemanticGraph {
     pub fn new<R: GraphResource + Copy + Ord>(graph: &EGraph<Semantic<R>>) -> Self {
         let mut facts = Facts::new();
-        facts.add_body(BodySite::Entry(0), graph, []).expect("valid EGIR incidences");
+        facts.add_body(BodySite::Entry(0), &GraphAnalysis::new(graph), []).expect("valid EGIR incidences");
         Self::from_facts(facts)
     }
 
-    pub fn for_program<Tag, Shape, GlobalContext, R>(program: &Program<Tag, Shape, GlobalContext>) -> Self
-    where
-        Shape: ProgramShape<Family = Semantic<R>>,
-        R: GraphResource + Copy + Ord,
-    {
+    pub(crate) fn for_bodies<'a, R: GraphResource + Copy + Ord + 'a>(
+        bodies: impl IntoIterator<Item = (BodySite, &'a GraphAnalysis<'a, Semantic<R>>)>,
+    ) -> Self {
         let mut facts = Facts::new();
-        for (body, graph) in program
-            .entry_points
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (BodySite::Entry(index), &entry.graph))
-            .chain(
-                program
-                    .functions
-                    .iter()
-                    .map(|function| (BodySite::Function(function.region), &function.graph)),
-            )
-        {
-            facts.add_body(body, graph, []).expect("valid EGIR incidences");
+        for (body, analysis) in bodies {
+            facts.add_body(body, analysis, []).expect("valid EGIR incidences");
         }
         Self::from_facts(facts)
     }

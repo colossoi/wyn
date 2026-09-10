@@ -228,7 +228,8 @@ impl Snapshot {
                     .collect::<Vec<_>>(),
                 _ => vec![],
             };
-            extract.facts.add_body(body, graph, observers)?;
+            let analysis = crate::egir::analysis::GraphAnalysis::new(graph);
+            extract.facts.add_body(body, &analysis, observers)?;
             for (block, _) in &graph.skeleton.blocks {
                 extract.catalog.scopes.insert(
                     (body, block),

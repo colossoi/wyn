@@ -22,6 +22,7 @@ pub type Converted = super::program::Program<
 use crate::builtins;
 use crate::builtins::{catalog, Purity};
 use crate::egir;
+use crate::egir::analysis::GraphAnalysis;
 use crate::op;
 use crate::op::BinaryOperator;
 use crate::pipeline_descriptor;
@@ -3025,8 +3026,9 @@ impl<'a, 'b> Converter<'a, 'b> {
             .iter()
             .map(|input| self.convert_array_expr_value(input))
             .collect::<Result<Vec<_>, _>>()?;
+        let analysis = GraphAnalysis::new(&self.graph);
         for &input_node in &input_nodes {
-            let producers = super::graph_ops::value_producer_closure(&self.graph, [input_node]);
+            let producers = super::graph_ops::value_producer_closure(&analysis, [input_node]);
             let materialized_soac = self.graph.skeleton.blocks.values().any(|block| {
                 block.side_effects.iter().any(|effect| {
                     effect.result.as_ref().is_some_and(|result| {
@@ -3051,7 +3053,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             .zip(&input_arrays)
             .zip(input_dimensions)
             .map(|((node, array), dimensions)| {
-                let producers = super::graph_ops::value_producer_closure(&self.graph, [*node]);
+                let producers = super::graph_ops::value_producer_closure(&analysis, [*node]);
                 let storage_type = producers.values().iter().find_map(|producer| {
                     matches!(
                         self.graph.nodes[*producer].kind,
