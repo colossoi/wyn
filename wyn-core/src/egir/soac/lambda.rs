@@ -1,9 +1,7 @@
-//! Shared construction utilities for canonical SOAC lambdas.
+//! Shared representation, validation, and construction of canonical SOAC lambdas.
 //!
-//! Lambda representation stays in [`super::screma`]. This module owns the
-//! repetitive EGIR mechanics needed by fusion and parallel lowering: emitting
-//! calls, packing and unpacking multi-result values, and finalising generated
-//! callable regions.
+//! Semantic construction and the explicit physical-call adapter use the same
+//! identity/region contract and preserve logical result boundaries.
 
 use crate::egir;
 use polytype::Type;
@@ -19,7 +17,133 @@ use crate::egir::types::{
 use crate::flow::BlockId;
 use crate::FunctionId;
 
-use super::screma;
+mod physical;
+pub(crate) use physical::{emit_physical_call, PhysicalCallables};
+
+#[cfg(test)]
+#[path = "lambda_tests.rs"]
+mod tests;
+
+/// The implementation of a canonical SOAC lambda.
+#[derive(Clone, Debug)]
+pub enum LambdaBody {
+    /// The lambda returns its parameters unchanged and has no concrete region.
+    Identity,
+    /// Executable scalar dataflow with explicit captures.
+    Region(SegBody),
+}
+
+/// A first-order lambda shared by Screma, Filter, and Hist.
+///
+/// This is deliberately distinct from `tlc::Lambda`: its higher-order meaning
+/// has already been eliminated, captures are explicit, and an identity lambda
+/// need not allocate a synthetic EGIR region.
+#[derive(Clone, Debug)]
+pub struct Lambda {
+    pub body: LambdaBody,
+    pub parameter_types: Vec<Type<TypeName>>,
+    pub result_types: Vec<Type<TypeName>>,
+}
+
+impl Lambda {
+    pub fn identity(types: Vec<Type<TypeName>>) -> Self {
+        Self {
+            parameter_types: types.clone(),
+            result_types: types,
+            body: LambdaBody::Identity,
+        }
+    }
+
+    pub fn region(
+        body: SegBody,
+        parameter_types: Vec<Type<TypeName>>,
+        result_types: Vec<Type<TypeName>>,
+    ) -> Self {
+        Self {
+            body: LambdaBody::Region(body),
+            parameter_types,
+            result_types,
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        matches!(self.body, LambdaBody::Identity)
+    }
+
+    pub fn seg_body(&self) -> Option<&SegBody> {
+        match &self.body {
+            LambdaBody::Identity => None,
+            LambdaBody::Region(body) => Some(body),
+        }
+    }
+
+    pub fn seg_body_mut(&mut self) -> Option<&mut SegBody> {
+        match &mut self.body {
+            LambdaBody::Identity => None,
+            LambdaBody::Region(body) => Some(body),
+        }
+    }
+
+    pub(crate) fn captures(&self) -> &[OperandRef] {
+        match &self.body {
+            LambdaBody::Identity => &[],
+            LambdaBody::Region(body) => &body.captures,
+        }
+    }
+
+    pub(crate) fn capture_count(&self) -> usize {
+        self.captures().len()
+    }
+    pub(crate) fn validate(&self, role: &str) -> Result<(), String> {
+        if self.is_identity() && self.parameter_types != self.result_types {
+            return Err(format!(
+                "{role} identity lambda has signature {:?} -> {:?}",
+                self.parameter_types, self.result_types
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
+        for ty in &mut self.parameter_types {
+            visit(ty);
+        }
+        for ty in &mut self.result_types {
+            visit(ty);
+        }
+    }
+
+    /// Validate an associative operator's componentwise (a, a) -> a contract.
+    pub(crate) fn validate_operator(&self, role: &str, neutral_count: usize) -> Result<(), String> {
+        if self.is_identity() {
+            return Err(format!("{role} operator is identity"));
+        }
+        if neutral_count == 0 {
+            return Err(format!("{role} has no neutral values"));
+        }
+        if self.result_types.len() != neutral_count {
+            return Err(format!(
+                "{role} has {neutral_count} neutral values but returns {} values",
+                self.result_types.len()
+            ));
+        }
+        if self.parameter_types.len() != neutral_count * 2 {
+            return Err(format!(
+                "{role} operator must have {} parameters, found {}",
+                neutral_count * 2,
+                self.parameter_types.len()
+            ));
+        }
+        let (left, right) = self.parameter_types.split_at(neutral_count);
+        if left != right || left != self.result_types {
+            return Err(format!(
+                "{role} operator must have type (a, a) -> a, found ({left:?}, {right:?}) -> {:?}",
+                self.result_types
+            ));
+        }
+        Ok(())
+    }
+}
 
 pub(crate) fn named_parameters<R: GraphResource>(
     types: &[Type<TypeName>],
@@ -132,7 +256,7 @@ pub(crate) fn result_argument_values<P: egir::ir::Family>(
 pub(crate) fn emit_call<R: GraphResource>(
     graph: &mut EGraph<Semantic<R>>,
     block: BlockId,
-    lambda: &screma::Lambda,
+    lambda: &Lambda,
     callee: Option<&Func<Semantic<R>>>,
     arguments: Vec<OperandRef>,
 ) -> Vec<ResultBinding<Type<TypeName>>> {
@@ -202,7 +326,7 @@ pub(crate) fn finish_region_lambda<R: GraphResource>(
     result_types: Vec<Type<TypeName>>,
     results: Vec<ValueId>,
     fold_identity: bool,
-) -> (screma::Lambda, Option<Func<Semantic<R>>>) {
+) -> (Lambda, Option<Func<Semantic<R>>>) {
     let is_identity = fold_identity
         && captures.is_empty()
         && params.len() == parameter_types.len()
@@ -215,7 +339,7 @@ pub(crate) fn finish_region_lambda<R: GraphResource>(
             )
         });
     if is_identity {
-        return (screma::Lambda::identity(parameter_types), None);
+        return (Lambda::identity(parameter_types), None);
     }
 
     let name = fresh_region_name(identities, &format!("{scope}_{label}"));
@@ -231,7 +355,7 @@ pub(crate) fn finish_region_lambda<R: GraphResource>(
         &results,
     );
     (
-        screma::Lambda::region(SegBody::new(region, captures), parameter_types, result_types),
+        Lambda::region(SegBody::new(region, captures), parameter_types, result_types),
         Some(function),
     )
 }

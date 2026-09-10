@@ -1,3 +1,4 @@
+use crate::egir::soac::Lambda;
 use polytype::Type;
 
 use crate::ast::TypeName;
@@ -9,7 +10,7 @@ use super::super::types::{
     GraphResource, SegResourceAccess, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId,
     WynSoacPhase,
 };
-use super::screma;
+use super::metadata::{impl_metadata, Metadata};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkBuffers<R = SemanticResourceRef> {
@@ -105,13 +106,21 @@ pub struct Body {
     /// Co-iterated array inputs consumed by `map`.
     pub inputs: Vec<SoacInputType>,
     /// Computes the candidate output element from one element of each input.
-    pub map: screma::Lambda,
+    pub map: Lambda,
     /// Decides whether the mapped candidate is retained.
-    pub predicate: screma::Lambda,
+    pub predicate: Lambda,
 }
+
+impl_metadata!(Body, |body, visit| {
+    let Self { map, predicate, .. } = body;
+    visit.lambda(map);
+    visit.lambda(predicate);
+});
 
 impl Body {
     pub fn validate(&self) -> Result<(), String> {
+        self.map.validate("Filter map")?;
+        self.predicate.validate("Filter predicate")?;
         let input_types = self.inputs.iter().map(SoacInputType::element).collect::<Vec<_>>();
         if self.map.parameter_types != input_types {
             return Err(format!(
@@ -153,17 +162,12 @@ impl Body {
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        lambda_capture_values(&self.map).chain(lambda_capture_values(&self.predicate)).collect()
+        self.metadata_captures()
     }
 
     fn remap_capture_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
-        self.map.remap_capture_values(map);
-        self.predicate.remap_capture_values(map);
+        self.remap_metadata_values(map);
     }
-}
-
-fn lambda_capture_values(lambda: &screma::Lambda) -> impl Iterator<Item = ValueId> + '_ {
-    lambda.seg_body().into_iter().flat_map(|body| body.capture_values())
 }
 #[derive(Clone, Debug)]
 pub struct RawState {
@@ -239,10 +243,6 @@ impl<P: WynSoacPhase> Op<P> {
 }
 
 impl<R: GraphResource> Op<Semantic<R>> {
-    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        self.body.capture_nodes()
-    }
-
     pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.body.capture_nodes();
         nodes.extend(self.state.space.referenced_nodes());

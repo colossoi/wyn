@@ -18,6 +18,7 @@ use crate::{LookupMap, LookupSet};
 #[cfg(test)]
 use smallvec::SmallVec;
 
+use super::soac::metadata::Metadata;
 use super::soac::{filter, hist, screma};
 
 pub use super::ir::{
@@ -128,96 +129,11 @@ impl<P: WynSoacPhase> Soac<P> {
     }
 
     pub(crate) fn seg_bodies(&self) -> Vec<&SegBody> {
-        match self {
-            Self::Screma(op) => {
-                let mut bodies = Vec::new();
-                if let Some(body) = op.form.pre.seg_body() {
-                    bodies.push(body);
-                }
-                bodies.extend(op.form.scans.iter().filter_map(|scan| scan.operator.seg_body()));
-                bodies.extend(
-                    op.form.reductions.iter().filter_map(|reduction| reduction.operator.seg_body()),
-                );
-                if let Some(body) = op.form.post.seg_body() {
-                    bodies.push(body);
-                }
-                bodies
-            }
-            Self::Filter(op) => {
-                op.body.map.seg_body().into_iter().chain(op.body.predicate.seg_body()).collect()
-            }
-            Self::Hist(op) => {
-                let mut bodies = op.form.bucket.seg_body().into_iter().collect::<Vec<_>>();
-                bodies.extend(
-                    op.form.operations.iter().filter_map(|operation| match &operation.update {
-                        hist::Update::OrderedOverwrite { .. } | hist::Update::BucketInsert { .. } => None,
-                        hist::Update::Reduce { operator, .. } => operator.seg_body(),
-                    }),
-                );
-                bodies
-            }
-        }
+        self.metadata_bodies()
     }
 
     pub(crate) fn seg_body_mut(&mut self, index: usize) -> Option<&mut SegBody> {
-        match self {
-            Self::Screma(op) => {
-                let mut remaining = index;
-                if let Some(body) = op.form.pre.seg_body_mut() {
-                    if remaining == 0 {
-                        return Some(body);
-                    }
-                    remaining -= 1;
-                }
-                for scan in &mut op.form.scans {
-                    if let Some(body) = scan.operator.seg_body_mut() {
-                        if remaining == 0 {
-                            return Some(body);
-                        }
-                        remaining -= 1;
-                    }
-                }
-                for reduction in &mut op.form.reductions {
-                    if let Some(body) = reduction.operator.seg_body_mut() {
-                        if remaining == 0 {
-                            return Some(body);
-                        }
-                        remaining -= 1;
-                    }
-                }
-                op.form.post.seg_body_mut().filter(|_| remaining == 0)
-            }
-            Self::Filter(op) => {
-                let mut remaining = index;
-                if let Some(body) = op.body.map.seg_body_mut() {
-                    if remaining == 0 {
-                        return Some(body);
-                    }
-                    remaining -= 1;
-                }
-                op.body.predicate.seg_body_mut().filter(|_| remaining == 0)
-            }
-            Self::Hist(op) => {
-                let mut remaining = index;
-                if let Some(body) = op.form.bucket.seg_body_mut() {
-                    if remaining == 0 {
-                        return Some(body);
-                    }
-                    remaining -= 1;
-                }
-                for operation in &mut op.form.operations {
-                    if let hist::Update::Reduce { operator, .. } = &mut operation.update {
-                        if let Some(body) = operator.seg_body_mut() {
-                            if remaining == 0 {
-                                return Some(body);
-                            }
-                            remaining -= 1;
-                        }
-                    }
-                }
-                None
-            }
-        }
+        self.metadata_body_mut(index)
     }
 }
 
@@ -338,11 +254,7 @@ impl<R: GraphResource> Family for Raw<R> {
     type Soac = SoacEffect<Self>;
 
     fn remap_soac_values(soac: &mut Self::Soac, map: &mut dyn FnMut(ValueId) -> ValueId) {
-        match &mut soac.1 {
-            Soac::Screma(op) => op.remap_base_referenced_values(map),
-            Soac::Filter(op) => op.remap_base_referenced_values(map),
-            Soac::Hist(op) => op.remap_base_referenced_values(map),
-        }
+        soac.1.remap_metadata_values(map);
     }
 }
 
@@ -911,12 +823,7 @@ impl<R: GraphResource> Soac<Semantic<R>> {
     }
 
     pub fn capture_nodes(&self) -> impl Iterator<Item = ValueId> {
-        let nodes = match self {
-            Self::Screma(op) => op.capture_nodes(),
-            Self::Filter(op) => op.capture_nodes(),
-            Self::Hist(op) => op.capture_nodes(),
-        };
-        nodes.into_iter()
+        self.metadata_captures().into_iter()
     }
 
     /// Concrete iteration space seen by scheduling, independent of SOAC

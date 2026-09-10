@@ -1,4 +1,5 @@
 use super::*;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{Raw, SegBody};
 use crate::types;
 use crate::FunctionId;
@@ -44,7 +45,7 @@ fn general_histogram() -> (Op<Raw>, HashMap<ValueId, Type<TypeName>>) {
     let op = Op::<Raw> {
         inputs: vec![SoacInputType::array(array(i32_type.clone()))],
         form: HistForm {
-            bucket: screma::Lambda::region(
+            bucket: Lambda::region(
                 SegBody {
                     region: FunctionId::from_index(0),
                     captures: vec![],
@@ -66,7 +67,7 @@ fn general_histogram() -> (Op<Raw>, HashMap<ValueId, Type<TypeName>>) {
                     race_factor: node(3),
                     destinations: vec![ViewId::test(node(4)), ViewId::test(node(5))],
                     update: Update::Reduce {
-                        operator: screma::Lambda::region(
+                        operator: Lambda::region(
                             SegBody {
                                 region: FunctionId::from_index(1),
                                 captures: vec![],
@@ -115,4 +116,20 @@ fn bucket_results_put_all_indices_before_all_values() {
         .validate(|node| nodes.get(&node).cloned())
         .expect_err("interleaving an operation value with indices must be rejected");
     assert!(error.contains("bucket lambda"), "unexpected error: {error}");
+}
+
+#[test]
+fn shared_lambda_validation_rejects_invalid_bucket_and_reducer() {
+    let (mut op, nodes) = general_histogram();
+    op.form.bucket.body = crate::egir::soac::LambdaBody::Identity;
+    let error = op.validate(|node| nodes.get(&node).cloned()).unwrap_err();
+    assert!(error.contains("histogram bucket identity lambda"), "{error}");
+
+    let (mut op, nodes) = general_histogram();
+    let Update::Reduce { operator, .. } = &mut op.form.operations[0].update else {
+        unreachable!()
+    };
+    operator.parameter_types.swap(0, 1);
+    let error = op.validate(|node| nodes.get(&node).cloned()).unwrap_err();
+    assert!(error.contains("operator must have type (a, a) -> a"), "{error}");
 }

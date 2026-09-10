@@ -1,9 +1,10 @@
 //! Dependency incidences for an unchanged EGIR snapshot.
 use super::analysis::GraphAnalysis;
 use super::block_interface;
+use super::soac::metadata::Metadata;
 use super::types::{
     CallEffects, EGraph, EffectOp, Family, GraphResource, OperandRef, PureOp, Raw, SegBody, Semantic,
-    SideEffect, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId, ValueKind, WynSoacPhase,
+    SideEffect, SideEffectKind, SideEffectSite, SoacEffect, ValueId, ValueKind, WynSoacPhase,
 };
 use crate::flow::BlockId;
 use std::collections::HashSet;
@@ -160,8 +161,9 @@ pub(crate) fn value_inputs<P: Family>(graph: &EGraph<P>, value: ValueId) -> Vec<
 
 /// Phase-specific SOAC metadata that contributes to a produced value.
 ///
-/// Raw SOACs have captures and operator seeds but no resolved segmented
-/// iteration space. Semantic SOACs additionally expose their resolved space.
+/// Raw SOACs expose every form-owned reference, including histogram shapes,
+/// destinations and operator seeds. Semantic SOACs additionally expose their
+/// resolved iteration space.
 pub(crate) trait ValueProducerPhase: WynSoacPhase {
     fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId>;
 
@@ -186,16 +188,10 @@ pub(crate) trait ValueProducerPhase: WynSoacPhase {
 
 impl<R: GraphResource> ValueProducerPhase for Raw<R> {
     fn effect_metadata_inputs(effect: &SideEffect<Self>) -> Vec<ValueId> {
-        let mut nodes = Vec::new();
         let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-            return nodes;
+            return Vec::new();
         };
-        nodes.extend(soac.seg_bodies().into_iter().flat_map(SegBody::capture_values));
-        if let Soac::Screma(op) = soac {
-            nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
-            nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
-        }
-        nodes
+        soac.metadata_values()
     }
 }
 

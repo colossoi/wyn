@@ -8,7 +8,8 @@ use wyn_core::egir::program::{
     OutputWriter, RealizedOutputRoute, ResourceId, ResourceOrigin, RewriteGlobal, SemanticOpId,
     SemanticProgramData, SemanticResourceRef,
 };
-use wyn_core::egir::soac::screma::{Lambda, ScremaOperands};
+use wyn_core::egir::soac::screma::ScremaOperands;
+use wyn_core::egir::soac::Lambda;
 use wyn_core::egir::soac::{filter, hist, screma};
 use wyn_core::egir::types::{
     EffectOp, GraphResource as WynGraphResource, Physical, PlaceDestination, Raw, ResultDestination,

@@ -3,6 +3,7 @@ use crate::ast::{Span, TypeName};
 use crate::egir;
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::soac::screma;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, OperandRef, Parameters, PureOp, SegBody,
     Semantic, SoacEffect, SoacOwnership, WynLanguage,
@@ -53,7 +54,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
             Soac::Screma(screma::Op {
                 inputs: vec![],
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::region(
+                    pre: Lambda::region(
                         SegBody {
                             region: FunctionId::from_index(0),
                             captures: captures.into_iter().map(OperandRef::Value).collect(),
@@ -63,7 +64,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
                     ),
                     scans: vec![],
                     reductions: vec![],
-                    post: screma::Lambda::identity(vec![ty]),
+                    post: Lambda::identity(vec![ty]),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,
@@ -91,7 +92,7 @@ fn array(element: Type<TypeName>) -> Type<TypeName> {
     )
 }
 
-fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) -> egir::reify::Segmented {
+fn screma_verification_program(operator: Lambda, neutral_is_bool: bool) -> egir::reify::Segmented {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let array_type = array(i32_type.clone());
     let result_type = Type::Constructed(TypeName::Tuple(1), vec![array_type.clone()]);
@@ -120,13 +121,13 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
             Soac::Screma(screma::Op {
                 inputs: vec![egir::types::SoacInputType::array(array_type.clone())],
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::identity(vec![i32_type.clone()]),
+                    pre: Lambda::identity(vec![i32_type.clone()]),
                     scans: vec![screma::Scan {
                         operator,
                         neutral: vec![neutral],
                     }],
                     reductions: vec![],
-                    post: screma::Lambda::identity(vec![i32_type]),
+                    post: Lambda::identity(vec![i32_type]),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,
@@ -165,8 +166,7 @@ fn screma_verification_program(operator: screma::Lambda, neutral_is_bool: bool) 
 #[test]
 fn verifier_rejects_identity_screma_operator_without_panicking() {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
-    let program =
-        screma_verification_program(screma::Lambda::identity(vec![i32_type.clone(), i32_type]), false);
+    let program = screma_verification_program(Lambda::identity(vec![i32_type.clone(), i32_type]), false);
 
     let error = verify(&program).expect_err("identity collective operator must be rejected");
     assert!(
@@ -179,7 +179,7 @@ fn verifier_rejects_identity_screma_operator_without_panicking() {
 fn verifier_rejects_screma_neutral_type_mismatch() {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
     let program = screma_verification_program(
-        screma::Lambda::region(
+        Lambda::region(
             SegBody {
                 region: FunctionId::from_index(0),
                 captures: vec![],

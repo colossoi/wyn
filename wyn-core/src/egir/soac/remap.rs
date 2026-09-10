@@ -2,6 +2,7 @@
 
 use crate::LookupMap;
 
+use super::metadata::Metadata;
 use super::{filter, hist, screma};
 use crate::egir::ir::PlaceId;
 use crate::egir::types::{GraphResource, SegExtent, SegResourceAccess, SegSpace, ValueId};
@@ -70,40 +71,13 @@ where
         Ok(SegSpace::from_dims(dimensions).expect("remapping cannot empty a segmented space"))
     }
 
-    pub(crate) fn lambda(&self, mut lambda: screma::Lambda) -> screma::Lambda {
-        if let Some(body) = lambda.seg_body_mut() {
-            for capture in body.captures_mut() {
-                *capture = capture
-                    .try_map(
-                        |value| Ok::<_, std::convert::Infallible>(self.nodes[&value]),
-                        |view| {
-                            view.try_remap(|value| Ok::<_, std::convert::Infallible>(self.nodes[&value]))
-                        },
-                        |place| Ok::<_, std::convert::Infallible>(self.places[&place]),
-                    )
-                    .unwrap();
-            }
-        }
-        lambda
-    }
-
     pub(crate) fn screma_form(&self, mut form: screma::ScremaForm) -> screma::ScremaForm {
-        form.pre = self.lambda(form.pre);
-        for scan in &mut form.scans {
-            scan.operator = self.lambda(scan.operator.clone());
-            scan.neutral.iter_mut().for_each(|value| *value = self.nodes[value]);
-        }
-        for reduction in &mut form.reductions {
-            reduction.operator = self.lambda(reduction.operator.clone());
-            reduction.neutral.iter_mut().for_each(|value| *value = self.nodes[value]);
-        }
-        form.post = self.lambda(form.post);
+        form.remap_metadata(|value| self.nodes[&value], |place| self.places[&place]);
         form
     }
 
     pub(crate) fn filter_body(&self, mut body: filter::Body) -> filter::Body {
-        body.map = self.lambda(body.map);
-        body.predicate = self.lambda(body.predicate);
+        body.remap_metadata(|value| self.nodes[&value], |place| self.places[&place]);
         body
     }
 
@@ -146,20 +120,7 @@ where
     }
 
     pub(crate) fn hist_form(&self, mut form: hist::HistForm) -> hist::HistForm {
-        form.bucket = self.lambda(form.bucket);
-        for operation in &mut form.operations {
-            operation.shape.iter_mut().for_each(|value| *value = self.nodes[value]);
-            operation.race_factor = self.nodes[&operation.race_factor];
-            operation.destinations.iter_mut().for_each(|view| view.remap_value(|value| self.nodes[&value]));
-            match &mut operation.update {
-                hist::Update::Reduce { operator, neutral } => {
-                    *operator = self.lambda(operator.clone());
-                    neutral.iter_mut().for_each(|value| *value = self.nodes[value]);
-                }
-                hist::Update::BucketInsert { capacity, .. } => *capacity = self.nodes[capacity],
-                hist::Update::OrderedOverwrite { .. } => {}
-            }
-        }
+        form.remap_metadata(|value| self.nodes[&value], |place| self.places[&place]);
         form
     }
 

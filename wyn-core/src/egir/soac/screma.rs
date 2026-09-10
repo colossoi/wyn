@@ -1,12 +1,14 @@
 use crate::BindingRef;
 use polytype::Type;
 
+use super::metadata::{impl_metadata, Metadata};
+use super::Lambda;
 use crate::ast::TypeName;
 
 use super::super::program::OutputSlotId;
 use super::super::types::{
-    GraphResource, OperandRef, ResultBinding, SegBody, SegResourceAccess, SegSpace, Semantic,
-    SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
+    GraphResource, OperandRef, ResultBinding, SegResourceAccess, SegSpace, Semantic, SoacInputType,
+    SoacOwnership, ValueId, WynSoacPhase,
 };
 
 /// One position in a Screma side effect's compact operand list.
@@ -76,106 +78,6 @@ impl<'a, P: WynSoacPhase> ScremaOperands<'a, P> {
         self.result.top_level_fields()
     }
 }
-/// The implementation of a Screma lambda.
-#[derive(Clone, Debug)]
-pub enum LambdaBody {
-    /// The lambda returns its parameters unchanged and has no concrete region.
-    Identity,
-    /// Executable scalar dataflow with explicit captures.
-    Region(SegBody),
-}
-
-/// A first-order lambda internal to a Screma.
-///
-/// This is deliberately distinct from `tlc::Lambda`: its higher-order meaning
-/// has already been eliminated, captures are explicit, and an identity lambda
-/// need not allocate a synthetic EGIR region.
-#[derive(Clone, Debug)]
-pub struct Lambda {
-    pub body: LambdaBody,
-    pub parameter_types: Vec<Type<TypeName>>,
-    pub result_types: Vec<Type<TypeName>>,
-}
-
-impl Lambda {
-    pub fn identity(types: Vec<Type<TypeName>>) -> Self {
-        Self {
-            parameter_types: types.clone(),
-            result_types: types,
-            body: LambdaBody::Identity,
-        }
-    }
-
-    pub fn region(
-        body: SegBody,
-        parameter_types: Vec<Type<TypeName>>,
-        result_types: Vec<Type<TypeName>>,
-    ) -> Self {
-        Self {
-            body: LambdaBody::Region(body),
-            parameter_types,
-            result_types,
-        }
-    }
-
-    pub fn is_identity(&self) -> bool {
-        matches!(self.body, LambdaBody::Identity)
-    }
-
-    pub fn seg_body(&self) -> Option<&SegBody> {
-        match &self.body {
-            LambdaBody::Identity => None,
-            LambdaBody::Region(body) => Some(body),
-        }
-    }
-
-    pub fn seg_body_mut(&mut self) -> Option<&mut SegBody> {
-        match &mut self.body {
-            LambdaBody::Identity => None,
-            LambdaBody::Region(body) => Some(body),
-        }
-    }
-
-    pub(crate) fn captures(&self) -> &[OperandRef] {
-        match &self.body {
-            LambdaBody::Identity => &[],
-            LambdaBody::Region(body) => &body.captures,
-        }
-    }
-
-    pub(crate) fn capture_count(&self) -> usize {
-        self.captures().len()
-    }
-    fn validate(&self, role: &str) -> Result<(), String> {
-        if self.is_identity() && self.parameter_types != self.result_types {
-            return Err(format!(
-                "Screma {role} identity lambda has signature {:?} -> {:?}",
-                self.parameter_types, self.result_types
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn for_each_type_mut(&mut self, visit: &mut impl FnMut(&mut Type<TypeName>)) {
-        for ty in &mut self.parameter_types {
-            visit(ty);
-        }
-        for ty in &mut self.result_types {
-            visit(ty);
-        }
-    }
-
-    fn capture_nodes(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.captures().iter().filter_map(|capture| capture.value())
-    }
-
-    pub(crate) fn remap_capture_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
-        if let Some(body) = self.seg_body_mut() {
-            body.remap_capture_values(map);
-        }
-    }
-}
-
 /// One associative scan operator at the Screma's collective barrier.
 #[derive(Clone, Debug)]
 pub struct Scan {
@@ -205,6 +107,32 @@ pub struct ScremaForm {
     pub reductions: Vec<Reduce>,
     pub post: Lambda,
 }
+
+impl_metadata!(ScremaForm, |form, visit| {
+    let Self {
+        pre,
+        scans,
+        reductions,
+        post,
+    } = form;
+    visit.lambda(pre);
+    for Scan { operator, neutral } in scans {
+        visit.lambda(operator);
+        for value in neutral {
+            visit.value(value);
+        }
+    }
+    for Reduce {
+        operator, neutral, ..
+    } in reductions
+    {
+        visit.lambda(operator);
+        for value in neutral {
+            visit.value(value);
+        }
+    }
+    visit.lambda(post);
+});
 
 /// A result position derived from Futhark's fixed Screma result convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -288,8 +216,8 @@ impl ScremaForm {
     }
 
     pub fn validate(&self, input_types: &[SoacInputType]) -> Result<(), String> {
-        self.pre.validate("pre")?;
-        self.post.validate("post")?;
+        self.pre.validate("Screma pre")?;
+        self.post.validate("Screma post")?;
 
         let pre_parameter_types = input_types.iter().map(SoacInputType::element).collect::<Vec<_>>();
         if self.pre.parameter_types != pre_parameter_types {
@@ -310,7 +238,7 @@ impl ScremaForm {
 
         let mut pre_offset = 0;
         for (index, scan) in self.scans.iter().enumerate() {
-            validate_operator_lambda("scan", index, &scan.operator, scan.neutral.len())?;
+            scan.operator.validate_operator(&format!("Screma scan {index}"), scan.neutral.len())?;
             let end = pre_offset + scan.neutral.len();
             let expected = &self.pre.result_types[pre_offset..end];
             if scan.operator.result_types != expected {
@@ -323,7 +251,9 @@ impl ScremaForm {
         }
 
         for (index, reduction) in self.reductions.iter().enumerate() {
-            validate_operator_lambda("reduction", index, &reduction.operator, reduction.neutral.len())?;
+            reduction
+                .operator
+                .validate_operator(&format!("Screma reduction {index}"), reduction.neutral.len())?;
             let end = pre_offset + reduction.neutral.len();
             let expected = &self.pre.result_types[pre_offset..end];
             if reduction.operator.result_types != expected {
@@ -384,40 +314,12 @@ impl ScremaForm {
         self.post.for_each_type_mut(visit);
     }
 
-    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        let mut nodes = self.pre.capture_nodes().collect::<Vec<_>>();
-        for scan in &self.scans {
-            nodes.extend(scan.operator.capture_nodes());
-        }
-        for reduction in &self.reductions {
-            nodes.extend(reduction.operator.capture_nodes());
-        }
-        nodes.extend(self.post.capture_nodes());
-        nodes
-    }
-
     fn base_referenced_nodes(&self) -> Vec<ValueId> {
-        let mut nodes = self.capture_nodes();
-        nodes.extend(self.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
-        nodes.extend(self.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
-        nodes
+        self.metadata_values()
     }
 
     fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
-        self.pre.remap_capture_values(map);
-        for scan in &mut self.scans {
-            scan.operator.remap_capture_values(map);
-            for neutral in &mut scan.neutral {
-                *neutral = map(*neutral);
-            }
-        }
-        for reduction in &mut self.reductions {
-            reduction.operator.remap_capture_values(map);
-            for neutral in &mut reduction.neutral {
-                *neutral = map(*neutral);
-            }
-        }
-        self.post.remap_capture_values(map);
+        self.remap_metadata_values(map);
     }
 }
 
@@ -435,40 +337,6 @@ fn validate_neutral_values(
                 "Screma {kind} {index} neutral {component} has type {actual:?}, expected {expected:?}"
             ));
         }
-    }
-    Ok(())
-}
-fn validate_operator_lambda(
-    kind: &str,
-    index: usize,
-    lambda: &Lambda,
-    neutral_count: usize,
-) -> Result<(), String> {
-    if lambda.is_identity() {
-        return Err(format!("Screma {kind} {index} operator is identity"));
-    }
-    if neutral_count == 0 {
-        return Err(format!("Screma {kind} {index} has no neutral values"));
-    }
-    if lambda.result_types.len() != neutral_count {
-        return Err(format!(
-            "Screma {kind} {index} has {neutral_count} neutral values but returns {} values",
-            lambda.result_types.len()
-        ));
-    }
-    if lambda.parameter_types.len() != neutral_count * 2 {
-        return Err(format!(
-            "Screma {kind} {index} operator must have {} parameters, found {}",
-            neutral_count * 2,
-            lambda.parameter_types.len()
-        ));
-    }
-    let (left, right) = lambda.parameter_types.split_at(neutral_count);
-    if left != right || left != lambda.result_types {
-        return Err(format!(
-            "Screma {kind} {index} operator must have type (a, a) -> a, found ({left:?}, {right:?}) -> {:?}",
-            lambda.result_types
-        ));
     }
     Ok(())
 }
@@ -580,10 +448,6 @@ impl<P: WynSoacPhase> Op<P> {
             visit(&mut input.array);
         }
         self.form.for_each_type_mut(visit);
-    }
-
-    pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        self.form.capture_nodes()
     }
 
     fn base_referenced_nodes(&self) -> Vec<ValueId> {

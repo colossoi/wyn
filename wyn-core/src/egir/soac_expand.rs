@@ -17,7 +17,7 @@ use wyn_base::IdSource;
 use polytype::Type;
 
 use super::graph_ops::{bind_by_value_result, load_result_value};
-use super::program::Func;
+use super::soac::lambda::PhysicalCallables as CallableMap;
 use super::soac::screma;
 use crate::ast::TypeName;
 use crate::types::{is_array_variant_view, is_virtual_array};
@@ -26,9 +26,6 @@ use super::types::{
     as_soa_tuple, by_value_function_result, EGraph, EffectToken, OperandRef, Physical, ResultBinding,
     ResultDestination, SideEffectKind, Soac, SoacEffect, ValueId, WynLanguage,
 };
-use crate::{FunctionId, LookupMap};
-
-type CallableMap = LookupMap<FunctionId, Func<Physical>>;
 
 mod array_io;
 mod filter_lowering;

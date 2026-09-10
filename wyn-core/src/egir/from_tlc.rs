@@ -65,7 +65,7 @@ use super::program::{
     ConstantDef, Func, Program, ProgramIdentities, RawEntry, RewriteGlobal, SemanticOpIdSource,
     SemanticProgramData,
 };
-use super::soac::{filter, hist, screma};
+use super::soac::{self, filter, hist, screma};
 use super::types::*;
 use crate::pipeline_descriptor::BufferLen;
 
@@ -2735,7 +2735,7 @@ impl<'a, 'b> Converter<'a, 'b> {
         let soac = Soac::Screma(screma::Op {
             inputs: input_arr_types.into_iter().map(SoacInputType::array).collect(),
             form: screma::ScremaForm {
-                pre: screma::Lambda::region(
+                pre: soac::Lambda::region(
                     SegBody {
                         region: map_region,
                         captures: capture_nids
@@ -2748,7 +2748,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                 ),
                 scans: Vec::new(),
                 reductions: Vec::new(),
-                post: screma::Lambda::identity(vec![output_elem_ty]),
+                post: soac::Lambda::identity(vec![output_elem_ty]),
             },
             result_state: vec![screma::ResultState { ownership }],
             state: screma::RawState,
@@ -2789,7 +2789,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             .cloned()
             .ok_or_else(|| ConvertError::GraphError("reduce_by_index values are not an array".into()))?;
         let operator_parameters = op.lam.params.iter().map(|(_, ty)| ty.clone()).collect();
-        let operator = screma::Lambda::region(
+        let operator = soac::Lambda::region(
             SegBody {
                 region: operator_region,
                 captures: operator_captures
@@ -2817,7 +2817,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     SoacInputType::array(value_array),
                 ],
                 form: hist::HistForm {
-                    bucket: screma::Lambda::identity(vec![index_type, value_type]),
+                    bucket: soac::Lambda::identity(vec![index_type, value_type]),
                     operations: vec![hist::HistOp {
                         emission: hist::Emission::Always,
                         shape: vec![destination_length],
@@ -2889,7 +2889,7 @@ impl<'a, 'b> Converter<'a, 'b> {
             Soac::Hist(hist::Op {
                 inputs: input_array_types.into_iter().map(SoacInputType::array).collect(),
                 form: hist::HistForm {
-                    bucket: screma::Lambda::region(
+                    bucket: soac::Lambda::region(
                         SegBody {
                             region: body_region,
                             captures: capture_nids
@@ -3136,7 +3136,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     })
                     .collect(),
                 form: hist::HistForm {
-                    bucket: screma::Lambda::region(
+                    bucket: soac::Lambda::region(
                         SegBody {
                             region: body_region,
                             captures: captures
@@ -3208,10 +3208,10 @@ impl<'a, 'b> Converter<'a, 'b> {
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType::array(arr_ty)],
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::identity(vec![result_ty.clone()]),
+                    pre: soac::Lambda::identity(vec![result_ty.clone()]),
                     scans: Vec::new(),
                     reductions: vec![screma::Reduce {
-                        operator: screma::Lambda::region(
+                        operator: soac::Lambda::region(
                             SegBody {
                                 region: op_region,
                                 captures: capture_nids
@@ -3225,7 +3225,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                         neutral: vec![init_nid],
                         commutative: false,
                     }],
-                    post: screma::Lambda::identity(Vec::new()),
+                    post: soac::Lambda::identity(Vec::new()),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,
@@ -3273,9 +3273,9 @@ impl<'a, 'b> Converter<'a, 'b> {
         let soac = Soac::Screma(screma::Op {
             inputs: vec![SoacInputType::array(arr_ty)],
             form: screma::ScremaForm {
-                pre: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
+                pre: soac::Lambda::identity(vec![scan_elem_ty.clone()]),
                 scans: vec![screma::Scan {
-                    operator: screma::Lambda::region(
+                    operator: soac::Lambda::region(
                         SegBody {
                             region: op_region,
                             captures: capture_nids
@@ -3289,7 +3289,7 @@ impl<'a, 'b> Converter<'a, 'b> {
                     neutral: vec![init_nid],
                 }],
                 reductions: Vec::new(),
-                post: screma::Lambda::identity(vec![scan_elem_ty.clone()]),
+                post: soac::Lambda::identity(vec![scan_elem_ty.clone()]),
             },
             result_state: vec![screma::ResultState { ownership }],
             state: screma::RawState,
@@ -3345,8 +3345,8 @@ impl<'a, 'b> Converter<'a, 'b> {
                 Soac::Filter(filter::Op {
                     body: filter::Body {
                         inputs: vec![SoacInputType::array(arr_ty)],
-                        map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
-                        predicate: screma::Lambda::region(
+                        map: soac::Lambda::identity(vec![output_elem_ty.clone()]),
+                        predicate: soac::Lambda::region(
                             pred_body.clone(),
                             vec![output_elem_ty.clone()],
                             vec![Type::Constructed(TypeName::Bool, vec![])],
@@ -3371,8 +3371,8 @@ impl<'a, 'b> Converter<'a, 'b> {
             Soac::Filter(filter::Op {
                 body: filter::Body {
                     inputs: vec![SoacInputType::array(arr_ty)],
-                    map: screma::Lambda::identity(vec![output_elem_ty.clone()]),
-                    predicate: screma::Lambda::region(
+                    map: soac::Lambda::identity(vec![output_elem_ty.clone()]),
+                    predicate: soac::Lambda::region(
                         pred_body,
                         vec![output_elem_ty.clone()],
                         vec![Type::Constructed(TypeName::Bool, vec![])],

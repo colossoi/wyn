@@ -4,6 +4,7 @@ use crate::ast::{Span, TypeName};
 use crate::egir::program::{OutputSlotId, SemanticOpId};
 use crate::egir::semantic_graph::{Facts, Incidence};
 pub(super) use crate::egir::semantic_graph::{ScopeKey, SourceValue};
+use crate::egir::soac::Lambda;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
     EGraph, PureOp, ResultBinding, SegResourceAccess, SegSpace, SideEffect, SideEffectKind, Soac,
@@ -38,7 +39,7 @@ pub(super) struct SourceLambda {
 }
 
 pub(super) enum SourceCode {
-    Lambda(screma::Lambda),
+    Lambda(Lambda),
     Projection(projection::ProjectionRecipe),
 }
 
@@ -434,11 +435,7 @@ impl Extract<'_> {
             .ok_or_else(|| FusionError::invalid("missing value incidence"))
     }
 
-    fn selection(
-        &mut self,
-        lambda: &screma::Lambda,
-        results: &[usize],
-    ) -> Option<projection::ProjectionRecipe> {
+    fn selection(&mut self, lambda: &Lambda, results: &[usize]) -> Option<projection::ProjectionRecipe> {
         let key = (lambda.seg_body()?.region, results.to_vec());
         self.selections
             .entry(key)
@@ -446,12 +443,7 @@ impl Extract<'_> {
             .clone()
     }
 
-    fn lambda(
-        &mut self,
-        scope: ScopeKey,
-        graph: &EGraph,
-        lambda: &screma::Lambda,
-    ) -> FusionResult<recipe::Lambda> {
+    fn lambda(&mut self, scope: ScopeKey, graph: &EGraph, lambda: &Lambda) -> FusionResult<recipe::Lambda> {
         let parameter_types =
             lambda.parameter_types.iter().map(|ty| self.catalog.ty(ty)).collect::<Vec<_>>();
         if lambda.is_identity() {

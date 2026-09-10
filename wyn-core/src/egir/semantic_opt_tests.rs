@@ -4,6 +4,7 @@ use crate::egir;
 use crate::egir::analysis::GraphAnalysis;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacEffect, SoacInputType, SoacOwnership};
 use crate::FunctionId;
 use polytype::Type;
@@ -23,7 +24,7 @@ fn dead_producer_graph() -> EGraph<Semantic> {
             Soac::Screma(screma::Op {
                 inputs: Vec::<SoacInputType>::new(),
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::region(
+                    pre: Lambda::region(
                         egir::types::SegBody {
                             region: FunctionId::from_index(0),
                             captures: vec![],
@@ -33,7 +34,7 @@ fn dead_producer_graph() -> EGraph<Semantic> {
                     ),
                     scans: vec![],
                     reductions: vec![],
-                    post: screma::Lambda::identity(vec![int]),
+                    post: Lambda::identity(vec![int]),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,

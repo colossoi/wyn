@@ -11,7 +11,8 @@ use crate::egir;
 use crate::egir::graph_ops::bind_by_value_result;
 use crate::egir::ir::PlaceOp;
 use crate::egir::program::{Func, ProgramIdentities, SemanticOpId};
-use crate::egir::soac::{hist, screma};
+use crate::egir::soac::Lambda;
+use crate::egir::soac::{filter, hist};
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EGraph, EffectOp, Family, Language,
     OperandRef, Parameters, Physical, PureOp, SideEffectKind, SkeletonTerminator, Soac, SoacEffect,
@@ -170,6 +171,95 @@ fn physical_callable(
 }
 
 #[test]
+fn filter_identity_predicate_expands_in_serial_and_parallel_flags() {
+    use crate::egir::graph_ops;
+    use crate::egir::types::{SegExtent, SegSpace};
+    use smallvec::smallvec;
+
+    for parallel in [false, true] {
+        let mut graph = EGraph::<Physical>::new();
+        let block = graph.skeleton.entry;
+        let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
+        let array_ty = plain_array_ty(bool_ty.clone());
+        let yes = graph.intern_pure(PureOp::Bool(true), smallvec![], bool_ty.clone(), None);
+        let no = graph.intern_pure(PureOp::Bool(false), smallvec![], bool_ty.clone(), None);
+        let input = graph.intern_pure(
+            PureOp::ArrayLit(4),
+            smallvec![yes, no, yes, no],
+            array_ty.clone(),
+            None,
+        );
+        let data = BindingRef::new(0, 0);
+        let length = BindingRef::new(0, 1);
+        let space = SegSpace::new(SegExtent::Fixed(4));
+        let (state, result_type) = if parallel {
+            (
+                filter::ScheduledState::Pipeline {
+                    space,
+                    storage: filter::RuntimeStorage { data, length },
+                    plan: filter::ParallelPlan {
+                        stage: filter::ParallelStage::Flags,
+                        buffers: filter::WorkBuffers {
+                            flags: BindingRef::new(0, 2),
+                            offsets: BindingRef::new(0, 3),
+                            block_sums: BindingRef::new(0, 4),
+                            block_offsets: BindingRef::new(0, 5),
+                        },
+                        scan_workgroup_width: 64,
+                    },
+                },
+                bool_ty.clone(),
+            )
+        } else {
+            (
+                filter::ScheduledState::Loop {
+                    space,
+                    storage: filter::Output::Runtime(filter::RuntimeOutput {
+                        capacity: filter::RuntimeCapacity::LikeInput {
+                            input: filter::FilterInputId(0),
+                        },
+                        backing: filter::RuntimeBacking::Bound(data),
+                        length: filter::RuntimeLength::Stored(length),
+                    }),
+                },
+                types::view_array_of(&bool_ty, types::buffer_tag(data)),
+            )
+        };
+        let filter = filter::Op::<Physical> {
+            body: filter::Body {
+                inputs: vec![SoacInputType::array(array_ty)],
+                map: Lambda::identity(vec![bool_ty.clone()]),
+                predicate: Lambda::identity(vec![bool_ty]),
+            },
+            state,
+        };
+        let mut effect_ids = IdSource::new();
+        let result = graph_ops::alloc_by_value_effect_result(&mut graph, result_type);
+        graph_ops::emit_pending_soac(
+            &mut graph,
+            block,
+            SemanticOpId::for_test(0),
+            Soac::Filter(filter),
+            smallvec![OperandRef::Value(input)],
+            result,
+            &mut effect_ids,
+            None,
+        );
+        let graph = super::run_one_body(graph, &Default::default(), &mut effect_ids)
+            .expect("identity predicate must not require a callable region");
+        assert!(graph.calls().is_empty());
+        assert!(graph.skeleton.blocks.values().all(|block| block
+            .side_effects
+            .iter()
+            .all(|effect| !matches!(effect.kind, SideEffectKind::Soac(_)))));
+        assert!(graph.skeleton.blocks.values().any(|block| block
+            .side_effects
+            .iter()
+            .any(|effect| matches!(effect.kind, SideEffectKind::Effect(EffectOp::Store { .. })))));
+    }
+}
+
+#[test]
 fn scatter_handleability_checks_every_input() {
     let mut identities = ProgramIdentities::default();
     let bucket_region = identities.alloc_function("scatter_bucket".into());
@@ -184,7 +274,7 @@ fn scatter_handleability_checks_every_input() {
                 SoacInputType::array(bad_input_ty),
             ],
             form: hist::HistForm {
-                bucket: screma::Lambda::region(
+                bucket: Lambda::region(
                     egir::types::SegBody {
                         region: bucket_region,
                         captures: vec![],
@@ -248,7 +338,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
     let histogram = hist::Op::<Physical> {
         inputs: (0..6).map(|_| SoacInputType::array(array_ty.clone())).collect(),
         form: hist::HistForm {
-            bucket: screma::Lambda::identity(vec![i32_ty.clone(); 6]),
+            bucket: Lambda::identity(vec![i32_ty.clone(); 6]),
             operations: vec![
                 hist::HistOp {
                     emission: hist::Emission::Always,
@@ -256,7 +346,7 @@ fn serial_hist_lowers_multiple_shapes_components_and_one_tuple_reducer_call() {
                     race_factor: one,
                     destinations: destinations[..2].to_vec(),
                     update: hist::Update::Reduce {
-                        operator: screma::Lambda::region(
+                        operator: Lambda::region(
                             egir::types::SegBody {
                                 region: reducer_region,
                                 captures: vec![],
@@ -378,7 +468,7 @@ fn serial_hist_ignores_out_of_bounds_indices() {
             SoacInputType::array(array_ty.clone()),
         ],
         form: hist::HistForm {
-            bucket: screma::Lambda::identity(vec![i32_ty.clone(), i32_ty.clone()]),
+            bucket: Lambda::identity(vec![i32_ty.clone(), i32_ty.clone()]),
             operations: vec![hist::HistOp {
                 emission: hist::Emission::Always,
                 shape: vec![four],
@@ -465,7 +555,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
     let histogram = hist::Op::<Physical> {
         inputs: (0..5).map(|_| SoacInputType::array(array_ty.clone())).collect(),
         form: hist::HistForm {
-            bucket: screma::Lambda::identity(vec![i32_ty.clone(); 5]),
+            bucket: Lambda::identity(vec![i32_ty.clone(); 5]),
             operations: vec![
                 hist::HistOp {
                     emission: hist::Emission::Always,
@@ -473,7 +563,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     race_factor: one,
                     destinations: vec![destinations[0]],
                     update: hist::Update::Reduce {
-                        operator: screma::Lambda::region(
+                        operator: Lambda::region(
                             egir::types::SegBody {
                                 region: first_reducer,
                                 captures: vec![],
@@ -490,7 +580,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
                     race_factor: one,
                     destinations: vec![destinations[1]],
                     update: hist::Update::Reduce {
-                        operator: screma::Lambda::region(
+                        operator: Lambda::region(
                             egir::types::SegBody {
                                 region: second_reducer,
                                 captures: vec![],

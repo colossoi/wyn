@@ -1,5 +1,6 @@
 use super::*;
 use crate::egir::program::SemanticOpId;
+use crate::egir::soac::Lambda;
 use crate::egir::types::EffectOp;
 use smallvec::SmallVec;
 
@@ -10,10 +11,10 @@ fn raw_map() -> SideEffect<Raw> {
             Soac::Screma(screma::Op {
                 inputs: vec![],
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::identity(vec![]),
+                    pre: Lambda::identity(vec![]),
                     scans: vec![],
                     reductions: vec![],
-                    post: screma::Lambda::identity(vec![]),
+                    post: Lambda::identity(vec![]),
                 },
                 result_state: vec![],
                 state: screma::RawState,
@@ -33,6 +34,33 @@ fn facts() -> Facts {
         resources: vec![],
         entry: false,
     }
+}
+
+#[test]
+fn semantic_resource_reads_include_values_behind_captured_places() {
+    use crate::egir::types::{OperandRef, SegBody};
+    use smallvec::smallvec;
+
+    let mut graph = EGraph::<Raw>::new();
+    let ty = Type::Constructed(TypeName::Int(32), vec![]);
+    let binding = BindingRef::new(1, 7);
+    let view = graph_ops::intern_interface_view(&mut graph, binding, ty.clone(), None);
+    let index = graph.intern_pure(PureOp::Int("0".into()), smallvec![], ty.clone(), None);
+    let place = graph.add_view_index_place(graph.view_id(view), index, ty, None);
+    let mut effect = raw_map();
+    let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
+        unreachable!()
+    };
+    op.form.pre = Lambda::region(
+        SegBody::new(crate::FunctionId::from_index(0), vec![OperandRef::Place(place)]),
+        vec![],
+        vec![],
+    );
+    let analysis = graph_ops::GraphAnalysis::new(&graph);
+    let resources = semantic_resources(&analysis, None, &effect, &[]);
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].resource, binding);
+    assert_eq!(resources[0].access, ResourceAccess::Read);
 }
 
 fn reified_source(source: &str) -> Segmented {

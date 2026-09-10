@@ -4,7 +4,8 @@ use crate::egir::analysis::GraphAnalysis;
 use crate::egir::graph_projector::{GraphProjector, ProjectionPlan};
 use crate::egir::ir::CallArgument;
 use crate::egir::program::{fresh_region_name, Func, ProgramIdentities};
-use crate::egir::soac::{lambda as lambda_ops, screma};
+use crate::egir::soac::lambda as lambda_ops;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{
     CallEffects, EGraph, ParameterId, PureOp, ResultBinding, Semantic, SkeletonTerminator, ValueId,
     ValueKind,
@@ -100,7 +101,7 @@ struct ProjectionBuilder<'a> {
 
 pub(super) fn build_projection_recipe(
     program: &Segmented,
-    lambda: &screma::Lambda,
+    lambda: &Lambda,
     results: &[usize],
 ) -> Option<ProjectionRecipe> {
     ProjectionBuilder {
@@ -113,7 +114,7 @@ pub(super) fn build_projection_recipe(
 }
 
 impl ProjectionBuilder<'_> {
-    fn lambda(mut self, lambda: &screma::Lambda, results: &[usize]) -> Option<ProjectionRecipe> {
+    fn lambda(mut self, lambda: &Lambda, results: &[usize]) -> Option<ProjectionRecipe> {
         let body = lambda.seg_body()?;
         let function = self.program.region(body.region)?;
         let (_, result) = function_return_site(function)?;

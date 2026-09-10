@@ -7,6 +7,7 @@ use super::{
 };
 use crate::ast::TypeName;
 use crate::egir::program::{Func, OutputWriter, ProgramIdentities, SemanticProgramData};
+use crate::egir::soac::Lambda;
 use crate::egir::soac::{filter, hist, lambda as lambda_ops, screma};
 use crate::egir::types::{
     EGraph, EffectToken, PureOp, ResultBinding, Semantic, SideEffect, SideEffectKind, SkeletonTerminator,
@@ -34,7 +35,7 @@ struct Emitter<'a> {
     recipes: &'a recipe::Recipes,
     identities: ProgramIdentities,
     functions: Vec<Func<Semantic>>,
-    lambdas: LookupMap<recipe::LambdaId, screma::Lambda>,
+    lambdas: LookupMap<recipe::LambdaId, Lambda>,
     plan: &'a wyn_fusion::Plan<ScopeKey, crate::BindingRef, Operation>,
     projections: projection::HelperCache,
 }
@@ -67,11 +68,11 @@ impl Emitter<'_> {
         scope: ScopeKey,
         graph: &mut EGraph,
         bindings: &LookupMap<PortId, ResultBinding<Type<TypeName>>>,
-    ) -> FusionResult<screma::Lambda> {
+    ) -> FusionResult<Lambda> {
         let parameter_types =
             lambda.parameter_types.iter().map(|ty| self.catalog.types[*ty].clone()).collect::<Vec<_>>();
         let Some(body) = &lambda.body else {
-            return Ok(screma::Lambda::identity(parameter_types));
+            return Ok(Lambda::identity(parameter_types));
         };
         let captures = lambda
             .captures()

@@ -7,13 +7,13 @@ use crate::builtins::catalog;
 use crate::egir::graph_ops::{
     alloca, emit_place_index_store, emit_storage_store, intern_storage_view, intern_u32, load, store,
 };
-use crate::egir::physical_call_abi::emit_call;
-use crate::egir::program::Func;
 use crate::egir::soac::filter;
+use crate::egir::soac::lambda::emit_physical_call;
+use crate::egir::soac::Lambda;
 use crate::egir::structured_cfg::{install_loop, install_selection, replace_effect_with_continuation};
 use crate::egir::types::{
-    EGraph, EffectToken, OperandRef, Physical, PlaceId, PureOp, SideEffectKind, SideEffectSite,
-    SkeletonTerminator, Soac, SoacEffect, SoacOwnership, ValueId, ValueKind,
+    EGraph, EffectToken, Physical, PlaceId, PureOp, SideEffectKind, SideEffectSite, SkeletonTerminator,
+    Soac, SoacEffect, SoacOwnership, ValueId, ValueKind,
 };
 use crate::flow::BlockId;
 use crate::op;
@@ -21,7 +21,7 @@ use crate::ssa;
 use crate::types;
 use crate::BindingRef;
 use polytype::Type;
-use smallvec::{smallvec, SmallVec};
+use smallvec::smallvec;
 use wyn_base::IdSource;
 
 /// Scan: `new_acc = func(acc, elem, ...caps); out[i] = new_acc` per iteration.
@@ -32,17 +32,15 @@ use wyn_base::IdSource;
 /// count' = if keep then count+1 else count`. The buffer write is unconditional —
 /// non-passing iterations overwrite the same slot on the next iteration that
 /// advances `count`. Two loop-carried values: the buffer and the runtime count.
-pub(super) struct FilterLoop {
+pub(super) struct FilterLoop<'a> {
     /// Co-iterated arrays read once per logical filter element.
     pub(super) read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>)>,
     /// The output element type returned by the canonical map lambda.
     pub(super) output_elem_ty: Type<TypeName>,
     pub(super) output: filter::Output<BindingRef>,
-    /// `None` denotes the validated one-input identity map.
-    pub(super) map_func: Option<Func<Physical>>,
-    pub(super) map_captures: Vec<OperandRef>,
-    pub(super) pred_func: Func<Physical>,
-    pub(super) captures: Vec<OperandRef>,
+    pub(super) map: &'a Lambda,
+    pub(super) predicate: &'a Lambda,
+    pub(super) callables: &'a CallableMap,
     pub(super) result_node: ValueId,
 }
 
@@ -61,6 +59,7 @@ pub(super) fn expand_filter(
     let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &effect.kind else {
         return Err("Filter lowering received a different effect family".into());
     };
+    op.body.validate()?;
     let input_count = op.body.inputs.len();
     let read_inputs = effect.operands[..input_count]
         .iter()
@@ -74,25 +73,7 @@ pub(super) fn expand_filter(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let map_body = op.body.map.seg_body();
-    let map_func = map_body
-        .map(|body| {
-            callables
-                .get(&body.region)
-                .cloned()
-                .ok_or_else(|| "Filter map callable boundary is missing".to_owned())
-        })
-        .transpose()?;
     let output_elem_ty = op.body.output_element_type();
-    let predicate_body = op
-        .body
-        .predicate
-        .seg_body()
-        .ok_or_else(|| "validated Filter predicate has no region".to_owned())?;
-    let pred_func = callables
-        .get(&predicate_body.region)
-        .cloned()
-        .ok_or_else(|| "Filter predicate callable boundary is missing".to_owned())?;
     let (output, plan) = match &op.state {
         filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
         filter::ScheduledState::Pipeline { storage, plan, .. } => {
@@ -115,18 +96,15 @@ pub(super) fn expand_filter(
             (output, plan)
         }
     };
-    let map_captures = map_body.map(|body| body.captures.clone()).unwrap_or_default();
-    let captures = predicate_body.captures.clone();
     let result_nid =
         effect.value_result().ok_or_else(|| "Filter has no by-value result root".to_owned())?;
     let spec = FilterLoop {
         read_inputs,
         output_elem_ty,
         output,
-        map_func,
-        map_captures,
-        pred_func,
-        captures,
+        map: &op.body.map,
+        predicate: &op.body.predicate,
+        callables,
         result_node: result_nid,
     };
     match plan {
@@ -150,7 +128,7 @@ pub(super) fn expand_filter(
     Ok(())
 }
 
-fn filter_primary_input(spec: &FilterLoop) -> &(ValueId, Type<TypeName>, Type<TypeName>) {
+fn filter_primary_input<'a>(spec: &'a FilterLoop<'_>) -> &'a (ValueId, Type<TypeName>, Type<TypeName>) {
     spec.read_inputs.first().expect("Filter has no input")
 }
 
@@ -160,7 +138,7 @@ fn filter_kept_value(
     graph: &mut EGraph<Physical>,
     block: BlockId,
     index: ValueId,
-    spec: &FilterLoop,
+    spec: &FilterLoop<'_>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<ValueId, String> {
     let elements = spec
@@ -169,26 +147,23 @@ fn filter_kept_value(
         .map(|(array, array_ty, elem_ty)| {
             emit_read_element(graph, block, *array, index, array_ty, elem_ty, next_effect)
         })
-        .collect::<SmallVec<[ValueId; 4]>>();
-    match &spec.map_func {
-        Some(function) => {
-            let mut operands =
-                elements.into_iter().map(|element| graph.operand_ref(element)).collect::<Vec<_>>();
-            operands.extend(spec.map_captures.iter().copied());
-            let result = emit_call(graph, block, function, operands, None, next_effect)?;
-            result.single_value().ok_or_else(|| "Filter map has no single by-value result".to_owned())
-        }
-        None => {
-            debug_assert_eq!(elements.len(), 1);
-            Ok(elements[0])
-        }
-    }
+        .collect::<Vec<_>>();
+    let results = emit_physical_call(
+        graph,
+        block,
+        spec.callables,
+        spec.map,
+        elements,
+        None,
+        next_effect,
+    )?;
+    results[0].single_value().ok_or_else(|| "Filter map has no single by-value result".to_owned())
 }
 pub(super) fn build_filter_loop(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
-    spec: FilterLoop,
+    spec: FilterLoop<'_>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     if let filter::Output::Runtime(runtime) = &spec.output {
@@ -262,7 +237,7 @@ fn build_serial_filter_cfg(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     after: BlockId,
-    spec: &FilterLoop,
+    spec: &FilterLoop<'_>,
     index_ty: Type<TypeName>,
     zero: ValueId,
     one: ValueId,
@@ -300,10 +275,16 @@ fn build_serial_filter_cfg(
     install_loop(graph, header, in_range, body, after, exit_args, continue_block);
 
     let kept = filter_kept_value(graph, body, index, spec, next_effect)?;
-    let mut pred_operands = vec![graph.operand_ref(kept)];
-    pred_operands.extend(spec.captures.iter().copied());
-    let predicate = emit_call(graph, body, &spec.pred_func, pred_operands, None, next_effect)?;
-    let predicate = predicate
+    let predicate = emit_physical_call(
+        graph,
+        body,
+        spec.callables,
+        spec.predicate,
+        vec![kept],
+        None,
+        next_effect,
+    )?;
+    let predicate = predicate[0]
         .single_value()
         .ok_or_else(|| "Filter predicate has no single by-value result".to_owned())?;
     install_selection(graph, body, predicate, then_block, else_block, selection_merge);
@@ -384,7 +365,7 @@ pub(super) fn build_filter_flags(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
-    spec: FilterLoop,
+    spec: FilterLoop<'_>,
     flags: BindingRef,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
@@ -411,11 +392,18 @@ pub(super) fn build_filter_flags(
     );
     install_selection(graph, bid, bounded, in_range, after, after);
     let kept = filter_kept_value(graph, in_range, gid, &spec, next_effect)?;
-    let mut operands = vec![graph.operand_ref(kept)];
-    operands.extend(spec.captures.iter().copied());
-    let pred = emit_call(graph, in_range, &spec.pred_func, operands, None, next_effect)?;
-    let pred =
-        pred.single_value().ok_or_else(|| "Filter predicate has no single by-value result".to_owned())?;
+    let pred = emit_physical_call(
+        graph,
+        in_range,
+        spec.callables,
+        spec.predicate,
+        vec![kept],
+        None,
+        next_effect,
+    )?;
+    let pred = pred[0]
+        .single_value()
+        .ok_or_else(|| "Filter predicate has no single by-value result".to_owned())?;
     install_selection(graph, in_range, pred, keep, drop, pred_merge);
     let view = intern_storage_view(graph, flags, Type::Constructed(TypeName::UInt(32), vec![]), None);
     for (block, value) in [(keep, 1), (drop, 0)] {
@@ -450,7 +438,7 @@ pub(super) fn build_filter_scan(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
-    spec: FilterLoop,
+    spec: FilterLoop<'_>,
     work: filter::WorkBuffers<BindingRef>,
     scan_workgroup_width: u32,
     next_effect: &mut IdSource<EffectToken>,
@@ -615,7 +603,7 @@ pub(super) fn build_filter_scatter(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx: usize,
-    spec: FilterLoop,
+    spec: FilterLoop<'_>,
     work: filter::WorkBuffers<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
@@ -729,7 +717,7 @@ fn build_runtime_filter_loop(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
     idx_in_block: usize,
-    spec: &FilterLoop,
+    spec: &FilterLoop<'_>,
     scratch_out: BindingRef,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {

@@ -520,10 +520,13 @@ fn semantic_resources(
     effect: &SideEffect<Raw>,
     output_slots: &[OutputSlotId],
 ) -> Vec<SegResourceAccess<BindingRef>> {
-    let mut accesses = graph_ops::read_storage_resources(analysis, referenced_nodes(effect))
-        .into_iter()
-        .map(|resource| (resource.resource, resource.access))
-        .collect::<HashMap<_, _>>();
+    let mut accesses = graph_ops::read_storage_resources(
+        analysis,
+        graph_ops::effect_value_inputs(analysis.graph(), effect),
+    )
+    .into_iter()
+    .map(|resource| (resource.resource, resource.access))
+    .collect::<HashMap<_, _>>();
     if let Some(entry) = entry {
         for slot in output_slots {
             if let Some(resource) = entry.outputs.get(slot.0).and_then(|output| output.resource) {
@@ -540,21 +543,4 @@ fn semantic_resources(
         .collect::<Vec<_>>();
     resources.sort_by_key(|resource| resource.resource);
     resources
-}
-
-fn referenced_nodes(effect: &SideEffect<Raw>) -> Vec<ValueId> {
-    let mut nodes = effect.operand_values().collect::<Vec<_>>();
-    let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-        return nodes;
-    };
-    nodes.extend(soac.seg_bodies().into_iter().flat_map(|body| body.capture_values()));
-    match soac {
-        Soac::Screma(op) => {
-            nodes.extend(op.form.scans.iter().flat_map(|scan| scan.neutral.iter().copied()));
-            nodes.extend(op.form.reductions.iter().flat_map(|reduction| reduction.neutral.iter().copied()));
-        }
-        Soac::Hist(op) => nodes.extend(op.referenced_nodes()),
-        Soac::Filter(_) => {}
-    }
-    nodes
 }

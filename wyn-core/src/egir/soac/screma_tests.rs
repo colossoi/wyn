@@ -1,5 +1,5 @@
 use super::*;
-use crate::egir::types::{Raw, Semantic};
+use crate::egir::types::{Raw, SegBody, Semantic};
 use crate::types;
 use crate::FunctionId;
 

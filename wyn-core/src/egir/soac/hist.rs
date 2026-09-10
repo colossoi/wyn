@@ -1,3 +1,4 @@
+use crate::egir::soac::Lambda;
 use crate::ssa;
 use crate::types;
 use polytype::Type;
@@ -7,7 +8,7 @@ use crate::ast::TypeName;
 use super::super::types::{
     GraphResource, SegSpace, Semantic, SoacInputType, ValueId, ViewId, WynSoacPhase,
 };
-use super::screma;
+use super::metadata::{impl_metadata, Metadata};
 
 /// Stable field identity in a histogram effect's logical result binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -33,7 +34,7 @@ pub enum Update {
         value_types: Vec<Type<TypeName>>,
     },
     Reduce {
-        operator: screma::Lambda,
+        operator: Lambda,
         neutral: Vec<ValueId>,
     },
     /// Capacity-bounded insertion with logical counts and overflow results.
@@ -108,9 +109,40 @@ impl HistOp {
 /// that result ABI.
 #[derive(Clone, Debug)]
 pub struct HistForm {
-    pub bucket: screma::Lambda,
+    pub bucket: Lambda,
     pub operations: Vec<HistOp>,
 }
+
+impl_metadata!(HistForm, |form, visit| {
+    let Self { bucket, operations } = form;
+    visit.lambda(bucket);
+    for HistOp {
+        shape,
+        race_factor,
+        destinations,
+        update,
+        ..
+    } in operations
+    {
+        for value in shape {
+            visit.value(value);
+        }
+        visit.value(race_factor);
+        for destination in destinations {
+            visit.view(destination);
+        }
+        match update {
+            Update::OrderedOverwrite { .. } => {}
+            Update::Reduce { operator, neutral } => {
+                visit.lambda(operator);
+                for value in neutral {
+                    visit.value(value);
+                }
+            }
+            Update::BucketInsert { capacity, .. } => visit.value(capacity),
+        }
+    }
+});
 
 impl HistForm {
     pub(crate) fn guard_count(&self) -> usize {
@@ -130,26 +162,7 @@ impl HistForm {
     }
 
     fn remap_referenced_values(&mut self, map: &mut impl FnMut(ValueId) -> ValueId) {
-        self.bucket.remap_capture_values(map);
-        for operation in &mut self.operations {
-            for dimension in &mut operation.shape {
-                *dimension = map(*dimension);
-            }
-            operation.race_factor = map(operation.race_factor);
-            for destination in &mut operation.destinations {
-                destination.remap_value(&mut *map);
-            }
-            match &mut operation.update {
-                Update::OrderedOverwrite { .. } => {}
-                Update::Reduce { operator, neutral } => {
-                    operator.remap_capture_values(map);
-                    for value in neutral {
-                        *value = map(*value);
-                    }
-                }
-                Update::BucketInsert { capacity, .. } => *capacity = map(*capacity),
-            }
-        }
+        self.remap_metadata_values(map);
     }
 }
 
@@ -259,14 +272,7 @@ impl<P: WynSoacPhase> Op<P> {
     }
 
     pub(crate) fn capture_nodes(&self) -> Vec<ValueId> {
-        let mut nodes =
-            self.form.bucket.captures().iter().filter_map(|capture| capture.value()).collect::<Vec<_>>();
-        for operation in &self.form.operations {
-            if let Update::Reduce { operator, .. } = &operation.update {
-                nodes.extend(operator.captures().iter().filter_map(|capture| capture.value()));
-            }
-        }
-        nodes
+        self.form.metadata_captures()
     }
 
     pub(crate) fn remap_base_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
@@ -274,25 +280,14 @@ impl<P: WynSoacPhase> Op<P> {
     }
 
     pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
-        let mut nodes = self.capture_nodes();
-        for operation in &self.form.operations {
-            nodes.extend(operation.shape.iter().copied());
-            nodes.push(operation.race_factor);
-            nodes.extend(operation.destinations.iter().map(|destination| destination.value()));
-            if let Update::Reduce { neutral, .. } = &operation.update {
-                nodes.extend(neutral.iter().copied());
-            }
-            if let Update::BucketInsert { capacity, .. } = operation.update {
-                nodes.push(capacity);
-            }
-        }
-        nodes
+        self.form.metadata_values()
     }
 
     pub(crate) fn validate(
         &self,
         mut node_type: impl FnMut(ValueId) -> Option<Type<TypeName>>,
     ) -> Result<(), String> {
+        self.form.bucket.validate("histogram bucket")?;
         if self.inputs.is_empty() {
             return Err("histogram requires at least one input array".into());
         }
@@ -378,20 +373,7 @@ impl<P: WynSoacPhase> Op<P> {
                     value_types.len(),
                 ));
             }
-            let expected_operator_parameters =
-                value_types.iter().cloned().chain(value_types.iter().cloned()).collect::<Vec<_>>();
-            if operator.is_identity()
-                || operator.parameter_types != expected_operator_parameters
-                || operator.result_types != value_types
-            {
-                return Err(format!(
-                    "histogram operation {index} reducer must have type {:?} -> {:?}, found {:?} -> {:?}",
-                    expected_operator_parameters,
-                    value_types,
-                    operator.parameter_types,
-                    operator.result_types,
-                ));
-            }
+            operator.validate_operator(&format!("histogram operation {index}"), neutral.len())?;
             for (component, (&neutral, value_type)) in neutral.iter().zip(value_types).enumerate() {
                 if node_type(neutral).as_ref() != Some(value_type) {
                     return Err(format!(

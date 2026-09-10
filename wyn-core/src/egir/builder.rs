@@ -1,6 +1,7 @@
 //! Focused construction API for planner-generated kernel entries.
 
 use crate::ast::{Span, TypeName};
+use crate::egir::soac::Lambda;
 use crate::flow::{BlockId, ExecutionModel};
 use crate::interface::{self, EntryInput, EntryOutput};
 use crate::types;
@@ -110,7 +111,7 @@ impl<'a> EntryBuilder<'a> {
     ) -> ValueId {
         let input = SoacInputType::array(input_array_ty);
         let input_element_type = input.element();
-        let pre = screma::Lambda::region(
+        let pre = Lambda::region(
             super::types::SegBody { region, captures },
             vec![input_element_type],
             vec![output_elem_ty.clone()],
@@ -127,7 +128,7 @@ impl<'a> EntryBuilder<'a> {
     pub fn emit_pending_map_into_views(
         &mut self,
         inputs: Vec<(ValueId, SoacInputType)>,
-        pre: screma::Lambda,
+        pre: Lambda,
         output_views: Vec<(ValueId, Type<TypeName>)>,
     ) -> ValueId {
         debug_assert_eq!(inputs.len(), pre.parameter_types.len());
@@ -163,7 +164,7 @@ impl<'a> EntryBuilder<'a> {
                     pre,
                     scans: Vec::new(),
                     reductions: Vec::new(),
-                    post: screma::Lambda::identity(result_types.clone()),
+                    post: Lambda::identity(result_types.clone()),
                 },
                 result_state: result_types
                     .iter()

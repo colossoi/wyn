@@ -1,5 +1,6 @@
 use super::*;
 use crate::egir::analysis::GraphAnalysis;
+use crate::egir::soac::Lambda;
 use crate::types;
 
 use crate::ast::{Span, TypeName};
@@ -359,7 +360,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
             Soac::Screma(screma::Op {
                 inputs: vec![SoacInputType::array(input_ty.clone())],
                 form: screma::ScremaForm {
-                    pre: screma::Lambda::region(
+                    pre: Lambda::region(
                         SegBody {
                             region: original_region,
                             captures: vec![OperandRef::Value(camera)],
@@ -369,7 +370,7 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                     ),
                     scans: vec![],
                     reductions: vec![],
-                    post: screma::Lambda::identity(vec![element_ty.clone()]),
+                    post: Lambda::identity(vec![element_ty.clone()]),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,

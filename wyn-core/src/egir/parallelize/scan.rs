@@ -6,6 +6,7 @@ use super::*;
 use crate::ast;
 use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{OperandRef, ResultBinding};
 use crate::interface;
 use crate::op;
@@ -260,7 +261,7 @@ pub(super) struct ScanPostOutput {
 
 /// The one canonical map run after block offsets have made every prefix global.
 pub(super) struct ScanPostPhaseSpec<'a> {
-    pub pre: screma::Lambda,
+    pub pre: Lambda,
     pub source_graph: &'a EGraph,
     pub inputs: Vec<(ValueId, egir::types::SoacInputType)>,
     pub input_declarations: Vec<SemanticResourceDecl>,
@@ -440,12 +441,12 @@ pub(super) struct ScanCandidate {
     pub owner: SemanticOpId,
     pub scratch_type: Type<TypeName>,
     serial: SerialScremaRecipe,
-    pre: screma::Lambda,
+    pre: Lambda,
     scans: Vec<screma::Scan>,
     reductions: Vec<screma::Reduce>,
     reduction_routing: super::reduce::ReductionRouting,
     operator_capture_inputs: Vec<SemanticResourceDecl>,
-    post: screma::Lambda,
+    post: Lambda,
     input_views: Vec<(ValueId, egir::types::SoacInputType)>,
     results: Vec<ResultBinding<Type<TypeName>>>,
     outputs: Vec<ScanOutput>,
@@ -702,7 +703,7 @@ impl KernelPlanBuilder<'_> {
                     )
                 },
             )?;
-            screma::Lambda::region(
+            Lambda::region(
                 SegBody {
                     region,
                     captures: operator_captures.clone(),
@@ -754,7 +755,7 @@ impl KernelPlanBuilder<'_> {
                         span,
                     )
                 })?;
-            screma::Lambda::region(
+            Lambda::region(
                 SegBody { region, captures },
                 parameter_types,
                 vec![elem_ty.clone()],
@@ -799,7 +800,7 @@ impl KernelPlanBuilder<'_> {
                         span,
                     )
                 })?;
-            Some(screma::Lambda::region(
+            Some(Lambda::region(
                 SegBody { region, captures },
                 parameter_types,
                 result_types,
@@ -877,7 +878,7 @@ impl KernelPlanBuilder<'_> {
             op.form.pre = phase1_pre.clone();
             op.form.scans = vec![phase_scan.clone()];
             op.form.reductions.clear();
-            op.form.post = screma::Lambda::identity(vec![elem_ty.clone()]);
+            op.form.post = Lambda::identity(vec![elem_ty.clone()]);
             op.result_state = vec![screma::ResultState {
                 ownership: types::SoacOwnership::Fresh,
             }];
@@ -903,7 +904,7 @@ impl KernelPlanBuilder<'_> {
                         neutral: phase_scan.neutral.clone(),
                         commutative: false,
                     }],
-                    post: screma::Lambda::identity(Vec::new()),
+                    post: Lambda::identity(Vec::new()),
                 },
                 result_state: vec![screma::ResultState {
                     ownership: types::SoacOwnership::Fresh,
@@ -1046,7 +1047,7 @@ impl KernelPlanBuilder<'_> {
 fn synthesize_packed_operator_function(
     region: FunctionId,
     name: String,
-    operators: Vec<(screma::Lambda, Func<Semantic>)>,
+    operators: Vec<(Lambda, Func<Semantic>)>,
     component_types: Vec<Type<TypeName>>,
     capture_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
@@ -1114,7 +1115,7 @@ fn synthesize_packed_operator_function(
 fn synthesize_scan_input_function(
     region: FunctionId,
     name: String,
-    pre: screma::Lambda,
+    pre: Lambda,
     pre_function: Option<Func<Semantic>>,
     capture_types: Vec<Type<TypeName>>,
     component_count: usize,
@@ -1153,9 +1154,9 @@ fn synthesize_scan_input_function(
 fn synthesize_scan_post_function(
     region: FunctionId,
     name: String,
-    pre: screma::Lambda,
+    pre: Lambda,
     pre_function: Option<Func<Semantic>>,
-    post: screma::Lambda,
+    post: Lambda,
     post_function: Option<Func<Semantic>>,
     component_types: Vec<Type<TypeName>>,
     scan_component_count: usize,

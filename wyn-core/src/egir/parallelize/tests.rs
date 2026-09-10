@@ -8,6 +8,7 @@ use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::ir::RealizedOutputRoute;
 use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
+use crate::egir::soac::Lambda;
 use crate::egir::types::{
     by_value_function_result, callable_parameter, CallEffects, EffectOp, EffectToken, OperandRef,
     Parameters, PlaceAccess, PlaceRegion, PlaceType, WynLanguage,
@@ -42,7 +43,7 @@ const OPERATOR_REGION: FunctionId = FunctionId::from_index(0);
 fn reduce_operator(neutral: ValueId, captures: Vec<ValueId>) -> screma::Reduce {
     let unit = Type::Constructed(TypeName::Unit, vec![]);
     screma::Reduce {
-        operator: screma::Lambda::region(
+        operator: Lambda::region(
             SegBody {
                 region: OPERATOR_REGION,
                 captures: captures.into_iter().map(OperandRef::Value).collect(),
@@ -138,10 +139,10 @@ fn reduction_keeps_canonical_operator_lambda_together() {
     let op = screma::Op::<Semantic> {
         inputs: vec![],
         form: screma::ScremaForm {
-            pre: screma::Lambda::identity(vec![unit]),
+            pre: Lambda::identity(vec![unit]),
             scans: vec![],
             reductions: vec![reduce_operator(neutral, vec![neutral])],
-            post: screma::Lambda::identity(vec![]),
+            post: Lambda::identity(vec![]),
         },
         result_state: vec![screma::ResultState {
             ownership: types::SoacOwnership::Fresh,
@@ -165,10 +166,10 @@ fn scan_form_carries_operator_and_neutral() {
     let op = screma::Op::<Semantic> {
         inputs: vec![],
         form: screma::ScremaForm {
-            pre: screma::Lambda::identity(vec![unit.clone()]),
+            pre: Lambda::identity(vec![unit.clone()]),
             scans: vec![scan_operator(neutral, vec![])],
             reductions: vec![],
-            post: screma::Lambda::identity(vec![unit]),
+            post: Lambda::identity(vec![unit]),
         },
         result_state: vec![screma::ResultState {
             ownership: types::SoacOwnership::Fresh,
@@ -188,10 +189,10 @@ fn screma_form_carries_scan_and_reduction_operators() {
     let op = screma::Op::<Semantic> {
         inputs: vec![],
         form: screma::ScremaForm {
-            pre: screma::Lambda::identity(vec![unit.clone(), unit.clone()]),
+            pre: Lambda::identity(vec![unit.clone(), unit.clone()]),
             scans: vec![scan_operator(scan_neutral, vec![])],
             reductions: vec![reduce_operator(reduce_neutral, vec![])],
-            post: screma::Lambda::identity(vec![unit]),
+            post: Lambda::identity(vec![unit]),
         },
         result_state: vec![
             screma::ResultState {

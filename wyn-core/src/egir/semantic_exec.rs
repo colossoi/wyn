@@ -6,6 +6,7 @@
 use crate::ast;
 use crate::egir::program::Func;
 use crate::egir::reify::Segmented;
+use crate::egir::soac::Lambda;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
     PureOp, ResultBinding, ResultDestination, Semantic, SkeletonTerminator, ValueId, ValueKind,
@@ -58,7 +59,7 @@ impl<'a> RegionExecutor<'a> {
     /// Invoke a canonical Screma lambda and unpack its logical result fields.
     fn call_lambda(
         &self,
-        lambda: &screma::Lambda,
+        lambda: &Lambda,
         parameters: &[Value],
         captures: &[Value],
     ) -> Result<Vec<Value>, String> {

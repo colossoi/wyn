@@ -5,7 +5,6 @@ use super::array_io::{
     emit_seg_space_dimensions, emit_seg_space_len,
 };
 use super::loop_builder::{expand_loop, LoopBody, LoopResultBinding, LoopResultSource};
-use super::screma_lowering::emit_screma_lambda;
 use super::CallableMap;
 use crate::ast::TypeName;
 use crate::builtins::{self, catalog};
@@ -14,7 +13,7 @@ use crate::egir::graph_ops::{
     rebind_physical_result, retype_projection_tree, store,
 };
 use crate::egir::soac::hist;
-use crate::egir::soac::lambda::result_argument_values;
+use crate::egir::soac::lambda::{emit_physical_call, result_argument_values};
 use crate::egir::structured_cfg::{install_loop, install_selection, replace_effect_with_continuation};
 use crate::egir::types::{
     ArrayLayout, EGraph, EffectToken, Physical, PlaceId, PureOp, SegSpace, SideEffectKind, SideEffectSite,
@@ -190,7 +189,7 @@ fn emit_hist_atomic_update(
     plan: hist::AtomicUpdate,
     next_effect: &mut IdSource<EffectToken>,
     regions: &CallableMap,
-) {
+) -> Result<(), String> {
     use crate::ssa::types::AtomicOp;
 
     match plan {
@@ -239,7 +238,7 @@ fn emit_hist_atomic_update(
             };
             install_loop(graph, header, retry_required, attempt, done, vec![], retry);
 
-            let result = emit_screma_lambda(
+            let result = emit_physical_call(
                 graph,
                 attempt,
                 regions,
@@ -247,7 +246,7 @@ fn emit_hist_atomic_update(
                 vec![expected, incoming],
                 None,
                 next_effect,
-            );
+            )?;
             let desired = result_argument_values(graph, &result)[0];
             let cas_type =
                 Type::Constructed(TypeName::Tuple(2), vec![value_type.clone(), bool_type.clone()]);
@@ -289,6 +288,7 @@ fn emit_hist_atomic_update(
             };
         }
     }
+    Ok(())
 }
 /// One invocation processes one input element and issues an atomic update
 /// for every operation. Candidate analysis has already proven that each
@@ -381,7 +381,7 @@ pub(super) fn build_hist_atomic(
         })
         .collect::<Vec<_>>();
     let bucket_results =
-        emit_screma_lambda(graph, body, regions, &form.bucket, arguments, None, next_effect);
+        emit_physical_call(graph, body, regions, &form.bucket, arguments, None, next_effect)?;
     let bucket_values = result_argument_values(graph, &bucket_results);
     debug_assert_eq!(
         bucket_values.len(),
@@ -431,7 +431,7 @@ pub(super) fn build_hist_atomic(
             *atomic,
             next_effect,
             regions,
-        );
+        )?;
         current = next;
     }
     graph.skeleton.blocks[current].term = SkeletonTerminator::Branch {
@@ -490,7 +490,7 @@ pub(super) fn build_hist_loop(
                 ));
             }
             let bucket_results =
-                emit_screma_lambda(graph, blk, regions, &form.bucket, arguments, None, next_effect);
+                emit_physical_call(graph, blk, regions, &form.bucket, arguments, None, next_effect)?;
             let bucket_values = result_argument_values(graph, &bucket_results);
             debug_assert_eq!(
                 bucket_values.len(),
@@ -550,7 +550,7 @@ pub(super) fn build_hist_loop(
                             ));
                         }
                         reducer_arguments.extend_from_slice(operation_values);
-                        let results = emit_screma_lambda(
+                        let results = emit_physical_call(
                             graph,
                             update,
                             regions,
@@ -558,7 +558,7 @@ pub(super) fn build_hist_loop(
                             reducer_arguments,
                             None,
                             next_effect,
-                        );
+                        )?;
                         result_argument_values(graph, &results)
                     }
                 };
@@ -944,7 +944,7 @@ pub(super) fn build_bucket_insert(
             )
         })
         .collect::<Vec<_>>();
-    let results = emit_screma_lambda(
+    let results = emit_physical_call(
         graph,
         body,
         regions,
@@ -952,7 +952,7 @@ pub(super) fn build_bucket_insert(
         arguments,
         None,
         next_effect,
-    );
+    )?;
     let results = result_argument_values(graph, &results);
     let [active, key, value] = results.as_slice() else {
         unreachable!("guarded bucket insertion envelope returns active, key, and value")
