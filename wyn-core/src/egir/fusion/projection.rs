@@ -19,6 +19,14 @@ impl From<u32> for ProjectionId {
         Self(value)
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ProjectedValueId(u32);
+impl From<u32> for ProjectedValueId {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
 pub(super) type HelperCache = LookupMap<(FunctionId, Vec<ValueId>), Func<Semantic>>;
 
 pub(super) struct Context<'a> {
@@ -38,11 +46,11 @@ enum ProjectedValue {
     },
     Pure {
         op: PureOp,
-        operands: Vec<ProjectedValue>,
+        operands: Vec<ProjectedValueId>,
         ty: Type<TypeName>,
         span: Option<Span>,
     },
-    Union(Box<ProjectedValue>, Box<ProjectedValue>),
+    Union(ProjectedValueId, ProjectedValueId),
     RegionResult {
         projection: ProjectionId,
         result: usize,
@@ -55,12 +63,15 @@ struct RegionProjection {
     roots: Vec<ValueId>,
     result_types: Vec<Type<TypeName>>,
     selection: ProjectionPlan,
-    arguments: Vec<(ValueId, ProjectedValue)>,
+    arguments: Vec<(ValueId, ProjectedValueId)>,
 }
 
 #[derive(Clone, Default)]
 pub(super) struct ProjectionRecipe {
-    values: Vec<ProjectedValue>,
+    values: Vec<ProjectedValueId>,
+    // Preserve source DAG sharing through projection, symbolic planning, and
+    // emission. Copying recursive values here expands repeated uses into trees.
+    nodes: IdArena<ProjectedValueId, ProjectedValue>,
     regions: IdArena<ProjectionId, RegionProjection>,
 }
 
@@ -81,6 +92,7 @@ fn function_result_field(function: &Func<Semantic>, index: usize) -> Option<Valu
 
 struct ProjectionBuilder<'a> {
     program: &'a Segmented,
+    nodes: IdArena<ProjectedValueId, ProjectedValue>,
     projections: IdArena<ProjectionId, RegionProjection>,
     region_stack: Vec<FunctionId>,
 }
@@ -92,6 +104,7 @@ pub(super) fn build_projection_recipe(
 ) -> Option<ProjectionRecipe> {
     ProjectionBuilder {
         program,
+        nodes: IdArena::new(),
         projections: IdArena::new(),
         region_stack: Vec::new(),
     }
@@ -115,7 +128,7 @@ impl ProjectionBuilder<'_> {
             .params()
             .ids()
             .enumerate()
-            .map(|(index, parameter)| (parameter, ProjectedValue::Input(index)))
+            .map(|(index, parameter)| (parameter, self.nodes.alloc(ProjectedValue::Input(index))))
             .collect::<StableMap<_, _>>();
         let values = results
             .iter()
@@ -123,6 +136,7 @@ impl ProjectionBuilder<'_> {
             .collect::<Option<Vec<_>>>()?;
         Some(ProjectionRecipe {
             values,
+            nodes: self.nodes,
             regions: self.projections,
         })
     }
@@ -131,20 +145,20 @@ impl ProjectionBuilder<'_> {
         &mut self,
         function: &Func<Semantic>,
         result: &ResultBinding<Type<TypeName>>,
-        arguments: &StableMap<ParameterId, ProjectedValue>,
-    ) -> Option<ProjectedValue> {
+        arguments: &StableMap<ParameterId, ProjectedValueId>,
+    ) -> Option<ProjectedValueId> {
         if result.is_product() {
             let fields = result
                 .top_level_fields()
                 .iter()
                 .map(|field| self.binding(function, field, arguments))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ProjectedValue::Pure {
+            Some(self.nodes.alloc(ProjectedValue::Pure {
                 op: PureOp::Tuple(fields.len()),
                 operands: fields,
                 ty: result.ty().clone(),
                 span: None,
-            })
+            }))
         } else {
             self.function(
                 function,
@@ -162,8 +176,8 @@ impl ProjectionBuilder<'_> {
         function: &Func<Semantic>,
         roots: &[ValueId],
         result_types: &[Type<TypeName>],
-        arguments: &StableMap<ParameterId, ProjectedValue>,
-    ) -> Option<Vec<ProjectedValue>> {
+        arguments: &StableMap<ParameterId, ProjectedValueId>,
+    ) -> Option<Vec<ProjectedValueId>> {
         if roots.len() != result_types.len()
             || arguments.len() != function.params().len()
             || self.region_stack.contains(&function.region)
@@ -204,12 +218,12 @@ impl ProjectionBuilder<'_> {
                                 .next()
                             })
                             .collect::<Option<Vec<_>>>()?;
-                        Some(ProjectedValue::Pure {
+                        Some(self.nodes.alloc(ProjectedValue::Pure {
                             op: PureOp::Tuple(*arity),
                             operands: fields,
                             ty: ty.clone(),
                             span: None,
-                        })
+                        }))
                     } else {
                         self.region(function, &[*root], &[ty.clone()], arguments)?.into_iter().next()
                     }
@@ -225,8 +239,8 @@ impl ProjectionBuilder<'_> {
         function: &Func<Semantic>,
         roots: &[ValueId],
         result_types: &[Type<TypeName>],
-        arguments: &StableMap<ParameterId, ProjectedValue>,
-    ) -> Option<Vec<ProjectedValue>> {
+        arguments: &StableMap<ParameterId, ProjectedValueId>,
+    ) -> Option<Vec<ProjectedValueId>> {
         let selection = GraphProjector::new(&function.graph).select_value_flow(roots.to_vec()).ok()?;
         let inputs = GraphProjector::new(&function.graph).value_flow_inputs(&selection, roots);
         let mut memo = LookupMap::new();
@@ -241,33 +255,40 @@ impl ProjectionBuilder<'_> {
             result_types: result_types.to_vec(),
             arguments,
         });
-        Some((0..roots.len()).map(|result| ProjectedValue::RegionResult { projection, result }).collect())
+        Some(
+            (0..roots.len())
+                .map(|result| self.nodes.alloc(ProjectedValue::RegionResult { projection, result }))
+                .collect(),
+        )
     }
 
     fn value(
         &mut self,
         function: &Func<Semantic>,
         source: ValueId,
-        arguments: &StableMap<ParameterId, ProjectedValue>,
-        memo: &mut LookupMap<ValueId, ProjectedValue>,
-    ) -> Option<ProjectedValue> {
+        arguments: &StableMap<ParameterId, ProjectedValueId>,
+        memo: &mut LookupMap<ValueId, ProjectedValueId>,
+    ) -> Option<ProjectedValueId> {
         if let Some(value) = memo.get(&source) {
-            return Some(value.clone());
+            return Some(*value);
         }
         let definition = function.graph.nodes.get(source)?;
         if let Some(alias) = definition.alias {
-            return self.value(function, alias, arguments, memo);
+            let value = self.value(function, alias, arguments, memo)?;
+            memo.insert(source, value);
+            return Some(value);
         }
         let value = match &definition.kind {
-            ValueKind::FuncParam { parameter } => arguments.get(parameter)?.clone(),
-            ValueKind::Constant(value) => ProjectedValue::Constant {
+            ValueKind::FuncParam { parameter } => *arguments.get(parameter)?,
+            ValueKind::Constant(value) => self.nodes.alloc(ProjectedValue::Constant {
                 value: value.clone(),
                 ty: definition.ty.clone(),
-            },
-            ValueKind::Union { left, right } => ProjectedValue::Union(
-                Box::new(self.value(function, *left, arguments, memo)?),
-                Box::new(self.value(function, *right, arguments, memo)?),
-            ),
+            }),
+            ValueKind::Union { left, right } => {
+                let left = self.value(function, *left, arguments, memo)?;
+                let right = self.value(function, *right, arguments, memo)?;
+                self.nodes.alloc(ProjectedValue::Union(left, right))
+            }
             ValueKind::Pure {
                 op: PureOp::Project { index },
                 operands,
@@ -281,18 +302,18 @@ impl ProjectionBuilder<'_> {
                     }
                     _ => {
                         let operand = self.value(function, operands[0], arguments, memo)?;
-                        match &operand {
+                        match &self.nodes[operand] {
                             ProjectedValue::Pure {
                                 op: PureOp::Tuple(arity),
                                 operands: fields,
                                 ..
-                            } if *arity == fields.len() => fields.get(*index as usize)?.clone(),
-                            _ => ProjectedValue::Pure {
+                            } if *arity == fields.len() => *fields.get(*index as usize)?,
+                            _ => self.nodes.alloc(ProjectedValue::Pure {
                                 op: PureOp::Project { index: *index },
                                 operands: vec![operand],
                                 ty: definition.ty.clone(),
                                 span: definition.span,
-                            },
+                            }),
                         }
                     }
                 }
@@ -312,21 +333,24 @@ impl ProjectionBuilder<'_> {
                     memo,
                 )?
             }
-            ValueKind::Pure { op, operands } => ProjectedValue::Pure {
-                op: op.clone(),
-                operands: operands
+            ValueKind::Pure { op, operands } => {
+                let operands = operands
                     .iter()
                     .map(|operand| self.value(function, *operand, arguments, memo))
-                    .collect::<Option<Vec<_>>>()?,
-                ty: definition.ty.clone(),
-                span: definition.span,
-            },
+                    .collect::<Option<Vec<_>>>()?;
+                self.nodes.alloc(ProjectedValue::Pure {
+                    op: op.clone(),
+                    operands,
+                    ty: definition.ty.clone(),
+                    span: definition.span,
+                })
+            }
             ValueKind::BlockParam { .. }
             | ValueKind::PlaceLength { .. }
             | ValueKind::PlaceView { .. }
             | ValueKind::SideEffectResult => return None,
         };
-        memo.insert(source, value.clone());
+        memo.insert(source, value);
         Some(value)
     }
 
@@ -336,9 +360,9 @@ impl ProjectionBuilder<'_> {
         callee: &FunctionId,
         call_arguments: &[CallArgument],
         result: usize,
-        caller_arguments: &StableMap<ParameterId, ProjectedValue>,
-        caller_memo: &mut LookupMap<ValueId, ProjectedValue>,
-    ) -> Option<ProjectedValue> {
+        caller_arguments: &StableMap<ParameterId, ProjectedValueId>,
+        caller_memo: &mut LookupMap<ValueId, ProjectedValueId>,
+    ) -> Option<ProjectedValueId> {
         let callee = self.program.region(*callee)?;
         if call_arguments.len() != callee.params().len() {
             return None;
@@ -370,28 +394,43 @@ impl ProjectionRecipe {
     ) -> Option<super::recipe::Lambda> {
         let mut builder = super::recipe::Builder::new(parameter_types, captures);
         let mut regions = LookupMap::new();
+        let mut memo = LookupMap::new();
         let results = self
             .values
             .iter()
-            .map(|value| self.symbolic_value(value, program, catalog, recipes, &mut builder, &mut regions))
+            .map(|value| {
+                self.symbolic_value(
+                    *value,
+                    program,
+                    catalog,
+                    recipes,
+                    &mut builder,
+                    &mut regions,
+                    &mut memo,
+                )
+            })
             .collect::<Option<Vec<_>>>()?;
         Some(builder.finish(recipes, results))
     }
 
     fn symbolic_value(
         &self,
-        value: &ProjectedValue,
+        value: ProjectedValueId,
         program: &Segmented,
         catalog: &mut super::snapshot::Catalog,
         recipes: &super::recipe::Recipes,
         builder: &mut super::recipe::Builder,
         regions: &mut LookupMap<ProjectionId, Vec<super::recipe::NodeId>>,
+        memo: &mut LookupMap<ProjectedValueId, super::recipe::NodeId>,
     ) -> Option<super::recipe::NodeId> {
         use super::{
             recipe::{self, Shape},
             snapshot::{Primitive, SourceCode, SourceLambda},
         };
-        match value {
+        if let Some(node) = memo.get(&value) {
+            return Some(*node);
+        }
+        let node = match &self.nodes[value] {
             ProjectedValue::Input(slot) => builder.arguments.get(*slot).copied(),
             ProjectedValue::Constant { value, ty } => {
                 let ty = catalog.ty(ty);
@@ -406,7 +445,9 @@ impl ProjectionRecipe {
             } => {
                 let operands = operands
                     .iter()
-                    .map(|value| self.symbolic_value(value, program, catalog, recipes, builder, regions))
+                    .map(|value| {
+                        self.symbolic_value(*value, program, catalog, recipes, builder, regions, memo)
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 let ty = catalog.ty(ty);
                 let shape = match op {
@@ -418,8 +459,9 @@ impl ProjectionRecipe {
                 builder.primitive(id, shape, operands, ty)
             }
             ProjectedValue::Union(left, right) => {
-                let left = self.symbolic_value(left, program, catalog, recipes, builder, regions)?;
-                let right = self.symbolic_value(right, program, catalog, recipes, builder, regions)?;
+                let left = self.symbolic_value(*left, program, catalog, recipes, builder, regions, memo)?;
+                let right =
+                    self.symbolic_value(*right, program, catalog, recipes, builder, regions, memo)?;
                 let id = catalog.primitives.alloc(Primitive::Union);
                 builder.primitive(id, Shape::Union, vec![left, right], builder.ty(left))
             }
@@ -431,7 +473,7 @@ impl ProjectionRecipe {
                         .arguments
                         .iter()
                         .map(|(_, value)| {
-                            self.symbolic_value(value, program, catalog, recipes, builder, regions)
+                            self.symbolic_value(*value, program, catalog, recipes, builder, regions, memo)
                         })
                         .collect::<Option<Vec<_>>>()?;
                     let parameter_types = source
@@ -442,21 +484,27 @@ impl ProjectionRecipe {
                     let result_types =
                         source.result_types.iter().map(|ty| catalog.ty(ty)).collect::<Vec<_>>();
                     let mut normalized = source.clone();
+                    let mut nodes = IdArena::new();
                     normalized.arguments = source
                         .arguments
                         .iter()
                         .enumerate()
-                        .map(|(slot, (parameter, _))| (*parameter, ProjectedValue::Input(slot)))
+                        .map(|(slot, (parameter, _))| {
+                            (*parameter, nodes.alloc(ProjectedValue::Input(slot)))
+                        })
                         .collect();
                     let mut selections = IdArena::new();
                     let id = selections.alloc(normalized);
                     let selected = ProjectionRecipe {
                         values: (0..result_types.len())
-                            .map(|result| ProjectedValue::RegionResult {
-                                projection: id,
-                                result,
+                            .map(|result| {
+                                nodes.alloc(ProjectedValue::RegionResult {
+                                    projection: id,
+                                    result,
+                                })
                             })
                             .collect(),
+                        nodes,
                         regions: selections,
                     };
                     let id = catalog.lambdas.alloc(SourceLambda {
@@ -485,40 +533,47 @@ impl ProjectionRecipe {
                 }
                 regions.get(projection)?.get(*result).copied()
             }
-        }
+        }?;
+        memo.insert(value, node);
+        Some(node)
     }
 
     pub(super) fn input_dependencies(&self) -> Vec<usize> {
         let mut inputs = crate::SortedSet::new();
         let mut regions = LookupSet::new();
+        let mut visited = LookupSet::new();
         for value in &self.values {
-            self.collect_inputs(value, &mut inputs, &mut regions);
+            self.collect_inputs(*value, &mut inputs, &mut regions, &mut visited);
         }
         inputs.into_iter().collect()
     }
 
     fn collect_inputs(
         &self,
-        value: &ProjectedValue,
+        value: ProjectedValueId,
         inputs: &mut crate::SortedSet<usize>,
         regions: &mut LookupSet<ProjectionId>,
+        visited: &mut LookupSet<ProjectedValueId>,
     ) {
-        match value {
+        if !visited.insert(value) {
+            return;
+        }
+        match &self.nodes[value] {
             ProjectedValue::Input(index) => {
                 inputs.insert(*index);
             }
             ProjectedValue::Pure { operands, .. } => {
                 for operand in operands {
-                    self.collect_inputs(operand, inputs, regions);
+                    self.collect_inputs(*operand, inputs, regions, visited);
                 }
             }
             ProjectedValue::Union(left, right) => {
-                self.collect_inputs(left, inputs, regions);
-                self.collect_inputs(right, inputs, regions);
+                self.collect_inputs(*left, inputs, regions, visited);
+                self.collect_inputs(*right, inputs, regions, visited);
             }
             ProjectedValue::RegionResult { projection, .. } if regions.insert(*projection) => {
                 for (_, argument) in &self.regions[*projection].arguments {
-                    self.collect_inputs(argument, inputs, regions);
+                    self.collect_inputs(*argument, inputs, regions, visited);
                 }
             }
             ProjectedValue::Constant { .. } | ProjectedValue::RegionResult { .. } => {}
@@ -532,6 +587,7 @@ struct ProjectionEmitter<'a, 'program> {
     label: &'a str,
     recipe: &'a ProjectionRecipe,
     inputs: &'a [Option<ValueId>],
+    emitted_values: LookupMap<ProjectedValueId, ValueId>,
     emitted_regions: LookupMap<ProjectionId, Vec<ValueId>>,
     synthesized: Vec<Func<Semantic>>,
 }
@@ -539,19 +595,22 @@ struct ProjectionEmitter<'a, 'program> {
 impl ProjectionEmitter<'_, '_> {
     fn emit(mut self) -> Option<(Vec<ValueId>, Vec<Func<Semantic>>)> {
         let values =
-            self.recipe.values.iter().map(|value| self.value(value)).collect::<Option<Vec<_>>>()?;
+            self.recipe.values.iter().map(|value| self.value(*value)).collect::<Option<Vec<_>>>()?;
         Some((values, self.synthesized))
     }
 
-    fn value(&mut self, value: &ProjectedValue) -> Option<ValueId> {
-        match value {
+    fn value(&mut self, value: ProjectedValueId) -> Option<ValueId> {
+        if let Some(node) = self.emitted_values.get(&value) {
+            return Some(*node);
+        }
+        let node = match &self.recipe.nodes[value] {
             ProjectedValue::Input(index) => self.inputs.get(*index).copied().flatten(),
             ProjectedValue::Constant { value, ty } => {
                 Some(self.graph.intern_constant(value.clone(), ty.clone()))
             }
             ProjectedValue::Union(left, right) => {
-                let left = self.value(left)?;
-                let right = self.value(right)?;
+                let left = self.value(*left)?;
+                let right = self.value(*right)?;
                 Some(self.graph.add_union(left, right))
             }
             ProjectedValue::Pure {
@@ -561,7 +620,7 @@ impl ProjectionEmitter<'_, '_> {
                 span,
             } => {
                 let operands =
-                    operands.iter().map(|operand| self.value(operand)).collect::<Option<Vec<_>>>()?;
+                    operands.iter().map(|operand| self.value(*operand)).collect::<Option<Vec<_>>>()?;
                 Some(self.graph.intern_pure(
                     op.clone(),
                     smallvec::SmallVec::from_vec(operands),
@@ -576,7 +635,9 @@ impl ProjectionEmitter<'_, '_> {
                 }
                 self.emitted_regions.get(projection)?.get(*result).copied()
             }
-        }
+        }?;
+        self.emitted_values.insert(value, node);
+        Some(node)
     }
 
     fn region(&mut self, index: ProjectionId) -> Option<Vec<ValueId>> {
@@ -585,7 +646,7 @@ impl ProjectionEmitter<'_, '_> {
         let call_arguments = projected
             .arguments
             .iter()
-            .map(|(_, argument)| self.value(argument).map(|value| self.graph.operand_ref(value)))
+            .map(|(_, argument)| self.value(*argument).map(|value| self.graph.operand_ref(value)))
             .collect::<Option<Vec<_>>>()?;
         if let Some(helper) = self.context.helpers.get(&key) {
             let (_, result) = self
@@ -672,6 +733,7 @@ impl ProjectionRecipe {
             label: "projection",
             recipe: self,
             inputs: arguments,
+            emitted_values: LookupMap::new(),
             emitted_regions: LookupMap::new(),
             synthesized: Vec::new(),
         }
