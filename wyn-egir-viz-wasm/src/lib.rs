@@ -628,42 +628,41 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
     let mut segmented = wyn_core::egir::reify_soacs(program);
     let aggregate_semantic_before =
         (pass == InspectPass::OptimizeSemanticOperations).then(|| snapshot_program(&segmented));
-    let mut aggregate_semantic_relations = Vec::new();
-    loop {
-        let before_dead =
-            (pass == InspectPass::EliminateDeadSemanticOperations).then(|| snapshot_program(&segmented));
-        let (rewritten, changed, trace) = wyn_core::egir::eliminate_dead_semantic_operations(segmented);
-        segmented = rewritten;
-        let relations = trace_relations(trace);
-        if pass == InspectPass::EliminateDeadSemanticOperations {
-            return inspection_with_relations(pass, before_dead, snapshot_program(&segmented), relations);
-        }
-        aggregate_semantic_relations.extend(relations);
-        if changed {
-            continue;
-        }
-
-        let before_fusion =
-            (pass == InspectPass::FuseSemanticOperations).then(|| snapshot_program(&segmented));
-        let (rewritten, changed, trace) =
-            try_compiler!(wyn_core::egir::fuse_semantic_operations(segmented));
-        segmented = rewritten;
-        let relations = trace_relations(trace);
-        if pass == InspectPass::FuseSemanticOperations {
-            return inspection_with_relations(pass, before_fusion, snapshot_program(&segmented), relations);
-        }
-        aggregate_semantic_relations.extend(relations);
-        if !changed {
-            break;
-        }
+    if pass == InspectPass::EliminateDeadSemanticOperations {
+        let before = snapshot_program(&segmented);
+        let (program, _, trace) = wyn_core::egir::eliminate_dead_semantic_operations(segmented);
+        return inspection_with_relations(
+            pass,
+            Some(before),
+            snapshot_program(&program),
+            trace_relations(trace),
+        );
     }
-    let semantic_operations_optimized: wyn_core::egir::SemanticOperationsOptimized = segmented.retag();
+    if pass == InspectPass::FuseSemanticOperations {
+        loop {
+            let (program, changed, _) = wyn_core::egir::eliminate_dead_semantic_operations(segmented);
+            segmented = program;
+            if !changed {
+                break;
+            }
+        }
+        let before = snapshot_program(&segmented);
+        let (program, _, trace) = try_compiler!(wyn_core::egir::fuse_semantic_operations(segmented));
+        return inspection_with_relations(
+            pass,
+            Some(before),
+            snapshot_program(&program),
+            trace_relations(trace),
+        );
+    }
+    let (semantic_operations_optimized, trace) =
+        try_compiler!(wyn_core::egir::optimize_semantic_operations_with_trace(segmented));
     if pass == InspectPass::OptimizeSemanticOperations {
         return inspection_with_relations(
             pass,
             aggregate_semantic_before,
             snapshot_program(&semantic_operations_optimized),
-            aggregate_semantic_relations,
+            trace_relations(trace),
         );
     }
 

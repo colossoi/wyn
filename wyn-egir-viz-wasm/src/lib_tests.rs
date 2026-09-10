@@ -562,3 +562,29 @@ fn physical_planning_subpasses_are_individually_inspectable() {
         assert!(result.after.is_some(), "{} has no after snapshot", pass.id());
     }
 }
+
+#[test]
+fn fusion_step_performs_one_action_while_aggregate_reaches_fixpoint() {
+    let source = r#"entry chain(xs: [4]i32) [4]i32 =
+  let a = map(|x: i32| x + 1, xs) in
+  let b = map(|x: i32| x * 2, a) in
+  map(|x: i32| x - 3, b)"#;
+    let step = inspect_pass_impl(source, InspectPass::FuseSemanticOperations);
+    assert!(step.success, "{:?}", step.error);
+    assert_eq!(
+        step.before.unwrap().nodes.iter().filter(|node| node.variant == "segmap").count(),
+        3
+    );
+    assert_eq!(
+        step.after.unwrap().nodes.iter().filter(|node| node.variant == "segmap").count(),
+        2
+    );
+    assert_eq!(step.relations.len(), 1);
+    let aggregate = inspect_impl(source);
+    assert!(aggregate.success, "{:?}", aggregate.error);
+    assert_eq!(
+        aggregate.after.unwrap().nodes.iter().filter(|node| node.variant == "segmap").count(),
+        1
+    );
+    assert_eq!(aggregate.relations.len(), 2);
+}

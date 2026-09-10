@@ -1,8 +1,6 @@
-//! Target-independent optimization of semantic EGIR: dead-SegOp elimination,
-//! indexed-demand scalarization, and graph-rewriting fusion (same-space
-//! horizontal, producer/consumer, envelope, and filter consumers). Every
-//! rewrite is gated by the semantic dependency DAG so two ops are never fused
-//! or reordered across a conflicting resource or effect.
+//! Target-independent dead-operation elimination and compositional fusion.
+//! Fusion contracts an owned dependency graph to a fixed point before emitting
+//! EGIR. Snapshots are rebuilt after application and dead-operation elimination.
 
 /// Semantic EGIR after dead-operation elimination and fusion reach a fixpoint.
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +33,6 @@ pub type Optimized = super::program::Program<
 use super::ir::BodySite;
 use super::program::SemanticOpId;
 use super::reify::Segmented;
-use super::semantic_graph::SemanticGraph;
 use super::soac::screma;
 use super::types::{
     EGraph, GraphResource, ResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
@@ -43,7 +40,6 @@ use super::types::{
 use crate::error::CompilerError;
 use crate::flow::BlockId;
 use crate::LookupMap;
-use std::collections::BTreeMap;
 
 #[cfg(test)]
 #[path = "semantic_opt_tests.rs"]
@@ -80,9 +76,6 @@ pub fn optimize_semantic_operations_with_trace(
     let mut trace = SemanticOptimizationTrace::default();
     let mut program = program;
 
-    // Fixpoint: rebuild the DAG, take one legal rewrite, repeat. Rebuilding
-    // between rewrites keeps the legality oracle sound — a stale DAG is the
-    // top correctness risk. Dead elimination runs first to shrink the graph.
     loop {
         let (rewritten, changed, step_trace) = eliminate_dead_semantic_operations(program);
         program = rewritten;
@@ -91,7 +84,8 @@ pub fn optimize_semantic_operations_with_trace(
             continue;
         }
 
-        let (rewritten, changed, step_trace) = fuse_semantic_operations(program)?;
+        let (rewritten, changed, step_trace) = super::fusion::run(program, None)
+            .map_err(|error| CompilerError::Internal(error.to_string()))?;
         program = rewritten;
         trace.extend(step_trace);
         if changed {
@@ -114,31 +108,40 @@ pub fn eliminate_dead_semantic_operations(
     let Some(patch) = analyze_dead_seg_ops(&program) else {
         return (program, false, SemanticOptimizationTrace::default());
     };
-    let before = semantic_operation_fingerprints(&program);
+    let mut before = patch
+        .bodies
+        .iter()
+        .flat_map(|(site, blocks)| {
+            let graph = program.body_graph(*site).expect("dead-operation patch body");
+            blocks.iter().flat_map(move |(block, indices)| {
+                indices.iter().filter_map(move |index| {
+                    match graph.skeleton.blocks[*block].side_effects[*index].kind() {
+                        SideEffectKind::Soac(SoacEffect(id, _)) => Some(*id),
+                        _ => None,
+                    }
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    before.sort_unstable();
+    before.dedup();
     let program = apply_dead_seg_ops(program, patch);
-    let mut trace = SemanticOptimizationTrace::default();
-    trace.record(before, semantic_operation_fingerprints(&program));
+    let trace = SemanticOptimizationTrace {
+        relations: vec![SemanticOptimizationRelation {
+            before,
+            after: vec![],
+        }],
+    };
     (program, true, trace)
 }
 
 /// Apply at most one legal semantic fusion rewrite.
 ///
-/// Candidate analysis and its dependency oracle are intentionally rebuilt for
-/// every call. This keeps the public sub-pass boundary safe for inspection
-/// clients while preserving the production optimizer's legality invariant.
+/// Builds a source snapshot and runs the shared planner with a one-action limit.
 pub fn fuse_semantic_operations(
     program: Segmented,
 ) -> std::result::Result<(Segmented, bool, SemanticOptimizationTrace), CompilerError> {
-    let dependencies = super::semantic_graph::dependencies(&program);
-    let oracle = SemanticGraph::new(&dependencies);
-    let before = semantic_operation_fingerprints(&program);
-    let (program, changed) = super::fusion::rewrite_once(program, &oracle)
-        .map_err(|error| CompilerError::Internal(error.to_string()))?;
-    let mut trace = SemanticOptimizationTrace::default();
-    if changed {
-        trace.record(before, semantic_operation_fingerprints(&program));
-    }
-    Ok((program, changed, trace))
+    super::fusion::run(program, Some(1)).map_err(|error| CompilerError::Internal(error.to_string()))
 }
 
 /// Lift values that are uniform at their execution stage, then validate the
@@ -182,48 +185,9 @@ pub fn apply_pipeline_topology_policy(
     }
 }
 
-fn semantic_operation_fingerprints(program: &Segmented) -> BTreeMap<SemanticOpId, String> {
-    program
-        .entry_points
-        .iter()
-        .map(|entry| &entry.graph)
-        .chain(program.functions.iter().map(|function| &function.graph))
-        .chain(program.constants.iter().map(|constant| &constant.graph))
-        .flat_map(|graph| graph.skeleton.blocks.iter().flat_map(|(_, block)| block.side_effects.iter()))
-        .filter_map(|effect| {
-            let SideEffectKind::Soac(SoacEffect(id, soac)) = effect.kind() else {
-                return None;
-            };
-            Some((*id, format!("{soac:#?}")))
-        })
-        .collect()
-}
-
 impl SemanticOptimizationTrace {
     fn extend(&mut self, mut other: Self) {
         self.relations.append(&mut other.relations);
-    }
-
-    fn record(&mut self, before: BTreeMap<SemanticOpId, String>, after: BTreeMap<SemanticOpId, String>) {
-        let removed = before.keys().filter(|id| !after.contains_key(id)).copied();
-        let added = after.keys().filter(|id| !before.contains_key(id)).copied();
-        let changed = before.iter().filter_map(|(id, fingerprint)| {
-            after.get(id).filter(|after| *after != fingerprint).map(|_| *id)
-        });
-
-        let mut before_ids = removed.chain(changed.clone()).collect::<Vec<_>>();
-        let mut after_ids = added.chain(changed).collect::<Vec<_>>();
-        before_ids.sort_unstable();
-        before_ids.dedup();
-        after_ids.sort_unstable();
-        after_ids.dedup();
-
-        if !before_ids.is_empty() || !after_ids.is_empty() {
-            self.relations.push(SemanticOptimizationRelation {
-                before: before_ids,
-                after: after_ids,
-            });
-        }
     }
 }
 

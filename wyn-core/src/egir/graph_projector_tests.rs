@@ -710,8 +710,11 @@ fn value_flow_projection_prunes_unrelated_cfg_lanes_and_parameters() {
     };
     graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(selected)));
 
-    let projected =
-        GraphProjector::new(&graph).value_flow(vec![selected]).expect("pure value-flow projection");
+    let projected = {
+        let projector = GraphProjector::new(&graph);
+        let selection = projector.select_value_flow(vec![selected]).expect("select pure values");
+        projector.emit_value_flow(&selection, &[]).expect("pure value-flow projection")
+    };
     let projected_merge = projected.block(merge).expect("projected merge");
     assert_eq!(projected.graph.skeleton.blocks[projected_merge].params.len(), 1);
     assert!(projected.node(selected).is_some());

@@ -655,7 +655,7 @@ fn inline_structured_call_before_terminator<P: Family>(
     // choose the block parameter while elaborating a value placed before its
     // defining continuation.
     for (&call_result, &result) in call_results.iter().zip(&results) {
-        caller.replace_node_references(call_result, result);
+        caller.replace_value_references(call_result, result);
     }
     old_term.visit_values_mut(|node| {
         if let Some(index) = call_results.iter().position(|result| result == node) {

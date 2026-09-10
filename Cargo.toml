@@ -8,6 +8,7 @@ members = [
     "wyn-pipeline-descriptor",
     "wyn-spirv",
     "wyn-graph",
+    "wyn-fusion",
     "wyn-module-graph",
     "wyn-package-manager",
     "wyn-staged-ir",

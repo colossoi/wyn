@@ -1,0 +1,6 @@
+-- A fused scan and reduction publish their array and scalar results for a gather.
+entry gen(xs: []i32) []i32 =
+  let counts = map(|x: i32| x * 2, xs) in
+  let total = reduce(|a: i32, b: i32| a + b, 0, counts) in
+  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
+  map(|i: i32| offsets[i % 8] + total, iota(64))

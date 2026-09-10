@@ -185,11 +185,18 @@ enum ProjectionMode {
     },
 }
 
+#[derive(Clone)]
 struct ProjectionSelection {
     blocks: HashSet<BlockId>,
     effects: HashSet<SideEffectSite>,
     values: HashSet<ValueId>,
 }
+
+/// Checked source identities for a pure structured projection. This contains
+/// no graph and allocates no target identities. It is valid for the unchanged
+/// source snapshot from which it was selected.
+#[derive(Clone)]
+pub(super) struct ValueFlowSelection(ProjectionSelection);
 
 struct ProjectionShell<R: GraphResource> {
     graph: EGraph<Semantic<R>>,
@@ -229,18 +236,129 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         self.project(selected, extra_values, ProjectionMode::Complete)
     }
 
-    /// Project selected pure values through the source CFG. Structured control
-    /// flow is retained, but unrelated block-parameter lanes and function
-    /// parameters are omitted. This is the control-flow counterpart to cloning
-    /// a straight-line value DAG.
-    pub(super) fn value_flow(&self, values: Vec<ValueId>) -> Result<GraphProjection<R>, String> {
+    /// Check selected pure values and their structured control dependencies.
+    pub(super) fn select_value_flow(&self, values: Vec<ValueId>) -> Result<ValueFlowSelection, String> {
         if values.is_empty() {
             return Err("value-flow projection requires at least one result".into());
         }
         if self.source.has_ordered_effects() {
             return Err("value-flow projection requires an effect-free graph".into());
         }
-        self.project(HashSet::new(), values, ProjectionMode::ValueFlow)
+        self.source.skeleton.verify_branch_arities()?;
+        let selection = self.select_projection(HashSet::new(), values, ProjectionMode::ValueFlow)?;
+        for value in &selection.values {
+            let definition = self
+                .source
+                .nodes
+                .get(*value)
+                .ok_or_else(|| format!("projection references missing value {value:?}"))?;
+            if let ValueKind::BlockParam { block, .. } = definition.kind() {
+                if !self.source.skeleton.blocks[*block]
+                    .params
+                    .iter()
+                    .any(|parameter| parameter.value() == *value)
+                {
+                    return Err("projection references an absent block parameter".into());
+                }
+            }
+        }
+        Ok(ValueFlowSelection(selection))
+    }
+
+    /// Factor pure parameter projections out of an already checked selection.
+    /// This preserves exact tuple-field dependencies at a callable boundary.
+    pub(super) fn value_flow_inputs(
+        &self,
+        selection: &ValueFlowSelection,
+        roots: &[ValueId],
+    ) -> Vec<ValueId> {
+        fn path<R: GraphResource>(graph: &EGraph<Semantic<R>>, value: ValueId) -> bool {
+            let node = &graph.nodes[value];
+            if let Some(alias) = node.alias {
+                return path(graph, alias);
+            }
+            match node.kind() {
+                ValueKind::FuncParam { .. } => true,
+                ValueKind::Pure {
+                    op: super::types::PureOp::Project { .. },
+                    operands,
+                } if operands.len() == 1 => path(graph, operands[0]),
+                _ => false,
+            }
+        }
+        let paths = selection
+            .0
+            .values
+            .iter()
+            .copied()
+            .filter(|value| path(self.source, *value))
+            .collect::<HashSet<_>>();
+        let mut inputs =
+            roots.iter().copied().filter(|value| paths.contains(value)).collect::<HashSet<_>>();
+        for value in &selection.0.values {
+            if !paths.contains(value) {
+                inputs.extend(
+                    self.source
+                        .value_dependencies(*value)
+                        .into_iter()
+                        .filter(|value| paths.contains(value)),
+                );
+            }
+        }
+        for block in &selection.0.blocks {
+            if let SkeletonTerminator::CondBranch { cond, .. } = &self.source.skeleton.blocks[*block].term {
+                if paths.contains(cond) {
+                    inputs.insert(*cond);
+                }
+            }
+        }
+        // A whole parameter demand subsumes projections of that parameter.
+        let selected = inputs.clone();
+        inputs.retain(|value| {
+            let mut current = *value;
+            while let Some(next) =
+                self.source.nodes[current].alias.or_else(|| match self.source.nodes[current].kind() {
+                    ValueKind::Pure {
+                        op: super::types::PureOp::Project { .. },
+                        operands,
+                    } => operands.first().copied(),
+                    _ => None,
+                })
+            {
+                if selected.contains(&next) {
+                    return false;
+                }
+                current = next;
+            }
+            true
+        });
+        self.source.nodes.keys().filter(|value| inputs.contains(value)).collect()
+    }
+
+    pub(super) fn emit_value_flow(
+        &self,
+        selection: &ValueFlowSelection,
+        inputs: &[(ValueId, super::types::ParameterId)],
+    ) -> Result<GraphProjection<R>, String> {
+        let mut selection = selection.0.clone();
+        // Ancestors of the factored inputs are supplied by the caller. The
+        // checked CFG/value selection is otherwise unchanged.
+        for (input, _) in inputs {
+            let mut current = *input;
+            while let Some(next) =
+                self.source.nodes[current].alias.or_else(|| match self.source.nodes[current].kind() {
+                    ValueKind::Pure {
+                        op: super::types::PureOp::Project { .. },
+                        operands,
+                    } => operands.first().copied(),
+                    _ => None,
+                })
+            {
+                selection.values.remove(&next);
+                current = next;
+            }
+        }
+        self.emit_selection_inputs(selection, ProjectionMode::ValueFlow, inputs)
     }
 
     pub fn selected(&self, roots: HashSet<SideEffectSite>) -> Result<GraphProjection<R>, String> {
@@ -512,7 +630,42 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
         mode: ProjectionMode,
     ) -> Result<GraphProjection<R>, String> {
         let selection = self.select_projection(selected, extra_values, mode)?;
-        let mut shell = self.projection_shell(mode, &selection)?;
+        self.emit_selection(selection, mode)
+    }
+
+    fn emit_selection(
+        &self,
+        selection: ProjectionSelection,
+        mode: ProjectionMode,
+    ) -> Result<GraphProjection<R>, String> {
+        self.emit_selection_inputs(selection, mode, &[])
+    }
+
+    fn emit_selection_inputs(
+        &self,
+        selection: ProjectionSelection,
+        mode: ProjectionMode,
+        inputs: &[(ValueId, super::types::ParameterId)],
+    ) -> Result<GraphProjection<R>, String> {
+        let mut shell_selection = selection.clone();
+        if !inputs.is_empty() {
+            shell_selection
+                .values
+                .retain(|value| !matches!(self.source.nodes[*value].kind(), ValueKind::FuncParam { .. }));
+        }
+        let mut shell = self.projection_shell(mode, &shell_selection)?;
+        for (source, parameter) in inputs {
+            let abi = super::ir::callable_parameter::<R, super::types::WynLanguage>(
+                String::new(),
+                self.source.nodes[*source].ty.clone(),
+            );
+            let target = shell
+                .graph
+                .add_parameter(*parameter, abi.representation())
+                .value()
+                .ok_or("projection input is not a value")?;
+            shell.nodes.insert(*source, target);
+        }
         for value in &selection.values {
             self.prepare_value(*value, &mut shell)?;
         }

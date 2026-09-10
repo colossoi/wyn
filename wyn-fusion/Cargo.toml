@@ -1,0 +1,11 @@
+[package]
+name = "wyn-fusion"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wyn-base = { path = "../wyn-base" }
+wyn-graph = { path = "../wyn-graph" }
+thiserror.workspace = true

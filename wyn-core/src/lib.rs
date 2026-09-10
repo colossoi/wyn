@@ -61,22 +61,7 @@ use ast::NodeCounter;
 // Collection aliases
 // =============================================================================
 
-/// Use for maps whose iteration order affects program output (binding
-/// allocation, code emission order, etc.). Insertion order is stable
-/// across compiles; `HashMap`'s randomized hasher is not.
-pub type StableMap<K, V> = indexmap::IndexMap<K, V>;
-
-/// Use for sets whose iteration follows the values' [`Ord`] ordering.
-pub type SortedSet<T> = std::collections::BTreeSet<T>;
-
-/// Use for maps consulted only via `get`/`contains_key`. Iteration
-/// order doesn't escape into observable output, so `HashMap`'s
-/// per-process random hash is fine — and we get the slightly faster
-/// lookups in exchange.
-pub type LookupMap<K, V> = std::collections::HashMap<K, V>;
-
-/// Set companion to [`LookupMap`].
-pub type LookupSet<T> = std::collections::HashSet<T>;
+pub use wyn_base::{LookupMap, LookupSet, SortedSet, StableMap};
 
 /// Stable compiler-internal identity of a callable body.
 ///

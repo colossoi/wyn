@@ -1375,28 +1375,6 @@ where
     writers
 }
 
-/// Return the output selected by a direct projection of `root`.
-pub(crate) fn projection_index<P: Family>(
-    graph: &EGraph<P>,
-    node: ValueId,
-    root: ValueId,
-) -> Option<usize> {
-    let node = graph.canonical_value(node);
-    let root = graph.canonical_value(root);
-    if node == root {
-        return Some(0);
-    }
-    match &graph.nodes.get(node)?.kind {
-        ValueKind::Pure {
-            op: PureOp::Project { index },
-            operands,
-        } if operands.first().is_some_and(|operand| graph.canonical_value(*operand) == root) => {
-            Some(*index as usize)
-        }
-        _ => None,
-    }
-}
-
 fn extend_incoming_block_args<P: Family>(
     graph: &EGraph<P>,
     target: BlockId,

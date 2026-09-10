@@ -260,10 +260,19 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     let condition = caller.add_test_value_parameter(caller_parameter_ids[1], bool_ty);
     let call =
         add_call(&mut caller, region, &params, ty.clone(), [actual, condition]).single_value().unwrap();
+    let downstream = add_call(
+        &mut caller,
+        FunctionId::from_index(1),
+        &semantic_params([("value", ty.clone())]),
+        ty.clone(),
+        [call],
+    )
+    .single_value()
+    .unwrap();
     let three = caller.intern_constant(ConstantValue::U32(3), ty.clone());
     let final_value = caller.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Multiply),
-        smallvec![call, three],
+        smallvec![downstream, three],
         ty,
         None,
     );
@@ -277,8 +286,19 @@ fn inline_call_at_block_splices_a_scalar_selection_cfg() {
     assert!(matches!(caller.nodes[call].kind, ValueKind::CallResult { .. }));
     assert!(matches!(
         &caller.nodes[final_value].kind,
-        ValueKind::Pure { operands, .. } if operands[0] == inlined
+        ValueKind::Pure { operands, .. } if operands[0] == downstream
     ));
+    let ValueKind::CallResult {
+        call: downstream_site,
+        ..
+    } = caller.nodes[downstream].kind
+    else {
+        panic!("downstream call remains explicit");
+    };
+    assert_eq!(
+        caller.call(downstream_site).argument_bindings()[0].value(),
+        Some(inlined)
+    );
     assert!(caller
         .skeleton
         .blocks

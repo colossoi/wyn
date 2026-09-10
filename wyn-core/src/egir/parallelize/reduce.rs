@@ -48,6 +48,60 @@ pub(super) struct RoutedReductionStore {
     pub(super) output: (ResourceId, Type<TypeName>, egir::program::LogicalSize),
 }
 
+/// Transfer publication ownership to the phase that computes the final totals.
+pub(super) fn retire_reduction_outputs(
+    entry: &mut egir::program::PlannedEntry,
+    stores: &[&RoutedReductionStore],
+) -> HashSet<ResourceId> {
+    let moved = stores.iter().map(|store| store.output.0).collect::<HashSet<_>>();
+    let graph = &entry.graph;
+    let sites = graph
+        .skeleton
+        .blocks
+        .iter()
+        .flat_map(|(block, body)| {
+            body.side_effects.iter().enumerate().filter_map(move |(index, effect)| {
+                let SideEffectKind::Effect(EffectOp::Store { place }) = effect.kind() else {
+                    return None;
+                };
+                let egir::ir::PlaceOp::ViewIndex { view, .. } = graph.place(*place).op() else {
+                    return None;
+                };
+                let resource = graph_ops::extract_storage_view_source(graph, view.value())?;
+                let [operand] = effect.operands() else {
+                    return None;
+                };
+                let value = graph.canonical_value(operand.value()?);
+                stores
+                    .iter()
+                    .any(|store| {
+                        store.output.0 == resource.0 && graph.canonical_value(store.value) == value
+                    })
+                    .then_some(SideEffectSite { block, index })
+            })
+        })
+        .collect::<Vec<_>>();
+    for site in sites.into_iter().rev() {
+        entry.graph.skeleton.remove_effect_splicing_dependencies(site);
+    }
+    entry.outputs.retain(|output| output.resource.is_none_or(|resource| !moved.contains(&resource.0)));
+    entry.internal_results.retain(|output| !moved.contains(&output.resource.0));
+    entry.resource_declarations.retain_mut(|declaration| {
+        if !moved.contains(&declaration.resource.0) {
+            return true;
+        }
+        match declaration.role {
+            interface::StorageRole::Output => false,
+            interface::StorageRole::InputOutput => {
+                declaration.role = interface::StorageRole::Input;
+                true
+            }
+            _ => true,
+        }
+    });
+    moved
+}
+
 pub(super) struct BoundReduce {
     candidate: ReduceCandidate,
     partials: Vec<ResourceId>,
@@ -366,28 +420,8 @@ impl KernelPlanBuilder<'_> {
                 role: interface::StorageRole::Intermediate,
             });
         }
-        // A moved output binding may also carry an Output storage declaration
-        // (e.g. a hoisted prepass result). Since phase 2 owns the write, the
-        // phase-1 declaration must not publish it as an output.
-        let moved: std::collections::HashSet<ResourceId> = accumulators
-            .iter()
-            .flat_map(|accumulator| &accumulator.stores)
-            .map(|store| store.output.0)
-            .collect();
-        entry.outputs.retain(|output| output.resource.is_none_or(|resource| !moved.contains(&resource.0)));
-        entry.resource_declarations.retain_mut(|declaration| {
-            if !moved.contains(&declaration.resource.0) {
-                return true;
-            }
-            match declaration.role {
-                interface::StorageRole::Output => false,
-                interface::StorageRole::InputOutput => {
-                    declaration.role = interface::StorageRole::Input;
-                    true
-                }
-                _ => true,
-            }
-        });
+        let stores = accumulators.iter().flat_map(|accumulator| &accumulator.stores).collect::<Vec<_>>();
+        let moved = retire_reduction_outputs(&mut entry, &stores);
 
         // 6. Synthesize one phase 2 entry per accumulator. Dropping the phase-1
         // stores leaves their pure place/value subgraphs available for projection.

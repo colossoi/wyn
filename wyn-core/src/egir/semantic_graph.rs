@@ -2,7 +2,7 @@
 //! rendering that read it.
 //!
 //! Semantic EGIR uses a DAG over side-effectful semantic SOAC operations for
-//! scheduling, fusion legality, multi-consumer materialization, and semantic
+//! scheduling, multi-consumer materialization, and semantic
 //! optimization. This module owns the snapshot edge builder ([`dependencies`]),
 //! the read-only query index over those edges ([`SemanticGraph`]), the
 //! well-formedness check for the semantic boundary ([`verify`]), and the
@@ -93,7 +93,17 @@ where
                         })
                     })
                 });
-                if indexed || captured {
+                let histogram_input = graph.skeleton.blocks.iter().any(|(_, block)| {
+                    block.side_effects.iter().any(|effect| {
+                        matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_))))
+                            && effect.operands.iter().filter_map(|operand| operand.value()).any(|input| {
+                                result_values
+                                    .iter()
+                                    .any(|result| graph_ops::value_depends_on(graph, input, *result))
+                            })
+                    })
+                });
+                if indexed || captured || histogram_input {
                     demands.insert(*id);
                 }
             }
@@ -424,9 +434,7 @@ where
     }
 }
 
-/// An index over `&[SemanticDependency]` answering the questions fusion asks:
-/// do two ops conflict, who consumes a producer's value, and is one op
-/// transitively downstream of another.
+/// Value and capture consumers used by residency and scheduling.
 pub struct SemanticGraph {
     /// Dense interning of every op that appears in any edge.
     index: HashMap<SemanticOpId, usize>,
@@ -434,15 +442,12 @@ pub struct SemanticGraph {
     operations: Vec<SemanticOpId>,
     /// Value successors (consumers that read the producer's result).
     value_succ: Vec<Vec<usize>>,
-    /// Unordered resource/effect reordering conflicts, stored both ways.
-    conflict: HashSet<(usize, usize)>,
     /// Reverse capture edges, built when captures are first recorded so
     /// residency does not have to rediscover shared captured values by
     /// scanning every operation.
     capture_succ: HashMap<ValueId, Vec<usize>>,
     capture_sources: Vec<ValueId>,
-    /// Stable-for-this-snapshot operation locations. Fusion does not require
-    /// these; scheduling policies use them to inspect and rewrite consumers.
+    /// Operation locations for scheduling policies to inspect consumers.
     operation_sites: Vec<Option<SideEffectSite>>,
 }
 
@@ -452,7 +457,6 @@ impl SemanticGraph {
             index: HashMap::new(),
             operations: Vec::new(),
             value_succ: Vec::new(),
-            conflict: HashSet::new(),
             capture_succ: HashMap::new(),
             capture_sources: Vec::new(),
             operation_sites: Vec::new(),
@@ -462,14 +466,7 @@ impl SemanticGraph {
             let c = graph.intern_operation(dep.consumer);
             match dep.kind {
                 SemanticDependencyKind::Value => graph.value_succ[p].push(c),
-                // Both explicit effect ordering and resource aliasing prohibit
-                // moving another operation across this edge. A directly
-                // adjacent pair may still be fused in source order; callers use
-                // this relation for the operations *between* that pair.
-                SemanticDependencyKind::Effect | SemanticDependencyKind::Resource => {
-                    graph.conflict.insert((p, c));
-                    graph.conflict.insert((c, p));
-                }
+                SemanticDependencyKind::Effect | SemanticDependencyKind::Resource => {}
             }
         }
         graph
@@ -538,28 +535,6 @@ impl SemanticGraph {
     /// Locate an operation in the EGIR snapshot used to add capture sources.
     pub(crate) fn operation_site(&self, operation: &SemanticOpId) -> Option<SideEffectSite> {
         self.index.get(operation).and_then(|index| self.operation_sites[*index])
-    }
-
-    /// Resource and Effect edges are both reordering conflicts. A caller may
-    /// still combine a directly adjacent pair while preserving source order,
-    /// but cannot move either operation across such an edge.
-    pub fn conflicts(&self, a: &SemanticOpId, b: &SemanticOpId) -> bool {
-        match (self.index.get(a), self.index.get(b)) {
-            (Some(&i), Some(&j)) => self.conflict.contains(&(i, j)),
-            _ => false,
-        }
-    }
-
-    /// True iff `b` is transitively reachable from `a` along *value* edges,
-    /// i.e. `a`'s result flows (directly or indirectly) into `b`, making them a
-    /// producer/consumer chain rather than fusable siblings.
-    pub fn reachable_between(&self, a: &SemanticOpId, b: &SemanticOpId) -> bool {
-        let (Some(&start), Some(&target)) = (self.index.get(a), self.index.get(b)) else {
-            return false;
-        };
-        wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |node, out| {
-            out.extend(self.value_succ[node].iter().copied());
-        })
     }
 
     /// Number of semantic operations that directly consume `producer`'s

@@ -1977,6 +1977,7 @@ dependencies = [
  "stacker",
  "thiserror 1.0.69",
  "wyn-base",
+ "wyn-fusion",
  "wyn-graph",
  "wyn-module-graph",
  "wyn-pipeline-descriptor",
@@ -1989,6 +1990,15 @@ name = "wyn-diagnostics"
 version = "0.1.0"
 dependencies = [
  "unicode-width",
+]
+
+[[package]]
+name = "wyn-fusion"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "wyn-base",
+ "wyn-graph",
 ]
 
 [[package]]

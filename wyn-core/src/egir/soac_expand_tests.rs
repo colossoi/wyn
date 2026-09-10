@@ -41,7 +41,14 @@ fn compile_to_planned(input: &str) -> egir::parallelize::Planned {
 }
 
 fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
-    let program = compile_to_planned(input);
+    let program = compile_thru_tlc(input).expect("compile_thru_tlc");
+    let program = tlc::infer_input_slice_bounds(program);
+    let program = to_egraph(program).expect("to_egraph");
+    let program = egir::reify_soacs(program);
+    // Preserve the SOACs whose aggregate stores this expansion test inspects.
+    let program = egir::lift_stage_uniform_values(program.retag());
+    let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
+    let program = egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule");
     let program = egir::expand_soacs(program).expect("physical SOAC expansion");
     let inner = &program;
     inner

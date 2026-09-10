@@ -814,35 +814,10 @@ impl KernelPlanBuilder<'_> {
             })
             .collect::<ParallelizeResult<Vec<_>>>()?;
         let reduction_stores = reduction_routing.stores;
-        let reduction_output_declarations = reduction_stores.iter().map(|store| store.output.clone()).fold(
-            Vec::new(),
-            |mut outputs, output| {
-                if !outputs.iter().any(|(resource, _, _)| *resource == output.0) {
-                    outputs.push(output);
-                }
-                outputs
-            },
+        let moved_reduction_outputs = super::reduce::retire_reduction_outputs(
+            &mut entry,
+            &reduction_stores.iter().collect::<Vec<_>>(),
         );
-        let moved_reduction_outputs = reduction_output_declarations
-            .iter()
-            .map(|(resource, _, _)| *resource)
-            .collect::<std::collections::HashSet<_>>();
-        entry.outputs.retain(|output| {
-            output.resource.is_none_or(|resource| !moved_reduction_outputs.contains(&resource.0))
-        });
-        entry.resource_declarations.retain_mut(|declaration| {
-            if !moved_reduction_outputs.contains(&declaration.resource.0) {
-                return true;
-            }
-            match declaration.role {
-                interface::StorageRole::Output => false,
-                interface::StorageRole::InputOutput => {
-                    declaration.role = interface::StorageRole::Input;
-                    true
-                }
-                _ => true,
-            }
-        });
         let mut phase1_resources = merge_scheduled_resources(
             &declared_input_resources(&entry.resource_declarations),
             &segmented_resources(&segment),

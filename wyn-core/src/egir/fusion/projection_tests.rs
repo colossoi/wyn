@@ -31,7 +31,7 @@ entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
             Some(op.form.pre.clone())
         })
         .expect("conditional map Screma");
-    assert!(lambda_results_projectable(&program, &lambda, 0..1));
+    let selection = build_projection_recipe(&program, &lambda, &[0]).expect("checked selection");
 
     let mut wrapper = EGraph::new();
     let params = lambda_ops::named_parameters(&lambda.parameter_types, "argument");
@@ -40,23 +40,23 @@ entry conditional_map<[n]>(xs: [n]i32) [n]i32 =
         .map(|argument| argument.value())
         .collect::<Vec<_>>();
     let mut identities = program.data.identities.clone();
-    let outer_types = LookupMap::new();
+    let mut helpers = LookupMap::new();
     let mut context = Context {
+        helpers: &mut helpers,
+        block: wrapper.skeleton.entry,
         program: &program,
         identities: &mut identities,
         scope: "conditional_projection_test",
         span: Span::generated(),
-        outer_types: &outer_types,
     };
-    let (results, projected) = emit_projected_lambda_results(
-        &mut wrapper,
-        &mut context,
-        "selected_result",
-        &lambda,
-        &arguments,
-        0..1,
-    )
-    .expect("project conditional result");
+    let (results, projected) =
+        selection.emit(&mut wrapper, &mut context, &arguments).expect("project conditional result");
+    let (_, repeated_helpers) =
+        selection.emit(&mut wrapper, &mut context, &arguments).expect("repeat checked selection");
+    assert!(
+        repeated_helpers.is_empty(),
+        "projected helper definitions are memoized"
+    );
     let projected = projected.into_iter().next().expect("CFG projection should synthesize a helper region");
     assert_eq!(results.len(), 1);
     assert_eq!(projected.params.len(), 1);

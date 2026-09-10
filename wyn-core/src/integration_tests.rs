@@ -11450,19 +11450,13 @@ entry gen(xs: []i32) []i32 =
     .expect("single-consumer reduce-over-map must lift + compile");
 }
 
-/// When `counts` is consumed by both a `reduce` and a `scan`, EGIR
-/// materializes it into one shared buffer that both downstream SOACs read.
+/// A shared map feeding a scan and a reduction composes their collective work
+/// without materializing the map's result.
 #[test]
 fn multi_consumer_scan_plus_reduce_lifts() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
-    let source = "\
-entry gen(xs: []i32) []i32 =
-  let counts  = map(|x: i32| x * 2, xs) in
-  let total   = reduce(|a: i32, b: i32| a + b, 0, counts) in
-  let offsets = scan(|a: i32, b: i32| a + b, 0, counts) in
-  map(|i: i32| offsets[i % 8] + total, iota(64))
-";
+    let source = include_str!("../../testfiles/gather_scan_reduce.wyn");
     let allocated = compile_to_semantic_egir(source);
     let handoff_kinds = allocated
         .data
@@ -11478,12 +11472,12 @@ entry gen(xs: []i32) []i32 =
         .collect::<Vec<_>>();
     assert_eq!(
         handoff_kinds.iter().filter(|kind| **kind == CompilerResourceKind::MultiConsumerArray).count(),
-        1,
-        "one shared producer has one canonical handoff"
+        0,
+        "composed collective work does not materialize its shared map input"
     );
     assert!(
-        !handoff_kinds.contains(&CompilerResourceKind::GatherHandoff),
-        "a multi-consumer producer is not a single-consumer gather"
+        handoff_kinds.contains(&CompilerResourceKind::GatherHandoff),
+        "the random gather reads the fused scan through its own output storage"
     );
 
     let lowered = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
@@ -13039,8 +13033,8 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
             let helper = ssa
                 .functions
                 .iter()
-                .find(|function| function.name.contains("main_vertical_pre_1"))
-                .expect("second unzip projection fusion helper");
+                .find(|function| function.name.contains("main_vertical_pre"))
+                .expect("composed unzip projection helper");
             let projects = helper
                 .body
                 .inner
@@ -14860,4 +14854,50 @@ entry world_to_clip_loop_invariant(
     );
 
     lower_ssa_to_spirv(converted).expect("optimized camera repro lowers to valid SPIR-V");
+}
+
+#[test]
+fn egir_one_action_and_unrestricted_fusion_preserve_output_semantics() {
+    use crate::egir::semantic_exec::{execute_map_screma, Value};
+    let source = r#"
+entry shared(xs: [8]i32) ([8]i32, [8]i32, [8]i32) =
+  let produced = map(|x: i32| x + 1, xs) in
+  let left = map(|x: i32| x * 2, produced) in
+  let right = map(|x: i32| x - 3, produced) in
+  (produced, left, right)
+"#;
+    let mut stepped = compile_to_segmented_egir(source);
+    let mut actions = 0;
+    loop {
+        let (next, changed, trace) = egir::fuse_semantic_operations(stepped).unwrap();
+        assert_eq!(trace.relations.len(), usize::from(changed));
+        stepped = next;
+        if !changed {
+            break;
+        }
+        actions += 1;
+        assert!(actions <= 2);
+    }
+    assert_eq!(actions, 2);
+    let (planned, trace) =
+        egir::optimize_semantic_operations_with_trace(compile_to_segmented_egir(source)).unwrap();
+    assert_eq!(trace.relations.len(), 2);
+    let planned: egir::reify::Segmented = planned.retag();
+    let input = (-4..4).map(Value::Int).collect::<Vec<_>>();
+    let execute = |program: &egir::reify::Segmented| {
+        let maps = segmented_entry_maps(program);
+        assert_eq!(maps.len(), 1);
+        let fields = execute_map_screma(program, maps[0], &[input.clone()]).unwrap();
+        segmented_entry_map_output_fields(program)
+            .into_iter()
+            .map(|slot| fields[slot].clone())
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        (-4..4).map(|x| Value::Int(x + 1)).collect::<Vec<_>>(),
+        (-4..4).map(|x| Value::Int((x + 1) * 2)).collect(),
+        (-4..4).map(|x| Value::Int(x - 2)).collect(),
+    ];
+    assert_eq!(execute(&stepped), expected);
+    assert_eq!(execute(&planned), expected);
 }
