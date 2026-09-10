@@ -18,47 +18,31 @@ fn op(id: u32) -> SemanticOpId {
     SemanticOpId::for_test(id)
 }
 
-fn dep(
-    producer: &SemanticOpId,
-    consumer: &SemanticOpId,
-    kind: SemanticDependencyKind,
-) -> SemanticDependency {
-    SemanticDependency {
-        producer: producer.clone(),
-        consumer: consumer.clone(),
-        kind,
-    }
-}
-
 #[test]
-fn consumers_follow_value_edges() {
-    let a = op(0);
-    let b = op(1);
-    let c = op(2);
-
-    // a --Resource--> b, b --Effect--> c, a --Value--> c
-    let deps = vec![
-        dep(&a, &b, SemanticDependencyKind::Resource),
-        dep(&b, &c, SemanticDependencyKind::Effect),
-        dep(&a, &c, SemanticDependencyKind::Value),
-    ];
-    let g = SemanticGraph::new(&deps);
-
-    assert_eq!(g.value_consumers(&a).collect::<Vec<_>>(), vec![c]);
-    assert_eq!(g.value_consumer_count(&a), 1);
-    assert_eq!(g.value_consumer_count(&b), 0);
+fn consumers_follow_value_incidences_and_deduplicate_captures() {
+    let mut egir = EGraph::<Semantic>::new();
+    let a = append_capturing_map(&mut egir, 0, vec![]);
+    append_capturing_map(&mut egir, 1, vec![]);
+    let c = append_capturing_map(&mut egir, 2, vec![a, a]);
+    append_capturing_map(&mut egir, 3, vec![c]);
+    let graph = SemanticGraph::new(&egir);
+    assert_eq!(
+        graph.value_consumers(&op(0)).collect::<Vec<_>>(),
+        vec![op(2), op(3)]
+    );
+    assert_eq!(graph.value_consumer_count(&op(0)), 2);
+    assert_eq!(graph.value_consumer_count(&op(1)), 0);
 }
 
 #[test]
 fn unknown_ops_have_no_edges() {
-    let a = op(0);
-    let lonely = op(1);
-    let g = SemanticGraph::new(&[dep(&a, &a, SemanticDependencyKind::Value)]);
-    assert_eq!(g.value_consumer_count(&lonely), 0);
-    assert_eq!(g.value_consumers(&lonely).count(), 0);
+    let egir = EGraph::<Semantic>::new();
+    let graph = SemanticGraph::new(&egir);
+    assert_eq!(graph.value_consumer_count(&op(1)), 0);
+    assert_eq!(graph.value_consumers(&op(1)).count(), 0);
 }
 
-fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<ValueId>) {
+fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<ValueId>) -> ValueId {
     let ty = Type::Constructed(TypeName::Unit, vec![]);
     let result = graph.alloc_side_effect_result(ty.clone());
     let result_binding = graph.value_result(result);
@@ -92,6 +76,7 @@ fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<Val
         effects: None,
         span: None,
     });
+    result
 }
 
 fn array(element: Type<TypeName>) -> Type<TypeName> {
@@ -215,12 +200,89 @@ fn scheduled_operations_expose_shared_prelude_inputs() {
     append_capturing_map(&mut egir, 10, vec![source, source]);
     append_capturing_map(&mut egir, 11, vec![source]);
 
-    let graph = SemanticGraph::with_operation_captures(&[], &egir);
-    assert_eq!(graph.captured_values().collect::<Vec<_>>(), vec![source]);
+    let graph = SemanticGraph::new(&egir);
     assert_eq!(
-        graph.capture_consumers(source).collect::<Vec<_>>(),
+        graph.captured_values(BodySite::Entry(0)).collect::<Vec<_>>(),
+        vec![source]
+    );
+    assert_eq!(
+        graph
+            .capture_consumers(SourceValue {
+                body: BodySite::Entry(0),
+                value: source
+            })
+            .collect::<Vec<_>>(),
         vec![op(10), op(11)]
     );
     assert_eq!(graph.operation_site(&op(10)).map(|site| site.index), Some(0));
     assert_eq!(graph.operation_site(&op(11)).map(|site| site.index), Some(1));
+}
+
+#[test]
+fn shared_facts_preserve_cross_block_observers_without_contraction_edges() {
+    let mut egir = EGraph::<Semantic>::new();
+    let a = append_capturing_map(&mut egir, 0, vec![]);
+    append_capturing_map(&mut egir, 1, vec![a]);
+    let entry = egir.skeleton.entry;
+    let next = egir.skeleton.create_block();
+    let consumer = egir.skeleton.blocks[entry].side_effects.pop().unwrap();
+    egir.skeleton.blocks[next].side_effects.push(consumer);
+    let mut facts = Facts::new();
+    facts.add_body(BodySite::Entry(0), &egir, []).unwrap();
+    let groups = facts.operations.keys().copied().collect::<Vec<_>>();
+    let producer = facts.builder.outputs(groups[0]).unwrap()[0];
+    let input = facts.ports[&((BodySite::Entry(0), next), a)];
+    assert_eq!(facts.external[&input], vec![producer]);
+    let graph = facts.builder.clone().finish(groups.iter().map(|id| (*id, ()))).unwrap();
+    assert!(graph.producers(input).unwrap().is_empty());
+    assert!(graph.boundary(&[groups[0]], &[]).unwrap().outputs.contains(&producer));
+    assert_eq!(graph.boundary(&groups, &[]), Err(wyn_fusion::Error::Scope));
+    assert_eq!(
+        SemanticGraph::from_facts(facts).value_consumers(&op(0)).collect::<Vec<_>>(),
+        vec![op(1)]
+    );
+}
+
+#[test]
+fn shared_facts_qualify_capture_sources_by_body() {
+    let mut first = EGraph::<Semantic>::new();
+    let value = first.add_block_param(first.skeleton.entry, Type::Constructed(TypeName::Unit, vec![]));
+    let mut second = first.clone();
+    append_capturing_map(&mut first, 0, vec![value]);
+    append_capturing_map(&mut second, 1, vec![value]);
+    let mut facts = Facts::new();
+    facts.add_body(BodySite::Entry(0), &first, []).unwrap();
+    facts.add_body(BodySite::Entry(1), &second, []).unwrap();
+    let graph = SemanticGraph::from_facts(facts);
+    for index in 0..2 {
+        let source = SourceValue {
+            body: BodySite::Entry(index),
+            value,
+        };
+        assert_eq!(
+            graph.capture_consumers(source).collect::<Vec<_>>(),
+            vec![op(index as u32)]
+        );
+    }
+}
+
+#[test]
+fn loop_carried_flow_is_visible_to_residency_without_a_contraction_cycle() {
+    let source = r#"
+entry repeated(xs: [4]i32) [4]i32 =
+  let seed = map(|x: i32| x + 1, xs) in
+  loop values = seed for i < 3 do map(|x: i32| x * 2, values)
+"#;
+    let tlc = crate::tlc::infer_input_slice_bounds(crate::compile_thru_tlc(source).unwrap());
+    let program = egir::reify_soacs(crate::to_egraph(tlc).unwrap());
+    let mut facts = Facts::new();
+    facts.add_body(BodySite::Entry(0), &program.entry_points[0].graph, []).unwrap();
+    let groups = facts.operations.keys().copied().collect::<Vec<_>>();
+    let graph = facts.builder.clone().finish(groups.iter().map(|id| (*id, ()))).unwrap();
+    assert!(graph.order().is_ok());
+    let maps = facts.operations.values().filter_map(|op| op.semantic_id).collect::<Vec<_>>();
+    assert_eq!(maps.len(), 2);
+    let index = SemanticGraph::from_facts(facts);
+    assert_eq!(index.value_consumers(&maps[0]).collect::<Vec<_>>(), vec![maps[1]]);
+    assert_eq!(index.value_consumer_count(&maps[1]), 0);
 }

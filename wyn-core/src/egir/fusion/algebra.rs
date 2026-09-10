@@ -110,11 +110,8 @@ pub(super) fn can_fuse_vertical(
     if routes.iter().any(|route| route.producer_post_output >= producer.post.result_types.len()) {
         return false;
     }
-    if producer.scans.is_empty() && producer.reductions.is_empty() && producer.post.is_identity() {
-        return true;
-    }
-    if producer.scans.is_empty() && producer.reductions.is_empty() {
-        return false;
+    if producer.scans.is_empty() {
+        return producer.post.is_identity();
     }
 
     let collective_results = consumer.operator_input_count();

@@ -3273,9 +3273,8 @@ entry r(bidx: []u32) ?k. [k]vec4f32 =
 /// SegMap remains and that the shared prepass replaces local `Materialize`s.
 #[test]
 fn multi_consumer_producer_survival_is_characterized() {
-    use crate::egir::semantic_graph::SemanticDependencyKind;
+    use crate::egir::semantic_graph::SemanticGraph;
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
-    use std::collections::HashMap;
 
     fn multi_consumer_producers(src: &str) -> usize {
         let allocated = compile_to_semantic_egir(src);
@@ -3289,15 +3288,12 @@ fn multi_consumer_producer_survival_is_characterized() {
                 })
             })
             .collect();
-        let mut consumers: HashMap<_, usize> = HashMap::new();
-        for dep in allocated_entries(&allocated)
-            .flat_map(|entry| egir::semantic_graph::graph_dependencies(&entry.graph))
-        {
-            if matches!(dep.kind, SemanticDependencyKind::Value) && seg_maps.contains(&dep.producer) {
-                *consumers.entry(dep.producer).or_default() += 1;
-            }
-        }
-        consumers.values().filter(|count| **count >= 2).count()
+        allocated_entries(&allocated)
+            .map(|entry| {
+                let graph = SemanticGraph::new(&entry.graph);
+                seg_maps.iter().filter(|id| graph.value_consumer_count(id) >= 2).count()
+            })
+            .sum()
     }
 
     // ys read by two elementwise maps (combined via zip).

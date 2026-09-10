@@ -40,8 +40,7 @@ fn analyze_parallel_scremas(
     origin: &StageOrigin,
     entry: &egir::program::AllocatedEntry,
 ) -> ParallelScremas {
-    let semantic_graph =
-        egir::semantic_graph::SemanticGraph::new(&egir::semantic_graph::graph_dependencies(&entry.graph));
+    let semantic_graph = egir::semantic_graph::SemanticGraph::new(&entry.graph);
     let mut parallel = HashSet::new();
     let mut folds = Vec::new();
     for (_, block) in &entry.graph.skeleton.blocks {

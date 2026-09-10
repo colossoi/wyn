@@ -593,7 +593,7 @@ impl Emitter<'_> {
         result: ResultBinding<Type<TypeName>>,
         outputs: &[PortId],
     ) -> FusionResult<Vec<SideEffect>> {
-        let block = self.catalog.scopes[&scope].block;
+        let block = scope.1;
         let inputs = op
             .inputs
             .iter()
@@ -657,7 +657,7 @@ impl Emitter<'_> {
             }
             Kind::Filter { map, predicate } => {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(mut original))) =
-                    self.catalog.effects[&op.anchor].effect.kind.clone()
+                    self.catalog.effects[&op.anchor].kind.clone()
                 else {
                     return Err(FusionError::invalid("filter recipe lost its source payload"));
                 };
@@ -676,7 +676,7 @@ impl Emitter<'_> {
             }
             Kind::Hist { bucket } => {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(mut original))) =
-                    self.catalog.effects[&op.anchor].effect.kind.clone()
+                    self.catalog.effects[&op.anchor].kind.clone()
                 else {
                     return Err(FusionError::invalid("histogram recipe lost its source payload"));
                 };
@@ -692,7 +692,7 @@ impl Emitter<'_> {
                 return Err(FusionError::invalid("unsupported composed operation"))
             }
         };
-        let mut effect = self.catalog.effects[&op.anchor].effect.clone();
+        let mut effect = self.catalog.effects[&op.anchor].clone();
         effect.kind = SideEffectKind::Soac(SoacEffect(
             required(op.semantic_id, "composed operation has no semantic identity")?,
             kind,
@@ -813,7 +813,7 @@ pub(super) fn apply(
                     op.result_types.iter().map(|ty| catalog.types[*ty].clone()).collect(),
                 ),
                 _ => required(
-                    catalog.effects[&op.anchor].effect.result.as_ref(),
+                    catalog.effects[&op.anchor].result.as_ref(),
                     "anchored recipe has no result",
                 )?
                 .ty()
@@ -833,9 +833,9 @@ pub(super) fn apply(
         let mut token_mapping = LookupMap::new();
         let mut retired_writers = LookupSet::new();
         for (id, scope) in &body_groups {
-            let block = catalog.scopes[&*scope].block;
+            let block = scope.1;
             if !planned.plan.changed(*id) {
-                sequences.entry(block).or_default().push(catalog.effects[id].effect.clone());
+                sequences.entry(block).or_default().push(catalog.effects[id].clone());
                 continue;
             }
             let group = planned.plan.group(*id)?;
@@ -851,7 +851,7 @@ pub(super) fn apply(
             sequences.entry(block).or_default().extend(effects);
             for source in planned.plan.group(*id)?.members() {
                 let source = &catalog.effects[source];
-                if let Some((input, output)) = source.effect.effects {
+                if let Some((input, output)) = source.effects {
                     let replacement = if matches!(op.kind, Kind::Indexed { .. }) {
                         op.effect_tokens.map(|(input, _)| input).unwrap_or(input)
                     } else {

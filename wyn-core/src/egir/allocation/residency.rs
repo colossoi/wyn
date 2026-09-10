@@ -8,6 +8,7 @@
 //! schedules the physical kernel recipe.
 
 use crate::egir;
+use crate::egir::ir::BodySite;
 use crate::ssa;
 use crate::types;
 use std::collections::{HashMap, HashSet};
@@ -25,7 +26,7 @@ use super::super::program::{
     Program, RealizedOutputRoute, ResidentStorage, ResourceId, SemanticOpId, SemanticResourceDecl,
     SemanticResourceRef, SlotSource, StageOrigin,
 };
-use super::super::semantic_graph::SemanticGraph;
+use super::super::semantic_graph::{SemanticGraph, SourceValue};
 use super::super::soac::{filter, screma};
 use super::super::stage_variance::StageDependenceAnalysis;
 use super::super::types::{
@@ -204,7 +205,7 @@ pub(super) fn resolve_residency_with_policy(
         // Prelude extraction is a separate, cost-driven phase. Its rewrite
         // changes the graph, so restart required-residency normalization
         // before considering another profitable prelude.
-        let dependencies = super::super::semantic_graph::dependencies(&program);
+        let dependencies = SemanticGraph::for_program(&program);
         let Some(candidate) = select_stage_prelude_candidate(&program, &dependencies) else {
             break;
         };
@@ -232,12 +233,10 @@ fn normalize_operation_result_residency(
         // Every rewrite can change both operation dependencies and which
         // runtime-composite arrays need storage, so neither analysis may be
         // reused across iterations.
-        let dependencies = super::super::semantic_graph::dependencies(&program);
-        let array_residency_demands = super::super::semantic_graph::array_residency_demands(&program);
+        let dependencies = SemanticGraph::for_program(&program);
 
         let plan = if let Some(plan) =
-            plan_operation_result(&program, &dependencies, &array_residency_demands)
-                .map_err(ConvertError::Internal)?
+            plan_operation_result(&program, &dependencies).map_err(ConvertError::Internal)?
         {
             plan
         } else if let Some(plan) =
@@ -279,9 +278,9 @@ fn normalize_operation_result_residency(
 
 fn select_stage_prelude_candidate(
     program: &ResidencyDraft,
-    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
+    dependencies: &SemanticGraph,
 ) -> Option<StagePreludeCandidate> {
-    if let Some(plan) = plan_parallel_prelude(program, dependency_edges) {
+    if let Some(plan) = plan_parallel_prelude(program, dependencies) {
         return Some(StagePreludeCandidate::ParallelPrelude(plan));
     }
     if let Some(plan) = plan_direct_stage_prelude(program) {
@@ -292,10 +291,8 @@ fn select_stage_prelude_candidate(
 
 fn plan_operation_result(
     program: &ResidencyDraft,
-    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
-    array_residency_demands: &HashSet<SemanticOpId>,
+    dependencies: &SemanticGraph,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
-    let dependencies = SemanticGraph::new(dependency_edges);
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
@@ -319,7 +316,7 @@ fn plan_operation_result(
                             result,
                             source_site,
                             semantic_consumers,
-                            array_residency_demands.contains(&id),
+                            dependencies.array_residency_demands.contains(&id),
                         ) else {
                             continue;
                         };
@@ -353,9 +350,8 @@ fn plan_operation_result(
 
 fn plan_scalar_result_handoff(
     program: &ResidencyDraft,
-    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
+    dependencies: &SemanticGraph,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
-    let dependencies = SemanticGraph::new(dependency_edges);
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
         let uses = graph_ops::ValueUseIndex::build(&entry.graph);
         for (block_id, block) in &entry.graph.skeleton.blocks {
@@ -584,11 +580,10 @@ fn operation_result_plan(
 
 fn plan_parallel_prelude(
     program: &ResidencyDraft,
-    dependency_edges: &[super::super::semantic_graph::SemanticDependency],
+    dependencies: &SemanticGraph,
 ) -> Option<StagePreludePlan> {
     for (entry_index, entry) in program.entry_points.iter().enumerate() {
-        let dependencies = SemanticGraph::with_operation_captures(dependency_edges, &entry.graph);
-        for prelude in parallel_preludes(entry, &dependencies) {
+        for prelude in parallel_preludes(entry, dependencies, BodySite::Entry(entry_index)) {
             let ty = &entry.graph.nodes[prelude.root].ty;
             if ssa::layout::storage_elem_stride(ty).is_none() {
                 continue;
@@ -805,11 +800,15 @@ fn stage_prelude_outputs(
     Some(outputs)
 }
 
-fn parallel_preludes(entry: &AllocatedEntry, dependencies: &SemanticGraph) -> Vec<ParallelPrelude> {
+fn parallel_preludes(
+    entry: &AllocatedEntry,
+    dependencies: &SemanticGraph,
+    body: BodySite,
+) -> Vec<ParallelPrelude> {
     let mut preludes = Vec::<ParallelPrelude>::new();
     let mut by_root = HashMap::<ValueId, usize>::new();
-    for capture in dependencies.captured_values() {
-        for operation in dependencies.capture_consumers(capture) {
+    for capture in dependencies.captured_values(body) {
+        for operation in dependencies.capture_consumers(SourceValue { body, value: capture }) {
             let Some(site) = dependencies.operation_site(&operation) else {
                 continue;
             };

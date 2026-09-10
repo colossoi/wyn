@@ -1,18 +1,13 @@
-//! The semantic layer of EGIR: its dependency graph, and the checks and
-//! rendering that read it.
-//!
-//! Semantic EGIR uses a DAG over side-effectful semantic SOAC operations for
-//! scheduling, multi-consumer materialization, and semantic
-//! optimization. This module owns the snapshot edge builder ([`dependencies`]),
-//! the read-only query index over those edges ([`SemanticGraph`]), the
-//! well-formedness check for the semantic boundary ([`verify`]), and the
-//! human-readable dump of it ([`summary`]).
+//! Shared semantic dependency facts, read-side analysis, and EGIR validation.
 
 #![deny(clippy::let_underscore_must_use)]
 
-use std::collections::{HashMap, HashSet};
+mod facts;
+pub(crate) use facts::{Facts, Incidence, ScopeKey, SourceValue};
 
-use crate::types::TypeExt;
+use super::ir::BodySite;
+use crate::{LookupMap, SortedSet, StableMap};
+use std::collections::HashSet;
 
 use super::graph_ops;
 use super::ir::{GraphResource, ProgramShape};
@@ -22,247 +17,6 @@ use super::types::{
     EGraph, ResourceAccess, SegResourceAccess, Semantic, SideEffect, SideEffectKind, SideEffectSite, Soac,
     SoacEffect, ValueId,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SemanticDependencyKind {
-    Value,
-    Effect,
-    Resource,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SemanticDependency {
-    pub producer: SemanticOpId,
-    pub consumer: SemanticOpId,
-    pub kind: SemanticDependencyKind,
-}
-
-/// Record runtime-composite array values whose use requires a storage-backed
-/// representation. This runs at the same semantic snapshot boundary as the
-/// dependency builder, when producer identity and use shape are both direct.
-pub(crate) fn array_residency_demands<Tag, Shape, GlobalContext, R>(
-    inner: &Program<Tag, Shape, GlobalContext>,
-) -> HashSet<SemanticOpId>
-where
-    Shape: ProgramShape<Family = Semantic<R>>,
-    R: GraphResource + Copy + Ord,
-{
-    let mut demands = HashSet::new();
-    for entry in &inner.entry_points {
-        let graph = &entry.graph;
-        for (producer_block, block) in &graph.skeleton.blocks {
-            for (producer_index, effect) in block.side_effects.iter().enumerate() {
-                let SideEffectKind::Soac(SoacEffect(id, _)) = &effect.kind else {
-                    continue;
-                };
-                let Some(result) = &effect.result else {
-                    continue;
-                };
-                let result_values = result.values();
-                if !result_values
-                    .iter()
-                    .any(|value| TypeExt::contains_runtime_sized_composite_array(&graph.nodes[*value].ty))
-                {
-                    continue;
-                }
-                let indexed = graph.nodes.iter().any(|(_, node)| {
-                    matches!(
-                        &node.kind,
-                        super::types::ValueKind::Pure {
-                            op: super::types::PureOp::Index,
-                            operands,
-                        } if operands.first().is_some_and(|base| {
-                            result_values
-                                .iter()
-                                .any(|result| graph_ops::value_depends_on(graph, *base, *result))
-                        })
-                    )
-                });
-                let captured = graph.skeleton.blocks.iter().any(|(consumer_block, block)| {
-                    block.side_effects.iter().enumerate().any(|(consumer_index, effect)| {
-                        if consumer_block == producer_block && consumer_index == producer_index {
-                            return false;
-                        }
-                        let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-                            return false;
-                        };
-                        soac.capture_nodes().any(|capture| {
-                            result_values
-                                .iter()
-                                .any(|result| graph_ops::value_depends_on(graph, capture, *result))
-                        })
-                    })
-                });
-                let histogram_input = graph.skeleton.blocks.iter().any(|(_, block)| {
-                    block.side_effects.iter().any(|effect| {
-                        matches!(&effect.kind, SideEffectKind::Soac(SoacEffect(_, Soac::Hist(_))))
-                            && effect.operands.iter().filter_map(|operand| operand.value()).any(|input| {
-                                result_values
-                                    .iter()
-                                    .any(|result| graph_ops::value_depends_on(graph, input, *result))
-                            })
-                    })
-                });
-                if indexed || captured || histogram_input {
-                    demands.insert(*id);
-                }
-            }
-        }
-    }
-    demands
-}
-
-/// Build semantic value/effect/resource dependencies for every semantic SOAC in
-/// the program.
-pub(crate) fn dependencies<Tag, Shape, GlobalContext, R>(
-    inner: &Program<Tag, Shape, GlobalContext>,
-) -> Vec<SemanticDependency>
-where
-    Shape: ProgramShape<Family = Semantic<R>>,
-    R: GraphResource + Copy + Ord,
-{
-    let mut dependencies = Vec::new();
-    for entry in &inner.entry_points {
-        collect_graph_dependencies(&entry.name, &entry.graph, &mut dependencies);
-    }
-    for function in &inner.functions {
-        collect_graph_dependencies(&function.name, &function.graph, &mut dependencies);
-    }
-    dependencies
-}
-
-/// Build semantic dependencies for one finalized graph.
-pub(crate) fn graph_dependencies<R>(graph: &EGraph<Semantic<R>>) -> Vec<SemanticDependency>
-where
-    R: GraphResource + Copy + Ord,
-{
-    let mut dependencies = Vec::new();
-    collect_graph_dependencies("", graph, &mut dependencies);
-    dependencies
-}
-
-/// Every edge runs between two ops of `graph`, so duplicates can only arise
-/// within one scope and `seen` need not outlive this call.
-fn collect_graph_dependencies<R>(
-    _scope: &str,
-    graph: &EGraph<Semantic<R>>,
-    output: &mut Vec<SemanticDependency>,
-) where
-    R: GraphResource + Copy + Ord,
-{
-    struct Record<'a, R: GraphResource> {
-        id: SemanticOpId,
-        results: Vec<ValueId>,
-        effect: &'a SideEffect<Semantic<R>>,
-        resources: Vec<SegResourceAccess<R>>,
-    }
-    let mut seen: HashSet<SemanticDependency> = HashSet::new();
-
-    let mut records = Vec::new();
-    for (_, block) in &graph.skeleton.blocks {
-        for effect in &block.side_effects {
-            let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
-                continue;
-            };
-            if let Some(result) = &effect.result {
-                let resources = match soac {
-                    Soac::Screma(op) => match op.semantic_state() {
-                        screma::SemanticState::Serial => read_resources(graph, effect),
-                        screma::SemanticState::Segmented { resources, .. } => resources.clone(),
-                    },
-                    Soac::Filter(op) => op.state.resources.clone(),
-                    Soac::Hist(op) => {
-                        let mut resources = read_resources(graph, effect);
-                        for destination in op
-                            .form
-                            .operations
-                            .iter()
-                            .flat_map(|operation| &operation.destinations)
-                            .filter_map(|view| graph_ops::extract_storage_view_source(graph, view.value()))
-                        {
-                            if let Some(resource) =
-                                resources.iter_mut().find(|resource| resource.resource == destination)
-                            {
-                                resource.access = ResourceAccess::ReadWrite;
-                            }
-                        }
-                        resources
-                    }
-                };
-                records.push(Record {
-                    id: *id,
-                    results: result.values(),
-                    effect,
-                    resources,
-                });
-            }
-        }
-    }
-
-    for consumer_index in 0..records.len() {
-        let consumer = &records[consumer_index];
-        let reachable = graph_ops::value_producer_closure(
-            graph,
-            graph_ops::effect_value_inputs(graph, consumer.effect),
-        )
-        .nodes;
-        for producer in &records[..consumer_index] {
-            if producer.results.iter().any(|result| reachable.contains(result)) {
-                push_dependency(
-                    output,
-                    &mut seen,
-                    &producer.id,
-                    &consumer.id,
-                    SemanticDependencyKind::Value,
-                );
-            }
-            if matches!((producer.effect.effects, consumer.effect.effects),
-                (Some((_, out)), Some((input, _))) if out == input)
-            {
-                push_dependency(
-                    output,
-                    &mut seen,
-                    &producer.id,
-                    &consumer.id,
-                    SemanticDependencyKind::Effect,
-                );
-            }
-            if producer.resources.iter().any(|left| {
-                consumer.resources.iter().any(|right| {
-                    left.resource == right.resource
-                        && (left.access != ResourceAccess::Read || right.access != ResourceAccess::Read)
-                })
-            }) {
-                push_dependency(
-                    output,
-                    &mut seen,
-                    &producer.id,
-                    &consumer.id,
-                    SemanticDependencyKind::Resource,
-                );
-            }
-        }
-    }
-}
-
-/// Append `edge` unless an identical one is already present. `output` keeps
-/// discovery order; `seen` answers membership without rescanning it.
-fn push_dependency(
-    output: &mut Vec<SemanticDependency>,
-    seen: &mut HashSet<SemanticDependency>,
-    producer: &SemanticOpId,
-    consumer: &SemanticOpId,
-    kind: SemanticDependencyKind,
-) {
-    let edge = SemanticDependency {
-        producer: producer.clone(),
-        consumer: consumer.clone(),
-        kind,
-    };
-    if seen.insert(edge.clone()) {
-        output.push(edge);
-    }
-}
 
 pub(crate) fn read_resources<R>(
     graph: &EGraph<Semantic<R>>,
@@ -434,129 +188,126 @@ where
     }
 }
 
-/// Value and capture consumers used by residency and scheduling.
+/// Read-side queries over the same incidences used by fusion.
+#[derive(Default)]
 pub struct SemanticGraph {
-    /// Dense interning of every op that appears in any edge.
-    index: HashMap<SemanticOpId, usize>,
-    /// Reverse lookup for dense operation indices.
-    operations: Vec<SemanticOpId>,
-    /// Value successors (consumers that read the producer's result).
-    value_succ: Vec<Vec<usize>>,
-    /// Reverse capture edges, built when captures are first recorded so
-    /// residency does not have to rediscover shared captured values by
-    /// scanning every operation.
-    capture_succ: HashMap<ValueId, Vec<usize>>,
-    capture_sources: Vec<ValueId>,
-    /// Operation locations for scheduling policies to inspect consumers.
-    operation_sites: Vec<Option<SideEffectSite>>,
+    consumers: LookupMap<SemanticOpId, SortedSet<SemanticOpId>>,
+    captures: StableMap<SourceValue, SortedSet<SemanticOpId>>,
+    sites: LookupMap<SemanticOpId, SideEffectSite>,
+    pub(crate) array_residency_demands: HashSet<SemanticOpId>,
 }
 
 impl SemanticGraph {
-    pub fn new(deps: &[SemanticDependency]) -> Self {
-        let mut graph = Self {
-            index: HashMap::new(),
-            operations: Vec::new(),
-            value_succ: Vec::new(),
-            capture_succ: HashMap::new(),
-            capture_sources: Vec::new(),
-            operation_sites: Vec::new(),
-        };
-        for dep in deps {
-            let p = graph.intern_operation(dep.producer);
-            let c = graph.intern_operation(dep.consumer);
-            match dep.kind {
-                SemanticDependencyKind::Value => graph.value_succ[p].push(c),
-                SemanticDependencyKind::Effect | SemanticDependencyKind::Resource => {}
-            }
-        }
-        graph
+    pub fn new<R: GraphResource + Copy + Ord>(graph: &EGraph<Semantic<R>>) -> Self {
+        let mut facts = Facts::new();
+        facts.add_body(BodySite::Entry(0), graph, []).expect("valid EGIR incidences");
+        Self::from_facts(facts)
     }
 
-    /// Extend the semantic operation DAG with graph-local values captured by
-    /// its SOACs. Capture sources are not assigned synthetic `SemanticOpId`s;
-    /// their successors use the DAG's existing dense operation identities.
-    pub(crate) fn with_operation_captures<R>(
-        deps: &[SemanticDependency],
-        egir: &EGraph<Semantic<R>>,
-    ) -> Self
+    pub fn for_program<Tag, Shape, GlobalContext, R>(program: &Program<Tag, Shape, GlobalContext>) -> Self
     where
-        R: GraphResource,
+        Shape: ProgramShape<Family = Semantic<R>>,
+        R: GraphResource + Copy + Ord,
     {
-        let mut graph = Self::new(deps);
-        for (block, skeleton_block) in &egir.skeleton.blocks {
-            for (effect_index, effect) in skeleton_block.side_effects.iter().enumerate() {
-                let SideEffectKind::Soac(SoacEffect(id, soac)) = &effect.kind else {
+        let mut facts = Facts::new();
+        for (body, graph) in program
+            .entry_points
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (BodySite::Entry(index), &entry.graph))
+            .chain(
+                program
+                    .functions
+                    .iter()
+                    .map(|function| (BodySite::Function(function.region), &function.graph)),
+            )
+        {
+            facts.add_body(body, graph, []).expect("valid EGIR incidences");
+        }
+        Self::from_facts(facts)
+    }
+
+    fn from_facts<R: GraphResource + Copy + Ord>(facts: Facts<R>) -> Self {
+        let graph = facts.builder.finish(facts.operations).expect("one fact per operation");
+        let producers = |roots: Vec<_>| {
+            let mut pending = roots;
+            let mut visited = HashSet::new();
+            let mut producers = SortedSet::new();
+            while let Some(port) = pending.pop() {
+                if !visited.insert(port) {
                     continue;
-                };
-                let operation = graph.intern_operation(*id);
-                graph.operation_sites[operation] = Some(SideEffectSite {
-                    block,
-                    index: effect_index,
-                });
-                let mut seen = HashSet::new();
-                for source in soac.capture_nodes().filter(|source| seen.insert(*source)) {
-                    let consumers = graph.capture_succ.entry(source).or_insert_with(|| {
-                        graph.capture_sources.push(source);
-                        Vec::new()
-                    });
-                    consumers.push(operation);
+                }
+                pending.extend(facts.external.get(&port).into_iter().flatten());
+                match facts.values.get(&port).map(|fact| &fact.incidence) {
+                    Some(Incidence::Pure(inputs)) => pending.extend(inputs),
+                    Some(Incidence::Project { base, .. }) => pending.push(*base),
+                    _ => {
+                        for producer in graph.producers(port).unwrap() {
+                            producers.insert(producer);
+                            pending.extend(graph.group(producer).unwrap().inputs());
+                        }
+                    }
+                }
+            }
+            producers
+        };
+        let mut index = Self::default();
+        for (_, group) in graph.groups() {
+            let op = group.payload();
+            let Some(id) = op.semantic_id else { continue };
+            index.sites.insert(id, op.site);
+            for &capture in &op.captures {
+                index
+                    .captures
+                    .entry(SourceValue {
+                        body: op.scope.0,
+                        value: capture,
+                    })
+                    .or_default()
+                    .insert(id);
+            }
+            for producer in producers(group.inputs().to_vec()) {
+                if let Some(producer) = graph
+                    .group(producer)
+                    .unwrap()
+                    .payload()
+                    .semantic_id
+                    .filter(|producer| *producer != id && index.sites.contains_key(producer))
+                {
+                    index.consumers.entry(producer).or_default().insert(id);
                 }
             }
         }
-        graph
-    }
-
-    fn intern_operation(&mut self, operation: SemanticOpId) -> usize {
-        if let Some(&index) = self.index.get(&operation) {
-            return index;
+        for producer in producers(facts.storage_uses) {
+            let group = graph.group(producer).unwrap();
+            if group.outputs().iter().any(|port| facts.runtime_arrays.contains(port)) {
+                index.array_residency_demands.extend(group.payload().semantic_id);
+            }
         }
-        let index = self.operations.len();
-        self.index.insert(operation, index);
-        self.operations.push(operation);
-        self.value_succ.push(Vec::new());
-        self.operation_sites.push(None);
         index
     }
 
-    /// Graph-local values captured by at least one semantic operation, in
-    /// source discovery order.
-    pub(crate) fn captured_values(&self) -> impl Iterator<Item = ValueId> + '_ {
-        self.capture_sources.iter().copied()
+    pub(crate) fn captured_values(&self, body: BodySite) -> impl Iterator<Item = ValueId> + '_ {
+        self.captures.keys().filter(move |source| source.body == body).map(|source| source.value)
     }
 
-    /// Semantic operations directly capturing `source`.
-    pub(crate) fn capture_consumers(&self, source: ValueId) -> impl Iterator<Item = SemanticOpId> + '_ {
-        self.capture_succ
-            .get(&source)
-            .into_iter()
-            .flat_map(|consumers| consumers.iter().map(|&consumer| self.operations[consumer]))
+    pub(crate) fn capture_consumers(&self, source: SourceValue) -> impl Iterator<Item = SemanticOpId> + '_ {
+        self.captures.get(&source).into_iter().flatten().copied()
     }
 
-    /// Locate an operation in the EGIR snapshot used to add capture sources.
     pub(crate) fn operation_site(&self, operation: &SemanticOpId) -> Option<SideEffectSite> {
-        self.index.get(operation).and_then(|index| self.operation_sites[*index])
+        self.sites.get(operation).copied()
     }
 
-    /// Number of semantic operations that directly consume `producer`'s
-    /// result. Multiple uses inside one consumer count once because the DAG is
-    /// operation-granular.
     pub fn value_consumer_count(&self, producer: &SemanticOpId) -> usize {
-        self.index.get(producer).map(|&index| self.value_succ[index].len()).unwrap_or(0)
+        self.consumers.get(producer).map_or(0, SortedSet::len)
     }
 
-    /// Semantic operations that directly consume `producer`'s result.
-    ///
-    /// This is the canonical read-side view of value-successor edges; callers
-    /// should not rebuild their own producer-to-consumer maps from the raw
-    /// dependency list.
     pub(crate) fn value_consumers(
         &self,
         producer: &SemanticOpId,
     ) -> impl Iterator<Item = SemanticOpId> + '_ {
-        self.index
-            .get(producer)
-            .into_iter()
-            .flat_map(|&index| self.value_succ[index].iter().map(|&consumer| self.operations[consumer]))
+        self.consumers.get(producer).into_iter().flatten().copied()
     }
 }
 

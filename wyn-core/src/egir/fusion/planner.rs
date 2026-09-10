@@ -1,4 +1,8 @@
 //! Deterministic fusion policy over the owned snapshot and composed recipes.
+#[cfg(test)]
+#[path = "planner_tests.rs"]
+mod tests;
+
 use super::{
     algebra, recipe,
     snapshot::{Kind, Operation, Slice, Snapshot, Use},
