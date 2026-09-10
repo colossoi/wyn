@@ -90,13 +90,86 @@ fn extraction_winners_follow_eliminated_block_parameter_aliases() {
     let merge = graph.skeleton.create_block();
     let selected = graph.add_block_param(merge, ty.clone());
     let replacement = graph.intern_constant(ConstantValue::U32(7), ty.clone());
-    let call = graph.intern_pure(PureOp::Materialize, smallvec::smallvec![replacement], ty, None);
+    let call = graph.intern_pure(
+        PureOp::Materialize,
+        smallvec::smallvec![replacement],
+        ty.clone(),
+        None,
+    );
     graph.subsume_pure_in_place(call, selected);
-    graph.nodes[selected].alias = Some(replacement);
+    graph.skeleton.blocks[graph.skeleton.entry].term = SkeletonTerminator::Branch {
+        target: merge,
+        args: graph.admit_flow_values([replacement]),
+    };
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(Some(graph.value_result(call)));
+    let aliases = super::super::skel_opt::run_one_body(&mut graph);
+    graph.install_aliases(aliases);
 
     let mut best = extract::extract(&graph);
     close_extraction_over_aliases(&graph, &mut best);
 
     assert_eq!(best[&call], replacement);
     assert_eq!(best[&selected], replacement);
+    assert_eq!(best[&replacement], replacement);
+
+    let body = elaborate_one_body(graph, &Parameters::new(), ty);
+    assert!(body.inner.blocks.values().any(|block| matches!(
+        block.term,
+        Terminator::Return(Some(ValueRef::Const(ConstantValue::U32(7))))
+    )));
+}
+
+fn composition_graph<const N: usize>() -> (EGraph<Physical>, [ValueId; N]) {
+    let mut graph = EGraph::new();
+    let ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let nodes = std::array::from_fn(|_| graph.add_block_param(graph.skeleton.entry, ty.clone()));
+    (graph, nodes)
+}
+
+#[test]
+fn extraction_and_alias_edges_alternate_to_a_terminal() {
+    let (mut graph, [a, b, c, d, terminal, unrelated]) = composition_graph();
+    graph.install_aliases(LookupMap::from([(b, c), (d, terminal)]));
+    let mut best = LookupMap::from([(a, b), (b, b), (c, d)]);
+
+    close_extraction_over_aliases(&graph, &mut best);
+
+    assert_eq!(best.len(), graph.nodes.len());
+    for node in [a, b, c, d, terminal] {
+        assert_eq!(best[&node], terminal);
+    }
+    assert_eq!(best[&unrelated], unrelated);
+}
+
+#[test]
+fn extraction_winner_takes_precedence_over_an_alias() {
+    let (mut graph, [source, winner, aliased]) = composition_graph();
+    graph.install_aliases(LookupMap::from([(source, aliased)]));
+    let mut best = LookupMap::from([(source, winner), (aliased, source)]);
+
+    close_extraction_over_aliases(&graph, &mut best);
+
+    assert_eq!(
+        best,
+        LookupMap::from([(source, winner), (winner, winner), (aliased, winner)])
+    );
+}
+
+#[test]
+fn composition_cycle_panics_before_updating_extraction() {
+    let (mut graph, [source, selected]) = composition_graph();
+    graph.install_aliases(LookupMap::from([(selected, source)]));
+    let mut best = LookupMap::from([(source, selected), (selected, selected)]);
+    let before = best.clone();
+
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        close_extraction_over_aliases(&graph, &mut best);
+    }))
+    .expect_err("the composed cycle must fail");
+    let message = error.downcast_ref::<String>().expect("replacement diagnostic");
+    assert!(message.contains("invalid extraction/CFG alias composition"));
+    assert!(message.contains("cycle"));
+    assert!(message.contains(&format!("{source:?}")));
+    assert!(message.contains(&format!("{selected:?}")));
+    assert_eq!(best, before);
 }

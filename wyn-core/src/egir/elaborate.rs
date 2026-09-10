@@ -27,6 +27,7 @@ use crate::types::{ExternDecl, TypeExt};
 use crate::{BindingRef, EntryId, LookupMap, LookupSet, ResourceAccess};
 use polytype::Type;
 use smallvec::SmallVec;
+use wyn_graph::ReplacementForest;
 
 use super::extract;
 use super::ir::{
@@ -1247,28 +1248,16 @@ fn result_type_at_path(result: &ResultBinding<Type<TypeName>>, path: &[u32]) -> 
 /// parameter; forwarding only the parameter itself would leave the union's
 /// winner pointing at a definition that is no longer in its block signature.
 fn close_extraction_over_aliases<P: Family>(graph: &EGraph<P>, best: &mut LookupMap<ValueId, ValueId>) {
-    let extracted = best.clone();
-    let resolve = |start| {
-        let mut current = start;
-        let mut seen = LookupSet::new();
-        loop {
-            assert!(
-                seen.insert(current),
-                "cycle while composing extraction and CFG aliases from {start:?}"
-            );
-            let chosen = extracted.get(&current).copied().unwrap_or(current);
-            if chosen != current {
-                current = chosen;
-                continue;
-            }
-            let Some(alias) = graph.nodes[current].alias else {
-                return current;
-            };
-            current = alias;
+    let mut replacements = ReplacementForest::new();
+    for (source, node) in &graph.nodes {
+        if let Some(target) = best.get(&source).copied().filter(|&winner| winner != source).or(node.alias) {
+            replacements
+                .replace(source, target)
+                .unwrap_or_else(|error| panic!("invalid extraction/CFG alias composition: {error}"));
         }
-    };
+    }
     for node in graph.nodes.keys() {
-        best.insert(node, resolve(node));
+        best.insert(node, replacements.resolve(node));
     }
 }
 

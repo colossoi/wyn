@@ -2,7 +2,7 @@
 //!
 //! This crate intentionally knows nothing about Wyn IR. Callers provide a node
 //! universe and tiny successor/dependency callbacks; the crate supplies the
-//! bookkeeping: reachability, topological ordering, and dominator trees.
+//! bookkeeping: reachability, topological ordering, dominators, and replacements.
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
@@ -11,6 +11,9 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 use thiserror::Error;
+
+mod replacement;
+pub use replacement::{ReplacementError, ReplacementForest};
 
 /// Which frontier discipline a reachable-node walk should use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

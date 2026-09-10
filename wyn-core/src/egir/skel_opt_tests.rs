@@ -8,7 +8,6 @@ use crate::op;
 use crate::ssa::types::ConstantValue;
 use polytype::Type;
 use smallvec::smallvec;
-use std::collections::HashMap;
 
 type EGraph = GenericEGraph;
 
@@ -25,28 +24,28 @@ fn bool_ty() -> Type<TypeName> {
 fn is_const_bool_recognizes_constant_true() {
     let mut graph = EGraph::new();
     let b = graph.intern_constant(ConstantValue::Bool(true), bool_ty());
-    assert_eq!(is_const_bool(b, &graph), Some(true));
+    assert_eq!(is_const_bool(&graph.nodes[b].kind), Some(true));
 }
 
 #[test]
 fn is_const_bool_recognizes_constant_false() {
     let mut graph = EGraph::new();
     let b = graph.intern_constant(ConstantValue::Bool(false), bool_ty());
-    assert_eq!(is_const_bool(b, &graph), Some(false));
+    assert_eq!(is_const_bool(&graph.nodes[b].kind), Some(false));
 }
 
 #[test]
 fn is_const_bool_recognizes_pure_bool() {
     let mut graph = EGraph::new();
     let b = graph.intern_pure(PureOp::Bool(true), smallvec![], bool_ty(), None);
-    assert_eq!(is_const_bool(b, &graph), Some(true));
+    assert_eq!(is_const_bool(&graph.nodes[b].kind), Some(true));
 }
 
 #[test]
 fn is_const_bool_rejects_non_bool() {
     let mut graph = EGraph::new();
     let n = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
-    assert_eq!(is_const_bool(n, &graph), None);
+    assert_eq!(is_const_bool(&graph.nodes[n].kind), None);
 }
 
 // -- fold_constant_branches ---------------------------------------------
@@ -180,7 +179,9 @@ fn phi_elim_strips_param_with_matching_incoming() {
     let x = graph.intern_pure(PureOp::Int("7".into()), smallvec![], i32_ty(), None);
     let (merge, _b2, param) = build_merge_skel(&mut graph, x, x);
 
-    let aliases = eliminate_redundant_params(&mut graph);
+    let mut replacements = ReplacementForest::new();
+    assert!(eliminate_redundant_params(&mut graph, &mut replacements));
+    let aliases = replacements.into_map();
 
     assert_eq!(aliases.get(&param), Some(&x));
     assert!(
@@ -197,6 +198,39 @@ fn phi_elim_strips_param_with_matching_incoming() {
 }
 
 #[test]
+fn invalid_parameter_replacements_panic_before_removing_slots() {
+    for conflict in [false, true] {
+        let mut graph = EGraph::new();
+        let x = graph.intern_constant(ConstantValue::I32(7), i32_ty());
+        let y = graph.intern_constant(ConstantValue::I32(8), i32_ty());
+        let (merge, _, param) = build_merge_skel(&mut graph, x, x);
+        let mut replacements = ReplacementForest::new();
+        let (old, survivor) = if conflict { (param, y) } else { (x, param) };
+        assert_eq!(replacements.replace(old, survivor), Ok(true));
+
+        let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eliminate_redundant_params(&mut graph, &mut replacements);
+        }))
+        .expect_err("invalid replacement must fail");
+        let message = error.downcast_ref::<String>().expect("replacement diagnostic");
+        assert!(message.contains("invalid skeleton parameter replacement"));
+        assert!(message.contains(if conflict { "conflict" } else { "cycle" }));
+        assert!(message.contains(&format!("{param:?}")));
+        assert!(message.contains(&format!("{x:?}")));
+        assert_eq!(graph.skeleton.blocks[merge].params.len(), 1);
+        assert_eq!(graph.skeleton.blocks[merge].params[0].value(), param);
+        for (_, block) in &graph.skeleton.blocks {
+            if let SkeletonTerminator::Branch { target, args } = &block.term {
+                if *target == merge {
+                    assert_eq!(args.iter().map(|arg| arg.value()).collect::<Vec<_>>(), [x]);
+                }
+            }
+        }
+        assert_eq!(replacements.into_map(), LookupMap::from([(old, survivor)]));
+    }
+}
+
+#[test]
 fn phi_elim_preserves_param_with_differing_incoming() {
     // Loop-accumulator shape: preheader X, backedge Y.
     let mut graph = EGraph::new();
@@ -204,7 +238,9 @@ fn phi_elim_preserves_param_with_differing_incoming() {
     let y = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
     let (merge, _b2, param) = build_merge_skel(&mut graph, x, y);
 
-    let aliases = eliminate_redundant_params(&mut graph);
+    let mut replacements = ReplacementForest::new();
+    assert!(!eliminate_redundant_params(&mut graph, &mut replacements));
+    let aliases = replacements.into_map();
 
     assert!(aliases.is_empty(), "differing incoming must not alias");
     assert_eq!(graph.skeleton.blocks[merge].params.len(), 1);
@@ -230,80 +266,13 @@ fn phi_elim_rejects_self_referential_param() {
         args: backedge_args,
     };
 
-    let aliases = eliminate_redundant_params(&mut graph);
+    let mut replacements = ReplacementForest::new();
+    assert!(!eliminate_redundant_params(&mut graph, &mut replacements));
+    let aliases = replacements.into_map();
 
     // Incoming set is {x, param}: two distinct values → not redundant.
     // Even if it were {param} alone, self-alias is rejected.
     assert!(aliases.is_empty());
-}
-
-// -- merge_aliases / close_aliases --------------------------------------
-
-fn mk_nid(graph: &mut EGraph) -> ValueId {
-    graph.intern_pure(PureOp::Int("0".into()), smallvec![], i32_ty(), None)
-}
-
-#[test]
-fn merge_aliases_forwards_existing_through_new() {
-    let mut graph = EGraph::new();
-    let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
-    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
-    let mut aliases = HashMap::new();
-    aliases.insert(a, b);
-    let mut new_aliases = HashMap::new();
-    new_aliases.insert(b, c);
-    merge_aliases(&mut aliases, new_aliases);
-    assert_eq!(aliases.get(&a), Some(&c));
-    assert_eq!(aliases.get(&b), Some(&c));
-}
-
-#[test]
-fn close_aliases_compresses_chain() {
-    let mut graph = EGraph::new();
-    let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
-    let c = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
-    let d = graph.intern_pure(PureOp::Int("3".into()), smallvec![], i32_ty(), None);
-    let mut aliases = HashMap::new();
-    aliases.insert(a, b);
-    aliases.insert(b, c);
-    aliases.insert(c, d);
-    close_aliases(&mut aliases);
-    assert_eq!(aliases[&a], d);
-    assert_eq!(aliases[&b], d);
-    assert_eq!(aliases[&c], d);
-}
-
-#[test]
-#[should_panic(expected = "alias cycle detected")]
-fn close_aliases_panics_on_cycle() {
-    let mut graph = EGraph::new();
-    let a = mk_nid(&mut graph);
-    let b = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
-    let mut aliases = HashMap::new();
-    aliases.insert(a, b);
-    aliases.insert(b, a); // cycle — logic bug upstream
-    close_aliases(&mut aliases);
-}
-
-#[test]
-fn close_aliases_compresses_two_step_chain() {
-    // p1 → p2 → x, all three distinct. Closure must collapse p1 and p2
-    // to x directly. (Covered end-to-end by
-    // optimize_skeleton_alias_closure_invariant, but exercising the
-    // helper in isolation is still worth a dedicated test.)
-    let mut graph = EGraph::new();
-    let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
-    let p1 = graph.intern_pure(PureOp::Int("1".into()), smallvec![], i32_ty(), None);
-    let p2 = graph.intern_pure(PureOp::Int("2".into()), smallvec![], i32_ty(), None);
-    let mut aliases = HashMap::new();
-    aliases.insert(p1, p2);
-    aliases.insert(p2, x);
-    close_aliases(&mut aliases);
-    assert_eq!(aliases[&p1], x);
-    assert_eq!(aliases[&p2], x);
-    assert!(aliases.values().all(|v| !aliases.contains_key(v)));
 }
 
 // -- optimize_skeleton fixpoint -----------------------------------------
@@ -355,7 +324,7 @@ fn optimize_skeleton_cascades_fold_into_phi_elim() {
 #[test]
 fn optimize_skeleton_alias_closure_invariant() {
     // entry → A(p1); A → B(p2); B returns p2. Both params get stripped
-    // across two iterations; closure forwards p2 past p1 to x.
+    // in one pass; both replacements must resolve to x.
     let mut graph = EGraph::new();
     let x = graph.intern_pure(PureOp::Int("42".into()), smallvec![], i32_ty(), None);
 
@@ -510,7 +479,9 @@ fn phi_elim_handles_condbranch_with_same_target_both_arms() {
         else_args,
     };
 
-    let aliases = eliminate_redundant_params(&mut graph);
+    let mut replacements = ReplacementForest::new();
+    assert!(eliminate_redundant_params(&mut graph, &mut replacements));
+    let aliases = replacements.into_map();
 
     // Both arms pass x; only one distinct value → param is redundant.
     assert_eq!(aliases.get(&param), Some(&x));
