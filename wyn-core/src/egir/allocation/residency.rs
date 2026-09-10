@@ -268,13 +268,8 @@ pub(super) fn resolve_residency_with_policy(
         // Required handoffs take priority over optional preludes. Every rewrite
         // restarts this read phase with fresh facts for the new graph.
         let (analyses, dependencies) = residency_facts(&program);
-        let operation = match plan_operation_result(&program, &dependencies, &analyses)
-            .map_err(ConvertError::Internal)?
-        {
-            Some(plan) => Some(plan),
-            None => plan_scalar_result_handoff(&program, &dependencies, &analyses)
-                .map_err(ConvertError::Internal)?,
-        };
+        let operation =
+            plan_required_residency(&program, &dependencies, &analyses).map_err(ConvertError::Internal)?;
         if let Some(plan) = operation {
             if topology == PipelineTopologyPolicy::AuthoredOnly {
                 return Err(ConvertError::PipelineTopology(
@@ -316,12 +311,15 @@ fn select_stage_prelude_candidate(
         .or_else(|| plan_direct_stage_prelude(program, analyses))
 }
 
-fn plan_operation_result(
+fn plan_required_residency(
     program: &ResidencyDraft,
     dependencies: &SemanticGraph,
     analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
 ) -> Result<Option<OperationMaterializationPlan>, String> {
+    let mut scalar_candidates = Vec::new();
     for (entry_index, (stage, _, entry)) in program.data.stages.stages().enumerate() {
+        let analysis = &analyses[entry_index];
+        let mut reductions = Vec::new();
         for (block_id, block) in &entry.graph.skeleton.blocks {
             for (effect_index, effect) in block.side_effects.iter().enumerate() {
                 let Some(result) = effect.result.as_ref() else {
@@ -331,7 +329,6 @@ fn plan_operation_result(
                     continue;
                 };
                 let semantic_consumers = dependencies.value_consumers(&id).collect::<HashSet<_>>();
-                let semantic_consumers = &semantic_consumers;
                 let source_site = SideEffectSite {
                     block: block_id,
                     index: effect_index,
@@ -339,11 +336,12 @@ fn plan_operation_result(
                 match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                         if op.form.post.result_types.is_empty() {
+                            reductions.push((source_site, id, op, result, semantic_consumers));
                             continue;
                         }
                         let Some(kind) = array_result_residency(
                             result,
-                            semantic_consumers,
+                            &semantic_consumers,
                             dependencies.array_residency_demands.contains(&id),
                         ) else {
                             continue;
@@ -351,7 +349,7 @@ fn plan_operation_result(
                         let Some(plan) = operation_result_plan(
                             stage,
                             entry,
-                            &analyses[entry_index],
+                            analysis,
                             op,
                             result,
                             id,
@@ -368,12 +366,12 @@ fn plan_operation_result(
                             dependencies,
                             stage,
                             entry,
-                            &analyses[entry_index],
+                            analysis,
                             op,
                             result,
                             id,
                             source_site,
-                            semantic_consumers,
+                            &semantic_consumers,
                         )? {
                             return Ok(Some(plan));
                         }
@@ -382,61 +380,40 @@ fn plan_operation_result(
                 }
             }
         }
+        scalar_candidates.push((stage, entry, analysis, reductions));
     }
-    Ok(None)
-}
-
-fn plan_scalar_result_handoff(
-    program: &ResidencyDraft,
-    dependencies: &SemanticGraph,
-    analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
-) -> Result<Option<OperationMaterializationPlan>, String> {
-    for (entry_index, (stage, _, entry)) in program.data.stages.stages().enumerate() {
-        let analysis = &analyses[entry_index];
+    // Structural residency has global priority. Defer scalar legality and
+    // projection until every structural candidate has been exhausted, including
+    // candidates in later entries. Each entry shares one lazy invariance check.
+    for (stage, entry, analysis, reductions) in scalar_candidates {
         let invariant = std::cell::OnceCell::new();
-        for (block_id, block) in &entry.graph.skeleton.blocks {
-            for (effect_index, effect) in block.side_effects.iter().enumerate() {
-                let Some(result) = effect.result.as_ref() else {
-                    continue;
-                };
-                let Some(&id) = effect.kind.soac_id() else {
-                    continue;
-                };
-                let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
-                    continue;
-                };
-                let semantic_consumers = dependencies.value_consumers(&id).collect::<HashSet<_>>();
-                let source_site = SideEffectSite {
-                    block: block_id,
-                    index: effect_index,
-                };
-                if !scalar_result_requires_handoff(
-                    dependencies,
-                    entry,
-                    analysis,
-                    &invariant,
-                    op,
-                    result,
-                    source_site,
-                    &semantic_consumers,
-                ) {
-                    continue;
-                }
-                let Some(plan) = operation_result_plan(
-                    stage,
-                    entry,
-                    analysis,
-                    op,
-                    result,
-                    id,
-                    source_site,
-                    FixedMaterializationKind::Scalar,
-                )?
-                else {
-                    continue;
-                };
-                return Ok(Some(plan));
+        for (source_site, id, op, result, semantic_consumers) in reductions {
+            if !scalar_result_requires_handoff(
+                dependencies,
+                entry,
+                analysis,
+                &invariant,
+                op,
+                result,
+                source_site,
+                &semantic_consumers,
+            ) {
+                continue;
             }
+            let Some(plan) = operation_result_plan(
+                stage,
+                entry,
+                analysis,
+                op,
+                result,
+                id,
+                source_site,
+                FixedMaterializationKind::Scalar,
+            )?
+            else {
+                continue;
+            };
+            return Ok(Some(plan));
         }
     }
     Ok(None)

@@ -541,6 +541,7 @@ fn realize_graph_dynamic_publication(
     resources: &mut LogicalResourceArena,
 ) -> Result<Vec<ResourceId>, String> {
     let mut filter_data = Vec::new();
+    let mut result_types = Vec::new();
     for (_, block) in &mut graph.skeleton.blocks {
         for effect in &mut block.side_effects {
             let SideEffectKind::Soac(SoacEffect(
@@ -561,11 +562,7 @@ fn realize_graph_dynamic_publication(
             else {
                 continue;
             };
-            if output_slots.is_empty() {
-                continue;
-            }
-
-            if matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
+            if !output_slots.is_empty() && matches!(runtime.backing, filter::RuntimeBacking::Deferred) {
                 runtime.backing = accesses
                     .iter()
                     .find(|access| access.access != crate::ResourceAccess::Read)
@@ -575,26 +572,41 @@ fn realize_graph_dynamic_publication(
             let filter::RuntimeBacking::Bound(backing) = runtime.backing else {
                 continue;
             };
-            let length = match runtime.length {
-                filter::RuntimeLength::Implicit => None,
-                filter::RuntimeLength::Stored(length) => Some(length.0),
-            };
             let elem_ty = body.output_element_type();
-            let size = filter_capacity_size(*owner, space, &elem_ty)?;
-            let storage = bind_filter_storage(resources, *owner, elem_ty, size, Some(backing.0), length)?;
-            filter_data.push(storage.data);
-            runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(storage.data));
-            runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(storage.length));
-            *accesses = super::types::SegResourceAccess::merge(
-                accesses,
-                &[super::types::SegResourceAccess {
-                    resource: SemanticResourceRef(storage.length),
-                    access: crate::ResourceAccess::Write,
-                }],
-            );
+            if !output_slots.is_empty() {
+                let length = match runtime.length {
+                    filter::RuntimeLength::Implicit => None,
+                    filter::RuntimeLength::Stored(length) => Some(length.0),
+                };
+                let size = filter_capacity_size(*owner, space, &elem_ty)?;
+                let storage =
+                    bind_filter_storage(resources, *owner, elem_ty.clone(), size, Some(backing.0), length)?;
+                filter_data.push(storage.data);
+                runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(storage.data));
+                runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(storage.length));
+                *accesses = super::types::SegResourceAccess::merge(
+                    accesses,
+                    &[super::types::SegResourceAccess {
+                        resource: SemanticResourceRef(storage.length),
+                        access: crate::ResourceAccess::Write,
+                    }],
+                );
+            }
+            // Bound results need storage-backed types even without host publication.
+            if let Some(result) = effect.result.as_ref().and_then(|result| result.single_value()) {
+                result_types.push((
+                    result,
+                    crate::types::view_array_of(
+                        &elem_ty,
+                        Type::Constructed(TypeName::Resource(backing.0), Vec::new()),
+                    ),
+                ));
+            }
         }
     }
-    realize_filter_result_types(graph);
+    for (result, ty) in result_types {
+        graph.retype_node(result, ty);
+    }
     Ok(filter_data)
 }
 
@@ -653,45 +665,6 @@ fn realize_filter_output_capacities(
         })? = Some(capacity);
     }
     Ok(())
-}
-
-fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<SemanticResourceRef>>) {
-    let results = graph
-        .skeleton
-        .blocks
-        .values()
-        .flat_map(|block| &block.side_effects)
-        .filter_map(|effect| {
-            let SideEffectKind::Soac(SoacEffect(
-                _,
-                Soac::Filter(filter::Op {
-                    body,
-                    state:
-                        filter::SemanticState {
-                            output:
-                                filter::Output::Runtime(filter::RuntimeOutput {
-                                    backing: filter::RuntimeBacking::Bound(backing),
-                                    ..
-                                }),
-                            ..
-                        },
-                }),
-            )) = &effect.kind
-            else {
-                return None;
-            };
-            Some((
-                effect.result.as_ref()?.single_value()?,
-                crate::types::view_array_of(
-                    &body.output_element_type(),
-                    Type::Constructed(TypeName::Resource(backing.0), Vec::new()),
-                ),
-            ))
-        })
-        .collect::<Vec<_>>();
-    for (result, ty) in results {
-        graph.retype_node(result, ty);
-    }
 }
 
 fn remap_function_resources(

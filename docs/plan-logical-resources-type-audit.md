@@ -73,3 +73,12 @@ The earlier coordinated refactor is implemented: complete fixed-output records, 
 - `git diff --check`: passed.
 
 No changes were made inside git submodules.
+
+## Follow-up: merged sub-pass traversals
+
+Two repeated traversals have been removed without adding any struct or enum:
+
+- [`plan_required_residency`](C:/Users/gmiller_amilarcap/dev/wyn/wyn-core/src/egir/allocation/residency.rs:314) replaces the separate structural-result and scalar-result discovery passes. It walks operations once, retaining scalar candidates and their consumer sets. Scalar legality and projection are deferred until structural candidates in every entry have been exhausted, preserving global priority and error ordering. Each entry still shares one lazy invariance check, and each materialization still restarts analysis.
+- [`realize_graph_dynamic_publication`](C:/Users/gmiller_amilarcap/dev/wyn/wyn-core/src/egir/allocation/mod.rs:539) now also collects bound Filter result-type updates during its existing traversal. The separate `realize_filter_result_types` graph scan is gone. Publication controls storage binding; every bound runtime Filter gets its result type updated, including those with no publication slots. Collected type updates are applied after the traversal releases its graph borrows.
+
+Together these changes remove 50 production lines. The full core library suite was rerun: **1,674 passed, 17 ignored**. Existing tests required no changes; the mergers preserve their behavior rather than changing assertions to match a new representation.
