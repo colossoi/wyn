@@ -4,7 +4,7 @@ use crate::egir;
 use crate::pipeline_descriptor;
 use std::collections::{HashMap, HashSet};
 
-use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan, PhaseGroup};
+use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan};
 use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::from_tlc::ConvertError;
 use crate::egir::program::{
@@ -22,15 +22,6 @@ impl KernelPlan {
         mut program: ResourcesAllocated,
         profile: LoweringProfile,
     ) -> Result<egir::parallelize::Planned, ConvertError> {
-        #[cfg(debug_assertions)]
-        {
-            let verification = self.validate();
-            debug_assert!(
-                verification.is_ok(),
-                "internally constructed kernel plan failed verification: {}",
-                verification.as_ref().err().map(String::as_str).unwrap_or("unknown verification failure")
-            );
-        }
         self.check_explicit_dispatch_coverage().map_err(ConvertError::InvalidDispatch)?;
         let physical_resources = self.publish_physical_layout(&mut program)?;
         let physical_kernels = super::PhysicalKernelGraph::from(&self);
@@ -116,9 +107,9 @@ impl KernelPlan {
     fn publications(&self, resources: &PhysicalResourceTable) -> Result<Vec<EntryPublication>, String> {
         let mut names = HashSet::new();
         let mut publications = Vec::new();
-        for source in &self.source_entries {
-            if names.insert(source.publication.name.as_str()) {
-                publications.push(source.publication.publication(resources)?);
+        for source in self.source_entries.values() {
+            if names.insert(source.name.as_str()) {
+                publications.push(source.publication(resources)?);
             }
         }
         for phase in self.phases() {
@@ -134,74 +125,49 @@ impl KernelPlan {
         &self,
         descriptor: &PipelineDescriptor,
     ) -> Result<StageEntryAssociations, String> {
-        let mut graphics = self.phase_ids_in(PhaseGroup::Graphics).into_iter();
-        let associations = descriptor
+        if descriptor.pipelines.len() != self.pipelines.len() {
+            return Err("publication group count differs from descriptor".into());
+        }
+        Ok(self
             .pipelines
             .iter()
-            .enumerate()
-            .map(|(index, pipeline)| -> Result<Vec<_>, String> {
-                Ok(match pipeline {
-                    Pipeline::Compute(_) => self
-                        .pipelines
-                        .iter()
-                        .find(|scheduled| scheduled.order == index)
-                        .map(|scheduled| self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id)))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|phase| self.phase(phase).entry.id)
-                        .collect(),
-                    Pipeline::Graphics(graphics_pipeline) => {
-                        let mut entries = Vec::with_capacity(graphics_pipeline.stages.len());
-                        for _ in &graphics_pipeline.stages {
-                            let Some(phase) = graphics.next() else {
-                                return Err(
-                                    "graphics descriptor has more stages than the kernel plan".to_string()
-                                );
-                            };
-                            entries.push(self.phase(phase).entry.id);
-                        }
-                        entries
-                    }
-                })
+            .map(|scheduled| match &scheduled.template {
+                Pipeline::Compute(_) => {
+                    self.phase_ids_in(scheduled.id).iter().map(|id| self.phase(*id).entry.id).collect()
+                }
+                Pipeline::Graphics(_) => scheduled.graphics_entries.clone(),
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        if graphics.next().is_some() {
-            return Err("kernel plan has more graphics phases than the descriptor has stages".to_string());
-        }
-        Ok(associations)
+            .collect())
     }
+
     fn install_phase_shells(&self, descriptor: &mut PipelineDescriptor) -> Result<(), String> {
-        let mut rebuilt = descriptor
+        descriptor.pipelines = self
             .pipelines
             .iter()
-            .enumerate()
-            .filter_map(|(order, pipeline)| {
-                matches!(pipeline, Pipeline::Graphics(_)).then(|| (order, pipeline.clone()))
+            .map(|scheduled| {
+                let mut pipeline = scheduled.template.clone();
+                if let Pipeline::Compute(compute) = &mut pipeline {
+                    compute.stages = self
+                        .phase_ids_in(scheduled.id)
+                        .iter()
+                        .map(|id| self.phase(*id))
+                        .map(|phase| ComputeStage {
+                            entry_point: phase.entry_point().to_owned(),
+                            owner: self.phase_owner(phase),
+                            workgroup_size: phase.workgroup_size(),
+                            dispatch_size: DispatchSize::Fixed {
+                                x: 1,
+                                y: 1,
+                                z: 1,
+                                explicit: false,
+                            },
+                            uses: StageBindingUses::default(),
+                        })
+                        .collect();
+                }
+                pipeline
             })
-            .collect::<Vec<_>>();
-        for scheduled in &self.pipelines {
-            let mut compute = scheduled.template.clone();
-            let phase_ids = self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id));
-            compute.stages = phase_ids
-                .iter()
-                .map(|id| self.phase(*id))
-                .map(|phase| ComputeStage {
-                    entry_point: phase.entry_point().to_owned(),
-                    owner: self.phase_owner(phase),
-                    workgroup_size: phase.workgroup_size(),
-                    dispatch_size: DispatchSize::Fixed {
-                        x: 1,
-                        y: 1,
-                        z: 1,
-                        explicit: false,
-                    },
-                    uses: StageBindingUses::default(),
-                })
-                .collect();
-            rebuilt.push((scheduled.order, Pipeline::Compute(compute)));
-        }
-        rebuilt.sort_by_key(|(order, _)| *order);
-        descriptor.pipelines = rebuilt.into_iter().map(|(_, pipeline)| pipeline).collect();
+            .collect();
         Ok(())
     }
 
@@ -210,9 +176,12 @@ impl KernelPlan {
         descriptor: &mut PipelineDescriptor,
         physical_resources: &PhysicalResourceTable,
     ) -> Result<(), String> {
-        for scheduled in &self.pipelines {
-            let phase_ids = self.phase_ids_in(PhaseGroup::Pipeline(scheduled.id));
-            let Some(Pipeline::Compute(compute)) = descriptor.pipelines.get_mut(scheduled.order) else {
+        for (index, scheduled) in self.pipelines.iter().enumerate() {
+            if !matches!(scheduled.template, Pipeline::Compute(_)) {
+                continue;
+            }
+            let phase_ids = self.phase_ids_in(scheduled.id);
+            let Some(Pipeline::Compute(compute)) = descriptor.pipelines.get_mut(index) else {
                 return Err(
                     "scheduled compute pipeline was not installed at its structural descriptor position"
                         .into(),
@@ -225,7 +194,7 @@ impl KernelPlan {
                 .filter_map(|(index, binding)| binding_ref(binding).map(|binding| (binding, index)))
                 .collect::<HashMap<_, _>>();
             let mut stages = Vec::with_capacity(phase_ids.len());
-            for id in &phase_ids {
+            for id in phase_ids {
                 let phase = self.phase(*id);
                 let mut reads = Vec::new();
                 let mut writes = Vec::new();
@@ -283,17 +252,21 @@ impl KernelPlan {
         Ok(())
     }
 
-    fn phase_owner(&self, phase: &super::KernelPhase) -> String {
+    fn phase_owner(&self, phase: &super::PreparedKernel) -> String {
         phase
             .source_entry
-            .and_then(|source| self.source_entries.get(source.index()))
-            .map(|source| source.publication.name.clone())
+            .and_then(|source| self.source_entries.get(&source))
+            .map(|source| source.name.clone())
             .unwrap_or_else(|| phase.entry_point().to_owned())
     }
 
     fn check_explicit_dispatch_coverage(&self) -> Result<(), String> {
-        for phase in
-            self.phases.iter().filter(|phase| matches!(phase.placement.group, PhaseGroup::Pipeline(_)))
+        for phase in self
+            .pipelines
+            .iter()
+            .filter(|pipeline| matches!(pipeline.template, Pipeline::Compute(_)))
+            .flat_map(|pipeline| self.phase_ids_in(pipeline.id))
+            .map(|id| self.phase(*id))
         {
             let KernelDispatch {
                 domain: KernelDomain::Fixed { x, y, z },

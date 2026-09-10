@@ -444,7 +444,7 @@ impl super::KernelPlanBuilder<'_> {
         kernel: super::schedule::KernelId,
         candidate: BoundBucketCandidate,
         output_projection: Option<Vec<usize>>,
-    ) -> ParallelizeResult<()> {
+    ) -> ParallelizeResult<super::schedule::PreparedRecipe> {
         use super::{project_kernel_body, project_single_effect_body, BuiltPhase, ProjectionSpec};
         use crate::ResourceAccess;
 
@@ -600,8 +600,12 @@ impl super::KernelPlanBuilder<'_> {
         )
         .with_output_projection(output_projection);
 
-        self.schedule.replace_chain(kernel, vec![init, insert], finish, Vec::new())?;
-        Ok(())
+        let init_id = self.schedule.allocate_kernel();
+        let insert_id = self.schedule.allocate_kernel();
+        Ok(super::schedule::PreparedRecipe::sequence(
+            vec![(init_id, init), (insert_id, insert), (kernel, finish)],
+            kernel,
+        )?)
     }
 }
 

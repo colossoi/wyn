@@ -8,7 +8,6 @@
 
 use crate::egir;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 
 use crate::egir::program::{
     GeneratedStageKind, LogicalResourceArena, OutputSlotId, PlannedEntry, PlannedPublication,
@@ -21,48 +20,50 @@ use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
 use crate::{BindingRef, EntryId, ResourceId};
-use wyn_graph::DisjointSets;
+use wyn_base::IdSource;
+pub use wyn_kernel_graph::KernelId;
+use wyn_kernel_graph::{Builder, Fragment, Plan};
 use wyn_staged_ir::StageId;
 
 use super::declared_resources;
 
 mod finalize;
-#[cfg(any(test, debug_assertions))]
 mod validation;
 
 #[cfg(test)]
 mod tests;
 
-/// A complete module-level compute schedule.
-#[derive(Debug, Default)]
+type Topology = Plan<StageId, ResourceId, PipelineId>;
+type TopologyBuilder = Builder<StageId, ResourceId, PipelineId>;
+
+/// The immutable topology and separately owned EGIR body catalog.
+#[derive(Debug)]
 pub(in crate::egir) struct KernelPlan {
-    phases: Vec<KernelPhase>,
+    topology: Topology,
+    catalog: BTreeMap<KernelId, PreparedKernel>,
     pipelines: Vec<ScheduledPipeline>,
-    next_pipeline_order: usize,
-    flow_sources: HashMap<StageId, KernelId>,
-    source_entries: Vec<SourceEntryPlan>,
+    source_entries: BTreeMap<EntryId, PlannedPublication>,
 }
 
-fn record_seeded_kernel(
-    seeded: &mut [Option<KernelId>],
-    source: EntryId,
-    kernel: KernelId,
-    name: &str,
-) -> Result<(), String> {
-    let slot = &mut seeded[source.index()];
-    if let Some(existing) = slot.replace(kernel) {
-        return Err(format!(
-            "semantic entry `{name}` is assigned to kernels {existing:?} and {kernel:?}"
-        ));
-    }
-    Ok(())
+pub(super) struct ScheduleBuilder {
+    topology: TopologyBuilder,
+    catalog: BTreeMap<KernelId, PreparedKernel>,
+    stages: BTreeMap<StageId, StageMetadata>,
+    pipelines: BTreeMap<PipelineId, Pipeline>,
+    graphics_associations: BTreeMap<PipelineId, Vec<EntryId>>,
+    source_entries: BTreeMap<EntryId, PlannedPublication>,
+    kernel_ids: IdSource<KernelId>,
 }
 
-#[derive(Clone, Debug)]
-struct SourceEntryPlan {
-    publication: PlannedPublication,
+/// Registration retains only stage policy and ABI facts. Recipes own all bodies.
+pub(super) struct StageMetadata {
     primary: KernelId,
-    output_owners: HashMap<OutputSlotId, KernelId>,
+    compute: bool,
+    source_entry: Option<EntryId>,
+    dispatch: KernelDispatch,
+    output_routes: Vec<OutputRouteProjection>,
+    required_elements: Option<u32>,
+    generated_kind: Option<GeneratedStageKind>,
 }
 
 impl KernelPlan {
@@ -76,43 +77,19 @@ impl KernelPlan {
             "authored-only scheduling unexpectedly produced a callable"
         );
         debug_assert_eq!(
-            self.phases.len(),
+            self.catalog.len(),
             authored_stage_count,
             "authored-only scheduling unexpectedly changed the stage count"
         );
     }
-
-    pub(in crate::egir) fn into_physical_entries(self) -> Vec<PlannedEntry<Scheduled>> {
-        let order = self.ordered_phase_ids();
-        let mut phases = self.phases.into_iter().map(Some).collect::<Vec<_>>();
-        order
-            .into_iter()
+    pub(in crate::egir) fn into_physical_entries(mut self) -> Vec<PlannedEntry<Scheduled>> {
+        self.topology
+            .kernel_order()
+            .iter()
             .map(|id| {
-                let Some(phase) = phases[id.index()].take() else {
-                    panic!("kernel order contained a duplicate phase");
-                };
-                match Arc::try_unwrap(phase.entry) {
-                    Ok(entry) => entry,
-                    Err(_) => panic!("completed kernel plan retained a shared entry body"),
-                }
+                self.catalog.remove(id).unwrap_or_else(|| unreachable!("validated kernel catalog")).entry
             })
             .collect()
-    }
-}
-
-/// Stable identity of a physical kernel in a plan. Dependencies use this id
-/// instead of vector positions so insertion cannot silently retarget an edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct KernelId(u32);
-
-impl KernelId {
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    #[cfg(test)]
-    pub(super) const fn for_test(index: u32) -> Self {
-        Self(index)
     }
 }
 
@@ -120,13 +97,9 @@ impl KernelId {
 pub(super) enum KernelMutationError {
     #[error("{0}")]
     InvalidKernel(String),
-    #[error("adding resource dependency {reader:?} -> {writer:?} would create a cycle")]
-    DependencyCycle {
-        reader: KernelId,
-        writer: KernelId,
-    },
+    #[error(transparent)]
+    Topology(#[from] wyn_kernel_graph::Error),
 }
-
 impl From<String> for KernelMutationError {
     fn from(error: String) -> Self {
         Self::InvalidKernel(error)
@@ -263,36 +236,36 @@ impl PhaseSpec {
         self
     }
 
-    fn prepare(self) -> Result<PreparedPhase, String> {
+    fn prepare(self) -> Result<PreparedKernel, String> {
         let entry = super::prepare::entry(self.body, self.filter_plan, self.hist_plan)?;
         if entry.execution_model.is_compute() != self.expected_compute {
             let expected = if self.expected_compute { "compute" } else { "graphics" };
             return Err(format!("entry `{}` cannot use a {expected} body", entry.name));
         }
-        let required_elements = match &self.dispatch.domain {
-            KernelDomain::Elements(DispatchLen::Fixed { count }) => Some(*count),
-            _ => None,
-        };
-        Ok(PreparedPhase {
+        let required_elements = self.dispatch.required_elements();
+        let projected = self.output_projection.is_some();
+        let output_routes = self
+            .output_projection
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(physical, semantic_slot)| OutputRouteProjection {
+                semantic_slot,
+                physical_slot: OutputSlotId(physical),
+            })
+            .collect();
+        Ok(PreparedKernel {
             label: self.label,
-            entry: Arc::new(entry),
+            entry,
+            source_entry: None,
+            output_routes,
+            projected,
             dispatch: self.dispatch,
             resources: self.resources,
             serial_single_workgroup: self.serial_single_workgroup,
             required_elements,
-            output_projection: self.output_projection,
         })
     }
-}
-
-struct PreparedPhase {
-    label: &'static str,
-    entry: Arc<PlannedEntry<Scheduled>>,
-    dispatch: KernelDispatch,
-    resources: Vec<SegResourceAccess<ResourceId>>,
-    serial_single_workgroup: bool,
-    required_elements: Option<u32>,
-    output_projection: Option<Vec<OutputSlotId>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,110 +274,123 @@ pub struct OutputRouteProjection {
     pub physical_slot: OutputSlotId,
 }
 
-/// Ordered phases that share one host binding table.
-#[derive(Clone, Debug)]
+/// Final descriptor indices are assigned exactly once, after grouping.
+#[derive(Debug)]
 struct ScheduledPipeline {
     id: PipelineId,
-    /// Original descriptor position, retained solely for stable publication.
-    order: usize,
-    /// Non-stage host metadata and already-published source bindings.
-    template: ComputePipeline,
+    template: Pipeline,
+    /// Graphics stage associations retain authored order.
+    graphics_entries: Vec<EntryId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct PipelineId(u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum PhaseGroup {
-    Pipeline(PipelineId),
-    Graphics,
-    Unpublished,
-}
-
-impl PhaseGroup {
-    fn is_graphics(self) -> bool {
-        matches!(self, Self::Graphics)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PhasePlacement {
-    group: PhaseGroup,
-    order: usize,
-}
-
-/// One executable kernel phase.
-#[derive(Clone, Debug)]
-struct KernelPhase {
-    placement: PhasePlacement,
-    /// Typed identity used by compiler-resource flow edges. It is separate
-    /// from the projected source ABI because generated requirements have no
-    /// semantic entry ABI of their own.
-    flow_source: Option<StageId>,
+/// A prepared body and creator-supplied metadata; it contains no topology.
+#[derive(Debug)]
+struct PreparedKernel {
     label: &'static str,
-    entry: Arc<PlannedEntry<Scheduled>>,
+    entry: PlannedEntry<Scheduled>,
     source_entry: Option<EntryId>,
     output_routes: Vec<OutputRouteProjection>,
+    projected: bool,
     dispatch: KernelDispatch,
     resources: Vec<SegResourceAccess<ResourceId>>,
-    /// Materialization kernels collapse to one workgroup under serial policy.
-    /// This is an execution constraint, unlike the diagnostic `label`.
     serial_single_workgroup: bool,
-    /// Semantic work-item requirement retained for explicit-dispatch coverage
-    /// checks without inspecting the scheduled graph.
     required_elements: Option<u32>,
-    /// Stable kernel identities that must complete first.
-    dependencies: Vec<KernelId>,
 }
 
-impl KernelPhase {
+impl PreparedKernel {
     fn entry_point(&self) -> &str {
         &self.entry.name
     }
-
     fn workgroup_size(&self) -> (u32, u32, u32) {
         execution_workgroup(&self.entry.execution_model)
     }
-
     fn resources(&self) -> &[SegResourceAccess<ResourceId>] {
         &self.resources
     }
+}
 
-    fn replace_body(&mut self, spec: PhaseSpec) -> Result<Option<Vec<OutputSlotId>>, String> {
-        let prepared = spec.prepare()?;
-        self.label = prepared.label;
-        self.entry = prepared.entry;
-        self.resources = prepared.resources;
-        self.serial_single_workgroup = prepared.serial_single_workgroup;
-        self.required_elements = prepared.required_elements;
-        if !self.dispatch.explicit {
-            self.dispatch.domain = prepared.dispatch.domain;
-        }
-        if let Some(outputs) = &prepared.output_projection {
-            self.output_routes = outputs
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(physical, semantic_slot)| OutputRouteProjection {
-                    semantic_slot,
-                    physical_slot: OutputSlotId(physical),
-                })
-                .collect();
-        }
-        Ok(prepared.output_projection)
+/// Lowerers finish body preparation before returning a composable fragment.
+pub(super) struct PreparedRecipe {
+    fragment: Fragment,
+    primary: KernelId,
+    bodies: BTreeMap<KernelId, PreparedKernel>,
+}
+
+impl PreparedRecipe {
+    pub(super) fn single(id: KernelId, spec: PhaseSpec) -> Result<Self, KernelMutationError> {
+        Ok(Self {
+            fragment: Fragment::kernel(id, 0),
+            primary: id,
+            bodies: [(id, spec.prepare()?)].into_iter().collect(),
+        })
     }
-
-    fn replace_scheduled_compute(
-        &mut self,
-        entry: PlannedEntry<Scheduled>,
-        label: &'static str,
-    ) -> Result<(), String> {
-        if !entry.execution_model.is_compute() {
-            return Err(format!("entry `{}` cannot use a compute body", entry.name));
+    pub(super) fn unchanged(
+        id: KernelId,
+        body: PlannedEntry,
+        stage: &StageMetadata,
+    ) -> Result<Self, KernelMutationError> {
+        let mut spec = if stage.compute {
+            let label = match stage.generated_kind {
+                Some(GeneratedStageKind::SharedArray) => "shared_array_materialization",
+                Some(GeneratedStageKind::Gather) => "gather_prepass",
+                Some(GeneratedStageKind::Scalar) => "scalar_prepass",
+                Some(GeneratedStageKind::RuntimeArray) => "runtime_array_materialization",
+                None => "serial_compute",
+            };
+            PhaseSpec::compute(body, stage.dispatch.clone(), label)
+        } else {
+            PhaseSpec::graphics(body, stage.dispatch.clone())
+        };
+        spec.serial_single_workgroup = stage.generated_kind.is_some();
+        let mut recipe = Self::single(id, spec)?;
+        recipe.bodies.get_mut(&id).unwrap_or_else(|| unreachable!("single kernel")).required_elements =
+            stage.required_elements;
+        Ok(recipe)
+    }
+    pub(super) fn sequence(
+        specs: Vec<(KernelId, PhaseSpec)>,
+        primary: KernelId,
+    ) -> Result<Self, KernelMutationError> {
+        let mut bodies = BTreeMap::new();
+        let mut fragments = Vec::new();
+        for (rank, (id, spec)) in specs.into_iter().enumerate() {
+            let body = spec.prepare()?;
+            if bodies.insert(id, body).is_some() {
+                return Err(wyn_kernel_graph::Error::DuplicateKernel(id).into());
+            }
+            fragments.push(Fragment::kernel(id, rank as u64));
         }
-        self.label = label;
-        self.entry = Arc::new(entry);
-        Ok(())
+        if !bodies.contains_key(&primary) {
+            return Err("recipe primary has no prepared body".to_string().into());
+        }
+        Ok(Self {
+            fragment: Fragment::sequence(fragments)?,
+            primary,
+            bodies,
+        })
+    }
+    pub(super) fn parallel(recipes: Vec<Self>, primary: KernelId) -> Result<Self, KernelMutationError> {
+        let mut fragments = Vec::new();
+        let mut bodies = BTreeMap::new();
+        for recipe in recipes {
+            fragments.push(recipe.fragment);
+            for (id, body) in recipe.bodies {
+                if bodies.insert(id, body).is_some() {
+                    return Err(wyn_kernel_graph::Error::DuplicateKernel(id).into());
+                }
+            }
+        }
+        if !bodies.contains_key(&primary) {
+            return Err("recipe primary has no prepared body".to_string().into());
+        }
+        Ok(Self {
+            fragment: Fragment::parallel(fragments)?,
+            primary,
+            bodies,
+        })
     }
 }
 
@@ -443,59 +429,22 @@ impl PhysicalKernelGraph {
         self.kernels.iter().find(|kernel| kernel.id == id)
     }
 
-    /// Kernel identities in dependency order. Stable schedule order breaks
-    /// ties between simultaneously ready kernels.
+    /// Kernel identities in the immutable finalized dependency order.
     pub fn topological_kernel_ids(&self) -> Vec<KernelId> {
-        wyn_graph::topo_sort_by_dependencies(self.kernels.iter().map(|kernel| kernel.id), |id, out| {
-            if let Some(kernel) = self.kernel(id) {
-                out.extend(kernel.dependencies.iter().copied());
-            }
-        })
-        .unwrap_or_else(|_| unreachable!("physical kernel graphs are validated when finalized"))
+        self.kernels.iter().map(|kernel| kernel.id).collect()
     }
 
+    /// Check the adapter-owned entry identities. Topology is established by
+    /// the finalized kernel plan and cannot be mutated through this graph.
     pub fn validate(&self) -> Result<(), String> {
-        let mut ids = HashSet::new();
         let mut entries = HashSet::new();
         for kernel in &self.kernels {
-            if !ids.insert(kernel.id) {
-                return Err(format!("duplicate physical kernel identity {:?}", kernel.id));
-            }
             if !entries.insert(kernel.entry) {
                 return Err(format!(
                     "physical entry {:?} is owned by multiple kernels",
                     kernel.entry
                 ));
             }
-        }
-        for kernel in &self.kernels {
-            let mut dependencies = HashSet::new();
-            for dependency in &kernel.dependencies {
-                if !dependencies.insert(*dependency) {
-                    return Err(format!(
-                        "physical kernel {:?} repeats dependency {:?}",
-                        kernel.id, dependency
-                    ));
-                }
-                if *dependency == kernel.id {
-                    return Err(format!("physical kernel {:?} depends on itself", kernel.id));
-                }
-                if !ids.contains(dependency) {
-                    return Err(format!(
-                        "physical kernel {:?} depends on unknown kernel {:?}",
-                        kernel.id, dependency
-                    ));
-                }
-            }
-        }
-        if wyn_graph::topo_sort_by_dependencies(self.kernels.iter().map(|kernel| kernel.id), |id, out| {
-            if let Some(kernel) = self.kernel(id) {
-                out.extend(kernel.dependencies.iter().copied());
-            }
-        })
-        .is_err()
-        {
-            return Err("physical kernel dependency graph contains a cycle".into());
         }
         Ok(())
     }
@@ -504,7 +453,6 @@ impl PhysicalKernelGraph {
         &self,
         entry_ids: impl IntoIterator<Item = EntryId>,
     ) -> Result<(), String> {
-        self.validate()?;
         let expected = self.kernels.iter().map(|kernel| kernel.entry).collect::<HashSet<_>>();
         let actual_ids = entry_ids.into_iter().collect::<Vec<_>>();
         let actual = actual_ids.iter().copied().collect::<HashSet<_>>();
@@ -540,30 +488,32 @@ pub struct PhysicalKernel {
 
 impl From<&KernelPlan> for PhysicalKernelGraph {
     fn from(plan: &KernelPlan) -> Self {
-        let kernels =
-            plan.phases_with_ids().map(|(id, phase)| PhysicalKernel::from_phase(id, phase)).collect();
-        let graph = Self { kernels };
-        debug_assert!(
-            graph.validate().is_ok(),
-            "validated kernel-plan construction produced an invalid persistent physical graph"
-        );
-        graph
-    }
-}
-
-impl PhysicalKernel {
-    fn from_phase(id: KernelId, phase: &KernelPhase) -> Self {
         Self {
-            id,
-            entry: phase.entry.id,
-            entry_point: phase.entry_point().to_owned(),
-            label: phase.label.to_owned(),
-            source_entry: phase.source_entry,
-            output_routes: phase.output_routes.clone(),
-            workgroup_size: phase.workgroup_size(),
-            domain: phase.dispatch.domain.clone(),
-            resources: phase.resources().to_vec(),
-            dependencies: phase.dependencies.clone(),
+            kernels: plan
+                .topology
+                .kernel_order()
+                .iter()
+                .map(|&id| {
+                    let phase = &plan.catalog[&id];
+                    PhysicalKernel {
+                        id,
+                        entry: phase.entry.id,
+                        entry_point: phase.entry_point().to_owned(),
+                        label: phase.label.to_owned(),
+                        source_entry: phase.source_entry,
+                        output_routes: phase.output_routes.clone(),
+                        workgroup_size: phase.workgroup_size(),
+                        domain: phase.dispatch.domain.clone(),
+                        resources: phase.resources.clone(),
+                        dependencies: plan
+                            .topology
+                            .kernel(id)
+                            .unwrap_or_else(|| unreachable!("finalized kernel"))
+                            .dependencies()
+                            .to_vec(),
+                    }
+                })
+                .collect(),
         }
     }
 }
@@ -597,6 +547,12 @@ pub(super) struct KernelDispatch {
 }
 
 impl KernelDispatch {
+    fn required_elements(&self) -> Option<u32> {
+        match &self.domain {
+            KernelDomain::Elements(DispatchLen::Fixed { count }) => Some(*count),
+            _ => None,
+        }
+    }
     pub(super) fn inferred(baseline: KernelDomain) -> Self {
         Self {
             domain: baseline,
@@ -613,745 +569,381 @@ impl KernelDispatch {
 }
 
 impl KernelPlan {
-    fn phases(&self) -> impl Iterator<Item = &KernelPhase> {
-        self.phases_with_ids().map(|(_, phase)| phase)
+    fn phases(&self) -> impl Iterator<Item = &PreparedKernel> {
+        self.topology.kernel_order().iter().map(|id| &self.catalog[id])
     }
-
-    fn phases_with_ids(&self) -> impl Iterator<Item = (KernelId, &KernelPhase)> {
-        self.ordered_phase_ids().into_iter().map(|id| (id, self.phase(id)))
+    fn phase(&self, id: KernelId) -> &PreparedKernel {
+        &self.catalog[&id]
     }
-
-    fn ordered_phase_ids(&self) -> Vec<KernelId> {
-        let mut pipelines = self.pipelines.iter().collect::<Vec<_>>();
-        pipelines.sort_by_key(|pipeline| pipeline.order);
-        let mut ids = pipelines
-            .into_iter()
-            .flat_map(|pipeline| self.phase_ids_in(PhaseGroup::Pipeline(pipeline.id)))
-            .collect::<Vec<_>>();
-        ids.extend(self.phase_ids_in(PhaseGroup::Graphics));
-        ids.extend(self.phase_ids_in(PhaseGroup::Unpublished));
-        ids
-    }
-
-    fn phase_ids_in(&self, group: PhaseGroup) -> Vec<KernelId> {
-        let mut ids = self
-            .phases
+    fn phase_ids_in(&self, group: PipelineId) -> &[KernelId] {
+        self.topology
+            .groups()
             .iter()
-            .enumerate()
-            .filter_map(|(index, phase)| {
-                (phase.placement.group == group).then_some((phase.placement.order, KernelId(index as u32)))
-            })
-            .collect::<Vec<_>>();
-        ids.sort_by_key(|(order, _)| *order);
-        ids.into_iter().map(|(_, id)| id).collect()
+            .find(|candidate| candidate.id() == group)
+            .map_or(&[], |group| group.kernels())
     }
+}
 
-    pub(super) fn contains_flow_source(&self, source: StageId) -> bool {
-        self.flow_sources.contains_key(&source)
-    }
-
-    pub(super) fn kernel_for_flow_source(&self, source: StageId) -> Option<KernelId> {
-        self.flow_sources.get(&source).copied()
-    }
-
-    fn flow_resource_phases(
-        &self,
-        source: StageId,
-        resource: ResourceId,
-        writes: bool,
-    ) -> impl Iterator<Item = (KernelId, &KernelPhase)> {
-        self.phases_with_ids().filter(move |(_, phase)| {
-            phase.flow_source == Some(source)
-                && phase.resources().iter().any(|item| {
-                    item.resource == resource
-                        && if writes { item.access.writes() } else { item.access.reads() }
-                })
-        })
-    }
-
+impl ScheduleBuilder {
     pub(super) fn from_descriptor(
         descriptor: &PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
         resources: &LogicalResourceArena,
         stages: &StagedProgram,
-        parallel_screma_plans: &super::planning::ParallelScremaPlans,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, KernelMutationError> {
+        if stage_entries.len() != descriptor.pipelines.len() {
+            return Err(
+                "descriptor pipeline stages are missing structural entry associations".to_string().into(),
+            );
+        }
         let authored = stages
             .stages()
             .filter(|(_, stage)| matches!(stage.origin(), StageOrigin::Authored))
             .collect::<Vec<_>>();
-        let mut seeded = vec![None; authored.len()];
-        let entries_by_id = authored
+        let entries = authored.iter().map(|(id, stage)| (stage.body().id, *id)).collect::<HashMap<_, _>>();
+        let mut topology = TopologyBuilder::default();
+        let mut pipelines = BTreeMap::new();
+        let mut graphics_associations = BTreeMap::new();
+        let mut associations = HashMap::new();
+        let mut dispatch = HashMap::new();
+        let mut sequencing = Vec::new();
+        for (index, (pipeline, associated)) in descriptor.pipelines.iter().zip(stage_entries).enumerate() {
+            let id = PipelineId(index as u32);
+            topology.register_group(id, index as u64, matches!(pipeline, Pipeline::Compute(_)))?;
+            pipelines.insert(id, pipeline.clone());
+            if matches!(pipeline, Pipeline::Graphics(_)) {
+                graphics_associations.insert(id, associated.clone());
+            }
+            let count = match pipeline {
+                Pipeline::Compute(p) => p.stages.len(),
+                Pipeline::Graphics(p) => p.stages.len(),
+            };
+            if count != associated.len() {
+                return Err("pipeline stage association count differs from descriptor".to_string().into());
+            }
+            let mut previous = None;
+            for (position, entry) in associated.iter().enumerate() {
+                let stage = *entries
+                    .get(entry)
+                    .ok_or_else(|| format!("descriptor stage has unknown semantic entry {entry:?}"))?;
+                if associations.insert(stage, id).is_some() {
+                    return Err(
+                        format!("semantic entry {entry:?} is assigned to multiple pipelines").into(),
+                    );
+                }
+                if let Pipeline::Compute(compute) = pipeline {
+                    dispatch.insert(
+                        stage,
+                        domain_selection_from_stage(&compute.stages[position], resources)?,
+                    );
+                    if let Some(before) = previous {
+                        sequencing.push((before, stage));
+                    }
+                    previous = Some(stage);
+                }
+            }
+        }
+        let ordered = stages.topological_stages();
+        let ranks = ordered
             .iter()
-            .map(|(stage, body)| (body.body().id, (*stage, body.body())))
-            .collect::<HashMap<_, _>>();
-        if stage_entries.len() != descriptor.pipelines.len() {
-            return Err("descriptor pipeline stages are missing structural entry associations".into());
-        }
-        let mut phases = Vec::new();
-        let mut pipelines = Vec::new();
-        let mut flow_sources = HashMap::new();
-        // Resolve descriptor ABI symbols while seeding. Subsequent plan
-        // membership and ownership use structural entry identities only.
-        let mut published_sources = HashSet::new();
-        for (order, pipeline) in descriptor.pipelines.iter().enumerate() {
-            let Pipeline::Compute(template) = pipeline else {
-                continue;
-            };
-            let pipeline_id = PipelineId(pipelines.len() as u32);
-            let associated_entries =
-                stage_entries.get(order).ok_or("compute pipeline has no stage associations")?;
-            if associated_entries.len() != template.stages.len() {
-                return Err("compute pipeline stage association count differs from descriptor".into());
-            }
-            for (stage_order, (stage, &source)) in
-                template.stages.iter().zip(associated_entries).enumerate()
-            {
-                let selection = domain_selection_from_stage(stage, resources)?;
-                let (stage_id, entry) = entries_by_id
-                    .get(&source)
-                    .copied()
-                    .ok_or_else(|| format!("descriptor stage has unknown semantic entry {source:?}"))?;
-                published_sources.insert(source);
-                let phase = phase_from_entry(
-                    stage_id,
-                    entry,
-                    selection,
-                    "serial_compute",
-                    PhasePlacement {
-                        group: PhaseGroup::Pipeline(pipeline_id),
-                        order: stage_order,
-                    },
-                    super::planning::parallel_scremas_for(parallel_screma_plans, stage_id)
-                        .map_err(|error| error.to_string())?,
-                )?;
-                let id = KernelId(phases.len() as u32);
-                record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-                flow_sources.insert(stage_id, id);
-                phases.push(phase);
-            }
-            pipelines.push(ScheduledPipeline {
-                id: pipeline_id,
-                order,
-                template: template.clone(),
-            });
-        }
-        let mut graphics_order = 0;
-        for (pipeline_index, pipeline) in descriptor.pipelines.iter().enumerate() {
-            let Pipeline::Graphics(graphics) = pipeline else {
-                continue;
-            };
-            let associated_entries =
-                stage_entries.get(pipeline_index).ok_or("graphics pipeline has no stage associations")?;
-            if associated_entries.len() != graphics.stages.len() {
-                return Err("graphics pipeline stage association count differs from descriptor".into());
-            }
-            for &source in associated_entries {
-                let (stage_id, entry) = entries_by_id
-                    .get(&source)
-                    .copied()
-                    .ok_or_else(|| format!("graphics stage has unknown semantic entry {source:?}"))?;
-                published_sources.insert(source);
-                let phase = graphics_passthrough_phase(
-                    stage_id,
-                    entry,
-                    PhasePlacement {
-                        group: PhaseGroup::Graphics,
-                        order: graphics_order,
-                    },
-                )?;
-                graphics_order += 1;
-                let id = KernelId(phases.len() as u32);
-                record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-                flow_sources.insert(stage_id, id);
-                phases.push(phase);
-            }
-        }
-        let mut unpublished_order = 0;
-        for (stage_id, body) in &authored {
-            let entry = body.body();
-            let source = entry.id;
-            if published_sources.contains(&source) {
-                continue;
-            }
-            let placement = PhasePlacement {
-                group: PhaseGroup::Unpublished,
-                order: unpublished_order,
-            };
-            unpublished_order += 1;
-            let result = if entry.execution_model.is_compute() {
-                phase_from_entry(
-                    *stage_id,
-                    entry,
-                    KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
-                    "serial_compute",
-                    placement,
-                    super::planning::parallel_scremas_for(parallel_screma_plans, *stage_id)
-                        .map_err(|error| error.to_string())?,
-                )
-            } else {
-                graphics_passthrough_phase(*stage_id, entry, placement)
-            };
-            let phase = result?;
-            let id = KernelId(phases.len() as u32);
-            record_seeded_kernel(&mut seeded, source, id, &entry.name)?;
-            flow_sources.insert(*stage_id, id);
-            phases.push(phase);
-        }
-        let seeded = seeded
-            .into_iter()
             .enumerate()
-            .map(|(index, kernel)| {
-                kernel.ok_or_else(|| format!("semantic entry {} has no seeded kernel", index))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(rank, &stage)| (stage, rank as u64))
+            .collect::<HashMap<_, _>>();
+        // Attribution follows the earliest downstream consumer in the staged
+        // DAG. It has no dependency on the order recipes happen to be built.
+        fn attributed_source(
+            stage: StageId,
+            stages: &StagedProgram,
+            ranks: &HashMap<StageId, u64>,
+        ) -> Result<StageId, String> {
+            let body = stages.stage(stage).ok_or_else(|| format!("missing staged body {stage:?}"))?;
+            if matches!(body.origin(), StageOrigin::Authored) {
+                return Ok(stage);
+            }
+            let consumer = body
+                .outgoing_flows()
+                .iter()
+                .filter_map(|flow| stages.flow(*flow))
+                .flat_map(|flow| flow.consumers())
+                .copied()
+                .min_by_key(|id| ranks[id])
+                .ok_or_else(|| format!("generated stage {stage:?} has no downstream consumer"))?;
+            attributed_source(consumer, stages, ranks)
+        }
+        let mut metadata = BTreeMap::new();
+        let mut kernel_ids = IdSource::new();
+        for &stage in &ordered {
+            let staged = stages.stage(stage).ok_or_else(|| format!("missing staged body {stage:?}"))?;
+            let source = attributed_source(stage, stages, &ranks)?;
+            let source_body =
+                stages.stage(source).ok_or_else(|| format!("missing attributed stage {source:?}"))?.body();
+            let mut group = associations.get(&source).copied();
+            let generated = matches!(staged.origin(), StageOrigin::Generated { .. });
+            // Generated publication starts independently of source attribution.
+            // Surviving topology edges decide which compute groups coalesce.
+            if generated && group.is_some() {
+                let id = PipelineId(pipelines.len() as u32);
+                topology.register_group(id, id.0 as u64, true)?;
+                pipelines.insert(
+                    id,
+                    Pipeline::Compute(ComputePipeline {
+                        bindings: Vec::new(),
+                        stages: Vec::new(),
+                        default_total_threads: None,
+                    }),
+                );
+                group = Some(id);
+            }
+            topology.register_stage(stage, group, ranks[&stage])?;
+            let entry = staged.body();
+            let selection = if generated {
+                KernelDispatch::explicit(
+                    staged.origin().space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed {
+                        x: 1,
+                        y: 1,
+                        z: 1,
+                    }),
+                )
+            } else if entry.execution_model.is_compute() {
+                let mut selection = dispatch
+                    .remove(&stage)
+                    .unwrap_or_else(|| KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }));
+                if !selection.explicit {
+                    if let Some(domain) = storage_image_domain_inputs(&entry.inputs, &selection.domain) {
+                        selection.domain = domain;
+                    }
+                }
+                selection
+            } else {
+                KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
+            };
+            metadata.insert(
+                stage,
+                StageMetadata {
+                    primary: kernel_ids.next_id(),
+                    compute: entry.execution_model.is_compute(),
+                    source_entry: Some(source_body.id),
+                    required_elements: selection.required_elements(),
+                    dispatch: selection,
+                    output_routes: if generated { Vec::new() } else { output_projection(entry) },
+                    generated_kind: staged.origin().generated_kind(),
+                },
+            );
+        }
+        for (before, after) in sequencing {
+            topology.sequence_stages(before, after)?;
+        }
         let source_entries = authored
             .iter()
-            .map(|(_, body)| {
-                let entry = body.body();
-                let source = entry.id;
-                let primary = seeded[source.index()];
-                SourceEntryPlan {
-                    publication: PlannedPublication::from_semantic(entry),
-                    primary,
-                    output_owners: entry
-                        .outputs
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, output)| !output.routes.is_empty())
-                        .map(|(slot, _)| (OutputSlotId(slot), primary))
-                        .collect(),
-                }
-            })
+            .map(|(_, stage)| (stage.body().id, PlannedPublication::from_semantic(stage.body())))
             .collect();
         Ok(Self {
-            phases,
+            topology,
+            catalog: BTreeMap::new(),
+            stages: metadata,
             pipelines,
-            next_pipeline_order: descriptor.pipelines.len(),
-            flow_sources,
+            graphics_associations,
             source_entries,
+            kernel_ids,
         })
     }
 
-    pub(super) fn primary_kernel(&self, source: EntryId) -> KernelId {
-        self.source_entries[source.index()].primary
+    pub(super) fn primary_kernel(&self, stage: StageId) -> KernelId {
+        self.stages[&stage].primary
     }
-
-    pub(super) fn set_required_elements(&mut self, endpoint: StageId, count: Option<u32>) {
-        if let Some(kernel) = self.flow_sources.get(&endpoint).copied() {
-            self.phase_mut(kernel).required_elements = count;
+    pub(super) fn stage_metadata(&self, stage: StageId) -> &StageMetadata {
+        &self.stages[&stage]
+    }
+    pub(super) fn allocate_kernel(&mut self) -> KernelId {
+        self.kernel_ids.next_id()
+    }
+    pub(super) fn set_required_elements(&mut self, stage: StageId, count: Option<u32>) {
+        if let Some(metadata) = self.stages.get_mut(&stage) {
+            metadata.required_elements = count;
         }
     }
-
-    fn push_phase(&mut self, phase: KernelPhase) -> KernelId {
-        let id = KernelId(self.phases.len() as u32);
-        self.phases.push(phase);
-        id
-    }
-
-    fn next_order(&self, group: PhaseGroup) -> usize {
-        self.phases
-            .iter()
-            .filter(|phase| phase.placement.group == group)
-            .map(|phase| phase.placement.order + 1)
-            .max()
-            .unwrap_or(0)
-    }
-
-    fn shift_orders_from(&mut self, group: PhaseGroup, order: usize, amount: usize) {
-        for phase in &mut self.phases {
-            if phase.placement.group == group && phase.placement.order >= order {
-                phase.placement.order += amount;
-            }
-        }
-    }
-
-    pub(super) fn add_generated_stage_before(
+    pub(super) fn install_stage(
         &mut self,
-        consumer: KernelId,
         stage: StageId,
-        origin: &StageOrigin,
-        entry: &egir::program::AllocatedEntry,
-        parallel_scremas: &super::planning::ParallelScremas,
-    ) -> Result<KernelId, KernelMutationError> {
-        // Recipe lowering may have expanded the consumer stage into a phase
-        // chain while generated stages farther upstream were still waiting to
-        // be attached. The stable stage handle names the chain's anchor, not
-        // necessarily its first phase (for a filter it names scatter, after
-        // flags and scan). A generated producer must precede the whole stage,
-        // otherwise final resource-flow wiring can discover that an earlier
-        // phase reads the producer and create an opposing dependency cycle.
-        let consumer_phase = self.phase(consumer);
-        let consumer_group = consumer_phase.placement.group;
-        let insertion_anchor = consumer_phase.flow_source.map_or(consumer, |source| {
-            self.phases_with_ids()
-                .filter(|(_, phase)| {
-                    phase.flow_source == Some(source) && phase.placement.group == consumer_group
-                })
-                .min_by_key(|(_, phase)| phase.placement.order)
-                .map(|(id, _)| id)
-                .unwrap_or(consumer)
-        });
-        let consumer_placement = self.phase(insertion_anchor).placement;
-        let generated_pipeline = consumer_placement.group.is_graphics().then(|| {
-            let id = PipelineId(self.pipelines.len() as u32);
-            let pipeline = ScheduledPipeline {
-                id,
-                order: self.next_pipeline_order,
-                template: ComputePipeline {
-                    bindings: Vec::new(),
-                    stages: Vec::new(),
-                    default_total_threads: None,
-                },
-            };
-            (id, pipeline)
-        });
-        let placement = if let Some((pipeline, _)) = &generated_pipeline {
-            PhasePlacement {
-                group: PhaseGroup::Pipeline(*pipeline),
-                order: 0,
-            }
-        } else {
-            self.shift_orders_from(consumer_placement.group, consumer_placement.order, 1);
-            PhasePlacement {
-                group: consumer_placement.group,
-                order: consumer_placement.order,
-            }
-        };
-        let dependencies = self.phase(insertion_anchor).dependencies.clone();
-        let source_entry = self.phase(consumer).source_entry;
-        let phase = phase_from_generated_stage(
-            stage,
-            origin,
-            entry,
-            source_entry,
-            dependencies,
-            placement,
-            parallel_scremas,
-        )?;
-        if let Some((_, pipeline)) = generated_pipeline {
-            self.next_pipeline_order += 1;
-            self.pipelines.push(pipeline);
+        mut recipe: PreparedRecipe,
+    ) -> Result<(), KernelMutationError> {
+        let metadata = self
+            .stages
+            .get(&stage)
+            .ok_or_else(|| format!("stage {stage:?} is not awaiting installation"))?;
+        if recipe.primary != metadata.primary {
+            return Err("stage recipe changed its primary kernel identity".to_string().into());
         }
-        let id = self.push_phase(phase);
-        self.flow_sources.insert(stage, id);
-        self.phase_mut(insertion_anchor).dependencies = vec![id];
-        Ok(id)
+        for (&id, body) in &mut recipe.bodies {
+            if body.entry.execution_model.is_compute() != metadata.compute {
+                return Err("recipe execution model differs from its registered stage".to_string().into());
+            }
+            if self.catalog.contains_key(&id) {
+                return Err(wyn_kernel_graph::Error::DuplicateKernel(id).into());
+            }
+            body.source_entry = metadata.source_entry;
+            if id == metadata.primary {
+                if metadata.dispatch.explicit {
+                    body.dispatch = metadata.dispatch.clone();
+                }
+                if !body.projected {
+                    body.output_routes = metadata.output_routes.clone();
+                }
+                // Generated stages retain their semantic materialization
+                // coverage policy. Scalar prepasses have no element grid.
+                if metadata.generated_kind.is_some() {
+                    body.required_elements = metadata.required_elements;
+                }
+            }
+        }
+        validate_routes(&recipe.bodies, &self.source_entries)?;
+        self.topology.bind_stage(stage, recipe.fragment)?;
+        // No fallible operation follows the checked topology installation.
+        self.stages.remove(&stage);
+        self.catalog.extend(recipe.bodies);
+        Ok(())
     }
 
-    pub(super) fn add_sibling(
-        &mut self,
-        parent: KernelId,
-        spec: PhaseSpec,
-    ) -> Result<KernelId, KernelMutationError> {
-        let placement = self.phase(parent).placement;
-        if placement.group.is_graphics() {
-            return Err(KernelMutationError::InvalidKernel(
-                "graphics passthroughs cannot own compute siblings".into(),
-            ));
-        }
-        let (source_entry, flow_source) = {
-            let parent = self.phase(parent);
-            (parent.source_entry, parent.flow_source)
-        };
-        let phase = phase_from_body(
-            flow_source,
-            source_entry,
-            PhasePlacement {
-                group: placement.group,
-                order: self.next_order(placement.group),
-            },
-            spec,
-        )?;
-        Ok(self.push_phase(phase))
-    }
-
-    pub(super) fn make_serial(&mut self) -> Result<(), KernelMutationError> {
-        let kernels = self
-            .phases
+    fn resource_kernels(
+        &self,
+        stage: StageId,
+        resource: ResourceId,
+        writes: bool,
+        membership: &HashMap<KernelId, StageId>,
+    ) -> Vec<KernelId> {
+        self.catalog
             .iter()
-            .enumerate()
-            .filter_map(|(index, phase)| {
-                (!phase.placement.group.is_graphics()).then_some(KernelId(index as u32))
+            .filter_map(|(&id, kernel)| {
+                (membership[&id] == stage
+                    && kernel.resources.iter().any(|access| {
+                        access.resource == resource
+                            && if writes { access.access.writes() } else { access.access.reads() }
+                    }))
+                .then_some(id)
             })
-            .collect::<Vec<_>>();
-        for kernel in kernels {
-            let phase = self.phase_mut(kernel);
-            let mut entry = phase.entry.as_ref().clone();
-            super::prepare::force_serial(&mut entry.graph);
-            let label = if phase.serial_single_workgroup { phase.label } else { "serial_compute" };
-            phase.replace_scheduled_compute(entry, label)?;
-            if phase.serial_single_workgroup {
-                let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
-                phase.dispatch = KernelDispatch::explicit(domain);
-            }
-        }
-        Ok(())
+            .collect()
     }
 
-    fn record_output_owners(
-        &mut self,
-        kernel: KernelId,
-        outputs: Vec<OutputSlotId>,
-    ) -> Result<(), KernelMutationError> {
-        let source_entry = self.phase(kernel).source_entry;
-        if let Some(source) = source_entry {
-            let entry = self.source_entries.get_mut(source.index()).ok_or_else(|| {
-                KernelMutationError::InvalidKernel(format!(
-                    "kernel {kernel:?} references missing semantic entry {source:?}"
-                ))
-            })?;
-            let mut unique = HashSet::new();
-            for output in &outputs {
-                if output.0 >= entry.publication.outputs.len() || !unique.insert(*output) {
-                    return Err(KernelMutationError::InvalidKernel(format!(
-                        "kernel {kernel:?} has invalid output slot {output:?}"
-                    )));
-                }
-                entry.output_owners.insert(*output, kernel);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn commit_kernel(
-        &mut self,
-        kernel: KernelId,
-        spec: PhaseSpec,
-    ) -> Result<KernelId, KernelMutationError> {
-        let output_projection = self.phase_mut(kernel).replace_body(spec)?;
-        if let Some(outputs) = output_projection {
-            self.record_output_owners(kernel, outputs)?;
-        }
-        Ok(kernel)
-    }
-
-    /// Install a complete phase chain transactionally. `kernel` remains the
-    /// anchor identity; surrounding phases receive ids only after all bodies
-    /// have prepared successfully.
-    pub(super) fn replace_chain(
-        &mut self,
-        kernel: KernelId,
-        before: Vec<PhaseSpec>,
-        anchor: PhaseSpec,
-        after: Vec<PhaseSpec>,
-    ) -> Result<(), KernelMutationError> {
-        let original = self.phase(kernel).clone();
-        if original.placement.group.is_graphics() {
-            return Err(KernelMutationError::InvalidKernel(
-                "graphics passthroughs cannot be replaced by a compute chain".into(),
-            ));
-        }
-        let source_entry = original.source_entry;
-        let flow_source = original.flow_source;
-        let group = original.placement.group;
-        let anchor_order = original.placement.order;
-        let mut additions = Vec::with_capacity(before.len() + after.len());
-        let mut dependencies = original.dependencies.clone();
-        let first_new_id = self.phases.len() as u32;
-        for (index, spec) in before.into_iter().enumerate() {
-            let id = KernelId(first_new_id + index as u32);
-            let mut phase = phase_from_body(
-                flow_source,
-                source_entry,
-                PhasePlacement {
-                    group,
-                    order: anchor_order + index,
-                },
-                spec,
-            )?;
-            phase.dependencies = dependencies;
-            dependencies = vec![id];
-            additions.push(phase);
-        }
-        let mut anchor_phase = original.clone();
-        let output_projection = anchor_phase.replace_body(anchor)?;
-        anchor_phase.placement.order = anchor_order + additions.len();
-        anchor_phase.dependencies = dependencies;
-        dependencies = vec![kernel];
-        for (index, spec) in after.into_iter().enumerate() {
-            let id = KernelId(first_new_id + additions.len() as u32);
-            let mut phase = phase_from_body(
-                flow_source,
-                source_entry,
-                PhasePlacement {
-                    group,
-                    order: anchor_phase.placement.order + index + 1,
-                },
-                spec,
-            )?;
-            phase.dependencies = dependencies;
-            dependencies = vec![id];
-            additions.push(phase);
-        }
-
-        let tail = dependencies[0];
-        let dependents = self
-            .phase_ids_in(group)
-            .into_iter()
-            .filter(|id| self.phase(*id).placement.order > anchor_order)
-            .collect::<Vec<_>>();
-        for dependent in dependents {
-            for dependency in &mut self.phase_mut(dependent).dependencies {
-                if *dependency == kernel {
-                    *dependency = tail;
-                }
-            }
-            self.phase_mut(dependent).dependencies.sort_unstable();
-            self.phase_mut(dependent).dependencies.dedup();
-        }
-        self.shift_orders_from(group, anchor_order + 1, additions.len());
-        *self.phase_mut(kernel) = anchor_phase;
-        if let Some(outputs) = output_projection {
-            self.record_output_owners(kernel, outputs)?;
-        }
-        for phase in additions {
-            self.push_phase(phase);
-        }
-        Ok(())
-    }
-
-    pub(super) fn coalesce_staged_flows(
-        &mut self,
+    pub(super) fn finish(
+        mut self,
         stages: &StagedProgram,
-    ) -> Result<(), KernelMutationError> {
-        self.connect_staged_flows(stages)?;
-        self.merge_connected_pipelines()
-    }
-
-    fn connect_staged_flows(&mut self, stages: &StagedProgram) -> Result<(), KernelMutationError> {
-        for (_, flow) in stages.flows() {
-            if flow.consumers().is_empty() {
-                continue;
-            }
-            let resource = flow.storage().data;
-            let producer = flow.producer();
-            let writers =
-                self.flow_resource_phases(producer, resource, true).map(|(id, _)| id).collect::<Vec<_>>();
-            if writers.is_empty() {
-                return Err(KernelMutationError::InvalidKernel(format!(
-                    "flow producer {:?} does not declare a writer for {:?}",
-                    producer, resource
-                )));
-            }
-            for consumer in flow.consumers() {
-                let consumer = *consumer;
-                let readers = self
-                    .flow_resource_phases(consumer, resource, false)
-                    .map(|(id, _)| id)
-                    .collect::<Vec<_>>();
-                // Allocation records endpoint-level consumers before output-domain
-                // projection. Projection may prove one result of a multi-result
-                // materialization dead in every physical kernel for that endpoint.
-                // The phase-owned resource facts are authoritative here: connect
-                // every surviving reader, but do not resurrect a pruned edge.
-                if readers.is_empty() {
-                    continue;
-                }
-                for reader in readers {
-                    for writer in writers.iter().copied().filter(|writer| *writer != reader) {
-                        self.add_dependency(reader, writer)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn phase(&self, id: KernelId) -> &KernelPhase {
-        &self.phases[id.index()]
-    }
-
-    fn phase_mut(&mut self, id: KernelId) -> &mut KernelPhase {
-        &mut self.phases[id.index()]
-    }
-
-    fn add_dependency(&mut self, reader: KernelId, writer: KernelId) -> Result<(), KernelMutationError> {
-        let reader_phase = self.phase(reader);
-        if reader_phase.dependencies.contains(&writer) {
-            return Ok(());
-        }
-        if self.depends_on(writer, reader) {
-            return Err(KernelMutationError::DependencyCycle { reader, writer });
-        }
-        let phase = self.phase_mut(reader);
-        phase.dependencies.push(writer);
-        phase.dependencies.sort_unstable();
-        Ok(())
-    }
-
-    fn depends_on(&self, start: KernelId, target: KernelId) -> bool {
-        wyn_graph::reaches_ordered(start, target, wyn_graph::WalkOrder::DepthFirst, |kernel, out| {
-            out.extend(self.phase(kernel).dependencies.iter().copied());
-        })
-    }
-
-    fn merge_connected_pipelines(&mut self) -> Result<(), KernelMutationError> {
-        let pipeline_indices = self
-            .pipelines
-            .iter()
-            .enumerate()
-            .map(|(index, pipeline)| (pipeline.id, index))
-            .collect::<HashMap<_, _>>();
-        let owner = self
-            .phases
-            .iter()
-            .enumerate()
-            .filter_map(|(index, phase)| match phase.placement.group {
-                PhaseGroup::Pipeline(pipeline) => {
-                    Some((KernelId(index as u32), pipeline_indices[&pipeline]))
-                }
-                _ => None,
+        serial: bool,
+    ) -> Result<KernelPlan, KernelMutationError> {
+        // All stages are bound before projecting resident flows onto kernels.
+        let membership = self
+            .catalog
+            .keys()
+            .map(|&id| {
+                (
+                    id,
+                    self.topology.stage_of(id).unwrap_or_else(|| unreachable!("bound kernel")),
+                )
             })
             .collect::<HashMap<_, _>>();
-        let mut pipeline_components = DisjointSets::new(self.pipelines.len());
-        for (&phase, &pipeline) in &owner {
-            for dependency in &self.phase(phase).dependencies {
-                if let Some(&other) = owner.get(dependency) {
-                    pipeline_components.merge(pipeline, other);
+        for (_, flow) in stages.flows() {
+            let producer = flow.producer();
+            for &consumer in flow.consumers() {
+                let mut surviving = false;
+                for resource in [Some(flow.storage().data), flow.storage().length].into_iter().flatten() {
+                    let readers = self.resource_kernels(consumer, resource, false, &membership);
+                    if readers.is_empty() {
+                        continue;
+                    }
+                    surviving = true;
+                    let writers = self.resource_kernels(producer, resource, true, &membership);
+                    if writers.is_empty() {
+                        return Err(format!(
+                            "flow producer {producer:?} does not declare a writer for {resource:?}"
+                        )
+                        .into());
+                    }
+                    for reader in readers {
+                        for &writer in &writers {
+                            if writer != reader {
+                                self.topology.connect_resource(resource, writer, reader)?;
+                            }
+                        }
+                    }
+                }
+                if surviving
+                    && stages
+                        .stage(producer)
+                        .is_some_and(|stage| matches!(stage.origin(), StageOrigin::Generated { .. }))
+                {
+                    self.topology.sequence_stages(producer, consumer)?;
                 }
             }
         }
-        let mut components = BTreeMap::<usize, Vec<usize>>::new();
-        for pipeline in 0..self.pipelines.len() {
-            let root = pipeline_components.representative(pipeline);
-            components.entry(root).or_default().push(pipeline);
-        }
-        let mut slots = std::mem::take(&mut self.pipelines).into_iter().map(Some).collect::<Vec<_>>();
-        for mut group in components.into_values() {
-            group.sort_by_key(|index| slots.get(*index).and_then(Option::as_ref).map(|slot| slot.order));
-            let Some((first, rest)) = group.split_first() else {
-                continue;
-            };
-            let mut merged = slots.get_mut(*first).and_then(Option::take).ok_or_else(|| {
-                KernelMutationError::InvalidKernel("pipeline component lost its first member".into())
-            })?;
-            let mut member_ids = vec![merged.id];
-            for index in rest {
-                let pipeline = slots.get_mut(*index).and_then(Option::take).ok_or_else(|| {
-                    KernelMutationError::InvalidKernel(
-                        "pipeline component contains a duplicate member".into(),
-                    )
-                })?;
-                merge_bindings(&mut merged.template.bindings, pipeline.template.bindings);
-                merged.order = merged.order.min(pipeline.order);
-                member_ids.push(pipeline.id);
+        if serial {
+            for body in self.catalog.values_mut().filter(|body| body.entry.execution_model.is_compute()) {
+                super::prepare::force_serial(&mut body.entry.graph);
+                if body.serial_single_workgroup {
+                    body.dispatch = KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+                } else {
+                    body.label = "serial_compute";
+                }
             }
-            let members = self
-                .phases
+        }
+        let topology = self.topology.finalize()?;
+        let mut pipelines = Vec::new();
+        for group in topology.groups() {
+            let mut templates = group
+                .members()
                 .iter()
-                .enumerate()
-                .filter_map(|(index, phase)| match phase.placement.group {
-                    PhaseGroup::Pipeline(pipeline) if member_ids.contains(&pipeline) => {
-                        Some(KernelId(index as u32))
+                .map(|id| self.pipelines.remove(id).unwrap_or_else(|| unreachable!("registered group")));
+            let mut template = templates.next().unwrap_or_else(|| unreachable!("nonempty group"));
+            for member in templates {
+                match (&mut template, member) {
+                    (Pipeline::Compute(target), Pipeline::Compute(source)) => {
+                        merge_bindings(&mut target.bindings, source.bindings)
                     }
-                    _ => None,
-                })
-                .collect();
-            let ordered = topologically_order_phases(&self.phases, members).map_err(|_| {
-                KernelMutationError::InvalidKernel("kernel dependency graph contains a cycle".into())
-            })?;
-            for (order, phase) in ordered.into_iter().enumerate() {
-                self.phase_mut(phase).placement = PhasePlacement {
-                    group: PhaseGroup::Pipeline(merged.id),
-                    order,
-                };
+                    _ => return Err("graphics pipelines cannot be coalesced".to_string().into()),
+                }
             }
-            self.pipelines.push(merged);
+            let graphics_entries = self.graphics_associations.remove(&group.id()).unwrap_or_default();
+            pipelines.push(ScheduledPipeline {
+                id: group.id(),
+                template,
+                graphics_entries,
+            });
         }
-        self.pipelines.sort_by_key(|pipeline| pipeline.order);
-        Ok(())
+        let plan = KernelPlan {
+            topology,
+            catalog: self.catalog,
+            pipelines,
+            source_entries: self.source_entries,
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 }
 
-fn phase_from_entry(
-    stage: StageId,
-    entry: &egir::program::AllocatedEntry,
-    mut selection: KernelDispatch,
-    label: &'static str,
-    placement: PhasePlacement,
-    parallel_scremas: &super::planning::ParallelScremas,
-) -> Result<KernelPhase, String> {
-    if !selection.explicit {
-        if let Some(domain) = storage_image_domain_inputs(&entry.inputs, &selection.domain) {
-            selection.domain = domain;
+fn validate_routes(
+    bodies: &BTreeMap<KernelId, PreparedKernel>,
+    sources: &BTreeMap<EntryId, PlannedPublication>,
+) -> Result<(), String> {
+    let mut owned = HashSet::new();
+    for (&id, body) in bodies {
+        let Some(source) = body.source_entry else {
+            continue;
+        };
+        let source_plan = sources
+            .get(&source)
+            .ok_or_else(|| format!("kernel {id:?} references missing semantic entry {source:?}"))?;
+        for route in &body.output_routes {
+            if route.semantic_slot.0 >= source_plan.outputs.len()
+                || !owned.insert((source, route.semantic_slot))
+            {
+                return Err(format!(
+                    "kernel {id:?} has invalid or duplicate output slot {:?}",
+                    route.semantic_slot
+                ));
+            }
+            // Physical slots name the projected publication ABI. Collective
+            // recipes may move its stores into helpers and retire body outputs.
         }
     }
-    let output_routes = output_projection(entry);
-    let body = PlannedEntry::project(entry)?.with_parallel_scremas(parallel_scremas.iter().copied());
-    let mut phase = phase_from_body(
-        Some(stage),
-        Some(entry.id),
-        placement,
-        PhaseSpec::compute(body, selection, label),
-    )?;
-    phase.output_routes = output_routes;
-    Ok(phase)
-}
-
-fn phase_from_body(
-    flow_source: Option<StageId>,
-    source_entry: Option<EntryId>,
-    placement: PhasePlacement,
-    spec: PhaseSpec,
-) -> Result<KernelPhase, String> {
-    let prepared = spec.prepare()?;
-    let phase = KernelPhase {
-        placement,
-        flow_source,
-        label: prepared.label,
-        entry: prepared.entry,
-        source_entry,
-        output_routes: Vec::new(),
-        dispatch: prepared.dispatch,
-        resources: prepared.resources,
-        serial_single_workgroup: prepared.serial_single_workgroup,
-        required_elements: prepared.required_elements,
-        dependencies: Vec::new(),
-    };
-    Ok(phase)
-}
-
-fn phase_from_generated_stage(
-    stage: StageId,
-    origin: &StageOrigin,
-    entry: &egir::program::AllocatedEntry,
-    source_entry: Option<EntryId>,
-    dependencies: Vec<KernelId>,
-    placement: PhasePlacement,
-    parallel_scremas: &super::planning::ParallelScremas,
-) -> Result<KernelPhase, String> {
-    let kind = origin
-        .generated_kind()
-        .ok_or_else(|| format!("authored stage {stage:?} cannot be attached as generated work"))?;
-    let domain =
-        origin.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
-    let spec = PhaseSpec::compute(
-        PlannedEntry::project(entry)?.with_parallel_scremas(parallel_scremas.iter().copied()),
-        KernelDispatch::explicit(domain),
-        match kind {
-            GeneratedStageKind::SharedArray => "shared_array_materialization",
-            GeneratedStageKind::Gather => "gather_prepass",
-            GeneratedStageKind::Scalar => "scalar_prepass",
-            GeneratedStageKind::RuntimeArray => "runtime_array_materialization",
-        },
-    );
-    let mut phase = phase_from_body(Some(stage), source_entry, placement, spec)?;
-    phase.serial_single_workgroup = true;
-    phase.dependencies = dependencies;
-    Ok(phase)
-}
-
-fn graphics_passthrough_phase(
-    stage: StageId,
-    entry: &egir::program::AllocatedEntry,
-    placement: PhasePlacement,
-) -> Result<KernelPhase, String> {
-    let domain = KernelDomain::Fixed { x: 1, y: 1, z: 1 };
-    let spec = PhaseSpec::graphics(PlannedEntry::project(entry)?, KernelDispatch::inferred(domain));
-    let mut phase = phase_from_body(Some(stage), Some(entry.id), placement, spec)?;
-    phase.output_routes = output_projection(entry);
-    Ok(phase)
+    Ok(())
 }
 
 fn output_projection(entry: &egir::program::AllocatedEntry) -> Vec<OutputRouteProjection> {
@@ -1460,23 +1052,6 @@ pub(super) fn domain_from_space(
         }),
         _ => None,
     }
-}
-
-fn topologically_order_phases(
-    arena: &[KernelPhase],
-    phases: Vec<KernelId>,
-) -> Result<Vec<KernelId>, Vec<KernelId>> {
-    let phase_ids = phases.iter().copied().collect::<HashSet<_>>();
-    wyn_graph::topo_sort_by_dependencies(phases, |phase, out| {
-        out.extend(
-            arena[phase.index()]
-                .dependencies
-                .iter()
-                .copied()
-                .filter(|dependency| phase_ids.contains(dependency)),
-        );
-    })
-    .map_err(|error| error.remaining().to_vec())
 }
 
 fn merge_bindings(target: &mut Vec<Binding>, source: Vec<Binding>) {

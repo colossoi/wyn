@@ -13,9 +13,15 @@ impl KernelPlanBuilder<'_> {
         kernel: schedule::KernelId,
         recipe: BoundFilter,
         output_projection: Option<Vec<usize>>,
-    ) -> ParallelizeResult<()> {
+    ) -> ParallelizeResult<schedule::PreparedRecipe> {
         let family = FilterKernelFamilyBuilder::new(self, body, recipe).build()?;
-        family.install(kernel, &mut self.schedule, output_projection)
+        let ids = [
+            self.schedule.allocate_kernel(),
+            self.schedule.allocate_kernel(),
+            self.schedule.allocate_kernel(),
+            self.schedule.allocate_kernel(),
+        ];
+        family.prepare(kernel, ids, output_projection)
     }
 }
 
@@ -217,12 +223,12 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
 }
 
 impl FilterKernelFamily {
-    fn install(
+    fn prepare(
         self,
         kernel: schedule::KernelId,
-        schedule: &mut schedule::KernelPlan,
+        ids: [schedule::KernelId; 4],
         output_projection: Option<Vec<usize>>,
-    ) -> ParallelizeResult<()> {
+    ) -> ParallelizeResult<schedule::PreparedRecipe> {
         use schedule::KernelDomain;
 
         let FilterKernelFamily {
@@ -274,13 +280,16 @@ impl FilterKernelFamily {
             "filter_combine",
         );
         let apply_offsets = apply_offsets.compute(scan_dispatch, "filter_apply_offsets");
-        schedule.replace_chain(
+        Ok(schedule::PreparedRecipe::sequence(
+            vec![
+                (ids[0], flags),
+                (ids[1], scan),
+                (ids[2], combine),
+                (ids[3], apply_offsets),
+                (kernel, scatter),
+            ],
             kernel,
-            vec![flags, scan, combine, apply_offsets],
-            scatter,
-            Vec::new(),
-        )?;
-        Ok(())
+        )?)
     }
 }
 

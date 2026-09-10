@@ -41,6 +41,9 @@ use crate::ResourceAccess;
 use crate::SchedulePolicy;
 use crate::SymbolTable;
 
+#[path = "kernel_schedule_integration_tests.rs"]
+mod kernel_schedule;
+
 #[test]
 fn graphics_vocabulary_is_absent_without_opt_in() {
     let error = compile_thru_frontend_with_options(

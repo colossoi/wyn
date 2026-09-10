@@ -47,8 +47,8 @@ fn resource_arena_interns_compiler_ownership_keys() {
 }
 
 #[test]
-fn serial_recipe_index_carries_no_parallel_recipe_state() {
+fn recipe_index_requires_a_body_for_every_stage() {
     let stage = StagedIrBuilder::<(), (), ()>::new().add_stage((), ()).expect("stage allocation");
-    let mut serial = RecipeIndex::serial(std::collections::HashMap::new());
-    assert!(serial.take_endpoint(stage).expect("serial endpoint lookup").is_none());
+    let mut recipes = RecipeIndex::new().bind_scratch(&ScratchBindings { ids: HashMap::new() });
+    assert!(recipes.take_endpoint(stage).is_err());
 }

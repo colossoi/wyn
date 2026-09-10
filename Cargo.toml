@@ -9,6 +9,7 @@ members = [
     "wyn-spirv",
     "wyn-graph",
     "wyn-fusion",
+    "wyn-kernel-graph",
     "wyn-module-graph",
     "wyn-package-manager",
     "wyn-staged-ir",

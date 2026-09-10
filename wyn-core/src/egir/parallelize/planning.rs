@@ -34,7 +34,6 @@ type SideEffect = FamilySideEffect<Semantic>;
 /// Semantic Scremas selected for parallel execution after optimization and
 /// logical residency have finalized an endpoint graph.
 pub(super) type ParallelScremas = HashSet<SemanticOpId>;
-pub(super) type ParallelScremaPlans = HashMap<StageId, ParallelScremas>;
 
 fn analyze_parallel_scremas(
     origin: &StageOrigin,
@@ -66,15 +65,6 @@ fn analyze_parallel_scremas(
         parallel.retain(|operation| !folds.contains(operation));
     }
     parallel
-}
-
-pub(super) fn parallel_scremas_for(
-    plans: &ParallelScremaPlans,
-    endpoint: StageId,
-) -> Result<&ParallelScremas> {
-    plans.get(&endpoint).ok_or_else(|| {
-        ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no parallel Screma plan"))
-    })
 }
 
 #[derive(Clone, Copy)]
@@ -276,8 +266,8 @@ impl<R> PlannedKernel<R> {
         (self.body, self.output_projection, self.recipe)
     }
 
-    pub(super) fn seed_body(&self) -> egir::program::PlannedEntry {
-        self.body.clone()
+    pub(super) fn entry_name(&self) -> &str {
+        &self.body.name
     }
 
     pub(super) fn assign_entry_id(&mut self, id: EntryId) {
@@ -285,9 +275,8 @@ impl<R> PlannedKernel<R> {
     }
 }
 
-/// A non-empty endpoint plan. `primary` always reuses the seeded kernel;
-/// siblings are installed beside it only when output-domain projection split
-/// the source entry.
+/// A non-empty endpoint plan. The primary component retains the stage's
+/// reserved kernel identity; output-domain projection can add siblings.
 pub(super) struct EndpointPlan<R = PlannedRecipe> {
     primary: PlannedKernel<R>,
     siblings: Vec<PlannedKernel<R>>,
@@ -303,28 +292,23 @@ impl<R> EndpointPlan<R> {
     }
 }
 
-/// Authoritative parallel recipes indexed by the endpoint that owns the
-/// seeded kernel. Serial policy carries no recipe map.
+/// Authoritative recipes and owned bodies for every stage, including serial
+/// and unchanged stages.
 pub(super) struct RecipeIndex<R = PlannedRecipe> {
-    plans: Option<HashMap<StageId, EndpointPlan<R>>>,
+    plans: HashMap<StageId, EndpointPlan<R>>,
     required_elements: HashMap<StageId, u32>,
 }
 
 impl RecipeIndex<AnalyzedRecipe> {
-    fn parallel() -> Self {
+    fn new() -> Self {
         Self {
-            plans: Some(HashMap::new()),
+            plans: HashMap::new(),
             required_elements: HashMap::new(),
         }
     }
 
     fn insert(&mut self, endpoint: StageId, plan: EndpointPlan<AnalyzedRecipe>) -> Result<()> {
-        let Some(endpoints) = &mut self.plans else {
-            return Err(ParallelizeError::Invalid(
-                "cannot add a parallel recipe to a serial recipe index".into(),
-            ));
-        };
-        if endpoints.insert(endpoint, plan).is_some() {
+        if self.plans.insert(endpoint, plan).is_some() {
             return Err(ParallelizeError::Invalid(format!(
                 "flow endpoint {endpoint:?} has multiple target recipes"
             )));
@@ -337,47 +321,32 @@ impl RecipeIndex<AnalyzedRecipe> {
             plans,
             required_elements,
         } = self;
-        let Some(endpoints) = plans else {
-            return RecipeIndex::serial(required_elements);
-        };
         RecipeIndex {
-            plans: Some(
-                endpoints
-                    .into_iter()
-                    .map(|(endpoint, plan)| {
-                        let (primary, siblings) = plan.into_parts();
-                        (
-                            endpoint,
-                            EndpointPlan::new(
-                                bind_kernel(primary, resources),
-                                siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
-                            ),
-                        )
-                    })
-                    .collect(),
-            ),
+            plans: plans
+                .into_iter()
+                .map(|(endpoint, plan)| {
+                    let (primary, siblings) = plan.into_parts();
+                    (
+                        endpoint,
+                        EndpointPlan::new(
+                            bind_kernel(primary, resources),
+                            siblings.into_iter().map(|kernel| bind_kernel(kernel, resources)).collect(),
+                        ),
+                    )
+                })
+                .collect(),
             required_elements,
         }
     }
 }
 
 impl RecipeIndex {
-    fn serial(required_elements: HashMap<StageId, u32>) -> Self {
-        Self {
-            plans: None,
-            required_elements,
-        }
-    }
-
     pub(super) fn required_elements(&self, endpoint: StageId) -> Option<u32> {
         self.required_elements.get(&endpoint).copied()
     }
 
-    pub(super) fn take_endpoint(&mut self, endpoint: StageId) -> Result<Option<EndpointPlan>> {
-        let Some(endpoints) = &mut self.plans else {
-            return Ok(None);
-        };
-        endpoints.remove(&endpoint).map(Some).ok_or_else(|| {
+    pub(super) fn take_endpoint(&mut self, endpoint: StageId) -> Result<EndpointPlan> {
+        self.plans.remove(&endpoint).ok_or_else(|| {
             ParallelizeError::Invalid(format!("flow endpoint {endpoint:?} has no target recipe"))
         })
     }
@@ -403,7 +372,6 @@ impl ScratchBindings {
 pub(super) struct AnalyzedPlan {
     recipes: RecipeIndex<AnalyzedRecipe>,
     requests: Vec<ScratchRequest>,
-    parallel_scremas: ParallelScremaPlans,
 }
 
 impl AnalyzedPlan {
@@ -412,7 +380,7 @@ impl AnalyzedPlan {
     pub(super) fn allocate_scratch(
         mut self,
         program: ResourcesAllocated,
-    ) -> Result<(ResourcesAllocated, RecipeIndex, ParallelScremaPlans)> {
+    ) -> Result<(ResourcesAllocated, RecipeIndex)> {
         self.requests.sort_by_key(|request| {
             (
                 request.endpoint,
@@ -443,15 +411,7 @@ impl AnalyzedPlan {
         Ok((
             Program::from_parts(functions, externs, entry_points, constants, data, global_context),
             self.recipes.bind_scratch(&bindings),
-            self.parallel_scremas,
         ))
-    }
-
-    pub(super) fn serial_plan(self) -> (RecipeIndex, ParallelScremaPlans) {
-        (
-            RecipeIndex::serial(self.recipes.required_elements),
-            self.parallel_scremas,
-        )
     }
 }
 
@@ -479,24 +439,19 @@ fn bind_kernel(kernel: PlannedKernel<AnalyzedRecipe>, resources: &ScratchBinding
 
 /// Analyze every projected endpoint once. Recipes retain their projected body
 /// and graph-local handles until emission consumes the endpoint plan.
-pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
-    let mut recipes = RecipeIndex::parallel();
+pub(super) fn analyze(inner: &ResourcesAllocated, policy: crate::SchedulePolicy) -> Result<AnalyzedPlan> {
+    let mut recipes = RecipeIndex::new();
     let mut requests = Vec::new();
-    let parallel_scremas = inner
-        .data
-        .stages
-        .stages()
-        .map(|(stage, body)| (stage, analyze_parallel_scremas(body.origin(), body.body())))
-        .collect::<ParallelScremaPlans>();
     for (stage, body) in inner.data.stages.stages() {
-        let parallel = parallel_scremas_for(&parallel_scremas, stage)?;
+        let parallel = analyze_parallel_scremas(body.origin(), body.body());
         let (plan, endpoint_requests, required_elements) = analyze_endpoint(
             inner,
             body.body(),
             stage,
             body.origin(),
             &inner.data.core.resources,
-            parallel,
+            &parallel,
+            policy,
         )?;
         recipes.insert(stage, plan)?;
         if let Some(count) = required_elements {
@@ -504,11 +459,7 @@ pub(super) fn analyze(inner: &ResourcesAllocated) -> Result<AnalyzedPlan> {
         }
         requests.extend(endpoint_requests);
     }
-    Ok(AnalyzedPlan {
-        recipes,
-        requests,
-        parallel_scremas,
-    })
+    Ok(AnalyzedPlan { recipes, requests })
 }
 
 fn analyze_endpoint(
@@ -518,11 +469,22 @@ fn analyze_endpoint(
     origin: &StageOrigin,
     resources: &LogicalResourceArena,
     parallel_scremas: &ParallelScremas,
+    policy: crate::SchedulePolicy,
 ) -> Result<(EndpointPlan<AnalyzedRecipe>, Vec<ScratchRequest>, Option<u32>)> {
     let projected = egir::program::PlannedEntry::project(entry)?
         .with_parallel_scremas(parallel_scremas.iter().copied());
     let targets = RecipeTargets::collect(&projected, parallel_scremas);
     let required_elements = fixed_required_elements(&projected, &targets);
+    if policy == crate::SchedulePolicy::Serial {
+        return Ok((
+            EndpointPlan::new(
+                PlannedKernel::new(projected, None, AnalyzedRecipe::Unchanged),
+                Vec::new(),
+            ),
+            Vec::new(),
+            required_elements,
+        ));
+    }
     let split = if origin.generated_kind().is_none() {
         super::partition_entry_output_domains(&projected)?
     } else {
