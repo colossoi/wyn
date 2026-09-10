@@ -1,19 +1,14 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir::analysis::GraphAnalysis;
-use crate::egir::graph_projector::GraphProjector;
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::stage_variance::StageDependenceAnalysis;
-use crate::egir::types::{
-    by_value_function_result, callable_parameter, EffectToken, Parameters, PureOp, SideEffectSite,
-    WynLanguage,
-};
+use crate::egir::types::{by_value_function_result, callable_parameter, Parameters, PureOp, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::interface::{BindingExposure, EntryInput, IoDecoration};
 use crate::op;
 use crate::BindingRef;
 use crate::EntryId;
-use crate::ResourceId;
 use polytype::Type;
 use smallvec::smallvec;
 
@@ -118,46 +113,6 @@ fn profitability_includes_launch_loads_and_margin() {
     assert_eq!(
         materialization_is_profitable(cost, invocations, 2),
         4 * recompute >= 5 * two_output_handoff
-    );
-}
-
-#[test]
-fn structured_storage_prefix_requires_materialization() {
-    let mut graph = EGraph::new();
-    let entry = graph.skeleton.entry;
-    let continuation = graph.skeleton.create_block();
-    let zero = graph.intern_constant(ConstantValue::U32(0), u32_ty());
-    let view = graph_ops::intern_resource_view(&mut graph, ResourceId::for_test(1), i32_ty(), None);
-    let place = graph.add_view_index_place(graph.view_id(view), zero, i32_ty(), None);
-    let loaded = graph.alloc_side_effect_result(i32_ty());
-    let loaded_binding = graph.value_result(loaded);
-    graph.skeleton.blocks[entry].side_effects.push(SideEffect {
-        kind: SideEffectKind::Effect(EffectOp::Load { place }),
-        operands: smallvec![],
-        result: Some(loaded_binding),
-        effects: Some((EffectToken::from(0), EffectToken::from(1))),
-        span: None,
-    });
-    let result = graph.add_block_param(continuation, i32_ty());
-    let loaded_args = graph.admit_flow_values([loaded]);
-    graph.skeleton.blocks[entry].term = SkeletonTerminator::Branch {
-        target: continuation,
-        args: loaded_args,
-    };
-    graph.skeleton.blocks[continuation].term = SkeletonTerminator::Return(None);
-
-    let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
-        .captured_value_recipe(
-            result,
-            SideEffectSite {
-                block: continuation,
-                index: 0,
-            },
-        )
-        .expect("structured storage recipe");
-    assert_eq!(
-        prelude_materialization_policy(&recipe, &GraphAnalysis::new(&recipe.projection.graph)),
-        PreludeMaterializationPolicy::Required
     );
 }
 

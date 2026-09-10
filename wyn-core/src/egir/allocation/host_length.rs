@@ -35,7 +35,8 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                         let canonical = entry.graph.canonical_value(extent_node);
                         if scalar(entry.graph.nodes[canonical].ty()).is_some() {
                             host_extents
-                                .insert(extent_node, host_dependencies(&analysis, entry, extent_node));
+                                .entry(extent_node)
+                                .or_insert_with(|| host_dependencies(&analysis, entry, extent_node));
                         }
                     }
                 }
@@ -58,7 +59,7 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                     .dims()
                     .iter()
                     .filter_map(|dim| match dim {
-                        SegExtent::Value(node) => Some(host_dependencies(&analysis, entry, *node)),
+                        SegExtent::Value(node) => host_extents.get(node).cloned(),
                         _ => None,
                     })
                     .flatten()
@@ -73,14 +74,8 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                     else {
                         continue;
                     };
-                    let (known_inputs, known_elem_bytes) =
+                    let (known_inputs, _) =
                         lengths.entry(slot.0).or_insert_with(|| (BTreeSet::new(), *elem_bytes));
-                    if *known_elem_bytes != *elem_bytes {
-                        return Err(ConvertError::GraphError(format!(
-                            "output {} of {} has conflicting storage strides",
-                            slot.0, entry.name
-                        )));
-                    }
                     known_inputs.extend(inputs.iter().cloned());
                 }
             }

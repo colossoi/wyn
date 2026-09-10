@@ -25,8 +25,7 @@ use super::ir::{PlaceId, RemapBlockIds};
 use super::program::{
     AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry, HostResource,
     HostSizePolicy, LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId,
-    ResourceOrigin, ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef,
-    StageOrigin,
+    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef, StageOrigin,
 };
 use super::semantic_opt::Optimized;
 use super::soac::{filter, hist, screma};
@@ -114,67 +113,15 @@ pub fn allocate_semantic_resources(mut program: Optimized) -> Result<ResidencyDr
     realize_dynamic_publication(program)
 }
 
-struct ResourceAllocationContext {
-    resources: LogicalResourceArena,
-}
-
-impl ResourceAllocationContext {
+impl LogicalResourceArena {
     fn resource_for_binding(&self, binding: BindingRef) -> Result<SemanticResourceRef, ConvertError> {
-        self.resources.host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
+        self.host_resource(binding).map(SemanticResourceRef).ok_or_else(|| {
             ConvertError::GraphError(format!(
                 "resource binding set={} binding={} is not declared by an entry interface",
                 binding.set, binding.binding
             ))
         })
     }
-}
-
-struct DraftLogicalResource {
-    binding: BindingRef,
-    elem_ty: Type<TypeName>,
-    /// `None` means policy lowering has not visited this resource. Once
-    /// visited, `Some(RuntimeProvided)` records a deliberate external/deferred
-    /// sizing decision rather than an unfinished reservation.
-    size: Option<HostSizePolicy>,
-}
-
-#[derive(Default)]
-struct ResourceAllocationBuilder {
-    resources: Vec<DraftLogicalResource>,
-    host: HashMap<BindingRef, ResourceId>,
-}
-
-impl ResourceAllocationBuilder {
-    fn reserve_host(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) -> Result<ResourceId, String> {
-        if let Some(id) = self.host.get(&binding).copied() {
-            let resource = &self.resources[id.index()];
-            if resource.elem_ty != elem_ty {
-                return Err(format!(
-                    "host resource set={} binding={} has conflicting element types: {:?} and {:?}",
-                    binding.set, binding.binding, resource.elem_ty, elem_ty
-                ));
-            }
-            return Ok(id);
-        }
-        let id = ResourceId::for_allocation(self.resources.len());
-        self.host.insert(binding, id);
-        self.resources.push(DraftLogicalResource {
-            binding,
-            elem_ty,
-            size: None,
-        });
-        Ok(id)
-    }
-
-    fn resource_for_binding(&self, binding: BindingRef) -> Result<SemanticResourceRef, ConvertError> {
-        self.host.get(&binding).copied().map(SemanticResourceRef).ok_or_else(|| {
-            ConvertError::GraphError(format!(
-                "resource binding set={} binding={} is not declared by an entry interface",
-                binding.set, binding.binding
-            ))
-        })
-    }
-
     fn logical_size(&self, length: Option<&BufferLen>) -> Result<HostSizePolicy, ConvertError> {
         Ok(match length {
             Some(BufferLen::HostProvided { inputs, elem_bytes }) => {
@@ -202,66 +149,71 @@ impl ResourceAllocationBuilder {
             None => HostSizePolicy::RuntimeProvided,
         })
     }
+}
+
+/// Resource identities are allocated once. Pending policies cannot escape finalization.
+#[derive(Default)]
+struct ResourceAllocationBuilder {
+    resources: LogicalResourceArena,
+    pending: std::collections::HashSet<ResourceId>,
+}
+
+impl ResourceAllocationBuilder {
+    fn reserve_host(&mut self, binding: BindingRef, elem_ty: Type<TypeName>) -> Result<ResourceId, String> {
+        if let Some(id) = self.resources.host_resource(binding) {
+            let current = self.resources[id].elem_ty();
+            if current != &elem_ty {
+                return Err(format!(
+                    "host resource set={} binding={} has conflicting element types: {:?} and {:?}",
+                    binding.set, binding.binding, current, elem_ty
+                ));
+            }
+            return Ok(id);
+        }
+        let id = self.resources.allocate_host(
+            HostResource { binding, name: None },
+            elem_ty,
+            HostSizePolicy::RuntimeProvided,
+        );
+        self.pending.insert(id);
+        Ok(id)
+    }
 
     fn set_host_size(&mut self, binding: BindingRef, size: HostSizePolicy) -> Result<(), String> {
-        let id = self.host.get(&binding).copied().ok_or_else(|| {
+        let id = self.resources.host_resource(binding).ok_or_else(|| {
             format!(
                 "host resource set={} binding={} must be reserved before its size is set",
                 binding.set, binding.binding
             )
         })?;
-        let resource = &mut self.resources[id.index()];
-        match (resource.size.as_ref(), &size) {
-            (None, _) => {
-                resource.size = Some(size);
-                Ok(())
-            }
-            (Some(HostSizePolicy::RuntimeProvided), HostSizePolicy::RuntimeProvided)
-            | (Some(_), HostSizePolicy::RuntimeProvided) => Ok(()),
-            (Some(HostSizePolicy::RuntimeProvided), _) => {
-                resource.size = Some(size);
-                Ok(())
-            }
-            (Some(current), proposed) if current == proposed => Ok(()),
-            (Some(current), proposed) => Err(format!(
-                "host resource set={} binding={} has conflicting size policies: {:?} and {:?}",
-                binding.set, binding.binding, current, proposed
-            )),
+        if let HostSizePolicy::Known(proposed) = size {
+            self.resources.get_mut(id).refine_size(&proposed).map_err(|current| {
+                format!(
+                    "host resource set={} binding={} has conflicting size policies: {:?} and {:?}",
+                    binding.set, binding.binding, current, proposed
+                )
+            })?;
         }
+        self.pending.remove(&id);
+        Ok(())
     }
 
-    fn finalize(self) -> Result<ResourceAllocationContext, ConvertError> {
-        if let Some(resource) = self.resources.iter().find(|resource| resource.size.is_none()) {
+    fn finalize(self) -> Result<LogicalResourceArena, ConvertError> {
+        if let Some(resource) = self.resources.iter().find(|resource| self.pending.contains(&resource.id()))
+        {
+            let binding = resource.host_binding().expect("reserved host resource");
             return Err(ConvertError::GraphError(format!(
                 "host resource set={} binding={} was reserved but its size policy was not processed",
-                resource.binding.set, resource.binding.binding
+                binding.set, binding.binding
             )));
         }
-        let mut resources = LogicalResourceArena::default();
-        for draft in self.resources {
-            let expected = self.host[&draft.binding];
-            let allocated = resources.allocate_host(
-                HostResource {
-                    binding: draft.binding,
-                    name: None,
-                },
-                draft.elem_ty,
-                draft.size.expect("all draft sizes were checked above"),
-            );
-            if allocated != expected {
-                return Err(ConvertError::GraphError(format!(
-                    "logical resource reservation for set={} binding={} changed identity during finalization",
-                    draft.binding.set, draft.binding.binding
-                )));
-            }
-        }
-        Ok(ResourceAllocationContext { resources })
+        Ok(self.resources)
     }
 }
 
 fn remap_program_resources(
     program: Optimized,
-    context: ResourceAllocationContext,
+    context: LogicalResourceArena,
 ) -> Result<ResidencyDraft, ConvertError> {
     let Program {
         functions,
@@ -287,28 +239,25 @@ fn remap_program_resources(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut stages = super::program::StagedProgramBuilder::new();
-    let mut stage_ids = HashMap::new();
-    for entry in &entry_points {
-        let stage = stages
-            .add_stage(StageOrigin::Authored, entry.id)
+    for entry in entry_points {
+        stages
+            .add_stage(StageOrigin::Authored, entry)
             .map_err(|error| ConvertError::Internal(error.to_string()))?;
-        stage_ids.insert(entry.id, stage);
     }
 
     Ok(Program::from_parts(
         functions,
         externs,
-        entry_points,
+        Vec::new(),
         constants,
         ResidencyProgramData {
             core: ResourceProgramData {
                 pipeline: data.pipeline,
                 stage_entries: data.stage_entries,
-                resources: context.resources,
+                resources: context,
                 identities: data.identities,
             },
             stages,
-            stage_ids,
             resident_flows: HashMap::new(),
         },
         global_context,
@@ -374,7 +323,7 @@ fn lower_host_size_policies(
 ) -> Result<(), ConvertError> {
     for entry in &program.entry_points {
         for resource in interface_resources(entry) {
-            let size = builder.logical_size(resource.length)?;
+            let size = builder.resources.logical_size(resource.length)?;
             builder.set_host_size(resource.binding, size).map_err(ConvertError::GraphError)?;
         }
     }
@@ -383,26 +332,20 @@ fn lower_host_size_policies(
 
 fn entry_resource_declarations(
     entry: &Entry<Semantic>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<Vec<SemanticResourceDecl>, ConvertError> {
-    let mut positions: HashMap<SemanticResourceRef, usize> = HashMap::new();
-    let mut declarations: Vec<SemanticResourceDecl> = Vec::new();
+    let mut declarations = crate::StableMap::<SemanticResourceRef, interface::StorageRole>::new();
     for item in interface_resources(entry) {
         let Some(role) = item.role else { continue };
         let resource = context.resource_for_binding(item.binding)?;
-        if let Some(position) = positions.get(&resource).copied() {
-            declarations[position].role = declarations[position].role.merge(role);
-            continue;
-        }
-        positions.insert(resource, declarations.len());
-        declarations.push(SemanticResourceDecl { resource, role });
+        declarations.entry(resource).and_modify(|current| *current = current.merge(role)).or_insert(role);
     }
-    Ok(declarations)
+    Ok(declarations.into_iter().map(|(resource, role)| SemanticResourceDecl { resource, role }).collect())
 }
 
 fn allocate_type_resources(
     ty: &mut Type<TypeName>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<(), ConvertError> {
     let mut error = None;
     super::program::visit_type_names_mut(ty, |name| {
@@ -420,7 +363,7 @@ fn remap_soac_resources(
     soac: Soac<Semantic>,
     nodes: &crate::LookupMap<ValueId, ValueId>,
     places: &crate::LookupMap<PlaceId, PlaceId>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<Soac<Semantic<SemanticResourceRef>>, ConvertError> {
     let mut remap =
         super::soac::remap::Remap::new(nodes, places, |binding| context.resource_for_binding(binding));
@@ -485,16 +428,15 @@ fn remap_soac_resources(
 
 fn remap_graph_resources(
     graph: super::types::EGraph<Semantic>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<
     (
         super::types::EGraph<Semantic<SemanticResourceRef>>,
-        crate::LookupMap<ValueId, ValueId>,
         crate::LookupMap<crate::flow::BlockId, crate::flow::BlockId>,
     ),
     ConvertError,
 > {
-    let (mut graph, nodes, blocks) = graph.try_map_resources_and_phase(
+    let (mut graph, _, blocks) = graph.try_map_resources_and_phase(
         |binding| context.resource_for_binding(binding),
         |owner, soac, nodes, places| {
             Ok::<_, ConvertError>((owner, remap_soac_resources(soac, nodes, places, context)?))
@@ -509,7 +451,7 @@ fn remap_graph_resources(
     if let Some(error) = type_error {
         return Err(error);
     }
-    Ok((graph, nodes, blocks))
+    Ok((graph, blocks))
 }
 
 fn realize_dynamic_publication(mut program: ResidencyDraft) -> Result<ResidencyDraft, ConvertError> {
@@ -522,7 +464,7 @@ fn realize_dynamic_publication(mut program: ResidencyDraft) -> Result<ResidencyD
         let _ = realize_graph_dynamic_publication(&mut constant.graph, resources)
             .map_err(ConvertError::GraphError)?;
     }
-    for entry in &mut program.entry_points {
+    for entry in program.data.stages.stage_bodies_mut() {
         let filter_data = realize_graph_dynamic_publication(&mut entry.graph, resources)
             .map_err(ConvertError::GraphError)?;
         realize_filter_output_capacities(entry, resources, &filter_data)
@@ -643,13 +585,13 @@ fn realize_graph_dynamic_publication(
             filter_data.push(storage.data);
             runtime.backing = filter::RuntimeBacking::Bound(SemanticResourceRef(storage.data));
             runtime.length = filter::RuntimeLength::Stored(SemanticResourceRef(storage.length));
-            if !accesses.iter().any(|access| access.resource.0 == storage.length) {
-                accesses.push(super::types::SegResourceAccess {
+            *accesses = super::types::SegResourceAccess::merge(
+                accesses,
+                &[super::types::SegResourceAccess {
                     resource: SemanticResourceRef(storage.length),
                     access: crate::ResourceAccess::Write,
-                });
-                accesses.sort_by_key(|access| access.resource);
-            }
+                }],
+            );
         }
     }
     realize_filter_result_types(graph);
@@ -659,13 +601,13 @@ fn realize_graph_dynamic_publication(
 fn filter_capacity_buffer_len(
     resources: &LogicalResourceArena,
     size: &LogicalSize,
-) -> Result<Option<BufferLen>, String> {
+) -> Result<BufferLen, String> {
     Ok(match size {
-        LogicalSize::HostProvided { inputs, elem_bytes } => Some(BufferLen::HostProvided {
+        LogicalSize::HostProvided { inputs, elem_bytes } => BufferLen::HostProvided {
             inputs: inputs.clone(),
             elem_bytes: *elem_bytes,
-        }),
-        LogicalSize::FixedBytes(bytes) => Some(BufferLen::Fixed { bytes: *bytes }),
+        },
+        LogicalSize::FixedBytes(bytes) => BufferLen::Fixed { bytes: *bytes },
         LogicalSize::LikeResource {
             resource,
             elem_bytes,
@@ -674,16 +616,16 @@ fn filter_capacity_buffer_len(
             let binding = resources[*resource].host_binding().ok_or_else(|| {
                 format!("host Filter output capacity depends on non-host resource {resource:?}")
             })?;
-            Some(BufferLen::LikeInput {
+            BufferLen::LikeInput {
                 set: binding.set,
                 binding: binding.binding,
                 elem_bytes: *elem_bytes,
                 src_elem_bytes: *src_elem_bytes,
-            })
+            }
         }
-        LogicalSize::SameAsDispatch { elem_bytes } => Some(BufferLen::SameAsDispatch {
+        LogicalSize::SameAsDispatch { elem_bytes } => BufferLen::SameAsDispatch {
             elem_bytes: *elem_bytes,
-        }),
+        },
     })
 }
 
@@ -708,7 +650,7 @@ fn realize_filter_output_capacities(
                 "entry `{}` publishes runtime Filter data {resource:?} through a non-storage output",
                 entry.name
             )
-        })? = capacity;
+        })? = Some(capacity);
     }
     Ok(())
 }
@@ -754,7 +696,7 @@ fn realize_filter_result_types(graph: &mut super::types::EGraph<Semantic<Semanti
 
 fn remap_function_resources(
     function: super::program::Func<Semantic>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<super::program::AllocatedFunc, ConvertError> {
     let super::program::Func {
         region,
@@ -767,7 +709,7 @@ fn remap_function_resources(
         graph,
         abi: _,
     } = function;
-    let (graph, _, _) = remap_graph_resources(graph, context)?;
+    let (graph, _) = remap_graph_resources(graph, context)?;
     let params = params.try_map(
         &mut |binding| context.resource_for_binding(binding),
         &mut |mut ty| {
@@ -798,7 +740,7 @@ fn remap_function_resources(
 
 fn remap_constant_resources(
     constant: super::program::ConstantDef<Semantic>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<super::program::AllocatedConstantDef, ConvertError> {
     let super::program::ConstantDef {
         id,
@@ -807,7 +749,7 @@ fn remap_constant_resources(
         mut return_ty,
         graph,
     } = constant;
-    let (graph, _, _) = remap_graph_resources(graph, context)?;
+    let (graph, _) = remap_graph_resources(graph, context)?;
     allocate_type_resources(&mut return_ty, context)?;
     Ok(super::program::ConstantDef {
         id,
@@ -820,7 +762,7 @@ fn remap_constant_resources(
 
 fn remap_entry_resources(
     entry: Entry<Semantic>,
-    context: &ResourceAllocationContext,
+    context: &LogicalResourceArena,
 ) -> Result<AllocatedEntry, ConvertError> {
     let declarations = entry_resource_declarations(&entry, context)?;
     let Entry {
@@ -837,7 +779,7 @@ fn remap_entry_resources(
         mut result,
         graph,
     } = entry;
-    let (graph, _, blocks) = remap_graph_resources(graph, context)?;
+    let (graph, blocks) = remap_graph_resources(graph, context)?;
     let inputs = inputs
         .into_iter()
         .map(|mut input| {
@@ -914,7 +856,7 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
     let Program {
         functions,
         externs,
-        entry_points,
+        entry_points: _,
         constants,
         mut data,
         global_context,
@@ -930,7 +872,7 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
             }
         }
     }
-    for entry in &entry_points {
+    for (_, _, entry) in data.stages.stages() {
         for declaration in &entry.resource_declarations {
             if !data.core.resources.contains(declaration.resource.0) {
                 return Err(ConvertError::Internal(format!(
@@ -982,83 +924,61 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
             }
         }
     }
-    for entry in &entry_points {
-        let stage = data.stage_ids[&entry.id];
+    let mut consumers = Vec::new();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    for (stage, _, entry) in data.stages.stages() {
         for declaration in entry.resource_declarations.iter().filter(|declaration| declaration.role.reads())
         {
-            let Some(flow) = data.resident_flows.get(&declaration.resource.0).copied() else {
-                continue;
-            };
-            let needs_edge = data.stages.flow(flow).is_some_and(|resident| {
-                resident.producer() != stage && !resident.consumers().contains(&stage)
-            });
-            if needs_edge {
-                data.stages
-                    .add_consumer(flow, stage)
-                    .map_err(|error| ConvertError::Internal(error.to_string()))?;
+            if let Some(flow) = data.resident_flows.get(&declaration.resource.0).copied() {
+                if data.stages.flow(flow).is_some_and(|resident| {
+                    resident.producer() != stage && !resident.consumers().contains(&stage)
+                }) {
+                    consumers.push((flow, stage));
+                }
             }
         }
+        inputs.extend(entry.inputs.iter().filter_map(|input| {
+            let resource = input.resource?.0;
+            data.core.resources[resource].host_binding()?;
+            Some((
+                stage,
+                input.ty.clone(),
+                super::program::ResidentStorage {
+                    data: resource,
+                    length: None,
+                },
+            ))
+        }));
+        outputs.extend(entry.outputs.iter().filter_map(|output| {
+            let resource = output.resource?.0;
+            data.core.resources[resource].host_binding()?;
+            Some((
+                stage,
+                output.ty.clone(),
+                super::program::ResidentStorage {
+                    data: resource,
+                    length: None,
+                },
+            ))
+        }));
     }
-    for entry in &entry_points {
-        let stage = data.stage_ids[&entry.id];
-        for input in &entry.inputs {
-            let Some(SemanticResourceRef(resource)) = input.resource else {
-                continue;
-            };
-            if !matches!(
-                data.core.resources[resource].origin(),
-                ResourceOrigin::Host { .. }
-            ) {
-                continue;
-            }
-            data.stages
-                .add_external_input(
-                    input.ty.clone(),
-                    super::program::ResidentStorage {
-                        data: resource,
-                        length: None,
-                    },
-                    [stage],
-                )
-                .map_err(|error| ConvertError::Internal(error.to_string()))?;
-        }
-        for output in &entry.outputs {
-            let Some(SemanticResourceRef(resource)) = output.resource else {
-                continue;
-            };
-            if !matches!(
-                data.core.resources[resource].origin(),
-                ResourceOrigin::Host { .. }
-            ) {
-                continue;
-            }
-            let flow = data
-                .stages
-                .add_flow(
-                    stage,
-                    output.ty.clone(),
-                    super::program::ResidentStorage {
-                        data: resource,
-                        length: None,
-                    },
-                )
-                .map_err(|error| ConvertError::Internal(error.to_string()))?;
-            data.stages.publish(flow).map_err(|error| ConvertError::Internal(error.to_string()))?;
-        }
+    for (flow, stage) in consumers {
+        data.stages.add_consumer(flow, stage).map_err(|error| ConvertError::Internal(error.to_string()))?;
     }
-
-    let mut entries = entry_points.into_iter().map(|entry| (entry.id, entry)).collect::<HashMap<_, _>>();
-    let stages = data
-        .stages
-        .finish()
-        .map_err(|error| ConvertError::Internal(error.to_string()))?
-        .map_stage_bodies(|_, entry| {
-            entries.remove(&entry).expect("staged lowering retained every executable entry exactly once")
-        });
-    assert!(
-        entries.is_empty(),
-        "every executable entry must be owned by one staged body"
-    );
+    for (stage, ty, storage) in inputs {
+        data.stages
+            .add_external_input(ty, storage, [stage])
+            .map_err(|error| ConvertError::Internal(error.to_string()))?;
+    }
+    for (stage, ty, storage) in outputs {
+        let flow = data
+            .stages
+            .add_flow(stage, ty, storage)
+            .map_err(|error| ConvertError::Internal(error.to_string()))?;
+        data.stages.publish(flow).map_err(|error| ConvertError::Internal(error.to_string()))?;
+    }
+    let stages = data.stages.finish().map_err(|error| ConvertError::Internal(error.to_string()))?;
     Ok(Program::from_parts(
         functions,
         externs,
@@ -1107,7 +1027,7 @@ mod tests {
         builder.set_host_size(binding, HostSizePolicy::RuntimeProvided).unwrap();
 
         let context = builder.finalize().expect("processed draft must finalize");
-        assert_eq!(context.resources[resource].size(), None);
+        assert_eq!(context[resource].size(), None);
     }
 
     #[test]

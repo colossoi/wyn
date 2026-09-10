@@ -194,12 +194,6 @@ impl ResourceId {
         self.0 as usize
     }
 
-    /// Reserve the dense identity that logical-resource allocation will
-    /// commit at this arena position.
-    pub(in crate::egir) const fn for_allocation(index: usize) -> Self {
-        Self(index as u32)
-    }
-
     #[cfg(test)]
     pub(crate) const fn for_test(index: u32) -> Self {
         Self(index)
@@ -1556,25 +1550,45 @@ pub struct ResidentStorage {
 
 pub type StagedProgram = StagedIr<AllocatedEntry, Type<TypeName>, ResidentStorage, StageOrigin>;
 
-pub type StagedProgramBuilder = StagedIrBuilder<EntryId, Type<TypeName>, ResidentStorage, StageOrigin>;
+pub type StagedProgramBuilder =
+    StagedIrBuilder<AllocatedEntry, Type<TypeName>, ResidentStorage, StageOrigin>;
 
 /// Intermediate lowering state used while residency discovers stage boundaries.
 #[derive(Debug)]
 pub struct ResidencyProgramData {
     pub core: ResourceProgramData,
     pub stages: StagedProgramBuilder,
-    pub stage_ids: HashMap<EntryId, wyn_staged_ir::StageId>,
-    pub resident_flows: HashMap<ResourceId, wyn_staged_ir::FlowId>,
+    pub(crate) resident_flows: HashMap<ResourceId, wyn_staged_ir::FlowId>,
 }
 
 impl ResidencyProgramData {
-    pub(crate) fn alloc_compiler_resource(
+    pub(crate) fn connect_resident_flow(
         &mut self,
-        compiler: CompilerResource,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> ResourceId {
-        self.core.resources.allocate_compiler(compiler, elem_ty, size)
+        producer: wyn_staged_ir::StageId,
+        consumer: wyn_staged_ir::StageId,
+        value_ty: Type<TypeName>,
+        storage: ResidentStorage,
+    ) -> Result<wyn_staged_ir::FlowId, String> {
+        let flow = if let Some(flow) = self.resident_flows.get(&storage.data).copied() {
+            let resident = self.stages.flow(flow).expect("registered resident flow");
+            if resident.producer() != producer
+                || resident.value_type() != &value_ty
+                || resident.storage() != &storage
+            {
+                return Err(format!(
+                    "resource {:?} has conflicting resident producers or storage",
+                    storage.data
+                ));
+            }
+            flow
+        } else {
+            let flow =
+                self.stages.add_flow(producer, value_ty, storage).map_err(|error| error.to_string())?;
+            self.resident_flows.insert(storage.data, flow);
+            flow
+        };
+        self.stages.add_consumer(flow, consumer).map_err(|error| error.to_string())?;
+        Ok(flow)
     }
 }
 

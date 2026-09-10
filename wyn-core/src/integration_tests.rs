@@ -6624,6 +6624,40 @@ entry direct_loop_prefix(xs: []u32, ys: []u32, events: []u32) ([]u32, []u32) =
 }
 
 #[test]
+fn authored_only_keeps_structured_storage_prefix_in_source_stage() {
+    run_with_large_stack(|| {
+        let source = r#"
+entry authored_prefix(xs: []u32, events: []u32) []u32 =
+  let state =
+    loop state = 0u32 for k < 32 do
+      (state ^ events[k]) * 1664525u32 + 1013904223u32
+  in map(|x| x + state, xs)
+"#;
+        let generated = compile_thru_spirv(source).expect("generated topology supports a prelude");
+        let pipeline = scalar_prelude_pipeline(&generated, "authored_prefix");
+        assert_eq!(
+            pipeline.stages.len(),
+            2,
+            "singleton prelude and parallel consumer"
+        );
+        assert_eq!(
+            pipeline.stages.iter().filter(|stage| is_singleton_stage(stage)).count(),
+            1
+        );
+
+        let planned = plan_direct(source, CodegenTarget::Spirv).expect("authored-only serial prefix");
+        let ssa = lower_egir_to_ssa(planned).expect("authored-only SSA");
+        let lowered = lower_ssa_to_spirv(ssa).expect("authored-only SPIR-V");
+        assert_eq!(
+            scalar_prelude_pipeline(&lowered, "authored_prefix").stages.len(),
+            1
+        );
+        assert!(spirv_entry_reaches_loop(&lowered.spirv, "authored_prefix"));
+        assert_naga_accepts_spirv(&lowered.spirv);
+    });
+}
+
+#[test]
 fn composite_serial_prefix_is_one_singleton_feeding_two_map_domains() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 

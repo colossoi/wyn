@@ -34,38 +34,18 @@ const LOOP_SETUP_COST: u64 = 1;
 const UNKNOWN_LOOP_COST: u64 = 4096;
 pub(crate) const SINGLETON_LAUNCH_COST: u64 = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PreludeMaterializationPolicy {
-    /// The structured prefix represents input-dependent serial work whose
-    /// evaluation count must not be multiplied by parallel consumers.
-    Required,
-    /// Pure recomputation is legal, so residency is an optimization choice.
-    CostBased,
-}
-
-#[derive(Debug)]
-pub(crate) struct PreludeAnalysis {
-    cost: u64,
-    output_count: u64,
-    policy: PreludeMaterializationPolicy,
-}
-
-impl PreludeAnalysis {
-    pub(crate) fn should_materialize(&self, invocations: u64) -> bool {
-        self.policy == PreludeMaterializationPolicy::Required
-            || materialization_is_profitable(self.cost, invocations, self.output_count)
-    }
-}
-
-/// Summarize one projected parallel-prefix recipe. The same structured path
+/// Decide whether to materialize one projected parallel-prefix recipe.
+/// `None` means relocation was not admitted as safe. The same structured path
 /// analysis prices straight-line values, selections, and loops. Residency
-/// policy separately preserves single evaluation for structured storage
-/// prefixes; all other recipes remain cost-based.
-pub(crate) fn analyze_prelude(
+/// policy prefers single evaluation for structured storage prefixes when
+/// generated topology is allowed; all other recipes remain cost-based.
+/// Authored-only topology may retain either form in the original stage.
+pub(super) fn should_materialize_prelude(
     program: &ResidencyDraft,
     entry: &AllocatedEntry,
     recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
-) -> Option<PreludeAnalysis> {
+    invocations: u64,
+) -> Option<bool> {
     let graph = &recipe.projection.graph;
     let analysis = graph_ops::GraphAnalysis::new(graph);
     let dependence =
@@ -94,17 +74,20 @@ pub(crate) fn analyze_prelude(
         None,
         &mut HashSet::new(),
     )?;
-    Some(PreludeAnalysis {
-        cost,
-        output_count: (recipe.values.len() + recipe.live_outs().count()) as u64,
-        policy: prelude_materialization_policy(recipe, &analysis),
-    })
+    Some(
+        prefers_single_evaluation(recipe, &analysis)
+            || materialization_is_profitable(
+                cost,
+                invocations,
+                (recipe.values.len() + recipe.live_outs().count()) as u64,
+            ),
+    )
 }
 
-fn prelude_materialization_policy(
+fn prefers_single_evaluation(
     recipe: &super::super::graph_projector::ProjectedValueRecipe<SemanticResourceRef>,
     analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
-) -> PreludeMaterializationPolicy {
+) -> bool {
     let structured = matches!(
         &recipe.source,
         super::super::graph_projector::ValueRecipeSource::StructuredPrefix { .. }
@@ -120,11 +103,7 @@ fn prelude_materialization_policy(
                     .is_empty()
             },
         );
-    if structured && reads_storage {
-        PreludeMaterializationPolicy::Required
-    } else {
-        PreludeMaterializationPolicy::CostBased
-    }
+    structured && reads_storage
 }
 
 /// Compare repeated evaluation with a one-thread producer and one handoff load

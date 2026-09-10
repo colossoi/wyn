@@ -220,6 +220,14 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
         self.ir.stages().map(|(id, stage)| (id, stage.origin(), stage.body()))
     }
 
+    pub fn stage_body(&self, id: StageId) -> Option<&Body> {
+        self.ir.stage(id).map(Stage::body)
+    }
+
+    pub fn stage_bodies_mut(&mut self) -> impl Iterator<Item = &mut Body> {
+        (&mut self.ir.stages).into_iter().map(|(_, stage)| &mut stage.body)
+    }
+
     pub fn stage_body_mut(&mut self, id: StageId) -> Option<&mut Body> {
         self.ir.stage_body_mut(id)
     }
