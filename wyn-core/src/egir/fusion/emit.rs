@@ -8,6 +8,7 @@ use super::{
 use crate::ast::TypeName;
 use crate::egir::program::{Func, OutputWriter, ProgramIdentities, SemanticProgramData};
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::soac::{filter, hist, lambda as lambda_ops, screma};
 use crate::egir::types::{
     EGraph, EffectToken, PureOp, ResultBinding, Semantic, SideEffect, SideEffectKind, SkeletonTerminator,
@@ -647,11 +648,11 @@ impl Emitter<'_> {
                     inputs: input_types,
                     form: self.form(form, scope, graph, bindings)?,
                     result_state: op.result_state.clone(),
-                    state: screma::SemanticState::Segmented {
+                    state: screma::SemanticState::Segmented(SegmentedMetadata {
                         space: required(op.space.clone(), "Screma recipe has no space")?,
                         output_slots: op.output_slots.clone(),
                         resources: op.resources.clone(),
-                    },
+                    }),
                 };
                 operation.validate().map_err(FusionError::invalid)?;
                 Soac::Screma(operation)
@@ -665,8 +666,8 @@ impl Emitter<'_> {
                 original.body.inputs = input_types;
                 original.body.map = self.lambda(map, scope, graph, bindings)?;
                 original.body.predicate = self.lambda(predicate, scope, graph, bindings)?;
-                original.state.space = required(op.space.clone(), "filter recipe has no space")?;
-                original.state.resources = op.resources.clone();
+                original.state.segment.space = required(op.space.clone(), "filter recipe has no space")?;
+                original.state.segment.resources = op.resources.clone();
                 if let filter::Output::Local { ownership, .. } = &mut original.state.output {
                     if *ownership == crate::types::SoacOwnership::UniqueInput {
                         *ownership = crate::types::SoacOwnership::Fresh;

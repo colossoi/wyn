@@ -7,11 +7,12 @@ use super::array_io::{
 use super::loop_builder::{expand_loop, LoopBody, LoopResultBinding, LoopResultSource};
 use super::CallableMap;
 use crate::ast::TypeName;
-use crate::builtins::{self, catalog};
+use crate::builtins::catalog;
 use crate::egir::graph_ops::{
     emit_atomic, emit_storage_store, emit_view_load, intern_storage_view, intern_u32, pack_result_values,
     rebind_physical_result, retype_projection_tree, store,
 };
+use crate::egir::kernel_index::{cast_u32_to_index, emit_invocation_index};
 use crate::egir::soac::hist;
 use crate::egir::soac::lambda::{emit_physical_call, result_argument_values};
 use crate::egir::structured_cfg::{install_loop, install_selection, replace_effect_with_continuation};
@@ -140,6 +141,25 @@ fn flatten_hist_index(graph: &mut EGraph<Physical>, indices: &[ValueId], shape: 
             None,
         )
     })
+}
+
+/// Ordinary Hist ignores an emission unless its guard and every index are valid.
+fn hist_update_guard(
+    graph: &mut EGraph<Physical>,
+    active: Option<ValueId>,
+    indices: &[ValueId],
+    shape: &[ValueId],
+) -> ValueId {
+    let in_bounds = hist_index_in_bounds(graph, indices, shape);
+    match active {
+        Some(active) => graph.intern_pure(
+            PureOp::BinOp(op::BinaryOperator::LogicalAnd),
+            smallvec![active, in_bounds],
+            Type::Constructed(TypeName::Bool, vec![]),
+            None,
+        ),
+        None => in_bounds,
+    }
 }
 
 fn hist_index_in_bounds(graph: &mut EGraph<Physical>, indices: &[ValueId], shape: &[ValueId]) -> ValueId {
@@ -326,29 +346,8 @@ pub(super) fn build_hist_atomic(
     );
 
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
-    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
-    let thread = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: catalog().known().thread_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        u32_type,
-        None,
-    );
-    let bitcast = catalog()
-        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
-        .expect("catalog has structural u32-to-i32 conversion");
-    let lane = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: bitcast,
-            overload_idx: 0,
-        },
-        smallvec![thread],
-        i32_type,
-        None,
-    );
+    let lane = emit_invocation_index(graph, catalog().known().thread_id, &i32_type)?;
     let length = emit_seg_space_len(
         graph,
         space,
@@ -383,37 +382,19 @@ pub(super) fn build_hist_atomic(
     let bucket_results =
         emit_physical_call(graph, body, regions, &form.bucket, arguments, None, next_effect)?;
     let bucket_values = result_argument_values(graph, &bucket_results);
-    debug_assert_eq!(
-        bucket_values.len(),
-        form.guard_count() + form.index_count() + form.value_count()
-    );
-    let (guards, bucket_values) = bucket_values.split_at(form.guard_count());
-    let (indices, values) = bucket_values.split_at(form.index_count());
-    let mut guard_offset = 0;
-    let mut index_offset = 0;
-    let mut value_offset = 0;
+    let decoded = form.decode_results(&bucket_values)?;
     let mut current = body;
 
-    for (operation, atomic) in form.operations.iter().zip(atomic_operations) {
-        let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
-        let operation_values = &values[value_offset..value_offset + operation.value_count()];
-        index_offset += operation.index_count();
-        value_offset += operation.value_count();
+    for (decoded, atomic) in decoded.zip(atomic_operations) {
+        let hist::BucketResults {
+            operation,
+            guard,
+            indices: operation_indices,
+            values: operation_values,
+        } = decoded;
         let update = graph.skeleton.create_block();
         let next = graph.skeleton.create_block();
-        let in_bounds = hist_index_in_bounds(graph, operation_indices, &operation.shape);
-        let valid = if matches!(operation.emission, hist::Emission::Guarded) {
-            let active = guards[guard_offset];
-            guard_offset += 1;
-            graph.intern_pure(
-                PureOp::BinOp(op::BinaryOperator::LogicalAnd),
-                smallvec![active, in_bounds],
-                Type::Constructed(TypeName::Bool, vec![]),
-                None,
-            )
-        } else {
-            in_bounds
-        };
+        let valid = hist_update_guard(graph, guard.copied(), operation_indices, &operation.shape);
         install_selection(graph, current, valid, update, next, next);
 
         let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
@@ -492,41 +473,23 @@ pub(super) fn build_hist_loop(
             let bucket_results =
                 emit_physical_call(graph, blk, regions, &form.bucket, arguments, None, next_effect)?;
             let bucket_values = result_argument_values(graph, &bucket_results);
-            debug_assert_eq!(
-                bucket_values.len(),
-                form.guard_count() + form.index_count() + form.value_count()
-            );
-            let (guards, bucket_values) = bucket_values.split_at(form.guard_count());
-            let (indices, values) = bucket_values.split_at(form.index_count());
-            let mut guard_offset = 0;
-            let mut index_offset = 0;
-            let mut value_offset = 0;
+            let decoded = form.decode_results(&bucket_values)?;
 
             let mut current = blk;
-            for operation in &form.operations {
-                let operation_indices = &indices[index_offset..index_offset + operation.index_count()];
-                let operation_values = &values[value_offset..value_offset + operation.value_count()];
-                index_offset += operation.index_count();
-                value_offset += operation.value_count();
+            for decoded in decoded {
+                let hist::BucketResults {
+                    operation,
+                    guard,
+                    indices: operation_indices,
+                    values: operation_values,
+                } = decoded;
 
                 // Futhark Hist ignores an update unless every index component
                 // is in range. Keep both the destination load and store in
                 // the selected block so serial and atomic paths agree.
                 let update = graph.skeleton.create_block();
                 let next = graph.skeleton.create_block();
-                let in_bounds = hist_index_in_bounds(graph, operation_indices, &operation.shape);
-                let valid = if matches!(operation.emission, hist::Emission::Guarded) {
-                    let active = guards[guard_offset];
-                    guard_offset += 1;
-                    graph.intern_pure(
-                        PureOp::BinOp(op::BinaryOperator::LogicalAnd),
-                        smallvec![active, in_bounds],
-                        Type::Constructed(TypeName::Bool, vec![]),
-                        None,
-                    )
-                } else {
-                    in_bounds
-                };
+                let valid = hist_update_guard(graph, guard.copied(), operation_indices, &operation.shape);
                 install_selection(graph, current, valid, update, next, next);
 
                 let bucket_index = flatten_hist_index(graph, operation_indices, &operation.shape);
@@ -590,36 +553,6 @@ pub(super) fn build_hist_loop(
         },
     )?;
     Ok(())
-}
-
-fn emit_thread_lane(graph: &mut EGraph<Physical>) -> ValueId {
-    emit_thread_coordinate(graph, catalog().known().thread_id)
-}
-
-fn emit_thread_coordinate(graph: &mut EGraph<Physical>, builtin: builtins::BuiltinId) -> ValueId {
-    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
-    let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
-    let thread = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: builtin,
-            overload_idx: 0,
-        },
-        smallvec![],
-        u32_type,
-        None,
-    );
-    let convert = catalog()
-        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
-        .expect("catalog has structural u32-to-i32 conversion");
-    graph.intern_pure(
-        PureOp::Intrinsic {
-            id: convert,
-            overload_idx: 0,
-        },
-        smallvec![thread],
-        i32_type,
-        None,
-    )
 }
 
 fn emit_dispatch_axis_extent(
@@ -735,7 +668,11 @@ pub(super) fn build_bucket_init(
     let hist::Update::BucketInsert { .. } = operation.update else {
         unreachable!("bucket init requires bucket insertion")
     };
-    let lane = emit_thread_lane(graph);
+    let lane = emit_invocation_index(
+        graph,
+        catalog().known().thread_id,
+        &Type::Constructed(TypeName::Int(32), vec![]),
+    )?;
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let in_range = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Less),
@@ -839,9 +776,9 @@ pub(super) fn build_bucket_insert(
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let domain_dimensions = emit_seg_space_dimensions(graph, space, &spec.len_input, &i32_type);
     let physical_lanes = [
-        emit_thread_coordinate(graph, catalog().known().thread_id),
-        emit_thread_coordinate(graph, catalog().known().thread_id_y),
-        emit_thread_coordinate(graph, catalog().known().thread_id_z),
+        emit_invocation_index(graph, catalog().known().thread_id, &i32_type)?,
+        emit_invocation_index(graph, catalog().known().thread_id_y, &i32_type)?,
+        emit_invocation_index(graph, catalog().known().thread_id_z, &i32_type)?,
     ];
     let mut lanes = physical_lanes;
     let (coordinate_block, grid_loop) = if let Some(stride) = topology.and_then(|plan| plan.grid_stride) {
@@ -954,8 +891,13 @@ pub(super) fn build_bucket_insert(
         next_effect,
     )?;
     let results = result_argument_values(graph, &results);
-    let [active, key, value] = results.as_slice() else {
-        unreachable!("guarded bucket insertion envelope returns active, key, and value")
+    let decoded = spec
+        .form
+        .decode_results(&results)?
+        .next()
+        .ok_or_else(|| "bucket insertion has no operation results".to_owned())?;
+    let (Some(active), [key], [value]) = (decoded.guard, decoded.indices, decoded.values) else {
+        return Err("guarded bucket insertion requires a guard, one key, and one value".into());
     };
     let check_bucket = graph.skeleton.create_block();
     install_selection(graph, body, *active, check_bucket, work_done, work_done);
@@ -988,18 +930,7 @@ pub(super) fn build_bucket_insert(
         next_effect,
         None,
     );
-    let convert = catalog()
-        .conversion(&TypeName::Int(32), &TypeName::UInt(32))
-        .expect("catalog has structural u32-to-i32 conversion");
-    let slot = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: convert,
-            overload_idx: 0,
-        },
-        smallvec![slot_u32],
-        i32_type,
-        None,
-    );
+    let slot = cast_u32_to_index(graph, slot_u32, &i32_type)?;
     let has_capacity = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Less),
         smallvec![slot, capacity],

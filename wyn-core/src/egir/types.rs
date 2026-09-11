@@ -4,6 +4,7 @@
 //! keeps the concrete family types and their `Family` implementations so the
 //! low-level IR does not need to know which phases the compiler defines.
 
+use crate::egir::soac::SegmentedMetadata;
 use crate::types;
 use crate::BindingRef;
 use polytype::Type;
@@ -94,7 +95,6 @@ impl Language for WynLanguage {
 
 pub trait WynSoacPhase: Family<Soac = SoacEffect<Self>> + Sized {
     type SoacId: Clone + std::fmt::Debug;
-    type ScremaResults: screma::PhaseResults;
     type ScremaState: Clone + std::fmt::Debug;
     type FilterState: Clone + std::fmt::Debug;
     type HistState: Clone + std::fmt::Debug;
@@ -260,7 +260,6 @@ impl<R: GraphResource> Family for Raw<R> {
 
 impl<R: GraphResource> WynSoacPhase for Raw<R> {
     type SoacId = ();
-    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::RawState;
     type FilterState = filter::RawState;
     type HistState = hist::RawState;
@@ -277,7 +276,6 @@ impl<R: GraphResource> Family for Semantic<R> {
 
 impl<R: GraphResource> WynSoacPhase for Semantic<R> {
     type SoacId = super::program::SemanticOpId;
-    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::SemanticState<R>;
     type FilterState = filter::SemanticState<R>;
     type HistState = hist::SemanticState<R>;
@@ -326,7 +324,6 @@ impl<R: GraphResource> Family for Scheduled<R> {
 
 impl<R: GraphResource> WynSoacPhase for Scheduled<R> {
     type SoacId = super::program::SemanticOpId;
-    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::ScheduledState<R>;
     type FilterState = filter::ScheduledState<R>;
     type HistState = hist::ScheduledState<R>;
@@ -377,7 +374,6 @@ impl Family for Physical {
 
 impl WynSoacPhase for Physical {
     type SoacId = super::program::SemanticOpId;
-    type ScremaResults = Vec<screma::ResultState>;
     type ScremaState = screma::PhysicalState;
     type FilterState = filter::ScheduledState<BindingRef>;
     type HistState = hist::ScheduledState<BindingRef>;
@@ -832,9 +828,9 @@ impl<R: GraphResource> Soac<Semantic<R>> {
         match self {
             Self::Screma(op) => match op.semantic_state() {
                 screma::SemanticState::Serial => None,
-                screma::SemanticState::Segmented { space, .. } => Some(space),
+                screma::SemanticState::Segmented(SegmentedMetadata { space, .. }) => Some(space),
             },
-            Self::Filter(op) => Some(&op.state.space),
+            Self::Filter(op) => Some(&op.state.segment.space),
             Self::Hist(op) => match &op.state {
                 hist::SemanticState::Serial => None,
                 hist::SemanticState::Segmented(space) => Some(space),

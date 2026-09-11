@@ -1,6 +1,7 @@
 //! Preserve logical array lengths whose allocation capacity must be supplied
 //! by the host. This follows semantic spaces, never physical workgroup counts.
 
+use crate::egir::soac::SegmentedMetadata;
 use std::collections::BTreeSet;
 
 use super::super::graph_ops;
@@ -22,9 +23,9 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                     continue;
                 };
-                let screma::SemanticState::Segmented {
+                let screma::SemanticState::Segmented(SegmentedMetadata {
                     space, output_slots, ..
-                } = op.semantic_state()
+                }) = op.semantic_state()
                 else {
                     continue;
                 };
@@ -88,7 +89,9 @@ pub(super) fn retain_output_lengths(program: &mut Optimized) -> Result<(), Conve
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
                     continue;
                 };
-                let screma::SemanticState::Segmented { space, .. } = op.semantic_state_mut() else {
+                let screma::SemanticState::Segmented(SegmentedMetadata { space, .. }) =
+                    op.semantic_state_mut()
+                else {
                     continue;
                 };
                 let dims = space

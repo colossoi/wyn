@@ -18,6 +18,7 @@ pub type Segmented = super::program::Program<
     super::program::RewriteGlobal,
 >;
 
+use crate::egir::soac::SegmentedMetadata;
 use crate::ssa;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -97,10 +98,12 @@ fn verify_canonical_resource_accesses(program: &Segmented) -> Result<(), String>
                 };
                 let (kind, resources) = match soac {
                     Soac::Screma(op) => match op.semantic_state() {
-                        screma::SemanticState::Segmented { resources, .. } => ("Screma", resources),
+                        screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) => {
+                            ("Screma", resources)
+                        }
                         screma::SemanticState::Serial => continue,
                     },
-                    Soac::Filter(op) => ("Filter", &op.state.resources),
+                    Soac::Filter(op) => ("Filter", &op.state.segment.resources),
                     Soac::Hist(_) => continue,
                 };
                 if !resource_accesses_are_canonical(resources) {
@@ -195,11 +198,11 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             inputs,
             form,
             result_state,
-            state: screma::SemanticState::Segmented {
+            state: screma::SemanticState::Segmented(SegmentedMetadata {
                 space: facts.space,
                 output_slots: facts.output_slots,
                 resources: facts.resources,
-            },
+            }),
         }),
         Soac::Filter(op) => {
             let output = match op.state.output {
@@ -215,10 +218,12 @@ fn reify_soac(soac: Soac<Raw>, facts: Facts) -> Soac<Semantic> {
             Soac::Filter(filter::Op {
                 body: op.body,
                 state: filter::SemanticState {
-                    space: facts.space,
+                    segment: SegmentedMetadata {
+                        space: facts.space,
+                        output_slots: facts.output_slots,
+                        resources: facts.resources,
+                    },
                     output,
-                    output_slots: facts.output_slots,
-                    resources: facts.resources,
                 },
             })
         }

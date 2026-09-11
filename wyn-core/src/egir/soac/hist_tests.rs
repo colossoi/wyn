@@ -119,6 +119,40 @@ fn bucket_results_put_all_indices_before_all_values() {
 }
 
 #[test]
+fn decoder_routes_mixed_guards_ranks_and_components() {
+    let (mut op, _) = general_histogram();
+    op.form.operations[1].emission = Emission::Guarded;
+    let mut third = op.form.operations[0].clone();
+    third.emission = Emission::Guarded;
+    op.form.operations.push(third);
+    let results = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    let decoded = op.form.decode_results(&results).unwrap().collect::<Vec<_>>();
+    assert_eq!(decoded.len(), 3);
+    assert_eq!(decoded[0].guard, None);
+    assert_eq!(decoded[1].guard, Some(&results[0]));
+    assert_eq!(decoded[2].guard, Some(&results[1]));
+    assert_eq!(decoded[0].indices, &results[2..4]);
+    assert_eq!(decoded[1].indices, &results[4..5]);
+    assert_eq!(decoded[2].indices, &results[5..7]);
+    assert_eq!(decoded[0].values, &results[7..9]);
+    assert_eq!(decoded[1].values, &results[9..10]);
+    assert_eq!(decoded[2].values, &results[10..12]);
+    for (decoded, operation) in decoded.iter().zip(&op.form.operations) {
+        assert!(std::ptr::eq(decoded.operation, operation));
+    }
+}
+
+#[test]
+fn decoder_rejects_missing_and_extra_results() {
+    let (op, _) = general_histogram();
+    for count in [0, 5, 7] {
+        let results = vec![0; count];
+        let error = op.form.decode_results(&results).err().expect("invalid result arity");
+        assert!(error.contains("expected 6"), "{error}");
+    }
+}
+
+#[test]
 fn shared_lambda_validation_rejects_invalid_bucket_and_reducer() {
     let (mut op, nodes) = general_histogram();
     op.form.bucket.body = crate::egir::soac::LambdaBody::Identity;

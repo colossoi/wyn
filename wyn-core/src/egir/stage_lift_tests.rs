@@ -1,6 +1,7 @@
 use super::*;
 use crate::egir::analysis::GraphAnalysis;
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::types;
 
 use crate::ast::{Span, TypeName};
@@ -375,11 +376,11 @@ fn parallel_soac_use_is_specialized_and_captures_the_lifted_value() {
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,
                 }],
-                state: screma::SemanticState::Segmented {
+                state: screma::SemanticState::Segmented(SegmentedMetadata {
                     space: SegSpace::new(SegExtent::Fixed(64)),
                     output_slots: vec![],
                     resources: vec![],
-                },
+                }),
             }),
         )),
         operands: smallvec![entry_graph.operand_ref(input)],

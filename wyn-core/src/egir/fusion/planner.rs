@@ -158,7 +158,7 @@ fn routed(
     let mut transform = None;
     for (slot, input) in consumer.inputs.iter().enumerate() {
         if let Some((field, slices)) = route(snapshot, input.node, producer) {
-            let post = field.checked_sub(form.reduction_result_count())?;
+            let post = field.checked_sub(form.layout().reduction_result_count())?;
             if post >= form.post.result_types.len() || transform.as_ref().is_some_and(|old| *old != slices)
             {
                 return None;
@@ -362,7 +362,7 @@ fn vertical(
     }
     let routed_outputs = routes
         .iter()
-        .map(|route| producer.outputs[a.reduction_result_count() + route.producer_post_output])
+        .map(|route| producer.outputs[a.layout().reduction_result_count() + route.producer_post_output])
         .collect::<Vec<_>>();
     let consumers = snapshot.graph.consumers(&routed_outputs).ok()?;
     if consumers.len() > 1
@@ -578,7 +578,7 @@ fn filter(
             if !form.scans.is_empty()
                 || form.reductions.is_empty()
                 || !form.post.result_types.is_empty()
-                || form.pre.result_types.len() != form.reduction_input_count()
+                || form.pre.result_types.len() != form.layout().reduction_input_count()
                 || op.inputs.is_empty()
                 || op.inputs.iter().any(|input| producer.outputs.as_slice() != [input.node])
             {

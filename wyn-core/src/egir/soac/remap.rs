@@ -1,5 +1,6 @@
 //! Structural SOAC remapping shared by resource allocation and physicalization.
 
+use crate::egir::soac::SegmentedMetadata;
 use crate::LookupMap;
 
 use super::metadata::Metadata;
@@ -102,8 +103,8 @@ where
         })
     }
 
-    pub(crate) fn segment(&mut self, segment: screma::Segmented<R>) -> Result<screma::Segmented<S>, E> {
-        Ok(screma::Segmented {
+    pub(crate) fn segment(&mut self, segment: SegmentedMetadata<R>) -> Result<SegmentedMetadata<S>, E> {
+        Ok(SegmentedMetadata {
             space: self.space(segment.space)?,
             output_slots: segment.output_slots,
             resources: segment

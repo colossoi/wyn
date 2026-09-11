@@ -3,6 +3,7 @@ use crate::ast::TypeName;
 use crate::egir::graph_ops;
 use crate::egir::program::{OutputSlotId, ResourceId, SemanticResourceRef};
 use crate::egir::slice::ValueProducerPhase;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::soac::{filter, hist, remap, screma};
 use crate::egir::types::{
     EGraph, EffectOp, Family, PureOp, Raw, ResourceAccess, SegExtent, SegResourceAccess, SegSpace,
@@ -346,7 +347,7 @@ fn resource_conversion_keeps_space_values_and_resource_identities_distinct() {
         Ok::<_, ()>(resource)
     });
     let mapped = remap
-        .segment(screma::Segmented {
+        .segment(SegmentedMetadata {
             space: SegSpace::from_dims(vec![
                 SegExtent::Fixed(8),
                 SegExtent::HostProvided {

@@ -516,9 +516,13 @@ entry evens(xs: []i32) []i32 =
             _ => None,
         })
         .expect("entry retains a semantic Filter");
-    assert_eq!(filter.state.output_slots, [egir::program::OutputSlotId(0)]);
+    assert_eq!(
+        filter.state.segment.output_slots,
+        [egir::program::OutputSlotId(0)]
+    );
     assert!(filter
         .state
+        .segment
         .resources
         .iter()
         .any(|access| { access.resource == output_resource && access.access != ResourceAccess::Read }));

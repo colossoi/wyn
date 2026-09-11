@@ -113,6 +113,15 @@ pub struct HistForm {
     pub operations: Vec<HistOp>,
 }
 
+/// One operation's results in the bucket lambda's guards/indices/values ABI.
+#[derive(Debug)]
+pub(crate) struct BucketResults<'a, T> {
+    pub operation: &'a HistOp,
+    pub guard: Option<&'a T>,
+    pub indices: &'a [T],
+    pub values: &'a [T],
+}
+
 impl_metadata!(HistForm, |form, visit| {
     let Self { bucket, operations } = form;
     visit.lambda(bucket);
@@ -145,6 +154,43 @@ impl_metadata!(HistForm, |form, visit| {
 });
 
 impl HistForm {
+    /// Check the complete result arity before exposing any operation slices.
+    pub(crate) fn decode_results<'a, T>(
+        &'a self,
+        results: &'a [T],
+    ) -> Result<impl Iterator<Item = BucketResults<'a, T>> + 'a, String> {
+        let guards = self.guard_count();
+        let indices = self.index_count();
+        let expected = guards + indices + self.value_count();
+        if results.len() != expected {
+            return Err(format!(
+                "histogram bucket returned {} results, expected {expected}",
+                results.len()
+            ));
+        }
+        let (guards, rest) = results.split_at(guards);
+        let (indices, values) = rest.split_at(indices);
+        let mut guards = guards.iter();
+        let mut indices = indices;
+        let mut values = values;
+        Ok(self.operations.iter().map(move |operation| {
+            let guard = match operation.emission {
+                Emission::Always => None,
+                Emission::Guarded => guards.next(),
+            };
+            let (operation_indices, rest) = indices.split_at(operation.index_count());
+            indices = rest;
+            let (operation_values, rest) = values.split_at(operation.value_count());
+            values = rest;
+            BucketResults {
+                operation,
+                guard,
+                indices: operation_indices,
+                values: operation_values,
+            }
+        }))
+    }
+
     pub(crate) fn guard_count(&self) -> usize {
         self.operations.iter().map(HistOp::guard_count).sum()
     }

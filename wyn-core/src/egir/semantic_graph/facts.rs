@@ -4,6 +4,7 @@ use super::{
     SemanticOpId, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId,
 };
 use crate::egir::ir::{BodySite, ResultDestination};
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::PureOp;
 use crate::egir::types::{CallEffects, EffectOp, ResultBinding, ValueKind};
 use crate::types::TypeExt;
@@ -299,10 +300,10 @@ fn resources<R: GraphResource + Copy + Ord>(
     let graph = analysis.graph();
     match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
-            screma::SemanticState::Segmented { resources, .. } => resources.clone(),
+            screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) => resources.clone(),
             screma::SemanticState::Serial => read_resources(analysis, effect),
         },
-        SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => op.state.resources.clone(),
+        SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => op.state.segment.resources.clone(),
         SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) => {
             let mut resources = read_resources(analysis, effect);
             for destination in op

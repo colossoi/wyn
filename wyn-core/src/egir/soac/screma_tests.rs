@@ -184,6 +184,52 @@ fn validation_covers_input_operator_and_phase_result_contracts() {
 }
 
 #[test]
+fn physical_admission_requires_parallel_folds_to_be_decomposed() {
+    use crate::egir::program::{physicalize_soac, OutputSlotId, PhysicalResourceTable};
+    use crate::egir::types::{Scheduled, SegExtent, SegSpace, Soac};
+    use crate::LookupMap;
+
+    let raw = valid_scan_op();
+    let op = Op::<Scheduled> {
+        inputs: raw.inputs,
+        form: raw.form,
+        result_state: raw.result_state,
+        state: ScheduledState::Segmented(SegmentedMetadata {
+            space: SegSpace::from_dims(vec![SegExtent::Fixed(4)]).unwrap(),
+            output_slots: vec![OutputSlotId(3)],
+            resources: vec![],
+        }),
+    };
+    let nodes = LookupMap::new();
+    let places = LookupMap::new();
+    let resources = PhysicalResourceTable::default();
+    let mut reduce = op.clone();
+    let scan = reduce.form.scans.pop().unwrap();
+    reduce.form.reductions.push(Reduce {
+        operator: scan.operator,
+        neutral: scan.neutral,
+        commutative: true,
+    });
+    reduce.form.post = Lambda::identity(vec![]);
+    for fold in [op.clone(), reduce] {
+        let error = physicalize_soac(Soac::Screma(fold), &nodes, &places, &resources).unwrap_err();
+        assert!(error.contains("scheduled parallel fold"), "{error}");
+    }
+    let mut map = op;
+    map.form.scans.clear();
+    let physical = physicalize_soac(Soac::Screma(map), &nodes, &places, &resources).unwrap();
+    let Soac::Screma(Op {
+        state: PhysicalState::Segmented(segment),
+        ..
+    }) = physical
+    else {
+        panic!("a scheduled map must retain its segmented state");
+    };
+    assert_eq!(segment.output_slots, [OutputSlotId(3)]);
+    assert_eq!(segment.space.dims(), &[SegExtent::Fixed(4)]);
+}
+
+#[test]
 fn node_traversal_covers_every_lambda_and_neutral() {
     let unit = scalar(TypeName::Unit);
     let mut op = Op::<Semantic> {

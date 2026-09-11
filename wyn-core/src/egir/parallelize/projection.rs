@@ -3,6 +3,7 @@
 use super::*;
 use crate::egir;
 use crate::egir::analysis::GraphAnalysis;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::{graph_projector, program};
 use crate::interface;
 use crate::types;
@@ -177,7 +178,9 @@ pub(super) fn project_single_effect_body(
 /// Resolve side-effect ownership from explicit output routes.
 pub(super) fn side_effect_output_slots(entry: &program::PlannedEntry, effect: &SideEffect) -> Vec<usize> {
     if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
-        if let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() {
+        if let screma::SemanticState::Segmented(SegmentedMetadata { output_slots, .. }) =
+            op.semantic_state()
+        {
             return output_slots.iter().map(|slot| slot.0).collect();
         }
     }

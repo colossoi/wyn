@@ -17,6 +17,7 @@ use crate::compile_thru_ssa;
 use crate::compile_thru_tlc;
 use crate::egir;
 use crate::egir::soac::screma;
+use crate::egir::soac::SegmentedMetadata;
 use crate::error;
 use crate::interface;
 use crate::lower_egir_to_ssa;
@@ -555,7 +556,8 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
             if !op.is_map() {
                 return None;
             }
-            let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() else {
+            let screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) = op.semantic_state()
+            else {
                 return None;
             };
             Some((
@@ -2049,7 +2051,8 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
                 return None;
             };
-            let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
+            let screma::SemanticState::Segmented(SegmentedMetadata { space, .. }) = op.semantic_state()
+            else {
                 return None;
             };
             Some((space, op.is_reduce()))

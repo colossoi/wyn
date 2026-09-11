@@ -10,6 +10,7 @@ use wyn_core::egir::program::{
 };
 use wyn_core::egir::soac::screma::ScremaOperands;
 use wyn_core::egir::soac::Lambda;
+use wyn_core::egir::soac::SegmentedMetadata;
 use wyn_core::egir::soac::{filter, hist, screma};
 use wyn_core::egir::types::{
     EffectOp, GraphResource as WynGraphResource, Physical, PlaceDestination, Raw, ResultDestination,
@@ -1196,11 +1197,11 @@ impl<R: SnapshotResource> SnapshotPhase for Semantic<R> {
             screma::SemanticState::Serial => {
                 graph_semantic_soac_state::<Self>(group, "serial", None, &[], &[], None)
             }
-            screma::SemanticState::Segmented {
+            screma::SemanticState::Segmented(SegmentedMetadata {
                 space,
                 output_slots,
                 resources,
-            } => graph_semantic_soac_state::<Self>(
+            }) => graph_semantic_soac_state::<Self>(
                 group,
                 "segmented",
                 Some(space),
@@ -1215,9 +1216,9 @@ impl<R: SnapshotResource> SnapshotPhase for Semantic<R> {
         graph_semantic_soac_state::<Self>(
             group,
             "segmented",
-            Some(&op.state.space),
-            &op.state.output_slots,
-            &op.state.resources,
+            Some(&op.state.segment.space),
+            &op.state.segment.output_slots,
+            &op.state.segment.resources,
             Some(graph_filter_output::<Self>(&op.state.output)),
         )
     }

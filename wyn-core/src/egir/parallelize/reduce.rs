@@ -5,6 +5,7 @@ use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
 use super::*;
 use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{OperandRef, ResultBinding};
 use crate::interface;
 use crate::op;
@@ -23,7 +24,7 @@ pub(super) struct ReduceCandidate {
     accumulators: Vec<ReductionAccumulator>,
     phase1_width: u32,
     phase2_width: u32,
-    segment: screma::Segmented<SemanticResourceRef>,
+    segment: SegmentedMetadata<SemanticResourceRef>,
 }
 
 struct ReductionAccumulator {
@@ -249,7 +250,7 @@ pub(super) fn analyze_reduce_candidate(
     let serial = located.serial_recipe();
     let site = located.site;
     let side_effect = located.effect;
-    let reduction_results = located.op.form.reduction_result_count();
+    let reduction_results = located.op.form.layout().reduction_result_count();
     let n_maps = located.op.form.post.result_types.len();
     let operands =
         screma::ScremaOperands::decode(located.op, &side_effect.operands, side_effect.result.as_ref())?;
@@ -299,7 +300,7 @@ pub(super) fn analyze_reduce_candidate(
     }))
 }
 impl BoundReduce {
-    pub(super) fn segment(&self) -> &screma::Segmented<SemanticResourceRef> {
+    pub(super) fn segment(&self) -> &SegmentedMetadata<SemanticResourceRef> {
         &self.candidate.segment
     }
 

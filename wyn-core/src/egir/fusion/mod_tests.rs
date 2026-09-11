@@ -1,6 +1,7 @@
 use super::*;
 use crate::compile_thru_tlc;
 use crate::egir;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 use crate::lower_egir_to_ssa;
 use crate::tlc;
@@ -45,8 +46,8 @@ fn assert_screma_and_lower(allocated: egir::ResourcesAllocated, scans: usize) {
         })
         .collect::<Vec<_>>();
     assert_eq!(scremas.len(), 1);
-    assert_eq!(scremas[0].form.scan_input_count(), scans);
-    assert_eq!(scremas[0].form.reduction_result_count(), 1);
+    assert_eq!(scremas[0].form.layout().scan_input_count(), scans);
+    assert_eq!(scremas[0].form.layout().reduction_result_count(), 1);
     assert_eq!(scremas[0].form.post.result_types.len(), 1);
     assert!(scremas[0].validate().is_ok());
 
@@ -232,7 +233,9 @@ fn horizontal_fusion_rejects_input_resource_write_hazards() {
     let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
         panic!("map");
     };
-    let crate::egir::soac::screma::SemanticState::Segmented { resources, .. } = &mut op.state else {
+    let crate::egir::soac::screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) =
+        &mut op.state
+    else {
         panic!("segmented map");
     };
     resources.iter_mut().find(|access| access.access == ResourceAccess::Read).unwrap().access =

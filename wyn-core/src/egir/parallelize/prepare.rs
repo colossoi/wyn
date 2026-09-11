@@ -5,6 +5,7 @@
 //! scheduler in phase-specific SOAC states.
 
 use crate::egir;
+use crate::egir::soac::SegmentedMetadata;
 use crate::flow::BlockId;
 use crate::LookupMap;
 
@@ -129,7 +130,11 @@ fn schedule_soac_with_mode(
             state: schedule_screma_state(state, parallel_screma, serial),
         }),
         Soac::Filter(filter::Op { body, state }) => {
-            let filter::SemanticState { space, output, .. } = state;
+            let filter::SemanticState {
+                segment: SegmentedMetadata { space, .. },
+                output,
+                ..
+            } = state;
             let state = match filter_plan {
                 None => filter::ScheduledState::Loop {
                     space,
@@ -184,16 +189,10 @@ fn schedule_screma_state(
 ) -> screma::ScheduledState<SemanticResourceRef> {
     match state {
         screma::SemanticState::Serial => screma::ScheduledState::Serial,
-        screma::SemanticState::Segmented {
-            space,
-            output_slots,
-            resources,
-        } if !serial && parallel => screma::ScheduledState::Segmented(screma::Segmented {
-            space,
-            output_slots,
-            resources,
-        }),
-        screma::SemanticState::Segmented { .. } => screma::ScheduledState::Serial,
+        screma::SemanticState::Segmented(segment) if !serial && parallel => {
+            screma::ScheduledState::Segmented(segment)
+        }
+        screma::SemanticState::Segmented(_) => screma::ScheduledState::Serial,
     }
 }
 

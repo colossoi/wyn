@@ -9,6 +9,7 @@
 
 use crate::egir;
 use crate::egir::ir::BodySite;
+use crate::egir::soac::SegmentedMetadata;
 use crate::ssa;
 use crate::types;
 use std::collections::HashSet;
@@ -431,7 +432,7 @@ fn filter_runtime_array_plan(
     consumers: &HashSet<SemanticOpId>,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
     let filter::SemanticState {
-        space,
+        segment: SegmentedMetadata { space, .. },
         output: filter::Output::Runtime(runtime),
         ..
     } = &op.state
@@ -525,7 +526,8 @@ fn operation_result_plan(
     source_site: SideEffectSite,
     kind: FixedMaterializationKind,
 ) -> Result<Option<OperationMaterializationPlan>, String> {
-    let screma::SemanticState::Segmented { space, resources, .. } = op.semantic_state() else {
+    let screma::SemanticState::Segmented(SegmentedMetadata { space, resources, .. }) = op.semantic_state()
+    else {
         return Ok(None);
     };
     if !op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
@@ -555,7 +557,7 @@ fn operation_result_plan(
     if !projection.source_effects().iter().filter(|site| **site != source_site).all(|site| {
         matches!(&entry.graph.skeleton.effect(*site).kind,
             SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
-                if matches!(op.semantic_state(), screma::SemanticState::Segmented { output_slots, resources, .. }
+                if matches!(op.semantic_state(), screma::SemanticState::Segmented(SegmentedMetadata { output_slots, resources, .. })
                     if output_slots.is_empty()
                         && op.result_state.iter().all(|result| result.ownership == types::SoacOwnership::Fresh)
                         && resources.iter().all(|resource| resource.access == ResourceAccess::Read)))
@@ -833,7 +835,7 @@ fn supports_parallel_prefix_consumer(entry: &AllocatedEntry, site: SideEffectSit
             if op.is_map()
                 && op.form.post.is_identity()
                 && !op.form.post.result_types.is_empty()
-                && matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
+                && matches!(op.semantic_state(), screma::SemanticState::Segmented(_))
     )
 }
 
@@ -909,7 +911,7 @@ fn has_segmented_screma_consumer(
         matches!(
             soac,
             Soac::Screma(op)
-                if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. })
+                if matches!(op.semantic_state(), screma::SemanticState::Segmented(_))
         )
     })
 }
@@ -1105,9 +1107,13 @@ fn materialize_runtime_array_result(
         Soac::Filter(filter::Op {
             state:
                 filter::SemanticState {
+                    segment:
+                        SegmentedMetadata {
+                            output_slots,
+                            resources,
+                            ..
+                        },
                     output: filter_output,
-                    output_slots,
-                    resources,
                     ..
                 },
             ..
@@ -1208,11 +1214,11 @@ fn configure_operation_materialization(
     else {
         return Err("fixed materialization projection did not retain a Screma operation".into());
     };
-    let screma::SemanticState::Segmented {
+    let screma::SemanticState::Segmented(SegmentedMetadata {
         output_slots,
         resources,
         ..
-    } = op.semantic_state_mut()
+    }) = op.semantic_state_mut()
     else {
         return Err("fixed materialization Screma was not segmented".into());
     };
@@ -1577,7 +1583,7 @@ fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[Value
             .filter(|site| {
                 matches!(&graph.skeleton.effect(*site).kind,
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op)))
-                    if matches!(op.semantic_state(), screma::SemanticState::Segmented { .. }))
+                    if matches!(op.semantic_state(), screma::SemanticState::Segmented(_)))
             })
             .collect::<HashSet<_>>();
         sites
@@ -1596,7 +1602,8 @@ fn refresh_resource_reads_for_values(graph: &mut AllocatedGraph, values: &[Value
         else {
             continue;
         };
-        let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+        let screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) = op.semantic_state_mut()
+        else {
             continue;
         };
         resources.retain(|access| access.access != ResourceAccess::Read);
@@ -1610,16 +1617,16 @@ fn retarget_input_metadata(graph: &mut AllocatedGraph, replacements: &[InputRepl
             let (inputs, segment) = match &mut effect.kind {
                 SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => {
                     let segment = match &mut op.state {
-                        screma::SemanticState::Segmented { space, resources, .. } => {
-                            Some((space, resources))
-                        }
+                        screma::SemanticState::Segmented(SegmentedMetadata {
+                            space, resources, ..
+                        }) => Some((space, resources)),
                         screma::SemanticState::Serial => None,
                     };
                     (&mut op.inputs, segment)
                 }
                 SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) => (
                     &mut op.body.inputs,
-                    Some((&mut op.state.space, &mut op.state.resources)),
+                    Some((&mut op.state.segment.space, &mut op.state.segment.resources)),
                 ),
                 _ => continue,
             };

@@ -282,7 +282,7 @@ pub(crate) fn execute_map_screma(
     }
 
     let executor = RegionExecutor::new(program);
-    let mut outputs = vec![Vec::with_capacity(len); op.form.result_count()];
+    let mut outputs = vec![Vec::with_capacity(len); op.form.layout().result_count()];
     for index in 0..len {
         let parameters = inputs.iter().map(|input| input[index].clone()).collect::<Vec<_>>();
         let mapped = executor.call_lambda(&op.form.pre, &parameters, &[])?;

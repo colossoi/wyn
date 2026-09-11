@@ -38,6 +38,7 @@ use super::types::{
     EGraph, GraphResource, ResourceAccess, Semantic, SideEffectKind, Soac, SoacEffect, ValueId,
 };
 use crate::egir::analysis::GraphAnalysis;
+use crate::egir::soac::SegmentedMetadata;
 use crate::error::CompilerError;
 use crate::flow::BlockId;
 use crate::LookupMap;
@@ -246,11 +247,11 @@ fn dead_seg_ops_in_graph<R: GraphResource>(
 ) -> DeadGraphPatch {
     let observable = |effect: &super::types::SideEffect<Semantic<R>>| match &effect.kind {
         SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) => match op.semantic_state() {
-            screma::SemanticState::Segmented {
+            screma::SemanticState::Segmented(SegmentedMetadata {
                 resources,
                 output_slots,
                 ..
-            } => !output_slots.is_empty() || resources.iter().any(|r| r.access != ResourceAccess::Read),
+            }) => !output_slots.is_empty() || resources.iter().any(|r| r.access != ResourceAccess::Read),
             screma::SemanticState::Serial => true,
         },
         _ => true,

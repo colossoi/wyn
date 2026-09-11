@@ -46,11 +46,13 @@ mod scan;
 mod schedule;
 
 use crate::egir;
+use crate::egir::kernel_index::emit_chunk_arithmetic;
+use crate::egir::soac::SegmentedMetadata;
 use crate::pipeline_descriptor;
 use filter::analyze_filter_candidate;
 use kernel::{
-    can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, emit_chunk_arithmetic,
-    synthesize_swap_wrapper, synthesize_u32_add_function,
+    can_chunk_view, can_clone_pure_subgraph, chunk_soac_inputs, chunk_view_like, synthesize_swap_wrapper,
+    synthesize_u32_add_function,
 };
 use model::{CandidateSelection, ParallelizeError, Result as ParallelizeResult};
 use planning::{make_screma_serial, LocatedScrema, SerialScremaRecipe};
@@ -122,7 +124,7 @@ impl BuiltPhase {
 
     fn for_segment(
         body: super::program::PlannedEntry,
-        segment: &screma::Segmented<SemanticResourceRef>,
+        segment: &SegmentedMetadata<SemanticResourceRef>,
     ) -> Self {
         let resources = merge_scheduled_resources(
             &declared_input_resources(&body.resource_declarations),
@@ -711,7 +713,7 @@ fn merge_scheduled_resources(
 }
 
 fn segmented_resources(
-    segment: &screma::Segmented<SemanticResourceRef>,
+    segment: &SegmentedMetadata<SemanticResourceRef>,
 ) -> Vec<SegResourceAccess<ResourceId>> {
     segment
         .resources

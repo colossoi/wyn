@@ -53,8 +53,8 @@ entry nested_redomap(xs: [4]i32) (i32, i32) =
     let Kind::Screma(form) = &snapshot.graph.group(consumer).unwrap().payload().kind else {
         panic!("expected composed consumer Screma");
     };
-    assert_eq!(form.reduction_result_count(), 1);
-    assert!(!form.pre.projectable(0..form.operator_input_count()));
+    assert_eq!(form.layout().reduction_result_count(), 1);
+    assert!(!form.pre.projectable(0..form.layout().operator_input_count()));
     snapshot.recipes = recipes;
 
     let planned = plan(snapshot, None).unwrap();
@@ -80,7 +80,7 @@ entry nested_redomap(xs: [4]i32) (i32, i32) =
         })
         .collect::<Vec<_>>();
     assert_eq!(scremas.len(), 1);
-    assert_eq!(scremas[0].form.reduction_result_count(), 2);
+    assert_eq!(scremas[0].form.layout().reduction_result_count(), 2);
     assert!(scremas[0].form.scans.is_empty());
     scremas[0].validate().unwrap();
     let optimized = egir::optimize_semantic_operations(program).unwrap();

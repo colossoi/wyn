@@ -7,6 +7,7 @@ use crate::ast::TypeName;
 use crate::builtins::catalog;
 use crate::egir::graph_ops::{alloca, materialize_place_backed_projections};
 use crate::egir::graph_ops::{emit_result_to_indexed_destination, rebind_physical_result};
+use crate::egir::kernel_index::emit_invocation_index;
 use crate::egir::soac::lambda::emit_physical_call;
 use crate::egir::soac::screma;
 use crate::egir::soac::Lambda;
@@ -121,8 +122,8 @@ fn expand_serial_screma(
         .map(|(&node, input)| (node, input.array.clone(), input.element()))
         .collect::<Vec<_>>();
     let len_input = (input_nids[0], first_input.array.clone());
-    let reduction_components = op.form.reduction_result_count();
-    let scan_components = op.form.scan_input_count();
+    let reduction_components = op.form.layout().reduction_result_count();
+    let scan_components = op.form.layout().scan_input_count();
     let post_count = op.form.post.result_types.len();
     let mut carried = Vec::new();
     let mut post_sinks = Vec::with_capacity(post_count);
@@ -385,7 +386,6 @@ pub(super) fn build_parallel_screma_map(
     callables: &CallableMap,
 ) -> Result<(), String> {
     let i32_type = Type::Constructed(TypeName::Int(32), vec![]);
-    let u32_type = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_type = Type::Constructed(TypeName::Bool, vec![]);
     let mut lane = None;
     let guarded = replace_effect_with_guarded_selection(
@@ -395,28 +395,7 @@ pub(super) fn build_parallel_screma_map(
             index: effect_index,
         },
         |graph| {
-            let known = catalog().known();
-            let thread = graph.intern_pure(
-                PureOp::Intrinsic {
-                    id: known.thread_id,
-                    overload_idx: 0,
-                },
-                smallvec![],
-                u32_type,
-                None,
-            );
-            let bitcast = catalog()
-                .conversion(&TypeName::Int(32), &TypeName::UInt(32))
-                .ok_or_else(|| "catalog has no structural u32-to-i32 conversion".to_owned())?;
-            let thread_lane = graph.intern_pure(
-                PureOp::Intrinsic {
-                    id: bitcast,
-                    overload_idx: 0,
-                },
-                smallvec![thread],
-                i32_type.clone(),
-                None,
-            );
+            let thread_lane = emit_invocation_index(graph, catalog().known().thread_id, &i32_type)?;
             lane = Some(thread_lane);
             let length = emit_seg_space_len(graph, space, &length_input, &i32_type);
             Ok(graph.intern_pure(

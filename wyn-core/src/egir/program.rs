@@ -7,6 +7,7 @@
 
 use crate::builtins;
 use crate::egir::analysis::GraphAnalysis;
+use crate::egir::soac::SegmentedMetadata;
 use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::LoweringProfile;
@@ -908,9 +909,9 @@ impl AllocatedEntry {
                     .map(|access| access.resource.0),
             );
             if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
-                if let screma::SemanticState::Segmented {
+                if let screma::SemanticState::Segmented(SegmentedMetadata {
                     resources: accesses, ..
-                } = op.semantic_state()
+                }) = op.semantic_state()
                 {
                     resources.extend(accesses.iter().map(|access| access.resource.0));
                 }
@@ -1026,7 +1027,9 @@ impl AllocatedEntry {
                         .map(|access| access.resource.0),
                 );
                 if let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind {
-                    if let screma::SemanticState::Segmented { resources, .. } = op.semantic_state() {
+                    if let screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) =
+                        op.semantic_state()
+                    {
                         used_resources.extend(resources.iter().map(|access| access.resource.0));
                     }
                 }

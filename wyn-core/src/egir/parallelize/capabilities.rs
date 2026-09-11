@@ -6,6 +6,7 @@
 
 use crate::egir::program::SemanticResourceRef;
 use crate::egir::soac::screma;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{ResourceAccess, Semantic};
 use crate::types;
 
@@ -18,7 +19,7 @@ pub(super) enum Strategy {
 }
 
 pub(super) fn classify(op: &screma::Op<Semantic<SemanticResourceRef>>) -> Strategy {
-    let reduction_results = op.form.reduction_result_count();
+    let reduction_results = op.form.layout().reduction_result_count();
     let reductions_ready = op
         .form
         .reductions
@@ -29,11 +30,11 @@ pub(super) fn classify(op: &screma::Op<Semantic<SemanticResourceRef>>) -> Strate
     let reductions_are_fresh =
         (0..reduction_results).all(|field| op.ownership(field) == Some(types::SoacOwnership::Fresh));
     let routed_post_results = match op.semantic_state() {
-        screma::SemanticState::Segmented {
+        screma::SemanticState::Segmented(SegmentedMetadata {
             output_slots,
             resources,
             ..
-        } => output_slots
+        }) => output_slots
             .len()
             .max(resources.iter().filter(|resource| resource.access != ResourceAccess::Read).count()),
         screma::SemanticState::Serial => 0,

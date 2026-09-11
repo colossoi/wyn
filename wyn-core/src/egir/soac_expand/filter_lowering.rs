@@ -7,6 +7,7 @@ use crate::builtins::catalog;
 use crate::egir::graph_ops::{
     alloca, emit_place_index_store, emit_storage_store, intern_storage_view, intern_u32, load, store,
 };
+use crate::egir::kernel_index::{emit_chunk_arithmetic, emit_invocation_index};
 use crate::egir::soac::filter;
 use crate::egir::soac::lambda::emit_physical_call;
 use crate::egir::soac::Lambda;
@@ -37,7 +38,6 @@ pub(super) struct FilterLoop<'a> {
     pub(super) read_inputs: Vec<(ValueId, Type<TypeName>, Type<TypeName>)>,
     /// The output element type returned by the canonical map lambda.
     pub(super) output_elem_ty: Type<TypeName>,
-    pub(super) output: filter::Output<BindingRef>,
     pub(super) map: &'a Lambda,
     pub(super) predicate: &'a Lambda,
     pub(super) callables: &'a CallableMap,
@@ -74,56 +74,37 @@ pub(super) fn expand_filter(
         })
         .collect::<Result<Vec<_>, String>>()?;
     let output_elem_ty = op.body.output_element_type();
-    let (output, plan) = match &op.state {
-        filter::ScheduledState::Loop { storage, .. } => (storage.clone(), filter::Plan::Loop),
-        filter::ScheduledState::Pipeline { storage, plan, .. } => {
-            let output = filter::Output::Runtime(filter::RuntimeOutput {
-                capacity: filter::RuntimeCapacity::LikeInput {
-                    input: filter::FilterInputId(0),
-                },
-                backing: filter::RuntimeBacking::Bound(storage.data),
-                length: filter::RuntimeLength::Stored(storage.length),
-            });
-            let config = filter::ParallelConfig {
-                buffers: plan.buffers,
-                scan_workgroup_width: plan.scan_workgroup_width,
-            };
-            let plan = match plan.stage {
-                filter::ParallelStage::Flags => filter::Plan::Flags(config),
-                filter::ParallelStage::Scan => filter::Plan::Scan(config),
-                filter::ParallelStage::Scatter => filter::Plan::Scatter(config),
-            };
-            (output, plan)
-        }
-    };
     let result_nid =
         effect.value_result().ok_or_else(|| "Filter has no by-value result root".to_owned())?;
     let spec = FilterLoop {
         read_inputs,
         output_elem_ty,
-        output,
         map: &op.body.map,
         predicate: &op.body.predicate,
         callables,
         result_node: result_nid,
     };
-    match plan {
-        filter::Plan::Flags(config) => {
-            build_filter_flags(graph, bid, idx, spec, config.buffers.flags, next_effect)?
+    match &op.state {
+        filter::ScheduledState::Loop { storage, .. } => {
+            build_filter_loop(graph, bid, idx, spec, storage, next_effect)?
         }
-        filter::Plan::Scan(config) => build_filter_scan(
-            graph,
-            bid,
-            idx,
-            spec,
-            config.buffers,
-            config.scan_workgroup_width,
-            next_effect,
-        ),
-        filter::Plan::Scatter(config) => {
-            build_filter_scatter(graph, bid, idx, spec, config.buffers, next_effect)?
-        }
-        filter::Plan::Loop => build_filter_loop(graph, bid, idx, spec, next_effect)?,
+        filter::ScheduledState::Pipeline { storage, plan, .. } => match plan.stage {
+            filter::ParallelStage::Flags => {
+                build_filter_flags(graph, bid, idx, spec, plan.buffers.flags, next_effect)?
+            }
+            filter::ParallelStage::Scan => build_filter_scan(
+                graph,
+                bid,
+                idx,
+                spec,
+                plan.buffers,
+                plan.scan_workgroup_width,
+                next_effect,
+            )?,
+            filter::ParallelStage::Scatter => {
+                build_filter_scatter(graph, bid, idx, spec, plan.buffers, *storage, next_effect)?
+            }
+        },
     }
     Ok(())
 }
@@ -164,16 +145,13 @@ pub(super) fn build_filter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: FilterLoop<'_>,
+    output: &filter::Output<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
-    if let filter::Output::Runtime(runtime) = &spec.output {
-        let filter::RuntimeBacking::Bound(data) = runtime.backing else {
-            panic!("scheduled runtime filter has no backing storage");
-        };
-        build_runtime_filter_loop(graph, bid, idx_in_block, &spec, data, next_effect)?;
-        return Ok(());
+    if let filter::Output::Runtime(runtime) = output {
+        return build_runtime_filter_loop(graph, bid, idx_in_block, &spec, *runtime, next_effect);
     }
-    let filter::Output::Local { capacity, ownership } = &spec.output else {
+    let filter::Output::Local { capacity, ownership } = output else {
         unreachable!()
     };
     let i32_ty = Type::Constructed(TypeName::Int(32), vec![]);
@@ -349,18 +327,6 @@ fn build_serial_filter_cfg(
     Ok(after_count)
 }
 
-fn filter_thread_index(graph: &mut EGraph<Physical>) -> ValueId {
-    graph.intern_pure(
-        PureOp::Intrinsic {
-            id: catalog().known().thread_id,
-            overload_idx: 0,
-        },
-        smallvec![],
-        Type::Constructed(TypeName::UInt(32), vec![]),
-        None,
-    )
-}
-
 pub(super) fn build_filter_flags(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
@@ -376,8 +342,8 @@ pub(super) fn build_filter_flags(
     let drop = graph.skeleton.create_block();
     let pred_merge = graph.skeleton.create_block();
     graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
-    let gid = filter_thread_index(graph);
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
+    let gid = emit_invocation_index(graph, catalog().known().thread_id, &u32_ty)?;
     let len = emit_length(
         graph,
         filter_primary_input(&spec).0,
@@ -442,7 +408,7 @@ pub(super) fn build_filter_scan(
     work: filter::WorkBuffers<BindingRef>,
     scan_workgroup_width: u32,
     next_effect: &mut IdSource<EffectToken>,
-) {
+) -> Result<(), String> {
     graph.skeleton.blocks[bid].side_effects.drain(idx..);
     let header = graph.skeleton.create_block();
     let body = graph.skeleton.create_block();
@@ -450,85 +416,13 @@ pub(super) fn build_filter_scan(
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let zero = intern_u32(graph, 0, None);
     let one = intern_u32(graph, 1, None);
-    let gid = filter_thread_index(graph);
     let input_len = emit_length(
         graph,
         filter_primary_input(&spec).0,
         &filter_primary_input(&spec).1,
         &u32_ty,
     );
-    let nwg = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: catalog().known().num_workgroups,
-            overload_idx: 0,
-        },
-        smallvec![],
-        u32_ty.clone(),
-        None,
-    );
-    let wg_width = graph.intern_pure(
-        PureOp::Uint(scan_workgroup_width.to_string()),
-        smallvec![],
-        u32_ty.clone(),
-        None,
-    );
-    let total_threads = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Multiply),
-        smallvec![nwg, wg_width],
-        u32_ty.clone(),
-        None,
-    );
-    let total_minus_one = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Subtract),
-        smallvec![total_threads, one],
-        u32_ty.clone(),
-        None,
-    );
-    let len_plus = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Add),
-        smallvec![input_len, total_minus_one],
-        u32_ty.clone(),
-        None,
-    );
-    let chunk_size = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Divide),
-        smallvec![len_plus, total_threads],
-        u32_ty.clone(),
-        None,
-    );
-    let raw_chunk_start = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Multiply),
-        smallvec![gid, chunk_size],
-        u32_ty.clone(),
-        None,
-    );
-    let u32_min = catalog()
-        .specialize_numeric(catalog().known().min, &TypeName::UInt(32))
-        .expect("catalog has u32 min specialization");
-    let chunk_start = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: u32_min,
-            overload_idx: 0,
-        },
-        smallvec![raw_chunk_start, input_len],
-        u32_ty.clone(),
-        None,
-    );
-    let remaining = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Subtract),
-        smallvec![input_len, chunk_start],
-        u32_ty.clone(),
-        None,
-    );
-    let chunk_len = graph.intern_pure(
-        PureOp::Intrinsic {
-            id: u32_min,
-            overload_idx: 0,
-        },
-        smallvec![chunk_size, remaining],
-        u32_ty.clone(),
-        None,
-    );
+    let (gid, chunk_start, chunk_len) = emit_chunk_arithmetic(graph, scan_workgroup_width, input_len)?;
     graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
         target: header,
         args: graph.admit_flow_values([zero, zero]),
@@ -597,6 +491,7 @@ pub(super) fn build_filter_scan(
         spec.result_node,
         ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
     );
+    Ok(())
 }
 
 pub(super) fn build_filter_scatter(
@@ -605,6 +500,7 @@ pub(super) fn build_filter_scatter(
     idx: usize,
     spec: FilterLoop<'_>,
     work: filter::WorkBuffers<BindingRef>,
+    storage: filter::RuntimeStorage<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let replacement = replace_effect_with_continuation(
@@ -622,7 +518,7 @@ pub(super) fn build_filter_scatter(
     let merge = graph.skeleton.create_block();
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let bool_ty = Type::Constructed(TypeName::Bool, vec![]);
-    let gid = filter_thread_index(graph);
+    let gid = emit_invocation_index(graph, catalog().known().thread_id, &u32_ty)?;
     let len = emit_length(
         graph,
         filter_primary_input(&spec).0,
@@ -659,16 +555,10 @@ pub(super) fn build_filter_scatter(
         None,
     );
     let kept = filter_kept_value(graph, write, gid, &spec, next_effect)?;
-    let (out_binding, len_binding) = match &spec.output {
-        filter::Output::Runtime(filter::RuntimeOutput {
-            backing: filter::RuntimeBacking::Bound(data),
-            length: filter::RuntimeLength::Stored(length),
-            ..
-        }) => (data, length),
-        _ => panic!("parallel filter scatter requires runtime entry output"),
-    };
-    let out_binding = *out_binding;
-    let len_binding = *len_binding;
+    let filter::RuntimeStorage {
+        data: out_binding,
+        length: len_binding,
+    } = storage;
     let output = intern_storage_view(graph, out_binding, spec.output_elem_ty.clone(), None);
     emit_storage_store(
         graph,
@@ -718,9 +608,12 @@ fn build_runtime_filter_loop(
     bid: BlockId,
     idx_in_block: usize,
     spec: &FilterLoop<'_>,
-    scratch_out: BindingRef,
+    output: filter::RuntimeOutput<BindingRef>,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
+    let filter::RuntimeBacking::Bound(scratch_out) = output.backing else {
+        panic!("scheduled runtime filter has no backing storage");
+    };
     let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let scratch_view = intern_storage_view(graph, scratch_out, spec.output_elem_ty.clone(), None);
     let replacement = replace_effect_with_continuation(
@@ -746,12 +639,8 @@ fn build_runtime_filter_loop(
         next_effect,
     )?;
 
-    if let filter::Output::Runtime(filter::RuntimeOutput {
-        length: filter::RuntimeLength::Stored(length),
-        ..
-    }) = &spec.output
-    {
-        let length_view = intern_storage_view(graph, *length, u32_ty.clone(), None);
+    if let filter::RuntimeLength::Stored(length) = output.length {
+        let length_view = intern_storage_view(graph, length, u32_ty.clone(), None);
         emit_storage_store(
             graph,
             after,

@@ -7,6 +7,7 @@ use crate::ast;
 use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{OperandRef, ResultBinding};
 use crate::interface;
 use crate::op;
@@ -452,7 +453,7 @@ pub(super) struct ScanCandidate {
     outputs: Vec<ScanOutput>,
     direct_output: bool,
     phase1_width: u32,
-    segment: screma::Segmented<SemanticResourceRef>,
+    segment: SegmentedMetadata<SemanticResourceRef>,
 }
 
 impl ScanCandidate {
@@ -518,7 +519,7 @@ pub(super) fn analyze_scan_candidate(
         input_views.push((operand, input.clone()));
     }
 
-    let reduction_results = located.op.form.reduction_result_count();
+    let reduction_results = located.op.form.layout().reduction_result_count();
     let results = operands.result_fields();
     let mut outputs = Vec::with_capacity(located.op.form.post.result_types.len());
     for post_field in 0..located.op.form.post.result_types.len() {
@@ -603,7 +604,7 @@ pub(super) fn analyze_scan_candidate(
 }
 
 impl BoundScan {
-    pub(super) fn segment(&self) -> &screma::Segmented<SemanticResourceRef> {
+    pub(super) fn segment(&self) -> &SegmentedMetadata<SemanticResourceRef> {
         &self.candidate.segment
     }
 

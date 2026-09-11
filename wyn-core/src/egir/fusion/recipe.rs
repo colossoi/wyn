@@ -154,23 +154,16 @@ pub(super) struct ScremaForm {
     pub post: Lambda,
 }
 impl ScremaForm {
-    pub fn scan_input_count(&self) -> usize {
-        self.scans.iter().map(|scan| scan.neutral.len()).sum()
+    pub fn layout(&self) -> crate::egir::soac::screma::Layout {
+        crate::egir::soac::screma::Layout::new(
+            self.scans.iter().map(|scan| scan.neutral.len()),
+            self.reductions.iter().map(|reduction| reduction.neutral.len()),
+            self.post.result_types.len(),
+        )
     }
-    pub fn reduction_input_count(&self) -> usize {
-        self.reductions.iter().map(|reduce| reduce.neutral.len()).sum()
-    }
-    pub fn operator_input_count(&self) -> usize {
-        self.scan_input_count() + self.reduction_input_count()
-    }
-    pub fn reduction_result_count(&self) -> usize {
-        self.reductions.iter().map(|reduce| reduce.operator.result_types.len()).sum()
-    }
-    pub fn result_count(&self) -> usize {
-        self.reduction_result_count() + self.post.result_types.len()
-    }
+
     pub fn mapped_types(&self) -> Option<&[TypeId]> {
-        self.pre.result_types.get(self.operator_input_count()..)
+        self.pre.result_types.get(self.layout().operator_input_count()..)
     }
     pub fn is_map(&self) -> bool {
         self.scans.is_empty() && self.reductions.is_empty()

@@ -1,14 +1,13 @@
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use polytype::Type;
 
 use crate::ast::TypeName;
 use crate::BindingRef;
 
-use super::super::program::OutputSlotId;
 use super::super::program::SemanticResourceRef;
 use super::super::types::{
-    GraphResource, SegResourceAccess, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId,
-    WynSoacPhase,
+    GraphResource, SegSpace, Semantic, SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
 };
 use super::metadata::{impl_metadata, Metadata};
 
@@ -83,14 +82,6 @@ pub enum RuntimeLength<R = BindingRef> {
     /// compiler-internal runtime-array handoffs use the same representation;
     /// publication decides whether the resource belongs to the host ABI.
     Stored(R),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Plan<R = SemanticResourceRef> {
-    Loop,
-    Flags(ParallelConfig<R>),
-    Scan(ParallelConfig<R>),
-    Scatter(ParallelConfig<R>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,13 +167,8 @@ pub struct RawState {
 
 #[derive(Clone, Debug)]
 pub struct SemanticState<R> {
-    pub space: SegSpace<R>,
+    pub segment: SegmentedMetadata<R>,
     pub output: Output<R>,
-    /// Host-visible slots published by this operation, linked from entry
-    /// routes during semantic reification.
-    pub output_slots: Vec<OutputSlotId>,
-    /// Uniform semantic resource effects, including publication writes.
-    pub resources: Vec<SegResourceAccess<R>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,14 +231,14 @@ impl<P: WynSoacPhase> Op<P> {
 impl<R: GraphResource> Op<Semantic<R>> {
     pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.body.capture_nodes();
-        nodes.extend(self.state.space.referenced_nodes());
+        nodes.extend(self.state.segment.space.referenced_nodes());
         nodes
     }
 
     pub(crate) fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         let Self { body, state } = self;
         body.remap_capture_values(&mut map);
-        for slot in state.space.referenced_node_slots() {
+        for slot in state.segment.space.referenced_node_slots() {
             *slot = map(*slot);
         }
     }

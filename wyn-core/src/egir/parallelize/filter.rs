@@ -4,6 +4,7 @@ use super::model::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 use super::*;
 use crate::egir;
 use crate::egir::soac::filter as filter_soac;
+use crate::egir::soac::SegmentedMetadata;
 use crate::interface;
 
 impl KernelPlanBuilder<'_> {
@@ -70,7 +71,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         Ok(FilterKernelFamily {
             domain,
             work: self.work,
-            storage: self.candidate.storage.runtime(),
+            storage: self.candidate.storage,
             flags,
             scan,
             combine,
@@ -326,28 +327,13 @@ impl FilterScanGrid {
 pub(super) struct FilterCandidate {
     pub semantic_id: SemanticOpId,
     pub space: SegSpace,
-    storage: StoredFilterStorage,
+    storage: filter_soac::RuntimeStorage<SemanticResourceRef>,
     scan_grid: FilterScanGrid,
 }
 
 impl FilterCandidate {
     pub(super) fn scan_worker_count(&self) -> u32 {
         self.scan_grid.worker_count()
-    }
-}
-
-#[derive(Clone, Copy)]
-struct StoredFilterStorage {
-    data: SemanticResourceRef,
-    length: SemanticResourceRef,
-}
-
-impl StoredFilterStorage {
-    fn runtime(self) -> filter_soac::RuntimeStorage<SemanticResourceRef> {
-        filter_soac::RuntimeStorage {
-            data: self.data,
-            length: self.length,
-        }
     }
 }
 
@@ -365,7 +351,7 @@ pub(super) fn analyze_filter_candidate(
         Soac::Filter(filter_soac::Op {
             state:
                 filter_soac::SemanticState {
-                    space,
+                    segment: SegmentedMetadata { space, .. },
                     output: filter_soac::Output::Runtime(runtime),
                     ..
                 },
@@ -380,7 +366,7 @@ pub(super) fn analyze_filter_candidate(
             CandidateSelection::Selected(FilterCandidate {
                 semantic_id: *semantic_id,
                 space: space.clone(),
-                storage: StoredFilterStorage { data, length },
+                storage: filter_soac::RuntimeStorage { data, length },
                 scan_grid: FilterScanGrid {
                     workgroup_width: REDUCE_PHASE1_WIDTH,
                     workgroups_x: FILTER_SCAN_GROUPS,

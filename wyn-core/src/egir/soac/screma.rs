@@ -1,3 +1,4 @@
+use crate::egir::soac::SegmentedMetadata;
 use crate::BindingRef;
 use polytype::Type;
 
@@ -5,10 +6,8 @@ use super::metadata::{impl_metadata, Metadata};
 use super::Lambda;
 use crate::ast::TypeName;
 
-use super::super::program::OutputSlotId;
 use super::super::types::{
-    GraphResource, OperandRef, ResultBinding, SegResourceAccess, SegSpace, Semantic, SoacInputType,
-    SoacOwnership, ValueId, WynSoacPhase,
+    GraphResource, OperandRef, ResultBinding, Semantic, SoacInputType, SoacOwnership, ValueId, WynSoacPhase,
 };
 
 /// One position in a Screma side effect's compact operand list.
@@ -134,6 +133,50 @@ impl_metadata!(ScremaForm, |form, visit| {
     visit.lambda(post);
 });
 
+/// Component counts shared by executable Scremas and symbolic fusion recipes.
+/// Associative operators have one input component and one result per neutral.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    scan_inputs: usize,
+    reduction_inputs: usize,
+    post_results: usize,
+}
+
+impl Layout {
+    pub(crate) fn new(
+        scans: impl Iterator<Item = usize>,
+        reductions: impl Iterator<Item = usize>,
+        post_results: usize,
+    ) -> Self {
+        Self {
+            scan_inputs: scans.sum(),
+            reduction_inputs: reductions.sum(),
+            post_results,
+        }
+    }
+
+    pub fn scan_input_count(self) -> usize {
+        self.scan_inputs
+    }
+
+    pub fn reduction_input_count(self) -> usize {
+        self.reduction_inputs
+    }
+
+    pub fn operator_input_count(self) -> usize {
+        self.scan_inputs + self.reduction_inputs
+    }
+
+    pub fn reduction_result_count(self) -> usize {
+        self.reduction_inputs
+    }
+
+    /// Result order is reduction scalars followed by post-lambda arrays.
+    pub fn result_count(self) -> usize {
+        self.reduction_inputs + self.post_results
+    }
+}
+
 /// A result position derived from Futhark's fixed Screma result convention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ResultId {
@@ -152,25 +195,17 @@ impl ScremaForm {
         self.reductions.len()
     }
 
-    pub fn scan_input_count(&self) -> usize {
-        self.scans.iter().map(|scan| scan.neutral.len()).sum()
-    }
-
-    pub fn reduction_input_count(&self) -> usize {
-        self.reductions.iter().map(|reduction| reduction.neutral.len()).sum()
-    }
-
-    pub fn operator_input_count(&self) -> usize {
-        self.scan_input_count() + self.reduction_input_count()
-    }
-
-    pub fn reduction_result_count(&self) -> usize {
-        self.reduction_input_count()
+    pub fn layout(&self) -> Layout {
+        Layout::new(
+            self.scans.iter().map(|scan| scan.neutral.len()),
+            self.reductions.iter().map(|reduction| reduction.neutral.len()),
+            self.post.result_types.len(),
+        )
     }
 
     /// The ordinary mapped values returned after operator inputs by `pre`.
     pub fn mapped_types(&self) -> Option<&[Type<TypeName>]> {
-        self.pre.result_types.get(self.operator_input_count()..)
+        self.pre.result_types.get(self.layout().operator_input_count()..)
     }
 
     /// Post-lambda parameters: scan results first, then mapped values.
@@ -183,11 +218,6 @@ impl ScremaForm {
                 .chain(mapped.iter().cloned())
                 .collect(),
         )
-    }
-
-    /// Futhark result order: reduction scalars, then post-lambda arrays.
-    pub fn result_count(&self) -> usize {
-        self.reduction_result_count() + self.post.result_types.len()
     }
 
     pub fn result_id(&self, field: usize) -> Option<ResultId> {
@@ -227,7 +257,7 @@ impl ScremaForm {
             ));
         }
 
-        let operator_inputs = self.operator_input_count();
+        let operator_inputs = self.layout().operator_input_count();
         if self.pre.result_types.len() < operator_inputs {
             return Err(format!(
                 "Screma pre-lambda returns {} values, but {} scan/reduction inputs are required",
@@ -349,61 +379,30 @@ pub struct ResultState {
     pub ownership: SoacOwnership,
 }
 
-/// Common access required by generic EGIR plumbing. Result metadata is a
-/// separate phase-associated tree from execution state.
-pub trait PhaseResults: Clone + std::fmt::Debug {
-    fn results(&self) -> &[ResultState];
-    fn results_mut(&mut self) -> &mut [ResultState];
-}
-
-impl PhaseResults for Vec<ResultState> {
-    fn results(&self) -> &[ResultState] {
-        self
-    }
-
-    fn results_mut(&mut self) -> &mut [ResultState] {
-        self
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct RawState;
 
 #[derive(Clone, Debug)]
 pub enum SemanticState<R> {
     Serial,
-    Segmented {
-        space: SegSpace<R>,
-        output_slots: Vec<OutputSlotId>,
-        resources: Vec<SegResourceAccess<R>>,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct Segmented<R> {
-    pub space: SegSpace<R>,
-    pub output_slots: Vec<OutputSlotId>,
-    pub resources: Vec<SegResourceAccess<R>>,
+    Segmented(SegmentedMetadata<R>),
 }
 
 #[derive(Clone, Debug)]
 pub enum ScheduledState<R> {
     Serial,
-    Segmented(Segmented<R>),
+    Segmented(SegmentedMetadata<R>),
 }
 
-#[derive(Clone, Debug)]
-pub enum PhysicalState {
-    Serial,
-    Segmented(Segmented<BindingRef>),
-}
+/// Physical admission still checks that parallel folds have been decomposed.
+pub type PhysicalState = ScheduledState<BindingRef>;
 
 /// A Screma plus information owned by one EGIR phase.
 #[derive(Clone, Debug)]
 pub struct Op<P: WynSoacPhase> {
     pub inputs: Vec<SoacInputType>,
     pub form: ScremaForm,
-    pub result_state: P::ScremaResults,
+    pub result_state: Vec<ResultState>,
     pub state: P::ScremaState,
 }
 
@@ -417,20 +416,20 @@ impl<P: WynSoacPhase> Op<P> {
     }
 
     pub fn result_count(&self) -> usize {
-        self.form.result_count()
+        self.form.layout().result_count()
     }
 
     pub fn ownership(&self, field: usize) -> Option<SoacOwnership> {
-        self.result_state.results().get(field).map(|result| result.ownership)
+        self.result_state.get(field).map(|result| result.ownership)
     }
 
     pub fn validate(&self) -> Result<(), String> {
         self.form.validate(&self.inputs)?;
-        let result_count = self.form.result_count();
-        if self.result_state.results().len() != result_count {
+        let result_count = self.form.layout().result_count();
+        if self.result_state.len() != result_count {
             return Err(format!(
                 "Screma form produces {result_count} results, but phase state describes {}",
-                self.result_state.results().len()
+                self.result_state.len()
             ));
         }
         Ok(())
@@ -470,7 +469,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
 
     pub(crate) fn referenced_nodes(&self) -> Vec<ValueId> {
         let mut nodes = self.base_referenced_nodes();
-        if let SemanticState::Segmented { space, .. } = &self.state {
+        if let SemanticState::Segmented(SegmentedMetadata { space, .. }) = &self.state {
             nodes.extend(space.referenced_nodes());
         }
         nodes
@@ -478,7 +477,7 @@ impl<R: GraphResource> Op<Semantic<R>> {
 
     pub(crate) fn remap_referenced_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         self.form.remap_referenced_values(&mut map);
-        if let SemanticState::Segmented { space, .. } = &mut self.state {
+        if let SemanticState::Segmented(SegmentedMetadata { space, .. }) = &mut self.state {
             for slot in space.referenced_node_slots() {
                 *slot = map(*slot);
             }

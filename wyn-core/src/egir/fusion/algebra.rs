@@ -36,7 +36,7 @@ fn routed_producer_post_output(routes: &[InputRoute], consumer_input: usize) -> 
 }
 
 fn result_post_output(form: &screma::ScremaForm, output: usize) -> Option<usize> {
-    let post = output.checked_sub(form.reduction_result_count())?;
+    let post = output.checked_sub(form.layout().reduction_result_count())?;
     (post < form.post.result_types.len()).then_some(post)
 }
 
@@ -70,13 +70,13 @@ pub(super) fn fuse_horizontal(
     )?;
     let post = parallel_post(context, producer.form, consumer.form)?;
 
-    let producer_reductions = producer.form.reduction_result_count();
-    let consumer_reductions = consumer.form.reduction_result_count();
+    let producer_reductions = producer.form.layout().reduction_result_count();
+    let consumer_reductions = consumer.form.layout().reduction_result_count();
     let outputs = (0..producer_reductions)
         .map(OutputOrigin::Producer)
         .chain((0..consumer_reductions).map(OutputOrigin::Consumer))
-        .chain((producer_reductions..producer.form.result_count()).map(OutputOrigin::Producer))
-        .chain((consumer_reductions..consumer.form.result_count()).map(OutputOrigin::Consumer))
+        .chain((producer_reductions..producer.form.layout().result_count()).map(OutputOrigin::Producer))
+        .chain((consumer_reductions..consumer.form.layout().result_count()).map(OutputOrigin::Consumer))
         .collect();
 
     Some(Normalized {
@@ -114,7 +114,7 @@ pub(super) fn can_fuse_vertical(
         return producer.post.is_identity();
     }
 
-    let collective_results = consumer.operator_input_count();
+    let collective_results = consumer.layout().operator_input_count();
     if collective_results == 0 {
         return true;
     }
@@ -122,7 +122,7 @@ pub(super) fn can_fuse_vertical(
     if !consumer.pre.projectable(collective.clone()) {
         return false;
     }
-    let scan_parameters = (0..producer.scan_input_count()).collect::<Vec<_>>();
+    let scan_parameters = (0..producer.layout().scan_input_count()).collect::<Vec<_>>();
     routes.iter().all(|route| {
         let producer_output = route.producer_post_output;
         let depends_on_route = consumer.pre.depends_on(collective.clone(), &[route.consumer_input]);
@@ -256,10 +256,10 @@ fn fuse_scanless_producer(
             remaining_slots.iter().position(|candidate| *candidate == slot).map(|position| remap[position])
         })
         .collect::<Vec<_>>();
-    let producer_reductions = producer.form.reduction_result_count();
-    let consumer_scan_inputs = consumer.form.scan_input_count();
-    let consumer_operator_inputs = consumer.form.operator_input_count();
-    let consumer_reductions = consumer.form.reduction_result_count();
+    let producer_reductions = producer.form.layout().reduction_result_count();
+    let consumer_scan_inputs = consumer.form.layout().scan_input_count();
+    let consumer_operator_inputs = consumer.form.layout().operator_input_count();
+    let consumer_reductions = consumer.form.layout().reduction_result_count();
     let retained_producer_post_outputs = retained_producer_outputs
         .iter()
         .filter_map(|&output| result_post_output(producer.form, output).map(|post| (output, post)))
@@ -334,7 +334,7 @@ fn fuse_scanless_producer(
     let outputs = (0..producer_reductions)
         .map(OutputOrigin::Producer)
         .chain((0..consumer_reductions).map(OutputOrigin::Consumer))
-        .chain((consumer_reductions..consumer.form.result_count()).map(OutputOrigin::Consumer))
+        .chain((consumer_reductions..consumer.form.layout().result_count()).map(OutputOrigin::Consumer))
         .chain(retained_producer_post_outputs.iter().map(|(output, _)| OutputOrigin::Producer(*output)))
         .collect::<Vec<_>>();
     debug_assert_eq!(
@@ -375,17 +375,17 @@ fn fuse_across_middle_barrier(
 
     let producer_parameters = remap[..producer_input_count].to_vec();
     let forwarded_parameters = remap[producer_input_count..].to_vec();
-    let producer_scan_inputs = producer.form.scan_input_count();
-    let producer_operator_inputs = producer.form.operator_input_count();
-    let producer_reduction_results = producer.form.reduction_result_count();
-    let consumer_reduction_results = consumer.form.reduction_result_count();
+    let producer_scan_inputs = producer.form.layout().scan_input_count();
+    let producer_operator_inputs = producer.form.layout().operator_input_count();
+    let producer_reduction_results = producer.form.layout().reduction_result_count();
+    let consumer_reduction_results = consumer.form.layout().reduction_result_count();
     let retained_producer_post_outputs = retained_producer_outputs
         .iter()
         .filter_map(|&output| result_post_output(producer.form, output).map(|post| (output, post)))
         .collect::<Vec<_>>();
     let producer_mapped_types = producer.form.mapped_types()?.to_vec();
-    let consumer_scan_inputs = consumer.form.scan_input_count();
-    let consumer_collective_inputs = consumer.form.operator_input_count();
+    let consumer_scan_inputs = consumer.form.layout().scan_input_count();
+    let consumer_collective_inputs = consumer.form.layout().operator_input_count();
     let dependent_routes = routes
         .iter()
         .copied()
@@ -603,7 +603,10 @@ fn fuse_across_middle_barrier(
         outputs: (0..producer_reduction_results)
             .map(OutputOrigin::Producer)
             .chain((0..consumer_reduction_results).map(OutputOrigin::Consumer))
-            .chain((consumer_reduction_results..consumer.form.result_count()).map(OutputOrigin::Consumer))
+            .chain(
+                (consumer_reduction_results..consumer.form.layout().result_count())
+                    .map(OutputOrigin::Consumer),
+            )
             .chain(retained_producer_post_outputs.iter().map(|(output, _)| OutputOrigin::Producer(*output)))
             .collect(),
     })
@@ -617,10 +620,10 @@ fn parallel_pre(
     producer_parameters: Vec<usize>,
     consumer_parameters: Vec<usize>,
 ) -> Option<screma::Lambda> {
-    let producer_scans = producer.scan_input_count();
-    let consumer_scans = consumer.scan_input_count();
-    let producer_reductions = producer.reduction_input_count();
-    let consumer_reductions = consumer.reduction_input_count();
+    let producer_scans = producer.layout().scan_input_count();
+    let consumer_scans = consumer.layout().scan_input_count();
+    let producer_reductions = producer.layout().reduction_input_count();
+    let consumer_reductions = consumer.layout().reduction_input_count();
     let producer_mapped = producer.pre.result_types.len() - producer_scans - producer_reductions;
     let consumer_mapped = consumer.pre.result_types.len() - consumer_scans - consumer_reductions;
 
@@ -668,8 +671,8 @@ fn parallel_post(
     producer: &screma::ScremaForm,
     consumer: &screma::ScremaForm,
 ) -> Option<screma::Lambda> {
-    let producer_scans = producer.scan_input_count();
-    let consumer_scans = consumer.scan_input_count();
+    let producer_scans = producer.layout().scan_input_count();
+    let consumer_scans = consumer.layout().scan_input_count();
     let producer_mapped_types = producer.mapped_types()?;
     let consumer_mapped_types = consumer.mapped_types()?;
     let producer_mapped = producer_mapped_types.len();

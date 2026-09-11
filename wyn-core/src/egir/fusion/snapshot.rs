@@ -5,6 +5,7 @@ use crate::egir::program::{OutputSlotId, SemanticOpId};
 use crate::egir::semantic_graph::{Facts, Incidence};
 pub(super) use crate::egir::semantic_graph::{ScopeKey, SourceValue};
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::soac::{hist, screma};
 use crate::egir::types::{
     EGraph, PureOp, ResultBinding, SegResourceAccess, SegSpace, SideEffect, SideEffectKind, Soac,
@@ -312,9 +313,11 @@ impl Snapshot {
                 }
                 match soac {
                     Soac::Screma(op) => {
-                        if let screma::SemanticState::Segmented {
-                            space, output_slots, ..
-                        } = op.semantic_state()
+                        if let screma::SemanticState::Segmented(SegmentedMetadata {
+                            space,
+                            output_slots,
+                            ..
+                        }) = op.semantic_state()
                         {
                             operation.kind = Kind::Screma(extract.form(scope, graph, &op.form)?);
                             operation.space = Some(space.clone());
@@ -327,7 +330,7 @@ impl Snapshot {
                             map: extract.lambda(scope, graph, &op.body.map)?,
                             predicate: extract.lambda(scope, graph, &op.body.predicate)?,
                         };
-                        operation.space = Some(op.state.space.clone());
+                        operation.space = Some(op.state.segment.space.clone());
                     }
                     Soac::Hist(op) => {
                         if let hist::SemanticState::Segmented(space) = &op.state {

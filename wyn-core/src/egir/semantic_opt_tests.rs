@@ -5,6 +5,7 @@ use crate::egir::analysis::GraphAnalysis;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::screma;
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{PureOp, SegSpace, SideEffect, Soac, SoacEffect, SoacInputType, SoacOwnership};
 use crate::FunctionId;
 use polytype::Type;
@@ -39,11 +40,11 @@ fn dead_producer_graph() -> EGraph<Semantic> {
                 result_state: vec![screma::ResultState {
                     ownership: SoacOwnership::Fresh,
                 }],
-                state: screma::SemanticState::Segmented {
+                state: screma::SemanticState::Segmented(SegmentedMetadata {
                     space: SegSpace::new(egir::types::SegExtent::Fixed(1)),
                     output_slots: vec![],
                     resources: vec![],
-                },
+                }),
             }),
         )),
         operands: smallvec![],

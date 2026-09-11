@@ -1,6 +1,7 @@
 //! Immutable recipe analysis and deterministic recipe-owned scratch allocation.
 
 use crate::egir;
+use crate::egir::soac::SegmentedMetadata;
 use crate::ssa;
 use crate::EntryId;
 use crate::LookupMap;
@@ -47,7 +48,9 @@ fn analyze_parallel_scremas(
             let SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) = &effect.kind else {
                 continue;
             };
-            let screma::SemanticState::Segmented { output_slots, .. } = op.semantic_state() else {
+            let screma::SemanticState::Segmented(SegmentedMetadata { output_slots, .. }) =
+                op.semantic_state()
+            else {
                 continue;
             };
             if entry.execution_model.is_compute()
@@ -55,7 +58,7 @@ fn analyze_parallel_scremas(
                 && semantic_graph.value_consumer_count(owner) == 0
             {
                 parallel.insert(*owner);
-                if op.form.operator_input_count() != 0 {
+                if op.form.layout().operator_input_count() != 0 {
                     folds.push(*owner);
                 }
             }
@@ -97,23 +100,13 @@ impl LocatedScrema<'_> {
         }
     }
 
-    pub(super) fn segmented(&self) -> Result<screma::Segmented<egir::program::SemanticResourceRef>> {
-        let screma::SemanticState::Segmented {
-            space,
-            output_slots,
-            resources,
-            ..
-        } = self.op.semantic_state()
-        else {
+    pub(super) fn segmented(&self) -> Result<SegmentedMetadata<egir::program::SemanticResourceRef>> {
+        let screma::SemanticState::Segmented(segment) = self.op.semantic_state() else {
             return Err(ParallelizeError::Invalid(
                 "selected parallel Screma lost its segmented semantic facts".into(),
             ));
         };
-        Ok(screma::Segmented {
-            space: space.clone(),
-            output_slots: output_slots.clone(),
-            resources: resources.clone(),
-        })
+        Ok(segment.clone())
     }
 }
 
@@ -142,13 +135,14 @@ impl RecipeTargets {
                     }
                     SideEffectKind::Soac(SoacEffect(owner, Soac::Screma(op))) => {
                         match op.semantic_state() {
-                            screma::SemanticState::Segmented { .. } if parallel.contains(owner) => {
+                            screma::SemanticState::Segmented(_) if parallel.contains(owner) => {
                                 targets.kernel_scremas.push(site);
                             }
-                            screma::SemanticState::Segmented { output_slots, .. }
-                                if !output_slots.is_empty()
-                                    && (op.is_reduce() || !op.form.scans.is_empty())
-                                    && entry.execution_model.is_compute() =>
+                            screma::SemanticState::Segmented(SegmentedMetadata {
+                                output_slots, ..
+                            }) if !output_slots.is_empty()
+                                && (op.is_reduce() || !op.form.scans.is_empty())
+                                && entry.execution_model.is_compute() =>
                             {
                                 targets.promoted_folds.push(site);
                             }
@@ -223,7 +217,7 @@ pub(super) enum Recipe<Hist, Filter, Reduce, Scan> {
     Hist(Hist),
     Reduce(Reduce),
     Scan(Scan),
-    Map(screma::Segmented<egir::program::SemanticResourceRef>),
+    Map(SegmentedMetadata<egir::program::SemanticResourceRef>),
     Serial(SerialScremaRecipe),
     Unchanged,
 }
@@ -532,7 +526,7 @@ fn fixed_required_elements(entry: &egir::program::PlannedEntry, targets: &Recipe
         else {
             return None;
         };
-        &op.state.space
+        &op.state.segment.space
     } else if targets.hists.len() == 1 {
         let SideEffectKind::Soac(SoacEffect(_, Soac::Hist(op))) =
             &entry.graph.skeleton.effect(targets.hists[0]).kind
@@ -549,7 +543,7 @@ fn fixed_required_elements(entry: &egir::program::PlannedEntry, targets: &Recipe
         else {
             return None;
         };
-        let screma::SemanticState::Segmented { space, .. } = op.semantic_state() else {
+        let screma::SemanticState::Segmented(SegmentedMetadata { space, .. }) = op.semantic_state() else {
             return None;
         };
         space

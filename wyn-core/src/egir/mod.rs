@@ -19,6 +19,7 @@ mod extract;
 mod fold;
 pub(crate) mod inlining;
 pub mod ir;
+pub(crate) mod kernel_index;
 mod loop_analysis;
 pub mod materialize;
 pub mod partial_inline;

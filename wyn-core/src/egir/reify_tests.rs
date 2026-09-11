@@ -1,6 +1,7 @@
 use super::*;
 use crate::egir::program::SemanticOpId;
 use crate::egir::soac::Lambda;
+use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::EffectOp;
 use smallvec::SmallVec;
 
@@ -84,7 +85,9 @@ fn canonical_resource_verifier_covers_screma_and_filter() {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &mut effect.kind else {
                     return None;
                 };
-                let screma::SemanticState::Segmented { resources, .. } = op.semantic_state_mut() else {
+                let screma::SemanticState::Segmented(SegmentedMetadata { resources, .. }) =
+                    op.semantic_state_mut()
+                else {
                     return None;
                 };
                 Some(resources)
@@ -106,7 +109,7 @@ fn canonical_resource_verifier_covers_screma_and_filter() {
                 let SideEffectKind::Soac(SoacEffect(_, Soac::Filter(op))) = &mut effect.kind else {
                     return None;
                 };
-                Some(&mut op.state.resources)
+                Some(&mut op.state.segment.resources)
             })
         })
         .expect("Filter resources");

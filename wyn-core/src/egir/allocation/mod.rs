@@ -10,6 +10,8 @@ mod residency;
 
 pub use residency::resolve_residency;
 
+use crate::egir::soac::SegmentedMetadata;
+
 use crate::ast::TypeName;
 use crate::interface;
 use crate::interface::{EntryInputKind, EntryOutputKind};
@@ -379,37 +381,18 @@ fn remap_soac_resources(
             result_state,
             state: match state {
                 screma::SemanticState::Serial => screma::SemanticState::Serial,
-                screma::SemanticState::Segmented {
-                    space,
-                    output_slots,
-                    resources: accesses,
-                } => {
-                    let segment = remap.segment(screma::Segmented {
-                        space,
-                        output_slots,
-                        resources: accesses,
-                    })?;
-                    screma::SemanticState::Segmented {
-                        space: segment.space,
-                        output_slots: segment.output_slots,
-                        resources: segment.resources,
-                    }
+                screma::SemanticState::Segmented(segment) => {
+                    screma::SemanticState::Segmented(remap.segment(segment)?)
                 }
             },
         }),
         Soac::Filter(filter::Op { body, state }) => {
-            let segment = remap.segment(screma::Segmented {
-                space: state.space,
-                output_slots: state.output_slots,
-                resources: state.resources,
-            })?;
+            let segment = remap.segment(state.segment)?;
             Soac::Filter(filter::Op {
                 body: remap.filter_body(body),
                 state: filter::SemanticState {
-                    space: segment.space,
+                    segment,
                     output: remap.filter_output(state.output)?,
-                    output_slots: segment.output_slots,
-                    resources: segment.resources,
                 },
             })
         }
@@ -550,10 +533,13 @@ fn realize_graph_dynamic_publication(
                     body,
                     state:
                         filter::SemanticState {
-                            space,
+                            segment:
+                                SegmentedMetadata {
+                                    space,
+                                    output_slots,
+                                    resources: accesses,
+                                },
                             output: filter::Output::Runtime(runtime),
-                            output_slots,
-                            resources: accesses,
                             ..
                         },
                     ..
