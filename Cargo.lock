@@ -1957,10 +1957,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wyn-block-interface"
-version = "0.1.0"
-
-[[package]]
 name = "wyn-core"
 version = "0.1.0"
 dependencies = [
@@ -1981,7 +1977,6 @@ dependencies = [
  "stacker",
  "thiserror 1.0.69",
  "wyn-base",
- "wyn-block-interface",
  "wyn-fusion",
  "wyn-graph",
  "wyn-kernel-graph",

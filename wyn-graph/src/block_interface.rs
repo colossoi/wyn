@@ -114,4 +114,5 @@ impl<E: Copy + Eq + Hash, V: Copy + Eq + Hash> Matrix<E, V> {
 }
 
 #[cfg(test)]
+#[path = "block_interface_tests.rs"]
 mod tests;

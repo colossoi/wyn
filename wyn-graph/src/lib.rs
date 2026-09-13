@@ -2,7 +2,8 @@
 //!
 //! This crate intentionally knows nothing about Wyn IR. Callers provide a node
 //! universe and tiny successor/dependency callbacks; the crate supplies the
-//! bookkeeping: reachability, topological ordering, dominators, and replacements.
+//! bookkeeping: reachability, topological ordering, dominators, replacements,
+//! and checked block-parameter columns.
 
 #![deny(clippy::expect_used, clippy::unwrap_used)]
 
@@ -12,6 +13,7 @@ use std::hash::Hash;
 
 use thiserror::Error;
 
+pub mod block_interface;
 mod replacement;
 pub use replacement::{ReplacementError, ReplacementForest};
 

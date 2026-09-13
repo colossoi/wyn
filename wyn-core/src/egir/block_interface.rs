@@ -48,7 +48,7 @@ impl IncomingEdge {
     }
 }
 
-pub(crate) type BlockInterface = wyn_block_interface::Matrix<IncomingEdge, FlowValueId>;
+pub(crate) type BlockInterface = wyn_graph::block_interface::Matrix<IncomingEdge, FlowValueId>;
 pub(crate) type BlockInterfaces = LookupMap<BlockId, BlockInterface>;
 
 pub(crate) fn extract<P: Family, Lang: Language>(

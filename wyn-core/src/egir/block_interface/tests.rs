@@ -162,7 +162,7 @@ fn edge_identity_is_source_and_arm_independent_of_condition_metadata() {
                 (IncomingEdge::Then(entry, parameters[1]), vec![argument]),
             ]
         ),
-        Err(wyn_block_interface::Error::DuplicateEdge)
+        Err(wyn_graph::block_interface::Error::DuplicateEdge)
     );
     assert_eq!(extract(&graph).unwrap()[&merge].edges().len(), 3);
 }
