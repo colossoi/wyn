@@ -7,9 +7,10 @@ use crate::interface;
 use crate::pipeline_descriptor;
 use polytype::Type;
 
+use super::planning::{OperationRef, ScratchRef};
 use crate::ast::TypeName;
-use crate::egir::allocation::ResourcesAllocated;
-use crate::egir::program::{SemanticOpId, SemanticResourceRef};
+use crate::egir::program::KernelProgram;
+use crate::egir::program::SemanticResourceRef;
 use crate::egir::soac::hist;
 use crate::egir::types::{
     PureOp, SegResourceAccess, SegSpace as FamilySegSpace, Semantic as SemanticFamily, SkeletonTerminator,
@@ -27,85 +28,28 @@ use super::planning::LocatedHist;
 type Semantic = SemanticFamily<SemanticResourceRef>;
 type SegSpace = FamilySegSpace<SemanticResourceRef>;
 
-/// A histogram proven to be expressible as one native atomic update per
-/// operation and input element.
-pub(super) enum HistCandidate {
-    Atomic(AtomicCandidate),
-    Bucket(BucketCandidate),
+#[derive(Debug)]
+pub enum HistRecipe<R> {
+    Atomic {
+        operation: OperationRef,
+        updates: Vec<hist::AtomicUpdate>,
+    },
+    Bucket {
+        operation: OperationRef,
+        destination: ResourceId,
+        input_resources: Vec<ResourceId>,
+        counts: R,
+        overflow: R,
+    },
 }
 
-pub(super) enum BoundHistCandidate {
-    Atomic(AtomicCandidate),
-    Bucket(BoundBucketCandidate),
-}
-
-pub(super) struct AtomicCandidate {
-    pub owner: SemanticOpId,
-    pub space: SegSpace,
-    pub operations: Vec<hist::AtomicUpdate>,
-}
-
-pub(super) struct BucketCandidate {
-    pub site: egir::types::SideEffectSite,
-    pub owner: SemanticOpId,
-    pub space: SegSpace,
-    pub bucket_count: u32,
-    pub destination: ResourceId,
-    pub input_resources: Vec<ResourceId>,
-    pub counts: Option<ResourceId>,
-    pub overflow: Option<ResourceId>,
-}
-
-pub(super) struct BoundBucketCandidate {
-    pub candidate: BucketCandidate,
-    pub counts: ResourceId,
-    pub overflow: ResourceId,
-}
-
-impl std::ops::Deref for BoundBucketCandidate {
-    type Target = BucketCandidate;
-
-    fn deref(&self) -> &Self::Target {
-        &self.candidate
-    }
-}
-
-impl BoundHistCandidate {
-    pub(super) fn bind(candidate: HistCandidate, resources: &super::planning::ScratchBindings) -> Self {
-        match candidate {
-            HistCandidate::Atomic(candidate) => Self::Atomic(candidate),
-            HistCandidate::Bucket(candidate) => {
-                let counts = candidate.counts.unwrap_or_else(|| {
-                    resources.id(
-                        candidate.owner,
-                        egir::program::CompilerResourceKind::BucketCounts,
-                        0,
-                    )
-                });
-                let overflow = candidate.overflow.unwrap_or_else(|| {
-                    resources.id(
-                        candidate.owner,
-                        egir::program::CompilerResourceKind::BucketOverflow,
-                        0,
-                    )
-                });
-                Self::Bucket(BoundBucketCandidate {
-                    candidate,
-                    counts,
-                    overflow,
-                })
-            }
-        }
-    }
-}
-
-pub(super) fn analyze_hist_candidate(
-    program: &ResourcesAllocated,
+pub(super) fn construct_hist_recipe(
+    program: &KernelProgram<()>,
     entry: &egir::program::PlannedEntry,
     located: LocatedHist<'_>,
-) -> Option<HistCandidate> {
+) -> Option<HistRecipe<ScratchRef>> {
     let graph = &entry.graph;
-    let hist::SemanticState::Segmented(space) = &located.op.state else {
+    let hist::SemanticState::Segmented(_) = &located.op.state else {
         return None;
     };
     if let [operation] = located.op.form.operations.as_slice() {
@@ -135,16 +79,37 @@ pub(super) fn analyze_hist_candidate(
                 .flat_map(resources_for)
                 .collect();
             let public_results = public_result_resources(entry, analysis.producers(), located.site);
-            return Some(HistCandidate::Bucket(BucketCandidate {
-                site: located.site,
-                owner: located.owner,
-                space: space.clone(),
-                bucket_count,
+            let slot = |field, kind, size| {
+                public_results.get(&field).copied().flatten().map(ScratchRef::Existing).unwrap_or_else(
+                    || {
+                        ScratchRef::new(
+                            located.owner,
+                            kind,
+                            0,
+                            Type::Constructed(TypeName::UInt(32), vec![]),
+                            egir::program::LogicalSize::FixedBytes(size),
+                        )
+                    },
+                )
+            };
+            return Some(HistRecipe::Bucket {
+                operation: OperationRef {
+                    site: located.site,
+                    owner: located.owner,
+                },
                 destination: resource_for(operation.destinations[0].value())?,
                 input_resources,
-                counts: public_results.get(&results.counts.0).copied().flatten(),
-                overflow: public_results.get(&results.overflow.0).copied().flatten(),
-            }));
+                counts: slot(
+                    results.counts.0,
+                    egir::program::CompilerResourceKind::BucketCounts,
+                    u64::from(bucket_count) * 4,
+                ),
+                overflow: slot(
+                    results.overflow.0,
+                    egir::program::CompilerResourceKind::BucketOverflow,
+                    4,
+                ),
+            });
         }
     }
     let operations = located
@@ -154,11 +119,13 @@ pub(super) fn analyze_hist_candidate(
         .iter()
         .map(|operation| analyze_operation(program, graph, operation))
         .collect::<Option<Vec<_>>>()?;
-    Some(HistCandidate::Atomic(AtomicCandidate {
-        owner: located.owner,
-        space: space.clone(),
-        operations,
-    }))
+    Some(HistRecipe::Atomic {
+        operation: OperationRef {
+            site: located.site,
+            owner: located.owner,
+        },
+        updates: operations,
+    })
 }
 
 fn public_result_resources(
@@ -192,7 +159,7 @@ fn public_result_resources(
     resources
 }
 fn analyze_operation(
-    program: &ResourcesAllocated,
+    program: &KernelProgram<()>,
     graph: &egir::types::EGraph<Semantic>,
     operation: &hist::HistOp,
 ) -> Option<hist::AtomicUpdate> {
@@ -445,22 +412,44 @@ impl super::KernelPlanBuilder<'_> {
         &mut self,
         body: egir::program::PlannedEntry,
         kernel: super::schedule::KernelId,
-        candidate: BoundBucketCandidate,
+        recipe: HistRecipe<ResourceId>,
         output_projection: Option<Vec<usize>>,
     ) -> ParallelizeResult<super::schedule::PreparedRecipe> {
         use super::{project_kernel_body, project_single_effect_body, BuiltPhase, ProjectionSpec};
         use crate::ResourceAccess;
 
+        let HistRecipe::Bucket {
+            operation,
+            destination,
+            input_resources,
+            counts,
+            overflow,
+        } = recipe
+        else {
+            return Err("bucket emission requires a bucket recipe".into());
+        };
+        let located = operation.hist(&body)?;
+        let hist::SemanticState::Segmented(space) = &located.op.state else {
+            return Err("bucket recipe has no segmented space".into());
+        };
+        let space = space.clone();
+        let bucket_count = u32::try_from(
+            constant_i32(&body.graph, located.op.form.operations[0].shape[0])
+                .ok_or_else(|| ParallelizeError::Invalid("bucket count is not constant".into()))?,
+        )
+        .map_err(|_| ParallelizeError::Invalid("bucket count is out of range".into()))?;
+        let site = operation.site;
+        let owner = operation.owner;
         let local_size = match &body.execution_model {
             flow::ExecutionModel::Compute { local_size } => *local_size,
             _ => (1, 1, 1),
         };
-        let fixed_dispatch = bucket_dispatch_topology(&body.graph, &candidate.space, local_size)
-            .map_err(ParallelizeError::Invalid)?;
+        let fixed_dispatch =
+            bucket_dispatch_topology(&body.graph, &space, local_size).map_err(ParallelizeError::Invalid)?;
         let (insert_domain, insert_topology) = if let Some((topology, domain)) = fixed_dispatch {
             (domain, Some(topology))
-        } else if candidate.space.dims().len() == 1 {
-            let domain = super::schedule::domain_from_space(&candidate.space).ok_or_else(|| {
+        } else if space.dims().len() == 1 {
+            let domain = super::schedule::domain_from_space(&space).ok_or_else(|| {
                 ParallelizeError::Invalid(
                     "bucket_scatter dynamic rank-one domain is not host-dispatchable".into(),
                 )
@@ -473,8 +462,8 @@ impl super::KernelPlanBuilder<'_> {
             ));
         };
         let storage = hist::BucketStorage {
-            counts: egir::program::SemanticResourceRef(candidate.counts),
-            overflow: egir::program::SemanticResourceRef(candidate.overflow),
+            counts: egir::program::SemanticResourceRef(counts),
+            overflow: egir::program::SemanticResourceRef(overflow),
         };
         let mut declarations = body.resource_declarations.clone();
         if !declarations.iter().any(|declaration| declaration.resource == storage.counts) {
@@ -495,29 +484,27 @@ impl super::KernelPlanBuilder<'_> {
         let init_body = project_single_effect_body(
             &body,
             init_id,
-            candidate.site,
+            site,
             ProjectionSpec::unit(init_name, body.execution_model.clone(), declarations.clone()),
         )?;
         let init = BuiltPhase::new(
             init_body,
             vec![
                 SegResourceAccess::<ResourceId> {
-                    resource: candidate.counts,
+                    resource: counts,
                     access: ResourceAccess::Write,
                 },
                 SegResourceAccess::<ResourceId> {
-                    resource: candidate.overflow,
+                    resource: overflow,
                     access: ResourceAccess::Write,
                 },
             ],
         )
         .bucket(
             super::schedule::KernelDispatch::explicit(super::schedule::KernelDomain::Elements(
-                pipeline_descriptor::DispatchLen::Fixed {
-                    count: candidate.bucket_count,
-                },
+                pipeline_descriptor::DispatchLen::Fixed { count: bucket_count },
             )),
-            candidate.owner,
+            owner,
             hist::ParallelStage::Init,
             None,
             storage,
@@ -528,25 +515,25 @@ impl super::KernelPlanBuilder<'_> {
         let insert_body = project_single_effect_body(
             &body,
             insert_id,
-            candidate.site,
+            site,
             ProjectionSpec::unit(insert_name, body.execution_model.clone(), declarations.clone()),
         )?;
         let mut insert_resources = vec![
             SegResourceAccess::<ResourceId> {
-                resource: candidate.destination,
+                resource: destination,
                 access: ResourceAccess::Write,
             },
             SegResourceAccess::<ResourceId> {
-                resource: candidate.counts,
+                resource: counts,
                 access: ResourceAccess::ReadWrite,
             },
             SegResourceAccess::<ResourceId> {
-                resource: candidate.overflow,
+                resource: overflow,
                 access: ResourceAccess::Write,
             },
         ];
         insert_resources.extend(
-            candidate.input_resources.iter().map(|resource| SegResourceAccess::<ResourceId> {
+            input_resources.iter().map(|resource| SegResourceAccess::<ResourceId> {
                 resource: *resource,
                 access: ResourceAccess::Read,
             }),
@@ -557,7 +544,7 @@ impl super::KernelPlanBuilder<'_> {
         )
         .bucket(
             super::schedule::KernelDispatch::inferred(insert_domain),
-            candidate.owner,
+            owner,
             hist::ParallelStage::Insert,
             insert_topology,
             storage,
@@ -574,13 +561,13 @@ impl super::KernelPlanBuilder<'_> {
             .filter_map(|output| output.resource.map(|resource| resource.0))
             .collect::<HashSet<_>>();
         let mut finish_resources = vec![SegResourceAccess::<ResourceId> {
-            resource: candidate.overflow,
+            resource: overflow,
             access: ResourceAccess::Read,
         }];
         finish_resources.extend(
             published_outputs
                 .into_iter()
-                .filter(|resource| *resource != candidate.destination && *resource != candidate.counts)
+                .filter(|resource| *resource != destination && *resource != counts)
                 .map(|resource| SegResourceAccess::<ResourceId> {
                     resource,
                     access: ResourceAccess::Write,
@@ -596,7 +583,7 @@ impl super::KernelPlanBuilder<'_> {
                 y: 1,
                 z: 1,
             }),
-            candidate.owner,
+            owner,
             hist::ParallelStage::Finish,
             None,
             storage,

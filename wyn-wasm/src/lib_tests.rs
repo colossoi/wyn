@@ -2,47 +2,6 @@
 
 use super::*;
 
-/// Compile a Wyn source through the same pipeline used by
-/// `compile_to_wgsl_impl` and return the SSA program so tests can inspect
-/// the interface shape without going through JSON serialization.
-fn compile_to_ssa(source: &str) -> wyn_core::ssa::stage::Elaborated {
-    let modules = load_source_modules(source, wyn_core::CompilerOptions { graphics: true })
-        .expect("source modules should load");
-    let program = modules.type_check().expect("type_check failed");
-    let program = wyn_core::ast_type_holes::reject_type_holes(program).expect("type holes");
-    let program = wyn_core::tlc::lower_from_ast(program).expect("lower_from_ast");
-    let program = wyn_core::tlc::validate_ownership(program).expect("validate_ownership");
-    let program = wyn_core::tlc::partial_eval(program);
-    let program = wyn_core::tlc::extract_stages(program).expect("extract_stages");
-    let program = wyn_core::tlc::pin_entry_buffers(program).expect("pin_entry_buffers");
-    let program = wyn_core::tlc::normalize_soacs(program);
-    let program = wyn_core::tlc::monomorphize(program).expect("monomorphize");
-    let program = wyn_core::tlc::rep_specialize(program);
-    let program = wyn_core::tlc::inline_small(program);
-    let program = wyn_core::tlc::force_inline_soac_helpers(program);
-    let program = wyn_core::tlc::renormalize_inlined_soa(program);
-    let program = wyn_core::tlc::canonicalize_conditional_producers(program);
-    let program = wyn_core::tlc::normalize_soacs_to_anf(program);
-    let program = wyn_core::tlc::float_runtime_index_nested_producers(program);
-    let program = wyn_core::tlc::defunctionalize(program);
-    let program = wyn_core::tlc::fold_generated_lambdas(program);
-    let program = wyn_core::tlc::apply_ownership(program);
-    let program = wyn_core::tlc::filter_reachable(program);
-    let program = wyn_core::tlc::infer_input_slice_bounds(program);
-    let program = wyn_core::to_egraph(program).expect("to_egraph failed");
-    let program = wyn_core::egir::reify_soacs(program);
-    let program = wyn_core::egir::optimize_semantic_operations(program)
-        .expect("semantic EGIR optimization failed");
-    let program = wyn_core::egir::lift_stage_uniform_values(program);
-    let program = wyn_core::egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
-    let program = wyn_core::egir::plan(
-        program,
-        wyn_core::LoweringProfile::new(wyn_core::CodegenTarget::Wgsl, wyn_core::SchedulePolicy::Parallel),
-    )
-    .expect("semantic EGIR planning failed");
-    wyn_core::lower_egir_to_ssa(program).expect("planned EGIR lowering failed")
-}
-
 #[test]
 fn shadertoy_example_compiles_with_standard_image_inputs() {
     std::thread::Builder::new()
@@ -50,7 +9,11 @@ fn shadertoy_example_compiles_with_standard_image_inputs() {
         .spawn(|| {
             assert!(init_compiler(), "compiler initialization failed");
             let result = compile_to_wgsl_impl(&get_example_program(), true, true);
-            assert!(result.success, "default example failed: {:?}", result.error.map(|e| e.message));
+            assert!(
+                result.success,
+                "default example failed: {:?}",
+                result.error.map(|e| e.message)
+            );
             assert!(result.wgsl.is_some(), "default example emitted no WGSL");
 
             let used_inputs = get_example_program().replace(
@@ -83,9 +46,11 @@ fn shadertoy_example_compiles_with_standard_image_inputs() {
             }
             for name in ["iChannelTime", "iChannelResolution"] {
                 assert!(
-                    interface.entries.iter().flat_map(|entry| &entry.inputs).any(|input| {
-                        input.name == name && input.decoration.starts_with("storage(")
-                    }),
+                    interface
+                        .entries
+                        .iter()
+                        .flat_map(|entry| &entry.inputs)
+                        .any(|input| { input.name == name && input.decoration.starts_with("storage(") }),
                     "referenced array input {name} was not published as an entry storage input; got {:?}",
                     interface
                         .entries
@@ -144,8 +109,9 @@ entry image(iTime: f32,
   let raster = rasterize_triangles(direct_draw(3u32, 1u32), vertex_main) in
   shade(screen, raster, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_main(iTime, fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index))
 "#;
-    let program = compile_to_ssa(src);
-    let iface = program_interface(&program);
+    let result = compile_to_wgsl_impl(src, true, false);
+    assert!(result.success, "{:?}", result.error.map(|error| error.message));
+    let iface = result.interface.expect("compiled program interface");
 
     // The WGSL backend emits entry-point names verbatim. In particular,
     // compiler-generated stage names contain underscores and must not be
@@ -153,11 +119,7 @@ entry image(iTime: f32,
     assert!(
         iface.entries.iter().all(|entry| entry.wgsl_name == entry.name),
         "interface entry names diverged from emitted WGSL names: {:?}",
-        iface
-            .entries
-            .iter()
-            .map(|entry| (&entry.name, &entry.wgsl_name))
-            .collect::<Vec<_>>()
+        iface.entries.iter().map(|entry| (&entry.name, &entry.wgsl_name)).collect::<Vec<_>>()
     );
 
     // The root scalar `iTime` (used inside the lifted reduce) must surface in

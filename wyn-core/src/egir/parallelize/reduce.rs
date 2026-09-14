@@ -1,52 +1,75 @@
 //! Parallel reduction candidate analysis, binding, and phase emission.
 
-use super::kernel::cloneable_capture_inputs;
+use super::kernel::{capture_declarations, cloneable_capture_inputs};
 use super::model::{REDUCE_PHASE1_WIDTH, REDUCE_PHASE2_WIDTH};
+use super::planning::{OperationRef, ScratchRef};
 use super::*;
 use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
-use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::{OperandRef, ResultBinding};
 use crate::interface;
 use crate::op;
-use crate::ssa;
 use crate::types;
 use crate::ResourceAccess;
 use wyn_base::IdSource;
-/// Complete graph-local reduction recipe, consumed before entry mutation.
-pub(super) struct ReduceCandidate {
-    pub site: SideEffectSite,
-    pub owner: SemanticOpId,
-    serial: SerialScremaRecipe,
-    input_views: Vec<(ValueId, Type<TypeName>)>,
-    map_outputs: Vec<(ResultBinding<Type<TypeName>>, SemanticResourceRef)>,
-    results: Vec<ResultBinding<Type<TypeName>>>,
-    accumulators: Vec<ReductionAccumulator>,
-    phase1_width: u32,
-    phase2_width: u32,
-    segment: SegmentedMetadata<SemanticResourceRef>,
+#[derive(Debug)]
+pub struct ReduceRecipe<R> {
+    pub operation: OperationRef,
+    pub accumulators: Vec<ReductionAccumulator<R>>,
+    pub routing: ReductionRouting,
 }
 
-struct ReductionAccumulator {
-    component_types: Vec<Type<TypeName>>,
-    scratch_type: Type<TypeName>,
-    combine_region: FunctionId,
-    combine_captures: Vec<OperandRef>,
-    capture_inputs: Vec<SemanticResourceDecl>,
-    neutrals: Vec<ValueId>,
-    stores: Vec<RoutedReductionStore>,
+#[derive(Debug)]
+pub struct ReductionAccumulator<R> {
+    pub capture_inputs: Vec<ResourceId>,
+    pub partials: R,
 }
 
-pub(super) struct ReductionRouting {
-    pub(super) stores: Vec<RoutedReductionStore>,
+#[derive(Debug)]
+pub struct ReductionRouting {
+    pub stores: Vec<ReductionStore>,
+}
+
+#[derive(Debug)]
+pub struct ReductionStore {
+    pub value: ValueId,
+    pub accumulators: Vec<usize>,
+    pub destination: ResourceId,
+}
+
+impl ReductionRouting {
+    pub(super) fn resolve(
+        self,
+        entry: &egir::program::PlannedEntry,
+        resources: &LogicalResourceArena,
+    ) -> ParallelizeResult<Vec<RoutedReductionStore>> {
+        self.stores
+            .into_iter()
+            .map(|store| {
+                let resource = &resources[store.destination];
+                Ok(RoutedReductionStore {
+                    value: store.value,
+                    ty: entry.graph.nodes[store.value].ty().clone(),
+                    accumulators: store.accumulators,
+                    output: (
+                        store.destination,
+                        resource.elem_ty().clone(),
+                        resource.size().cloned().ok_or_else(|| {
+                            ParallelizeError::Invalid("reduction output has no logical size".into())
+                        })?,
+                    ),
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct RoutedReductionStore {
-    pub(super) value: ValueId,
-    pub(super) ty: Type<TypeName>,
+    pub value: ValueId,
+    pub ty: Type<TypeName>,
     accumulators: Vec<usize>,
-    pub(super) output: (ResourceId, Type<TypeName>, egir::program::LogicalSize),
+    pub output: (ResourceId, Type<TypeName>, egir::program::LogicalSize),
 }
 
 /// Transfer publication ownership to the phase that computes the final totals.
@@ -103,11 +126,6 @@ pub(super) fn retire_reduction_outputs(
     moved
 }
 
-pub(super) struct BoundReduce {
-    candidate: ReduceCandidate,
-    partials: Vec<ResourceId>,
-}
-
 struct EmissionAccumulator {
     component_types: Vec<Type<TypeName>>,
     scratch_type: Type<TypeName>,
@@ -119,40 +137,34 @@ struct EmissionAccumulator {
     partial: ResourceId,
 }
 
-impl ReduceCandidate {
-    pub(super) fn scratch_types(&self) -> impl Iterator<Item = &Type<TypeName>> {
-        self.accumulators.iter().map(|accumulator| &accumulator.scratch_type)
-    }
-}
-
 fn analyze_reduction_operators(
     entry: &egir::program::PlannedEntry,
     analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
-    op: &screma::Op<Semantic>,
-) -> Option<Vec<ReductionAccumulator>> {
-    op.form
+    located: LocatedScrema<'_>,
+) -> Option<Vec<ReductionAccumulator<ScratchRef>>> {
+    located
+        .op
+        .form
         .reductions
         .iter()
-        .map(|reduction| {
+        .enumerate()
+        .map(|(slot, reduction)| {
             if reduction.neutral.iter().any(|neutral| !can_clone_pure_subgraph(&entry.graph, *neutral, &[]))
+                || reduction.operator.seg_body().is_none()
             {
                 return None;
             }
-            let combine_captures = reduction.operator.captures().to_vec();
-            let capture_inputs = cloneable_capture_inputs(entry, analysis, &combine_captures)?;
-            let component_types = reduction.operator.result_types.clone();
-            let scratch_type = lambda_ops::result_type(&component_types);
-            if ssa::layout::type_byte_size(&scratch_type).is_none() {
-                return None;
-            }
+            let capture_inputs = cloneable_capture_inputs(entry, analysis, reduction.operator.captures())?;
+            let partials = ScratchRef::dispatch(
+                located.owner,
+                CompilerResourceKind::ReducePartial,
+                slot,
+                lambda_ops::result_type(&reduction.operator.result_types),
+            )
+            .ok()?;
             Some(ReductionAccumulator {
-                component_types,
-                scratch_type,
-                combine_region: reduction.operator.seg_body()?.region,
-                combine_captures,
                 capture_inputs,
-                neutrals: reduction.neutral.clone(),
-                stores: Vec::new(),
+                partials,
             })
         })
         .collect()
@@ -181,11 +193,8 @@ pub(super) fn analyze_reduction_routing(
             .resource_declarations
             .iter()
             .find(|declaration| declaration.role.writes() && declaration.resource.0 == resource)?;
-        let destination = (
-            resource,
-            resources[resource].elem_ty().clone(),
-            resources[resource].size()?.clone(),
-        );
+        resources[resource].size()?;
+        let destination = resource;
         let value = route.source.value;
         let producers = graph_ops::value_producer_closure(analysis, [value]);
         let mut accumulator_dependencies = Vec::new();
@@ -203,11 +212,10 @@ pub(super) fn analyze_reduction_routing(
         if !can_clone_pure_subgraph(&entry.graph, value, &supplied) {
             return None;
         }
-        stores.push(RoutedReductionStore {
+        stores.push(ReductionStore {
             value,
-            ty: entry.graph.nodes[value].ty().clone(),
             accumulators: accumulator_dependencies,
-            output: destination,
+            destination,
         });
     }
     if !(0..op.form.reductions.len())
@@ -218,43 +226,20 @@ pub(super) fn analyze_reduction_routing(
     Some(ReductionRouting { stores })
 }
 
-fn analyze_reduction_accumulators(
-    entry: &egir::program::PlannedEntry,
-    op: &screma::Op<Semantic>,
-    results: &[ResultBinding<Type<TypeName>>],
-    resources: &egir::program::LogicalResourceArena,
-) -> Option<Vec<ReductionAccumulator>> {
-    let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
-    let mut accumulators = analyze_reduction_operators(entry, &analysis, op)?;
-    let routing = analyze_reduction_routing(entry, &analysis, op, results, resources)?;
-    for store in routing.stores {
-        let [accumulator] = store.accumulators.as_slice() else {
-            // Independent reduce combine phases cannot jointly rebuild one store.
-            return None;
-        };
-        let accumulator = *accumulator;
-        accumulators[accumulator].stores.push(store);
-    }
-    Some(accumulators)
-}
-pub(super) fn analyze_reduce_candidate(
+pub(super) fn construct_reduce_recipe(
     entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     resources: &egir::program::LogicalResourceArena,
-) -> ParallelizeResult<Option<ReduceCandidate>> {
+) -> ParallelizeResult<Option<ReduceRecipe<ScratchRef>>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
         super::capabilities::Strategy::Reduce
     );
-    let segment = located.segmented()?;
-    let serial = located.serial_recipe();
-    let site = located.site;
     let side_effect = located.effect;
     let reduction_results = located.op.form.layout().reduction_result_count();
     let n_maps = located.op.form.post.result_types.len();
     let operands =
         screma::ScremaOperands::decode(located.op, &side_effect.operands, side_effect.result.as_ref())?;
-    let mut input_views = Vec::with_capacity(located.op.inputs.len());
     for input in operands.inputs() {
         let Some(input) = input.operand.value() else {
             return Ok(None);
@@ -262,78 +247,103 @@ pub(super) fn analyze_reduce_candidate(
         if !can_chunk_view(&entry.graph, input) {
             return Ok(None);
         }
-        input_views.push((input, entry.graph.nodes[input].ty.clone()));
     }
     let results = operands.result_fields();
-    let mut map_outputs = Vec::with_capacity(n_maps);
     for index in 0..n_maps {
         let Some(result) = results.get(reduction_results + index) else {
             return Ok(None);
         };
-        let Some(resource) = entry.resource_for_result(result) else {
+        let Some(_) = entry.resource_for_result(result) else {
             return Ok(None);
         };
-        map_outputs.push((result.clone(), resource));
     }
 
     if results.len() < reduction_results {
         return Ok(None);
     }
     let reduction_values = results[..reduction_results].to_vec();
-    let owner = located.owner;
-    let Some(accumulators) =
-        analyze_reduction_accumulators(entry, located.op, &reduction_values, resources)
+    let analysis = graph_ops::GraphAnalysis::new(&entry.graph);
+    let Some(accumulators) = analyze_reduction_operators(entry, &analysis, located) else {
+        return Ok(None);
+    };
+    let Some(routing) =
+        analyze_reduction_routing(entry, &analysis, located.op, &reduction_values, resources)
     else {
         return Ok(None);
     };
-    Ok(Some(ReduceCandidate {
-        site,
-        owner,
-        serial,
-        input_views,
-        map_outputs,
-        results: reduction_values,
+    if routing.stores.iter().any(|store| store.accumulators.len() != 1) {
+        return Ok(None);
+    }
+    Ok(Some(ReduceRecipe {
+        operation: located.reference(),
         accumulators,
-        phase1_width: REDUCE_PHASE1_WIDTH,
-        phase2_width: REDUCE_PHASE2_WIDTH,
-        segment,
+        routing,
     }))
-}
-impl BoundReduce {
-    pub(super) fn segment(&self) -> &SegmentedMetadata<SemanticResourceRef> {
-        &self.candidate.segment
-    }
-
-    pub(super) fn bind(candidate: ReduceCandidate, resources: &super::planning::ScratchBindings) -> Self {
-        let partials = (0..candidate.accumulators.len())
-            .map(|slot| resources.id(candidate.owner, CompilerResourceKind::ReducePartial, slot))
-            .collect();
-        Self { candidate, partials }
-    }
 }
 
 impl KernelPlanBuilder<'_> {
     pub(super) fn emit_reduce_entry(
         &mut self,
         mut entry: egir::program::PlannedEntry,
-        bound: BoundReduce,
+        recipe: ReduceRecipe<ResourceId>,
     ) -> ParallelizeResult<(BuiltPhase, Vec<BuiltPhase>)> {
-        let BoundReduce {
-            candidate,
-            partials: partial_resources,
-        } = bound;
-        let ReduceCandidate {
-            site,
-            serial,
-            input_views: input_view_data,
-            map_outputs,
-            results: screma_results,
-            accumulators,
-            phase1_width,
-            phase2_width,
-            segment,
-            ..
-        } = candidate;
+        let located = recipe.operation.screma(&entry)?;
+        let site = located.site;
+        let serial = recipe.operation;
+        let segment = located.segmented()?;
+        let phase1_width = REDUCE_PHASE1_WIDTH;
+        let phase2_width = REDUCE_PHASE2_WIDTH;
+        let operands = screma::ScremaOperands::decode(
+            located.op,
+            &located.effect.operands,
+            located.effect.result.as_ref(),
+        )?;
+        let input_view_data = operands
+            .inputs()
+            .map(|input| {
+                let value = input
+                    .operand
+                    .value()
+                    .ok_or_else(|| ParallelizeError::Invalid("reduction input is not a value".into()))?;
+                Ok((value, entry.graph.nodes[value].ty().clone()))
+            })
+            .collect::<ParallelizeResult<Vec<_>>>()?;
+        let results = operands.result_fields();
+        let reduction_results = located.op.form.layout().reduction_result_count();
+        let map_outputs = results[reduction_results..]
+            .iter()
+            .map(|result| {
+                let resource = entry.resource_for_result(result).ok_or_else(|| {
+                    ParallelizeError::Invalid("mapped reduction result has no resource".into())
+                })?;
+                Ok((result.clone(), resource))
+            })
+            .collect::<ParallelizeResult<Vec<_>>>()?;
+        let screma_results = results[..reduction_results].to_vec();
+        let mut stores = recipe.routing.resolve(&entry, self.resources)?;
+        let accumulators = recipe
+            .accumulators
+            .into_iter()
+            .zip(&located.op.form.reductions)
+            .enumerate()
+            .map(|(index, (accumulator, reduction))| {
+                let operator = reduction
+                    .operator
+                    .seg_body()
+                    .ok_or_else(|| ParallelizeError::Invalid("reduction operator has no region".into()))?;
+                let routed = stores.extract_if(.., |store| store.accumulators == [index]).collect();
+                Ok(EmissionAccumulator {
+                    component_types: reduction.operator.result_types.clone(),
+                    scratch_type: self.resources[accumulator.partials].elem_ty().clone(),
+                    operator: self.callable(operator.region)?.clone(),
+                    operator_captures: reduction.operator.captures().to_vec(),
+                    capture_inputs: capture_declarations(&entry, &accumulator.capture_inputs)?,
+                    neutrals: reduction.neutral.clone(),
+                    stores: routed,
+                    partial: accumulator.partials,
+                })
+            })
+            .collect::<ParallelizeResult<Vec<_>>>()?;
         let mut phase1_resources = merge_scheduled_resources(
             &declared_input_resources(&entry.resource_declarations),
             &segmented_resources(&segment),
@@ -341,22 +351,6 @@ impl KernelPlanBuilder<'_> {
         let block_id = site.block;
         let total_threads = phase1_width;
         let n_accs = accumulators.len();
-        let accumulators = accumulators
-            .into_iter()
-            .zip(partial_resources)
-            .map(|(accumulator, partial)| {
-                Ok(EmissionAccumulator {
-                    component_types: accumulator.component_types,
-                    scratch_type: accumulator.scratch_type,
-                    operator: self.callable(accumulator.combine_region)?.clone(),
-                    operator_captures: accumulator.combine_captures,
-                    capture_inputs: accumulator.capture_inputs,
-                    neutrals: accumulator.neutrals,
-                    stores: accumulator.stores,
-                    partial,
-                })
-            })
-            .collect::<ParallelizeResult<Vec<_>>>()?;
         // 3. Chunk every input view and bind mapped results to their matching
         // resource slices.
         let chunked = chunk_soac_inputs(&mut entry.graph, &input_view_data, total_threads, "SegRed")?;
@@ -454,7 +448,7 @@ impl KernelPlanBuilder<'_> {
             phase2s.push(phase2);
         }
         // Scheduling consumed the semantic SegRed. Phase 1 is now an ordinary
-        // per-invocation Screma over the thread's chunk; `soac_expand` lowers that
+        // per-invocation Screma over the thread's chunk; `soac_lowering` lowers that
         // local loop while the synthesized phase-2 entries combine its partials.
         make_screma_serial(&mut entry.graph, serial);
         phase1_resources.retain_mut(|access| {

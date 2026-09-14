@@ -21,7 +21,10 @@ impl KernelPlan {
                 ));
             }
         }
-        validate_routes(&self.catalog, &self.source_entries)?;
+        validate_routes(
+            self.catalog.iter().map(|(&id, body)| (id, body)),
+            &self.source_entries,
+        )?;
         Ok(())
     }
 }

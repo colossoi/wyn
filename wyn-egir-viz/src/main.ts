@@ -12,6 +12,7 @@ import {
   type PassId,
 } from "./passes";
 import "./style.css";
+import { metadataRecords, metadataLeaves, matchingBodyGroups, type MetadataField } from "./metadata";
 
 type Side = "before" | "after";
 
@@ -240,6 +241,8 @@ interface GraphSnapshot {
   flows: GraphFlow[];
   external_inputs: GraphExternalInput[];
   kernels: GraphKernel[];
+  recipes: GraphRecipe[];
+  publications: Record<string, unknown>[];
   groups: GraphGroup[];
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -248,9 +251,8 @@ interface GraphSnapshot {
 
 interface GraphStage {
   id: string;
-  entry_group: string;
-  entry_name: string;
-  origin: string;
+  kernels: string[];
+  origin: Record<string, unknown>;
   incoming_flows: string[];
   outgoing_flows: string[];
 }
@@ -279,8 +281,26 @@ interface GraphKernel {
   entry_name: string;
   label: string;
   dependencies: string[];
-  domain: string;
+  domain: Record<string, unknown>;
+  workgroup_size: [number, number, number];
+  planned_component?: string;
+  required_elements?: number;
+  source_entry?: string;
+  output_routes: Record<string, unknown>[];
   resources: GraphResourceAccess[];
+}
+
+interface GraphRecipe {
+  id: string;
+  stage: string;
+  entry_group: string;
+  kind: string;
+  operation?: string;
+  output_projection?: number[];
+  required_elements?: number;
+  dispatch: Record<string, unknown>;
+  details: Record<string, unknown>;
+  scratch: Record<string, unknown>[];
 }
 
 interface NodeRelation {
@@ -661,6 +681,9 @@ function diffRecords(snapshot: GraphSnapshot): Map<string, string> {
   const records = new Map<string, string>();
   for (const node of snapshot.nodes) records.set(node.id, normalizedRecord(node));
   for (const block of snapshot.blocks) records.set(block.id, normalizedRecord(block));
+  for (const record of metadataRecords(snapshot)) {
+    for (const field of metadataLeaves(record.fields)) records.set(field.id, JSON.stringify(field.value));
+  }
   return records;
 }
 
@@ -697,7 +720,7 @@ function highlightUnmatchedMetadataLines(side: Side, kind: "added" | "removed"):
 
 function metadataLines(side: Side): HTMLElement[] {
   return Array.from(listings[side].querySelectorAll<HTMLElement>(
-    ".ir-program-metadata .ir-source-row, .ir-body > .ir-metadata-line .ir-source-row",
+    ".ir-body > .ir-metadata-line .ir-source-row",
   ));
 }
 
@@ -1190,81 +1213,40 @@ function renderEntryInterface(group: GraphGroup, names: Names): string {
   return `<div class="ir-comment">; entry interface and resource uses (sidecar)</div><div class="ir-metadata-line">${sourceRow(0, `<span class="ir-keyword">INTERFACE</span> <span class="punct">{</span>`)}${sourceRow(1, irField("outputs", `<span class="punct">[</span>`))}${outputRows.join("")}${sourceRow(1, comma(`<span class="punct">]</span>`))}${sourceRow(1, irField("resource_declarations", `<span class="punct">[</span>`))}${declarationRows.join("")}${sourceRow(1, `<span class="punct">]</span>`)}${sourceRow(0, `<span class="punct">}</span>`)}</div>`;
 }
 
-function renderProgramMetadata(snapshot: GraphSnapshot): string {
-  const resources = snapshot.resources ?? [];
-  const stages = snapshot.stages ?? [];
-  const flows = snapshot.flows ?? [];
-  const externalInputs = snapshot.external_inputs ?? [];
-  const kernels = snapshot.kernels ?? [];
-  if (!resources.length && !stages.length && !flows.length && !externalInputs.length && !kernels.length) return "";
-  const resourceRows = resources.map((resource) => [
-    sourceRow(0, `<span class="ir-keyword">RESOURCE</span> ${resourceToken(resource.id)}<span class="punct">:</span> ${typeToken(resource.elem_ty)} <span class="ir-keyword">WITH</span> <span class="punct">{</span>`),
-    sourceRow(1, comma(irField("origin", renderResourceOrigin(resource.origin)))),
-    sourceRow(1, irField("size", renderSize(resource.size))),
-    sourceRow(0, `<span class="punct">}</span>`),
-  ].join("")).join("");
-  const symbol = (value: string) => `<span class="ir-symbol">${escapeHtml(value)}</span>`;
-  const stageRows = stages.map((stage) => variantTerm("stage", [
-    irField("id", symbol(stage.id)),
-    irField("body", `<span class="ir-symbol">@${escapeHtml(stage.entry_name)}</span>`),
-    irField("origin", literalTerm(stage.origin)),
-    irField("incoming_flows", listTerm(stage.incoming_flows.map(symbol))),
-    irField("outgoing_flows", listTerm(stage.outgoing_flows.map(symbol))),
-  ]));
-  const flowRows = flows.map((flow) => variantTerm("flow", [
-    irField("id", symbol(flow.id)),
-    irField("type", typeToken(flow.ty)),
-    irField("producer", symbol(flow.producer)),
-    irField("consumers", listTerm(flow.consumers.map(symbol))),
-    irField("storage", recordTerm([
-      irField("data", resourceToken(flow.data_resource)),
-      irField("length", flow.length_resource ? resourceToken(flow.length_resource) : keywordTerm("none")),
-    ])),
-    irField("published", keywordTerm(String(flow.published))),
-  ]));
-  const inputRows = externalInputs.map((input) => variantTerm("external_input", [
-    irField("id", symbol(input.id)),
-    irField("type", typeToken(input.ty)),
-    irField("consumers", listTerm(input.consumers.map(symbol))),
-    irField("storage", recordTerm([
-      irField("data", resourceToken(input.data_resource)),
-      irField("length", input.length_resource ? resourceToken(input.length_resource) : keywordTerm("none")),
-    ])),
-  ]));
-  const kernelRows = kernels.map((kernel) => variantTerm("kernel", [
-    irField("id", symbol(kernel.id)),
-    irField("body", `<span class="ir-symbol">@${escapeHtml(kernel.entry_name)}</span>`),
-    irField("label", literalTerm(kernel.label)),
-    irField("dependencies", listTerm(kernel.dependencies.map(symbol))),
-    irField("domain", literalTerm(kernel.domain)),
-    irField("resources", listTerm(kernel.resources.map(renderResourceAccess))),
-  ]));
-  const topologyFields = [
-    ...(stageRows.length ? [irField("stages", listTerm(stageRows))] : []),
-    ...(flowRows.length ? [irField("flows", listTerm(flowRows))] : []),
-    ...(inputRows.length ? [irField("external_inputs", listTerm(inputRows))] : []),
-    ...(kernelRows.length ? [irField("kernels", listTerm(kernelRows))] : []),
-  ];
-  const programRows = topologyFields.length
-    ? `${sourceRow(0, `<span class="ir-keyword">PROGRAM WITH</span> <span class="punct">{</span>`)}${topologyFields.map((field, index) => sourceRow(1, index + 1 < topologyFields.length ? comma(field) : field)).join("")}${sourceRow(0, `<span class="punct">}</span>`)}`
-    : "";
-  return `<section class="ir-program-metadata"><div class="ir-comment">; program-owned resources and execution topology</div><div class="ir-metadata-line">${resourceRows}${programRows}</div></section>`;
+function renderMetadataValue(value: unknown): string {
+  if (typeof value === "string") {
+    if (value.startsWith("$")) return resourceToken(value);
+    if (/\/(op:|v:|value\/)/.test(value)) return refToken(value, value, "ir-symbol");
+    if (value.startsWith("op:")) return `<span class="ir-symbol">${escapeHtml(value)}</span>`;
+    return literalTerm(value);
+  }
+  if (typeof value === "number") return numberTerm(value);
+  if (value == null) return keywordTerm("none");
+  if (typeof value === "boolean") return keywordTerm(String(value));
+  return `<span class="punct">${escapeHtml(JSON.stringify(value))}</span>`;
 }
 
-function renderResourceOrigin(origin: GraphResourceOrigin): string {
-  if (origin.variant === "host") {
-    return variantTerm("host", [
-      irField("binding", renderBinding(origin.binding)),
-      irField("name", origin.name ? literalTerm(origin.name) : keywordTerm("none")),
-    ]);
-  }
-  return variantTerm("compiler", [
-    irField("kind", keywordTerm(origin.compiler_kind ?? "unknown")),
-    irField("owner", origin.owner
-      ? `<span class="ir-symbol">${escapeHtml(origin.owner)}</span>`
-      : keywordTerm("none")),
-    irField("slot", numberTerm(origin.slot ?? 0)),
-  ]);
+function renderMetadataFields(fields: MetadataField[], indent: number): string {
+  return fields.map((field, index) => {
+    const last = index === fields.length - 1;
+    const suffix = (value: string) => last ? value : comma(value);
+    const labeled = (value: string) => field.label === undefined ? value : irField(field.label, value);
+    if (!field.children.length) {
+      return sourceRow(indent, suffix(labeled(renderMetadataValue(field.value))), field.id);
+    }
+    const [open, close] = Array.isArray(field.value) ? ["[", "]"] : ["{", "}"];
+    return sourceRow(indent, labeled(`<span class="punct">${open}</span>`))
+      + renderMetadataFields(field.children, indent + 1)
+      + sourceRow(indent, suffix(`<span class="punct">${close}</span>`));
+  }).join("");
+}
+
+function renderProgramMetadata(snapshot: GraphSnapshot): string {
+  const records = metadataRecords(snapshot).map((record) => {
+    const header = sourceRow(0, `<span class="ir-keyword">${escapeHtml(record.kind.replace(/s$/, "").toUpperCase())}</span> ${literalTerm(record.label)} <span class="punct">{</span>`);
+    return header + renderMetadataFields(record.fields, 1) + sourceRow(0, '<span class="punct">}</span>');
+  }).join("");
+  return `<section class="ir-program-metadata"><div class="ir-comment">; resources, recipes, and execution topology</div>${records}</section>`;
 }
 
 function renderOutputKind(kind: GraphOutputKind): string {
@@ -1370,8 +1352,8 @@ function comma(value: string): string {
   return `${value}<span class="punct">,</span>`;
 }
 
-function sourceRow(indent: number, content: string): string {
-  return `<span class="ir-source-row ir-indent-${indent}">${content}</span>`;
+function sourceRow(indent: number, content: string, metadataId?: string): string {
+  return `<span class="ir-source-row" style="padding-left: ${indent * 2}ch"${metadataId ? ` data-node-id="${escapeHtml(metadataId)}"` : ""}>${content}</span>`;
 }
 
 function variantTerm(name: string, fields: string[]): string {
@@ -1597,8 +1579,14 @@ function relatedSelection(): Record<Side, Set<string>> {
 
 function alignDefinition(source: Side, group: string): void {
   const target: Side = source === "before" ? "after" : "before";
+  const from = result?.[source];
+  const to = result?.[target];
+  if (!from || !to) return;
+  const matches = matchingBodyGroups(from, to, group);
+  const matched = matches[0];
+  if (!matched) return;
   const counterpart = listings[target].querySelector<HTMLElement>(
-    `.ir-body[data-group-id="${cssEscape(group)}"]`,
+    `.ir-body[data-group-id="${cssEscape(matched)}"]`,
   );
   if (!counterpart) return;
   const scroller = scrollers[target];

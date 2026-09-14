@@ -15,7 +15,7 @@ fn reified(source: &str) -> egir::reify::Segmented {
     egir::reify_soacs(program)
 }
 
-fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
+fn force_horizontal_then_vertical(source: &str) -> egir::semantic_opt::Optimized {
     let program = reified(source);
     let function_count = program.functions.len();
     let (snapshot, catalog) = snapshot::Snapshot::build(&program).unwrap();
@@ -28,15 +28,13 @@ fn force_horizontal_then_vertical(source: &str) -> egir::ResourcesAllocated {
     let (program, _) = emit::apply(program, planned, catalog).unwrap();
     let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let optimized = egir::lift_stage_uniform_values(program);
-    egir::plan_logical_resources(optimized).expect("allocate the vertically normalized Screma")
+    optimized
 }
 
-fn assert_screma_and_lower(allocated: egir::ResourcesAllocated, scans: usize) {
+fn assert_screma_and_lower(allocated: egir::semantic_opt::Optimized, scans: usize) {
     let scremas = allocated
-        .data
-        .stages
-        .stages()
-        .map(|(_, stage)| stage.body())
+        .entry_points
+        .iter()
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .filter_map(|effect| {
             let SideEffectKind::Soac(SoacEffect(_, Soac::Screma(op))) = &effect.kind else {
@@ -111,8 +109,7 @@ entry scan_map_reduce(xs: [4]i32) ([4]i32, i32) =
     );
 
     let optimized: egir::Optimized = fused.retag();
-    let allocated =
-        egir::plan_logical_resources(optimized).expect("allocate the cross-barrier conditional Screma");
+    let allocated = optimized;
     let planned = egir::plan(allocated, LoweringProfile::PORTABLE)
         .expect("plan the cross-barrier conditional Screma");
     lower_egir_to_ssa(planned).expect("lower the cross-barrier conditional Screma");
@@ -270,7 +267,7 @@ entry tuple_item(xs: [4]i32) (i32, i32) =
     assert!(planned.plan.groups().any(|(_, group)| matches!(&group.payload().kind, snapshot::Kind::Indexed { demands, .. } if demands.iter().any(|(_, _, path)| !path.is_empty()))));
     let (program, _) = emit::apply(program, planned, catalog).unwrap();
     let optimized = egir::optimize_semantic_operations(program).unwrap();
-    let allocated = egir::plan_logical_resources(egir::lift_stage_uniform_values(optimized)).unwrap();
+    let allocated = egir::lift_stage_uniform_values(optimized);
     let planned = egir::plan(allocated, LoweringProfile::PORTABLE).unwrap();
     lower_egir_to_ssa(planned).unwrap();
 }
@@ -293,7 +290,7 @@ fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
     assert!(scan.result_state.iter().all(|state| state.ownership == crate::types::SoacOwnership::Fresh));
     let (program, _) = emit::apply(program, planned, catalog).unwrap();
     let optimized = egir::optimize_semantic_operations(program).unwrap();
-    let allocated = egir::plan_logical_resources(egir::lift_stage_uniform_values(optimized)).unwrap();
+    let allocated = egir::lift_stage_uniform_values(optimized);
     let planned = egir::plan(allocated, LoweringProfile::PORTABLE).unwrap();
     lower_egir_to_ssa(planned).unwrap();
 }

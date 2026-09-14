@@ -153,6 +153,7 @@ where
     output
 }
 
+#[cfg(test)]
 pub(crate) fn write_graph_summary<R>(output: &mut String, scope: &str, graph: &EGraph<Semantic<R>>)
 where
     R: GraphResource + Copy + Ord,

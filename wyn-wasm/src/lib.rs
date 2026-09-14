@@ -5,9 +5,7 @@ use wyn_core::{
     initialize_frontend, CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError,
     LoweringProfile, ParsedModules, PipelineTopologyPolicy, SchedulePolicy,
 };
-use wyn_module_graph::{
-    BuildError, ModulePath, PackageIdentity, PackagePlan,
-};
+use wyn_module_graph::{BuildError, ModulePath, PackageIdentity, PackagePlan};
 
 /// Get the compiler version string
 #[wasm_bindgen]
@@ -17,8 +15,7 @@ pub fn version() -> String {
 
 fn single_source_input(source: &str) -> Result<PackagePlan, String> {
     let root_path = ModulePath::new("main.wyn").map_err(|error| error.to_string())?;
-    let identity = PackageIdentity::new("wasm/root", "v0.0.0")
-        .map_err(|error| error.to_string())?;
+    let identity = PackageIdentity::new("wasm/root", "v0.0.0").map_err(|error| error.to_string())?;
     Ok(PackagePlan::single_source(identity, root_path, source))
 }
 
@@ -695,7 +692,6 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         let program = wyn_core::egir::optimize_semantic_operations(program)
             .map_err(|error| wyn_core::egir::from_tlc::ConvertError::Internal(error.to_string()))?;
         let program = wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology);
-        let program = wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)?;
         let program = wyn_core::egir::plan(program, profile)?;
         wyn_core::lower_egir_to_ssa(program)
     };

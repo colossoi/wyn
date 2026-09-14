@@ -32,7 +32,7 @@ pub mod rewrite;
 mod scoped_map;
 pub mod skel_opt;
 pub mod soac;
-pub mod soac_expand;
+pub mod soac_lowering;
 pub mod types;
 
 pub mod builder;
@@ -54,10 +54,7 @@ pub(crate) mod structured_cfg;
 pub(crate) mod stage_variance;
 pub(crate) mod verify_physical;
 
-pub use allocation::{
-    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources,
-    plan_logical_resources_with_policy, resolve_residency, ResidencyDraft, ResourcesAllocated,
-};
+pub use allocation::{allocate_semantic_resources, finalize_staged_ir, resolve_residency, ResidencyDraft};
 pub use elaborate::elaborate;
 pub use eliminate_call_places::{
     eliminate_internal_place_calls, eliminate_internal_place_calls_with_trace, verify_ssa_lowerable_calls,
@@ -65,9 +62,8 @@ pub use eliminate_call_places::{
 };
 pub use materialize::{materialize_dynamic_extracts, Materialized};
 pub use parallelize::{
-    allocate_recipe_scratch, analyze_kernel_recipes, bind_mapped_output_destinations,
-    build_kernel_schedule, finalize_kernel_schedule, plan, KernelRecipesAnalyzed, KernelScheduleBuilt,
-    OutputDestinationsBound, RecipeScratchAllocated,
+    allocate_recipe_scratch, build_kernel_schedule, physicalize_kernel_schedule, plan,
+    KernelRecipesPlanned, KernelScheduleBuilt, RecipeScratchAllocated,
 };
 pub use partial_inline::{
     partially_inline_calls, partially_inline_calls_with_trace, PartialInliningReason,
@@ -84,7 +80,7 @@ pub use semantic_opt::{
     SemanticOptimizationRelation, SemanticOptimizationTrace,
 };
 pub use skel_opt::{optimize_skeleton, SkeletonOptimized};
-pub use soac_expand::{expand_soacs, SoacsExpanded};
+pub use soac_lowering::{lower_soacs, SoacsLowered};
 
 #[cfg(test)]
 pub(crate) mod semantic_exec;

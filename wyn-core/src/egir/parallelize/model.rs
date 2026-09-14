@@ -9,7 +9,7 @@ pub(super) const REDUCE_PHASE2_WIDTH: u32 = 256;
 pub(super) const FILTER_SCAN_GROUPS: u32 = 4;
 
 #[derive(Debug, Error)]
-pub(super) enum ParallelizeError {
+pub(crate) enum ParallelizeError {
     #[error("{0}")]
     Invalid(String),
     #[error("kernel schedule mutation failed: {0}")]
@@ -29,10 +29,3 @@ impl From<&str> for ParallelizeError {
 }
 
 pub(super) type Result<T> = std::result::Result<T, ParallelizeError>;
-
-/// Candidate analysis either selects a target recipe or explains why the
-/// operation must use fallback lowering.
-pub(super) enum CandidateSelection<T> {
-    Selected(T),
-    Fallback,
-}

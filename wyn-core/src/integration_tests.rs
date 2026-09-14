@@ -94,8 +94,9 @@ fn plan_direct(
     let program = egir::optimize_semantic_operations(program)?;
     let topology = PipelineTopologyPolicy::AuthoredOnly;
     let program = egir::apply_pipeline_topology_policy(program, topology);
-    let program = egir::plan_logical_resources_with_policy(program, topology)?;
-    Ok(egir::plan(
+    let program = egir::allocate_semantic_resources(program)?;
+    let program = egir::resolve_residency(program, topology)?;
+    Ok(plan_residency(
         program,
         LoweringProfile::with_topology(target, SchedulePolicy::Serial, topology),
     )?)
@@ -129,7 +130,7 @@ fn playground_nested_fragment_loops_preserve_side_effect_producers() {
     run_with_large_stack(|| {
         let source = include_str!("../../testfiles/regressions/playground_nested_fragment_loops.wyn");
         let ssa = lower_semantic_egir(
-            compile_to_semantic_egir(source),
+            compile_to_residency(source),
             LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
         );
         lower_ssa_to_wgsl(ssa).expect("nested fragment loops lower to WGSL");
@@ -141,7 +142,7 @@ fn playground_nested_loop_helper_binds_all_wgsl_values() {
     run_with_large_stack(|| {
         let source = include_str!("../../testfiles/regressions/playground_nested_loop_helper.wyn");
         let ssa = lower_semantic_egir(
-            compile_to_semantic_egir(source),
+            compile_to_residency(source),
             LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
         );
         lower_ssa_to_wgsl(ssa).expect("nested loop helper binds every referenced WGSL value");
@@ -362,25 +363,54 @@ fn compile_to_segmented_egir(input: &str) -> egir::reify::Segmented {
 /// Helper to compile through semantic EGIR optimization and allocation.
 /// Off-milestone stop — drives the typestate API directly so the same
 /// Semantic module coverage spans both `type_check` and `to_tlc`.
-fn compile_to_semantic_egir(input: &str) -> egir::ResourcesAllocated {
+pub(crate) fn compile_to_residency(input: &str) -> egir::ResidencyDraft {
     let program = egir::optimize_semantic_operations(compile_to_segmented_egir(input))
         .expect("semantic EGIR optimization failed");
     let program = egir::lift_stage_uniform_values(program);
-    egir::plan_logical_resources(program).expect("allocate semantic EGIR resources")
+    let program = egir::allocate_semantic_resources(program).expect("allocate semantic EGIR resources");
+    egir::resolve_residency(program, PipelineTopologyPolicy::AllowGenerated).expect("resolve residency")
+}
+
+fn plan_residency(
+    program: egir::ResidencyDraft,
+    profile: LoweringProfile,
+) -> Result<egir::parallelize::Planned, egir::from_tlc::ConvertError> {
+    let program = egir::finalize_staged_ir(program, profile)?;
+    let program = egir::allocate_recipe_scratch(program)?;
+    egir::physicalize_kernel_schedule(egir::build_kernel_schedule(program)?)
+}
+
+fn residency_ir(program: &egir::ResidencyDraft) -> String {
+    let mut output = String::new();
+    for (_, _, entry) in program.data.stages.stages() {
+        egir::semantic_graph::write_graph_summary(
+            &mut output,
+            &format!("entry {}", entry.name),
+            &entry.graph,
+        );
+    }
+    for function in &program.functions {
+        egir::semantic_graph::write_graph_summary(
+            &mut output,
+            &format!("function {}", function.name),
+            &function.graph,
+        );
+    }
+    output
 }
 
 fn lower_semantic_egir(
-    allocated: egir::ResourcesAllocated,
+    allocated: egir::ResidencyDraft,
     profile: LoweringProfile,
 ) -> ssa::stage::Elaborated {
-    let program = egir::plan(allocated, profile).expect("plan semantic EGIR");
+    let program = plan_residency(allocated, profile).expect("plan semantic EGIR");
     lower_egir_to_ssa(program).expect("lower planned EGIR to SSA")
 }
 
 fn allocated_entries(
-    allocated: &egir::ResourcesAllocated,
+    allocated: &egir::ResidencyDraft,
 ) -> impl Iterator<Item = &egir::program::AllocatedEntry> {
-    allocated.data.stages.stages().map(|(_, stage)| stage.body())
+    allocated.data.stages.stage_records().map(|(_, stage)| stage.body())
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -396,7 +426,7 @@ struct SemanticSoacStats {
     scan_operators: usize,
 }
 
-fn semantic_soac_stats(allocated: &egir::ResourcesAllocated) -> SemanticSoacStats {
+fn semantic_soac_stats(allocated: &egir::ResidencyDraft) -> SemanticSoacStats {
     use crate::egir::types::{EGraph, SideEffectKind, Soac, SoacEffect};
 
     fn visit(
@@ -435,7 +465,7 @@ fn semantic_soac_stats(allocated: &egir::ResourcesAllocated) -> SemanticSoacStat
     for function in &allocated.functions {
         visit(&function.graph, &mut stats);
     }
-    for (_, stage) in allocated.data.stages.stages() {
+    for (_, stage) in allocated.data.stages.stage_records() {
         visit(&stage.body().graph, &mut stats);
     }
     stats
@@ -489,7 +519,7 @@ entry chain(xs: []i32) []i32 =
   let b = map(|x: i32| x * 2, a) in
   map(|x: i32| x - 3, b)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.seg_maps, 1, "three vertically fused maps become one SegMap");
     assert_eq!(
         stats.map_bodies, 1,
@@ -539,7 +569,7 @@ entry chain(xs: []i32) []i32 =
 fn egir_vertical_fusion_preserves_multi_input_producer_sources() {
     use crate::egir::types::{ResourceAccess, SideEffectKind, Soac, SoacEffect};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
   let pairs = zip(xs, ys) in
@@ -577,7 +607,7 @@ entry zipped<[n]>(xs: [n]i32, ys: [n]i32) [n]i32 =
 fn egir_vertical_fusion_composes_one_slot_of_multi_input_consumer() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry mixed() [4]i32 =
   let produced = map(|x: i32| x + 1, [1, 2, 3, 4]) in
@@ -617,7 +647,7 @@ entry paired<[n]>(xs: [n]i32) [n]i32 =
   map(|values: (i32, i32)| values.0 + values.1, zip(plus, times))
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "both producer fields route into one composed map"
@@ -629,7 +659,7 @@ entry paired<[n]>(xs: [n]i32) [n]i32 =
 fn egir_horizontal_fusion_deduplicates_shared_multi_input_vector() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry siblings<[n]>(xs: [n]i32, ys: [n]i32) ([n]i32, [n]i32) =
   let pairs = zip(xs, ys) in
@@ -697,7 +727,7 @@ entry both(xs: []i32) ([]i32, []i32) =
   let consumed = map(|x: i32| x * 2, produced) in
   (produced, consumed)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.seg_maps, 1, "the fused map retains both observable outputs");
     compile_to_spirv(source).expect("output-preserving vertical fusion lowers to SPIR-V");
 }
@@ -711,7 +741,7 @@ entry shared(xs: []i32) ([]i32, []i32) =
   let right = map(|x: i32| x - 3, produced) in
   (left, right)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "one Screma serves both consumers without materializing the shared producer"
@@ -759,7 +789,7 @@ entry sliced(xs: []i32) [4]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|x: i32| x * 2, produced[2..6])
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "a sliced producer should execute as one transformed Screma"
@@ -807,7 +837,7 @@ entry sliced_twice(xs: []i32) [3]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|x: i32| x * 2, produced[1..7][2..5])
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "nested slices should remain one ordered input-transform chain"
@@ -822,7 +852,7 @@ entry sliced_zip(xs: []i32, ys: []i32) [4]i32 =
   let produced = map(|pair: (i32, i32)| pair.0 + pair.1, zip(xs, ys)) in
   map(|x: i32| x * 2, produced[2..6])
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "one slice transform must be pushed onto every producer input"
@@ -837,7 +867,7 @@ entry differently_sliced(xs: [8]i32) [4]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   map(|pair: (i32, i32)| pair.0 + pair.1, zip(produced[0..4], produced[2..6]))
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 2,
         "different producer indices cannot share one transformed producer invocation"
@@ -853,7 +883,7 @@ entry retained(xs: []i32) ([]i32, [4]i32) =
   let sliced = map(|x: i32| x * 2, produced[2..6]) in
   (produced, sliced)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 2,
         "a transformed fusion must not replace an escaping full-domain producer"
@@ -868,7 +898,7 @@ entry one() [1]i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   [produced[3]]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 0,
         "one static demand should remove the array producer"
@@ -883,7 +913,7 @@ entry one() i32 =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   produced[3]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 0,
         "a direct scalar output should not keep the array producer"
@@ -908,7 +938,7 @@ entry both() ([8]i32, [1]i32) =
   let produced = map(|x: i32| x + 1, 0i32 ..< 8) in
   (produced, [produced[3]])
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "a directly returned producer must remain materialized"
@@ -922,7 +952,7 @@ entry many(i: i32, j: i32, k: i32) [1]i32 =
   let produced = map(|x: i32| x + 1, [10, 20]) in
   [produced[i % 2] + produced[j % 2] + produced[k % 2]]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "three point evaluations should not replace a two-element materialization"
@@ -936,7 +966,7 @@ entry many(xs: []i32, i: i32, j: i32, k: i32) [1]i32 =
   let produced = map(|x: i32| x + 1, xs) in
   [produced[i] + produced[j] + produced[k]]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 1,
         "unknown-size maps should not be copied across unbounded point demands"
@@ -949,7 +979,7 @@ entry count(xs: []i32) i32 =
   let kept = filter(|x: i32| x > 0, xs) in
   length(kept)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.filters, 0);
     assert_eq!(stats.seg_reds, 1);
     assert_eq!(
@@ -971,7 +1001,7 @@ entry stats(xs: []i32) [4]i32 =
   let maximum = reduce(|a: i32, x: i32| if a > x then a else x, -2147483648, kept) in
   [n1, total, n2, maximum]
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let stats = semantic_soac_stats(&allocated);
     assert_eq!(stats.filters, 0, "the non-escaping filter should disappear");
     assert_eq!(
@@ -1018,7 +1048,7 @@ entry both(xs: []i32) ?k. ([k]i32, i32) =
   let kept = filter(|x: i32| x > 0, xs) in
   (kept, length(kept))
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.filters, 1,
         "the returned filtered array still needs compaction"
@@ -1039,7 +1069,7 @@ entry pick(xs: []i32) ?k. [k]i32 =
   let shifted = map(|x: i32| x + 1, xs) in
   filter(|x: i32| x > 0, shifted)
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let stats = semantic_soac_stats(&allocated);
     assert_eq!(stats.seg_maps, 0, "the producer map should not materialize");
     assert_eq!(stats.filters, 1, "the escaping filter remains the envelope");
@@ -1075,7 +1105,7 @@ entry accumulate(indices: []i32,
   let _ = scatter(updated, [0i32], [bias]) in
   ()
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let histogram = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| match &effect.kind {
@@ -1110,7 +1140,7 @@ entry accumulate(indices: []i32,
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, doubled) in
   ()
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let stats = semantic_soac_stats(&allocated);
     assert_eq!(
         stats.seg_maps, 0,
@@ -1128,7 +1158,7 @@ entry accumulate(indices: []i32,
         histogram.form.operations[0].update,
         hist::Update::Reduce { .. }
     ));
-    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
+    let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE)
         .expect("plan direct-atomic histogram");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -1148,7 +1178,7 @@ entry accumulate(indices: []i32,
     );
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("atomic histogram lowers to WGSL");
@@ -1168,7 +1198,7 @@ entry accumulate(indices: []i32,
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b + bias, -bias, indices, values) in
   ()
 "#;
-    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
+    let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE)
         .expect("plan compare-exchange histogram");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -1191,7 +1221,7 @@ entry accumulate(indices: []i32,
     );
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("CAS histogram lowers to WGSL");
@@ -1213,11 +1243,11 @@ entry accumulate(indices: []i32,
   let _ = reduce_by_index(dest, |a: i32, b: i32| a + b, 0, indices, values) in
   ()
 "#;
-    let mut allocated = compile_to_semantic_egir(source);
+    let mut allocated = compile_to_residency(source);
     let (stage, race_factor) = allocated
         .data
         .stages
-        .stages()
+        .stage_records()
         .find_map(|(stage, staged)| {
             let entry = staged.body();
             entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects).find_map(
@@ -1236,7 +1266,8 @@ entry accumulate(indices: []i32,
         smallvec![],
     );
 
-    let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan high-contention histogram");
+    let planned =
+        plan_residency(allocated, LoweringProfile::PORTABLE).expect("plan high-contention histogram");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
         ["serial_compute"],
@@ -1263,7 +1294,7 @@ entry collision_shape_3d(dest: *[64][64]u32) ([64][64]u32, [64]u32, u32) =
 "#;
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("ranked bucket scatter lowers to WGSL");
@@ -1373,7 +1404,7 @@ entry scatter_with_named_shape(
 "#;
 
             let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             ))
             .expect("named bucket dimensions lower to WGSL");
@@ -1402,7 +1433,7 @@ entry descriptor_for_wgsl(dest: *[2][4]u32) ([2][4]u32, [2]u32, u32) =
 "#;
 
     let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("bucket scatter lowers to WGSL with its descriptor");
@@ -1422,7 +1453,7 @@ fn wgsl_descriptor_publishes_scalar_inputs_as_the_emitted_storage_block() {
 entry scalar_parameters(index: u32) u32 = index + 1u32
 "#;
     let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("scalar input lowers to WGSL with a WebGPU descriptor");
@@ -1496,7 +1527,7 @@ entry dynamic_parameter(n: u32) []u32 =
   map(|i: u32| i + 1u32, 0u32..<n)
 "#;
     let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("dynamic scalar input lowers to a WebGPU descriptor");
@@ -1568,7 +1599,7 @@ entry reproduce(params: params) []f32 =
         )));
 
         let lowered = lower_ssa_to_wgsl_with_pipeline(lower_semantic_egir(
-            compile_to_semantic_egir(source),
+            compile_to_residency(source),
             LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
         ))
         .expect("projected runtime length compiles to WGSL");
@@ -1615,7 +1646,7 @@ entry named_storage_helper(
 "#;
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("named helper over a fixed storage array lowers to WGSL");
@@ -1673,7 +1704,7 @@ entry collision_shape_2d_bound(
 "#;
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("bound ranked bucket scatter lowers to WGSL");
@@ -1691,8 +1722,8 @@ entry collision_shape_2d_bound(
     .unwrap_or_else(|error| panic!("Naga rejected bound bucket layout: {error:?}\n{wgsl}"));
     compile_thru_spirv(source).expect("bound ranked bucket scatter emits SPIR-V");
 
-    let serial = egir::plan(
-        compile_to_semantic_egir(source),
+    let serial = plan_residency(
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Serial),
     );
     let Err(error) = serial else {
@@ -1709,7 +1740,7 @@ fn ranked_bucket_scatter_records_layout_independently_of_logical_rank() {
     use crate::egir::types::{ArrayLayout, SideEffectKind, Soac, SoacEffect};
 
     fn bucket_layouts(source: &str) -> Vec<ArrayLayout> {
-        let program = compile_to_semantic_egir(source);
+        let program = compile_to_residency(source);
         let layouts = allocated_entries(&program)
             .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
             .find_map(|effect| match &effect.kind {
@@ -1753,7 +1784,7 @@ entry literal_layout(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
     assert_eq!(bucket_layouts(literal), [ArrayLayout::StructureOfArrays]);
     compile_thru_spirv(literal).expect("literal SoA layout emits SPIR-V");
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(literal),
+        compile_to_residency(literal),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("literal SoA layout emits WGSL");
@@ -1842,7 +1873,7 @@ entry strided_bucket_domain(dest: *[4][8]u32) ([4][8]u32, [4]u32, u32) =
 "#;
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("grid-stride bucket scatter lowers to WGSL");
@@ -2011,7 +2042,7 @@ entry write(xs: []i32, dest: *[]i32) () =
   let _ = scatter(dest, indices, values) in
   ()
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let stats = semantic_soac_stats(&allocated);
     assert_eq!(
         stats.seg_maps, 0,
@@ -2033,10 +2064,10 @@ entry write(xs: []i32, dest: *[]i32) () =
 }
 
 #[test]
-fn semantic_segops_survive_optimization_and_logical_allocation() {
+fn staged_finalization_constructs_recipes_without_allocating_scratch() {
     use crate::egir::types::{SegExtent, SideEffectKind, Soac, SoacEffect};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#,
@@ -2044,7 +2075,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
     let seg = allocated
         .data
         .stages
-        .stages()
+        .stage_records()
         .map(|(_, stage)| stage.body())
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
@@ -2064,11 +2095,14 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         allocated.data.core.resources.len() >= 2,
         "input and output resources are planned logically"
     );
-    assert!(allocated.data.stages.external_inputs().any(|input| matches!(
+    let semantic_ir = residency_ir(&allocated);
+    let allocated = egir::finalize_staged_ir(allocated, LoweringProfile::PORTABLE)
+        .expect("finalize stages and recipes");
+    assert!(allocated.data.topology.external_inputs().any(|input| matches!(
         allocated.data.core.resources[input.storage().data].origin(),
         egir::program::ResourceOrigin::Host { .. }
     )));
-    assert!(allocated.data.stages.flows().any(|(_, flow)| {
+    assert!(allocated.data.topology.flows().any(|(_, flow)| {
         flow.is_published()
             && matches!(
                 allocated.data.core.resources[flow.storage().data].origin(),
@@ -2076,7 +2110,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
             )
     }));
 
-    assert!(allocated.semantic_ir().contains("ResourceLength"));
+    assert!(semantic_ir.contains("ResourceLength"));
 
     // Residency allocation is target independent: the semantic operation does
     // not reserve a phase-local partial buffer yet.
@@ -2095,7 +2129,9 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
         })
         .count();
     assert_eq!(partials, 0, "pre-target allocation has no reduce scratch");
-    let planned = egir::plan(allocated, LoweringProfile::PORTABLE).expect("plan parallel reduction");
+    let allocated = egir::allocate_recipe_scratch(allocated).expect("allocate reduction scratch");
+    let schedule = egir::build_kernel_schedule(allocated).expect("schedule reduction");
+    let planned = egir::physicalize_kernel_schedule(schedule).expect("physicalize reduction");
     assert!(planned.logical_resources().iter().any(|resource| matches!(
         resource.origin(),
         ResourceOrigin::Compiler { resource: compiler, .. }
@@ -2111,7 +2147,7 @@ entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 fn same_space_reductions_fuse_into_one_multi_accumulator_op() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 def N: i32 = 256
 entry e() [4]f32 =
@@ -2165,7 +2201,7 @@ entry e() [4]f32 =
 #[test]
 fn horizontal_fusion_does_not_cross_an_intervening_effect_token() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry e() [3]i32 =
     let xs = 0i32 ..< 8 in
@@ -2203,7 +2239,7 @@ entry e() [2]i32 =
   [reduce(|a: i32, b: i32| a + b, 0, xs),
    reduce(|a: i32, b: i32| a + b, 0, ys)]
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let operators = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
@@ -2251,17 +2287,17 @@ fn target_planning_owns_parallel_work_scratch() {
             .collect::<std::collections::HashSet<_>>()
     };
 
-    let scan =
-        compile_to_semantic_egir(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
-    let scan_kinds = kinds(scan.logical_resources());
+    let scan = compile_to_residency(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
+    let scan_kinds = kinds(&scan.data.core.resources);
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(!scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
-    let scan = egir::plan(scan, LoweringProfile::PORTABLE).expect("plan parallel scan");
-    let scan_kinds = kinds(scan.logical_resources());
+    let scan = plan_residency(scan, LoweringProfile::PORTABLE).expect("plan parallel scan");
+    let scan_kinds = kinds(&scan.data.resources);
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockSums));
     assert!(scan_kinds.contains(&CompilerResourceKind::ScanBlockOffsets));
     let scan_resource_count = scan
-        .logical_resources()
+        .data
+        .resources
         .iter()
         .filter_map(|resource| match resource.origin() {
             ResourceOrigin::Compiler {
@@ -2278,17 +2314,20 @@ fn target_planning_owns_parallel_work_scratch() {
         .count();
     assert_eq!(scan_resource_count, 2);
 
-    let filter =
-        compile_to_semantic_egir(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)");
+    let filter = compile_to_residency(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)");
     let host_abi = filter
-        .logical_resources()
+        .data
+        .core
+        .resources
         .iter()
         .filter_map(|resource| resource.host_binding())
         .collect::<Vec<_>>();
-    let filter_kinds = kinds(filter.logical_resources());
+    let filter_kinds = kinds(&filter.data.core.resources);
     assert!(
         filter
-            .logical_resources()
+            .data
+            .core
+            .resources
             .iter()
             .filter(|resource| matches!(resource.origin(), ResourceOrigin::Host { .. }))
             .count()
@@ -2300,30 +2339,26 @@ fn target_planning_owns_parallel_work_scratch() {
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
     assert!(!filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
-    let filter = egir::plan(filter, LoweringProfile::PORTABLE).expect("plan parallel filter");
+    let filter = plan_residency(filter, LoweringProfile::PORTABLE).expect("plan parallel filter");
     assert_eq!(
-        filter
-            .logical_resources()
-            .iter()
-            .filter_map(|resource| resource.host_binding())
-            .collect::<Vec<_>>(),
+        filter.data.resources.iter().filter_map(|resource| resource.host_binding()).collect::<Vec<_>>(),
         host_abi,
         "target scratch allocation must not change host ABI bindings"
     );
-    let filter_kinds = kinds(filter.logical_resources());
+    let filter_kinds = kinds(&filter.data.resources);
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterFlags));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterOffsets));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockSums));
     assert!(filter_kinds.contains(&CompilerResourceKind::FilterScanBlockOffsets));
 
-    let scalar_handoff = compile_to_semantic_egir(
+    let scalar_handoff = compile_to_residency(
         r#"
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
   map(|x: i32| x + total, xs)
 "#,
     );
-    assert!(scalar_handoff.logical_resources().iter().any(|resource| {
+    assert!(scalar_handoff.data.core.resources.iter().any(|resource| {
         matches!(
             resource.origin(),
             ResourceOrigin::Compiler { resource: compiler, .. }
@@ -2331,8 +2366,8 @@ entry add_sum(xs: []i32) []i32 =
         )
     }));
 
-    let single = egir::plan(
-        compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
+    let single = plan_residency(
+        compile_to_residency(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
         LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     )
     .expect("plan sequential reduction");
@@ -2341,11 +2376,11 @@ entry add_sum(xs: []i32) []i32 =
         "serial planning must not reserve parallel partial buffers"
     );
 
-    let fallback = compile_to_semantic_egir(
+    let fallback = compile_to_residency(
         " entry sum_from(xs: []i32, z: i32) i32 = reduce(|a: i32, b: i32| a + b, z, xs)",
     );
     let fallback =
-        egir::plan(fallback, LoweringProfile::PORTABLE).expect("plan reduction with a runtime neutral");
+        plan_residency(fallback, LoweringProfile::PORTABLE).expect("plan reduction with a runtime neutral");
     assert!(
         !kinds(fallback.logical_resources()).contains(&CompilerResourceKind::ReducePartial),
         "a reduction rejected before mutation must not retain speculative scratch"
@@ -2390,8 +2425,8 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
             .collect::<Vec<_>>()
     };
 
-    let scalar_reduce = egir::plan(
-        compile_to_semantic_egir(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
+    let scalar_reduce = plan_residency(
+        compile_to_residency(" entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)"),
         LoweringProfile::PORTABLE,
     )
     .expect("plan scalar reduction");
@@ -2402,7 +2437,7 @@ fn selected_recipes_allocate_exact_ordered_scratch() {
     assert_eq!(scratch[0].2, 0);
     assert_eq!(scratch[0].3, LogicalSize::SameAsDispatch { elem_bytes: 4 });
 
-    let multi_reduce = compile_to_semantic_egir(
+    let multi_reduce = compile_to_residency(
         r#"
 entry sums() (i32, i32) =
   let xs = map(|i: i32| i + 1, 0i32 ..< 8) in
@@ -2412,7 +2447,7 @@ entry sums() (i32, i32) =
 "#,
     );
     let multi_reduce =
-        egir::plan(multi_reduce, LoweringProfile::PORTABLE).expect("plan multi-accumulator reduction");
+        plan_residency(multi_reduce, LoweringProfile::PORTABLE).expect("plan multi-accumulator reduction");
     let scratch = planned_scratch(multi_reduce.logical_resources());
     assert_eq!(scratch.len(), 2);
     assert_eq!(
@@ -2441,8 +2476,8 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let scan = egir::plan(
-        compile_to_semantic_egir(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)"),
+    let scan = plan_residency(
+        compile_to_residency(" entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)"),
         LoweringProfile::PORTABLE,
     )
     .expect("plan scan");
@@ -2466,8 +2501,8 @@ entry sums() (i32, i32) =
         ]
     );
 
-    let filter = egir::plan(
-        compile_to_semantic_egir(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)"),
+    let filter = plan_residency(
+        compile_to_residency(" entry evens(xs: []i32) []i32 = filter(|x: i32| x % 2 == 0, xs)"),
         LoweringProfile::PORTABLE,
     )
     .expect("plan runtime filter");
@@ -3283,7 +3318,7 @@ fn multi_consumer_producer_survival_is_characterized() {
     use crate::egir::types::{SideEffectKind, Soac, SoacEffect};
 
     fn multi_consumer_producers(src: &str) -> usize {
-        let allocated = compile_to_semantic_egir(src);
+        let allocated = compile_to_residency(src);
         let seg_maps: std::collections::HashSet<_> = allocated_entries(&allocated)
             .flat_map(|entry| {
                 entry.graph.skeleton.blocks.iter().flat_map(move |(_, block)| {
@@ -3367,10 +3402,12 @@ entry e() [4]i32 =
         "multi-consumer subsumption boundary moved — Phase M scope changed"
     );
 
-    let allocated = compile_to_semantic_egir(reduce_then_map);
+    let allocated = compile_to_residency(reduce_then_map);
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
     let shared: Vec<_> = allocated
-        .logical_resources()
+        .data
+        .core
+        .resources
         .iter()
         .filter(|resource| {
             matches!(
@@ -3389,7 +3426,7 @@ entry e() [4]i32 =
     let shared_stages = allocated
         .data
         .stages
-        .stages()
+        .stage_records()
         .filter(|(_, stage)| {
             stage.origin().generated_kind() == Some(egir::program::GeneratedStageKind::SharedArray)
         })
@@ -3423,11 +3460,12 @@ entry e() [4]i32 =
             allocated
                 .data
                 .stages
-                .stage(*consumer)
+                .stage_records()
+                .find_map(|(id, stage)| (id == *consumer).then_some(stage))
                 .is_some_and(|stage| matches!(stage.origin(), egir::program::StageOrigin::Authored))
         })
         .expect("shared array remains an input of the source entry");
-    assert_eq!(allocated.data.stages.stage(consumer).unwrap().body().name, "e");
+    assert_eq!(allocated.data.stages.stage_body(consumer).unwrap().name, "e");
     let lowered = lower_semantic_egir(allocated, LoweringProfile::PORTABLE);
     let mir = ssa::print::format_program(&lowered);
     assert_eq!(
@@ -3451,10 +3489,7 @@ entry e() [4]i32 =
         .iter()
         .any(|resource| resource.resource == shared_resource && resource.access.reads()));
     assert!(phases.last().unwrap().dependencies.contains(&phases[0].id));
-    let second = lower_semantic_egir(
-        compile_to_semantic_egir(reduce_then_map),
-        LoweringProfile::PORTABLE,
-    );
+    let second = lower_semantic_egir(compile_to_residency(reduce_then_map), LoweringProfile::PORTABLE);
     assert_eq!(
         serde_json::to_string(&lowered.global_context.pipeline).unwrap(),
         serde_json::to_string(&second.global_context.pipeline).unwrap(),
@@ -3468,7 +3503,7 @@ entry e() [4]i32 =
     );
 
     let single = lower_semantic_egir(
-        compile_to_semantic_egir(reduce_then_map),
+        compile_to_residency(reduce_then_map),
         LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial),
     );
     let single_phases: Vec<_> = single.global_context.physical_kernels.phases().collect();
@@ -3483,7 +3518,7 @@ entry e() [4]i32 =
     ));
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(reduce_then_map),
+        compile_to_residency(reduce_then_map),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("shared materialization lowers to WGSL");
@@ -3511,7 +3546,7 @@ fn terminal_schedule_and_descriptor_are_atomic_and_deterministic() {
     let source = r#"
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     for pipeline in &allocated.data.core.pipeline.pipelines {
         if let pipeline_descriptor::Pipeline::Compute(compute) = pipeline {
             assert!(
@@ -3539,7 +3574,7 @@ fn serial_is_a_terminal_schedule_policy() {
     let source = r#"
 entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
 
     let lowered = lower_semantic_egir(
         allocated,
@@ -5674,19 +5709,20 @@ fn target_profiles_are_selected_before_ssa_lowering() {
 #[test]
 fn terminal_scan_helpers_are_complete_region_arena_members() {
     let source = " entry prefix(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)";
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     assert!(
         !allocated.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
         "planner-generated scan helper leaked into semantic EGIR"
     );
-    let planned_callables =
-        egir::parallelize::tests::planned_callable_names(compile_to_semantic_egir(source))
-            .expect("parallel schedule");
+    let recipes =
+        egir::finalize_staged_ir(allocated, LoweringProfile::PORTABLE).expect("finalize scan recipes");
+    let scratch = egir::allocate_recipe_scratch(recipes).expect("allocate scan scratch");
+    let schedule = egir::build_kernel_schedule(scratch).expect("schedule scan");
     assert!(
-        planned_callables.iter().any(|name| name.ends_with("_scan_op_swap")),
-        "scan helper must be owned by the kernel plan"
+        schedule.functions.iter().any(|function| function.name.ends_with("_scan_op_swap")),
+        "the scheduled program owns its generated callable"
     );
-    let physical = egir::plan(allocated, LoweringProfile::PORTABLE).expect("terminal schedule");
+    let physical = egir::physicalize_kernel_schedule(schedule).expect("physicalize scan");
     let helper = physical
         .functions
         .iter()
@@ -6204,7 +6240,7 @@ entry tuple_prefixes(xs: [8](i32, i32)) [8](i32, i32) =
     (0, -2147483648),
     xs)
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let scan = allocated_entries(&allocated)
         .flat_map(|entry| entry.graph.skeleton.blocks.iter().flat_map(|(_, block)| &block.side_effects))
         .find_map(|effect| {
@@ -6991,7 +7027,7 @@ fn expensive_scalar_source_is_profitable_for_one_map() {
 
 fn assert_scalar_prefix_emits_valid_wgsl(source: &str) {
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("scalar prepass lowers to WGSL");
@@ -7061,7 +7097,7 @@ entry cheap_prefix(xs: []u32, ys: []u32, factor: u32) ([]u32, []u32) =
 fn scalar_prepass_flow_is_explicit_in_resource_manifest() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         r#"
 entry add_sum(xs: []i32) []i32 =
   let total = reduce(|a: i32, b: i32| a + b, 0, xs) in
@@ -7069,7 +7105,9 @@ entry add_sum(xs: []i32) []i32 =
 "#,
     );
     let resource = allocated
-        .logical_resources()
+        .data
+        .core
+        .resources
         .iter()
         .find(|resource| match resource.origin() {
             ResourceOrigin::Compiler {
@@ -7084,14 +7122,24 @@ entry add_sum(xs: []i32) []i32 =
         .flows()
         .find_map(|(_, flow)| (flow.storage().data == resource.id()).then_some(flow))
         .expect("scalar handoff has an explicit staged flow");
-    let producer = allocated.data.stages.stage(flow.producer()).expect("staged producer");
+    let producer = allocated
+        .data
+        .stages
+        .stage_records()
+        .find_map(|(id, stage)| (id == flow.producer()).then_some(stage))
+        .expect("staged producer");
     assert_eq!(
         producer.origin().generated_kind(),
         Some(egir::program::GeneratedStageKind::Scalar)
     );
     assert!(producer.body().name.contains("prepass_scalar"));
     assert_eq!(flow.consumers().len(), 1);
-    let consumer = allocated.data.stages.stage(flow.consumers()[0]).expect("staged consumer");
+    let consumer = allocated
+        .data
+        .stages
+        .stage_records()
+        .find_map(|(id, stage)| (id == flow.consumers()[0]).then_some(stage))
+        .expect("staged consumer");
     assert_eq!(consumer.body().name, "add_sum");
 }
 
@@ -7431,7 +7479,7 @@ entry frag() vec4f32 =
 fn consuming_map_compiles_end_to_end() {
     // `*[N]T` map whose input is dead-after: TLC ownership grants a
     // `UniqueInput` capability, EGIR resolves it to `InputBuffer` from the
-    // final use graph, and `soac_expand` emits the in-place loop. Compiling
+    // final use graph, and `soac_lowering` emits the in-place loop. Compiling
     // end-to-end through SSA exercises every layer.
     let _ssa = compile_to_ssa(
         r#"
@@ -7471,7 +7519,7 @@ fn count_uninit_in_program<Tag, GlobalContext>(ssa: &Program<Tag, GlobalContext>
 fn consuming_scan_compiles_end_to_end() {
     // Parallel of `consuming_map_compiles_end_to_end` for Scan: `*[N]T`
     // input that's dead-after; ownership grants `UniqueInput`, EGIR resolves
-    // it to `InputBuffer`, and `soac_expand` runs the destination-passing
+    // it to `InputBuffer`, and `soac_lowering` runs the destination-passing
     // loop.
     let _ssa = compile_to_ssa(
         r#"
@@ -7812,7 +7860,7 @@ entry gen(xs: []i32) ([]i32, [1]i32) =
   (c, [d])
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_reds, 1,
         "map producer and map+reduce consumers should fuse"
@@ -7832,7 +7880,7 @@ entry gen(xs: []i32) ([]i32, []i32) =
   (c, d)
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_scans, 1,
         "map producer and map+scan consumers should fuse"
@@ -7854,7 +7902,7 @@ entry gen(xs: []i32) ([]i32, []i32, [1]i32, []i32) =
   (c, e, [d], f)
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_reds, 0,
         "the reduction is represented by the mixed canonical Screma"
@@ -7995,7 +8043,7 @@ entry two(ids: []u32, params: []f32) ([]f32, []f32) =
 "#;
 
     let wgsl = lower_ssa_to_wgsl(lower_semantic_egir(
-        compile_to_semantic_egir(source),
+        compile_to_residency(source),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     ))
     .expect("WGSL lowering");
@@ -9227,7 +9275,7 @@ fn runtime_index_into_nested_producer_scalarizes() {
 def g(n: i32) []f32 = map(|i: i32| f32.i32(i), 0i32 ..< n)
 entry e(j: i32) [1]f32 = [g(256)[j]]
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.seg_maps, 0,
         "a producer-independent runtime point demand should not materialize its map"
@@ -9573,7 +9621,7 @@ entry compute_main(data: [4]f32) [4]f32 =
 /// Mapping a lambda whose return type is a mixed scalar/vector tuple. The SoA
 /// transform rewrites the output
 /// `[N](f32, i32, vec3f32)` into a tuple-of-arrays before EGIR
-/// conversion; `egir::soac_expand` must split the per-iteration
+/// conversion; `egir::soac_lowering` must split the per-iteration
 /// ArrayWith into per-component ArrayWith calls + a Tuple repack.
 /// The split supplies the element types needed by SPIR-V runtime indexing.
 #[test]
@@ -9629,7 +9677,7 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
 }
 
 /// A loop carries an array whose next-iteration value comes from
-/// `map(…, iota(N))`. Although `iota` is Virtual, `egir::soac_expand`
+/// `map(…, iota(N))`. Although `iota` is Virtual, `egir::soac_lowering`
 /// materializes the map result through `_w_intrinsic_uninit` and
 /// `_w_intrinsic_array_with_inplace`, so the carried result must have
 /// Composite representation.
@@ -10666,7 +10714,7 @@ entry pair(xs: []f32) ([]f32, []f32) =
   let b = map(|x: f32| x + 1.0, xs) in
   (a, b)
 "#;
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(src));
+    let stats = semantic_soac_stats(&compile_to_residency(src));
     assert_eq!(stats.seg_maps, 1, "equal-domain sibling maps should co-schedule");
     assert_eq!(
         stats.map_bodies, 1,
@@ -11015,7 +11063,7 @@ entry filt_stats(xs: []i32) (i32, i32) =
   (length(kept), reduce(|a: i32, b: i32| a + b, 0i32, kept))
 ";
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.filters, 0,
         "scalar consumers should eliminate filter materialization"
@@ -11307,7 +11355,7 @@ entry e(xs: []f32,
         reduce(|a: f32, b: f32| a + b, 0.0, ws),
       p)
 ";
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.filters, 0, "the filter must fold into the masked SegRed");
     assert_eq!(stats.seg_reds, 1, "the nested chain should contain one SegRed");
     compile_to_spirv(source).expect("map→filter→map→reduce should lower to SPIR-V");
@@ -11493,7 +11541,7 @@ fn multi_consumer_scan_plus_reduce_lifts() {
     use crate::egir::program::{CompilerResourceKind, ResourceOrigin};
 
     let source = include_str!("../../testfiles/gather_scan_reduce.wyn");
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let handoff_kinds = allocated
         .data
         .core
@@ -11793,7 +11841,7 @@ entry g(xs: []i32) []i32 =
     }
 
     let converted = lower_semantic_egir(
-        compile_to_semantic_egir(src),
+        compile_to_residency(src),
         LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
     );
     let wgsl_slot = converted
@@ -12603,7 +12651,7 @@ entry nested_view(
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let leaf =
@@ -12661,7 +12709,7 @@ entry main(roots: [1][1024]u32) [1]u32 =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
@@ -12742,7 +12790,7 @@ entry main(roots: [1][1024]u32) [4]u32 =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let helper = ssa
@@ -12838,7 +12886,7 @@ entry main(root: [2]u32) [4]u32 =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
@@ -12902,7 +12950,7 @@ entry main(root: [2]u32, table: [1024][2]u32) [4]u32 =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let entry = ssa.entry_points.iter().find(|entry| entry.name == "main").expect("main entry");
@@ -12978,7 +13026,7 @@ entry main(roots: [1]([{width}]u32), table: [1024][2]u32) [1]([{width}]u32) =
                 );
 
                 let ssa = lower_semantic_egir(
-                    compile_to_semantic_egir(&source),
+                    compile_to_residency(&source),
                     LoweringProfile::new(
                         CodegenTarget::Wgsl,
                         SchedulePolicy::Parallel,
@@ -13063,7 +13111,7 @@ entry main(input: [1]u32) ([1]u32, [1]([2]u32)) =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             let helper = ssa
@@ -13155,7 +13203,7 @@ entry main(input: [1]u32) ([1]u32, [1]u32) =
 "#;
 
             let ssa = lower_semantic_egir(
-                compile_to_semantic_egir(source),
+                compile_to_residency(source),
                 LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
             );
             assert!(
@@ -13534,7 +13582,7 @@ entry e(a: []f32,
 /// Range -> Reduce, e.g. `reduce(op, ne, lo..<hi)`. The iota is NOT
 /// materialized: a `Range` lowers to a Virtual array `{start, step, len}` and the
 /// reduce reads each element as `start + i*step` arithmetic inside its own loop
-/// (see `egir/soac_expand.rs` `is_virtual_source`). So this is already optimally
+/// (see `egir/soac_lowering.rs` `is_virtual_source`). So this is already optimally
 /// fused at the backend level — no fusion-engine Range builder is needed. We
 /// assert exactly ONE loop in the MIR: a materialized-then-reduced range would
 /// emit two (one to fill the buffer, one to fold it).
@@ -13657,7 +13705,7 @@ entry e(a: []f32) []f32 =
     ];
 
     for (label, src, parallel, expected_lambdas, expected_outputs) in cases {
-        let allocated = compile_to_semantic_egir(src);
+        let allocated = compile_to_residency(src);
         let stats = semantic_soac_stats(&allocated);
         assert_eq!(stats.seg_scans, 1, "{label}: scan and post-map share one Screma");
         assert_eq!(stats.seg_maps, 0, "{label}: no map may remain materialized");
@@ -13681,7 +13729,7 @@ entry e(a: []f32) []f32 =
             has_post_scan,
             "{label}: scan result must route through the post-map"
         );
-        let planned = egir::plan(compile_to_semantic_egir(src), LoweringProfile::PORTABLE)
+        let planned = plan_residency(compile_to_residency(src), LoweringProfile::PORTABLE)
             .unwrap_or_else(|error| panic!("{label}: parallel plan: {error}"));
         let expected_phases: &[&str] = if parallel {
             &["scan_phase1", "scan_block", "scan_apply_offsets"]
@@ -13708,7 +13756,7 @@ entry e(a: []f32) []f32 =
         );
         compile_thru_spirv(src).unwrap_or_else(|error| panic!("{label}: SPIR-V: {error}"));
         lower_ssa_to_wgsl(lower_semantic_egir(
-            compile_to_semantic_egir(src),
+            compile_to_residency(src),
             LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
         ))
         .unwrap_or_else(|error| panic!("{label}: WGSL: {error}"));
@@ -13723,10 +13771,10 @@ entry paired_prefixes(xs: []i32) ([]i32, []i32) =
    scan(|a: i32, b: i32| if a > b then a else b, 0, xs))
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.seg_scans, 1, "independent scans share one Screma");
     assert_eq!(stats.scan_operators, 2);
-    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
+    let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE)
         .expect("plan independent scans");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -13744,7 +13792,7 @@ entry e(xs: []i32) ([]i32, [1]i32) =
   (mapped, [total])
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(
         stats.mixed_scremas, 1,
         "independent scan and reduction share one Screma"
@@ -13752,7 +13800,7 @@ entry e(xs: []i32) ([]i32, [1]i32) =
     assert_eq!(stats.scan_operators, 1);
     assert_eq!(stats.reduce_operators, 1);
     assert_eq!(stats.seg_maps + stats.seg_scans + stats.seg_reds, 0);
-    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
+    let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE)
         .expect("plan mixed scan/reduction");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -13775,11 +13823,11 @@ entry collective_product(xs: []i32, modes: []i32) ([2]i32, []i32, []i32) =
   ([total, maximum], totals, maxima)
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.mixed_scremas, 1);
     assert_eq!(stats.scan_operators, 2);
     assert_eq!(stats.reduce_operators, 2);
-    let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE)
+    let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE)
         .expect("plan collective product");
     assert_eq!(
         planned.physical_kernels().phases().map(|phase| phase.label.as_str()).collect::<Vec<_>>(),
@@ -13796,7 +13844,7 @@ entry e(xs: [8]i32) [1]i32 =
   [total]
 "#;
 
-    let stats = semantic_soac_stats(&compile_to_semantic_egir(source));
+    let stats = semantic_soac_stats(&compile_to_residency(source));
     assert_eq!(stats.seg_scans, 1, "the producer scan barrier remains");
     assert_eq!(stats.seg_reds, 1, "the dependent reduction barrier remains");
     assert_eq!(stats.mixed_scremas, 0);
@@ -14135,7 +14183,7 @@ entry f() vec4f32 =
 }
 
 /// `filter` allocates a scratch storage binding (`filt_gather_b<n>`)
-/// that the same compute stage writes into via the SOAC expansion.
+/// that the same compute stage writes into via the SOAC lowering.
 /// `egir::from_tlc::convert_soac_filter` declares that scratch with
 /// `role: Output` so `publish.rs` reports it as write-capable rather than a
 /// read-only intermediate.
@@ -14221,7 +14269,7 @@ entry tick(buf: *[]u32) *[]u32 =
 /// backend tries to lower a Composite array with a runtime size
 /// (the input view's runtime length) and panics. Wired in
 /// `egir::from_tlc::convert_soac_map` (`InputBuffer`-aware project
-/// type, mirroring `convert_soac_scan`) and in `egir::soac_expand`
+/// type, mirroring `convert_soac_scan`) and in `egir::soac_lowering`
 /// (`emit_write_element` takes the post-decision carried type).
 /// Structural records lower to `OpTypeStruct` in SPIR-V (via the
 /// alias to `draw_args`). Member offsets get added when the record is
@@ -14278,8 +14326,8 @@ entry step(dom: []u32, points_in: []vec2f32, items_in: []vec4f32)
 fn physical_planning_finalizes_internal_and_extern_callable_abis() {
     use egir::types::{OperandType, PlaceAccess, ResultDestination, ValueKind};
 
-    let planned = egir::plan(
-        compile_to_semantic_egir(
+    let planned = plan_residency(
+        compile_to_residency(
             r#"
 def countdown(n: i32) i32 =
   if n <= 0 then 0 else countdown(n - 1)
@@ -14349,8 +14397,8 @@ entry run(xs: [4]i32, n: i32) [2]i32 =
         }));
     }
 
-    let extern_planned = egir::plan(
-        compile_to_semantic_egir(
+    let extern_planned = plan_residency(
+        compile_to_residency(
             r#"
 #[linked("keep_abi")]
 extern keep_abi(xs: [4]i32) [4]i32

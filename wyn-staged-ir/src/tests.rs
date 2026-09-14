@@ -70,8 +70,24 @@ fn body_mutation_and_mapping_preserve_topology() {
     let mut ir = builder.finish().unwrap();
 
     *ir.stage_body_mut(stage).unwrap() = "after";
-    let ir = ir.map_stage_bodies(|_, body| body.len());
+    let ir = ir
+        .try_map_stage_bodies(|id, origin, body| {
+            assert_eq!(id, stage);
+            assert_eq!(origin, &"authored");
+            body.len().checked_sub(1).ok_or("empty stage")
+        })
+        .unwrap()
+        .map_stage_bodies(|_, length| length + 1);
     assert_eq!(ir.stage(stage).unwrap().body(), &5);
     assert_eq!(ir.flow(flow).unwrap().producer(), stage);
     assert!(ir.flow(flow).unwrap().is_published());
+}
+
+#[test]
+fn consuming_body_transformation_propagates_failure() {
+    let mut builder = Builder::new();
+    let stage = builder.add_stage("authored", "body").unwrap();
+    let ir = builder.finish().unwrap();
+    let failed = ir.try_map_stage_bodies(|id, _, _| Err::<(), _>(id));
+    assert_eq!(failed.unwrap_err(), stage);
 }

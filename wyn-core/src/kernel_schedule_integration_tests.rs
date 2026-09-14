@@ -54,9 +54,9 @@ fn finalized_order_owns_recipe_bodies_and_descriptor_stages() {
         "entry mixed() ([]i32, []i32) = (map(|i| i, iota(1)), filter(|i| true, iota(1)))",
         "entry buckets(dest: *[4][8]u32, items: [](i32, u32)) ([4][8]u32, [4]u32, u32) = bucket_scatter_1d(dest, items)",
     ] {
-        let planned = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE).unwrap();
+        let planned = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE).unwrap();
         assert_publication_agreement(&planned);
-        let rebuilt = egir::plan(compile_to_semantic_egir(source), LoweringProfile::PORTABLE).unwrap();
+        let rebuilt = plan_residency(compile_to_residency(source), LoweringProfile::PORTABLE).unwrap();
         assert_eq!(planned.physical_kernels().topological_kernel_ids(), rebuilt.physical_kernels().topological_kernel_ids());
         assert_eq!(serde_json::to_value(&planned.data.pipeline).unwrap(), serde_json::to_value(&rebuilt.data.pipeline).unwrap());
     }
@@ -65,21 +65,19 @@ fn finalized_order_owns_recipe_bodies_and_descriptor_stages() {
 #[test]
 fn serial_recipes_preserve_unsplit_outputs_without_allocating_parallel_scratch() {
     use crate::egir::parallelize::{
-        allocate_recipe_scratch, analyze_kernel_recipes, bind_mapped_output_destinations,
-        build_kernel_schedule, finalize_kernel_schedule,
+        allocate_recipe_scratch, build_kernel_schedule, physicalize_kernel_schedule,
     };
-    let allocated = compile_to_semantic_egir(
+    let allocated = compile_to_residency(
         "entry mixed() ([]i32, []i32) = (map(|i| i, iota(1)), filter(|i| true, iota(1)))",
     );
     let stage_entries =
-        allocated.data.stages.stages().map(|(_, stage)| stage.body().id).collect::<Vec<_>>();
+        allocated.data.stages.stage_records().map(|(_, stage)| stage.body().id).collect::<Vec<_>>();
     let resource_count = allocated.data.core.resources.len();
     let profile = LoweringProfile::new(CodegenTarget::Portable, SchedulePolicy::Serial);
-    let analyzed =
-        analyze_kernel_recipes(bind_mapped_output_destinations(allocated).unwrap(), profile).unwrap();
+    let analyzed = egir::finalize_staged_ir(allocated, profile).unwrap();
     let allocated = allocate_recipe_scratch(analyzed).unwrap();
-    assert_eq!(allocated.program().data.core.resources.len(), resource_count);
-    let planned = finalize_kernel_schedule(build_kernel_schedule(allocated).unwrap()).unwrap();
+    assert_eq!(allocated.data.core.resources.len(), resource_count);
+    let planned = physicalize_kernel_schedule(build_kernel_schedule(allocated).unwrap()).unwrap();
     let kernels = planned.physical_kernels().kernels().collect::<Vec<_>>();
     assert_eq!(kernels.len(), stage_entries.len());
     assert!(kernels.iter().all(|kernel| stage_entries.contains(&kernel.entry)));
@@ -92,8 +90,8 @@ fn serial_recipes_preserve_unsplit_outputs_without_allocating_parallel_scratch()
 
 #[test]
 fn mixed_projected_outputs_have_no_invented_cross_branch_dependency() {
-    let planned = egir::plan(
-        compile_to_semantic_egir(
+    let planned = plan_residency(
+        compile_to_residency(
             "entry mixed() ([]i32, []i32) = (map(|i| i, iota(1)), filter(|i| true, iota(1)))",
         ),
         LoweringProfile::PORTABLE,
@@ -120,7 +118,7 @@ entry frame(points: []vec2f32, target: render_target<vec4f32>) ([]vec2f32, rende
   let target' = shade(target, covered, |value, position, front, primitive, sample| @[value.x, value.y, 0.0, 1.0]) in
   (updated, target')
 "#;
-    let allocated = compile_to_semantic_egir(source);
+    let allocated = compile_to_residency(source);
     let authored_graphics = allocated
         .data
         .core
@@ -143,7 +141,7 @@ entry frame(points: []vec2f32, target: render_target<vec4f32>) ([]vec2f32, rende
             _ => None,
         })
         .unwrap();
-    let planned = egir::plan(allocated, LoweringProfile::PORTABLE).unwrap();
+    let planned = plan_residency(allocated, LoweringProfile::PORTABLE).unwrap();
     assert_publication_agreement(&planned);
     let pipelines = &planned.data.pipeline.pipelines;
     let graphics_index =
@@ -163,7 +161,7 @@ fn explicit_single_workgroup_dispatch_is_preserved_and_coverage_is_checked() {
     use crate::pipeline_descriptor::DispatchSize;
     for count in [1, 1024] {
         let source = format!("entry mapped() []i32 = map(|i: i32| i + 1, iota({count}))");
-        let mut allocated = compile_to_semantic_egir(&source);
+        let mut allocated = compile_to_residency(&source);
         let Pipeline::Compute(compute) = &mut allocated.data.core.pipeline.pipelines[0] else {
             unreachable!()
         };
@@ -173,7 +171,7 @@ fn explicit_single_workgroup_dispatch_is_preserved_and_coverage_is_checked() {
             z: 1,
             explicit: true,
         };
-        let result = egir::plan(allocated, LoweringProfile::PORTABLE);
+        let result = plan_residency(allocated, LoweringProfile::PORTABLE);
         if count == 1 {
             let planned = result.unwrap();
             assert_eq!(

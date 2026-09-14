@@ -1,6 +1,6 @@
-//! Structural tests for `egir::soac_expand`.
+//! Structural tests for `egir::soac_lowering`.
 //!
-//! These tests drive the pipeline up to `expand_soacs` and inspect the
+//! These tests drive the pipeline up to `lower_soacs` and inspect the
 //! resulting graph, including its addressable places and CFG state.
 
 use crate::ast::Span;
@@ -37,7 +37,6 @@ fn compile_to_planned(input: &str) -> egir::parallelize::Planned {
     let program = egir::reify_soacs(program);
     let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let program = egir::lift_stage_uniform_values(program);
-    let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
     egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule")
 }
 
@@ -48,9 +47,8 @@ fn compile_to_expanded_egraph(input: &str) -> EGraph<Physical> {
     let program = egir::reify_soacs(program);
     // Preserve the SOACs whose aggregate stores this expansion test inspects.
     let program = egir::lift_stage_uniform_values(program.retag());
-    let program = egir::plan_logical_resources(program).expect("allocate semantic EGIR");
     let program = egir::plan(program, LoweringProfile::PORTABLE).expect("terminal schedule");
-    let program = egir::expand_soacs(program).expect("physical SOAC expansion");
+    let program = egir::lower_soacs(program).expect("physical SOAC lowering");
     let inner = &program;
     inner
         .entry_points
@@ -669,7 +667,7 @@ fn atomic_hist_lowers_multiple_operations_with_bounds_checks() {
 fn map_array_of_mixed_tuple_writes_component_places_without_array_flow() {
     // Map output: [8](f32, i32, vec3f32).
     // After SoA, the output becomes ([8]f32, [8]i32, [8]vec3f32).
-    // soac_expand should split the per-iteration write across three
+    // soac_lowering should split the per-iteration write across three
     // addressable component arrays without carrying any array value through
     // the loop CFG.
     let source = r#"

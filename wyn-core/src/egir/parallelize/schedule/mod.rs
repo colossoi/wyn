@@ -9,9 +9,11 @@
 use crate::egir;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::planning::RecipeStages;
+use crate::ast::TypeName;
 use crate::egir::program::{
-    GeneratedStageKind, LogicalResourceArena, OutputSlotId, PlannedEntry, PlannedPublication,
-    SemanticResourceRef, StageOrigin, StagedProgram,
+    AllocatedEntry, GeneratedStageKind, LogicalResourceArena, OutputSlotId, PlannedEntry,
+    PlannedPublication, ResidentStorage, ResourceProgramData, SemanticResourceRef, StageOrigin,
 };
 use crate::egir::soac::filter;
 use crate::egir::types::{Scheduled, SegExtent, SegResourceAccess};
@@ -20,10 +22,11 @@ use crate::pipeline_descriptor::{
     Binding, ComputePipeline, ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
 };
 use crate::{BindingRef, EntryId, ResourceId};
+use polytype::Type;
 use wyn_base::IdSource;
 pub use wyn_kernel_graph::KernelId;
 use wyn_kernel_graph::{Builder, Fragment, Plan};
-use wyn_staged_ir::StageId;
+use wyn_staged_ir::{StageId, StagedIr};
 
 use super::declared_resources;
 
@@ -38,7 +41,7 @@ type TopologyBuilder = Builder<StageId, ResourceId, PipelineId>;
 
 /// The immutable topology and separately owned EGIR body catalog.
 #[derive(Debug)]
-pub(in crate::egir) struct KernelPlan {
+pub struct KernelPlan {
     topology: Topology,
     catalog: BTreeMap<KernelId, PreparedKernel>,
     pipelines: Vec<ScheduledPipeline>,
@@ -47,7 +50,7 @@ pub(in crate::egir) struct KernelPlan {
 
 pub(super) struct ScheduleBuilder {
     topology: TopologyBuilder,
-    catalog: BTreeMap<KernelId, PreparedKernel>,
+    catalog: BTreeMap<KernelId, PendingKernel>,
     stages: BTreeMap<StageId, StageMetadata>,
     pipelines: BTreeMap<PipelineId, Pipeline>,
     graphics_associations: BTreeMap<PipelineId, Vec<EntryId>>,
@@ -67,6 +70,22 @@ pub(super) struct StageMetadata {
 }
 
 impl KernelPlan {
+    pub fn kernels(&self) -> impl Iterator<Item = (KernelId, StageId, &PreparedKernel)> {
+        self.topology.kernel_order().iter().map(|&id| {
+            (
+                id,
+                self.topology.kernel(id).unwrap_or_else(|| unreachable!("validated kernel stage")).stage(),
+                &self.catalog[&id],
+            )
+        })
+    }
+    pub fn dependencies(&self, id: KernelId) -> &[KernelId] {
+        self.topology.kernel(id).map_or(&[], |kernel| kernel.dependencies())
+    }
+    pub fn publications(&self) -> impl Iterator<Item = &PlannedPublication> {
+        self.source_entries.values()
+    }
+
     pub(in crate::egir::parallelize) fn debug_assert_authored_only(
         &self,
         authored_stage_count: usize,
@@ -94,7 +113,7 @@ impl KernelPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub(super) enum KernelMutationError {
+pub(crate) enum KernelMutationError {
     #[error("{0}")]
     InvalidKernel(String),
     #[error(transparent)]
@@ -236,7 +255,7 @@ impl PhaseSpec {
         self
     }
 
-    fn prepare(self) -> Result<PreparedKernel, String> {
+    fn prepare(self) -> Result<PendingKernel, String> {
         let entry = super::prepare::entry(self.body, self.filter_plan, self.hist_plan)?;
         if entry.execution_model.is_compute() != self.expected_compute {
             let expected = if self.expected_compute { "compute" } else { "graphics" };
@@ -254,16 +273,19 @@ impl PhaseSpec {
                 physical_slot: OutputSlotId(physical),
             })
             .collect();
-        Ok(PreparedKernel {
-            label: self.label,
-            entry,
-            source_entry: None,
-            output_routes,
+        Ok(PendingKernel {
             projected,
-            dispatch: self.dispatch,
-            resources: self.resources,
             serial_single_workgroup: self.serial_single_workgroup,
-            required_elements,
+            kernel: PreparedKernel {
+                component: 0,
+                label: self.label,
+                entry,
+                source_entry: None,
+                output_routes,
+                dispatch: self.dispatch,
+                resources: self.resources,
+                required_elements,
+            },
         })
     }
 }
@@ -288,26 +310,65 @@ struct PipelineId(u32);
 
 /// A prepared body and creator-supplied metadata; it contains no topology.
 #[derive(Debug)]
-struct PreparedKernel {
+pub struct PreparedKernel {
+    component: u32,
     label: &'static str,
     entry: PlannedEntry<Scheduled>,
     source_entry: Option<EntryId>,
     output_routes: Vec<OutputRouteProjection>,
-    projected: bool,
     dispatch: KernelDispatch,
     resources: Vec<SegResourceAccess<ResourceId>>,
-    serial_single_workgroup: bool,
     required_elements: Option<u32>,
 }
 
+#[derive(Debug)]
+struct PendingKernel {
+    kernel: PreparedKernel,
+    projected: bool,
+    serial_single_workgroup: bool,
+}
+impl std::ops::Deref for PendingKernel {
+    type Target = PreparedKernel;
+    fn deref(&self) -> &PreparedKernel {
+        &self.kernel
+    }
+}
+impl std::ops::DerefMut for PendingKernel {
+    fn deref_mut(&mut self) -> &mut PreparedKernel {
+        &mut self.kernel
+    }
+}
+
 impl PreparedKernel {
+    pub fn body(&self) -> &PlannedEntry<Scheduled> {
+        &self.entry
+    }
+    pub fn component(&self) -> u32 {
+        self.component
+    }
+    pub fn source_entry(&self) -> Option<EntryId> {
+        self.source_entry
+    }
+    pub fn output_routes(&self) -> &[OutputRouteProjection] {
+        &self.output_routes
+    }
+    pub fn label(&self) -> &str {
+        self.label
+    }
+    pub fn dispatch(&self) -> &KernelDispatch {
+        &self.dispatch
+    }
+    pub fn required_elements(&self) -> Option<u32> {
+        self.required_elements
+    }
+
     fn entry_point(&self) -> &str {
         &self.entry.name
     }
     fn workgroup_size(&self) -> (u32, u32, u32) {
         execution_workgroup(&self.entry.execution_model)
     }
-    fn resources(&self) -> &[SegResourceAccess<ResourceId>] {
+    pub fn resources(&self) -> &[SegResourceAccess<ResourceId>] {
         &self.resources
     }
 }
@@ -316,10 +377,17 @@ impl PreparedKernel {
 pub(super) struct PreparedRecipe {
     fragment: Fragment,
     primary: KernelId,
-    bodies: BTreeMap<KernelId, PreparedKernel>,
+    bodies: BTreeMap<KernelId, PendingKernel>,
 }
 
 impl PreparedRecipe {
+    pub(super) fn with_component(mut self, component: u32) -> Self {
+        for body in self.bodies.values_mut() {
+            body.component = component;
+        }
+        self
+    }
+
     pub(super) fn single(id: KernelId, spec: PhaseSpec) -> Result<Self, KernelMutationError> {
         Ok(Self {
             fragment: Fragment::kernel(id, 0),
@@ -541,13 +609,20 @@ pub enum KernelDomain {
 /// domains replace inferred descriptor placeholders but never explicit host
 /// dispatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct KernelDispatch {
+pub struct KernelDispatch {
     domain: KernelDomain,
     explicit: bool,
 }
 
 impl KernelDispatch {
-    fn required_elements(&self) -> Option<u32> {
+    pub fn domain(&self) -> &KernelDomain {
+        &self.domain
+    }
+    pub fn is_explicit(&self) -> bool {
+        self.explicit
+    }
+
+    pub(super) fn required_elements(&self) -> Option<u32> {
         match &self.domain {
             KernelDomain::Elements(DispatchLen::Fixed { count }) => Some(*count),
             _ => None,
@@ -584,12 +659,44 @@ impl KernelPlan {
     }
 }
 
+pub(crate) fn stage_dispatch(
+    core: &ResourceProgramData,
+    origin: &StageOrigin,
+    entry: &AllocatedEntry,
+) -> Result<KernelDispatch, KernelMutationError> {
+    if origin.generated_kind().is_some() {
+        return Ok(KernelDispatch::explicit(
+            origin.space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
+        ));
+    }
+    let mut selection = KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 });
+    if entry.execution_model.is_compute() {
+        for (pipeline, entries) in core.pipeline.pipelines.iter().zip(&core.stage_entries) {
+            if let Pipeline::Compute(compute) = pipeline {
+                if let Some(position) = entries.iter().position(|id| *id == entry.id) {
+                    let stage = compute.stages.get(position).ok_or_else(|| {
+                        KernelMutationError::InvalidKernel(
+                            "pipeline stage association count differs from descriptor".into(),
+                        )
+                    })?;
+                    selection = domain_selection_from_stage(stage, &core.resources)?;
+                }
+            }
+        }
+        if !selection.explicit {
+            if let Some(domain) = storage_image_domain_inputs(&entry.inputs, &selection.domain) {
+                selection.domain = domain;
+            }
+        }
+    }
+    Ok(selection)
+}
+
 impl ScheduleBuilder {
     pub(super) fn from_descriptor(
         descriptor: &PipelineDescriptor,
         stage_entries: &[Vec<EntryId>],
-        resources: &LogicalResourceArena,
-        stages: &StagedProgram,
+        stages: &mut RecipeStages<ResourceId>,
     ) -> Result<Self, KernelMutationError> {
         if stage_entries.len() != descriptor.pipelines.len() {
             return Err(
@@ -600,12 +707,12 @@ impl ScheduleBuilder {
             .stages()
             .filter(|(_, stage)| matches!(stage.origin(), StageOrigin::Authored))
             .collect::<Vec<_>>();
-        let entries = authored.iter().map(|(id, stage)| (stage.body().id, *id)).collect::<HashMap<_, _>>();
+        let entries =
+            authored.iter().map(|(id, stage)| (stage.body().entry().id, *id)).collect::<HashMap<_, _>>();
         let mut topology = TopologyBuilder::default();
         let mut pipelines = BTreeMap::new();
         let mut graphics_associations = BTreeMap::new();
         let mut associations = HashMap::new();
-        let mut dispatch = HashMap::new();
         let mut sequencing = Vec::new();
         for (index, (pipeline, associated)) in descriptor.pipelines.iter().zip(stage_entries).enumerate() {
             let id = PipelineId(index as u32);
@@ -622,7 +729,7 @@ impl ScheduleBuilder {
                 return Err("pipeline stage association count differs from descriptor".to_string().into());
             }
             let mut previous = None;
-            for (position, entry) in associated.iter().enumerate() {
+            for entry in associated {
                 let stage = *entries
                     .get(entry)
                     .ok_or_else(|| format!("descriptor stage has unknown semantic entry {entry:?}"))?;
@@ -631,11 +738,7 @@ impl ScheduleBuilder {
                         format!("semantic entry {entry:?} is assigned to multiple pipelines").into(),
                     );
                 }
-                if let Pipeline::Compute(compute) = pipeline {
-                    dispatch.insert(
-                        stage,
-                        domain_selection_from_stage(&compute.stages[position], resources)?,
-                    );
+                if let Pipeline::Compute(_) = pipeline {
                     if let Some(before) = previous {
                         sequencing.push((before, stage));
                     }
@@ -653,7 +756,7 @@ impl ScheduleBuilder {
         // DAG. It has no dependency on the order recipes happen to be built.
         fn attributed_source(
             stage: StageId,
-            stages: &StagedProgram,
+            stages: &RecipeStages<ResourceId>,
             ranks: &HashMap<StageId, u64>,
         ) -> Result<StageId, String> {
             let body = stages.stage(stage).ok_or_else(|| format!("missing staged body {stage:?}"))?;
@@ -695,35 +798,15 @@ impl ScheduleBuilder {
                 group = Some(id);
             }
             topology.register_stage(stage, group, ranks[&stage])?;
-            let entry = staged.body();
-            let selection = if generated {
-                KernelDispatch::explicit(
-                    staged.origin().space().and_then(domain_from_space).unwrap_or(KernelDomain::Fixed {
-                        x: 1,
-                        y: 1,
-                        z: 1,
-                    }),
-                )
-            } else if entry.execution_model.is_compute() {
-                let mut selection = dispatch
-                    .remove(&stage)
-                    .unwrap_or_else(|| KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 }));
-                if !selection.explicit {
-                    if let Some(domain) = storage_image_domain_inputs(&entry.inputs, &selection.domain) {
-                        selection.domain = domain;
-                    }
-                }
-                selection
-            } else {
-                KernelDispatch::inferred(KernelDomain::Fixed { x: 1, y: 1, z: 1 })
-            };
+            let entry = staged.body().entry();
+            let selection = staged.body().dispatch.clone();
             metadata.insert(
                 stage,
                 StageMetadata {
                     primary: kernel_ids.next_id(),
                     compute: entry.execution_model.is_compute(),
-                    source_entry: Some(source_body.id),
-                    required_elements: selection.required_elements(),
+                    source_entry: Some(source_body.entry().id),
+                    required_elements: staged.body().required_elements,
                     dispatch: selection,
                     output_routes: if generated { Vec::new() } else { output_projection(entry) },
                     generated_kind: staged.origin().generated_kind(),
@@ -733,10 +816,17 @@ impl ScheduleBuilder {
         for (before, after) in sequencing {
             topology.sequence_stages(before, after)?;
         }
-        let source_entries = authored
-            .iter()
-            .map(|(_, stage)| (stage.body().id, PlannedPublication::from_semantic(stage.body())))
-            .collect();
+        let authored_ids = authored.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        let mut source_entries = BTreeMap::new();
+        for id in authored_ids {
+            let stage =
+                stages.stage_body_mut(id).ok_or_else(|| format!("missing authored stage {id:?}"))?;
+            let publication = stage
+                .publication
+                .take()
+                .ok_or_else(|| format!("authored stage {id:?} has no publication"))?;
+            source_entries.insert(publication.id, publication);
+        }
         Ok(Self {
             topology,
             catalog: BTreeMap::new(),
@@ -756,11 +846,6 @@ impl ScheduleBuilder {
     }
     pub(super) fn allocate_kernel(&mut self) -> KernelId {
         self.kernel_ids.next_id()
-    }
-    pub(super) fn set_required_elements(&mut self, stage: StageId, count: Option<u32>) {
-        if let Some(metadata) = self.stages.get_mut(&stage) {
-            metadata.required_elements = count;
-        }
     }
     pub(super) fn install_stage(
         &mut self,
@@ -796,7 +881,10 @@ impl ScheduleBuilder {
                 }
             }
         }
-        validate_routes(&recipe.bodies, &self.source_entries)?;
+        validate_routes(
+            recipe.bodies.iter().map(|(&id, body)| (id, &body.kernel)),
+            &self.source_entries,
+        )?;
         self.topology.bind_stage(stage, recipe.fragment)?;
         // No fallible operation follows the checked topology installation.
         self.stages.remove(&stage);
@@ -806,7 +894,7 @@ impl ScheduleBuilder {
 
     pub(super) fn finish(
         mut self,
-        stages: &StagedProgram,
+        stages: &StagedIr<(), Type<TypeName>, ResidentStorage, StageOrigin>,
         serial: bool,
     ) -> Result<KernelPlan, KernelMutationError> {
         // All stages are bound before projecting resident flows onto kernels.
@@ -897,7 +985,7 @@ impl ScheduleBuilder {
         }
         let plan = KernelPlan {
             topology,
-            catalog: self.catalog,
+            catalog: self.catalog.into_iter().map(|(id, body)| (id, body.kernel)).collect(),
             pipelines,
             source_entries: self.source_entries,
         };
@@ -906,12 +994,12 @@ impl ScheduleBuilder {
     }
 }
 
-fn validate_routes(
-    bodies: &BTreeMap<KernelId, PreparedKernel>,
+fn validate_routes<'a>(
+    bodies: impl Iterator<Item = (KernelId, &'a PreparedKernel)>,
     sources: &BTreeMap<EntryId, PlannedPublication>,
 ) -> Result<(), String> {
     let mut owned = HashSet::new();
-    for (&id, body) in bodies {
+    for (id, body) in bodies {
         let Some(source) = body.source_entry else {
             continue;
         };

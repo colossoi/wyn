@@ -27,7 +27,7 @@ use polytype::Type;
 use wyn_base::IdSource;
 
 /// Compile a source string through the full TLC pipeline, then convert
-/// through the full EGIR chain (`from_tlc → expand_soacs → optimize_skeleton
+/// through the full EGIR chain (`from_tlc → lower_soacs → optimize_skeleton
 /// → elaborate`) to a `Program`. No `materialize` — tests don't exercise
 /// SPIR-V-specific dynamic-index rewrites.
 fn compile_via_egir(src: &str) -> ssa::stage::Elaborated {
@@ -37,7 +37,6 @@ fn compile_via_egir(src: &str) -> ssa::stage::Elaborated {
     let program = egir::reify_soacs(program);
     let program = egir::optimize_semantic_operations(program).expect("semantic EGIR optimization failed");
     let program = egir::lift_stage_uniform_values(program);
-    let program = egir::plan_logical_resources(program).expect("semantic EGIR allocation failed");
     let program = egir::plan(program, LoweringProfile::PORTABLE).expect("semantic EGIR planning failed");
     lower_egir_to_ssa(program).expect("semantic EGIR lowering failed")
 }
@@ -75,7 +74,7 @@ fn elaborate_converter(
                     "unit-test graph unexpectedly references resource {resource:?}"
                 ))
             },
-            |_, _, _, _| Err("unit-test graph unexpectedly contains an unexpanded SOAC".into()),
+            |_, _, _, _| Err("unit-test graph unexpectedly contains an unlowered SOAC".into()),
         )
         .expect("unit-test graph should be directly physicalizable");
     egir::elaborate::elaborate_one_body(graph, params, return_ty)
@@ -757,7 +756,7 @@ fn wrap_arrow_return_in_marker(mut ty: &mut Type<TypeName>) {
 
 /// Correctness risk #2 — terminal lowering of a parallel scan synthesizes a
 /// swap-wrapper region (`{entry}_scan_op_swap`). That region is interned during
-/// `lower`, not present in the pre-lowering arena, and `soac_expand` recovers
+/// `lower`, not present in the pre-lowering arena, and `soac_lowering` recovers
 /// its SSA `Call` name through the interner. If the synthesized region were not
 /// interned, name recovery would panic. Compiling a parallel scan to SSA drives
 /// that path end to end.

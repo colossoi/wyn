@@ -358,8 +358,8 @@ constants remain ordinary auxiliary body arenas rather than kernel nodes.
 
 | Checkpoint orchestrator | Sub-pass | Role / condition |
 |-------------------------|----------|------------------|
-| **`expand_soacs`** | `expand_one` to fixpoint | Expand each selected physical SOAC recipe into explicit loop or kernel operations |
-| **`expand_soacs`** | `verify_physical::check_graph_flow` | Validate each expanded body's physical control and data flow |
+| **`lower_soacs`** | `expand_one` to fixpoint | Lower each selected physical SOAC recipe into explicit loop or kernel operations |
+| **`lower_soacs`** | `verify_physical::check_graph_flow` | Validate each lowered body's physical control and data flow |
 | **`eliminate_internal_place_calls`** | `eliminate_body` to fixpoint, `verify_ssa_lowerable_calls` | Inline every internal call whose arguments or results use place channels, then prove that all remaining calls can use the SSA value channel |
 | **`partially_inline_calls`** | `inline_body` to bounded fixpoint | Inline profitable mixed-variance calls inside explicit loops so invariant subgraphs can hoist |
 | **`materialize_dynamic_extracts`** | `materialize::run_one_body` | Normalize place-backed stores and consumers, then materialize dynamic aggregate extraction where the SSA boundary requires explicit control and data flow |
@@ -370,7 +370,7 @@ constants remain ordinary auxiliary body arenas rather than kernel nodes.
 
 The physical order is also enforced by typestate:
 
-- **`plan` before `expand_soacs` before `eliminate_internal_place_calls` before
+- **`plan` before `lower_soacs` before `eliminate_internal_place_calls` before
   `partially_inline_calls` before `materialize_dynamic_extracts` before
   `rewrite` before `optimize_skeleton` before `erase_resources` before
   `elaborate`** — every transition consumes the checkpoint produced by the
@@ -410,7 +410,7 @@ Parallel semantics begin in semantic EGIR. TLC performs source-level
 normalization and uniqueness reasoning but emits no per-entry strategy record.
 Semantic EGIR reifies every reachable SOAC; staged IR retains those semantic
 EGIR bodies while making cross-stage residency explicit. `plan` selects recipes
-and constructs scheduled physical EGIR entries, and `expand_soacs` replaces the
+and constructs scheduled physical EGIR entries, and `lower_soacs` replaces the
 selected SOACs with explicit physical operations before SSA elaboration. The
 published physical program carries its kernels, dependency/resource schedule,
 and descriptor together. Its initial portable scheduler implements:
@@ -436,7 +436,7 @@ and descriptor together. Its initial portable scheduler implements:
 
 TLC has six `SoacOp` variants; the table also lists Redomap, which is a fused
 semantic EGIR form rather than a TLC constructor. "Serial" = correct sequential
-lowering through `soac_expand`. "Consuming-input DPS" = TLC records a uniqueness
+lowering through `soac_lowering`. "Consuming-input DPS" = TLC records a uniqueness
 candidate and EGIR residency verifies post-fusion death before choosing in-place
 reuse instead of a fresh output buffer. "Parallel" = EGIR-side parallelization
 fires on a compute-entry SOAC matching the strategy's shape.
@@ -456,7 +456,7 @@ Notes:
   `egir::plan_logical_resources` promotes it to `InputBuffer`
   only when the final semantic graph proves the compatible input dead;
   otherwise it becomes `Fresh` (or output routing has already selected an
-  `OutputView`). `soac_expand` turns an accepted in-place destination into
+  `OutputView`). `soac_lowering` turns an accepted in-place destination into
   `array_with_inplace` operations.
 - Phase 3 of parallel scan applies `op(off, elem)`, not `op(elem, off)`:
   `egir::parallelize` synthesizes a swap-args wrapper EgirFunc
@@ -470,7 +470,7 @@ Notes:
 to a runtime length `k ≤ n` at the consumer. Two lowerings, by input size:
 
 - **Static input** (`[N]T`, capacity known): a function-local **Bounded**
-  `{buffer:[N]T, len:i32}` struct — `soac_expand::build_filter_loop`.
+  `{buffer:[N]T, len:i32}` struct — `soac_lowering::build_filter_loop`.
 - **Runtime input** (a storage view / entry param, length only known at
   dispatch): the serial loop compacts kept elements into a reserved scratch
   **storage** buffer (capacity `n`, host-sized `LikeInput` of the input) and

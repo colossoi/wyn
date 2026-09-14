@@ -1,10 +1,12 @@
 //! Runtime-filter candidate analysis and five-phase kernel emission.
 
 use super::model::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
+use super::planning::{OperationRef, ScratchRef};
 use super::*;
 use crate::egir;
 use crate::egir::soac::filter as filter_soac;
 use crate::egir::soac::SegmentedMetadata;
+use crate::egir::types::SegExtent;
 use crate::interface;
 
 impl KernelPlanBuilder<'_> {
@@ -12,10 +14,10 @@ impl KernelPlanBuilder<'_> {
         &mut self,
         body: egir::program::PlannedEntry,
         kernel: schedule::KernelId,
-        recipe: BoundFilter,
+        recipe: FilterRecipe<ResourceId>,
         output_projection: Option<Vec<usize>>,
     ) -> ParallelizeResult<schedule::PreparedRecipe> {
-        let family = FilterKernelFamilyBuilder::new(self, body, recipe).build()?;
+        let family = FilterKernelFamilyBuilder::new(self, body, recipe)?.build()?;
         let ids = [
             self.schedule.allocate_kernel(),
             self.schedule.allocate_kernel(),
@@ -41,7 +43,7 @@ struct FilterKernelFamily {
 struct FilterKernelFamilyBuilder<'lowering, 'effects> {
     lowering: &'lowering mut KernelPlanBuilder<'effects>,
     entry: egir::program::PlannedEntry,
-    candidate: FilterCandidate,
+    candidate: FilterContext,
     work: filter_soac::WorkBuffers,
     elem_ty: Type<TypeName>,
 }
@@ -50,15 +52,41 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
     fn new(
         lowering: &'lowering mut KernelPlanBuilder<'effects>,
         entry: egir::program::PlannedEntry,
-        recipe: BoundFilter,
-    ) -> Self {
-        Self {
+        recipe: FilterRecipe<ResourceId>,
+    ) -> ParallelizeResult<Self> {
+        let op = recipe.operation.filter(&entry)?;
+        let filter_soac::Output::Runtime(runtime) = &op.state.output else {
+            return Err("filter recipe has no runtime output".into());
+        };
+        let (filter_soac::RuntimeBacking::Bound(data), filter_soac::RuntimeLength::Stored(length)) =
+            (&runtime.backing, &runtime.length)
+        else {
+            return Err("filter recipe has no resident output".into());
+        };
+        let candidate = FilterContext {
+            space: op.state.segment.space.clone(),
+            storage: filter_soac::RuntimeStorage {
+                data: *data,
+                length: *length,
+            },
+            scan_grid: FilterScanGrid {
+                workgroup_width: REDUCE_PHASE1_WIDTH,
+                workgroups_x: FILTER_SCAN_GROUPS,
+            },
+        };
+        let work = recipe.work;
+        Ok(Self {
             lowering,
             entry,
-            candidate: recipe.candidate,
-            work: recipe.work,
+            candidate,
+            work: filter_soac::WorkBuffers {
+                flags: SemanticResourceRef(work.flags),
+                offsets: SemanticResourceRef(work.offsets),
+                block_sums: SemanticResourceRef(work.block_sums),
+                block_offsets: SemanticResourceRef(work.block_offsets),
+            },
             elem_ty: Type::Constructed(TypeName::UInt(32), vec![]),
-        }
+        })
     }
 
     fn build(mut self) -> ParallelizeResult<FilterKernelFamily> {
@@ -305,10 +333,6 @@ impl FilterScanGrid {
         self.workgroup_width
     }
 
-    fn worker_count(self) -> u32 {
-        self.workgroup_width * self.workgroups_x
-    }
-
     fn local_size(self) -> (u32, u32, u32) {
         (self.workgroup_width, 1, 1)
     }
@@ -322,30 +346,22 @@ impl FilterScanGrid {
     }
 }
 
-#[derive(Clone)]
-/// Complete graph-local runtime-filter recipe, consumed before entry mutation.
-pub(super) struct FilterCandidate {
-    pub semantic_id: SemanticOpId,
-    pub space: SegSpace,
+struct FilterContext {
+    space: SegSpace,
     storage: filter_soac::RuntimeStorage<SemanticResourceRef>,
     scan_grid: FilterScanGrid,
 }
 
-impl FilterCandidate {
-    pub(super) fn scan_worker_count(&self) -> u32 {
-        self.scan_grid.worker_count()
-    }
+#[derive(Debug)]
+pub struct FilterRecipe<R> {
+    pub operation: OperationRef,
+    pub work: filter_soac::WorkBuffers<R>,
 }
 
-pub(super) struct BoundFilter {
-    candidate: FilterCandidate,
-    work: filter_soac::WorkBuffers,
-}
-
-pub(super) fn analyze_filter_candidate(
+pub(super) fn construct_filter_recipe(
     entry: &egir::program::AllocatedEntry,
     site: SideEffectSite,
-) -> Option<CandidateSelection<FilterCandidate>> {
+) -> Option<FilterRecipe<ScratchRef>> {
     let SideEffectKind::Soac(SoacEffect(
         semantic_id,
         Soac::Filter(filter_soac::Op {
@@ -361,32 +377,43 @@ pub(super) fn analyze_filter_candidate(
     else {
         return None;
     };
-    Some(match (runtime.backing, runtime.length) {
-        (filter_soac::RuntimeBacking::Bound(data), filter_soac::RuntimeLength::Stored(length)) => {
-            CandidateSelection::Selected(FilterCandidate {
-                semantic_id: *semantic_id,
-                space: space.clone(),
-                storage: filter_soac::RuntimeStorage { data, length },
-                scan_grid: FilterScanGrid {
-                    workgroup_width: REDUCE_PHASE1_WIDTH,
-                    workgroups_x: FILTER_SCAN_GROUPS,
-                },
-            })
-        }
-        _ => CandidateSelection::Fallback,
+    let (filter_soac::RuntimeBacking::Bound(_), filter_soac::RuntimeLength::Stored(_)) =
+        (runtime.backing, runtime.length)
+    else {
+        return None;
+    };
+    let element_size = match space.dims() {
+        [SegExtent::Fixed(count)] => egir::program::LogicalSize::FixedBytes(u64::from(*count) * 4),
+        [SegExtent::ResourceLength {
+            resource, elem_bytes, ..
+        }] => egir::program::LogicalSize::LikeResource {
+            resource: resource.0,
+            elem_bytes: 4,
+            src_elem_bytes: *elem_bytes,
+        },
+        _ => egir::program::LogicalSize::SameAsDispatch { elem_bytes: 4 },
+    };
+    let workers =
+        egir::program::LogicalSize::FixedBytes(u64::from(REDUCE_PHASE1_WIDTH * FILTER_SCAN_GROUPS) * 4);
+    let scratch = |kind, slot, size| {
+        ScratchRef::new(
+            *semantic_id,
+            kind,
+            slot,
+            Type::Constructed(TypeName::UInt(32), vec![]),
+            size,
+        )
+    };
+    Some(FilterRecipe {
+        operation: OperationRef {
+            site,
+            owner: *semantic_id,
+        },
+        work: filter_soac::WorkBuffers {
+            flags: scratch(CompilerResourceKind::FilterFlags, 0, element_size.clone()),
+            offsets: scratch(CompilerResourceKind::FilterOffsets, 1, element_size),
+            block_sums: scratch(CompilerResourceKind::FilterScanBlockSums, 2, workers.clone()),
+            block_offsets: scratch(CompilerResourceKind::FilterScanBlockOffsets, 3, workers),
+        },
     })
-}
-
-impl BoundFilter {
-    pub(super) fn bind(candidate: FilterCandidate, resources: &super::planning::ScratchBindings) -> Self {
-        let owner = candidate.semantic_id;
-        let resource_id = |kind, slot| SemanticResourceRef(resources.id(owner, kind, slot));
-        let work = filter_soac::WorkBuffers {
-            flags: resource_id(CompilerResourceKind::FilterFlags, 0),
-            offsets: resource_id(CompilerResourceKind::FilterOffsets, 1),
-            block_sums: resource_id(CompilerResourceKind::FilterScanBlockSums, 2),
-            block_offsets: resource_id(CompilerResourceKind::FilterScanBlockOffsets, 3),
-        };
-        Self { candidate, work }
-    }
 }

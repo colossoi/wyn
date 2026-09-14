@@ -4,7 +4,6 @@ use super::projection::side_effect_output_slots;
 use super::*;
 use crate::ast::Span;
 use crate::egir;
-use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::ir::RealizedOutputRoute;
 use crate::egir::program::SlotSource;
 use crate::egir::soac::screma;
@@ -22,20 +21,6 @@ use wyn_base::IdSource;
 
 pub(crate) const FILTER_SCAN_GROUPS: u32 = model::FILTER_SCAN_GROUPS;
 pub(crate) const REDUCE_PHASE1_WIDTH: u32 = model::REDUCE_PHASE1_WIDTH;
-
-pub(crate) fn planned_callable_names(
-    program: ResourcesAllocated,
-) -> std::result::Result<Vec<String>, String> {
-    let existing = program.functions.len();
-    let program = bind_mapped_output_destinations(program).map_err(|error| error.to_string())?;
-    let program =
-        analyze_kernel_recipes(program, LoweringProfile::PORTABLE).map_err(|error| error.to_string())?;
-    let program = allocate_recipe_scratch(program).map_err(|error| error.to_string())?;
-    let program = build_kernel_schedule(program).map_err(|error| error.to_string())?;
-    let names =
-        program.program().functions[existing..].iter().map(|function| function.name.clone()).collect();
-    Ok(names)
-}
 
 /// Opaque region used by canonical operator-lambda fixtures.
 const OPERATOR_REGION: FunctionId = FunctionId::from_index(0);

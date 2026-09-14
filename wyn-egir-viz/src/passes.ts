@@ -7,7 +7,7 @@ export const passDefinitions = {
   },
   "egir::eliminate_dead_semantic_operations": {
     before: "Segmented semantic EGIR",
-    after: "Dead semantic operation removed",
+    after: "Dead semantic elimination step applied",
     example: `entry discard_map(xs: [4]i32) [4]i32 =
   let dead = map(|x: i32| x + 99, xs) in
   xs`,
@@ -33,62 +33,50 @@ entry lift_uniform(points: [64]f32, phase: f32) [64]f32 =
   },
   "egir::allocate_semantic_resources": {
     before: "Stage-uniform semantic EGIR",
-    after: "Logical resources allocated",
+    after: "Logical resources allocated in staged draft",
     example: `entry allocate_filter(xs: []i32) []i32 =
   filter(|x: i32| x % 2 == 0, xs)`,
   },
   "egir::resolve_residency": {
-    before: "Logical resources allocated",
-    after: "Cross-stage residency resolved",
+    before: "Logical resources allocated in staged draft",
+    after: "Resident stages and flows resolved",
     example: `entry resident_filter(xs: []i32) []i32 =
   let selected = filter(|x: i32| x > 0, xs) in
   map(|x: i32| x + 1, selected)`,
   },
   "egir::finalize_staged_ir": {
     before: "Residency draft",
-    after: "Finalized staged IR",
+    after: "Stages with projected kernels and recipes",
     example: `entry staged_filter(xs: []i32) []i32 =
   let selected = filter(|x: i32| x != 0, xs) in
   map(|x: i32| x * x, selected)`,
   },
-  "egir::bind_mapped_output_destinations": {
-    before: "Finalized staged IR",
-    after: "Mapped output destinations bound",
-    example: `entry mapped_output(xs: [4]i32) [4]i32 =
-  map(|x: i32| x + 1, xs)`,
-  },
-  "egir::analyze_kernel_recipes": {
-    before: "Mapped output destinations bound",
-    after: "Kernel recipes analyzed",
-    example: `entry analyzed_sum(xs: []i32) i32 =
-  reduce(|a: i32, b: i32| a + b, 0, xs)`,
-  },
   "egir::allocate_recipe_scratch": {
-    before: "Kernel recipes analyzed",
-    after: "Recipe scratch allocated",
+    before: "Stage-owned recipes and scratch requirements",
+    after: "Recipe scratch bound to logical resources",
     example: `entry scratch_sum(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, xs)`,
   },
   "egir::build_kernel_schedule": {
-    before: "Recipe scratch allocated",
-    after: "Kernel schedule built",
+    before: "Recipe scratch bound to logical resources",
+    after: "Generated kernel bodies and dependency graph",
     example: `entry scheduled_scan(xs: []i32) []i32 =
   scan(|a: i32, b: i32| a + b, 0, xs)`,
   },
-  "egir::finalize_kernel_schedule": {
-    before: "Kernel schedule built",
+  "egir::physicalize_kernel_schedule": {
+    before: "Generated kernel bodies and dependency graph",
     after: "Planned physical EGIR",
     example: `entry finalized_sum(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, xs)`,
   },
-  "egir::expand_soacs": {
+  "egir::lower_soacs": {
     before: "Planned physical EGIR",
-    after: "SOACs expanded",
+    after: "SOACs lowered",
     example: `entry scan_offsets(xs: []i32) []i32 =
   scan(|a: i32, b: i32| a + b, 0, xs)`,
   },
   "egir::eliminate_internal_place_calls": {
-    before: "SOACs expanded",
+    before: "SOACs lowered",
     after: "Internal place calls eliminated",
     example: `def choose_sum(values: [4]i32, flag: u32) i32 =
   let left = values[0] + values[1] in
@@ -101,14 +89,13 @@ entry call_place(values: [4]i32, flag: u32) i32 =
   "egir::partially_inline_calls": {
     before: "Internal calls place-free",
     after: "Profitable calls partially inlined",
-    example: `def choose_and_scale(varying: u32, invariant: u32) u32 =
-  let scale = invariant * invariant in
-  if varying == 0u32 then scale else varying + scale
+    example: `def step(value: u32, scale: u32) u32 =
+  let squared_scale = scale * scale in
+  if value == 0u32 then squared_scale else value + squared_scale
 
 entry mixed_loop(seed: u32, scale: u32) u32 =
   loop value = seed for i < 4 do
-    let stable = choose_and_scale(0u32, scale) in
-    choose_and_scale(value + u32.i32(i), stable)`,
+    step(value, scale)`,
   },
   "egir::materialize_dynamic_extracts": {
     before: "Calls partially inlined",

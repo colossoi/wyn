@@ -3,9 +3,7 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir;
-use crate::egir::allocation::{
-    allocate_semantic_resources, finalize_staged_ir, plan_logical_resources, ResourcesAllocated,
-};
+use crate::egir::allocation::{allocate_semantic_resources, finalize_staged_ir, ResidencyDraft};
 use crate::egir::types::{by_value_function_result, CallEffects, EGraph, Parameters, WynLanguage};
 use crate::flow::ExecutionModel;
 use crate::interface;
@@ -71,11 +69,20 @@ fn storage_input(
     }
 }
 
-fn into_allocated(program: egir::reify::Segmented) -> ResourcesAllocated {
-    plan_logical_resources(program.retag()).expect("allocate test program")
+fn resource_draft(
+    program: egir::semantic_opt::Optimized,
+) -> Result<ResidencyDraft, egir::from_tlc::ConvertError> {
+    egir::resolve_residency(
+        allocate_semantic_resources(program)?,
+        crate::PipelineTopologyPolicy::AllowGenerated,
+    )
 }
 
-fn allocated_program(size: HostSizePolicy) -> ResourcesAllocated {
+fn into_allocated(program: egir::reify::Segmented) -> ResidencyDraft {
+    resource_draft(program.retag()).expect("allocate test program")
+}
+
+fn allocated_program(size: HostSizePolicy) -> ResidencyDraft {
     let binding = BindingRef::new(0, 7);
     let mut identities = ProgramIdentities::default();
     let main = identities.alloc_entry("main".into());
@@ -90,7 +97,7 @@ fn allocated_program(size: HostSizePolicy) -> ResourcesAllocated {
     let mut program = into_allocated(program);
     let resource =
         program.data.core.resources.allocate_host(HostResource { binding, name: None }, unit_ty(), size);
-    let stage = program.data.stages.stages().next().expect("allocated stage").0;
+    let stage = program.data.stages.stage_records().next().expect("allocated stage").0;
     program.data.stages.stage_body_mut(stage).expect("allocated entry").resource_declarations.push(
         SemanticResourceDecl {
             resource: SemanticResourceRef(resource),
@@ -125,9 +132,9 @@ fn logical_allocation_introduces_the_allocated_sidecar() {
         PipelineDescriptor::default(),
         ProgramIdentities::default(),
     );
-    let allocated = plan_logical_resources(semantic.retag()).expect("logical resource planning");
+    let allocated = resource_draft(semantic.retag()).expect("logical resource planning");
 
-    assert_eq!(allocated.data.stages.stages().count(), 1);
+    assert_eq!(allocated.data.stages.stage_records().count(), 1);
     assert_eq!(allocated.data.stages.flows().count(), 0);
     assert_eq!(allocated.data.core.resources.len(), 1);
     assert_eq!(allocated.data.core.resources[0].host_binding(), Some(binding));
@@ -164,7 +171,7 @@ fn host_size_policy_can_reference_a_later_interface_binding() {
         ProgramIdentities::default(),
     );
 
-    let allocated = plan_logical_resources(semantic.retag()).expect("forward LikeInput reference");
+    let allocated = resource_draft(semantic.retag()).expect("forward LikeInput reference");
     let target = allocated.data.core.resources.host_resource(target_binding).unwrap();
     let source = allocated.data.core.resources.host_resource(source_binding).unwrap();
     assert_eq!(
@@ -202,7 +209,7 @@ fn host_size_policy_rejects_a_reference_to_an_unreserved_binding() {
         ProgramIdentities::default(),
     );
 
-    let error = plan_logical_resources(semantic.retag()).expect_err("missing size source must fail");
+    let error = resource_draft(semantic.retag()).expect_err("missing size source must fail");
     assert!(error.to_string().contains("is not declared"), "{error}");
 }
 
@@ -231,7 +238,7 @@ fn repeated_compatible_host_declarations_share_an_identity() {
         ProgramIdentities::default(),
     );
 
-    let allocated = plan_logical_resources(semantic.retag()).expect("compatible declarations");
+    let allocated = resource_draft(semantic.retag()).expect("compatible declarations");
     assert_eq!(allocated.data.core.resources.len(), 1);
     assert_eq!(
         allocated.data.core.resources[0].size(),
@@ -264,7 +271,7 @@ fn conflicting_host_element_types_are_rejected() {
         ProgramIdentities::default(),
     );
 
-    let error = plan_logical_resources(semantic.retag()).expect_err("element types must conflict");
+    let error = resource_draft(semantic.retag()).expect_err("element types must conflict");
     assert!(error.to_string().contains("conflicting element types"), "{error}");
 }
 
@@ -293,7 +300,7 @@ fn conflicting_host_size_policies_are_rejected() {
         ProgramIdentities::default(),
     );
 
-    let error = plan_logical_resources(semantic.retag()).expect_err("size policies must conflict");
+    let error = resource_draft(semantic.retag()).expect_err("size policies must conflict");
     assert!(error.to_string().contains("conflicting size policies"), "{error}");
 }
 
@@ -323,7 +330,7 @@ fn semantic_entry_identity_is_stable_and_reused_by_flow_endpoints() {
     let entries = allocated
         .data
         .stages
-        .stages()
+        .stage_records()
         .map(|(_, stage)| (stage.body().id, stage.body().name.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(entries, vec![(before[0], "renamed"), (before[1], "second")]);
@@ -343,7 +350,7 @@ fn entry_publication_reads_type_and_size_from_resource_arena() {
         unit_ty(),
         LogicalSize::FixedBytes(12),
     );
-    let stage = program.data.stages.stages().next().expect("allocated stage").0;
+    let stage = program.data.stages.stage_records().next().expect("allocated stage").0;
     program.data.stages.stage_body_mut(stage).unwrap().resource_declarations[0].resource =
         SemanticResourceRef(resource);
     let physical = PhysicalResourceTable::allocate(&program.data.core.resources, &mut IdSource::new());
@@ -351,9 +358,8 @@ fn entry_publication_reads_type_and_size_from_resource_arena() {
     let publication = program
         .data
         .stages
-        .stage(stage)
+        .stage_body(stage)
         .unwrap()
-        .body()
         .publication(&physical)
         .expect("publish allocated entry");
     let [binding] = publication.storage_bindings.as_slice() else {
@@ -615,7 +621,8 @@ fn staged_finalization_rejects_missing_size_source_inline() {
         }),
     );
 
-    let error = finalize_staged_ir(program).expect_err("missing size source must fail finalization");
+    let error = finalize_staged_ir(program, crate::LoweringProfile::PORTABLE)
+        .expect_err("missing size source must fail finalization");
     assert!(error.to_string().contains("missing source"), "{error}");
 }
 

@@ -280,11 +280,11 @@ serialized in the `PROGRAM WITH { ... }` record:
 - staged nodes, resident flows, and external inputs when present; and
 - selected lowering profile or kernel-plan metadata when present.
 
-A staged node names its owned semantic EGIR body and lists incoming and outgoing
-resident flows. Each flow records one producer, all consumers, typed logical
-storage, and whether it is published. Physical snapshots replace that topology
-with `kernels`; each kernel names one physical body and records stable kernel
-identity, dependencies, dispatch domain, and logical-resource accesses.
+A staged node names its owned bodies and lists incoming and outgoing resident
+flows. Finalized stages own projected bodies with recipes and scratch slots.
+Each flow records one producer, consumers, typed logical storage, and publication.
+Scheduled snapshots replace the staged topology with kernels, each owning one
+body and its dependencies, dispatch, resource accesses, and publication routes.
 
 Identity arenas are used to resolve function, global, and entry IDs to the
 symbols printed elsewhere. ID-source counters and phase proof tags are
@@ -376,50 +376,49 @@ names for them.
 A raw runtime Filter output carries only its capacity rule. Reification adds
 `backing: deferred` and `length: implicit`; these are explicit promises that no
 backing buffer or length cell has been selected yet. A later
-`plan_logical_resources` pass may replace them with `bound(resource: $r)` and
+`allocate_semantic_resources` pass may replace them with `bound(resource: $r)` and
 `stored(resource: $r)` when publication and scheduling actually require those
 representations.
 
-### `plan_logical_resources` checkpoint boundary
+### Resource, recipe, and schedule checkpoints
 
-The left pane is optimized semantic EGIR. Storage identities in graphs and
-SOAC state are still authored host `binding(...)` values, the program has no
-logical-resource arena, and runtime Filter storage may remain `deferred` with
-an `implicit` length.
+`allocate_semantic_resources` converts optimized semantic host bindings into
+logical resources and retains executable bodies in the residency draft.
+`resolve_residency` introduces generated stages and typed data/length flows.
 
-The right pane is `ResourcesAllocated` EGIR. Every executable storage identity
-has become a target-independent `$resource`; host bindings survive only in
-interface exposure and `RESOURCE ... origin: host(...)` constraints. The pane
-therefore includes program-owned `RESOURCE` declarations and entry-local
-`resource_decl(...)` sidecars. A logical size may be `fixed_bytes(...)`,
-`like_resource(...)`, `same_as_dispatch(...)`, or `unspecified`.
+`finalize_staged_ir` completes external inputs and published outputs, binds
+destinations, and constructs each stage's projected kernels and recipes.
+Each recipe records its owning stage/component, body operation reference,
+output projection, dispatch policy, coverage requirement, algorithm metadata,
+and scratch requirements. Reduction routing, capture resources, scan prefix
+choices, and histogram strategies are structured fields.
 
-Residency planning may also extract a compiler-owned producer stage. Such
-stages use the same body and interface grammar as authored stages and connect
-to their consumers through `PROGRAM WITH { stages: [...], flows: [...] }`.
-Runtime-array residency binds a Filter's capacity backing and stored length to
-`filter_data` and `filter_len_cell` resources. This pass does not choose
-descriptor bindings for compiler resources, a target recipe, dispatch
-geometry, or a physical schedule; those decisions belong to `egir::plan`.
+`allocate_recipe_scratch` preserves stage/component and body identities while
+replacing each scratch requirement with a logical resource ID. Requirements
+carry owner/kind/slot, element type, and logical size; allocated resources have
+corresponding arena declarations.
 
-### `plan` checkpoint boundary
+`build_kernel_schedule` exposes generated logical phase bodies and their
+dependencies, dispatch, workgroup sizes, resource accesses, source entries,
+and output routes. Each phase records its originating stage/component.
+`physicalize_kernel_schedule` preserves kernel IDs while assigning physical
+bindings, publishing interfaces, and reconciling callable boundaries.
 
-The left pane is staged IR: semantic EGIR bodies are connected by typed
-resident flows. The right pane is Physical EGIR: `PROGRAM WITH { kernels:
-[...] }` is the physical kernel DAG, and each `kernel` body uses physical
-bindings and scheduled SOAC state. Kernel dependency entries refer to stable
-kernel identities; body names and resource accesses can be matched directly
-against the corresponding kernel record.
-Physical entry construction also selects the ABI channel required by each
-published input. Scalars remain `%` values and resource-backed storage uses
-`~` views. A materialized aggregate without a resource binding, such as a
-fixed array passed through the parametric entry interface, is constructed as
-a read-only `&` place; an explicit `place.view` supplies its uses. There is no
-intermediate Physical EGIR state whose boundary and body disagree.
-Auxiliary functions likewise expose flattened physical inputs, appended result
-destinations, rewritten returns, and calls whose displayed arguments already
-follow the callee's final parameter order. SOAC expansion consumes this state;
-it does not repair callable boundaries.
+The aggregate `plan` inspection spans optimized semantic IR through physical
+kernel construction. Physical entry parameters use values, views, or read-only
+places as required by their published interface. Auxiliary functions and calls
+expose the reconciled physical parameter and result channels.
+
+The program metadata listing uses one record per resource, stage, flow,
+external input, recipe, kernel, or publication. Field paths retain nested
+ownership and array positions; uniquely named scratch roles provide stable
+paths across allocation. Differences compare structured leaf values, with
+absent optional values displayed as `none`. Resource and body-operation
+references retain their identities for navigation.
+
+Node IDs are scoped to their owning body. Semantic IDs remain provenance
+across projections; stage/component links connect planned bodies to emitted
+phase families, and kernel IDs link scheduled and physical bodies.
 
 ## Floating values and places
 

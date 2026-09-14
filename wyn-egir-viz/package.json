@@ -6,8 +6,9 @@
   "scripts": {
     "build:wasm": "wasm-pack build ../wyn-egir-viz-wasm --target web --out-dir ../wyn-egir-viz/src/wasm-pkg --release --offline",
     "dev": "vite",
+    "test": "node --test tests/*.test.mjs",
     "build": "tsc --noEmit && vite build",
-    "build:all": "npm run build:wasm && npm run build",
+    "build:all": "npm run build:wasm && npm test && npm run build",
     "preview": "vite preview"
   },
   "devDependencies": {

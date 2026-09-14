@@ -252,16 +252,7 @@ impl InputReplacement {
     }
 }
 
-pub fn resolve_residency(program: ResidencyDraft) -> Result<ResidencyDraft, String> {
-    resolve_residency_with_policy(program, PipelineTopologyPolicy::AllowGenerated).map_err(|error| {
-        match error {
-            ConvertError::Internal(message) => message,
-            error => error.to_string(),
-        }
-    })
-}
-
-pub(super) fn resolve_residency_with_policy(
+pub fn resolve_residency(
     mut program: ResidencyDraft,
     topology: PipelineTopologyPolicy,
 ) -> Result<ResidencyDraft, ConvertError> {

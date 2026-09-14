@@ -336,10 +336,10 @@ pub struct CompilerResource {
 /// most one logical resource to each key, so target recipes can retain the
 /// returned id instead of rediscovering it from the manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct CompilerResourceKey {
-    pub(crate) owner: SemanticOpId,
-    pub(crate) kind: CompilerResourceKind,
-    pub(crate) slot: usize,
+pub struct CompilerResourceKey {
+    pub owner: SemanticOpId,
+    pub kind: CompilerResourceKind,
+    pub slot: usize,
 }
 
 impl CompilerResource {
@@ -502,7 +502,6 @@ impl LogicalResourceArena {
         self.host.keys().copied()
     }
 
-    #[cfg(test)]
     pub(crate) fn compiler_resource(
         &self,
         owner: SemanticOpId,
@@ -1551,6 +1550,88 @@ pub struct ResidentStorage {
     pub length: Option<ResourceId>,
 }
 
+#[derive(Debug)]
+pub struct KernelProgramData<Topology> {
+    pub core: ResourceProgramData,
+    pub profile: LoweringProfile,
+    pub reserved_bindings: HashSet<BindingRef>,
+    pub topology: Topology,
+}
+
+#[derive(Debug)]
+pub enum KernelProgramTag {}
+pub type KernelProgram<T> = Program<
+    KernelProgramTag,
+    super::ir::ProgramFamily<
+        Semantic<SemanticResourceRef>,
+        SemanticResourceDecl,
+        RealizedOutputRoute,
+        KernelProgramData<T>,
+    >,
+    RewriteGlobal,
+>;
+
+impl<T: std::fmt::Debug> KernelProgram<T> {
+    pub(crate) fn split_topology(self) -> (KernelProgram<()>, T) {
+        let Program {
+            functions,
+            externs,
+            constants,
+            data,
+            global_context,
+            ..
+        } = self;
+        let KernelProgramData {
+            core,
+            profile,
+            reserved_bindings,
+            topology,
+        } = data;
+        (
+            Program::from_parts(
+                functions,
+                externs,
+                Vec::new(),
+                constants,
+                KernelProgramData {
+                    core,
+                    profile,
+                    reserved_bindings,
+                    topology: (),
+                },
+                global_context,
+            ),
+            topology,
+        )
+    }
+}
+
+impl KernelProgram<()> {
+    pub(crate) fn with_topology<T: std::fmt::Debug>(self, topology: T) -> KernelProgram<T> {
+        let Program {
+            functions,
+            externs,
+            constants,
+            data,
+            global_context,
+            ..
+        } = self;
+        Program::from_parts(
+            functions,
+            externs,
+            Vec::new(),
+            constants,
+            KernelProgramData {
+                core: data.core,
+                profile: data.profile,
+                reserved_bindings: data.reserved_bindings,
+                topology,
+            },
+            global_context,
+        )
+    }
+}
+
 pub type StagedProgram = StagedIr<AllocatedEntry, Type<TypeName>, ResidentStorage, StageOrigin>;
 
 pub type StagedProgramBuilder =
@@ -1592,24 +1673,6 @@ impl ResidencyProgramData {
         };
         self.stages.add_consumer(flow, consumer).map_err(|error| error.to_string())?;
         Ok(flow)
-    }
-}
-
-/// Program-owned data after target-independent residency has been planned.
-#[derive(Debug)]
-pub struct AllocatedProgramData {
-    pub core: ResourceProgramData,
-    pub stages: StagedProgram,
-}
-
-impl AllocatedProgramData {
-    pub(crate) fn alloc_compiler_resource(
-        &mut self,
-        compiler: CompilerResource,
-        elem_ty: Type<TypeName>,
-        size: LogicalSize,
-    ) -> ResourceId {
-        self.core.resources.allocate_compiler(compiler, elem_ty, size)
     }
 }
 
@@ -2062,7 +2125,7 @@ fn physicalize_entry(
 }
 
 pub(in crate::egir) fn physicalize_program(
-    program: super::allocation::ResourcesAllocated,
+    program: KernelProgram<()>,
     entries: impl IntoIterator<Item = PlannedEntry<Scheduled>>,
     physical_resources: &PhysicalResourceTable,
     serial: bool,

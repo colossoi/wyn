@@ -2523,7 +2523,7 @@ struct BodyCopier<'a, P: Family> {
 impl<P: Family> BodyCopier<'_, P> {
     fn clone_effect(&mut self, source: &SideEffect<P>) -> Result<Option<SideEffect<P>>, String> {
         if matches!(source.kind(), SideEffectKind::Soac(_)) {
-            return Err("body clone requires SOAC expansion before effectful inlining".into());
+            return Err("body clone requires SOAC lowering before effectful inlining".into());
         }
         if matches!(
             source.kind(),

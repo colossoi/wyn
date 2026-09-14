@@ -45,14 +45,14 @@ struct PlaceCallCandidate {
 /// Eliminate internal calls with place arguments or destination-passed
 /// results, then prove that every remaining call is directly SSA-callable.
 pub fn eliminate_internal_place_calls(
-    program: super::soac_expand::SoacsExpanded,
+    program: super::soac_lowering::SoacsLowered,
 ) -> Result<CallsPlaceFree, String> {
     eliminate_internal_place_calls_with_trace(program).map(|(program, _)| program)
 }
 
 /// Required call lowering with separate per-body accounting for diagnostics.
 pub fn eliminate_internal_place_calls_with_trace(
-    program: super::soac_expand::SoacsExpanded,
+    program: super::soac_lowering::SoacsLowered,
 ) -> Result<(CallsPlaceFree, RequiredCallInliningTrace), String> {
     let callees: LookupMap<FunctionId, Func<Physical>> =
         program.functions.iter().map(|function| (function.region, function.clone())).collect();

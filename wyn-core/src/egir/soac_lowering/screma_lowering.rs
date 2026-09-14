@@ -93,7 +93,7 @@ pub(super) fn expand_screma(
     if matches!(op.state, screma::PhysicalState::Segmented(_)) && op.is_map() {
         return expand_segmented_map(graph, bid, idx, &effect, op, next_effect, callables);
     }
-    Err("SOAC expansion target changed after Screma selection".into())
+    Err("SOAC lowering target changed after Screma selection".into())
 }
 
 fn expand_serial_screma(

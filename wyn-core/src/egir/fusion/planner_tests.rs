@@ -161,7 +161,7 @@ entry nested_redomap(xs: [4]i32) (i32, i32) =
     assert!(scremas[0].form.scans.is_empty());
     scremas[0].validate().unwrap();
     let optimized = egir::optimize_semantic_operations(program).unwrap();
-    let allocated = egir::plan_logical_resources(egir::lift_stage_uniform_values(optimized)).unwrap();
+    let allocated = egir::lift_stage_uniform_values(optimized);
     let planned = egir::plan(allocated, crate::LoweringProfile::PORTABLE).unwrap();
     crate::lower_ssa_to_spirv(crate::lower_egir_to_ssa(planned).unwrap()).unwrap();
 }

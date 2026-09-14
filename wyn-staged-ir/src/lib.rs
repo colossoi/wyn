@@ -157,22 +157,34 @@ impl<Body, ValueType, Storage, Origin> StagedIr<Body, ValueType, Storage, Origin
         self,
         mut map: impl FnMut(StageId, Body) -> NewBody,
     ) -> StagedIr<NewBody, ValueType, Storage, Origin> {
+        match self.try_map_stage_bodies(|id, _, body| Ok::<_, std::convert::Infallible>(map(id, body))) {
+            Ok(stages) => stages,
+            Err(error) => match error {},
+        }
+    }
+
+    /// Transform owned bodies while preserving validated flow and stage identities.
+    pub fn try_map_stage_bodies<NewBody, E>(
+        self,
+        mut map: impl FnMut(StageId, &Origin, Body) -> Result<NewBody, E>,
+    ) -> Result<StagedIr<NewBody, ValueType, Storage, Origin>, E> {
         let mut stages = IdArena::new();
         for (key, stage) in self.stages {
             let id = StageId(key);
+            let body = map(id, &stage.origin, stage.body)?;
             let mapped_key = stages.alloc(Stage {
                 origin: stage.origin,
-                body: map(id, stage.body),
+                body,
                 incoming_flows: stage.incoming_flows,
                 outgoing_flows: stage.outgoing_flows,
             });
             debug_assert_eq!(mapped_key, key, "stage mapping must retain arena identities");
         }
-        StagedIr {
+        Ok(StagedIr {
             stages,
             flows: self.flows,
             external_inputs: self.external_inputs,
-        }
+        })
     }
 
     /// Stages in producer-before-consumer order.
@@ -218,6 +230,20 @@ impl<Body, ValueType, Storage, Origin> StagedIrBuilder<Body, ValueType, Storage,
 
     pub fn stages(&self) -> impl Iterator<Item = (StageId, &Origin, &Body)> {
         self.ir.stages().map(|(id, stage)| (id, stage.origin(), stage.body()))
+    }
+
+    /// Inspect stage bodies and incidence while the graph is still being built.
+    pub fn stage_records(&self) -> impl Iterator<Item = (StageId, &Stage<Body, Origin>)> {
+        self.ir.stages()
+    }
+
+    /// Inspect resident flows, including any that do not yet have destinations.
+    pub fn flows(&self) -> impl Iterator<Item = (FlowId, &ResidentFlow<ValueType, Storage>)> {
+        self.ir.flows()
+    }
+
+    pub fn external_inputs(&self) -> impl ExactSizeIterator<Item = &ExternalInput<ValueType, Storage>> {
+        self.ir.external_inputs()
     }
 
     pub fn stage_body(&self, id: StageId) -> Option<&Body> {

@@ -459,7 +459,7 @@ impl<'a> GlobalContext<'a> {
 
 /// Convert a TLC program into a raw EGIR program — each function and entry
 /// point becomes a per-body `EGraph` + metadata, waiting for the caller to
-/// chain the pipeline (`expand_soacs → [materialize →] optimize_skeleton →
+/// chain the pipeline (`lower_soacs → [materialize →] optimize_skeleton →
 /// elaborate`).
 pub fn convert_program(
     program: &TlcProgram,

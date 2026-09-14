@@ -1,4 +1,4 @@
-//! Generic loop construction for physical SOAC expansion.
+//! Generic loop construction for physical SOAC lowering.
 
 use super::array_io::emit_length;
 use super::value_binding;

@@ -35,7 +35,8 @@ entry e() [8]i32 =
 "#,
             );
 
-            let resolved = resolve_residency(program).expect("resolve all residency candidates");
+            let resolved = resolve_residency(program, crate::PipelineTopologyPolicy::AllowGenerated)
+                .expect("resolve all residency candidates");
             let first = materialization_signature(&resolved);
             assert_eq!(
                 first.0,
@@ -43,7 +44,8 @@ entry e() [8]i32 =
                 "the shared producer is materialized before its scalar consumer"
             );
 
-            let resolved_again = resolve_residency(resolved).expect("re-run residency at its fixpoint");
+            let resolved_again = resolve_residency(resolved, crate::PipelineTopologyPolicy::AllowGenerated)
+                .expect("re-run residency at its fixpoint");
             assert_eq!(
                 materialization_signature(&resolved_again),
                 first,

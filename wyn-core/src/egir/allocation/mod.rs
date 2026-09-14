@@ -18,35 +18,21 @@ use crate::interface::{EntryInputKind, EntryOutputKind};
 use crate::pipeline_descriptor::BufferLen;
 use crate::types::TypeExt;
 use crate::BindingRef;
-use crate::PipelineTopologyPolicy;
 use polytype::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::from_tlc::ConvertError;
 use super::ir::{PlaceId, RemapBlockIds};
 use super::program::{
-    AllocatedEntry, AllocatedProgramData, CompilerResource, CompilerResourceKind, Entry, HostResource,
-    HostSizePolicy, LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId,
-    ResourceProgramData, RewriteGlobal, SemanticResourceDecl, SemanticResourceRef, StageOrigin,
+    AllocatedEntry, CompilerResource, CompilerResourceKind, Entry, HostResource, HostSizePolicy,
+    LogicalResourceArena, LogicalSize, Program, ResidencyProgramData, ResourceId, ResourceProgramData,
+    RewriteGlobal, SemanticResourceDecl, SemanticResourceRef, StageOrigin,
 };
 use super::semantic_opt::Optimized;
 use super::soac::{filter, hist, screma};
 use super::types::{Semantic, SideEffectKind, Soac, SoacEffect, ValueId};
 
-/// EGIR after logical resources and materialization entries have been planned.
-#[derive(Debug, Clone, Copy)]
-pub enum ResourcesAllocatedTag {}
-pub type ResourcesAllocated = super::program::Program<
-    ResourcesAllocatedTag,
-    super::ir::ProgramFamily<
-        Semantic<SemanticResourceRef>,
-        super::program::SemanticResourceDecl,
-        super::ir::RealizedOutputRoute,
-        AllocatedProgramData,
-    >,
-    RewriteGlobal,
->;
-
+#[derive(Debug)]
 pub enum ResidencyDraftTag {}
 pub type ResidencyDraft = super::program::Program<
     ResidencyDraftTag,
@@ -58,49 +44,6 @@ pub type ResidencyDraft = super::program::Program<
     >,
     RewriteGlobal,
 >;
-
-impl ResourcesAllocated {
-    /// Human-readable semantic IR including segmented spaces, captures,
-    /// output routing, and logical resource accesses.
-    pub fn semantic_ir(&self) -> String {
-        let mut output = String::new();
-        for (_, stage) in self.data.stages.stages() {
-            let entry = stage.body();
-            super::semantic_graph::write_graph_summary(
-                &mut output,
-                &format!("entry {}", entry.name),
-                &entry.graph,
-            );
-        }
-        for function in &self.functions {
-            super::semantic_graph::write_graph_summary(
-                &mut output,
-                &format!("function {}", function.name),
-                &function.graph,
-            );
-        }
-        output
-    }
-
-    /// Target-independent logical resources known before recipe selection.
-    pub fn logical_resources(&self) -> &[super::program::LogicalResource] {
-        &self.data.core.resources
-    }
-}
-
-/// Establish target-independent residency and logical resources.
-pub fn plan_logical_resources(program: Optimized) -> Result<ResourcesAllocated, ConvertError> {
-    plan_logical_resources_with_policy(program, PipelineTopologyPolicy::AllowGenerated)
-}
-
-pub fn plan_logical_resources_with_policy(
-    program: Optimized,
-    topology: PipelineTopologyPolicy,
-) -> Result<ResourcesAllocated, ConvertError> {
-    let program = allocate_semantic_resources(program)?;
-    let program = residency::resolve_residency_with_policy(program, topology)?;
-    finalize_staged_ir(program)
-}
 
 /// Replace pre-allocation descriptor bindings with target-independent logical
 /// resource identities. This is intentionally the first pass allowed to own
@@ -811,7 +754,12 @@ fn remap_entry_resources(
     })
 }
 
-pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated, ConvertError> {
+pub fn finalize_staged_ir(
+    program: ResidencyDraft,
+    profile: crate::LoweringProfile,
+) -> Result<super::parallelize::KernelRecipesPlanned, ConvertError> {
+    use super::program::{KernelProgramData, PlannedPublication, StageOrigin};
+
     let Program {
         functions,
         externs,
@@ -937,18 +885,51 @@ pub fn finalize_staged_ir(program: ResidencyDraft) -> Result<ResourcesAllocated,
             .map_err(|error| ConvertError::Internal(error.to_string()))?;
         data.stages.publish(flow).map_err(|error| ConvertError::Internal(error.to_string()))?;
     }
+    let mut reserved_bindings = data
+        .stages
+        .stages()
+        .flat_map(|(_, _, entry)| entry.inputs.iter().filter_map(|input| input.descriptor_binding()))
+        .collect::<HashSet<_>>();
+    for pipeline in &data.core.pipeline.pipelines {
+        let crate::pipeline_descriptor::Pipeline::Graphics(graphics) = pipeline else {
+            continue;
+        };
+        for buffer in [
+            graphics.invocation.draw.indices(),
+            graphics.invocation.draw.indirect_commands(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            reserved_bindings.insert(BindingRef::new(buffer.set, buffer.binding));
+        }
+    }
     let stages = data.stages.finish().map_err(|error| ConvertError::Internal(error.to_string()))?;
-    Ok(Program::from_parts(
+    let program = Program::from_parts(
         functions,
         externs,
         Vec::new(),
         constants,
-        AllocatedProgramData {
+        KernelProgramData {
             core: data.core,
-            stages,
+            profile,
+            reserved_bindings,
+            topology: stages,
         },
         global_context,
-    ))
+    );
+    super::parallelize::validate_finalized_stages(&program)?;
+    let (program, stages) = program.split_topology();
+    let stages = stages.try_map_stage_bodies(|_, origin, mut entry| {
+        let dispatch = super::parallelize::stage_dispatch(&program.data.core, origin, &entry)
+            .map_err(|error| ConvertError::Internal(error.to_string()))?;
+        let publication =
+            matches!(origin, StageOrigin::Authored).then(|| PlannedPublication::from_semantic(&entry));
+        entry.bind_mapped_output_destinations().map_err(ConvertError::Internal)?;
+        super::parallelize::planning::construct_stage(&program, entry, origin, publication, dispatch)
+            .map_err(ConvertError::from)
+    })?;
+    Ok(program.with_topology(stages))
 }
 
 #[cfg(test)]

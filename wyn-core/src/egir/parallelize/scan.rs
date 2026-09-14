@@ -1,14 +1,14 @@
 //! Parallel scan candidate analysis, binding, and phase emission.
 
-use super::kernel::cloneable_capture_inputs;
+use super::kernel::{capture_declarations, cloneable_capture_inputs};
 use super::model::REDUCE_PHASE1_WIDTH;
+use super::planning::{OperationRef, ScratchRef};
 use super::*;
 use crate::ast;
 use crate::egir;
 use crate::egir::soac::lambda as lambda_ops;
 use crate::egir::soac::Lambda;
-use crate::egir::soac::SegmentedMetadata;
-use crate::egir::types::{OperandRef, ResultBinding};
+use crate::egir::types::OperandRef;
 use crate::interface;
 use crate::op;
 use crate::ssa;
@@ -436,50 +436,31 @@ struct ScanOutput {
     resource: SemanticResourceRef,
     view_type: Type<TypeName>,
 }
-/// Complete graph-local scan recipe, consumed before entry mutation.
-pub(super) struct ScanCandidate {
-    pub site: SideEffectSite,
-    pub owner: SemanticOpId,
-    pub scratch_type: Type<TypeName>,
-    serial: SerialScremaRecipe,
-    pre: Lambda,
-    scans: Vec<screma::Scan>,
-    reductions: Vec<screma::Reduce>,
-    reduction_routing: super::reduce::ReductionRouting,
-    operator_capture_inputs: Vec<SemanticResourceDecl>,
-    post: Lambda,
-    input_views: Vec<(ValueId, egir::types::SoacInputType)>,
-    results: Vec<ResultBinding<Type<TypeName>>>,
-    outputs: Vec<ScanOutput>,
-    direct_output: bool,
-    phase1_width: u32,
-    segment: SegmentedMetadata<SemanticResourceRef>,
+#[derive(Debug)]
+pub struct ScanRecipe<R> {
+    pub operation: OperationRef,
+    pub reduction_routing: super::reduce::ReductionRouting,
+    pub capture_inputs: Vec<ResourceId>,
+    pub block_sums: R,
+    pub block_offsets: R,
+    pub prefixes: ScanPrefixes<R>,
 }
 
-impl ScanCandidate {
-    pub(super) fn prefix_scratch_type(&self) -> Option<&Type<TypeName>> {
-        (!self.direct_output).then_some(&self.scratch_type)
-    }
+#[derive(Debug)]
+pub enum ScanPrefixes<R> {
+    DirectOutput,
+    Scratch(R),
 }
 
-pub(super) struct BoundScan {
-    candidate: ScanCandidate,
-    block_sums: ResourceId,
-    block_offsets: ResourceId,
-    scan_prefixes: Option<ResourceId>,
-}
-
-pub(super) fn analyze_scan_candidate(
+pub(super) fn construct_scan_recipe(
     entry: &egir::program::PlannedEntry,
     located: LocatedScrema<'_>,
     resources: &egir::program::LogicalResourceArena,
-) -> ParallelizeResult<Option<ScanCandidate>> {
+) -> ParallelizeResult<Option<ScanRecipe<ScratchRef>>> {
     debug_assert_eq!(
         super::capabilities::classify(located.op),
         super::capabilities::Strategy::Scan
     );
-    let segment = located.segmented()?;
-    let serial = located.serial_recipe();
     let scans = &located.op.form.scans;
     let reductions = &located.op.form.reductions;
     if scans.is_empty()
@@ -508,15 +489,13 @@ pub(super) fn analyze_scan_candidate(
         &located.effect.operands,
         located.effect.result.as_ref(),
     )?;
-    let mut input_views = Vec::with_capacity(located.op.inputs.len());
-    for (operand, input) in operands.inputs().zip(&located.op.inputs) {
+    for operand in operands.inputs() {
         let Some(operand) = operand.operand.value() else {
             return Ok(None);
         };
         if !can_chunk_view(&entry.graph, operand) {
             return Ok(None);
         }
-        input_views.push((operand, input.clone()));
     }
 
     let reduction_results = located.op.form.layout().reduction_result_count();
@@ -583,76 +562,79 @@ pub(super) fn analyze_scan_candidate(
     ) else {
         return Ok(None);
     };
-    Ok(Some(ScanCandidate {
-        site: located.site,
-        owner: located.owner,
-        scratch_type,
-        serial,
-        pre: located.op.form.pre.clone(),
-        scans: scans.to_vec(),
-        reductions: reductions.to_vec(),
+    let scratch = |kind, slot| ScratchRef::dispatch(located.owner, kind, slot, scratch_type.clone());
+    Ok(Some(ScanRecipe {
+        operation: located.reference(),
         reduction_routing,
-        operator_capture_inputs,
-        post: located.op.form.post.clone(),
-        input_views,
-        results,
-        outputs,
-        direct_output,
-        phase1_width: REDUCE_PHASE1_WIDTH,
-        segment,
+        capture_inputs: operator_capture_inputs,
+        block_sums: scratch(CompilerResourceKind::ScanBlockSums, 0)?,
+        block_offsets: scratch(CompilerResourceKind::ScanBlockOffsets, 1)?,
+        prefixes: if direct_output {
+            ScanPrefixes::DirectOutput
+        } else {
+            ScanPrefixes::Scratch(scratch(CompilerResourceKind::ScanPrefixes, 2)?)
+        },
     }))
-}
-
-impl BoundScan {
-    pub(super) fn segment(&self) -> &SegmentedMetadata<SemanticResourceRef> {
-        &self.candidate.segment
-    }
-
-    pub(super) fn bind(candidate: ScanCandidate, resources: &super::planning::ScratchBindings) -> Self {
-        let block_sums = resources.id(candidate.owner, CompilerResourceKind::ScanBlockSums, 0);
-        let block_offsets = resources.id(candidate.owner, CompilerResourceKind::ScanBlockOffsets, 1);
-        let scan_prefixes = candidate
-            .prefix_scratch_type()
-            .map(|_| resources.id(candidate.owner, CompilerResourceKind::ScanPrefixes, 2));
-        Self {
-            candidate,
-            block_sums,
-            block_offsets,
-            scan_prefixes,
-        }
-    }
 }
 
 impl KernelPlanBuilder<'_> {
     pub(super) fn emit_scan_entry(
         &mut self,
         mut entry: egir::program::PlannedEntry,
-        analysis: BoundScan,
+        recipe: ScanRecipe<ResourceId>,
     ) -> ParallelizeResult<[BuiltPhase; 3]> {
-        let BoundScan {
-            candidate,
-            block_sums: block_sums_resource,
-            block_offsets: block_offsets_resource,
-            scan_prefixes,
-        } = analysis;
-        let ScanCandidate {
-            site,
-            owner,
-            scratch_type: elem_ty,
-            serial,
-            pre,
-            scans,
-            reductions,
-            reduction_routing,
-            operator_capture_inputs,
-            post,
-            input_views,
-            results: screma_results,
-            outputs,
-            direct_output,
-            phase1_width: total_threads,
-            segment,
-        } = candidate;
+        let located = recipe.operation.screma(&entry)?;
+        let site = located.site;
+        let owner = located.owner;
+        let serial = recipe.operation;
+        let segment = located.segmented()?;
+        let pre = located.op.form.pre.clone();
+        let post = located.op.form.post.clone();
+        let scans = located.op.form.scans.clone();
+        let reductions = located.op.form.reductions.clone();
+        let operands = screma::ScremaOperands::decode(
+            located.op,
+            &located.effect.operands,
+            located.effect.result.as_ref(),
+        )?;
+        let input_views = operands
+            .inputs()
+            .zip(&located.op.inputs)
+            .map(|(operand, input)| {
+                Ok((
+                    operand
+                        .operand
+                        .value()
+                        .ok_or_else(|| ParallelizeError::Invalid("scan input is not a value".into()))?,
+                    input.clone(),
+                ))
+            })
+            .collect::<ParallelizeResult<Vec<_>>>()?;
+        let screma_results = operands.result_fields();
+        let outputs = screma_results
+            .iter()
+            .skip(located.op.form.layout().reduction_result_count())
+            .take(post.result_types.len())
+            .map(|result| {
+                Ok(ScanOutput {
+                    resource: entry
+                        .resource_for_result(result)
+                        .ok_or_else(|| ParallelizeError::Invalid("scan output has no resource".into()))?,
+                    view_type: result.ty().clone(),
+                })
+            })
+            .collect::<ParallelizeResult<Vec<_>>>()?;
+        let block_sums_resource = recipe.block_sums;
+        let block_offsets_resource = recipe.block_offsets;
+        let scan_prefixes = match recipe.prefixes {
+            ScanPrefixes::DirectOutput => None,
+            ScanPrefixes::Scratch(id) => Some(id),
+        };
+        let direct_output = scan_prefixes.is_none();
+        let elem_ty = self.resources[block_sums_resource].elem_ty().clone();
+        let total_threads = REDUCE_PHASE1_WIDTH;
+        let operator_capture_inputs = capture_declarations(&entry, &recipe.capture_inputs)?;
+        let reduction_routing = recipe.reduction_routing.resolve(&entry, self.resources)?;
         let block_id = site.block;
         let component_types = scans
             .iter()
@@ -818,7 +800,7 @@ impl KernelPlanBuilder<'_> {
                 graph_ops::pack_result_values(&mut entry.graph, result).map_err(ParallelizeError::from)
             })
             .collect::<ParallelizeResult<Vec<_>>>()?;
-        let reduction_stores = reduction_routing.stores;
+        let reduction_stores = reduction_routing;
         let moved_reduction_outputs = super::reduce::retire_reduction_outputs(
             &mut entry,
             &reduction_stores.iter().collect::<Vec<_>>(),

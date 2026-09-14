@@ -529,10 +529,12 @@ dependencies = [
  "console_error_panic_hook",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
  "web-sys",
  "wyn-core",
  "wyn-module-graph",
+ "wyn-staged-ir",
 ]
 
 [[package]]

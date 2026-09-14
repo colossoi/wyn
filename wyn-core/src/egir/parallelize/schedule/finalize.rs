@@ -5,8 +5,8 @@ use crate::pipeline_descriptor;
 use std::collections::{HashMap, HashSet};
 
 use super::{execution_workgroup, KernelDispatch, KernelDomain, KernelPlan};
-use crate::egir::allocation::ResourcesAllocated;
 use crate::egir::from_tlc::ConvertError;
+use crate::egir::program::KernelProgram;
 use crate::egir::program::{
     host_resource_names, physicalize_program, EntryPublication, PhysicalResourceTable,
 };
@@ -14,14 +14,14 @@ use crate::egir::publish::{PipelineDescriptorPublish, StageEntryAssociations};
 use crate::pipeline_descriptor::{
     ComputeStage, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor, StageBindingUses,
 };
-use crate::{BindingRef, LoweringProfile, SchedulePolicy};
+use crate::{BindingRef, SchedulePolicy};
 
 impl KernelPlan {
     pub(in crate::egir::parallelize) fn finalize(
         self,
-        mut program: ResourcesAllocated,
-        profile: LoweringProfile,
+        mut program: KernelProgram<()>,
     ) -> Result<egir::parallelize::Planned, ConvertError> {
+        let profile = program.data.profile;
         self.check_explicit_dispatch_coverage().map_err(ConvertError::InvalidDispatch)?;
         let physical_resources = self.publish_physical_layout(&mut program)?;
         let physical_kernels = super::PhysicalKernelGraph::from(&self);
@@ -42,7 +42,7 @@ impl KernelPlan {
     /// kernel graph without consuming its topology or bodies.
     fn publish_physical_layout(
         &self,
-        program: &mut ResourcesAllocated,
+        program: &mut KernelProgram<()>,
     ) -> Result<PhysicalResourceTable, ConvertError> {
         self.install_phase_shells(&mut program.data.core.pipeline)?;
         let mut reserved_bindings = program
@@ -57,34 +57,13 @@ impl KernelPlan {
             })
             .filter_map(binding_ref)
             .collect::<HashSet<_>>();
-        reserved_bindings.extend(
-            program
-                .data
-                .stages
-                .stages()
-                .flat_map(|(_, stage)| &stage.body().inputs)
-                .filter_map(|input| input.descriptor_binding()),
-        );
-        for pipeline in &program.data.core.pipeline.pipelines {
-            let Pipeline::Graphics(graphics) = pipeline else {
-                continue;
-            };
-            for buffer in [
-                graphics.invocation.draw.indices(),
-                graphics.invocation.draw.indirect_commands(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                reserved_bindings.insert(BindingRef::new(buffer.set, buffer.binding));
-            }
-        }
+        reserved_bindings.extend(&program.data.reserved_bindings);
         let physical_resources = PhysicalResourceTable::allocate_avoiding(
             &program.data.core.resources,
             &mut program.global_context.binding_ids,
             reserved_bindings,
         );
-        let publications = self.publications(&physical_resources)?;
+        let publications = self.entry_publications(&physical_resources)?;
         let publication_refs = publications.iter().collect::<Vec<_>>();
         let stage_entries = self.stage_entry_associations(&program.data.core.pipeline)?;
         program.data.core.pipeline.publish_implicit_bindings(&publication_refs, &stage_entries)?;
@@ -104,7 +83,10 @@ impl KernelPlan {
     /// Entry ABI records in deterministic descriptor-publication order. The
     /// kernel plan, rather than physical graphs, is the sole authority for
     /// backend-visible entry metadata.
-    fn publications(&self, resources: &PhysicalResourceTable) -> Result<Vec<EntryPublication>, String> {
+    fn entry_publications(
+        &self,
+        resources: &PhysicalResourceTable,
+    ) -> Result<Vec<EntryPublication>, String> {
         let mut names = HashSet::new();
         let mut publications = Vec::new();
         for source in self.source_entries.values() {

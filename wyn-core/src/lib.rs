@@ -369,7 +369,6 @@ pub use polytype::Context as PolytypeContext;
 //                                      -> SemanticOperationsOptimized
 //       egir::lift_stage_uniform_values(...)
 //                                      -> Optimized
-//       egir::plan_logical_resources(...) -> ResourcesAllocated
 //       egir::plan(..., profile)          -> Planned
 //       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
 //
@@ -508,7 +507,7 @@ impl LoweringProfile {
 pub fn lower_egir_to_ssa(
     program: egir::parallelize::Planned,
 ) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
-    let program = egir::expand_soacs(program)?;
+    let program = egir::lower_soacs(program)?;
     let program = egir::eliminate_internal_place_calls(program)?;
     let program = egir::partially_inline_calls(program)?;
     let program = egir::materialize_dynamic_extracts(program);
@@ -789,7 +788,6 @@ fn ssa_from_reachable(
     let program = egir::reify_soacs(program);
     let program = egir::optimize_semantic_operations(program)?;
     let program = egir::lift_stage_uniform_values(program);
-    let program = egir::plan_logical_resources(program)?;
     let program = egir::plan(program, profile)?;
     Ok(lower_egir_to_ssa(program)?)
 }

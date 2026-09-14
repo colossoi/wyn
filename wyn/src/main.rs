@@ -721,9 +721,6 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     let program = time("egir_apply_pipeline_topology_policy", verbose, || {
         wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology)
     });
-    let program = time("egir_plan_logical_resources", verbose, || {
-        wyn_core::egir::plan_logical_resources_with_policy(program, profile.topology)
-    })?;
     let program = time("egir_plan", verbose, || wyn_core::egir::plan(program, profile))?;
     let ssa = time("egir_lower_to_ssa", verbose, || {
         wyn_core::lower_egir_to_ssa(program)

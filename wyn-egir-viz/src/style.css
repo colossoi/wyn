@@ -399,9 +399,12 @@ kbd {
   min-width: max-content;
   padding: 14px 0 80px;
   counter-reset: ir-line;
+  font-size: 12px;
+  line-height: 19px;
 }
 
-.ir-body {
+.ir-body,
+.ir-program-metadata {
   position: relative;
   min-width: 620px;
   padding: 8px 20px 16px 90px;
@@ -458,8 +461,6 @@ kbd {
   z-index: 1;
   min-height: 25px;
   padding: 3px 12px 3px 0;
-  font-size: 12px;
-  line-height: 19px;
   white-space: nowrap;
 }
 
@@ -606,26 +607,6 @@ kbd {
 
 .ir-source-row {
   display: block;
-}
-
-.ir-indent-1 {
-  padding-left: 2ch;
-}
-
-.ir-indent-2 {
-  padding-left: 4ch;
-}
-
-.ir-indent-3 {
-  padding-left: 6ch;
-}
-
-.ir-indent-4 {
-  padding-left: 8ch;
-}
-
-.ir-indent-5 {
-  padding-left: 10ch;
 }
 
 .ir-op.op-segmap,
@@ -833,7 +814,8 @@ kbd {
     left: 14px;
   }
 
-  .ir-body {
+  .ir-body,
+  .ir-program-metadata {
     padding-left: 76px;
   }
 

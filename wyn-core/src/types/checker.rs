@@ -1609,7 +1609,7 @@ impl<'a> TypeChecker<'a> {
 
         // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, n, Composite]
         //
-        // The output variant is pinned to Composite because `egir::soac_expand`
+        // The output variant is pinned to Composite because `egir::soac_lowering`
         // always materializes the map result via `_w_intrinsic_uninit` +
         // `_w_intrinsic_array_with_inplace`. Preserving the input variant `s`
         // in the output type would be a lie: post-expand the representation

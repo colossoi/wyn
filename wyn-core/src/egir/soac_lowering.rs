@@ -1,4 +1,4 @@
-//! Expand physical `SideEffectKind::Soac(SoacEffect(_, ...))` skeleton side-effects
+//! Lower physical `SideEffectKind::Soac(SoacEffect(_, ...))` skeleton side-effects
 //! into explicit loop subgraphs with pure ops in the sea and block params
 //! carrying accumulators.
 //!
@@ -6,10 +6,10 @@
 //! elaboration. Every physical variant must be handled here; any SOAC left in
 //! the skeleton after this stage is a bug.
 
-/// Physical EGIR whose SOAC effects have been expanded into explicit CFGs.
+/// Physical EGIR whose SOAC effects have been lowered into explicit CFGs.
 #[derive(Debug, Clone, Copy)]
-pub enum SoacsExpandedTag {}
-pub type SoacsExpanded = super::program::PhysicalProgram<SoacsExpandedTag>;
+pub enum SoacsLoweredTag {}
+pub type SoacsLowered = super::program::PhysicalProgram<SoacsLoweredTag>;
 
 use crate::flow::BlockId;
 use wyn_base::IdSource;
@@ -37,9 +37,9 @@ use filter_lowering::expand_filter;
 use hist_lowering::expand_hist;
 use screma_lowering::expand_screma;
 
-/// Expand every graph-bearing body and rebuild the program at the
-/// post-expansion checkpoint.
-pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpanded, String> {
+/// Lower SOACs in every graph-bearing body and rebuild the program at the
+/// post-lowering checkpoint.
+pub fn lower_soacs(program: super::parallelize::Planned) -> Result<SoacsLowered, String> {
     let mut program = program;
     let callables = program
         .functions
@@ -52,7 +52,7 @@ pub fn expand_soacs(program: super::parallelize::Planned) -> Result<SoacsExpande
     Ok(program.retag_physical())
 }
 
-/// Expand every physical SOAC in the skeleton.
+/// Lower every physical SOAC in the skeleton.
 pub fn run_one_body(
     mut graph: EGraph<Physical>,
     callables: &CallableMap,
@@ -74,15 +74,15 @@ pub fn run_one_body(
             .map(|effect| (block, effect))
     }) {
         return Err(format!(
-            "SOAC expansion left an unsupported physical operation in {block:?}: {:?}",
+            "SOAC lowering left an unsupported physical operation in {block:?}: {:?}",
             effect.kind
         ));
     }
-    super::verify_physical::check_graph_flow(&graph, "SOAC expansion result")?;
+    super::verify_physical::check_graph_flow(&graph, "SOAC lowering result")?;
     Ok(graph)
 }
 
-/// Does this SOAC kind have a TLC→EGIR expansion implemented here?
+/// Does this physical SOAC kind have an implemented CFG lowering?
 fn is_handleable_soac(kind: &SideEffectKind<Physical>) -> bool {
     let SideEffectKind::Soac(SoacEffect(_, soac)) = kind else {
         return false;
@@ -197,7 +197,7 @@ fn expand_one(
         .get(idx)
         .ok_or_else(|| format!("missing selected SOAC effect {idx} in {bid:?}"))?;
     let SideEffectKind::Soac(SoacEffect(_, soac)) = &effect.kind else {
-        return Err("SOAC expansion target changed after selection".into());
+        return Err("SOAC lowering target changed after selection".into());
     };
     match soac {
         Soac::Screma(_) => expand_screma(graph, bid, idx, next_effect, callables),
@@ -207,5 +207,5 @@ fn expand_one(
 }
 
 #[cfg(test)]
-#[path = "soac_expand_tests.rs"]
-mod soac_expand_tests;
+#[path = "soac_lowering_tests.rs"]
+mod soac_lowering_tests;

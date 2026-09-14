@@ -62,7 +62,9 @@ entry main(xs: [4]i32) [4]i32 =
         "expected compiler-authored many-to-one fusion provenance"
     );
     assert!(
-        result.relations.iter().any(|relation| relation.before == ["op:0"] && relation.after.is_empty()),
+        result.relations.iter().any(|relation| relation.before.len() == 1
+            && relation.before[0].ends_with("/op:0")
+            && relation.after.is_empty()),
         "expected compiler-authored dead-operation provenance"
     );
 }
@@ -183,18 +185,24 @@ entry evens(xs: []i32) []i32 =
 }
 
 #[test]
-fn logical_resource_planning_exposes_filter_stage_and_flow() {
+fn residency_exposes_filter_resources_and_handoff() {
     let result = inspect_pass_impl(
         r#"
 entry main(xs: []i32) []i32 =
   let selected = filter(|x: i32| x % 2 == 0, xs) in
   map(|x: i32| x * 2, selected)
 "#,
-        InspectPass::PlanLogicalResources,
+        InspectPass::ResolveResidency,
     );
     assert!(result.success, "{:?}", result.error);
-    assert_eq!(result.pass, InspectPass::PLAN_LOGICAL_RESOURCES);
-    let before = result.before.expect("optimized snapshot");
+    let allocation = inspect_pass_impl(
+        r#"entry main(xs: []i32) []i32 =
+  let selected = filter(|x: i32| x % 2 == 0, xs) in
+  map(|x: i32| x * 2, selected)"#,
+        InspectPass::AllocateSemanticResources,
+    );
+    assert!(allocation.success, "{:?}", allocation.error);
+    let before = allocation.before.expect("optimized snapshot");
     let after = result.after.expect("allocated snapshot");
     assert!(before.resources.is_empty());
     assert!(before.stages.is_empty());
@@ -219,10 +227,12 @@ entry main(xs: []i32) []i32 =
     let producer_stage = after
         .stages
         .iter()
-        .find(|stage| stage.entry_name.starts_with("main_materialize_filter_"))
+        .find(|stage| {
+            after.nodes.iter().any(|node| stage.kernels.contains(&node.group) && node.variant == "filter")
+        })
         .expect("generated Filter producer stage");
     let main_stage =
-        after.stages.iter().find(|stage| stage.entry_name == "main").expect("authored consumer stage");
+        after.stages.iter().find(|stage| stage.id != producer_stage.id).expect("authored consumer stage");
     assert!(after
         .flows
         .iter()
@@ -239,7 +249,7 @@ entry main(xs: []i32) []i32 =
         .find(|node| node.operation.as_ref().and_then(|op| op.semantic_id.as_deref()) == Some("op:0"))
         .expect("allocated Filter");
     assert_eq!(before_filter.group, "entry:0");
-    assert_eq!(after_filter.group, producer_stage.entry_group);
+    assert_eq!(after_filter.group, producer_stage.kernels[0]);
     let before_output = before_filter
         .operation
         .as_ref()
@@ -270,7 +280,7 @@ entry main(xs: []i32) []i32 =
     );
 
     let main =
-        after.groups.iter().find(|group| group.id == main_stage.entry_group).expect("main stage body");
+        after.groups.iter().find(|group| group.id == main_stage.kernels[0]).expect("main stage body");
     assert!(main
         .resource_declarations
         .iter()
@@ -278,12 +288,94 @@ entry main(xs: []i32) []i32 =
     let producer = after
         .groups
         .iter()
-        .find(|group| group.id == producer_stage.entry_group)
+        .find(|group| group.id == producer_stage.kernels[0])
         .expect("producer stage body");
     assert!(producer
         .resource_declarations
         .iter()
         .any(|decl| { decl.resource == data.id && decl.role == "output" }));
+}
+
+#[test]
+fn allocation_checkpoints_retain_stage_bodies_and_resident_flows() {
+    let source = r#"entry main(xs: []i32) []i32 =
+  let selected = filter(|x: i32| x % 2 == 0, xs) in
+  map(|x: i32| x * 2, selected)"#;
+    let allocation = inspect_pass_impl(source, InspectPass::AllocateSemanticResources);
+    assert!(allocation.success, "{:?}", allocation.error);
+    let allocated = allocation.after.expect("allocation snapshot");
+    assert_eq!(allocated.stages.len(), 1, "allocation retains the authored stage");
+    let main = &allocated.stages[0];
+    assert_eq!(main.kernels.len(), 1);
+    assert!(allocated.nodes.iter().any(|node| node.group == main.kernels[0] && node.variant == "filter"));
+    assert!(
+        allocated.flows.is_empty(),
+        "the handoff is introduced by residency"
+    );
+
+    let residency = inspect_pass_impl(source, InspectPass::ResolveResidency);
+    assert!(residency.success, "{:?}", residency.error);
+    let before = residency.before.expect("before residency");
+    assert_eq!(before.stages[0].kernels[0], main.kernels[0]);
+    assert_eq!(before.nodes.len(), allocated.nodes.len());
+    let resident = residency.after.expect("after residency");
+    let producer = resident
+        .stages
+        .iter()
+        .find(|stage| {
+            resident
+                .nodes
+                .iter()
+                .any(|node| stage.kernels.contains(&node.group) && node.variant == "filter")
+        })
+        .expect("generated Filter producer is visible before finalization");
+    let consumer = resident.stages.iter().find(|stage| stage.id != producer.id).unwrap();
+    let flow = resident
+        .flows
+        .iter()
+        .find(|flow| flow.producer == producer.id && flow.consumers.contains(&consumer.id))
+        .expect("resident handoff is visible before finalization");
+    assert!(producer.outgoing_flows.contains(&flow.id));
+    assert!(consumer.incoming_flows.contains(&flow.id));
+    assert!(
+        flow.length_resource.is_some(),
+        "dynamic handoff retains its logical length"
+    );
+    assert!(resident
+        .nodes
+        .iter()
+        .any(|node| node.group == producer.kernels[0] && node.variant == "filter"));
+    assert!(
+        resident.external_inputs.is_empty(),
+        "external inputs are linked at finalization"
+    );
+
+    let finalization = inspect_pass_impl(source, InspectPass::FinalizeStagedIr);
+    assert!(finalization.success, "{:?}", finalization.error);
+    let before = finalization.before.expect("before finalization");
+    let after = finalization.after.expect("after finalization");
+    assert_eq!(before.stages.len(), resident.stages.len());
+    assert_eq!(before.flows.len(), resident.flows.len());
+    assert_eq!(after.stages.len(), before.stages.len());
+    for stage in &before.stages {
+        let finalized = after.stages.iter().find(|candidate| candidate.id == stage.id).unwrap();
+        assert_eq!(finalized.origin, stage.origin);
+        assert!(!finalized.kernels.is_empty());
+        for kernel in &finalized.kernels {
+            assert!(after.groups.iter().any(|group| &group.id == kernel));
+            assert!(after
+                .recipes
+                .iter()
+                .any(|recipe| &recipe.entry_group == kernel && recipe.stage == stage.id));
+        }
+    }
+    let finalized_flow = after.flows.iter().find(|candidate| candidate.id == flow.id).unwrap();
+    assert_eq!(finalized_flow.producer, flow.producer);
+    assert_eq!(finalized_flow.consumers, flow.consumers);
+    assert_eq!(finalized_flow.data_resource, flow.data_resource);
+    assert_eq!(finalized_flow.length_resource, flow.length_resource);
+    assert!(!after.external_inputs.is_empty());
+    assert!(after.flows.iter().any(|flow| flow.published));
 }
 
 #[test]
@@ -299,7 +391,8 @@ entry sum(xs: []i32) i32 =
     assert_eq!(result.pass, InspectPass::PLAN_PHYSICAL_KERNELS);
     let before = result.before.expect("staged snapshot");
     let after = result.after.expect("physical snapshot");
-    assert!(!before.stages.is_empty());
+    assert!(before.stages.is_empty());
+    assert!(before.groups.iter().any(|group| group.kind == "entry"));
     assert!(before.kernels.is_empty());
     assert!(after.stages.is_empty());
     assert!(
@@ -435,7 +528,7 @@ fn inline_debug_preserves_long_constructs() {
 fn physical_subpasses_are_individually_inspectable() {
     let cases = [
         (
-            InspectPass::ExpandSoacs,
+            InspectPass::LowerSoacs,
             r#"entry scan_offsets(xs: []i32) []i32 =
   scan(|a: i32, b: i32| a + b, 0, xs)"#,
         ),
@@ -548,11 +641,10 @@ fn physical_planning_subpasses_are_individually_inspectable() {
     let source = r#"entry planned_sum(xs: []i32) i32 =
   reduce(|a: i32, b: i32| a + b, 0, xs)"#;
     let passes = [
-        InspectPass::BindMappedOutputDestinations,
-        InspectPass::AnalyzeKernelRecipes,
+        InspectPass::FinalizeStagedIr,
         InspectPass::AllocateRecipeScratch,
         InspectPass::BuildKernelSchedule,
-        InspectPass::FinalizeKernelSchedule,
+        InspectPass::PhysicalizeKernelSchedule,
     ];
 
     for pass in passes {
@@ -587,4 +679,89 @@ fn fusion_step_performs_one_action_while_aggregate_reaches_fixpoint() {
         1
     );
     assert_eq!(aggregate.relations.len(), 2);
+}
+
+#[test]
+fn recipes_own_body_references_and_scratch_across_public_transitions() {
+    let source = "entry sum(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)";
+    let finalized = inspect_pass_impl(source, InspectPass::FinalizeStagedIr);
+    assert!(finalized.success, "{:?}", finalized.error);
+    assert!(finalized.before.unwrap().recipes.is_empty());
+    let planned = finalized.after.unwrap();
+    let recipe = planned.recipes.iter().find(|recipe| recipe.kind == "reduce").unwrap();
+    assert!(planned
+        .nodes
+        .iter()
+        .any(|node| Some(&node.id) == recipe.operation.as_ref() && node.group == recipe.entry_group));
+    assert!(!recipe.details["routing"].as_array().unwrap().is_empty());
+    assert!(!recipe.scratch.is_empty());
+    assert!(recipe.scratch.iter().all(|slot| slot["state"] == "required"));
+
+    let allocation = inspect_pass_impl(source, InspectPass::AllocateRecipeScratch);
+    assert!(allocation.success, "{:?}", allocation.error);
+    let bound = allocation.after.unwrap();
+    let allocated = bound.recipes.iter().find(|candidate| candidate.id == recipe.id).unwrap();
+    assert_eq!(allocated.operation, recipe.operation);
+    assert_eq!(allocated.details, recipe.details);
+    assert_eq!(allocated.output_projection, recipe.output_projection);
+    for (requirement, resource) in recipe.scratch.iter().zip(&allocated.scratch) {
+        assert_eq!(requirement["role"], resource["role"]);
+        assert_eq!(resource["state"], "bound");
+        assert!(bound.resources.iter().any(|decl| resource["resource"] == decl.id));
+    }
+    let repeated = inspect_pass_impl(source, InspectPass::AllocateRecipeScratch).after.unwrap();
+    assert_eq!(
+        serde_json::to_value(&bound.resources).unwrap(),
+        serde_json::to_value(&repeated.resources).unwrap()
+    );
+    assert_eq!(
+        bound.recipes.iter().map(|recipe| (&recipe.id, &recipe.scratch)).collect::<Vec<_>>(),
+        repeated.recipes.iter().map(|recipe| (&recipe.id, &recipe.scratch)).collect::<Vec<_>>(),
+    );
+
+    let scheduled = inspect_pass_impl(source, InspectPass::BuildKernelSchedule);
+    assert!(scheduled.success, "{:?}", scheduled.error);
+    let schedule = scheduled.after.unwrap();
+    assert!(schedule.stages.is_empty());
+    assert!(schedule.recipes.is_empty());
+    assert!(schedule.kernels.len() >= 2);
+    assert_eq!(schedule.publications, planned.publications);
+    for kernel in &schedule.kernels {
+        assert_eq!(kernel.planned_component.as_ref(), Some(&recipe.id));
+        assert!(schedule.nodes.iter().any(|node| node.group == kernel.entry_group));
+        assert!(kernel.resources.iter().all(|access| access.resource.is_some()));
+    }
+    let physicalized = inspect_pass_impl(source, InspectPass::PhysicalizeKernelSchedule);
+    assert!(physicalized.success, "{:?}", physicalized.error);
+    let physical = physicalized.after.unwrap();
+    assert_eq!(
+        schedule.kernels.iter().map(|kernel| &kernel.id).collect::<Vec<_>>(),
+        physical.kernels.iter().map(|kernel| &kernel.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn projected_bodies_have_scoped_nodes_and_unique_output_owners() {
+    let source = "entry mixed(a: []i32, b: []i32) ([]i32, []i32) =
+        (map(|x: i32| x + 1, a), map(|x: i32| x * 2, b))";
+    let result = inspect_pass_impl(source, InspectPass::FinalizeStagedIr);
+    assert!(result.success, "{:?}", result.error);
+    let snapshot = result.after.unwrap();
+    assert_eq!(snapshot.recipes.len(), 2);
+    let ids = snapshot.nodes.iter().map(|node| &node.id).collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), snapshot.nodes.len());
+    let mut outputs = snapshot
+        .recipes
+        .iter()
+        .flat_map(|recipe| recipe.output_projection.as_ref().unwrap())
+        .copied()
+        .collect::<Vec<_>>();
+    outputs.sort_unstable();
+    assert_eq!(outputs, [0, 1]);
+    for recipe in &snapshot.recipes {
+        assert!(ids.contains(recipe.operation.as_ref().unwrap()));
+    }
+    for relation in &result.relations {
+        assert!(relation.after.iter().all(|id| ids.contains(id)));
+    }
 }

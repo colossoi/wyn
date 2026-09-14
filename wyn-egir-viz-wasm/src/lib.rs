@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as JsonValue};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 use wyn_core::ast::Span;
 use wyn_core::egir::ir::{OperandRef, OperandType, PlaceOp, ProgramFamily, SideEffectKind};
+use wyn_core::egir::parallelize::planning::{Recipe, RecipeKernel, RecipeStages, ScratchRef};
+use wyn_core::egir::program::KernelProgram;
 use wyn_core::egir::program::{
     CompilerResourceKind, LogicalResource, LogicalResourceArena, LogicalSize, NoStorageDeclaration,
-    OutputWriter, RealizedOutputRoute, ResourceId, ResourceOrigin, RewriteGlobal, SemanticOpId,
-    SemanticProgramData, SemanticResourceRef,
+    OutputWriter, RealizedOutputRoute, ResidentStorage, ResourceId, ResourceOrigin, RewriteGlobal,
+    SemanticOpId, SemanticProgramData, SemanticResourceRef, StageOrigin,
 };
 use wyn_core::egir::soac::screma::ScremaOperands;
 use wyn_core::egir::soac::Lambda;
@@ -14,19 +17,20 @@ use wyn_core::egir::soac::SegmentedMetadata;
 use wyn_core::egir::soac::{filter, hist, screma};
 use wyn_core::egir::types::{
     EffectOp, GraphResource as WynGraphResource, Physical, PlaceDestination, Raw, ResultDestination,
-    SegExtent, SegResourceAccess, SegSpace, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase,
+    Scheduled, SegExtent, SegResourceAccess, SegSpace, Semantic, Soac, SoacEffect, ValueKind, WynSoacPhase,
 };
 use wyn_core::error::CompilerError;
+use wyn_core::types::Type;
 use wyn_core::{
     initialize_frontend, BindingRef, CompilationFailure, CompilerOptions, FunctionId, LoadModulesError,
     LoweringProfile, ParsedModules, ResourceAccess,
 };
 use wyn_module_graph::{BuildError, ModulePath, PackageIdentity, PackagePlan};
+use wyn_staged_ir::{ExternalInput, FlowId, ResidentFlow, Stage, StageId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectPass {
     OptimizeSemanticOperations,
-    PlanLogicalResources,
     PlanPhysicalKernels,
     ReifySoacs,
     EliminateDeadSemanticOperations,
@@ -35,12 +39,10 @@ enum InspectPass {
     AllocateSemanticResources,
     ResolveResidency,
     FinalizeStagedIr,
-    BindMappedOutputDestinations,
-    AnalyzeKernelRecipes,
     AllocateRecipeScratch,
     BuildKernelSchedule,
-    FinalizeKernelSchedule,
-    ExpandSoacs,
+    PhysicalizeKernelSchedule,
+    LowerSoacs,
     EliminateInternalPlaceCalls,
     PartiallyInlineCalls,
     MaterializeDynamicExtracts,
@@ -51,7 +53,6 @@ enum InspectPass {
 
 impl InspectPass {
     const OPTIMIZE_SEMANTIC_OPERATIONS: &'static str = "egir::optimize_semantic_operations";
-    const PLAN_LOGICAL_RESOURCES: &'static str = "egir::plan_logical_resources";
     const PLAN_PHYSICAL_KERNELS: &'static str = "egir::plan";
     const REIFY_SOACS: &'static str = "egir::reify_soacs";
     const ELIMINATE_DEAD_SEMANTIC_OPERATIONS: &'static str = "egir::eliminate_dead_semantic_operations";
@@ -60,12 +61,10 @@ impl InspectPass {
     const ALLOCATE_SEMANTIC_RESOURCES: &'static str = "egir::allocate_semantic_resources";
     const RESOLVE_RESIDENCY: &'static str = "egir::resolve_residency";
     const FINALIZE_STAGED_IR: &'static str = "egir::finalize_staged_ir";
-    const BIND_MAPPED_OUTPUT_DESTINATIONS: &'static str = "egir::bind_mapped_output_destinations";
-    const ANALYZE_KERNEL_RECIPES: &'static str = "egir::analyze_kernel_recipes";
     const ALLOCATE_RECIPE_SCRATCH: &'static str = "egir::allocate_recipe_scratch";
     const BUILD_KERNEL_SCHEDULE: &'static str = "egir::build_kernel_schedule";
-    const FINALIZE_KERNEL_SCHEDULE: &'static str = "egir::finalize_kernel_schedule";
-    const EXPAND_SOACS: &'static str = "egir::expand_soacs";
+    const PHYSICALIZE_KERNEL_SCHEDULE: &'static str = "egir::physicalize_kernel_schedule";
+    const LOWER_SOACS: &'static str = "egir::lower_soacs";
     const ELIMINATE_INTERNAL_PLACE_CALLS: &'static str = "egir::eliminate_internal_place_calls";
     const PARTIALLY_INLINE_CALLS: &'static str = "egir::partially_inline_calls";
     const MATERIALIZE_DYNAMIC_EXTRACTS: &'static str = "egir::materialize_dynamic_extracts";
@@ -76,7 +75,6 @@ impl InspectPass {
     fn parse(value: &str) -> Option<Self> {
         match value {
             Self::OPTIMIZE_SEMANTIC_OPERATIONS => Some(Self::OptimizeSemanticOperations),
-            Self::PLAN_LOGICAL_RESOURCES => Some(Self::PlanLogicalResources),
             Self::PLAN_PHYSICAL_KERNELS => Some(Self::PlanPhysicalKernels),
             Self::REIFY_SOACS => Some(Self::ReifySoacs),
             Self::ELIMINATE_DEAD_SEMANTIC_OPERATIONS => Some(Self::EliminateDeadSemanticOperations),
@@ -85,12 +83,10 @@ impl InspectPass {
             Self::ALLOCATE_SEMANTIC_RESOURCES => Some(Self::AllocateSemanticResources),
             Self::RESOLVE_RESIDENCY => Some(Self::ResolveResidency),
             Self::FINALIZE_STAGED_IR => Some(Self::FinalizeStagedIr),
-            Self::BIND_MAPPED_OUTPUT_DESTINATIONS => Some(Self::BindMappedOutputDestinations),
-            Self::ANALYZE_KERNEL_RECIPES => Some(Self::AnalyzeKernelRecipes),
             Self::ALLOCATE_RECIPE_SCRATCH => Some(Self::AllocateRecipeScratch),
             Self::BUILD_KERNEL_SCHEDULE => Some(Self::BuildKernelSchedule),
-            Self::FINALIZE_KERNEL_SCHEDULE => Some(Self::FinalizeKernelSchedule),
-            Self::EXPAND_SOACS => Some(Self::ExpandSoacs),
+            Self::PHYSICALIZE_KERNEL_SCHEDULE => Some(Self::PhysicalizeKernelSchedule),
+            Self::LOWER_SOACS => Some(Self::LowerSoacs),
             Self::ELIMINATE_INTERNAL_PLACE_CALLS => Some(Self::EliminateInternalPlaceCalls),
             Self::PARTIALLY_INLINE_CALLS => Some(Self::PartiallyInlineCalls),
             Self::MATERIALIZE_DYNAMIC_EXTRACTS => Some(Self::MaterializeDynamicExtracts),
@@ -104,7 +100,6 @@ impl InspectPass {
     fn id(self) -> &'static str {
         match self {
             Self::OptimizeSemanticOperations => Self::OPTIMIZE_SEMANTIC_OPERATIONS,
-            Self::PlanLogicalResources => Self::PLAN_LOGICAL_RESOURCES,
             Self::PlanPhysicalKernels => Self::PLAN_PHYSICAL_KERNELS,
             Self::ReifySoacs => Self::REIFY_SOACS,
             Self::EliminateDeadSemanticOperations => Self::ELIMINATE_DEAD_SEMANTIC_OPERATIONS,
@@ -113,12 +108,10 @@ impl InspectPass {
             Self::AllocateSemanticResources => Self::ALLOCATE_SEMANTIC_RESOURCES,
             Self::ResolveResidency => Self::RESOLVE_RESIDENCY,
             Self::FinalizeStagedIr => Self::FINALIZE_STAGED_IR,
-            Self::BindMappedOutputDestinations => Self::BIND_MAPPED_OUTPUT_DESTINATIONS,
-            Self::AnalyzeKernelRecipes => Self::ANALYZE_KERNEL_RECIPES,
             Self::AllocateRecipeScratch => Self::ALLOCATE_RECIPE_SCRATCH,
             Self::BuildKernelSchedule => Self::BUILD_KERNEL_SCHEDULE,
-            Self::FinalizeKernelSchedule => Self::FINALIZE_KERNEL_SCHEDULE,
-            Self::ExpandSoacs => Self::EXPAND_SOACS,
+            Self::PhysicalizeKernelSchedule => Self::PHYSICALIZE_KERNEL_SCHEDULE,
+            Self::LowerSoacs => Self::LOWER_SOACS,
             Self::EliminateInternalPlaceCalls => Self::ELIMINATE_INTERNAL_PLACE_CALLS,
             Self::PartiallyInlineCalls => Self::PARTIALLY_INLINE_CALLS,
             Self::MaterializeDynamicExtracts => Self::MATERIALIZE_DYNAMIC_EXTRACTS,
@@ -399,6 +392,8 @@ pub struct GraphSnapshot {
     pub flows: Vec<GraphFlow>,
     pub external_inputs: Vec<GraphExternalInput>,
     pub kernels: Vec<GraphKernel>,
+    pub recipes: Vec<GraphRecipe>,
+    pub publications: Vec<JsonValue>,
     pub groups: Vec<GraphGroup>,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
@@ -408,9 +403,8 @@ pub struct GraphSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GraphStage {
     pub id: String,
-    pub entry_group: String,
-    pub entry_name: String,
-    pub origin: String,
+    pub kernels: Vec<String>,
+    pub origin: JsonValue,
     pub incoming_flows: Vec<String>,
     pub outgoing_flows: Vec<String>,
 }
@@ -442,8 +436,27 @@ pub struct GraphKernel {
     pub entry_name: String,
     pub label: String,
     pub dependencies: Vec<String>,
-    pub domain: String,
+    pub domain: JsonValue,
+    pub workgroup_size: (u32, u32, u32),
+    pub planned_component: Option<String>,
+    pub required_elements: Option<u32>,
+    pub source_entry: Option<String>,
+    pub output_routes: Vec<JsonValue>,
     pub resources: Vec<GraphResourceAccess>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphRecipe {
+    pub id: String,
+    pub stage: String,
+    pub entry_group: String,
+    pub kind: String,
+    pub operation: Option<String>,
+    pub output_projection: Option<Vec<usize>>,
+    pub required_elements: Option<u32>,
+    pub dispatch: JsonValue,
+    pub details: JsonValue,
+    pub scratch: Vec<JsonValue>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -491,11 +504,6 @@ pub fn init_compiler() -> bool {
 }
 
 #[wasm_bindgen]
-pub fn inspect_optimize_semantic_operations(source: &str) -> JsValue {
-    inspect_pass(source, InspectPass::OPTIMIZE_SEMANTIC_OPERATIONS)
-}
-
-#[wasm_bindgen]
 pub fn inspect_pass(source: &str, pass: &str) -> JsValue {
     console_error_panic_hook::set_once();
     let Some(pass) = InspectPass::parse(pass) else {
@@ -507,14 +515,16 @@ pub fn inspect_pass(source: &str, pass: &str) -> JsValue {
         .expect("serialize unknown EGIR pass error");
     };
     let result = inspect_pass_impl(source, pass);
-    serde_wasm_bindgen::to_value(&result).unwrap_or_else(|error| {
-        serde_wasm_bindgen::to_value(&InspectResult::error(
-            pass.id(),
-            format!("failed to serialize EGIR snapshots: {error}"),
-            None,
-        ))
-        .expect("serialize fallback EGIR visualization error")
-    })
+    result
+        .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
+        .unwrap_or_else(|error| {
+            serde_wasm_bindgen::to_value(&InspectResult::error(
+                pass.id(),
+                format!("failed to serialize EGIR snapshots: {error}"),
+                None,
+            ))
+            .expect("serialize fallback EGIR visualization error")
+        })
 }
 
 fn compiler_error(pass: InspectPass, error: CompilerError) -> InspectResult {
@@ -675,8 +685,8 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         return successful_inspection(pass, before_stage_lift, snapshot_program(&optimized));
     }
 
-    let aggregate_allocation_before =
-        (pass == InspectPass::PlanLogicalResources).then(|| snapshot_program(&optimized));
+    let aggregate_planning_before =
+        (pass == InspectPass::PlanPhysicalKernels).then(|| snapshot_program(&optimized));
     let before_resource_allocation =
         (pass == InspectPass::AllocateSemanticResources).then(|| snapshot_program(&optimized));
     let residency_draft = match wyn_core::egir::allocate_semantic_resources(optimized) {
@@ -699,16 +709,17 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
 
     let before_residency =
         (pass == InspectPass::ResolveResidency).then(|| snapshot_residency_program(&residency_draft));
-    let residency_draft = match wyn_core::egir::resolve_residency(residency_draft) {
-        Ok(program) => program,
-        Err(error) => {
-            return InspectResult::error(
-                pass.id(),
-                format!("EGIR residency resolution error: {error}"),
-                None,
-            )
-        }
-    };
+    let residency_draft =
+        match wyn_core::egir::resolve_residency(residency_draft, LoweringProfile::PORTABLE.topology) {
+            Ok(program) => program,
+            Err(error) => {
+                return InspectResult::error(
+                    pass.id(),
+                    format!("EGIR residency resolution error: {error}"),
+                    None,
+                )
+            }
+        };
     if pass == InspectPass::ResolveResidency {
         return successful_inspection(
             pass,
@@ -719,7 +730,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
 
     let before_finalization =
         (pass == InspectPass::FinalizeStagedIr).then(|| snapshot_residency_program(&residency_draft));
-    let allocated = match wyn_core::egir::finalize_staged_ir(residency_draft) {
+    let allocated = match wyn_core::egir::finalize_staged_ir(residency_draft, LoweringProfile::PORTABLE) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
@@ -730,62 +741,12 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         }
     };
     if pass == InspectPass::FinalizeStagedIr {
-        return successful_inspection(pass, before_finalization, snapshot_allocated_program(&allocated));
+        return successful_inspection(pass, before_finalization, snapshot_recipe_program(&allocated));
     }
 
-    if pass == InspectPass::PlanLogicalResources {
-        return successful_inspection(
-            pass,
-            aggregate_allocation_before,
-            snapshot_allocated_program(&allocated),
-        );
-    }
-    let aggregate_planning_before =
-        (pass == InspectPass::PlanPhysicalKernels).then(|| snapshot_allocated_program(&allocated));
-    let before_destination_binding =
-        (pass == InspectPass::BindMappedOutputDestinations).then(|| snapshot_allocated_program(&allocated));
-    let destinations_bound = match wyn_core::egir::bind_mapped_output_destinations(allocated) {
-        Ok(program) => program,
-        Err(error) => {
-            return InspectResult::error(
-                pass.id(),
-                format!("EGIR output-destination binding error: {error:?}"),
-                None,
-            )
-        }
-    };
-    if pass == InspectPass::BindMappedOutputDestinations {
-        return successful_inspection(
-            pass,
-            before_destination_binding,
-            snapshot_allocated_program(destinations_bound.program()),
-        );
-    }
-
-    let before_recipe_analysis = (pass == InspectPass::AnalyzeKernelRecipes)
-        .then(|| snapshot_allocated_program(destinations_bound.program()));
-    let recipes_analyzed =
-        match wyn_core::egir::analyze_kernel_recipes(destinations_bound, LoweringProfile::PORTABLE) {
-            Ok(program) => program,
-            Err(error) => {
-                return InspectResult::error(
-                    pass.id(),
-                    format!("EGIR kernel-recipe analysis error: {error:?}"),
-                    None,
-                )
-            }
-        };
-    if pass == InspectPass::AnalyzeKernelRecipes {
-        return successful_inspection(
-            pass,
-            before_recipe_analysis,
-            snapshot_allocated_program(recipes_analyzed.program()),
-        );
-    }
-
-    let before_recipe_scratch = (pass == InspectPass::AllocateRecipeScratch)
-        .then(|| snapshot_allocated_program(recipes_analyzed.program()));
-    let recipe_scratch = match wyn_core::egir::allocate_recipe_scratch(recipes_analyzed) {
+    let before_recipe_scratch =
+        (pass == InspectPass::AllocateRecipeScratch).then(|| snapshot_recipe_program(&allocated));
+    let recipe_scratch = match wyn_core::egir::allocate_recipe_scratch(allocated) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
@@ -799,12 +760,12 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         return successful_inspection(
             pass,
             before_recipe_scratch,
-            snapshot_allocated_program(recipe_scratch.program()),
+            snapshot_recipe_program(&recipe_scratch),
         );
     }
 
-    let before_schedule = (pass == InspectPass::BuildKernelSchedule)
-        .then(|| snapshot_allocated_program(recipe_scratch.program()));
+    let before_schedule =
+        (pass == InspectPass::BuildKernelSchedule).then(|| snapshot_recipe_program(&recipe_scratch));
     let schedule = match wyn_core::egir::build_kernel_schedule(recipe_scratch) {
         Ok(program) => program,
         Err(error) => {
@@ -816,16 +777,12 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         }
     };
     if pass == InspectPass::BuildKernelSchedule {
-        return successful_inspection(
-            pass,
-            before_schedule,
-            snapshot_allocated_program(schedule.program()),
-        );
+        return successful_inspection(pass, before_schedule, snapshot_schedule_program(&schedule));
     }
 
-    let before_schedule_finalization = (pass == InspectPass::FinalizeKernelSchedule)
-        .then(|| snapshot_allocated_program(schedule.program()));
-    let planned = match wyn_core::egir::finalize_kernel_schedule(schedule) {
+    let before_schedule_finalization =
+        (pass == InspectPass::PhysicalizeKernelSchedule).then(|| snapshot_schedule_program(&schedule));
+    let planned = match wyn_core::egir::physicalize_kernel_schedule(schedule) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
@@ -835,7 +792,7 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
             )
         }
     };
-    if pass == InspectPass::FinalizeKernelSchedule {
+    if pass == InspectPass::PhysicalizeKernelSchedule {
         return successful_inspection(
             pass,
             before_schedule_finalization,
@@ -850,20 +807,20 @@ fn inspect_pass_impl(source: &str, pass: InspectPass) -> InspectResult {
         );
     }
 
-    let before_expansion = (pass == InspectPass::ExpandSoacs).then(|| snapshot_physical_program(&planned));
-    let expanded = match wyn_core::egir::expand_soacs(planned) {
+    let before_lowering = (pass == InspectPass::LowerSoacs).then(|| snapshot_physical_program(&planned));
+    let lowered = match wyn_core::egir::lower_soacs(planned) {
         Ok(program) => program,
         Err(error) => {
-            return InspectResult::error(pass.id(), format!("EGIR SOAC expansion error: {error}"), None)
+            return InspectResult::error(pass.id(), format!("EGIR SOAC lowering error: {error}"), None)
         }
     };
-    if pass == InspectPass::ExpandSoacs {
-        return successful_inspection(pass, before_expansion, snapshot_physical_program(&expanded));
+    if pass == InspectPass::LowerSoacs {
+        return successful_inspection(pass, before_lowering, snapshot_physical_program(&lowered));
     }
 
     let before_place_elimination =
-        (pass == InspectPass::EliminateInternalPlaceCalls).then(|| snapshot_physical_program(&expanded));
-    let calls_place_free = match wyn_core::egir::eliminate_internal_place_calls(expanded) {
+        (pass == InspectPass::EliminateInternalPlaceCalls).then(|| snapshot_physical_program(&lowered));
+    let calls_place_free = match wyn_core::egir::eliminate_internal_place_calls(lowered) {
         Ok(program) => program,
         Err(error) => {
             return InspectResult::error(
@@ -948,7 +905,24 @@ fn successful_inspection(
     before: Option<GraphSnapshot>,
     after: GraphSnapshot,
 ) -> InspectResult {
-    inspection_with_relations(pass, before, after, Vec::new())
+    let relations = before
+        .as_ref()
+        .map(|before| {
+            let mut ids = std::collections::BTreeSet::new();
+            for node in &before.nodes {
+                if let Some(id) = node.operation.as_ref().and_then(|op| op.semantic_id.as_ref()) {
+                    ids.insert(id.clone());
+                }
+            }
+            ids.into_iter()
+                .map(|id| NodeRelation {
+                    before: vec![id.clone()],
+                    after: vec![id],
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    inspection_with_relations(pass, before, after, relations)
 }
 
 fn inspection_with_relations(
@@ -957,6 +931,34 @@ fn inspection_with_relations(
     after: GraphSnapshot,
     relations: Vec<NodeRelation>,
 ) -> InspectResult {
+    let expand = |snapshot: &GraphSnapshot, ids: &[String]| {
+        snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                ids.contains(&node.id)
+                    || node
+                        .operation
+                        .as_ref()
+                        .and_then(|op| op.semantic_id.as_ref())
+                        .is_some_and(|id| ids.contains(id))
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let relations = before
+        .as_ref()
+        .map(|snapshot| {
+            relations
+                .into_iter()
+                .filter_map(|relation| {
+                    let before = expand(snapshot, &relation.before);
+                    let after = expand(&after, &relation.after);
+                    (!before.is_empty() || !after.is_empty()).then_some(NodeRelation { before, after })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     InspectResult {
         success: true,
         pass: pass.id().to_string(),
@@ -1177,11 +1179,11 @@ impl<R: SnapshotResource> SnapshotPhase for Semantic<R> {
 
     fn soac_node_id(
         id: &Self::SoacId,
-        _group: &str,
+        group: &str,
         _block: wyn_core::flow::BlockId,
         _index: usize,
     ) -> String {
-        operation_node_id(*id)
+        format!("{group}/{}", operation_node_id(*id))
     }
 
     fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String {
@@ -1235,102 +1237,122 @@ impl<R: SnapshotResource> SnapshotPhase for Semantic<R> {
     }
 }
 
-impl SnapshotPhase for Physical {
-    fn graph_resource(resource: &Self::Resource) -> (Option<GraphBinding>, Option<String>) {
-        (Some(graph_binding(*resource)), None)
-    }
+macro_rules! scheduled_snapshot_phase {
+    ($phase:ty, $name:literal) => {
+        impl SnapshotPhase for $phase {
+            fn graph_resource(resource: &Self::Resource) -> (Option<GraphBinding>, Option<String>) {
+                resource.graph_reference()
+            }
 
-    fn soac_node_id(
-        id: &Self::SoacId,
-        _group: &str,
-        _block: wyn_core::flow::BlockId,
-        _index: usize,
-    ) -> String {
-        operation_node_id(*id)
-    }
+            fn soac_node_id(
+                id: &Self::SoacId,
+                group: &str,
+                _block: wyn_core::flow::BlockId,
+                _index: usize,
+            ) -> String {
+                format!("{group}/{}", operation_node_id(*id))
+            }
 
-    fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String {
-        format!("physical op {}\n\n{soac:#?}", id.source_index())
-    }
+            fn soac_detail(id: &Self::SoacId, soac: &Soac<Self>) -> String {
+                format!("{} op {}\n\n{soac:#?}", $name, id.source_index())
+            }
 
-    fn semantic_id(id: &Self::SoacId) -> Option<String> {
-        Some(operation_node_id(*id))
-    }
+            fn semantic_id(id: &Self::SoacId) -> Option<String> {
+                Some(operation_node_id(*id))
+            }
 
-    fn screma_state(group: &str, op: &screma::Op<Self>) -> GraphSoacState {
-        match &op.state {
-            screma::PhysicalState::Serial => graph_physical_soac_state("serial", None, &[], &[], None),
-            screma::PhysicalState::Segmented(segment) => graph_physical_soac_state(
-                "segmented",
-                Some(graph_seg_space::<Self>(group, &segment.space)),
-                &segment.output_slots,
-                &segment.resources,
-                None,
-            ),
+            fn screma_state(group: &str, op: &screma::Op<Self>) -> GraphSoacState {
+                match &op.state {
+                    screma::ScheduledState::Serial => {
+                        graph_scheduled_soac_state::<Self>($name, "serial", None, &[], &[], None)
+                    }
+                    screma::ScheduledState::Segmented(segment) => graph_scheduled_soac_state::<Self>(
+                        $name,
+                        "segmented",
+                        Some(graph_seg_space::<Self>(group, &segment.space)),
+                        &segment.output_slots,
+                        &segment.resources,
+                        None,
+                    ),
+                }
+            }
+
+            fn filter_state(group: &str, op: &filter::Op<Self>) -> GraphSoacState {
+                match &op.state {
+                    filter::ScheduledState::Loop { space, storage } => graph_scheduled_soac_state::<Self>(
+                        $name,
+                        "loop",
+                        Some(graph_seg_space::<Self>(group, space)),
+                        &[],
+                        &[],
+                        Some(graph_filter_output::<Self>(storage)),
+                    ),
+                    filter::ScheduledState::Pipeline { space, plan, .. } => {
+                        graph_scheduled_soac_state::<Self>(
+                            $name,
+                            match plan.stage {
+                                filter::ParallelStage::Flags => "filter_flags",
+                                filter::ParallelStage::Scan => "filter_scan",
+                                filter::ParallelStage::Scatter => "filter_scatter",
+                            },
+                            Some(graph_seg_space::<Self>(group, space)),
+                            &[],
+                            &[],
+                            None,
+                        )
+                    }
+                }
+            }
+
+            fn hist_state(group: &str, op: &hist::Op<Self>) -> GraphSoacState {
+                match &op.state {
+                    hist::ScheduledState::Serial => {
+                        graph_scheduled_soac_state::<Self>($name, "serial", None, &[], &[], None)
+                    }
+                    hist::ScheduledState::Atomic { space, .. } => graph_scheduled_soac_state::<Self>(
+                        $name,
+                        "hist_atomic",
+                        Some(graph_seg_space::<Self>(group, space)),
+                        &[],
+                        &[],
+                        None,
+                    ),
+                    hist::ScheduledState::Bucket { space, stage, .. } => {
+                        graph_scheduled_soac_state::<Self>(
+                            $name,
+                            match stage {
+                                hist::ParallelStage::Init => "bucket_init",
+                                hist::ParallelStage::Insert => "bucket_insert",
+                                hist::ParallelStage::Finish => "bucket_finish",
+                            },
+                            Some(graph_seg_space::<Self>(group, space)),
+                            &[],
+                            &[],
+                            None,
+                        )
+                    }
+                }
+            }
         }
-    }
-
-    fn filter_state(group: &str, op: &filter::Op<Self>) -> GraphSoacState {
-        match &op.state {
-            filter::ScheduledState::Loop { space, storage } => graph_physical_soac_state(
-                "loop",
-                Some(graph_seg_space::<Self>(group, space)),
-                &[],
-                &[],
-                Some(graph_filter_output::<Self>(storage)),
-            ),
-            filter::ScheduledState::Pipeline { space, plan, .. } => graph_physical_soac_state(
-                match plan.stage {
-                    filter::ParallelStage::Flags => "filter_flags",
-                    filter::ParallelStage::Scan => "filter_scan",
-                    filter::ParallelStage::Scatter => "filter_scatter",
-                },
-                Some(graph_seg_space::<Self>(group, space)),
-                &[],
-                &[],
-                None,
-            ),
-        }
-    }
-
-    fn hist_state(group: &str, op: &hist::Op<Self>) -> GraphSoacState {
-        match &op.state {
-            hist::ScheduledState::Serial => graph_physical_soac_state("serial", None, &[], &[], None),
-            hist::ScheduledState::Atomic { space, .. } => graph_physical_soac_state(
-                "hist_atomic",
-                Some(graph_seg_space::<Self>(group, space)),
-                &[],
-                &[],
-                None,
-            ),
-            hist::ScheduledState::Bucket { space, stage, .. } => graph_physical_soac_state(
-                match stage {
-                    hist::ParallelStage::Init => "bucket_init",
-                    hist::ParallelStage::Insert => "bucket_insert",
-                    hist::ParallelStage::Finish => "bucket_finish",
-                },
-                Some(graph_seg_space::<Self>(group, space)),
-                &[],
-                &[],
-                None,
-            ),
-        }
-    }
+    };
 }
+scheduled_snapshot_phase!(Scheduled, "scheduled");
+scheduled_snapshot_phase!(Physical, "physical");
 
-fn graph_physical_soac_state(
+fn graph_scheduled_soac_state<P: SnapshotPhase>(
+    phase: &str,
     variant: &str,
     space: Option<Vec<GraphSegExtent>>,
     output_slots: &[wyn_core::egir::program::OutputSlotId],
-    resources: &[SegResourceAccess<BindingRef>],
+    resources: &[SegResourceAccess<P::Resource>],
     filter_output: Option<GraphFilterOutput>,
 ) -> GraphSoacState {
     GraphSoacState {
-        phase: "physical".to_string(),
+        phase: phase.to_string(),
         variant: variant.to_string(),
         space: space.unwrap_or_default(),
         output_slots: output_slots.iter().map(|slot| slot.0).collect(),
-        resources: resources.iter().map(graph_resource_access::<Physical>).collect(),
+        resources: resources.iter().map(graph_resource_access::<P>).collect(),
         filter_output,
     }
 }
@@ -1758,52 +1780,284 @@ fn snapshot_residency_program(program: &wyn_core::egir::ResidencyDraft) -> Graph
         .iter()
         .map(|function| (function.region, function.name.clone()))
         .collect::<HashMap<_, _>>();
-    for (index, entry) in program.entry_points.iter().enumerate() {
-        snapshot_allocated_entry(
-            &mut snapshot,
-            format!("entry:{index}"),
-            "entry",
-            entry,
-            &program.data.core.resources,
-            &region_names,
-        );
-    }
+    snapshot_staged_topology(
+        &mut snapshot,
+        program.data.stages.stage_records(),
+        program.data.stages.flows(),
+        program.data.stages.external_inputs(),
+        |snapshot, _, group, entry| {
+            snapshot_allocated_entry(
+                snapshot,
+                group.clone(),
+                "stage",
+                entry,
+                &program.data.core.resources,
+                &region_names,
+            );
+            vec![group]
+        },
+    );
     snapshot_auxiliary_bodies(&mut snapshot, program, &region_names);
     snapshot
 }
 
-fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> GraphSnapshot {
+trait SnapshotScratch: std::fmt::Debug {
+    fn snapshot(&self, role: &str) -> JsonValue;
+}
+
+impl SnapshotScratch for ResourceId {
+    fn snapshot(&self, role: &str) -> JsonValue {
+        json!({ "role": role, "state": "bound", "resource": resource_id_name(*self) })
+    }
+}
+
+impl SnapshotScratch for ScratchRef {
+    fn snapshot(&self, role: &str) -> JsonValue {
+        match self {
+            ScratchRef::Existing(id) => id.snapshot(role),
+            ScratchRef::Allocate(request) => json!({
+                "role": role, "state": "required",
+                "owner": operation_node_id(request.key.owner), "kind": compiler_resource_kind(request.key.kind),
+                "slot": request.key.slot, "elem_ty": wyn_core::diags::format_type(&request.elem_ty),
+                "size": graph_logical_size(Some(&request.size)),
+            }),
+        }
+    }
+}
+
+fn graph_domain(domain: &wyn_core::egir::parallelize::KernelDomain) -> JsonValue {
+    use wyn_core::egir::parallelize::KernelDomain;
+    match domain {
+        KernelDomain::Fixed { x, y, z } => json!({ "kind": "fixed", "x": x, "y": y, "z": z }),
+        KernelDomain::Elements(length) => json!({ "kind": "elements", "length": length }),
+        KernelDomain::ResourceElements { resource, elem_bytes } => {
+            json!({ "kind": "resource_elements", "resource": resource_id_name(*resource), "elem_bytes": elem_bytes })
+        }
+    }
+}
+
+fn graph_publication(publication: &wyn_core::egir::program::PlannedPublication) -> JsonValue {
+    json!({
+        "id": format!("{:?}", publication.id), "name": publication.name,
+        "execution_model": match publication.execution_model {
+            wyn_core::flow::ExecutionModel::Compute { local_size } => json!({ "kind": "compute", "workgroup_size": local_size }),
+            wyn_core::flow::ExecutionModel::Vertex => json!({ "kind": "vertex" }),
+            wyn_core::flow::ExecutionModel::Fragment => json!({ "kind": "fragment" }),
+        },
+        "inputs": publication.inputs.iter().map(|input| json!({ "name": input.name, "ty": wyn_core::diags::format_type(&input.ty), "binding": input.descriptor_binding().map(graph_binding), "size_hint": input.size_hint })).collect::<Vec<_>>(),
+        "outputs": publication.outputs.iter().map(|output| json!({ "ty": wyn_core::diags::format_type(&output.ty), "kind": graph_output_kind(&output.kind) })).collect::<Vec<_>>(),
+        "resources": publication.resource_declarations.iter().map(|decl| json!({ "resource": resource_name(decl.resource), "role": storage_role(decl.role) })).collect::<Vec<_>>(),
+    })
+}
+
+fn graph_routing(
+    routing: &wyn_core::egir::parallelize::reduce::ReductionRouting,
+    group: &str,
+) -> JsonValue {
+    json!(routing
+        .stores
+        .iter()
+        .map(|store| json!({
+            "value": value_node_id(group, store.value), "accumulators": store.accumulators,
+            "destination": resource_id_name(store.destination),
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn graph_recipe<R: SnapshotScratch>(
+    kernel: &RecipeKernel<R>,
+    stage: &str,
+    group: &str,
+    plan: &wyn_core::egir::parallelize::planning::StagePlan<R>,
+) -> GraphRecipe {
+    use wyn_core::egir::parallelize::{hist::HistRecipe, scan::ScanPrefixes};
+    let captures = |inputs: &[ResourceId]| inputs.iter().copied().map(resource_id_name).collect::<Vec<_>>();
+    let (kind, operation, details, roles): (
+        &str,
+        Option<wyn_core::egir::parallelize::planning::OperationRef>,
+        JsonValue,
+        Vec<String>,
+    ) = match kernel.recipe() {
+        Recipe::Unchanged => ("unchanged", None, json!({}), Vec::new()),
+        Recipe::Serial(op) => ("serial", Some(*op), json!({}), Vec::new()),
+        Recipe::Map(op) => ("map", Some(*op), json!({}), Vec::new()),
+        Recipe::Reduce(recipe) => (
+            "reduce",
+            Some(recipe.operation),
+            json!({ "routing": graph_routing(&recipe.routing, group),
+                "capture_inputs": recipe.accumulators.iter().map(|acc| captures(&acc.capture_inputs)).collect::<Vec<_>>() }),
+            (0..recipe.accumulators.len()).map(|index| format!("partials[{index}]")).collect(),
+        ),
+        Recipe::Scan(recipe) => (
+            "scan",
+            Some(recipe.operation),
+            json!({ "routing": graph_routing(&recipe.reduction_routing, group), "capture_inputs": captures(&recipe.capture_inputs),
+                "prefixes": match recipe.prefixes { ScanPrefixes::DirectOutput => "direct_output", ScanPrefixes::Scratch(_) => "scratch" } }),
+            ["block_sums", "block_offsets"]
+                .into_iter()
+                .chain(matches!(recipe.prefixes, ScanPrefixes::Scratch(_)).then_some("prefixes"))
+                .map(String::from)
+                .collect(),
+        ),
+        Recipe::Filter(recipe) => (
+            "filter",
+            Some(recipe.operation),
+            json!({}),
+            ["flags", "offsets", "block_sums", "block_offsets"].into_iter().map(String::from).collect(),
+        ),
+        Recipe::Hist(HistRecipe::Atomic { operation, updates }) => (
+            "hist_atomic",
+            Some(*operation),
+            json!({ "updates": updates.iter().map(|update| match update {
+                hist::AtomicUpdate::Direct(op) => json!({ "kind": "direct", "operation": format!("{op:?}") }),
+                hist::AtomicUpdate::CompareExchange => json!({ "kind": "compare_exchange" }),
+            }).collect::<Vec<_>>() }),
+            Vec::new(),
+        ),
+        Recipe::Hist(HistRecipe::Bucket {
+            operation,
+            destination,
+            input_resources,
+            ..
+        }) => (
+            "hist_bucket",
+            Some(*operation),
+            json!({ "destination": resource_id_name(*destination), "input_resources": captures(input_resources) }),
+            vec!["counts".into(), "overflow".into()],
+        ),
+    };
+    GraphRecipe {
+        id: group.to_string(),
+        stage: stage.to_string(),
+        entry_group: group.to_string(),
+        kind: kind.into(),
+        operation: operation.map(|op| format!("{group}/{}", operation_node_id(op.owner))),
+        output_projection: kernel
+            .output_projection()
+            .map(|slots| slots.iter().map(|slot| slot.0).collect()),
+        required_elements: plan.required_elements(),
+        dispatch: json!({ "explicit": plan.dispatch().is_explicit(), "domain": graph_domain(plan.dispatch().domain()) }),
+        details,
+        scratch: kernel
+            .recipe()
+            .resources()
+            .into_iter()
+            .zip(roles)
+            .map(|(slot, role)| slot.snapshot(&role))
+            .collect(),
+    }
+}
+
+fn snapshot_recipe_program<R: SnapshotScratch>(program: &KernelProgram<RecipeStages<R>>) -> GraphSnapshot {
     let mut snapshot = GraphSnapshot::default();
     snapshot.resources = graph_logical_resources(&program.data.core.resources);
-    let region_names = program
-        .functions
-        .iter()
-        .map(|function| (function.region, function.name.clone()))
-        .collect::<HashMap<_, _>>();
-    let stage_indices = program
-        .data
-        .stages
-        .stages()
-        .enumerate()
-        .map(|(index, (stage, _))| (stage, index))
-        .collect::<HashMap<_, _>>();
-    let flow_indices = program
-        .data
-        .stages
-        .flows()
-        .enumerate()
-        .map(|(index, (flow, _))| (flow, index))
-        .collect::<HashMap<_, _>>();
+    let names = program.functions.iter().map(|function| (function.region, function.name.clone())).collect();
+    snapshot_staged_topology(
+        &mut snapshot,
+        program.data.topology.stages(),
+        program.data.topology.flows(),
+        program.data.topology.external_inputs(),
+        |snapshot, stage, group, plan| {
+            if let Some(publication) = plan.publication() {
+                snapshot.publications.push(graph_publication(publication));
+            }
+            plan.kernels()
+                .enumerate()
+                .map(|(component, kernel)| {
+                    let group = format!("{group}/component:{component}");
+                    snapshot.recipes.push(graph_recipe(kernel, stage, &group, plan));
+                    snapshot_allocated_entry(
+                        snapshot,
+                        group.clone(),
+                        "kernel",
+                        kernel.body(),
+                        &program.data.core.resources,
+                        &names,
+                    );
+                    group
+                })
+                .collect()
+        },
+    );
+    snapshot_auxiliary_bodies(&mut snapshot, program, &names);
+    snapshot
+}
 
-    for (stage_id, stage) in program.data.stages.stages() {
-        let entry = stage.body();
+fn snapshot_schedule_program(program: &wyn_core::egir::KernelScheduleBuilt) -> GraphSnapshot {
+    let mut snapshot = GraphSnapshot::default();
+    snapshot.resources = graph_logical_resources(&program.data.core.resources);
+    let names = program.functions.iter().map(|function| (function.region, function.name.clone())).collect();
+    let schedule = &program.data.topology;
+    let stage_ids =
+        schedule.kernels().map(|(_, stage, _)| stage).collect::<std::collections::BTreeSet<_>>();
+    let indices =
+        stage_ids.into_iter().enumerate().map(|(index, id)| (id, index)).collect::<HashMap<_, _>>();
+    snapshot.publications = schedule.publications().map(graph_publication).collect();
+    for (id, stage, kernel) in schedule.kernels() {
+        let group = format!("kernel:{}", id.index());
+        let workgroup_size = match kernel.body().execution_model {
+            wyn_core::flow::ExecutionModel::Compute { local_size } => local_size,
+            _ => (1, 1, 1),
+        };
+        snapshot.kernels.push(GraphKernel {
+            id: format!("kernel: {}", id.index()), entry_group: group.clone(), entry_name: kernel.body().name.clone(),
+            label: kernel.label().to_string(),
+            dependencies: schedule.dependencies(id).iter().map(|dep| format!("kernel: {}", dep.index())).collect(),
+            domain: graph_domain(kernel.dispatch().domain()), workgroup_size,
+            planned_component: Some(format!("stage:{}/component:{}", indices[&stage], kernel.component())),
+            required_elements: kernel.required_elements(),
+            source_entry: kernel.source_entry().map(|id| format!("{id:?}")),
+            output_routes: kernel.output_routes().iter().map(|route| json!({ "semantic_slot": route.semantic_slot.0, "physical_slot": route.physical_slot.0 })).collect(),
+            resources: kernel.resources().iter().map(|access| graph_resource_access::<Scheduled>(&SegResourceAccess {
+                resource: SemanticResourceRef(access.resource), access: access.access,
+            })).collect(),
+        });
+        snapshot_allocated_entry(
+            &mut snapshot,
+            group,
+            "kernel",
+            kernel.body(),
+            &program.data.core.resources,
+            &names,
+        );
+    }
+    snapshot_auxiliary_bodies(&mut snapshot, program, &names);
+    snapshot
+}
+
+fn snapshot_staged_topology<'a, B: 'a>(
+    snapshot: &mut GraphSnapshot,
+    stages: impl Iterator<Item = (StageId, &'a Stage<B, StageOrigin>)>,
+    flows: impl Iterator<Item = (FlowId, &'a ResidentFlow<Type, ResidentStorage>)>,
+    external_inputs: impl Iterator<Item = &'a ExternalInput<Type, ResidentStorage>>,
+    mut emit: impl FnMut(&mut GraphSnapshot, &str, String, &B) -> Vec<String>,
+) {
+    let stages = stages.collect::<Vec<_>>();
+    let flows = flows.collect::<Vec<_>>();
+    let stage_indices =
+        stages.iter().enumerate().map(|(index, (stage, _))| (*stage, index)).collect::<HashMap<_, _>>();
+    let flow_indices =
+        flows.iter().enumerate().map(|(index, (flow, _))| (*flow, index)).collect::<HashMap<_, _>>();
+
+    for (stage_id, stage) in stages {
         let stage_index = stage_indices[&stage_id];
         let group = format!("stage:{stage_index}");
+        let id = format!("stage: {stage_index}");
+        let kernels = emit(snapshot, &id, group, stage.body());
         snapshot.stages.push(GraphStage {
-            id: format!("stage: {stage_index}"),
-            entry_group: group.clone(),
-            entry_name: entry.name.clone(),
-            origin: format!("{:?}", stage.origin()),
+            id,
+            kernels,
+            origin: match stage.origin() {
+                StageOrigin::Authored => json!({ "kind": "authored" }),
+                StageOrigin::Generated { kind, .. } => json!({
+                    "kind": "generated", "source": match kind {
+                        wyn_core::egir::program::GeneratedStageKind::SharedArray => "shared_array",
+                        wyn_core::egir::program::GeneratedStageKind::Gather => "gather",
+                        wyn_core::egir::program::GeneratedStageKind::RuntimeArray => "runtime_array",
+                        wyn_core::egir::program::GeneratedStageKind::Scalar => "scalar",
+                    },
+                }),
+            },
             incoming_flows: stage
                 .incoming_flows()
                 .iter()
@@ -1815,19 +2069,9 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
                 .map(|flow| format!("flow: {}", flow_indices[flow]))
                 .collect(),
         });
-        snapshot_allocated_entry(
-            &mut snapshot,
-            group,
-            "stage",
-            entry,
-            program.logical_resources(),
-            &region_names,
-        );
     }
-    snapshot.flows = program
-        .data
-        .stages
-        .flows()
+    snapshot.flows = flows
+        .into_iter()
         .map(|(flow_id, flow)| GraphFlow {
             id: format!("flow: {}", flow_indices[&flow_id]),
             producer: format!("stage: {}", stage_indices[&flow.producer()]),
@@ -1842,10 +2086,7 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
             length_resource: flow.storage().length.map(resource_id_name),
         })
         .collect();
-    snapshot.external_inputs = program
-        .data
-        .stages
-        .external_inputs()
+    snapshot.external_inputs = external_inputs
         .enumerate()
         .map(|(index, input)| GraphExternalInput {
             id: format!("input: {index}"),
@@ -1859,8 +2100,6 @@ fn snapshot_allocated_program(program: &wyn_core::egir::ResourcesAllocated) -> G
             length_resource: input.storage().length.map(resource_id_name),
         })
         .collect();
-    snapshot_auxiliary_bodies(&mut snapshot, program, &region_names);
-    snapshot
 }
 
 fn snapshot_physical_program<Tag>(
@@ -1890,7 +2129,10 @@ fn snapshot_physical_program<Tag>(
                 .iter()
                 .map(|dependency| format!("kernel: {}", dependency.index()))
                 .collect(),
-            domain: format!("{:?}", kernel.domain),
+            domain: graph_domain(&kernel.domain),
+            workgroup_size: kernel.workgroup_size, planned_component: None, required_elements: None,
+            source_entry: kernel.source_entry.map(|id| format!("{id:?}")),
+            output_routes: kernel.output_routes.iter().map(|route| json!({ "semantic_slot": route.semantic_slot.0, "physical_slot": route.physical_slot.0 })).collect(),
             resources: kernel
                 .resources
                 .iter()
@@ -1980,11 +2222,11 @@ fn snapshot_physical_program<Tag>(
     snapshot
 }
 
-fn snapshot_allocated_entry(
+fn snapshot_allocated_entry<P: SnapshotPhase<Resource = SemanticResourceRef>>(
     snapshot: &mut GraphSnapshot,
     group: String,
     kind: &str,
-    entry: &wyn_core::egir::program::AllocatedEntry,
+    entry: &wyn_core::egir::program::Entry<P, wyn_core::egir::program::SemanticResourceDecl>,
     resources: &[LogicalResource],
     region_names: &HashMap<FunctionId, String>,
 ) {

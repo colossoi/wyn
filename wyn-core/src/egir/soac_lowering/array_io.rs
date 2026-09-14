@@ -1,4 +1,4 @@
-//! Array length and element-access helpers for SOAC expansion.
+//! Array length and element-access helpers for SOAC lowering.
 
 use super::{is_plain_array_source, is_view_source, is_virtual_source};
 use crate::ast::TypeName;

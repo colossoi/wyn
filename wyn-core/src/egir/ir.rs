@@ -24,7 +24,7 @@ pub use crate::types::SoacOwnership;
 /// These are purely an EGIR-internal concept — they never reach the SSA
 /// backend. `elaborate` emits instructions in skeleton block order and
 /// doesn't pass the tokens through. The token chain only exists to support
-/// rewriting passes (e.g. `soac_expand` allocating fresh tokens for new
+/// rewriting passes (e.g. `soac_lowering` allocating fresh tokens for new
 /// Load/Store side-effects so they don't collide with existing ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectToken(u32);
@@ -1664,7 +1664,7 @@ pub struct SideEffect<P: Family, Lang: Language> {
     /// Effect token chain.
     pub(crate) effects: Option<(EffectToken, EffectToken)>,
     /// Source span of the user expression that produced this side-effect,
-    /// or `None` for synthesized side-effects (e.g. SOAC expansion).
+    /// or `None` for synthesized side-effects (e.g. SOAC lowering).
     pub(crate) span: Option<Span>,
 }
 
@@ -1824,8 +1824,8 @@ impl<R> EffectOp<R> {
 #[derive(Clone, Debug)]
 pub enum SideEffectKind<P: Family> {
     Effect(EffectOp<P::Resource>),
-    /// A placeholder for an unexpanded SOAC. Produced by `from_tlc` and
-    /// consumed by `soac_expand`. Never reaches elaborate.
+    /// A placeholder for an unlowered SOAC. Produced by `from_tlc` and
+    /// consumed by `soac_lowering`. Never reaches elaborate.
     Soac(P::Soac),
 }
 

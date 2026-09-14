@@ -17,7 +17,7 @@ pub(super) fn cloneable_capture_inputs(
     entry: &egir::program::PlannedEntry,
     analysis: &graph_ops::GraphAnalysis<'_, Semantic>,
     captures: &[OperandRef],
-) -> Option<Vec<SemanticResourceDecl>> {
+) -> Option<Vec<ResourceId>> {
     let values = captures.iter().map(|capture| capture.value()).collect::<Option<Vec<_>>>()?;
     if values.iter().any(|capture| !can_clone_pure_subgraph(&entry.graph, *capture, &[])) {
         return None;
@@ -32,7 +32,24 @@ pub(super) fn cloneable_capture_inputs(
                     declaration.resource == access.resource
                         && declaration.role == interface::StorageRole::Input
                 })
+                .map(|declaration| declaration.resource.0)
+        })
+        .collect()
+}
+
+pub(super) fn capture_declarations(
+    entry: &egir::program::PlannedEntry,
+    inputs: &[ResourceId],
+) -> ParallelizeResult<Vec<SemanticResourceDecl>> {
+    inputs
+        .iter()
+        .map(|id| {
+            entry
+                .resource_declarations
+                .iter()
+                .find(|declaration| declaration.resource.0 == *id)
                 .cloned()
+                .ok_or_else(|| ParallelizeError::Invalid(format!("missing capture resource {id:?}")))
         })
         .collect()
 }

@@ -474,7 +474,7 @@ impl<'a> Elaborator<'a> {
         let effect = match &se.kind {
             super::types::SideEffectKind::Effect(effect) => effect,
             super::types::SideEffectKind::Soac(SoacEffect(_, p)) => {
-                panic!("elaborate: unexpanded EgirSoac in skeleton: {:?}", p)
+                panic!("elaborate: unlowered EgirSoac in skeleton: {:?}", p)
             }
         };
 

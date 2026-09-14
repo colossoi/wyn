@@ -3,6 +3,7 @@
 use super::*;
 use crate::egir;
 use crate::egir::builder::EntryBuilder;
+use crate::egir::program::StagedProgram;
 use wyn_base::IdSource;
 
 fn body(name: &str, identities: &mut egir::program::ProgramIdentities) -> PlannedEntry {
@@ -75,10 +76,40 @@ fn install_unchanged(draft: &mut ScheduleBuilder, stage: StageId, body: PlannedE
     draft.install_stage(stage, recipe).unwrap();
 }
 
-fn unchanged_recipe(draft: &ScheduleBuilder, stages: &StagedProgram, stage: StageId) -> PreparedRecipe {
+fn fixture_stages(
+    stages: StagedProgram,
+    descriptor: &PipelineDescriptor,
+    associations: &[Vec<EntryId>],
+) -> RecipeStages<ResourceId> {
+    let core = ResourceProgramData {
+        pipeline: descriptor.clone(),
+        stage_entries: associations.to_vec(),
+        resources: LogicalResourceArena::default(),
+        identities: Default::default(),
+    };
+    stages
+        .map_stage_bodies(|_, entry| entry)
+        .try_map_stage_bodies(|_, origin, entry| {
+            let dispatch = stage_dispatch(&core, origin, &entry)?;
+            let publication =
+                matches!(origin, StageOrigin::Authored).then(|| PlannedPublication::from_semantic(&entry));
+            Ok::<_, KernelMutationError>(super::super::planning::StagePlan::fixture(
+                PlannedEntry::project(&entry).unwrap(),
+                publication,
+                dispatch,
+            ))
+        })
+        .unwrap()
+}
+
+fn unchanged_recipe(
+    draft: &ScheduleBuilder,
+    stages: &RecipeStages<ResourceId>,
+    stage: StageId,
+) -> PreparedRecipe {
     PreparedRecipe::unchanged(
         draft.primary_kernel(stage),
-        PlannedEntry::project(stages.stage(stage).unwrap().body()).unwrap(),
+        stages.stage(stage).unwrap().body().entry().clone(),
         draft.stage_metadata(stage),
     )
     .unwrap()
@@ -87,7 +118,7 @@ fn unchanged_recipe(draft: &ScheduleBuilder, stages: &StagedProgram, stage: Stag
 fn plan(draft: ScheduleBuilder) -> KernelPlan {
     KernelPlan {
         topology: draft.topology.finalize().unwrap(),
-        catalog: draft.catalog,
+        catalog: draft.catalog.into_iter().map(|(id, body)| (id, body.kernel)).collect(),
         pipelines: Vec::new(),
         source_entries: draft.source_entries,
     }
@@ -381,13 +412,8 @@ fn generated_flow_connects_both_storage_resources_and_complete_consumers_in_eith
             ],
             ..Default::default()
         };
-        let mut draft = ScheduleBuilder::from_descriptor(
-            &descriptor,
-            &associations,
-            &LogicalResourceArena::default(),
-            &stages,
-        )
-        .unwrap();
+        let mut stages = fixture_stages(stages, &descriptor, &associations);
+        let mut draft = ScheduleBuilder::from_descriptor(&descriptor, &associations, &mut stages).unwrap();
         let first_id = draft.primary_kernel(first);
         let first_start = draft.allocate_kernel();
         let second_id = draft.primary_kernel(second);
@@ -456,7 +482,7 @@ fn generated_flow_connects_both_storage_resources_and_complete_consumers_in_eith
         }
         let recipe = unchanged_recipe(&draft, &stages, tail);
         draft.install_stage(tail, recipe).unwrap();
-        let plan = draft.finish(&stages, false).unwrap();
+        let plan = draft.finish(&stages.map_stage_bodies(|_, _| ()), false).unwrap();
         assert_eq!(
             plan.topology.groups().len(),
             1,
@@ -523,13 +549,8 @@ fn pruned_consumers_do_not_recreate_prerequisites_and_surviving_reads_require_wr
             pipelines: vec![compute_pipeline(&["consumer"])],
             ..Default::default()
         };
-        let mut draft = ScheduleBuilder::from_descriptor(
-            &descriptor,
-            &association,
-            &LogicalResourceArena::default(),
-            &stages,
-        )
-        .unwrap();
+        let mut stages = fixture_stages(stages, &descriptor, &association);
+        let mut draft = ScheduleBuilder::from_descriptor(&descriptor, &association, &mut stages).unwrap();
         let producer_id = draft.primary_kernel(producer);
         let consumer_id = draft.primary_kernel(consumer);
         let mut consumer_recipe = unchanged_recipe(&draft, &stages, consumer);
@@ -553,7 +574,7 @@ fn pruned_consumers_do_not_recreate_prerequisites_and_surviving_reads_require_wr
         }
         draft.install_stage(consumer, consumer_recipe).unwrap();
         draft.install_stage(producer, producer_recipe).unwrap();
-        let result = draft.finish(&stages, false);
+        let result = draft.finish(&stages.map_stage_bodies(|_, _| ()), false);
         if reads && !writes {
             assert!(result.unwrap_err().to_string().contains("does not declare a writer"));
         } else {
@@ -627,13 +648,8 @@ fn generated_work_serving_graphics_gets_a_separate_compute_publication() {
         })],
         ..Default::default()
     };
-    let mut draft = ScheduleBuilder::from_descriptor(
-        &descriptor,
-        &associations,
-        &LogicalResourceArena::default(),
-        &stages,
-    )
-    .unwrap();
+    let mut stages = fixture_stages(stages, &descriptor, &associations);
+    let mut draft = ScheduleBuilder::from_descriptor(&descriptor, &associations, &mut stages).unwrap();
     let writer = draft.primary_kernel(generated);
     let reader = draft.primary_kernel(vertex);
     for stage in [fragment, vertex, generated] {
@@ -645,7 +661,7 @@ fn generated_work_serving_graphics_gets_a_separate_compute_publication() {
         }
         draft.install_stage(stage, recipe).unwrap();
     }
-    let plan = draft.finish(&stages, false).unwrap();
+    let plan = draft.finish(&stages.map_stage_bodies(|_, _| ()), false).unwrap();
     assert!(matches!(plan.pipelines[0].template, Pipeline::Compute(_)));
     assert!(matches!(plan.pipelines[1].template, Pipeline::Graphics(_)));
     assert_eq!(plan.pipelines[1].graphics_entries, associations[0]);
