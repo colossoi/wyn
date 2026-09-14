@@ -335,6 +335,76 @@ fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
 }
 
 #[test]
+fn float_bounds_use_exact_finite_hex_literals_in_wgsl_reductions() {
+    for (ty, bound) in [("f32", "0x1.fffffep+127f"), ("f16", "f16(0x1.ffcp+15f)")] {
+        let source = format!(
+            "entry extrema(xs: [4]{ty}) ({ty}, {ty}) =
+              (reduce({ty}.min, {ty}.highest, xs), reduce({ty}.max, {ty}.lowest, xs))"
+        );
+        let wgsl = compile_to_wgsl(&source).expect("floating bounds must lower to WGSL");
+        validate_wgsl(&wgsl);
+        assert!(wgsl.contains(bound), "missing upper bound:\n{wgsl}");
+        assert!(
+            wgsl.contains(&format!("-{bound}")),
+            "missing lower bound:\n{wgsl}"
+        );
+    }
+}
+
+#[test]
+fn float_bounds_in_named_arrays_lower_to_wgsl() {
+    let wgsl = compile_to_wgsl(
+        "def bounds: [2]f32 = [f32.highest, f32.lowest]
+         entry get_bound(i: i32) f32 = bounds[i]",
+    )
+    .expect("bounds inside a named aggregate must lower");
+    validate_wgsl(&wgsl);
+    assert!(wgsl.contains("0x1.fffffep+127f"));
+    assert!(wgsl.contains("-0x1.fffffep+127f"));
+}
+
+#[test]
+fn float_bounds_do_not_legalize_authored_infinities_or_nan() {
+    for value in ["f32.inf", "f32.nan", "1.0f32 / 0.0f32", "f32.highest + f32.inf"] {
+        let source = format!("entry nonfinite() f32 = {value}");
+        let error = compile_to_wgsl(&source).expect_err("non-bound nonfinite values must still fail");
+        assert!(error.to_string().contains("NaN/Infinity constants"), "{error}");
+    }
+}
+
+#[test]
+fn float_bounds_keep_infinity_constants_in_spirv() {
+    use wspirv::dr::Operand;
+    for (ty, width, positive, negative) in [
+        ("f32", 32, f32::INFINITY.to_bits(), f32::NEG_INFINITY.to_bits()),
+        ("f16", 16, 0x7c00, 0xfc00),
+    ] {
+        let source = format!("entry bounds() ({ty}, {ty}) = ({ty}.highest, {ty}.lowest)");
+        let lowered = crate::compile_thru_spirv(&source).expect("SPIR-V bounds must still compile");
+        let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
+        let float_type = module
+            .types_global_values
+            .iter()
+            .find(|inst| {
+                inst.class.opcode == spirv::Op::TypeFloat
+                    && inst.operands == vec![Operand::LiteralBit32(width)]
+            })
+            .unwrap()
+            .result_id;
+        for bits in [positive, negative] {
+            assert!(
+                module.types_global_values.iter().any(|inst| {
+                    inst.class.opcode == spirv::Op::Constant
+                        && inst.result_type == float_type
+                        && inst.operands == vec![Operand::LiteralBit32(bits)]
+                }),
+                "missing {ty} infinity {bits:#x}"
+            );
+        }
+    }
+}
+
+#[test]
 fn f16_scalar_and_vectors_lower_to_valid_wgsl() {
     let source = r#"
 entry half_vectors(xs: []vec4f16) []vec4f16 =

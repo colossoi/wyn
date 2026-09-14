@@ -597,6 +597,12 @@ pub trait TypeExt {
     /// Check if this type is a scalar numeric type (float, int, or uint)
     fn is_scalar(&self) -> bool;
 
+    /// Check for the scalar f16 type, excluding vectors and other aggregates.
+    fn is_f16(&self) -> bool;
+
+    /// Check for the scalar f32 type, excluding vectors and other aggregates.
+    fn is_f32(&self) -> bool;
+
     /// Get the element type (args[0]) of a Vec, Mat, or Array.
     fn elem_type(&self) -> Option<&Type>;
 
@@ -722,6 +728,14 @@ impl TypeExt for Type {
 
     fn is_vec(&self) -> bool {
         matches!(self, Type::Constructed(TypeName::Vec, _))
+    }
+
+    fn is_f16(&self) -> bool {
+        matches!(self, Type::Constructed(TypeName::Float(16), args) if args.is_empty())
+    }
+
+    fn is_f32(&self) -> bool {
+        matches!(self, Type::Constructed(TypeName::Float(32), args) if args.is_empty())
     }
 
     fn is_scalar(&self) -> bool {

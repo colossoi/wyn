@@ -132,6 +132,29 @@ pub fn all_builtins() -> Vec<BuiltinDefRaw> {
 }
 
 static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
+    // Keep bounds distinct from authored infinities through constant folding.
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_float_highest",
+        intrinsic_source_names: &["_w_intrinsic_float_highest"],
+        impl_source_names: &["_w_intrinsic_float_highest"],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: Some(scalar_unary),
+            lowering: BuiltinLowering::PrimOp(PrimOp::FloatBound { negative: false }),
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: "_w_intrinsic_float_lowest",
+        intrinsic_source_names: &["_w_intrinsic_float_lowest"],
+        impl_source_names: &["_w_intrinsic_float_lowest"],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: Some(scalar_unary),
+            lowering: BuiltinLowering::PrimOp(PrimOp::FloatBound { negative: true }),
+        }],
+    },
     // ---- vec.* trig ----
     vec_module_op!(
         "vec.sin",

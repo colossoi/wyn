@@ -117,6 +117,12 @@ pub enum PrimOp {
     // OpIsNan / OpIsInf.
     IsNan,
     IsInf,
+    /// Floating-point `highest`/`lowest`, kept symbolic until backend lowering.
+    /// The operand is a precision witness. SPIR-V uses signed infinity;
+    /// WGSL uses the corresponding largest-magnitude finite value.
+    FloatBound {
+        negative: bool,
+    },
     // Type conversions
     // Float to signed int
     FPToSI,

@@ -413,6 +413,20 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
 
         match prim_op {
+            PrimOp::FloatBound { negative } => {
+                if arg_ids.len() != 1 {
+                    bail_spirv!("float bound requires one precision witness");
+                }
+                if result_ty == self.constructor.f32_type {
+                    let value = if *negative { f32::NEG_INFINITY } else { f32::INFINITY };
+                    Ok(self.constructor.const_f32(value))
+                } else if result_ty == *self.constructor.builder.type_float(16) {
+                    let value = if *negative { half::f16::NEG_INFINITY } else { half::f16::INFINITY };
+                    Ok(*self.constructor.builder.const_f16_bits(value.to_bits()))
+                } else {
+                    bail_spirv!("float bound requires an f16 or f32 result");
+                }
+            }
             PrimOp::GlslExt(ext_op) => {
                 Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext_op, operands)?)
             }

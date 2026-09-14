@@ -663,9 +663,11 @@ impl SemanticModules {
             .collect()
     }
 
-    /// Check if a declaration is an intrinsic (uses _w_intrinsic_* in its body)
+    /// Check if a function declaration is implemented by intrinsic calls.
+    /// Value declarations still need a body, even when that body uses an
+    /// intrinsic: references to the value do not carry call arguments.
     pub fn is_intrinsic_decl(decl: &Decl) -> bool {
-        Self::expr_uses_intrinsic(&decl.body)
+        !decl.params.is_empty() && Self::expr_uses_intrinsic(&decl.body)
     }
 
     /// Get all elaborated modules for TLC transformation (sorted for determinism)

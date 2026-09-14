@@ -3459,6 +3459,21 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 }
             }
         }
+        if let PrimOp::FloatBound { negative } = prim_op {
+            let magnitude = match ret_ty {
+                Some(ty) if ty.is_f32() && args.len() == 1 => "0x1.fffffep+127f",
+                // Naga 26/27 reject the equivalent hex literal with an h suffix.
+                // This exactly representable f32 literal converts to the same f16.
+                Some(ty) if ty.is_f16() && args.len() == 1 => "f16(0x1.ffcp+15f)",
+                _ => {
+                    return Err(err_wgsl_at!(
+                        self.blame_span(),
+                        "float bound requires one f16 or f32 precision witness"
+                    ))
+                }
+            };
+            return Ok(format!("{}{magnitude}", if *negative { "-" } else { "" }));
+        }
         let result_ty_str = match ret_ty {
             Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
             None => None,

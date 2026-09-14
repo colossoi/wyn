@@ -87,11 +87,12 @@ module type numeric = {
   sig clamp(a: t, b: t, c: t) t
 
   -- | The largest representable value. For `real` `t` this is
-  -- `+inf` (so `clamp(x, _, highest)` is a no-op upper bound).
+  -- `+inf` on SPIR-V, or the largest finite value on WGSL.
   sig highest: t
 
   -- | The smallest representable value. For `real` `t` this is
-  -- `-inf`; for signed integral `t` it's `-2^(num_bits-1)`.
+  -- `-inf` on SPIR-V, or the most negative finite value on WGSL;
+  -- for signed integral `t` it's `-2^(num_bits-1)`.
   sig lowest: t
 
   sig sum<[n]>(x: [n]t) t
@@ -427,11 +428,11 @@ module f32 : (float with t = f32 with int_t = u32) = {
 
   def neg(x: t) t = 0.0f32 - x
 
-  -- | `+inf`. The largest representable `f32`.
-  def highest: t = 1.0f32 / 0.0f32
+  -- | The upper `f32` bound: `+inf` on SPIR-V, largest finite on WGSL.
+  def highest: t = _w_intrinsic_float_highest(0.0f32)
 
-  -- | `-inf`. The smallest (most negative) representable `f32`.
-  def lowest: t = (0.0f32 - 1.0f32) / 0.0f32
+  -- | The lower `f32` bound: `-inf` on SPIR-V, most negative finite on WGSL.
+  def lowest: t = _w_intrinsic_float_lowest(0.0f32)
 
   -- Whole-array reductions (the `numeric` `sum`/`product`/`maximum`/`minimum`
   -- specs), expressed as `reduce` over the per-type operator and its neutral.
@@ -454,8 +455,8 @@ module f32 : (float with t = f32 with int_t = u32) = {
   -- guarantee. Use `fma` for IEEE-754 fused multiply-add.
   def mad(a: t, b: t, c: t) t = a * b + c
 
-  -- | `+inf`, same value as `highest`. Exposed under both names
-  -- because `inf` reads more naturally in floating-point contexts.
+  -- | `+inf`. Unlike `highest`, this does not become finite on WGSL;
+  -- WGSL rejects infinity constants.
   def inf: t = 1.0f32 / 0.0f32
 
   -- | A NaN. Bit pattern is `0/0`. Compare with `isnan`, not `(==)`.
@@ -497,8 +498,8 @@ module f16 : (float with t = f16 with int_t = u16) = {
   def (<=)(a: t, b: t) bool = a <= b
   def (>=)(a: t, b: t) bool = a >= b
 
-  def highest: t = 1.0f16 / 0.0f16
-  def lowest: t = (0.0f16 - 1.0f16) / 0.0f16
+  def highest: t = _w_intrinsic_float_highest(0.0f16)
+  def lowest: t = _w_intrinsic_float_lowest(0.0f16)
   def sum<[n]>(x: [n]t) t = reduce(f16.(+), 0.0f16, x)
   def product<[n]>(x: [n]t) t = reduce(f16.(*), 1.0f16, x)
   def maximum<[n]>(x: [n]t) t = reduce(f16.max, f16.lowest, x)
