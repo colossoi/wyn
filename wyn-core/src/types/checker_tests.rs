@@ -637,6 +637,31 @@ fn test_polymorphic_id_tuple() {
 }
 
 #[test]
+fn let_generalization_preserves_variables_reachable_through_solved_parameters() {
+    // Inferring the alias solves f's original variable to an arrow. Its
+    // argument variable must remain shared with f across both alias calls.
+    let result = try_typecheck_program(
+        r#"
+def bad(f) =
+    let alias = |x| f(x) in
+    (alias(1), alias(true))
+"#,
+    );
+    assert!(matches!(result, Err(CompilerError::TypeError(_, _))));
+}
+
+#[test]
+fn let_generalization_quantifies_only_the_uncaptured_part_of_a_type() {
+    typecheck_program(
+        r#"
+def pair_with(captured) =
+    let pair = |x| (captured, x) in
+    (pair(1), pair(true))
+"#,
+    );
+}
+
+#[test]
 fn test_qualified_name_sqrt() {
     // Test that qualified names like f32.sqrt type check correctly
     typecheck_program(
@@ -3601,6 +3626,29 @@ entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
       @[f32(vertex_index), 0.0, 0.0, 1.0],
       @[1.0, 0.0, 0.0, 1.0])) in
   shade(target, covered, |fragment_value, fragment_position, fragment_front_facing, fragment_primitive_index, fragment_sample_index| fragment_value)
+"#,
+    );
+}
+
+#[test]
+fn contextual_overload_retains_prior_types_and_vector_conversion_dispatch() {
+    // The fragment-output overload needs contextual checking after the plain
+    // color overload fails. Both earlier bindings and conversions inferred in
+    // the successful trial must retain their node types for materialization.
+    typecheck_program(
+        r#"
+def earlier(value: i32) i32 = value + 1
+
+entry triangle(target: render_target<vec4f32>) render_target<vec4f32> =
+  let tint = vec4f32(@[earlier(0), 2, 3, 4]) in
+  let covered = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |vertex_index, instance_index, draw_index| vertex_output(
+      @[f32(vertex_index), 0.0, 0.0, 1.0], tint)) in
+  let image = shade(target, covered,
+    |value, position, front_facing, primitive_index, sample_index|
+      #color(vec4f32(vec4i32(value)))) in
+  image
 "#,
     );
 }

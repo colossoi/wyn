@@ -852,6 +852,12 @@ impl<'a> TypeChecker<'a> {
         // unification, not let-generalized (see `fv_type_generalizable`).
         let mut fv_ty = fv_type_generalizable(&applied);
 
+        // A solved type with no generalizable variables is already monomorphic;
+        // its environment cannot change the resulting scheme.
+        if fv_ty.is_empty() {
+            return TypeScheme::Monotype(applied);
+        }
+
         // Free vars in environment
         let fv_env = self.env_free_type_vars();
 
@@ -874,6 +880,9 @@ impl<'a> TypeChecker<'a> {
         );
 
         let mut fv_ty = fv_type_generalizable_for_function(&applied);
+        if fv_ty.is_empty() {
+            return TypeScheme::Monotype(applied);
+        }
         let fv_env = self.env_free_type_vars();
         for v in fv_env {
             fv_ty.remove(&v);
@@ -3029,8 +3038,13 @@ impl<'a> TypeChecker<'a> {
 
                     // A lambda may require its candidate's parameter and result
                     // types before its body can be checked. Probe each overload
-                    // on a complete checker clone, then keep the unique winner.
+                    // on an isolated checker, then keep the unique winner.
                     if args.iter().any(|arg| matches!(arg.kind, ExprKind::Lambda(_))) {
+                        // Earlier node types are materialization output. Trials
+                        // read only argument types inferred within that trial
+                        // (for vector-constructor dispatch), so keep the prior
+                        // table outside the clones and merge the winner's delta.
+                        let prior_types = std::mem::take(&mut self.type_table);
                         let mut winners = Vec::new();
                         for (index, candidate) in candidate_tys.iter().enumerate() {
                             let mut trial = self.clone();
@@ -3050,6 +3064,7 @@ impl<'a> TypeChecker<'a> {
                                 winners.push((index, trial, result));
                             }
                         }
+                        self.type_table = prior_types;
                         let context_len = self.context.len();
                         self.context.rollback(context_len);
 
@@ -3065,6 +3080,8 @@ impl<'a> TypeChecker<'a> {
                                 .insert(expr.h.id, TypeScheme::Monotype(return_type.clone()));
                             winner.name_resolution.set_overload_idx(func.h.id, winner_index);
                             winner.record_constructor_dispatch(func.h.id, winner_index);
+                            self.type_table.extend(winner.type_table);
+                            winner.type_table = std::mem::take(&mut self.type_table);
                             *self = winner;
                             return Ok(return_type);
                         }
