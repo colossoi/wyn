@@ -335,6 +335,28 @@ fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
 }
 
 #[test]
+fn constant_rng_seed_folds_with_wrapping_arithmetic() {
+    let source = "entry seed() u32 =
+       let s = 2326157778u32 in
+       let w = ((s >> ((s >> 28u32) + 4u32)) ^ s) * 277803737u32 in
+       (w >> 22u32) ^ w";
+    let wgsl = compile_to_wgsl(source).expect("constant RNG seed must compile");
+    validate_wgsl(&wgsl);
+    // Reference result using u32 wrapping multiplication at every step.
+    assert!(
+        wgsl.contains(" = 2419168863u;"),
+        "seed must fold to its wrapped value:\n{wgsl}"
+    );
+
+    let lowered = crate::compile_thru_spirv(source).expect("constant RNG seed must compile to SPIR-V");
+    let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
+    assert!(module.types_global_values.iter().any(|inst| {
+        inst.class.opcode == spirv::Op::Constant
+            && inst.operands == vec![wspirv::dr::Operand::LiteralBit32(2419168863)]
+    }));
+}
+
+#[test]
 fn float_bounds_use_exact_finite_hex_literals_in_wgsl_reductions() {
     for (ty, bound) in [("f32", "0x1.fffffep+127f"), ("f16", "f16(0x1.ffcp+15f)")] {
         let source = format!(

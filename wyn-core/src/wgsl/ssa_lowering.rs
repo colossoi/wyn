@@ -3474,11 +3474,32 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
             };
             return Ok(format!("{}{magnitude}", if *negative { "-" } else { "" }));
         }
-        let result_ty_str = match ret_ty {
-            Some(ty) => Some(self.ctx.type_emitter.type_to_wgsl(ty)?),
-            None => None,
-        };
-        lower_primop_wgsl(prim_op, args, result_ty_str.as_deref()).ok_or_else(|| {
+        if matches!(
+            prim_op,
+            PrimOp::SIToFP
+                | PrimOp::UIToFP
+                | PrimOp::FPToSI
+                | PrimOp::FPToUI
+                | PrimOp::FPConvert
+                | PrimOp::SConvert
+                | PrimOp::UConvert
+                | PrimOp::Bitcast
+        ) {
+            let (Some(target_ty), [arg]) = (ret_ty, args) else {
+                return Err(err_wgsl_at!(
+                    self.blame_span(),
+                    "conversion requires one operand and a result type"
+                ));
+            };
+            // Render the type only where WGSL cast syntax requires it.
+            let target = self.ctx.type_emitter.type_to_wgsl(target_ty)?;
+            return Ok(if matches!(prim_op, PrimOp::Bitcast) {
+                format!("bitcast<{target}>({arg})")
+            } else {
+                format!("{target}({arg})")
+            });
+        }
+        lower_primop_wgsl(prim_op, args).ok_or_else(|| {
             err_wgsl_at!(
                 self.blame_span(),
                 "builtin '{}' (id {:?}, overload {}) is not yet implemented in WGSL lowering",
@@ -3490,19 +3511,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 }
 
-/// Lower a `BuiltinLowering::PrimOp` to its WGSL expression. Mirrors the
-/// SPIR-V backend's `lower_primop`: both consume the chosen `BuiltinId`
-/// overload's lowering descriptor. Surface spellings such as `f32.cos` are
-/// diagnostic metadata only; emission depends solely on the structural `PrimOp`.
-///
-/// `result_ty_str` is the WGSL spelling of the call's result type
-/// (e.g. `"f32"`, `"i32"`, `"vec3<f32>"`). Required for type-cast ops
-/// (`SIToFP`, `Bitcast`, …) where the cast target comes from the
-/// result slot, not the operand.
-///
-/// Returns `None` for `PrimOp`s without a defined WGSL emission (e.g.
-/// `IsNan`, `OuterProduct`); the caller surfaces an error or falls
-/// back to a user-function call.
 fn wgsl_storage_image_format(format: pipeline_descriptor::StorageImageFormat) -> &'static str {
     use crate::pipeline_descriptor::StorageImageFormat;
     match format {
@@ -3577,7 +3585,12 @@ fn glsl_std450_wgsl_name(n: u32) -> Option<&'static str> {
     })
 }
 
-fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&str>) -> Option<String> {
+/// Emit primitive expressions that do not need a result type. Type-dependent
+/// bounds and casts are handled by `BodyLowerCtx::lower_intrinsic`.
+/// Surface spellings such as `f32.cos` are diagnostic metadata only;
+/// emission depends on the structural `PrimOp`.
+/// Returns `None` for unsupported operations so the caller can report an error.
+fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String]) -> Option<String> {
     use PrimOp::*;
     match prim_op {
         // GLSL.std.450 ops with direct WGSL builtin equivalents.
@@ -3630,31 +3643,8 @@ fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String], result_ty_str: Option<&s
             }
         }
 
-        // Type conversions: WGSL spells the cast as `<target_ty>(x)`.
-        // `Bitcast` is special — WGSL needs explicit `bitcast<T>(x)`.
-        SIToFP | UIToFP | FPToSI | FPToUI | FPConvert | SConvert | UConvert => {
-            let result_ty = result_ty_str?;
-            if args.len() == 1 {
-                Some(format!("{}({})", result_ty, args[0]))
-            } else {
-                None
-            }
-        }
-        Bitcast => {
-            let result_ty = result_ty_str?;
-            if args.len() == 1 {
-                Some(format!("bitcast<{}>({})", result_ty, args[0]))
-            } else {
-                None
-            }
-        }
-
-        // `OuterProduct`, `IsNan`, `IsInf`, and the arithmetic /
-        // comparison / bitwise ops don't reach this path under current
-        // codegen (arithmetic flows through `InstKind::BinOp`/`UnaryOp`
-        // with infix emission; nan/inf and outer aren't used by any
-        // testfile yet). Return `None` so the caller can surface a
-        // clear "not yet implemented" error if one shows up.
+        // Arithmetic, comparisons, and bitwise operations normally reach
+        // BinOp/UnaryOp emission. Other unsupported operations report an error.
         _ => None,
     }
 }
