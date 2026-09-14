@@ -1,6 +1,83 @@
 use super::*;
 use crate::egir::{self, fusion::emit};
 
+fn entry_snapshot(source: &str) -> (Snapshot, Vec<GroupId>) {
+    let tlc = crate::tlc::infer_input_slice_bounds(crate::compile_thru_tlc(source).unwrap());
+    let program = egir::reify_soacs(crate::to_egraph(tlc).unwrap());
+    let (snapshot, _) = Snapshot::build(&program).unwrap();
+    let groups = snapshot
+        .graph
+        .order()
+        .unwrap()
+        .into_iter()
+        .filter(|id| {
+            matches!(
+                snapshot.graph.group(*id).unwrap().scope().0,
+                egir::ir::BodySite::Entry(_)
+            )
+        })
+        .collect();
+    (snapshot, groups)
+}
+
+#[test]
+fn malformed_candidates_report_errors_without_changing_the_graph() {
+    let (mut snapshot, groups) = entry_snapshot(
+        r#"
+entry siblings(xs: [4]i32) ([4]i32, [4]i32) =
+  (map(|x: i32| x + 1, xs), map(|x: i32| x * 2, xs))
+"#,
+    );
+    let [left, right] = groups[..] else {
+        panic!("expected two entry operations, got {groups:?}");
+    };
+    let before = format!("{:?}", snapshot.graph);
+    for (sources, expected) in [
+        (vec![left, right], wyn_fusion::Error::Routing),
+        (vec![left, left], wyn_fusion::Error::Membership),
+        (vec![left], wyn_fusion::Error::Routing),
+    ] {
+        let proposal = Proposal {
+            sources: sources.clone(),
+            absorbed_values: vec![],
+            results: vec![],
+            accounted_constraints: vec![],
+            payload: operation(&snapshot, left),
+        };
+        let error = apply_candidate(&mut snapshot, proposal).unwrap_err().to_string();
+        assert!(error.contains(&expected.to_string()), "{error}");
+        assert!(error.contains(&format!("{sources:?}")), "{error}");
+        assert_eq!(format!("{:?}", snapshot.graph), before);
+    }
+}
+
+#[test]
+fn cycle_candidates_are_skipped_without_changing_the_graph() {
+    let (mut snapshot, groups) = entry_snapshot(
+        r#"
+entry chain(xs: [4]i32) [4]i32 =
+  let a = map(|x: i32| x + 1, xs) in
+  let b = map(|x: i32| x * 2, a) in
+  map(|x: i32| x - 3, b)
+"#,
+    );
+    let [first, _, last] = groups[..] else {
+        panic!("expected three entry operations, got {groups:?}");
+    };
+    let sources = vec![first, last];
+    let boundary = snapshot.graph.boundary(&sources, &[]).unwrap();
+    let proposal = Proposal {
+        sources,
+        absorbed_values: vec![],
+        results: boundary.outputs.into_iter().map(|port| vec![port]).collect(),
+        accounted_constraints: boundary.constraints,
+        payload: operation(&snapshot, first),
+    };
+    let before = format!("{:?}", snapshot.graph);
+    assert!(!apply_candidate(&mut snapshot, proposal).unwrap());
+    assert_eq!(format!("{:?}", snapshot.graph), before);
+}
+
 fn contract(snapshot: &mut Snapshot, sources: Vec<GroupId>, composition: Composition) -> GroupId {
     let boundary = snapshot.graph.boundary(&sources, &composition.absorbed).unwrap();
     snapshot

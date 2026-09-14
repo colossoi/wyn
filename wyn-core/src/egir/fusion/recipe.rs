@@ -1,5 +1,10 @@
 //! Symbolic scalar recipes. Only source/catalog identities and owned facts live here.
+#[cfg(test)]
+#[path = "recipe_tests.rs"]
+mod tests;
+
 use crate::SortedSet;
+use std::sync::Arc;
 use wyn_base::IdArena;
 use wyn_fusion::PortId;
 
@@ -247,7 +252,8 @@ impl Expression {
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct Recipes {
-    pub expressions: IdArena<LambdaId, Expression>,
+    // Candidate snapshots share the arena until composition adds an expression.
+    pub expressions: Arc<IdArena<LambdaId, Expression>>,
 }
 
 pub(super) struct Builder {
@@ -518,7 +524,7 @@ impl Builder {
         let dependencies =
             results.iter().map(|node| self.expression.nodes[*node].dependency.clone()).collect();
         self.expression.results = results;
-        let id = recipes.expressions.alloc(self.expression);
+        let id = Arc::make_mut(&mut recipes.expressions).alloc(self.expression);
         Lambda {
             original: None,
             body: Some(Body {

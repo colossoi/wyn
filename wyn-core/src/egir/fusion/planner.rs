@@ -90,14 +90,9 @@ pub(super) fn plan_with_priority(
                         .iter()
                         .filter_map(|id| operation(&snapshot, *id).semantic_id)
                         .collect::<Vec<_>>();
-                    let result = if right.is_some() {
-                        snapshot.graph.contract(proposal)
-                    } else {
-                        snapshot.graph.rewrite(proposal)
-                    };
-                    let Ok(_) = result else {
+                    if !apply_candidate(&mut snapshot, proposal)? {
                         continue;
-                    };
+                    }
                     before.sort_unstable();
                     before.dedup();
                     trace.relations.push(SemanticOptimizationRelation { before, after });
@@ -116,6 +111,23 @@ pub(super) fn plan_with_priority(
         recipes,
         trace,
     })
+}
+
+fn apply_candidate(snapshot: &mut Snapshot, proposal: Proposal<Operation>) -> FusionResult<bool> {
+    let sources = proposal.sources.clone();
+    let result = if sources.len() == 1 {
+        snapshot.graph.rewrite(proposal)
+    } else {
+        snapshot.graph.contract(proposal)
+    };
+    match result {
+        Ok(_) => Ok(true),
+        // A valid composition can still create a cycle in the surrounding graph.
+        Err(wyn_fusion::Error::Cycle) => Ok(false),
+        Err(error) => Err(super::FusionError::invalid(format!(
+            "cannot apply fusion candidate {sources:?}: {error}"
+        ))),
+    }
 }
 
 fn operation(snapshot: &Snapshot, id: GroupId) -> Operation {

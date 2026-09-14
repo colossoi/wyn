@@ -31,6 +31,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -64,6 +70,17 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -471,6 +488,7 @@ dependencies = [
 name = "wyn-core"
 version = "0.1.0"
 dependencies = [
+ "half",
  "indexmap",
  "itertools 0.14.0",
  "log",
@@ -483,11 +501,23 @@ dependencies = [
  "spirv",
  "thiserror",
  "wyn-base",
+ "wyn-fusion",
  "wyn-graph",
+ "wyn-kernel-graph",
  "wyn-module-graph",
  "wyn-pipeline-descriptor",
+ "wyn-slice",
  "wyn-spirv",
  "wyn-staged-ir",
+]
+
+[[package]]
+name = "wyn-fusion"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wyn-base",
+ "wyn-graph",
 ]
 
 [[package]]
@@ -495,6 +525,15 @@ name = "wyn-graph"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "wyn-kernel-graph"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wyn-base",
+ "wyn-graph",
 ]
 
 [[package]]
@@ -510,6 +549,13 @@ name = "wyn-pipeline-descriptor"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "wyn-slice"
+version = "0.1.0"
+dependencies = [
+ "wyn-graph",
 ]
 
 [[package]]
@@ -541,6 +587,26 @@ dependencies = [
  "web-sys",
  "wyn-core",
  "wyn-module-graph",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

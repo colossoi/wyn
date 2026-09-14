@@ -679,6 +679,8 @@ cargo test
 
 Use `cargo test --workspace` for the full Rust suite. All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
 
+The two WebAssembly crates are excluded from the workspace and need separate checks, including their own lockfiles. Install the target with `rustup target add wasm32-unknown-unknown`, then run `bash scripts/check_wasm.sh` (or `./scripts/check_wasm.ps1` in PowerShell). Both checks use `--locked`; additional Cargo arguments such as `--offline` can be passed to the script.
+
 ## Language Overview
 
 ### Types

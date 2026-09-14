@@ -514,8 +514,10 @@ dependencies = [
  "wyn-base",
  "wyn-fusion",
  "wyn-graph",
+ "wyn-kernel-graph",
  "wyn-module-graph",
  "wyn-pipeline-descriptor",
+ "wyn-slice",
  "wyn-spirv",
  "wyn-staged-ir",
 ]
@@ -550,6 +552,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyn-kernel-graph"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wyn-base",
+ "wyn-graph",
+]
+
+[[package]]
 name = "wyn-module-graph"
 version = "0.1.0"
 dependencies = [
@@ -562,6 +573,13 @@ name = "wyn-pipeline-descriptor"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "wyn-slice"
+version = "0.1.0"
+dependencies = [
+ "wyn-graph",
 ]
 
 [[package]]
