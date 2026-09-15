@@ -1,0 +1,18 @@
+; Select an execution recipe from collective structure and sidecar effect proofs.
+; No scalar expressions or lambda implementation enter this pass.
+(datatype OperationKey (OperationId i64))
+(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Serial))
+(relation Collectives (OperationKey i64 i64 bool))
+(relation Filter (OperationKey bool))
+(relation IndexedWrite (OperationKey))
+(relation Plan (OperationKey Recipe))
+(ruleset schedule)
+(rule ((Collectives op 0 0 true)) ((Plan op (Elements))) :ruleset schedule)
+(rule ((Collectives op 0 reductions true) (> reductions 0)) ((Plan op (Totals))) :ruleset schedule)
+(rule ((Collectives op scans reductions true) (> scans 0)) ((Plan op (Prefixes))) :ruleset schedule)
+(rule ((Collectives op scans reductions false)) ((Plan op (Serial))) :ruleset schedule)
+(rule ((Filter op true)) ((Plan op (Compact))) :ruleset schedule)
+(rule ((Filter op false)) ((Plan op (Serial))) :ruleset schedule)
+; Preserve ordering for potentially colliding writes until atomic/disjointness
+; proofs are available. A single-invocation kernel implements the serial loop.
+(rule ((IndexedWrite op)) ((Plan op (Serial))) :ruleset schedule)

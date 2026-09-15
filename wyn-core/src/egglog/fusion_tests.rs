@@ -23,10 +23,7 @@ fn entry(data: &AssociatedData) -> RegionId {
 }
 
 fn entry_ops(data: &AssociatedData) -> Vec<OperationId> {
-    super::extract::schedules(&super::optimize::analyze(data).unwrap(), data)
-        .unwrap()
-        .remove(&entry(data))
-        .unwrap_or_default()
+    super::snapshot::analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
 }
 
 fn form(data: &AssociatedData, id: OperationId) -> &ScremaForm {
@@ -224,7 +221,8 @@ fn cross_region_uses_keep_the_producer_materialized() {
     let result = optimized(input);
     assert_eq!(entry_ops(&result.data), before);
     assert_eq!(
-        super::extract::schedules(&super::optimize::analyze(&result.data).unwrap(), &result.data)
+        super::snapshot::analyze(&result.data)
+            .schedules(&result.data)
             .unwrap()
             .values()
             .map(Vec::len)
@@ -245,9 +243,7 @@ fn separate_bodies_and_loop_parameters_do_not_alias() {
     );
     let result = optimized(input);
     let mut parameters = Vec::new();
-    for (region_id, ops) in
-        super::extract::schedules(&super::optimize::analyze(&result.data).unwrap(), &result.data).unwrap()
-    {
+    for (region_id, ops) in super::snapshot::analyze(&result.data).schedules(&result.data).unwrap() {
         let region = &result.data.regions[region_id];
         for op in ops {
             if let OperationKind::Screma { inputs, .. } = &result.data.operations[op].kind {

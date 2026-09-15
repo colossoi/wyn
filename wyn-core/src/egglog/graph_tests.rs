@@ -1,6 +1,6 @@
 use super::optimize::analyze;
 use super::{
-    convert_program, extract, optimize, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData,
+    convert_program, optimize, snapshot, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData,
     OperationData, OperationId, OperationKind, RegionId,
 };
 use crate::{compile_thru_tlc, tlc, types};
@@ -18,7 +18,7 @@ fn entry(data: &AssociatedData) -> RegionId {
 }
 
 fn schedule(data: &AssociatedData) -> Vec<OperationId> {
-    extract::schedules(&analyze(data).unwrap(), data).unwrap().remove(&entry(data)).unwrap_or_default()
+    snapshot::analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
 }
 
 fn parameter(data: &AssociatedData) -> super::ExprId {
@@ -57,7 +57,7 @@ fn fusion_follows_dependencies_across_an_independent_reduction() {
         .parse_and_run_program(
             None,
             &format!(
-                "(check (LiveOperation {} {})) (fail (check (LiveOperation {} {})))",
+                "(check (Operation {} {})) (fail (check (Operation {} {})))",
                 entry(&result.data).egglog(),
                 before[2].egglog(),
                 entry(&result.data).egglog(),
@@ -151,15 +151,16 @@ fn effect_roots_keep_their_value_dependencies_but_not_unrelated_ordered_work() {
     input.data.regions[region].members.insert(effect);
     input.data.regions[region].results = vec![parameter(&input.data)];
     assert_eq!(schedule(&input.data), [producer, effect]);
-    // consumer->effect is an ordering constraint, not a liveness dependency.
+    // The dead consumer supplies neither demand nor a fusion constraint.
     let mut graph = analyze(&input.data).unwrap();
     graph
         .parse_and_run_program(
             None,
             &format!(
-                "(check (EffectBefore {} {})) (check (RequiredEffect {}))",
+                "(fail (check (EffectBefore {} {}))) (check (Operation {} {}))",
                 consumer.egglog(),
                 effect.egglog(),
+                region.egglog(),
                 effect.egglog(),
             ),
         )
@@ -189,7 +190,7 @@ fn inactive_nested_regions_do_not_keep_enclosing_pure_work_alive() {
     input.data.regions[region].members.remove(&control);
     input.data.regions[region].results = vec![parameter(&input.data)];
     assert!(schedule(&input.data).is_empty());
-    let schedules = extract::schedules(&analyze(&input.data).unwrap(), &input.data).unwrap();
+    let schedules = snapshot::analyze(&input.data).schedules(&input.data).unwrap();
     assert!(!schedules.contains_key(&then_region));
 }
 
@@ -202,6 +203,6 @@ fn cyclic_execution_graphs_are_rejected() {
         panic!("map")
     };
     inputs[0] = Array::Value(consumer_array);
-    let error = extract::schedules(&analyze(&input.data).unwrap(), &input.data).unwrap_err();
+    let error = snapshot::analyze(&input.data).schedules(&input.data).unwrap_err();
     assert!(error.to_string().contains("cycle"));
 }

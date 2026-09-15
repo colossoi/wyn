@@ -1,40 +1,18 @@
-; Candidate construction over a complete dependency/effect snapshot.
-; Candidates do NOT union execution identities or mutate membership. The driver
-; selects one, applies it atomically, and recomputes analysis before the next pass.
+; Egglog selects legal contractions. Bodies and input expressions remain opaque:
+; applying a decision composes the two sidecar bodies and preserves the consumer.
 (ruleset fusion)
-(relation FusionCandidate (RegionKey OperationKey OperationKey Action))
+(relation FusionCandidate (RegionKey OperationKey OperationKey))
 
 (rule (
-    ; An ordinary map: no collectives, one logical output (possibly tuple-valued),
-    ; and fresh storage. Both executions belong to the SAME lexical region.
-    (Operation region producer producer-result-type
-      (ScremaApp (Screma map-body (NoCollectives) (NoCollectives)
-                (IdentityBody (TypesCons element-type (NoTypes))))
-              inputs (OwnershipsCons (Fresh) (NoOwnerships))))
-    (Operation region consumer consumer-result-type
-      (ScremaApp (Screma consumer-pre scans reductions post)
-        ; Match the data edge, with no adjacency or source-position restriction.
-        (ArraysCons
-          (ArrayInput
-            (Typed array-type
-              (Project (Typed producer-result-type (OperationResult producer)) 0)))
-          (NoArrays))
-        (OwnershipsCons ownership (NoOwnerships))))
-    (LiveOperation region consumer)
+    (Operation region producer) (Operation region consumer)
+    ; Current vertical case: a map with one result feeds a single-input Screma.
+    (Screma producer producer-inputs 1 0 0) (IdentityPost producer)
+    (Screma consumer 1 1 scans reductions)
+    (InputFrom consumer 0 producer 0)
     (!= producer consumer)
-    ; This COMPLETE use set must contain only the consumer's streamed input.
-    ; Returns, captures, neutrals, and cross-region observers prevent absorption.
+    (Movable producer) (Safe consumer)
+    ; Complete uses include captures, neutrals, returns, and cross-scope observers.
     (= (Uses producer) (set-of (OperationUse consumer (Input))))
-    ; Contracting the edge must not create a cycle or cross an effect barrier.
-    (= 0 (set-length (Intermediates producer consumer)))
-    (SafeBody map-body) (SafeBody consumer-pre)
-    (SafeCollectives scans) (SafeCollectives reductions) (SafeBody post))
-  ((FusionCandidate region producer consumer
-     ; Preserve the consumer identity and logical result layout. The absorbed
-     ; temporary no longer exists, so its UniqueInput reuse becomes Fresh.
-     (ScremaApp (Screma (ComposeBody map-body consumer-pre) scans reductions post)
-       inputs (OwnershipsCons (Fresh) (NoOwnerships)))))
+    (= 0 (set-length (Intermediates producer consumer))))
+  ((FusionCandidate region producer consumer))
   :ruleset fusion)
-
-(rewrite (ComposeBody (IdentityBody ts) body) body :ruleset fusion)
-(rewrite (ComposeBody body (IdentityBody ts)) body :ruleset fusion)

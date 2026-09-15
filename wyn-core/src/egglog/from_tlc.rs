@@ -1,4 +1,4 @@
-//! Construct an interned value graph and region membership from backend-ready TLC.
+//! Retain backend-ready TLC structure in arenas and emit its fusion summary.
 
 use super::data::{
     Array, AssociatedData, BucketShapeData, BuiltinData, BuiltinId, DefinitionData, DefinitionId,
@@ -24,7 +24,10 @@ type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPa
 
 #[derive(Clone, Debug)]
 pub struct Converted {
+    /// Facts from the last completed pass: a fusion summary after import or
+    /// optimization, and a block/dispatch graph after scheduling.
     pub program: Vec<egglog_engine::ast::Command>,
+    /// Full bodies, expressions, arguments, types, and diagnostic metadata.
     pub data: AssociatedData,
 }
 
@@ -39,10 +42,11 @@ pub enum ConvertError {
 }
 
 /// Import the same TLC checkpoint accepted by `egir::from_tlc`. Types and pure
-/// values are structurally interned; local lets become value references.
+/// values are structurally interned in the sidecar; local lets become references.
 /// Operations have their own identities and remain in their execution regions.
 /// Map/reduce/scan construct Scremas directly.
-/// This conversion neither mutates TLC nor runs optimization or extraction.
+/// Egglog receives only the fusion summary. This conversion neither mutates TLC
+/// nor runs optimization or extraction.
 pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result<Converted, ConvertError> {
     let mut converter = Converter::default();
     converter.data.programs.alloc(ProgramData {

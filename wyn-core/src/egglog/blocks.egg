@@ -1,0 +1,29 @@
+; Scheduled program topology. Scalar implementation, argument tuples, branch
+; conditions and grid formulas are opaque sidecar bodies/data.
+(datatype BlockKey (BlockId i64))
+(datatype BodyKey (BodyId i64))
+(datatype BufferKey (BufferId i64))
+(datatype DispatchKey (DispatchId i64))
+(datatype GridKey (GridId i64))
+; Function entry, parameter arity, result arity. A function IS an adorned block.
+(relation Function (BlockKey i64 i64))
+(relation Entry (i64 BlockKey))
+(relation Host (BlockKey))
+(relation Device (BlockKey))
+(relation Kernel (BlockKey i64 i64 i64))
+; Block, owning entry, opaque body, parameter arity.
+(relation Block (BlockKey BlockKey BodyKey i64))
+(relation Return (BlockKey BodyKey))
+(relation Jump (BlockKey BlockKey BodyKey))
+(relation Branch (BlockKey BodyKey BlockKey BodyKey BlockKey BodyKey))
+; Ordinals locate visible control operations within opaque block bodies.
+(relation Call (BlockKey i64 BlockKey))
+(relation Launch (BlockKey i64 DispatchKey))
+(relation Allocate (BlockKey i64 BufferKey))
+(relation Dispatch (DispatchKey BlockKey GridKey))
+(relation After (DispatchKey DispatchKey))
+(relation Read (DispatchKey BufferKey))
+(relation Write (DispatchKey BufferKey))
+(relation DeviceBuffer (BufferKey))
+(relation LocalBuffer (BufferKey))
+(relation InputBuffer (BufferKey))

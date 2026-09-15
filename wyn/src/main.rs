@@ -120,7 +120,7 @@ enum Commands {
         #[arg(long, conflicts_with_all = ["output", "output_mir"])]
         egglog: bool,
 
-        /// Save the raw egglog program to this file (requires --egglog).
+        /// Save the final egglog block/dispatch graph to this file (requires --egglog).
         #[arg(long, value_name = "FILE", requires = "egglog")]
         egg_out: Option<PathBuf>,
 
@@ -609,6 +609,9 @@ fn build(
         })?;
         let converted = time("optimize_egglog", verbose, || {
             wyn_core::egglog::optimize(converted)
+        })?;
+        let converted = time("schedule_egglog", verbose, || {
+            wyn_core::egglog::schedule(converted)
         })?;
         let printed_program = wyn_core::egglog::readout(&converted.data)?;
         let egglog_elapsed = egglog_start.elapsed();

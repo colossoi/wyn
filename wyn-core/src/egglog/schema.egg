@@ -1,119 +1,22 @@
-; Value graph and relational execution graph, schema version 4. Metadata keys index
-; IdArenas in AssociatedData and are local to this emitted program.
-(datatype ProgramKey (ProgramId i64))
-(datatype Symbol (SymbolId i64))
-(datatype Type (TypeId i64))
-(datatype ExprKey (ExprId i64))
-(datatype OperationKey (OperationId i64))
+; Fusion graph only. Scalar expressions, types, bodies, argument values, and
+; control-flow structure live in AssociatedData, indexed by these opaque IDs.
 (datatype RegionKey (RegionId i64))
-(datatype ParameterKey (ParameterId i64))
-(datatype OriginKey (OriginId i64))
-(datatype DefinitionKey (DefinitionId i64))
-(datatype EntryKey (EntryId i64))
-(datatype EntryParamKey (EntryParamId i64))
-(datatype InputBoundKey (InputBoundId i64))
-(datatype BuiltinKey (BuiltinId i64))
-(datatype ExternKey (ExternId i64))
-(datatype BucketShapeKey (BucketShapeId i64))
-(datatype Ownership (Fresh) (UniqueInput))
-(datatype Ownerships (NoOwnerships) (OwnershipsCons Ownership Ownerships))
-(datatype Types (NoTypes) (TypesCons Type Types))
-(datatype Indices (NoIndices) (IndicesCons i64 Indices))
+(datatype OperationKey (OperationId i64))
 
-(datatype*
-  ; Pure values carry no occurrence ID. ExprId is attached by Expression facts.
-  (Expr
-    (Typed Type Expr)
-    (Global Symbol)
-    (Parameter ParameterKey)
-    (Builtin BuiltinKey)
-    (BinOp String)
-    (UnOp String)
-    (PureApp Expr Exprs)
-    (LambdaValue RegionKey)
-    (Closure Symbol i64 Exprs)
-    (Int String)
-    (FloatBits i64)
-    (Bool bool)
-    (UnitLit)
-    (Coerce Expr)
-    (Extern ExternKey)
-    (If Expr Expr Expr)
-    (ArrayValue Array)
-    (Tuple Exprs)
-    (Project Expr i64)
-    (Vector Exprs)
-    ; References one execution; the operation itself lives in its region.
-    (OperationResult OperationKey))
-  (Exprs (NoExprs) (ExprsCons Expr Exprs))
-  (OptionalExpr (NoExpr) (SomeExpr Expr))
-  (Destination (Place Expr Type))
-  (Action
-    (Call Expr Exprs)
-    (EvalGlobal Symbol)
-    (Choose Expr RegionKey RegionKey)
-    ; Loop init header kind body: header parameters are accumulator then the
-    ; iteration value for counted loops. While headers return a condition and
-    ; run before each test; counted headers run on actual iterations. Body
-    ; returns the next accumulator and can reference header-local values.
-    (Loop Expr RegionKey LoopKind RegionKey)
-    (Index Expr Expr)
-    ; Results are a tuple: reduction values, then post-map arrays.
-    ; Ownerships has one entry per logical result.
-    (ScremaApp ScremaForm Arrays Ownerships)
-    (Filter SoacBody Array Ownership)
-    (Scatter Destination SoacBody Arrays)
-    (BucketScatter Destination SoacBody Arrays BucketShapeKey)
-    (ReduceByIndex Destination SoacBody Expr Array Array))
-  (LoopKind (For Expr) (ForRange Expr) (While))
-  (SoacBody
-    (ComposeBody SoacBody SoacBody)
-    ; Select/reorder logical arguments; ParallelBody runs both bodies on the
-    ; same arguments and concatenates their logical results.
-    (RouteBody Types Indices)
-    (ParallelBody SoacBody SoacBody)
-    ; Apply a region to logical inputs followed by capture arguments.
-    ; Results remain logical values: a tuple is ONE result, not flattened.
-    (ApplyBody RegionKey Types Types Exprs)
-    (IdentityBody Types))
-  ; pre returns scan inputs, reduction inputs, then mapped values.
-  ; post receives scan results and mapped values; reductions bypass it.
-  (ScremaForm (Screma SoacBody Collectives Collectives SoacBody))
-  ; Both collective kinds have an element body and neutral values. Their tags
-  ; retain the semantic distinction, with shared traversal and effect analysis.
-  ; The two Screma fields contain scans and reductions respectively.
-  (Collective (Scan SoacBody Exprs) (Reduction SoacBody Exprs bool))
-  (Collectives (NoCollectives) (CollectivesCons Collective Collectives))
-  (Array
-    (ArrayInput Expr)
-    (Zip Arrays)
-    (ArrayLiteral Exprs)
-    (Range Expr Expr OptionalExpr))
-  (Arrays (NoArrays) (ArraysCons Array Arrays)))
-
-(relation Program (ProgramKey))
-(relation Definition (DefinitionKey Symbol Type RegionKey))
-(relation Region (RegionKey))
-(relation ParentRegion (RegionKey RegionKey))
-(relation RegionParameter (RegionKey i64 ParameterKey Type))
-(relation RegionResult (RegionKey i64 Expr))
-(relation RegionSignature (RegionKey Types Types))
-; One selected action per execution. Membership has no list order.
-(relation Operation (RegionKey OperationKey Type Action))
-(relation ResultArity (OperationKey i64))
-; Source positions orient effects; they impose no order on independent pure work.
-(relation SourcePosition (OperationKey i64))
-(relation CopyType (Type))
-; Public analysis facts, also included in the final --egg-out fact base.
-; DependsOn consumer producer; EffectBefore before after.
+; Live executions in scopes containing SOACs. Other executions appear only as
+; dependency/effect constraints or external observers of a SOAC's result.
+(relation Operation (RegionKey OperationKey))
+; Input count, result count, scan count, reduction count.
+(relation Screma (OperationKey i64 i64 i64 i64))
+(relation IdentityPost (OperationKey))
+(relation Safe (OperationKey))
+(relation Movable (OperationKey))
+; Consumer input slot -> producer result slot. No scalar argument syntax.
+(relation InputFrom (OperationKey i64 OperationKey i64))
 (relation DependsOn (OperationKey OperationKey))
-(relation ResultDependsOn (RegionKey OperationKey))
 (relation EffectBefore (OperationKey OperationKey))
-(relation RequiredEffect (OperationKey))
-(relation LiveOperation (RegionKey OperationKey))
-(relation Entry (EntryKey DefinitionKey))
-(relation EntryParam (EntryParamKey EntryKey i64))
-(relation InputBound (InputBoundKey EntryKey Symbol))
-; Stable sidecar handles do not constrain expression equality.
-(relation Expression (ExprKey Expr))
-(relation Origin (OriginKey Expr DefinitionKey))
+
+; A streamed use must not hide a capture, neutral, or externally observed use.
+(datatype OperandRole (Input) (Capture) (Neutral) (Argument))
+(datatype UseSite (OperationUse OperationKey OperandRole) (ReturnUse))
+(relation Use (OperationKey UseSite))

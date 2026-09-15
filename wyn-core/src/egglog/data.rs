@@ -1,12 +1,13 @@
-//! Typed, append-only metadata for one imported program.
+//! Complete program structure retained outside the egglog fusion graph.
 
+use super::blocks::{BlockData, BodyData, BufferData, DispatchData, GridData};
 use crate::{ast, builtins, interface, pipeline_descriptor, types};
 use std::collections::BTreeSet;
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
 
 macro_rules! ids {
-    ($($name:ident => $constructor:literal),* $(,)?) => {$(
+    ($($name:ident),* $(,)?) => {$(
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(u32);
 
@@ -17,48 +18,27 @@ macro_rules! ids {
         impl $name {
             pub const fn as_u32(self) -> u32 { self.0 }
 
-            /// Render this sidecar ID as a typed egglog value.
-            pub fn egglog(self) -> String {
-                format!(concat!("(", $constructor, " {})"), self.0)
-            }
         }
     )*};
 }
 
 ids! {
-    ProgramId => "ProgramId",
-    SymbolId => "SymbolId",
-    TypeId => "TypeId",
-    ExprId => "ExprId",
-    OperationId => "OperationId",
-    RegionId => "RegionId",
-    ParameterId => "ParameterId",
-    OriginId => "OriginId",
-    DefinitionId => "DefinitionId",
-    EntryId => "EntryId",
-    EntryParamId => "EntryParamId",
-    InputBoundId => "InputBoundId",
-    BuiltinId => "BuiltinId",
-    ExternId => "ExternId",
-    BucketShapeId => "BucketShapeId",
-}
-
-impl ExprId {
-    /// The egglog binding for this structurally interned, typed value.
-    pub fn binding_name(self) -> String {
-        format!("$expr-{}", self.0)
-    }
+    ProgramId, SymbolId, TypeId, ExprId, OperationId, RegionId, ParameterId,
+    OriginId, DefinitionId, EntryId, EntryParamId, InputBoundId, BuiltinId,
+    ExternId, BucketShapeId, BlockId, BodyId, BufferId, DispatchId, GridId,
 }
 
 impl RegionId {
-    pub fn binding_name(self) -> String {
-        format!("$region-{}", self.0)
+    /// Render this scope's opaque identity in the fusion graph.
+    pub fn egglog(self) -> String {
+        format!("(RegionId {})", self.0)
     }
 }
 
 impl OperationId {
-    pub fn binding_name(self) -> String {
-        format!("$operation-{}", self.0)
+    /// Render this execution's opaque identity in the fusion graph.
+    pub fn egglog(self) -> String {
+        format!("(OperationId {})", self.0)
     }
 }
 
@@ -66,6 +46,11 @@ impl OperationId {
 /// used during conversion are temporary and do not escape into this sidecar.
 #[derive(Clone, Debug, Default)]
 pub struct AssociatedData {
+    pub blocks: IdArena<BlockId, BlockData>,
+    pub bodies: IdArena<BodyId, BodyData>,
+    pub buffers: IdArena<BufferId, BufferData>,
+    pub dispatches: IdArena<DispatchId, DispatchData>,
+    pub grids: IdArena<GridId, GridData>,
     pub programs: IdArena<ProgramId, ProgramData>,
     pub symbols: IdArena<SymbolId, SymbolData>,
     pub types: IdArena<TypeId, TypeData>,
@@ -100,8 +85,7 @@ pub struct TypeData {
     pub ty: types::Type,
 }
 
-/// Construction-time identity is content-based and excludes source metadata.
-/// Egglog may subsequently equate different expression IDs through rewrites.
+/// Sidecar values are interned by content, independently of diagnostic metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExprData {
     pub ty: TypeId,

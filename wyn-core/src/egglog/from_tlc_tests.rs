@@ -29,47 +29,30 @@ fn run(converted: &Converted) -> EGraph {
     graph
 }
 
-fn check(graph: &mut EGraph, command: &str) {
-    graph.parse_and_run_program(None, command).unwrap_or_else(|error| panic!("{command}\n{error}"));
-}
-
 fn source(source: &str) -> tlc::stage::InputSliceBoundsInferred {
     tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(source))
 }
 
 fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Converted) {
-    let mut graph = run(converted);
+    run(converted);
     // Every imported shape must also support dependency/effect analysis and a
     // valid scoped schedule, including nested loops and all SOAC constructors.
-    let analyzed = super::optimize::analyze(&converted.data).unwrap();
-    super::extract::schedules(&analyzed, &converted.data).unwrap();
+    super::optimize::analyze(&converted.data).unwrap();
+    super::snapshot::analyze(&converted.data).schedules(&converted.data).unwrap();
     assert_eq!(program.defs.len(), converted.data.definitions.len());
     assert_eq!(program.symbols.len(), converted.data.symbols.len());
     let mut expressions = crate::LookupSet::new();
-    for (id, expression) in &converted.data.expressions {
+    for expression in converted.data.expressions.values() {
         assert!(expressions.insert(expression.clone()), "pure values are interned");
         assert!(converted.data.types.get(expression.ty).is_some());
-        check(
-            &mut graph,
-            &format!("(check (Expression {} {}))", id.egglog(), id.binding_name()),
-        );
     }
     let mut types = crate::LookupSet::new();
     for ty in converted.data.types.values() {
         assert!(types.insert(ty.clone()), "types are interned");
     }
-    for (id, origin) in &converted.data.origins {
+    for origin in converted.data.origins.values() {
         assert!(converted.data.expressions.get(origin.expression).is_some());
         assert!(converted.data.definitions.get(origin.definition).is_some());
-        check(
-            &mut graph,
-            &format!(
-                "(check (Origin {} {} {}))",
-                id.egglog(),
-                origin.expression.binding_name(),
-                origin.definition.egglog()
-            ),
-        );
     }
     let mut operations = crate::LookupSet::new();
     for (id, region) in &converted.data.regions {
@@ -87,26 +70,32 @@ fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Co
     }
     assert_eq!(operations.len(), converted.data.operations.len());
     let emitted = text(converted);
-    for removed in ["TermId", "TermKey", "SourceTerm", "OriginalSoac", "(Let "] {
+    for removed in [
+        "TermId",
+        "ExprId",
+        "ParameterId",
+        "TypeId",
+        "Definition",
+        "Origin",
+        "FloatBits",
+        "BinOp",
+        "ApplyBody",
+        "Typed",
+        "NoExprs",
+        "ProgramId",
+        "SourcePosition",
+        "RegionResult",
+        "(Let ",
+    ] {
         assert!(!emitted.contains(removed), "unexpected {removed}");
     }
-    for ((id, def), source) in converted.data.definitions.iter().zip(&program.defs) {
+    for (def, source) in converted.data.definitions.values().zip(&program.defs) {
         assert_eq!(converted.data.symbols[def.symbol].source, source.name);
         assert_eq!(converted.data.types[def.ty].ty, source.ty);
         assert_eq!(def.arity, source.arity);
         assert_eq!(def.package, source.package);
         assert_eq!(def.param_diets, source.param_diets);
         assert_eq!(def.return_diet, source.return_diet);
-        check(
-            &mut graph,
-            &format!(
-                "(check (Definition {} {} {} {}))",
-                id.egglog(),
-                def.symbol.egglog(),
-                def.ty.egglog(),
-                def.body.binding_name(),
-            ),
-        );
     }
 }
 
@@ -161,8 +150,69 @@ fn empty_program_is_executable() {
     assert!(converted.data.definitions.is_empty());
     assert!(converted.data.expressions.is_empty());
     assert_eq!(converted.data.programs.len(), 1);
-    let mut graph = run(&converted);
-    check(&mut graph, "(check (Program (ProgramId 0)))");
+    run(&converted);
+    assert_eq!(text(&converted), text(&convert_program(&program).unwrap()));
+}
+
+#[test]
+fn fusion_graph_does_not_grow_with_scalar_body_structure() {
+    let small = convert_program(&source(
+        "entry mapped(xs: [4]i32) [4]i32 = map(|x: i32| x + 1, xs)",
+    ))
+    .unwrap();
+    let mut expression = "x".to_owned();
+    for n in 1..5 {
+        expression = format!("({expression} * x + {n})");
+    }
+    let large = convert_program(&source(&format!(
+        "entry mapped(xs: [4]i32) [4]i32 = map(|x: i32| {expression}, xs)"
+    )))
+    .unwrap();
+    assert!(large.data.expressions.len() > small.data.expressions.len());
+    let small_graph = run(&small);
+    let large_graph = run(&large);
+    for relation in [
+        "Operation",
+        "Screma",
+        "InputFrom",
+        "Use",
+        "DependsOn",
+        "EffectBefore",
+        "Safe",
+        "Movable",
+    ] {
+        let (small_rows, _, _) = small_graph.function_to_dag(relation, usize::MAX, false).unwrap();
+        let (large_rows, _, _) = large_graph.function_to_dag(relation, usize::MAX, false).unwrap();
+        assert_eq!(small_rows.len(), large_rows.len(), "{relation}");
+    }
+    assert_eq!(
+        small.program.len(),
+        large.program.len(),
+        "no scalar facts are emitted"
+    );
+}
+
+#[test]
+fn scalar_only_effects_stay_in_the_sidecar_without_fusion_facts() {
+    let mut f = Fixture::new();
+    let callee = f.term(TermKind::Extern("effect".into()));
+    let call = f.term(TermKind::App {
+        func: Box::new(callee),
+        args: vec![],
+    });
+    let program = f.program(vec![call]);
+    let converted = convert_program(&program).unwrap();
+    verify_sources(&program, &converted);
+    let graph = run(&converted);
+    let (rows, _, _) = graph.function_to_dag("Operation", usize::MAX, false).unwrap();
+    assert!(rows.is_empty(), "no SOACs to optimize");
+    assert_eq!(converted.data.operations.len(), 1);
+    let schedules = super::snapshot::analyze(&converted.data).schedules(&converted.data).unwrap();
+    assert_eq!(
+        schedules.values().map(Vec::len).sum::<usize>(),
+        1,
+        "readout still retains the effect"
+    );
 }
 
 #[test]
@@ -181,8 +231,7 @@ fn input_bounds_are_arena_records_with_deterministic_ids() {
         converted.data.programs.values().next().unwrap().next_auto_storage_binding,
         program.global_context.auto_storage_binding_ids.peek_id(),
     );
-    let mut graph = run(&converted);
-    for (id, bound) in &converted.data.input_bounds {
+    for bound in converted.data.input_bounds.values() {
         let entry = &converted.data.entries[bound.entry];
         let definition = &converted.data.definitions[entry.definition];
         let source_symbol = converted.data.symbols[definition.symbol].source;
@@ -193,15 +242,6 @@ fn input_bounds_are_arena_records_with_deterministic_ids() {
         assert_eq!(
             source_entry.data.by_symbol[&converted.data.symbols[bound.symbol].source],
             bound.length
-        );
-        check(
-            &mut graph,
-            &format!(
-                "(check (InputBound {} {} {}))",
-                id.egglog(),
-                bound.entry.egglog(),
-                bound.symbol.egglog()
-            ),
         );
     }
     for def in &mut program.defs {
@@ -301,7 +341,7 @@ fn i32_ty() -> types::Type {
 }
 
 #[test]
-fn literals_stay_in_the_program_and_names_stay_in_arenas() {
+fn literals_and_names_stay_in_the_sidecar() {
     let mut f = Fixture::new();
     let values = vec![
         f.int("18446744073709551615"),
@@ -318,9 +358,14 @@ fn literals_stay_in_the_program_and_names_stay_in_arenas() {
     let converted = convert_program(&program).unwrap();
     verify_sources(&program, &converted);
     let emitted = text(&converted);
-    assert!(emitted.contains("(Int \"18446744073709551615\")"));
-    assert!(emitted.contains("(FloatBits 2147483648)"));
-    assert!(emitted.contains("(FloatBits 2143289410)"));
+    assert!(!emitted.contains("18446744073709551615"));
+    for literal in [
+        ExprKind::Int("18446744073709551615".into()),
+        ExprKind::FloatBits(2147483648),
+        ExprKind::FloatBits(2143289410),
+    ] {
+        assert!(converted.data.expressions.values().any(|expr| expr.kind == literal));
+    }
     assert!(!emitted.contains("shadowed"));
     assert!(!emitted.contains("external"));
     assert!(!emitted.contains("Wyn"));
@@ -330,15 +375,7 @@ fn literals_stay_in_the_program_and_names_stay_in_arenas() {
     );
     let shadowed: Vec<_> =
         converted.data.symbols.iter().filter(|(_, symbol)| symbol.name == "shadowed").collect();
-    let mut graph = run(&converted);
-    check(
-        &mut graph,
-        &format!(
-            "(fail (check (= (Global {}) (Global {}))))",
-            shadowed[0].0.egglog(),
-            shadowed[1].0.egglog()
-        ),
-    );
+    assert_ne!(shadowed[0].0, shadowed[1].0);
 }
 
 #[test]
@@ -368,18 +405,9 @@ fn repeated_effectful_calls_keep_distinct_occurrences() {
             ExprKind::OperationResult(*operation)
         );
     }
-    let mut graph = run(&converted);
-    check(
-        &mut graph,
-        &format!(
-            "(fail (check (= {} {})))",
-            ids[0].binding_name(),
-            ids[1].binding_name()
-        ),
-    );
 }
 #[test]
-fn equal_constants_share_an_eclass_without_losing_provenance() {
+fn equal_constants_share_a_sidecar_record_without_losing_provenance() {
     let mut f = Fixture::new();
     let left = f.int("42");
     let right = f.int("42");
@@ -621,17 +649,7 @@ fn type_and_exact_float_bits_participate_in_interning() {
     assert_ne!(values[0], values[2]);
     assert_ne!(values[3], values[4]);
     assert_eq!(values[5], values[6]);
-    let mut graph = run(&converted);
-    for (left, right) in [(0, 2), (3, 4)] {
-        check(
-            &mut graph,
-            &format!(
-                "(fail (check (= {} {})))",
-                values[left].binding_name(),
-                values[right].binding_name()
-            ),
-        );
-    }
+    run(&converted);
 }
 
 #[test]

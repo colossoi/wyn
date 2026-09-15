@@ -644,7 +644,7 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
-# Use the egglog route; print a readable program and optionally save raw egglog
+# Use the egglog route; print the GPU scaffold and optionally save its facts
 cargo run --bin wyn -- build input.wyn --egglog --egg-out output.egg
 
 # Compile a graphics program directly, without compiler-created prepasses
@@ -665,21 +665,41 @@ cargo run --bin wyn -- build input.wyn --output-annotated out.ann  # Annotated s
 cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
 
-The experimental egglog route interns types and pure expressions and constructs
-`map`, `reduce`, and `scan` as Scremas in `egglog::from_tlc`. `Screma` describes
-the pre-map, scans, reductions, and post-map; `ScremaApp` applies it to arrays.
-Region membership is unordered. Egglog derives value dependencies, scoped uses,
-and required effect ordering; metadata stays in `IdArena` sidecars.
-`--egglog` prints a diagnostic program starting at entries. Within each function,
-it walks backward from outputs and required effects, then topologically orders
-only reachable operations. Dead records can remain in the fact base.
-`--egg-out FILE` saves the selected program and its dependency/liveness facts.
+The experimental egglog route constructs `map`, `reduce`, and `scan` as Scremas
+in `egglog::from_tlc`. Full expressions, types, bodies, argument values, control
+flow, and metadata stay in `IdArena` sidecars. Egglog receives only a fusion
+summary: SOAC layouts, producer/consumer links, uses, and dependency/effect
+constraints. Scalar expression syntax and lambda bodies are opaque to the rules.
+`--egglog` prints a GPU scaffold starting at entries. Within each function,
+lowering walks backward from outputs and required effects, then topologically
+orders only reachable operations. Dead records can remain in the source sidecar.
+`--egg-out FILE` saves the last pass's block/dispatch facts (`blocks.egg`), with
+no SOAC or scalar-expression constructors. Printed blocks show opaque body IDs,
+calls, branches, jumps, allocations and launches. Functions adorn entry blocks.
 A shared pass loop analyzes a complete graph, derives fusion candidates in
-`fusion.egg`, selects one candidate, and repeats with fresh facts. Selection is
+`fusion.egg`, applies the selected composition to sidecar bodies, and repeats
+with fresh facts. Selection is
 deterministic and greedy. Fresh maps can fuse into single-input maps, scans, or
 reductions across independent operations, preserving captures and logical tuple
 elements. Shared live observers, effect barriers, and region boundaries prevent
 absorption. Horizontal fusion and fusion across scan barriers remain unimplemented.
+
+After fusion, `schedule.egg` selects execution recipes. Rust instantiates their
+CFGs and scalar payloads in sidecar arenas. Maps use parallel elementwise kernels;
+reductions use chunk and combine dispatches; scans add an offset application
+dispatch; filters use flags, local offsets, combined offsets and compaction.
+Chunks contain 64 consecutive elements and preserve operator order. Combine
+dispatches use one invocation. Grid-stride loops cap launches at 65,535
+workgroups. Empty inputs still initialize collective identities and lengths.
+Nested array work becomes local device loops. Potentially colliding indexed
+writes and effectful bodies use ordered single-invocation kernels.
+
+The scaffold preserves host branches and loops, including conditional and
+repeated dispatch sites. A launch completes and makes its writes visible before
+host control continues; explicit dispatch dependencies describe stage ordering.
+Buffer element types and dynamic grid formulas remain in the sidecar. Physical
+buffer packing, bindings, transfers, shader emission and runtime submission are
+not implemented by this experimental route yet.
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, and
