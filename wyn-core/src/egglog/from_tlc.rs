@@ -1,4 +1,4 @@
-//! Construct an interned value graph and ordered regions from backend-ready TLC.
+//! Construct an interned value graph and region membership from backend-ready TLC.
 
 use super::data::{
     Array, AssociatedData, BucketShapeData, BuiltinData, BuiltinId, DefinitionData, DefinitionId,
@@ -9,6 +9,8 @@ use super::data::{
 };
 use super::emit;
 use crate::ast::Span;
+use crate::builtins::lowering::PrimOp;
+use crate::builtins::BuiltinLowering;
 use crate::tlc::{self, data, VarRef};
 use crate::{builtins, types, LookupMap};
 use wyn_base::Interner;
@@ -37,8 +39,8 @@ pub enum ConvertError {
 }
 
 /// Import the same TLC checkpoint accepted by `egir::from_tlc`. Types and pure
-/// values are structurally interned; local lets become value references. Ordered
-/// operations have their own identities and remain in their execution regions.
+/// values are structurally interned; local lets become value references.
+/// Operations have their own identities and remain in their execution regions.
 /// Map/reduce/scan construct Scremas directly.
 /// This conversion neither mutates TLC nor runs optimization or extraction.
 pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result<Converted, ConvertError> {
@@ -180,7 +182,7 @@ impl Converter {
                 definition,
                 parent,
                 parameters: vec![],
-                operations: vec![],
+                members: Default::default(),
                 results: vec![],
             },
         }
@@ -218,8 +220,9 @@ impl Converter {
             ty,
             span,
             region: scope.id,
+            source_position: scope.data.members.len(),
         });
-        scope.data.operations.push(id);
+        scope.data.members.insert(id);
         self.expr(ty, ExprKind::OperationResult(id))
     }
     fn var(
@@ -507,9 +510,23 @@ impl Converter {
         match &self.expressions.resolve(function).kind {
             ExprKind::BinOp(_) | ExprKind::UnOp(_) => true,
             ExprKind::Builtin(id) => {
-                let builtin = self.data.builtins[*id].builtin;
+                let record = &self.data.builtins[*id];
+                let builtin = record.builtin;
+                let definition = builtins::by_id(builtin);
+                let Some(overload) = definition.overloads().get(record.overload_idx) else {
+                    return false;
+                };
+                // A movable pure application depends only on its operands.
+                // Invocation queries, derivatives and opaque builtin lowering
+                // retain an ordered execution even when the catalog calls them pure.
+                let movable = match &overload.lowering {
+                    BuiltinLowering::PrimOp(PrimOp::DPdx | PrimOp::DPdy | PrimOp::Fwidth) => false,
+                    BuiltinLowering::PrimOp(_) | BuiltinLowering::ExtInstSplat { .. } => !args.is_empty(),
+                    _ => false,
+                };
                 builtin != builtins::catalog().known().storage_index
-                    && builtins::by_id(builtin).raw.purity == builtins::Purity::Pure
+                    && movable
+                    && definition.raw.purity == builtins::Purity::Pure
                     && types::is_copy(&self.types.resolve(result).ty)
                     && args
                         .iter()
@@ -587,7 +604,7 @@ impl Converter {
                 let then_value = self.term(then_branch, &mut then_scope)?;
                 let mut else_scope = self.child(scope);
                 let else_value = self.term(else_branch, &mut else_scope)?;
-                let pure = then_scope.data.operations.is_empty() && else_scope.data.operations.is_empty();
+                let pure = then_scope.data.members.is_empty() && else_scope.data.members.is_empty();
                 let then_region = self.finish(then_scope, vec![then_value]);
                 let else_region = self.finish(else_scope, vec![else_value]);
                 if pure {

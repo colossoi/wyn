@@ -39,6 +39,10 @@ fn source(source: &str) -> tlc::stage::InputSliceBoundsInferred {
 
 fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Converted) {
     let mut graph = run(converted);
+    // Every imported shape must also support dependency/effect analysis and a
+    // valid scoped schedule, including nested loops and all SOAC constructors.
+    let analyzed = super::optimize::analyze(&converted.data).unwrap();
+    super::extract::schedules(&analyzed, &converted.data).unwrap();
     assert_eq!(program.defs.len(), converted.data.definitions.len());
     assert_eq!(program.symbols.len(), converted.data.symbols.len());
     let mut expressions = crate::LookupSet::new();
@@ -70,7 +74,7 @@ fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Co
     let mut operations = crate::LookupSet::new();
     for (id, region) in &converted.data.regions {
         assert!(converted.data.definitions.get(region.definition).is_some());
-        for operation in &region.operations {
+        for operation in &region.members {
             assert!(
                 operations.insert(*operation),
                 "an execution has exactly one region"
@@ -351,14 +355,14 @@ fn repeated_effectful_calls_keep_distinct_occurrences() {
     verify_sources(&program, &converted);
     let root = converted.data.definitions.values().next().unwrap().body;
     let region = &converted.data.regions[root];
-    assert_eq!(region.operations.len(), 2);
-    assert_ne!(region.operations[0], region.operations[1]);
+    assert_eq!(region.members.len(), 2);
+    assert_ne!(*region.members.first().unwrap(), *region.members.last().unwrap());
     let ExprKind::Tuple(ids) = &converted.data.expressions[region.results[0]].kind else {
         panic!("tuple");
     };
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
-    for (value, operation) in ids.iter().zip(&region.operations) {
+    for (value, operation) in ids.iter().zip(&region.members) {
         assert_eq!(
             converted.data.expressions[*value].kind,
             ExprKind::OperationResult(*operation)
@@ -572,7 +576,7 @@ fn lets_and_repeated_arithmetic_resolve_to_shared_values() {
     verify_sources(&program, &converted);
     let entry = converted.data.entries.values().next().unwrap();
     let region = &converted.data.regions[converted.data.definitions[entry.definition].body];
-    assert!(region.operations.is_empty());
+    assert!(region.members.is_empty());
     let ExprKind::Tuple(values) = &converted.data.expressions[region.results[0]].kind else {
         panic!("tuple");
     };
@@ -685,25 +689,25 @@ fn unused_call_results_remain_ordered_and_branches_keep_their_own_effects() {
     verify_sources(&program, &converted);
     let root = converted.data.definitions.values().next().unwrap().body;
     let region = &converted.data.regions[root];
-    assert_eq!(region.operations.len(), 2);
+    assert_eq!(region.members.len(), 2);
     let OperationKind::If {
         then_region,
         else_region,
         ..
-    } = converted.data.operations[region.operations[0]].kind
+    } = converted.data.operations[*region.members.first().unwrap()].kind
     else {
         panic!("branch");
     };
     for child in [then_region, else_region] {
-        let ops = &converted.data.regions[child].operations;
+        let ops = &converted.data.regions[child].members;
         assert_eq!(ops.len(), 1);
         assert!(matches!(
-            converted.data.operations[ops[0]].kind,
+            converted.data.operations[*ops.first().unwrap()].kind,
             OperationKind::Call { .. }
         ));
     }
     assert!(matches!(
-        converted.data.operations[region.operations[1]].kind,
+        converted.data.operations[*region.members.last().unwrap()].kind,
         OperationKind::Call { .. }
     ));
     assert_eq!(

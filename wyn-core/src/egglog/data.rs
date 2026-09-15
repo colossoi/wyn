@@ -1,6 +1,7 @@
 //! Typed, append-only metadata for one imported program.
 
 use crate::{ast, builtins, interface, pipeline_descriptor, types};
+use std::collections::BTreeSet;
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
 
@@ -45,19 +46,19 @@ ids! {
 impl ExprId {
     /// The egglog binding for this structurally interned, typed value.
     pub fn binding_name(self) -> String {
-        format!("expr-{}", self.0)
+        format!("$expr-{}", self.0)
     }
 }
 
 impl RegionId {
     pub fn binding_name(self) -> String {
-        format!("region-{}", self.0)
+        format!("$region-{}", self.0)
     }
 }
 
 impl OperationId {
     pub fn binding_name(self) -> String {
-        format!("operation-{}", self.0)
+        format!("$operation-{}", self.0)
     }
 }
 
@@ -143,7 +144,7 @@ pub enum ExprKind {
     },
     Vector(Vec<ExprId>),
     Extern(ExternId),
-    /// A value dependency on one particular ordered execution.
+    /// A value dependency on one particular execution.
     OperationResult(OperationId),
 }
 
@@ -174,20 +175,24 @@ pub struct ParameterData {
     pub region: RegionId,
 }
 
-/// A lexical execution scope. Operations execute in list order; results are
-/// demanded from the pure value graph. Nested regions execute only when invoked.
+/// A lexical execution scope with unordered operation membership. Dependencies
+/// and effect constraints determine execution order, never iteration over members.
+/// Nested regions execute only when invoked.
 #[derive(Clone, Debug)]
 pub struct RegionData {
     pub definition: DefinitionId,
     pub parent: Option<RegionId>,
     pub parameters: Vec<ParameterId>,
-    pub operations: Vec<OperationId>,
+    pub members: BTreeSet<OperationId>,
     pub results: Vec<ExprId>,
 }
 
 #[derive(Clone, Debug)]
 pub struct OperationData {
     pub region: RegionId,
+    /// Original TLC position, used only to orient conservative effect edges.
+    /// Independent, movable operations need not execute in this order.
+    pub source_position: usize,
     pub ty: TypeId,
     pub span: ast::Span,
     pub kind: OperationKind,
@@ -264,6 +269,12 @@ pub struct Place {
 
 #[derive(Clone, Debug)]
 pub enum SoacBody {
+    /// Apply `first` to the inputs, then pass its logical results to `then`.
+    /// Each body retains its own capture arguments.
+    Compose {
+        first: Box<SoacBody>,
+        then: Box<SoacBody>,
+    },
     /// Lambda-lifted TLC names a function, applied to inputs then captures.
     Function {
         function: SymbolId,

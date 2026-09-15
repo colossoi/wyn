@@ -666,11 +666,20 @@ cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
 
 The experimental egglog route interns types and pure expressions and constructs
-`map`, `reduce`, and `scan` as Scremas in `egglog::from_tlc`. Ordered operations
-and their results have separate identities; metadata stays in `IdArena` sidecars.
-`--egglog` prints a diagnostic program reconstructed from reachable entries,
-values, and callables, retaining ordered effects. `--egg-out FILE` separately
-saves the raw egglog program. The current stage is the normalized import.
+`map`, `reduce`, and `scan` as Scremas in `egglog::from_tlc`. `Screma` describes
+the pre-map, scans, reductions, and post-map; `ScremaApp` applies it to arrays.
+Region membership is unordered. Egglog derives value dependencies, scoped uses,
+and required effect ordering; metadata stays in `IdArena` sidecars.
+`--egglog` prints a diagnostic program starting at entries. Within each function,
+it walks backward from outputs and required effects, then topologically orders
+only reachable operations. Dead records can remain in the fact base.
+`--egg-out FILE` saves the selected program and its dependency/liveness facts.
+A shared pass loop analyzes a complete graph, derives fusion candidates in
+`fusion.egg`, selects one candidate, and repeats with fresh facts. Selection is
+deterministic and greedy. Fresh maps can fuse into single-input maps, scans, or
+reductions across independent operations, preserving captures and logical tuple
+elements. Shared live observers, effect barriers, and region boundaries prevent
+absorption. Horizontal fusion and fusion across scan barriers remain unimplemented.
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, and

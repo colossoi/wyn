@@ -206,6 +206,9 @@ enum DriverError {
     #[error(transparent)]
     EgglogConversionError(#[from] wyn_core::egglog::from_tlc::ConvertError),
 
+    #[error(transparent)]
+    EgglogOptimizationError(#[from] wyn_core::egglog::OptimizeError),
+
     #[error("invalid command-line option: {0}")]
     InvalidOption(String),
 }
@@ -604,7 +607,10 @@ fn build(
         let converted = time("from_tlc_egglog", verbose, || {
             wyn_core::egglog::from_tlc::convert_program(&tlc.program)
         })?;
-        let printed_program = wyn_core::egglog::readout(&converted.data);
+        let converted = time("optimize_egglog", verbose, || {
+            wyn_core::egglog::optimize(converted)
+        })?;
+        let printed_program = wyn_core::egglog::readout(&converted.data)?;
         let egglog_elapsed = egglog_start.elapsed();
         if let Some(path) = egg_out {
             let mut file = std::io::BufWriter::new(fs::File::create(path)?);

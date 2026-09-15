@@ -5,7 +5,10 @@ use super::data::{
     ScremaForm, SoacBody, TypeId,
 };
 use super::SCHEMA;
-use crate::{types::SoacOwnership, LookupSet};
+use crate::{
+    types::{self, SoacOwnership},
+    LookupSet,
+};
 
 pub(super) fn program(data: &AssociatedData) -> String {
     let mut emitter = Emitter {
@@ -18,6 +21,11 @@ pub(super) fn program(data: &AssociatedData) -> String {
     };
     for id in data.programs.ids() {
         emitter.emit(format!("(Program {})", id.egglog()));
+    }
+    for (id, ty) in &data.types {
+        if types::is_copy(&ty.ty) {
+            emitter.emit(format!("(CopyType {})", id.egglog()));
+        }
     }
     for (id, def) in &data.definitions {
         let body = emitter.region(def.body);
@@ -78,7 +86,7 @@ impl Emitter<'_> {
         self.output.push('\n');
     }
     fn bind(&mut self, expression: String) -> String {
-        let name = format!("aux-{}", self.next_aux);
+        let name = format!("$aux-{}", self.next_aux);
         self.next_aux += 1;
         self.emit(format!("(let {name} {expression})"));
         name
@@ -174,10 +182,13 @@ impl Emitter<'_> {
         self.list("NoArrays", "ArraysCons", values)
     }
     fn place(&mut self, place: &Place) -> String {
-        format!("(MkPlace {} {})", self.expr(place.value), place.elem_ty.egglog())
+        format!("(Place {} {})", self.expr(place.value), place.elem_ty.egglog())
     }
     fn soac_body(&mut self, body: &SoacBody) -> String {
         let body = match body {
+            SoacBody::Compose { first, then } => {
+                format!("(ComposeBody {} {})", self.soac_body(first), self.soac_body(then))
+            }
             SoacBody::Identity(types) => format!("(IdentityBody {})", self.types(types)),
             SoacBody::Function {
                 function,
@@ -212,10 +223,10 @@ impl Emitter<'_> {
             .map(|scan| {
                 let operator = self.soac_body(&scan.operator);
                 let neutral = self.exprs(&scan.neutral);
-                self.bind(format!("(MkScan {operator} {neutral})"))
+                self.bind(format!("(Scan {operator} {neutral})"))
             })
             .collect();
-        let scans = self.list("NoScans", "ScansCons", scans);
+        let scans = self.list("NoCollectives", "CollectivesCons", scans);
         let reductions = form
             .reductions
             .iter()
@@ -223,14 +234,14 @@ impl Emitter<'_> {
                 let operator = self.soac_body(&reduction.operator);
                 let neutral = self.exprs(&reduction.neutral);
                 self.bind(format!(
-                    "(MkReduction {operator} {neutral} {})",
+                    "(Reduction {operator} {neutral} {})",
                     reduction.commutative
                 ))
             })
             .collect();
-        let reductions = self.list("NoReductions", "ReductionsCons", reductions);
+        let reductions = self.list("NoCollectives", "CollectivesCons", reductions);
         let post = self.soac_body(&form.post);
-        self.bind(format!("(MkScremaForm {pre} {scans} {reductions} {post})"))
+        self.bind(format!("(Screma {pre} {scans} {reductions} {post})"))
     }
     fn operation(&mut self, id: OperationId) -> String {
         let name = id.binding_name();
@@ -283,7 +294,7 @@ impl Emitter<'_> {
                     "OwnershipsCons",
                     destinations.iter().map(|&dest| ownership(dest).into()).collect(),
                 );
-                format!("(Screma {form} {inputs} {destinations})")
+                format!("(ScremaApp {form} {inputs} {destinations})")
             }
             OperationKind::Filter {
                 body,
@@ -332,10 +343,17 @@ impl Emitter<'_> {
                 self.array(values)
             ),
         };
+        self.emit(format!("(let {name} {body})"));
         self.emit(format!(
-            "(let {name} (Do {} {} {body}))",
+            "(Operation {} {} {} {name})",
+            operation.region.egglog(),
             id.egglog(),
             operation.ty.egglog()
+        ));
+        self.emit(format!(
+            "(SourcePosition {} {})",
+            id.egglog(),
+            operation.source_position
         ));
         name
     }
@@ -345,25 +363,25 @@ impl Emitter<'_> {
             return name;
         }
         let region = &self.data.regions[id];
-        let parameters = region
-            .parameters
-            .iter()
-            .map(|id| {
-                format!(
-                    "(MkParam {} {})",
-                    id.egglog(),
-                    self.data.parameters[*id].ty.egglog()
-                )
-            })
-            .collect();
-        let parameters = self.list("NoParams", "ParamsCons", parameters);
-        let operations = region.operations.iter().map(|&id| self.operation(id)).collect();
-        let operations = self.list("NoOperations", "OperationsCons", operations);
-        let results = self.exprs(&region.results);
-        self.emit(format!(
-            "(let {name} (MkRegion {} {parameters} {operations} {results}))",
-            id.egglog()
-        ));
+        self.emit(format!("(let {name} {})", id.egglog()));
+        self.emit(format!("(Region {name})"));
+        if let Some(parent) = region.parent {
+            self.emit(format!("(ParentRegion {name} {})", parent.egglog()));
+        }
+        for (position, id) in region.parameters.iter().enumerate() {
+            self.emit(format!(
+                "(RegionParameter {name} {position} {} {})",
+                id.egglog(),
+                self.data.parameters[*id].ty.egglog()
+            ));
+        }
+        for &id in &region.members {
+            self.operation(id);
+        }
+        for (position, &id) in region.results.iter().enumerate() {
+            let value = self.expr(id);
+            self.emit(format!("(RegionResult {name} {position} {value})"));
+        }
         name
     }
 }

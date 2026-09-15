@@ -5,16 +5,24 @@ use super::data::{
     Array, AssociatedData, DefinitionId, DefinitionKind, ExprId, ExprKind, LoopKind, OperationId,
     OperationKind, ParameterId, RegionId, ScremaForm, SoacBody, SymbolId, TypeId,
 };
+use super::{
+    extract,
+    optimize::{analyze, OptimizeError},
+};
 use crate::{builtins, types, LookupMap, LookupSet};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
-/// Reconstruct a readable program from the current constructed graph, starting
-/// at all entries. Only demanded pure expressions and reachable callables are
-/// printed. Ordered operations in reachable regions are retained, including
-/// those whose return values are unused. This is a diagnostic syntax, not Wyn.
-pub fn readout(data: &AssociatedData) -> String {
+/// Reconstruct a readable program from the current graph, starting
+/// at all entries. Within a region, walk backward from returned values and
+/// required effects, then topologically order the reachable execution graph.
+/// Membership and diagnostic metadata are never liveness roots.
+/// This is a diagnostic syntax, not Wyn.
+pub fn readout(data: &AssociatedData) -> Result<String, OptimizeError> {
+    let graph = analyze(data)?;
+    let schedules = extract::schedules(&graph, data)?;
     let mut printer = Printer {
         data,
+        schedules,
         output: String::new(),
         pending: VecDeque::new(),
         queued: LookupSet::new(),
@@ -33,11 +41,12 @@ pub fn readout(data: &AssociatedData) -> String {
     if printer.output.is_empty() {
         printer.output.push_str("// No reachable entry points.\n");
     }
-    printer.output
+    Ok(printer.output)
 }
 
 struct Printer<'a> {
     data: &'a AssociatedData,
+    schedules: BTreeMap<RegionId, Vec<OperationId>>,
     output: String,
     pending: VecDeque<DefinitionId>,
     queued: LookupSet<DefinitionId>,
@@ -85,7 +94,7 @@ impl Printer<'_> {
             .join(", ");
         self.line(indent, format!("{heading}({parameters}) {{"));
         let mut printed = LookupSet::new();
-        for &operation in &region.operations {
+        for operation in self.schedules.get(&id).cloned().unwrap_or_default() {
             self.operation(operation, indent + 1, &mut printed);
         }
         let results = self.values(&region.results, indent + 1, &mut printed);
@@ -181,6 +190,11 @@ impl Printer<'_> {
     }
     fn body(&mut self, body: &SoacBody, indent: usize, printed: &mut LookupSet<ExprId>) -> String {
         match body {
+            SoacBody::Compose { first, then } => format!(
+                "compose({}, {})",
+                self.body(first, indent, printed),
+                self.body(then, indent, printed)
+            ),
             SoacBody::Identity(types) => format!("identity/{}", types.len()),
             SoacBody::Function {
                 function, captures, ..
