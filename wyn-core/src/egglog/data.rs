@@ -1,6 +1,6 @@
 //! Typed, append-only metadata for one imported program.
 
-use crate::{ast, builtins, interface, pipeline_descriptor, tlc, types};
+use crate::{ast, builtins, interface, pipeline_descriptor, types};
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
 
@@ -28,7 +28,11 @@ ids! {
     ProgramId => "ProgramId",
     SymbolId => "SymbolId",
     TypeId => "TypeId",
-    TermId => "TermId",
+    ExprId => "ExprId",
+    OperationId => "OperationId",
+    RegionId => "RegionId",
+    ParameterId => "ParameterId",
+    OriginId => "OriginId",
     DefinitionId => "DefinitionId",
     EntryId => "EntryId",
     EntryParamId => "EntryParamId",
@@ -38,10 +42,22 @@ ids! {
     BucketShapeId => "BucketShapeId",
 }
 
-impl TermId {
-    /// The global egglog binding containing this source occurrence's expression.
+impl ExprId {
+    /// The egglog binding for this structurally interned, typed value.
     pub fn binding_name(self) -> String {
-        format!("term-{}", self.0)
+        format!("expr-{}", self.0)
+    }
+}
+
+impl RegionId {
+    pub fn binding_name(self) -> String {
+        format!("region-{}", self.0)
+    }
+}
+
+impl OperationId {
+    pub fn binding_name(self) -> String {
+        format!("operation-{}", self.0)
     }
 }
 
@@ -52,7 +68,11 @@ pub struct AssociatedData {
     pub programs: IdArena<ProgramId, ProgramData>,
     pub symbols: IdArena<SymbolId, SymbolData>,
     pub types: IdArena<TypeId, TypeData>,
-    pub terms: IdArena<TermId, TermData>,
+    pub expressions: IdArena<ExprId, ExprData>,
+    pub operations: IdArena<OperationId, OperationData>,
+    pub regions: IdArena<RegionId, RegionData>,
+    pub parameters: IdArena<ParameterId, ParameterData>,
+    pub origins: IdArena<OriginId, OriginData>,
     pub definitions: IdArena<DefinitionId, DefinitionData>,
     pub entries: IdArena<EntryId, EntryData>,
     pub entry_params: IdArena<EntryParamId, EntryParamData>,
@@ -74,19 +94,212 @@ pub struct SymbolData {
     pub name: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TypeData {
     pub ty: types::Type,
 }
 
-/// Provenance is a relation, not part of pure expression identity. Multiple
-/// source occurrences may therefore point to one egglog equivalence class.
-#[derive(Clone, Debug)]
-pub struct TermData {
-    pub source: tlc::TermId,
-    pub span: ast::Span,
+/// Construction-time identity is content-based and excludes source metadata.
+/// Egglog may subsequently equate different expression IDs through rewrites.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ExprData {
     pub ty: TypeId,
+    pub kind: ExprKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ExprKind {
+    Global(SymbolId),
+    Parameter(ParameterId),
+    Builtin(BuiltinId),
+    BinOp(String),
+    UnOp(String),
+    /// Only statically known scalar operators/catalog builtins use PureApp.
+    PureApp {
+        function: ExprId,
+        args: Vec<ExprId>,
+    },
+    Lambda(RegionId),
+    Closure {
+        code: SymbolId,
+        param_count: usize,
+        captures: Vec<ExprId>,
+    },
+    Int(String),
+    FloatBits(u32),
+    Bool(bool),
+    Unit,
+    Coerce(ExprId),
+    If {
+        condition: ExprId,
+        then_value: ExprId,
+        else_value: ExprId,
+    },
+    Array(Array),
+    Tuple(Vec<ExprId>),
+    Project {
+        tuple: ExprId,
+        index: usize,
+    },
+    Vector(Vec<ExprId>),
+    Extern(ExternId),
+    /// A value dependency on one particular ordered execution.
+    OperationResult(OperationId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Array {
+    Value(ExprId),
+    Zip(Vec<Array>),
+    Literal(Vec<ExprId>),
+    Range {
+        start: ExprId,
+        len: ExprId,
+        step: Option<ExprId>,
+    },
+}
+
+/// Diagnostic provenance attaches to values, without tracking TLC node IDs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OriginData {
+    pub span: ast::Span,
+    pub expression: ExprId,
     pub definition: DefinitionId,
+}
+
+#[derive(Clone, Debug)]
+pub struct ParameterData {
+    pub symbol: SymbolId,
+    pub ty: TypeId,
+    pub region: RegionId,
+}
+
+/// A lexical execution scope. Operations execute in list order; results are
+/// demanded from the pure value graph. Nested regions execute only when invoked.
+#[derive(Clone, Debug)]
+pub struct RegionData {
+    pub definition: DefinitionId,
+    pub parent: Option<RegionId>,
+    pub parameters: Vec<ParameterId>,
+    pub operations: Vec<OperationId>,
+    pub results: Vec<ExprId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OperationData {
+    pub region: RegionId,
+    pub ty: TypeId,
+    pub span: ast::Span,
+    pub kind: OperationKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum OperationKind {
+    Call {
+        function: ExprId,
+        args: Vec<ExprId>,
+    },
+    EvalGlobal(SymbolId),
+    If {
+        condition: ExprId,
+        then_region: RegionId,
+        else_region: RegionId,
+    },
+    /// The header binds the accumulator and (for counted loops) iteration
+    /// parameter. While headers return the condition. Counted headers run
+    /// their destructuring bindings only on actual iterations. The body
+    /// returns the next accumulator and can reference header-local values.
+    Loop {
+        init: ExprId,
+        header: RegionId,
+        kind: LoopKind,
+        body: RegionId,
+    },
+    Index {
+        array: ExprId,
+        index: ExprId,
+    },
+    Screma {
+        form: ScremaForm,
+        inputs: Vec<Array>,
+        ownership: Vec<types::SoacOwnership>,
+    },
+    Filter {
+        body: SoacBody,
+        input: Array,
+        ownership: types::SoacOwnership,
+    },
+    Scatter {
+        destination: Place,
+        body: SoacBody,
+        inputs: Vec<Array>,
+    },
+    BucketScatter {
+        destination: Place,
+        body: SoacBody,
+        inputs: Vec<Array>,
+        shape: BucketShapeId,
+    },
+    ReduceByIndex {
+        destination: Place,
+        body: SoacBody,
+        neutral: ExprId,
+        indices: Array,
+        values: Array,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum LoopKind {
+    For(ExprId),
+    ForRange(ExprId),
+    While,
+}
+
+#[derive(Clone, Debug)]
+pub struct Place {
+    pub value: ExprId,
+    pub elem_ty: TypeId,
+}
+
+#[derive(Clone, Debug)]
+pub enum SoacBody {
+    /// Lambda-lifted TLC names a function, applied to inputs then captures.
+    Function {
+        function: SymbolId,
+        parameters: Vec<TypeId>,
+        results: Vec<TypeId>,
+        captures: Vec<ExprId>,
+    },
+    Inline {
+        region: RegionId,
+        results: Vec<TypeId>,
+        captures: Vec<ExprId>,
+    },
+    Identity(Vec<TypeId>),
+}
+
+#[derive(Clone, Debug)]
+pub struct Scan {
+    pub operator: SoacBody,
+    pub neutral: Vec<ExprId>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Reduction {
+    pub operator: SoacBody,
+    pub neutral: Vec<ExprId>,
+    pub commutative: bool,
+}
+
+/// pre returns scan inputs, reduction inputs, then mapped values. post receives
+/// scan results and mapped values. Final results are reductions, then post arrays.
+#[derive(Clone, Debug)]
+pub struct ScremaForm {
+    pub pre: SoacBody,
+    pub scans: Vec<Scan>,
+    pub reductions: Vec<Reduction>,
+    pub post: SoacBody,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +314,7 @@ pub struct DefinitionData {
     pub symbol: SymbolId,
     pub package: Option<PackageId>,
     pub ty: TypeId,
-    pub body: TermId,
+    pub body: RegionId,
     pub kind: DefinitionKind,
     pub arity: usize,
     pub param_diets: Vec<types::Diet>,

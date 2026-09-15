@@ -116,9 +116,13 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
 
-        /// Convert TLC to egglog, print the program to stdout, and stop.
+        /// Use the egglog compiler route and print a reconstructed program to stdout.
         #[arg(long, conflicts_with_all = ["output", "output_mir"])]
         egglog: bool,
+
+        /// Save the raw egglog program to this file (requires --egglog).
+        #[arg(long, value_name = "FILE", requires = "egglog")]
+        egg_out: Option<PathBuf>,
 
         /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
@@ -517,6 +521,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
+            egg_out,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -530,6 +535,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
+            egg_out,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -553,6 +559,7 @@ fn build(
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     egglog: bool,
+    egg_out: Option<PathBuf>,
     graphics: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
@@ -593,13 +600,26 @@ fn build(
     };
     if egglog {
         let tlc = compile_tlc(parsed_modules, &options)?;
+        let egglog_start = Instant::now();
         let converted = time("from_tlc_egglog", verbose, || {
             wyn_core::egglog::from_tlc::convert_program(&tlc.program)
         })?;
-        let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-        for command in &converted.program {
-            writeln!(stdout, "{command}")?;
+        let printed_program = wyn_core::egglog::readout(&converted.data);
+        let egglog_elapsed = egglog_start.elapsed();
+        if let Some(path) = egg_out {
+            let mut file = std::io::BufWriter::new(fs::File::create(path)?);
+            for command in &converted.program {
+                writeln!(file, "{command}")?;
+            }
+            file.flush()?;
         }
+        let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+        writeln!(
+            stdout,
+            "// egglog: {:.3} ms",
+            egglog_elapsed.as_secs_f64() * 1000.0
+        )?;
+        write!(stdout, "{printed_program}")?;
         stdout.flush()?;
         for artifact in tlc.auxiliary {
             fs::write(artifact.path, artifact.contents)?;

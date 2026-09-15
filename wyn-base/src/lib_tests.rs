@@ -1,4 +1,4 @@
-use super::{IdArena, IdSource};
+use super::{IdArena, IdSource, Interner};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TestId(u32);
@@ -52,4 +52,35 @@ fn arena_supports_mutation_and_owned_iteration() {
         arena.into_iter().collect::<Vec<_>>(),
         vec![(first, "first!".to_owned()), (second, "second?".to_owned())]
     );
+}
+
+#[test]
+fn interner_reuses_borrowed_values_and_finishes_as_an_arena() {
+    let mut values = Interner::<TestId, String>::new();
+    let first = values.intern("first");
+    let second = values.intern("second");
+    assert_eq!(values.intern("first"), first);
+    assert_eq!(values.get("second"), Some(second));
+    assert_eq!(values.resolve(first), "first");
+    assert_eq!(values.arena().len(), 2);
+    let arena = values.into_arena();
+    assert_eq!(arena[first], "first");
+    assert_eq!(arena.ids().collect::<Vec<_>>(), vec![first, second]);
+}
+
+#[test]
+fn interner_checks_equality_when_hashes_collide() {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Collision(u32);
+    impl std::hash::Hash for Collision {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            state.write_u8(0);
+        }
+    }
+    let mut values = Interner::<TestId, Collision>::new();
+    let first = values.intern(&Collision(1));
+    let second = values.intern(&Collision(2));
+    assert_ne!(first, second);
+    assert_eq!(values.intern(&Collision(1)), first);
+    assert_eq!(values.resolve(second), &Collision(2));
 }

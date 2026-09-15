@@ -1,20 +1,25 @@
-//! Lossless structural import of backend-ready TLC into egglog.
+//! Construct an interned value graph and ordered regions from backend-ready TLC.
 
-use std::fmt::Write;
-
+use super::data::{
+    Array, AssociatedData, BucketShapeData, BuiltinData, BuiltinId, DefinitionData, DefinitionId,
+    DefinitionKind, EntryData, EntryParamData, ExprData, ExprId, ExprKind, ExternData, ExternId,
+    InputBoundData, LoopKind, OperationData, OperationKind, OriginData, OriginId, ParameterData, Place,
+    ProgramData, Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId,
+    TypeData, TypeId,
+};
+use super::emit;
+use crate::ast::Span;
 use crate::tlc::{self, data, VarRef};
-use crate::{types, LookupMap, LookupSet};
-
-use super::*;
+use crate::{builtins, types, LookupMap};
+use wyn_base::Interner;
 
 type Term = tlc::Term<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
 type TermKind = tlc::TermKind<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
 type ArrayExpr = tlc::ArrayExpr<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type Lambda = tlc::Lambda<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type SoacBody = tlc::SoacBody<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
+type TlcLambda = tlc::Lambda<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
+type TlcSoacBody = tlc::SoacBody<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
 type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
 
-/// An egglog command AST and its matching metadata arenas.
 #[derive(Clone, Debug)]
 pub struct Converted {
     pub program: Vec<egglog_engine::ast::Command>,
@@ -31,19 +36,16 @@ pub enum ConvertError {
     InvalidProgram(String),
 }
 
-/// Import the same TLC checkpoint accepted by `egir::from_tlc`, without
-/// mutating it or running any EGIR passes. Every current TLC variant is
-/// represented structurally; source names never become egglog identifiers.
-///
-/// The AST can be passed directly to `egglog::EGraph::run_program`.
-/// Conversion does not run rules or extraction.
+/// Import the same TLC checkpoint accepted by `egir::from_tlc`. Types and pure
+/// values are structurally interned; local lets become value references. Ordered
+/// operations have their own identities and remain in their execution regions.
+/// Map/reduce/scan construct Scremas directly.
+/// This conversion neither mutates TLC nor runs optimization or extraction.
 pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result<Converted, ConvertError> {
     let mut converter = Converter::default();
-    let program_id = converter.data.programs.alloc(ProgramData {
+    converter.data.programs.alloc(ProgramData {
         next_auto_storage_binding: program.global_context.auto_storage_binding_ids.peek_id(),
     });
-    converter.emit(format!("(Program {})", program_id.egglog()));
-
     for (&source, name) in &program.symbols {
         let id = converter.data.symbols.alloc(SymbolData {
             source,
@@ -51,12 +53,12 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
         });
         converter.symbols.insert(source, id);
     }
-
-    let mut seen = LookupSet::new();
     for def in &program.defs {
-        if !seen.insert(def.name) {
+        if converter.globals.insert(def.name, (def.arity, def.ty.clone())).is_some() {
             return Err(ConvertError::DuplicateDefinition(def.name));
         }
+    }
+    for def in &program.defs {
         let id = converter.data.definitions.alloc_id();
         let symbol = converter.symbol(def.name)?;
         let ty = converter.ty(&def.ty);
@@ -68,44 +70,37 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
                     definition: id,
                     declaration: (*entry.declaration).clone(),
                 });
-                converter.emit(format!("(Entry {} {})", entry_id.egglog(), id.egglog()));
                 for (position, binding) in entry.data.param_bindings.iter().enumerate() {
                     if let Some(binding) = binding {
                         converter.symbol(binding.param_sym)?;
                     }
-                    let param_id = converter.data.entry_params.alloc(EntryParamData {
+                    converter.data.entry_params.alloc(EntryParamData {
                         entry: entry_id,
                         position,
                         binding: binding.clone(),
                     });
-                    converter.emit(format!(
-                        "(EntryParam {} {} {position})",
-                        param_id.egglog(),
-                        entry_id.egglog(),
-                    ));
                 }
-                // Entry bounds originate in a HashMap. Sort before allocating
-                // IDs so output and sidecar order are reproducible.
                 let mut bounds: Vec<_> = entry.data.by_symbol.iter().collect();
                 bounds.sort_by_key(|(symbol, _)| symbol.0);
                 for (&source, length) in bounds {
                     let symbol = converter.symbol(source)?;
-                    let bound_id = converter.data.input_bounds.alloc(InputBoundData {
+                    converter.data.input_bounds.alloc(InputBoundData {
                         entry: entry_id,
                         symbol,
                         length: length.clone(),
                     });
-                    converter.emit(format!(
-                        "(InputBound {} {} {})",
-                        bound_id.egglog(),
-                        entry_id.egglog(),
-                        symbol.egglog(),
-                    ));
                 }
                 DefinitionKind::Entry(entry_id)
             }
         };
-        let body = converter.term(&def.body, id)?;
+        let mut scope = converter.scope(id, None, LookupMap::new());
+        let result = if let TermKind::Lambda(lambda) = &def.body.kind {
+            converter.parameters(&lambda.params, &mut scope)?;
+            converter.term(&lambda.body, &mut scope)?
+        } else {
+            converter.term(&def.body, &mut scope)?
+        };
+        let body = converter.finish(scope, vec![result]);
         converter.data.definitions.insert(
             id,
             DefinitionData {
@@ -119,17 +114,13 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
                 return_diet: def.return_diet.clone(),
             },
         );
-        converter.emit(format!(
-            "(Definition {} {} {} {})",
-            id.egglog(),
-            symbol.egglog(),
-            ty.egglog(),
-            body.binding_name(),
-        ));
     }
-
+    converter.data.types = converter.types.into_arena();
+    converter.data.expressions = converter.expressions.into_arena();
+    converter.data.origins = converter.origins.into_arena();
+    let output = emit::program(&converter.data);
     let program = egglog_engine::ast::Parser::default()
-        .get_program_from_string(Some("wyn-from-tlc.egg".into()), &converter.output)
+        .get_program_from_string(Some("wyn-from-tlc.egg".into()), &output)
         .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     Ok(Converted {
         program,
@@ -137,68 +128,118 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
     })
 }
 
+#[derive(Default)]
 struct Converter {
     data: AssociatedData,
-    output: String,
-    next_aux: usize,
     symbols: LookupMap<crate::SymbolId, SymbolId>,
-    types: LookupMap<types::Type, TypeId>,
-    builtins: LookupMap<(crate::builtins::BuiltinId, usize), BuiltinId>,
+    globals: LookupMap<crate::SymbolId, (usize, types::Type)>,
+    types: Interner<TypeId, TypeData>,
+    expressions: Interner<ExprId, ExprData>,
+    origins: Interner<OriginId, OriginData>,
+    builtins: LookupMap<(builtins::BuiltinId, usize), BuiltinId>,
     externs: LookupMap<String, ExternId>,
 }
 
-impl Default for Converter {
-    fn default() -> Self {
-        Self {
-            data: AssociatedData::default(),
-            output: SCHEMA.to_owned(),
-            next_aux: 0,
-            symbols: LookupMap::new(),
-            types: LookupMap::new(),
-            builtins: LookupMap::new(),
-            externs: LookupMap::new(),
-        }
-    }
+struct Scope {
+    id: RegionId,
+    data: RegionData,
+    locals: LookupMap<crate::SymbolId, ExprId>,
 }
 
 impl Converter {
-    fn emit(&mut self, command: String) {
-        writeln!(self.output, "{command}").unwrap();
-    }
-
-    fn bind(&mut self, expression: String) -> String {
-        let name = format!("aux-{}", self.next_aux);
-        self.next_aux += 1;
-        self.emit(format!("(let {name} {expression})"));
-        name
-    }
-
-    /// Emit lists as flat let-bindings, avoiding quadratic string construction
-    /// and unbounded parser nesting for large arrays or argument lists.
-    fn list(&mut self, nil: &str, cons: &str, items: Vec<String>) -> String {
-        let mut tail = format!("({nil})");
-        for item in items.into_iter().rev() {
-            tail = self.bind(format!("({cons} {item} {tail})"));
-        }
-        tail
-    }
-
     fn symbol(&self, source: crate::SymbolId) -> Result<SymbolId, ConvertError> {
-        self.symbols.get(&source).copied().ok_or(ConvertError::MissingSymbol(source))
+        let Some(id) = self.symbols.get(&source) else {
+            return Err(ConvertError::MissingSymbol(source));
+        };
+        Ok(*id)
     }
-
     fn ty(&mut self, ty: &types::Type) -> TypeId {
-        if let Some(&id) = self.types.get(ty) {
-            return id;
-        }
-        let id = self.data.types.alloc(TypeData { ty: ty.clone() });
-        self.types.insert(ty.clone(), id);
-        id
+        self.types.intern(&TypeData { ty: ty.clone() })
     }
-
-    fn var(&mut self, var: VarRef) -> Result<String, ConvertError> {
-        Ok(match var {
-            VarRef::Symbol(source) => format!("(Var {})", self.symbol(source)?.egglog()),
+    fn expr(&mut self, ty: TypeId, kind: ExprKind) -> ExprId {
+        self.expressions.intern(&ExprData { ty, kind })
+    }
+    fn retype(&mut self, value: ExprId, ty: TypeId) -> ExprId {
+        let data = self.expressions.resolve(value);
+        if data.ty == ty {
+            value
+        } else {
+            self.expr(ty, data.kind.clone())
+        }
+    }
+    fn scope(
+        &mut self,
+        definition: DefinitionId,
+        parent: Option<RegionId>,
+        locals: LookupMap<crate::SymbolId, ExprId>,
+    ) -> Scope {
+        Scope {
+            id: self.data.regions.alloc_id(),
+            locals,
+            data: RegionData {
+                definition,
+                parent,
+                parameters: vec![],
+                operations: vec![],
+                results: vec![],
+            },
+        }
+    }
+    fn child(&mut self, scope: &Scope) -> Scope {
+        self.scope(scope.data.definition, Some(scope.id), scope.locals.clone())
+    }
+    fn finish(&mut self, mut scope: Scope, results: Vec<ExprId>) -> RegionId {
+        scope.data.results = results;
+        self.data.regions.insert(scope.id, scope.data);
+        scope.id
+    }
+    fn parameters(
+        &mut self,
+        parameters: &[(crate::SymbolId, types::Type)],
+        scope: &mut Scope,
+    ) -> Result<(), ConvertError> {
+        for (source, ty) in parameters {
+            let symbol = self.symbol(*source)?;
+            let ty = self.ty(ty);
+            let parameter = self.data.parameters.alloc(ParameterData {
+                symbol,
+                ty,
+                region: scope.id,
+            });
+            scope.data.parameters.push(parameter);
+            let value = self.expr(ty, ExprKind::Parameter(parameter));
+            scope.locals.insert(*source, value);
+        }
+        Ok(())
+    }
+    fn operation(&mut self, kind: OperationKind, ty: TypeId, span: Span, scope: &mut Scope) -> ExprId {
+        let id = self.data.operations.alloc(OperationData {
+            kind,
+            ty,
+            span,
+            region: scope.id,
+        });
+        scope.data.operations.push(id);
+        self.expr(ty, ExprKind::OperationResult(id))
+    }
+    fn var(
+        &mut self,
+        var: VarRef,
+        ty: TypeId,
+        span: Span,
+        scope: &mut Scope,
+    ) -> Result<ExprId, ConvertError> {
+        match var {
+            VarRef::Symbol(source) => {
+                let symbol = self.symbol(source)?;
+                if let Some(&value) = scope.locals.get(&source) {
+                    return Ok(self.retype(value, ty));
+                }
+                if self.globals.get(&source).is_some_and(|(arity, _)| *arity == 0) {
+                    return Ok(self.operation(OperationKind::EvalGlobal(symbol), ty, span, scope));
+                }
+                Ok(self.expr(ty, ExprKind::Global(symbol)))
+            }
             VarRef::Builtin { id, overload_idx } => {
                 let builtin = *self.builtins.entry((id, overload_idx)).or_insert_with(|| {
                     self.data.builtins.alloc(BuiltinData {
@@ -206,136 +247,163 @@ impl Converter {
                         overload_idx,
                     })
                 });
-                format!("(Builtin {})", builtin.egglog())
+                Ok(self.expr(ty, ExprKind::Builtin(builtin)))
             }
+        }
+    }
+    fn terms(&mut self, terms: &[Term], scope: &mut Scope) -> Result<Vec<ExprId>, ConvertError> {
+        terms.iter().map(|term| self.term(term, scope)).collect()
+    }
+    fn lambda(&mut self, lambda: &TlcLambda, scope: &Scope) -> Result<RegionId, ConvertError> {
+        let mut body = self.child(scope);
+        self.parameters(&lambda.params, &mut body)?;
+        let result = self.term(&lambda.body, &mut body)?;
+        Ok(self.finish(body, vec![result]))
+    }
+    fn soac_body(&mut self, body: &TlcSoacBody, scope: &mut Scope) -> Result<SoacBody, ConvertError> {
+        let mut captures = Vec::new();
+        for (_, _, capture) in &body.data.captures {
+            captures.push(self.term(capture, scope)?);
+        }
+        let results = vec![self.ty(&body.lam.ret_ty)];
+        // Closure conversion stores a callable reference here. Its arguments
+        // are the SOAC inputs followed by the explicit capture values.
+        if let TermKind::Var(VarRef::Symbol(function)) = &body.lam.body.kind {
+            if self.globals.get(function).is_some_and(|(arity, _)| *arity > 0) {
+                let function = self.symbol(*function)?;
+                let parameters = body.lam.params.iter().map(|(_, ty)| self.ty(ty)).collect();
+                return Ok(SoacBody::Function {
+                    function,
+                    parameters,
+                    results,
+                    captures,
+                });
+            }
+        }
+        let mut inner = self.child(scope);
+        for ((symbol, _, _), &capture) in body.data.captures.iter().zip(&captures) {
+            inner.locals.insert(*symbol, capture);
+        }
+        self.parameters(&body.lam.params, &mut inner)?;
+        let result = self.term(&body.lam.body, &mut inner)?;
+        let region = self.finish(inner, vec![result]);
+        Ok(SoacBody::Inline {
+            region,
+            results,
+            captures,
         })
     }
-
-    fn param(&mut self, symbol: crate::SymbolId, ty: &types::Type) -> Result<String, ConvertError> {
-        Ok(format!(
-            "(MkParam {} {})",
-            self.symbol(symbol)?.egglog(),
-            self.ty(ty).egglog()
-        ))
-    }
-
-    fn terms(&mut self, terms: &[Term], owner: DefinitionId) -> Result<String, ConvertError> {
-        let items = terms
-            .iter()
-            .map(|term| self.term(term, owner).map(TermId::binding_name))
-            .collect::<Result<_, _>>()?;
-        Ok(self.list("NoExprs", "ExprsCons", items))
-    }
-
-    fn bindings(
-        &mut self,
-        bindings: &[(crate::SymbolId, types::Type, Term)],
-        owner: DefinitionId,
-    ) -> Result<String, ConvertError> {
-        let mut items = Vec::with_capacity(bindings.len());
-        for (symbol, ty, value) in bindings {
-            let param = self.param(*symbol, ty)?;
-            let value = self.term(value, owner)?.binding_name();
-            items.push(self.bind(format!("(MkBinding {param} {value})")));
-        }
-        Ok(self.list("NoBindings", "BindingsCons", items))
-    }
-
-    fn lambda(&mut self, lambda: &Lambda, owner: DefinitionId) -> Result<String, ConvertError> {
-        let params =
-            lambda.params.iter().map(|(symbol, ty)| self.param(*symbol, ty)).collect::<Result<_, _>>()?;
-        let params = self.list("NoParams", "ParamsCons", params);
-        let ty = self.ty(&lambda.ret_ty).egglog();
-        let body = self.term(&lambda.body, owner)?.binding_name();
-        Ok(self.bind(format!("(MkLambda {params} {ty} {body})")))
-    }
-
-    fn soac_body(&mut self, body: &SoacBody, owner: DefinitionId) -> Result<String, ConvertError> {
-        let lambda = self.lambda(&body.lam, owner)?;
-        let captures = self.bindings(&body.data.captures, owner)?;
-        Ok(self.bind(format!("(MkSoacBody {lambda} {captures})")))
-    }
-
-    fn arrays(&mut self, arrays: &[ArrayExpr], owner: DefinitionId) -> Result<String, ConvertError> {
-        let items = arrays.iter().map(|array| self.array(array, owner)).collect::<Result<_, _>>()?;
-        Ok(self.list("NoArrays", "ArraysCons", items))
-    }
-
-    fn array(&mut self, array: &ArrayExpr, owner: DefinitionId) -> Result<String, ConvertError> {
-        let expression = match array {
+    fn array(&mut self, array: &ArrayExpr, scope: &mut Scope) -> Result<Array, ConvertError> {
+        Ok(match array {
             ArrayExpr::Var(var, ty) => {
-                format!("(ArrayVar {} {})", self.ty(ty).egglog(), self.var(*var)?)
+                let ty = self.ty(ty);
+                Array::Value(self.var(*var, ty, Span::generated(), scope)?)
             }
-            ArrayExpr::Zip(arrays) => format!("(Zip {})", self.arrays(arrays, owner)?),
-            ArrayExpr::Literal(terms) => format!("(ArrayLiteral {})", self.terms(terms, owner)?),
-            ArrayExpr::Range { start, len, step } => {
-                let start = self.term(start, owner)?.binding_name();
-                let len = self.term(len, owner)?.binding_name();
-                let step = match step {
-                    Some(step) => format!("(SomeExpr {})", self.term(step, owner)?.binding_name()),
-                    None => "(NoExpr)".into(),
-                };
-                format!("(Range {start} {len} {step})")
-            }
+            ArrayExpr::Zip(arrays) => Array::Zip(self.arrays(arrays, scope)?),
+            ArrayExpr::Literal(terms) => Array::Literal(self.terms(terms, scope)?),
+            ArrayExpr::Range { start, len, step } => Array::Range {
+                start: self.term(start, scope)?,
+                len: self.term(len, scope)?,
+                step: step.as_ref().map(|step| self.term(step, scope)).transpose()?,
+            },
+        })
+    }
+    fn arrays(&mut self, arrays: &[ArrayExpr], scope: &mut Scope) -> Result<Vec<Array>, ConvertError> {
+        arrays.iter().map(|array| self.array(array, scope)).collect()
+    }
+    fn place(&mut self, place: &tlc::Place, scope: &mut Scope) -> Result<Place, ConvertError> {
+        let elem_ty = self.ty(&place.elem_ty);
+        let value = if let Some(&value) = scope.locals.get(&place.id) {
+            value
+        } else {
+            let ty = self
+                .globals
+                .get(&place.id)
+                .map(|(_, ty)| ty.clone())
+                .unwrap_or_else(|| place.elem_ty.clone());
+            let ty = self.ty(&ty);
+            self.var(VarRef::Symbol(place.id), ty, Span::generated(), scope)?
         };
-        Ok(self.bind(expression))
+        Ok(Place { value, elem_ty })
     }
-
-    fn place(&mut self, place: &tlc::Place) -> Result<String, ConvertError> {
-        Ok(format!(
-            "(MkPlace {} {})",
-            self.symbol(place.id)?.egglog(),
-            self.ty(&place.elem_ty).egglog()
-        ))
-    }
-
-    fn soac(&mut self, soac: &SoacOp, site: TermId, owner: DefinitionId) -> Result<String, ConvertError> {
-        let site = site.egglog();
-        Ok(match soac {
+    fn soac(&mut self, soac: &SoacOp, term: &Term, scope: &mut Scope) -> Result<ExprId, ConvertError> {
+        let kind = match soac {
             SoacOp::Map {
                 lam,
                 inputs,
                 destination,
-            } => format!(
-                "(Map {site} {} {} {})",
-                self.soac_body(lam, owner)?,
-                self.arrays(inputs, owner)?,
-                ownership(*destination),
-            ),
-            SoacOp::Reduce { op, ne, input } => format!(
-                "(Reduce {site} {} {} {})",
-                self.soac_body(op, owner)?,
-                self.term(ne, owner)?.binding_name(),
-                self.array(input, owner)?,
-            ),
+            } => {
+                let pre = self.soac_body(lam, scope)?;
+                let post = SoacBody::Identity(vec![self.ty(&lam.lam.ret_ty)]);
+                let inputs = self.arrays(inputs, scope)?;
+                OperationKind::Screma {
+                    form: ScremaForm {
+                        pre,
+                        scans: vec![],
+                        reductions: vec![],
+                        post,
+                    },
+                    inputs,
+                    ownership: vec![*destination],
+                }
+            }
+            SoacOp::Reduce { op, ne, input } => {
+                let pre = SoacBody::Identity(vec![self.ty(&op.lam.ret_ty)]);
+                let operator = self.soac_body(op, scope)?;
+                let neutral = vec![self.term(ne, scope)?];
+                let input = self.array(input, scope)?;
+                let form = ScremaForm {
+                    pre,
+                    scans: vec![],
+                    reductions: vec![Reduction {
+                        operator,
+                        neutral,
+                        commutative: false,
+                    }],
+                    post: SoacBody::Identity(vec![]),
+                };
+                OperationKind::Screma {
+                    form,
+                    inputs: vec![input],
+                    ownership: vec![types::SoacOwnership::Fresh],
+                }
+            }
             SoacOp::Scan {
                 op,
                 ne,
                 input,
                 destination,
-            } => format!(
-                "(Scan {site} {} {} {} {})",
-                self.soac_body(op, owner)?,
-                self.term(ne, owner)?.binding_name(),
-                self.array(input, owner)?,
-                ownership(*destination),
-            ),
+            } => {
+                let pre = SoacBody::Identity(vec![self.ty(&op.lam.ret_ty)]);
+                let operator = self.soac_body(op, scope)?;
+                let neutral = vec![self.term(ne, scope)?];
+                let input = self.array(input, scope)?;
+                let form = ScremaForm {
+                    post: pre.clone(),
+                    pre,
+                    scans: vec![Scan { operator, neutral }],
+                    reductions: vec![],
+                };
+                OperationKind::Screma {
+                    form,
+                    inputs: vec![input],
+                    ownership: vec![*destination],
+                }
+            }
             SoacOp::Filter {
                 pred,
                 input,
                 destination,
-            } => format!(
-                "(Filter {site} {} {} {})",
-                self.soac_body(pred, owner)?,
-                self.array(input, owner)?,
-                ownership(*destination),
-            ),
-            SoacOp::Scatter { dest, lam, inputs } => format!(
-                "(Scatter {site} {} {} {})",
-                self.place(dest)?,
-                self.soac_body(lam, owner)?,
-                self.arrays(inputs, owner)?,
-            ),
+            } => OperationKind::Filter {
+                body: self.soac_body(pred, scope)?,
+                input: self.array(input, scope)?,
+                ownership: *destination,
+            },
+            SoacOp::Scatter { dest, lam, inputs } => OperationKind::Scatter {
+                destination: self.place(dest, scope)?,
+                body: self.soac_body(lam, scope)?,
+                inputs: self.arrays(inputs, scope)?,
+            },
             SoacOp::BucketScatter {
                 dest,
                 lam,
@@ -347,13 +415,12 @@ impl Converter {
                     input_dimensions: input_dimensions.clone(),
                     domain_rank: *domain_rank,
                 });
-                format!(
-                    "(BucketScatter {site} {} {} {} {})",
-                    self.place(dest)?,
-                    self.soac_body(lam, owner)?,
-                    self.arrays(inputs, owner)?,
-                    shape.egglog(),
-                )
+                OperationKind::BucketScatter {
+                    destination: self.place(dest, scope)?,
+                    body: self.soac_body(lam, scope)?,
+                    inputs: self.arrays(inputs, scope)?,
+                    shape,
+                }
             }
             SoacOp::ReduceByIndex {
                 dest,
@@ -361,140 +428,223 @@ impl Converter {
                 ne,
                 indices,
                 values,
-            } => format!(
-                "(ReduceByIndex {site} {} {} {} {} {})",
-                self.place(dest)?,
-                self.soac_body(op, owner)?,
-                self.term(ne, owner)?.binding_name(),
-                self.array(indices, owner)?,
-                self.array(values, owner)?,
-            ),
-        })
-    }
-
-    fn term(&mut self, term: &Term, owner: DefinitionId) -> Result<TermId, ConvertError> {
+            } => OperationKind::ReduceByIndex {
+                destination: self.place(dest, scope)?,
+                body: self.soac_body(op, scope)?,
+                neutral: self.term(ne, scope)?,
+                indices: self.array(indices, scope)?,
+                values: self.array(values, scope)?,
+            },
+        };
         let ty = self.ty(&term.ty);
-        // Allocate per occurrence, even when cloned TLC nodes share a source ID.
-        let id = self.data.terms.alloc(TermData {
-            source: term.id,
-            span: term.span,
-            ty,
-            definition: owner,
-        });
-        let expression = match &term.kind {
-            TermKind::Var(var) => self.var(*var)?,
-            TermKind::BinOp(op) => format!("(BinOp {})", quote(op.op.symbol())),
-            TermKind::UnOp(op) => format!("(UnOp {})", quote(op.op.symbol())),
-            TermKind::Lambda(lambda) => format!("(LambdaValue {})", self.lambda(lambda, owner)?),
-            TermKind::Closure(closure) => format!(
-                "(Closure {} {} {})",
-                self.symbol(closure.code)?.egglog(),
-                closure.param_count,
-                self.terms(&closure.captures, owner)?,
-            ),
-            TermKind::App { func, args } => format!(
-                "(App {} {} {})",
-                id.egglog(),
-                self.term(func, owner)?.binding_name(),
-                self.terms(args, owner)?,
-            ),
-            TermKind::Let {
-                name,
-                name_ty,
-                rhs,
+        if matches!(&kind, OperationKind::Screma { .. }) {
+            let tuple_ty = self.ty(&types::tuple(vec![term.ty.clone()]));
+            let tuple = self.operation(kind, tuple_ty, term.span, scope);
+            Ok(self.expr(ty, ExprKind::Project { tuple, index: 0 }))
+        } else {
+            Ok(self.operation(kind, ty, term.span, scope))
+        }
+    }
+    fn loop_value(&mut self, term: &Term, scope: &mut Scope) -> Result<ExprId, ConvertError> {
+        let TermKind::Loop {
+            loop_var,
+            loop_var_ty,
+            init,
+            init_bindings,
+            kind,
+            body,
+        } = &term.kind
+        else {
+            unreachable!("loop_value requires a TLC loop");
+        };
+        let init = self.term(init, scope)?;
+        let mut header = self.child(scope);
+        self.parameters(&[(*loop_var, loop_var_ty.clone())], &mut header)?;
+        let kind = match kind {
+            tlc::LoopKind::For { var, var_ty, iter } => {
+                let iter = self.term(iter, scope)?;
+                self.parameters(&[(*var, var_ty.clone())], &mut header)?;
+                LoopKind::For(iter)
+            }
+            tlc::LoopKind::ForRange { var, var_ty, bound } => {
+                let bound = self.term(bound, scope)?;
+                self.parameters(&[(*var, var_ty.clone())], &mut header)?;
+                LoopKind::ForRange(bound)
+            }
+            tlc::LoopKind::While { .. } => LoopKind::While,
+        };
+        for (name, _, binding) in init_bindings {
+            let value = self.term(binding, &mut header)?;
+            header.locals.insert(*name, value);
+        }
+        let condition = if let TermKind::Loop {
+            kind: tlc::LoopKind::While { cond },
+            ..
+        } = &term.kind
+        {
+            vec![self.term(cond, &mut header)?]
+        } else {
+            vec![]
+        };
+        let mut body_scope = self.child(&header);
+        let result = self.term(body, &mut body_scope)?;
+        let body = self.finish(body_scope, vec![result]);
+        let header = self.finish(header, condition);
+        let ty = self.ty(&term.ty);
+        Ok(self.operation(
+            OperationKind::Loop {
+                init,
+                header,
+                kind,
                 body,
-            } => format!(
-                "(Let {} {} {})",
-                self.param(*name, name_ty)?,
-                self.term(rhs, owner)?.binding_name(),
-                self.term(body, owner)?.binding_name(),
-            ),
-            TermKind::IntLit(value) => format!("(Int {})", quote(value)),
-            TermKind::FloatLit(value) => format!("(FloatBits {})", value.to_bits()),
-            TermKind::BoolLit(value) => format!("(Bool {value})"),
-            TermKind::UnitLit => "(UnitLit)".into(),
-            TermKind::Coerce { inner, target_ty } => format!(
-                "(Coerce {} {})",
-                self.term(inner, owner)?.binding_name(),
-                self.ty(target_ty).egglog(),
-            ),
+            },
+            ty,
+            term.span,
+            scope,
+        ))
+    }
+    fn pure_callee(&self, function: ExprId, args: &[ExprId], result: TypeId) -> bool {
+        match &self.expressions.resolve(function).kind {
+            ExprKind::BinOp(_) | ExprKind::UnOp(_) => true,
+            ExprKind::Builtin(id) => {
+                let builtin = self.data.builtins[*id].builtin;
+                builtin != builtins::catalog().known().storage_index
+                    && builtins::by_id(builtin).raw.purity == builtins::Purity::Pure
+                    && types::is_copy(&self.types.resolve(result).ty)
+                    && args
+                        .iter()
+                        .all(|id| types::is_copy(&self.types.resolve(self.expressions.resolve(*id).ty).ty))
+            }
+            _ => false,
+        }
+    }
+    fn term(&mut self, term: &Term, scope: &mut Scope) -> Result<ExprId, ConvertError> {
+        let ty = self.ty(&term.ty);
+        let value = match &term.kind {
+            TermKind::Var(var) => self.var(*var, ty, term.span, scope)?,
+            TermKind::BinOp(op) => self.expr(ty, ExprKind::BinOp(op.op.symbol().into())),
+            TermKind::UnOp(op) => self.expr(ty, ExprKind::UnOp(op.op.symbol().into())),
+            TermKind::IntLit(value) => self.expr(ty, ExprKind::Int(value.clone())),
+            TermKind::FloatLit(value) => self.expr(ty, ExprKind::FloatBits(value.to_bits())),
+            TermKind::BoolLit(value) => self.expr(ty, ExprKind::Bool(*value)),
+            TermKind::UnitLit => self.expr(ty, ExprKind::Unit),
+            TermKind::Lambda(lambda) => {
+                let region = self.lambda(lambda, scope)?;
+                self.expr(ty, ExprKind::Lambda(region))
+            }
+            TermKind::Closure(closure) => {
+                let code = self.symbol(closure.code)?;
+                let captures = self.terms(&closure.captures, scope)?;
+                self.expr(
+                    ty,
+                    ExprKind::Closure {
+                        code,
+                        param_count: closure.param_count,
+                        captures,
+                    },
+                )
+            }
+            TermKind::App { func, args } => {
+                let function = self.term(func, scope)?;
+                let args = self.terms(args, scope)?;
+                if self.pure_callee(function, &args, ty) {
+                    self.expr(ty, ExprKind::PureApp { function, args })
+                } else {
+                    self.operation(OperationKind::Call { function, args }, ty, term.span, scope)
+                }
+            }
+            TermKind::Let { name, rhs, body, .. } => {
+                self.symbol(*name)?;
+                let rhs = self.term(rhs, scope)?;
+                let old = scope.locals.insert(*name, rhs);
+                let result = self.term(body, scope)?;
+                if let Some(old) = old {
+                    scope.locals.insert(*name, old);
+                } else {
+                    scope.locals.remove(name);
+                }
+                self.retype(result, ty)
+            }
+            TermKind::Coerce { inner, .. } => {
+                let inner = self.term(inner, scope)?;
+                self.expr(ty, ExprKind::Coerce(inner))
+            }
             TermKind::Extern(name) => {
-                let extern_id = *self.externs.entry(name.clone()).or_insert_with(|| {
+                let id = *self.externs.entry(name.clone()).or_insert_with(|| {
                     self.data.externs.alloc(ExternData {
                         linkage_name: name.clone(),
                     })
                 });
-                format!("(Extern {})", extern_id.egglog())
+                self.expr(ty, ExprKind::Extern(id))
             }
             TermKind::If {
                 cond,
                 then_branch,
                 else_branch,
-            } => format!(
-                "(If {} {} {})",
-                self.term(cond, owner)?.binding_name(),
-                self.term(then_branch, owner)?.binding_name(),
-                self.term(else_branch, owner)?.binding_name(),
-            ),
-            TermKind::Loop {
-                loop_var,
-                loop_var_ty,
-                init,
-                init_bindings,
-                kind,
-                body,
             } => {
-                let param = self.param(*loop_var, loop_var_ty)?;
-                let init = self.term(init, owner)?.binding_name();
-                let bindings = self.bindings(init_bindings, owner)?;
-                let kind = match kind {
-                    tlc::LoopKind::For { var, var_ty, iter } => format!(
-                        "(For {} {})",
-                        self.param(*var, var_ty)?,
-                        self.term(iter, owner)?.binding_name(),
-                    ),
-                    tlc::LoopKind::ForRange { var, var_ty, bound } => format!(
-                        "(ForRange {} {})",
-                        self.param(*var, var_ty)?,
-                        self.term(bound, owner)?.binding_name(),
-                    ),
-                    tlc::LoopKind::While { cond } => {
-                        format!("(While {})", self.term(cond, owner)?.binding_name())
-                    }
-                };
-                let body = self.term(body, owner)?.binding_name();
-                format!("(Loop {} {param} {init} {bindings} {kind} {body})", id.egglog())
+                let condition = self.term(cond, scope)?;
+                let mut then_scope = self.child(scope);
+                let then_value = self.term(then_branch, &mut then_scope)?;
+                let mut else_scope = self.child(scope);
+                let else_value = self.term(else_branch, &mut else_scope)?;
+                let pure = then_scope.data.operations.is_empty() && else_scope.data.operations.is_empty();
+                let then_region = self.finish(then_scope, vec![then_value]);
+                let else_region = self.finish(else_scope, vec![else_value]);
+                if pure {
+                    self.expr(
+                        ty,
+                        ExprKind::If {
+                            condition,
+                            then_value,
+                            else_value,
+                        },
+                    )
+                } else {
+                    self.operation(
+                        OperationKind::If {
+                            condition,
+                            then_region,
+                            else_region,
+                        },
+                        ty,
+                        term.span,
+                        scope,
+                    )
+                }
             }
-            TermKind::Soac(soac) => self.soac(soac, id, owner)?,
-            TermKind::ArrayExpr(array) => format!("(ArrayValue {})", self.array(array, owner)?),
-            TermKind::Tuple(items) => format!("(Tuple {})", self.terms(items, owner)?),
+            TermKind::Loop { .. } => self.loop_value(term, scope)?,
+            TermKind::Soac(soac) => self.soac(soac, term, scope)?,
+            TermKind::ArrayExpr(array) => {
+                let array = self.array(array, scope)?;
+                if let Array::Value(value) = array {
+                    self.retype(value, ty)
+                } else {
+                    self.expr(ty, ExprKind::Array(array))
+                }
+            }
+            TermKind::Tuple(items) => {
+                let items = self.terms(items, scope)?;
+                self.expr(ty, ExprKind::Tuple(items))
+            }
             TermKind::TupleProj { tuple, idx } => {
-                format!("(Project {} {idx})", self.term(tuple, owner)?.binding_name())
+                let tuple = self.term(tuple, scope)?;
+                self.expr(ty, ExprKind::Project { tuple, index: *idx })
             }
-            TermKind::Index { array, index } => format!(
-                "(Index {} {} {})",
-                id.egglog(),
-                self.term(array, owner)?.binding_name(),
-                self.term(index, owner)?.binding_name(),
-            ),
-            TermKind::VecLit(items) => format!("(Vector {})", self.terms(items, owner)?),
+            TermKind::Index { array, index } => {
+                let array = self.term(array, scope)?;
+                let index = self.term(index, scope)?;
+                self.operation(OperationKind::Index { array, index }, ty, term.span, scope)
+            }
+            TermKind::VecLit(items) => {
+                let items = self.terms(items, scope)?;
+                self.expr(ty, ExprKind::Vector(items))
+            }
         };
-        let name = id.binding_name();
-        self.emit(format!("(let {name} (Typed {} {expression}))", ty.egglog()));
-        self.emit(format!("(SourceTerm {} {name})", id.egglog()));
-        Ok(id)
+        self.origins.intern(&OriginData {
+            span: term.span,
+            expression: value,
+            definition: scope.data.definition,
+        });
+        Ok(value)
     }
-}
-
-fn ownership(ownership: types::SoacOwnership) -> &'static str {
-    match ownership {
-        types::SoacOwnership::Fresh => "(Fresh)",
-        types::SoacOwnership::UniqueInput => "(UniqueInput)",
-    }
-}
-
-fn quote(value: &str) -> String {
-    // Only literal values and the fixed operator vocabulary enter the program
-    // as strings. Source names and extern linkage strings stay in their arenas.
-    serde_json::to_string(value).expect("serializing a string cannot fail")
 }

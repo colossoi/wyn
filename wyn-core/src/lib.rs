@@ -32,8 +32,8 @@ pub mod lowering_common;
 pub mod name_registry;
 pub mod tlc;
 
-pub mod egir;
 pub mod egglog;
+pub mod egir;
 pub use egir::program::ResourceId;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
@@ -51,8 +51,6 @@ mod test_pipeline;
 
 #[cfg(test)]
 mod slice_range_tests;
-
-use std::hash::Hash;
 
 use egir::from_tlc::ConvertError;
 use wyn_base::{IdArena, IdSource};
@@ -143,77 +141,7 @@ impl std::fmt::Display for EntryId {
     }
 }
 
-/// Append-only bidirectional interner for values with compiler-assigned IDs.
-///
-/// Equal values share one ID. The arena provides ID-to-value resolution while
-/// the lookup map provides value-to-ID lookup and deduplication.
-#[derive(Debug, Clone)]
-pub struct Interner<Id, T> {
-    arena: IdArena<Id, T>,
-    by_value: LookupMap<T, Id>,
-}
-
-impl<Id, T> Interner<Id, T>
-where
-    Id: From<u32> + Copy + Eq + Hash,
-{
-    pub fn new() -> Self {
-        Self {
-            arena: IdArena::new(),
-            by_value: LookupMap::new(),
-        }
-    }
-
-    pub fn intern<Q>(&mut self, value: &Q) -> Id
-    where
-        T: std::borrow::Borrow<Q> + Clone + Eq + Hash,
-        Q: Eq + Hash + ToOwned<Owned = T> + ?Sized,
-    {
-        if let Some(id) = self.by_value.get(value) {
-            return *id;
-        }
-        let value = value.to_owned();
-        let id = self.arena.alloc(value.clone());
-        self.by_value.insert(value, id);
-        id
-    }
-
-    pub fn get<Q>(&self, value: &Q) -> Option<Id>
-    where
-        T: std::borrow::Borrow<Q> + Eq + Hash,
-        Q: Eq + Hash + ?Sized,
-    {
-        self.by_value.get(value).copied()
-    }
-
-    pub fn resolve(&self, id: Id) -> &T {
-        self.arena.get(id).expect("interner received an ID it did not allocate")
-    }
-
-    pub fn resolve_cloned(&self, ids: impl IntoIterator<Item = Id>) -> Vec<T>
-    where
-        T: Clone,
-    {
-        ids.into_iter().map(|id| self.resolve(id).clone()).collect()
-    }
-
-    pub fn len(&self) -> usize {
-        self.arena.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.arena.is_empty()
-    }
-}
-
-impl<Id, T> Default for Interner<Id, T>
-where
-    Id: From<u32> + Copy + Eq + Hash,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use wyn_base::Interner;
 
 // =============================================================================
 // Symbol Table for TLC

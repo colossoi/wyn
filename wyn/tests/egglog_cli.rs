@@ -34,26 +34,35 @@ impl Drop for TestDirectory {
 }
 
 #[test]
-fn egglog_prints_program_to_stdout_and_stops_before_egir() {
+fn egglog_saves_egg_output_and_prints_program_to_stdout() {
     let directory = TestDirectory::new();
     let source = directory.source("entry mapped(xs: []i32) []i32 = map(|x: i32| x + 17, xs)");
     let tlc = directory.0.join("input.tlc");
+    let egg = directory.0.join("input.egg");
     let output = Command::new(env!("CARGO_BIN_EXE_wyn"))
         .arg("build")
         .arg(&source)
         .args(["--egglog", "--verbose", "--output-tlc"])
         .arg(&tlc)
+        .arg("--egg-out")
+        .arg(&egg)
         .output()
         .expect("run wyn");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{stderr}");
-    assert!(stdout.starts_with("(datatype ProgramKey"), "{stdout}");
-    assert!(stdout.contains("(Definition (DefinitionId"));
-    assert!(stdout.contains("(Map (TermId"));
-    assert!(stdout.contains("(Int \"17\")"));
-    assert!(!stdout.contains("mapped"));
-    assert!(!stdout.contains("Converted"));
+    assert!(!stdout.is_empty());
+    let egg = fs::read_to_string(egg).unwrap();
+    assert!(egg.starts_with("(datatype ProgramKey"), "{egg}");
+    assert!(egg.contains("(Definition (DefinitionId"));
+    assert!(egg.contains("(Screma "));
+    assert!(egg.contains("(Expression (ExprId"));
+    assert!(egg.contains("(Do (OperationId"));
+    assert!(!egg.contains("TermId"));
+    assert!(!egg.contains("OriginalSoac"));
+    assert!(!egg.contains("(Let "));
+    assert!(egg.contains("(Int \"17\")"));
+    assert!(!egg.contains("mapped"));
     assert!(stderr.contains("from_tlc_egglog:"));
     assert!(!stderr.contains("to_egraph:"));
     assert!(!stderr.contains("egir_plan:"));

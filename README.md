@@ -644,8 +644,8 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
-# Convert TLC to an egglog program on stdout and stop
-cargo run --bin wyn -- build input.wyn --egglog > output.egg
+# Use the egglog route; print a readable program and optionally save raw egglog
+cargo run --bin wyn -- build input.wyn --egglog --egg-out output.egg
 
 # Compile a graphics program directly, without compiler-created prepasses
 cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
@@ -664,6 +664,13 @@ cargo run --bin wyn -- build input.wyn --output-annotated out.ann  # Annotated s
 # Run a compiler-published SPIR-V or WGSL pipeline
 cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
+
+The experimental egglog route interns types and pure expressions and constructs
+`map`, `reduce`, and `scan` as Scremas in `egglog::from_tlc`. Ordered operations
+and their results have separate identities; metadata stays in `IdArena` sidecars.
+`--egglog` prints a diagnostic program reconstructed from reachable entries,
+values, and callables, retaining ordered effects. `--egg-out FILE` separately
+saves the raw egglog program. The current stage is the normalized import.
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, and
