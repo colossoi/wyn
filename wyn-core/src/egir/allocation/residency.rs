@@ -602,11 +602,12 @@ fn plan_parallel_prelude(
             }
             let consumer_site_set = consumer_sites.iter().copied().collect::<HashSet<_>>();
             let projector = GraphProjector::new(&analyses[entry_index]);
-            if !source_is_observed_only_by_consumers_or_outputs(
+            if !source_observers_support_prelude(
                 entry,
                 analyses[entry_index].slice(),
                 root,
                 &consumer_site_set,
+                consumer_block,
             ) {
                 continue;
             }
@@ -830,15 +831,18 @@ fn supports_parallel_prefix_consumer(entry: &AllocatedEntry, site: SideEffectSit
     )
 }
 
-fn source_is_observed_only_by_consumers_or_outputs(
+fn source_observers_support_prelude(
     entry: &AllocatedEntry,
     uses: &graph_ops::SliceFacts,
     root: ValueId,
     consumers: &HashSet<SideEffectSite>,
+    consumer_block: BlockId,
 ) -> bool {
     // Realized output stores are valid additional observers: residency
-    // rewrites their value dependencies to the same handoff load. Other
-    // serial effects and terminators still keep the prefix in place.
+    // rewrites their value dependencies to the same handoff load. Retained
+    // terminators can also use that load when the consumer block dominates
+    // them, since the load is inserted before the first consumer. Earlier
+    // terminators and other serial effects still keep the prefix in place.
     let output_effects = entry
         .routes()
         .flat_map(|route| &route.writers)
@@ -848,7 +852,7 @@ fn source_is_observed_only_by_consumers_or_outputs(
         })
         .collect::<HashSet<_>>();
     let observers = uses.pure_observers(root);
-    observers.effect_sites().all(|site| {
+    if !observers.effect_sites().all(|site| {
         consumers.contains(&site)
             || entry
                 .graph
@@ -856,7 +860,17 @@ fn source_is_observed_only_by_consumers_or_outputs(
                 .effect(site)
                 .effects
                 .is_some_and(|(_, output)| output_effects.contains(&output))
-    }) && observers.terminator_blocks().next().is_none()
+    }) {
+        return false;
+    }
+    if observers.terminator_blocks().next().is_none() {
+        return true;
+    }
+    let dominators = wyn_graph::DominatorTree::build(entry.graph.skeleton.entry, |block, successors| {
+        successors.extend(entry.graph.skeleton.blocks[block].term.successors());
+    });
+    let dominated = observers.terminator_blocks().all(|block| dominators.dominates(consumer_block, block));
+    dominated
 }
 
 fn launched_consumer_invocations(entry: &AllocatedEntry, consumers: &[SideEffectSite]) -> u64 {

@@ -21,6 +21,40 @@ fn materialization_signature(program: &ResidencyDraft) -> (Vec<GeneratedStageKin
 }
 
 #[test]
+fn prelude_rejects_a_terminator_observer_before_the_consumer_block() {
+    let program = allocate_before_residency(
+        r#"
+def prefix(events: []i32) =
+  loop state = 0 for k < 32 do state + events[k]
+
+entry earlier_observer(events: []i32) ([]i32, [1]i32) =
+  let state = prefix(events)
+  let output = if state > 0 then state else 0 in
+  (map(|i| state, iota(64)), [output])
+"#,
+    );
+    let (analyses, dependencies) = residency_facts(&program);
+    let (_, _, entry) = program.data.stages.stages().next().expect("source entry");
+    let (root, consumers) = parallel_preludes(entry, &dependencies, BodySite::Entry(0))
+        .into_iter()
+        .find(|(root, _)| matches!(entry.graph.nodes[*root].kind, ValueKind::CallResult { .. }))
+        .expect("the map captures the prefix call");
+    let sites = operation_sites(&dependencies, &consumers).expect("consumer sites");
+    let consumer_block = sites[0].block;
+    assert!(analyses[0].slice().pure_observers(root).terminator_blocks().next().is_some());
+    assert!(
+        !source_observers_support_prelude(
+            entry,
+            analyses[0].slice(),
+            root,
+            &sites.into_iter().collect(),
+            consumer_block,
+        ),
+        "a load inserted at the map cannot supply the earlier branch"
+    );
+}
+
+#[test]
 fn operation_materializations_restart_to_a_stable_fixpoint() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)

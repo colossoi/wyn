@@ -325,6 +325,7 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
     let continuation = graph.skeleton.create_block();
     let then_block = graph.skeleton.create_block();
     let else_block = graph.skeleton.create_block();
+    let merge = graph.skeleton.create_block();
     let place = test_place(&mut graph);
     let live_out = graph.alloc_side_effect_result(bool_ty());
     let effect = load_effect(
@@ -355,8 +356,14 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
         else_target: else_block,
         else_args: vec![],
     };
-    graph.skeleton.blocks[then_block].term = SkeletonTerminator::Return(None);
-    graph.skeleton.blocks[else_block].term = SkeletonTerminator::Return(None);
+    graph.skeleton.blocks[continuation].control_header = Some(ControlHeader::Selection { merge });
+    for block in [then_block, else_block] {
+        graph.skeleton.blocks[block].term = SkeletonTerminator::Branch {
+            target: merge,
+            args: vec![],
+        };
+    }
+    graph.skeleton.blocks[merge].term = SkeletonTerminator::Return(None);
 
     let recipe = GraphProjector::new(&GraphAnalysis::new(&graph))
         .captured_value_recipe(
@@ -369,6 +376,13 @@ fn captured_recipe_reports_selected_effect_result_used_by_retained_terminator() 
         .expect("structured value recipe");
 
     assert_eq!(recipe.live_outs().collect::<Vec<_>>(), vec![live_out]);
+    let exit = &recipe.projection.graph.skeleton.blocks[recipe.result_block];
+    assert!(matches!(exit.term, SkeletonTerminator::Return(None)));
+    assert!(
+        exit.control_header.is_none(),
+        "the following selection stays in the consumer"
+    );
+    assert!(recipe.projection.block(merge).is_none());
 }
 
 #[test]

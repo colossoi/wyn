@@ -571,7 +571,7 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
                 block.control_header = None;
             }
         } else {
-            self.project_control_headers(&mut shell)?;
+            self.project_control_headers(mode, &mut shell)?;
         }
         self.project_aliases(&mut shell);
         shell.graph.verify_hash_cons()?;
@@ -1208,8 +1208,18 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             .collect()
     }
 
-    fn project_control_headers(&self, shell: &mut ProjectionShell<R>) -> Result<(), String> {
+    fn project_control_headers(
+        &self,
+        mode: ProjectionMode,
+        shell: &mut ProjectionShell<R>,
+    ) -> Result<(), String> {
         for (header, block) in &self.source.skeleton.blocks {
+            // The continuation becomes the recipe's return block. Any control
+            // region starting there belongs to the retained consumer graph.
+            if matches!(mode, ProjectionMode::StructuredPrefix { continuation, .. } if header == continuation)
+            {
+                continue;
+            }
             let Some(control) = &block.control_header else {
                 continue;
             };

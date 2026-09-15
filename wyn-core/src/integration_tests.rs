@@ -6954,6 +6954,57 @@ entry mixed_fixed_parallel_prefix_ice(events: []i32) ([1]i32, []i32) =
 }
 
 #[test]
+fn conditional_fixed_output_preserves_shared_scalar_prepass() {
+    // Cover calls and structured prefixes, including a runtime condition that
+    // also observes the shared scalar in the consumer block's terminator.
+    for prefix in ["prefix(events)", "loop state = 0 for k < 32 do state + events[k]"] {
+        for output in [
+            "state",
+            "if true then state else 0",
+            "if state > 0 then state else 0",
+        ] {
+            let source = format!(
+                r#"
+def prefix(events: []i32) =
+  loop state = 0 for k < 32 do state + events[k]
+
+entry repro(events: []i32) ([]i32, []i32, [1]i32) =
+  let state = {prefix} in
+  (map(|i| state, iota(64)),
+   map(|i| state, iota(128)),
+   [{output}])
+"#
+            );
+            let lowered = compile_thru_spirv(&source).expect("conditional fixed output compiles");
+            let pipeline = scalar_prelude_pipeline(&lowered, "repro");
+            let loop_stages = pipeline
+                .stages
+                .iter()
+                .filter(|stage| spirv_entry_reaches_loop(&lowered.spirv, &stage.entry_point))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                loop_stages.len(),
+                1,
+                "the prefix is evaluated by only one stage: {prefix}, {output}"
+            );
+            let prepass = loop_stages[0];
+            assert!(is_singleton_stage(prepass), "the prefix is evaluated once");
+            assert_eq!(pipeline.stages.len(), 4, "one prepass and three output stages");
+            assert!(
+                pipeline
+                    .stages
+                    .iter()
+                    .filter(|stage| stage.entry_point != prepass.entry_point)
+                    .all(|stage| { prepass.writes.iter().any(|binding| stage.reads.contains(binding)) }),
+                "all outputs read the shared prefix"
+            );
+            assert_naga_accepts_spirv(&lowered.spirv);
+            assert_scalar_prefix_emits_valid_wgsl(&source);
+        }
+    }
+}
+
+#[test]
 fn conditional_state_prefix_publishes_all_live_outs_to_mixed_consumers() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
