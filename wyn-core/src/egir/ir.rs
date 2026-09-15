@@ -182,16 +182,14 @@ pub struct ResultLeaf<Ty, R, P> {
 enum ResultNode<Ty, R, P> {
     Product {
         ty: Ty,
-        fields: Box<[ResultNode<Ty, R, P>]>,
+        fields: Box<[ResultTree<Ty, R, P>]>,
     },
     Leaf(ResultLeaf<Ty, R, P>),
 }
 
 fn result_node_contains_return_value<Ty>(node: &ResultNode<Ty, ValueId, PlaceId>, value: ValueId) -> bool {
     match node {
-        ResultNode::Product { fields, .. } => {
-            fields.iter().any(|field| result_node_contains_return_value(field, value))
-        }
+        ResultNode::Product { fields, .. } => fields.iter().any(|field| field.contains_value(value)),
         ResultNode::Leaf(ResultLeaf {
             destination: ResultDestination::ReturnValue(candidate),
             ..
@@ -504,7 +502,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         Self {
             root: ResultNode::Product {
                 ty,
-                fields: fields.into_iter().map(|field| field.root).collect(),
+                fields: fields.into_iter().collect(),
             },
         }
     }
@@ -517,9 +515,15 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
     }
 
     pub fn field_count(&self) -> usize {
+        self.fields().len()
+    }
+
+    /// Borrow top-level logical fields in declaration order. A leaf is its
+    /// own sole field; each product child is itself a complete result tree.
+    pub fn fields(&self) -> &[Self] {
         match &self.root {
-            ResultNode::Product { fields, .. } => fields.len(),
-            ResultNode::Leaf(_) => 1,
+            ResultNode::Product { fields, .. } => fields,
+            ResultNode::Leaf(_) => std::slice::from_ref(self),
         }
     }
 
@@ -533,11 +537,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: Clone,
         P: Clone,
     {
-        match &self.root {
-            ResultNode::Product { fields, .. } => fields.get(index).cloned().map(|root| Self { root }),
-            ResultNode::Leaf(_) if index == 0 => Some(self.clone()),
-            ResultNode::Leaf(_) => None,
-        }
+        self.fields().get(index).cloned()
     }
 
     /// Borrow-independent views of the top-level logical result fields. A
@@ -548,7 +548,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: Clone,
         P: Clone,
     {
-        (0..self.field_count()).filter_map(|field| self.field(field)).collect()
+        self.fields().to_vec()
     }
 
     pub fn top_level_field_index(&self, field: &Self) -> Option<usize>
@@ -557,12 +557,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: PartialEq,
         P: PartialEq,
     {
-        match &self.root {
-            ResultNode::Product { fields, .. } => {
-                fields.iter().position(|candidate| candidate == &field.root)
-            }
-            ResultNode::Leaf(_) => (self == field).then_some(0),
-        }
+        self.fields().iter().position(|candidate| candidate == field)
     }
 
     /// Borrow-independent views of the physical destination leaves, in ABI
@@ -591,25 +586,10 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         R: Clone,
         P: Clone,
     {
-        fn walk<Ty: Clone, R: Clone, P: Clone>(
-            node: &ResultNode<Ty, R, P>,
-            path: &mut Vec<usize>,
-            leaves: &mut Vec<(Box<[usize]>, ResultLeaf<Ty, R, P>)>,
-        ) {
-            match node {
-                ResultNode::Product { fields, .. } => {
-                    for (index, field) in fields.iter().enumerate() {
-                        path.push(index);
-                        walk(field, path, leaves);
-                        path.pop();
-                    }
-                }
-                ResultNode::Leaf(leaf) => leaves.push((path.clone().into_boxed_slice(), leaf.clone())),
-            }
-        }
-
         let mut leaves = Vec::with_capacity(self.destination_count());
-        walk(&self.root, &mut Vec::new(), &mut leaves);
+        self.for_each_leaf_with_path(|path, leaf| {
+            leaves.push((path.into(), leaf.clone()));
+        });
         leaves
     }
 
@@ -634,13 +614,12 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
             match node {
                 ResultNode::Product { fields, .. } => {
                     for field in fields {
-                        walk(field, visit);
+                        walk(&field.root, visit);
                     }
                 }
-                ResultNode::Leaf(leaf) => visit(&leaf.ty, &leaf.destination),
+                ResultNode::Leaf(leaf) => visit(leaf.ty(), leaf.destination()),
             }
         }
-
         walk(&self.root, &mut visit);
     }
 
@@ -655,7 +634,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
             match node {
                 ResultNode::Product { ty: _, fields } => {
                     for field in fields {
-                        walk(field, visit);
+                        walk(&mut field.root, visit);
                     }
                 }
                 ResultNode::Leaf(leaf) => visit(&mut leaf.ty, &mut leaf.destination),
@@ -671,7 +650,7 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                 ResultNode::Product { ty, fields } => {
                     visit(ty);
                     for field in fields {
-                        walk(field, visit);
+                        walk(&mut field.root, visit);
                     }
                 }
                 ResultNode::Leaf(leaf) => visit(&mut leaf.ty),
@@ -695,7 +674,12 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
             match node {
                 ResultNode::Product { ty, fields } => ResultNode::Product {
                     ty: ty.clone(),
-                    fields: fields.iter().map(|field| walk(field, map)).collect(),
+                    fields: fields
+                        .iter()
+                        .map(|field| ResultTree {
+                            root: walk(&field.root, map),
+                        })
+                        .collect(),
                 },
                 ResultNode::Leaf(leaf) => ResultNode::Leaf(ResultLeaf {
                     ty: leaf.ty.clone(),
@@ -727,7 +711,11 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
                     fields: fields
                         .into_vec()
                         .into_iter()
-                        .map(|field| walk(field, map_ty, map_return, map_place))
+                        .map(|field| {
+                            Ok(ResultTree {
+                                root: walk(field.root, map_ty, map_return, map_place)?,
+                            })
+                        })
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                 },
@@ -769,9 +757,69 @@ impl<Ty, R, P> ResultTree<Ty, R, P> {
         )
         .unwrap()
     }
+
+    /// Visit physical leaves without copying types, destinations, or paths.
+    pub fn for_each_leaf_with_path<'a>(
+        &'a self,
+        mut visit: impl FnMut(&[usize], &'a ResultLeaf<Ty, R, P>),
+    ) {
+        let result = self.try_for_each_leaf_with_path(|path, leaf| {
+            visit(path, leaf);
+            Ok::<_, std::convert::Infallible>(())
+        });
+        match result {
+            Ok(()) => (),
+            Err(never) => match never {},
+        }
+    }
+
+    /// Visit borrowed physical leaves, stopping at the first visitor error.
+    pub fn try_for_each_leaf_with_path<'a, E>(
+        &'a self,
+        mut visit: impl FnMut(&[usize], &'a ResultLeaf<Ty, R, P>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        fn walk<'a, Ty, R, P, E>(
+            node: &'a ResultNode<Ty, R, P>,
+            path: &mut SmallVec<[usize; 4]>,
+            visit: &mut impl FnMut(&[usize], &'a ResultLeaf<Ty, R, P>) -> Result<(), E>,
+        ) -> Result<(), E> {
+            match node {
+                ResultNode::Product { fields, .. } => {
+                    for (index, field) in fields.iter().enumerate() {
+                        path.push(index);
+                        walk(&field.root, path, visit)?;
+                        path.pop();
+                    }
+                    Ok(())
+                }
+                ResultNode::Leaf(leaf) => visit(path, leaf),
+            }
+        }
+        walk(&self.root, &mut SmallVec::new(), &mut visit)
+    }
 }
 
 impl<Ty> ResultBinding<Ty> {
+    /// Exactly one returned leaf, ignoring place destinations. Repeated
+    /// occurrences of the same value still count as multiple return leaves.
+    pub fn single_value(&self) -> Option<ValueId> {
+        fn walk<Ty>(node: &ResultNode<Ty, ValueId, PlaceId>, value: &mut Option<ValueId>) -> bool {
+            match node {
+                ResultNode::Product { fields, .. } => fields.iter().all(|field| walk(&field.root, value)),
+                ResultNode::Leaf(leaf) => match leaf.destination() {
+                    ResultDestination::ReturnValue(next) => value.replace(*next).is_none(),
+                    ResultDestination::Place(_) => true,
+                },
+            }
+        }
+        let mut value = None;
+        if walk(&self.root, &mut value) {
+            value
+        } else {
+            None
+        }
+    }
+
     pub fn values(&self) -> Vec<ValueId> {
         let mut values = Vec::new();
         self.for_each_destination(|_, destination| {
@@ -789,18 +837,10 @@ impl<Ty> ResultBinding<Ty> {
     pub fn top_level_field_containing_value(&self, value: ValueId) -> Option<usize> {
         match &self.root {
             ResultNode::Product { fields, .. } => {
-                fields.iter().position(|field| result_node_contains_return_value(field, value))
+                fields.iter().position(|field| field.contains_value(value))
             }
             ResultNode::Leaf(_) => self.contains_value(value).then_some(0),
         }
-    }
-
-    pub fn single_value(&self) -> Option<ValueId> {
-        let values = self.values();
-        let [value] = values.as_slice() else {
-            return None;
-        };
-        Some(*value)
     }
 
     pub fn places(&self) -> Vec<PlaceId> {
@@ -901,7 +941,11 @@ impl<Ty: Clone> FunctionResult<Ty> {
                     ty: ty.clone(),
                     fields: fields
                         .iter()
-                        .map(|field| walk(field, bind_return, bind_place))
+                        .map(|field| {
+                            Ok(ResultTree {
+                                root: walk(&field.root, bind_return, bind_place)?,
+                            })
+                        })
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                 },
@@ -1333,7 +1377,12 @@ pub fn by_value_function_result<Lang: Language>(ty: Lang::Ty) -> FunctionResult<
             let fields = fields.to_vec();
             ResultNode::Product {
                 ty,
-                fields: fields.into_iter().map(|field| build::<Lang>(field, next_slot)).collect(),
+                fields: fields
+                    .into_iter()
+                    .map(|field| ResultTree {
+                        root: build::<Lang>(field, next_slot),
+                    })
+                    .collect(),
             }
         } else {
             let slot = ReturnSlotId::new(*next_slot);
@@ -1367,7 +1416,9 @@ pub fn destination_passing_function_result<R, Lang: Language>(
                 ty,
                 fields: fields
                     .into_iter()
-                    .map(|field| build::<R, Lang>(field, parameters, next_slot, next_destination))
+                    .map(|field| ResultTree {
+                        root: build::<R, Lang>(field, parameters, next_slot, next_destination),
+                    })
                     .collect(),
             };
         }

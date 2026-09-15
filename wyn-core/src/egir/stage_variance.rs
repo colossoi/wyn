@@ -11,6 +11,8 @@
 //! profitability remain scheduling decisions.
 
 use smallvec::SmallVec;
+use std::fmt::Debug;
+use std::hash::Hash;
 
 use crate::builtins::catalog;
 use crate::flow::BlockId;
@@ -66,12 +68,59 @@ pub(crate) enum DependenceSource {
     Unknown,
 }
 
+impl DependenceSource {
+    fn bit(self) -> u16 {
+        1 << match self {
+            Self::Uniform => 0,
+            Self::PushConstant => 1,
+            Self::StageInput => 2,
+            Self::Storage => 3,
+            Self::Texture => 4,
+            Self::Sampler => 5,
+            Self::StorageImage => 6,
+            Self::DispatchBuiltin => 7,
+            Self::InvocationBuiltin => 8,
+            Self::RepeatedRegionInput => 9,
+            Self::WorkgroupMemory => 10,
+            Self::Output => 11,
+            Self::SideEffect => 12,
+            Self::Unknown => 13,
+        }
+    }
+}
+
+/// A set drawn only from the finite source-category domain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourceSet(u16);
+
+impl SourceSet {
+    pub(crate) fn contains(self, source: DependenceSource) -> bool {
+        self.0 & source.bit() != 0
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn join_assign(&mut self, other: Self) -> bool {
+        let previous = self.0;
+        self.0 |= other.0;
+        self.0 != previous
+    }
+}
+
+impl FromIterator<DependenceSource> for SourceSet {
+    fn from_iter<T: IntoIterator<Item = DependenceSource>>(sources: T) -> Self {
+        Self(sources.into_iter().fold(0, |bits, source| bits | source.bit()))
+    }
+}
+
 /// Dependence facts for one value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StageDependence {
     uniformity: Uniformity,
     loop_dependencies: LookupSet<BlockId>,
-    sources: LookupSet<DependenceSource>,
+    sources: SourceSet,
 }
 
 impl StageDependence {
@@ -79,7 +128,7 @@ impl StageDependence {
         Self {
             uniformity: Uniformity::Constant,
             loop_dependencies: LookupSet::new(),
-            sources: LookupSet::new(),
+            sources: SourceSet::default(),
         }
     }
 
@@ -114,12 +163,12 @@ impl StageDependence {
         &self.loop_dependencies
     }
 
-    pub(crate) fn sources(&self) -> &LookupSet<DependenceSource> {
+    pub(crate) fn sources(&self) -> &SourceSet {
         &self.sources
     }
 
     pub(crate) fn depends_on(&self, source: DependenceSource) -> bool {
-        self.sources.contains(&source)
+        self.sources.contains(source)
     }
 
     fn with_loop_dependencies(mut self, dependencies: &LookupSet<BlockId>) -> Self {
@@ -128,21 +177,62 @@ impl StageDependence {
     }
 
     fn join(mut self, other: &Self) -> Self {
-        self.uniformity = self.uniformity.join(other.uniformity);
-        self.loop_dependencies.extend(other.loop_dependencies.iter().copied());
-        self.sources.extend(other.sources.iter().copied());
+        self.join_assign(other);
         self
+    }
+
+    /// Accumulate information and report growth as part of the same operation.
+    fn join_assign(&mut self, other: &Self) -> bool {
+        let uniformity = self.uniformity.join(other.uniformity);
+        let mut changed = self.uniformity != uniformity;
+        self.uniformity = uniformity;
+        changed |= self.sources.join_assign(other.sources);
+        let previous_loops = self.loop_dependencies.len();
+        self.loop_dependencies.extend(other.loop_dependencies.iter().copied());
+        changed | (self.loop_dependencies.len() != previous_loops)
+    }
+}
+
+/// All facts are seeded before solving. The only update admits a monotone
+/// join at an existing key; missing graph references are analysis errors.
+struct GrowingFacts<K> {
+    facts: LookupMap<K, StageDependence>,
+}
+
+impl<K: Copy + Debug + Eq + Hash> GrowingFacts<K> {
+    fn new(facts: impl IntoIterator<Item = (K, StageDependence)>) -> Self {
+        Self {
+            facts: facts.into_iter().collect(),
+        }
+    }
+
+    fn get(&self, key: K) -> Result<&StageDependence, String> {
+        let Some(fact) = self.facts.get(&key) else {
+            return Err(format!(
+                "stage-dependence analysis references an unseeded graph key {key:?}"
+            ));
+        };
+        Ok(fact)
+    }
+
+    fn join(&mut self, key: K, next: &StageDependence) -> Result<bool, String> {
+        let Some(fact) = self.facts.get_mut(&key) else {
+            return Err(format!(
+                "stage-dependence analysis updates an unseeded graph key {key:?}"
+            ));
+        };
+        Ok(fact.join_assign(next))
     }
 }
 
 /// Dependence of every argument at one pure user-call node.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CallArgumentDependences {
+pub(crate) struct CallArgumentDependences<'a> {
     pub(crate) callee: FunctionId,
-    pub(crate) arguments: SmallVec<[(ValueId, StageDependence); 4]>,
+    pub(crate) arguments: SmallVec<[(ValueId, &'a StageDependence); 4]>,
 }
 
-impl CallArgumentDependences {
+impl CallArgumentDependences<'_> {
     /// Whether the call combines stage-invariant and invocation-varying data.
     pub(crate) fn has_mixed_stage_variance(&self) -> bool {
         self.arguments.iter().any(|(_, facts)| facts.is_stage_invariant())
@@ -154,6 +244,7 @@ impl CallArgumentDependences {
 #[derive(Clone, Debug)]
 pub(crate) struct StageDependenceAnalysis {
     values: LookupMap<ValueId, StageDependence>,
+    unknown: StageDependence,
 }
 
 pub(crate) fn bind_parameter_dependences<R, Ty>(
@@ -177,32 +268,25 @@ impl StageDependenceAnalysis {
         let interfaces = analysis.interfaces()?;
         let loops = analysis.loops();
         let producers = analysis.producers();
-        let mut values = graph
-            .nodes
-            .iter()
-            .map(|(node, definition)| {
-                let dependence = match &definition.kind {
-                    ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => {
-                        parameter_dependences.get(parameter).cloned().unwrap_or_else(unknown_dependence)
-                    }
-                    ValueKind::BlockParam { .. }
-                    | ValueKind::Pure { .. }
-                    | ValueKind::Union { .. }
-                    | ValueKind::CallResult { .. }
-                    | ValueKind::PlaceLength { .. }
-                    | ValueKind::PlaceView { .. } => StageDependence::constant(),
-                    ValueKind::SideEffectResult => side_effect_dependence(node, producers, loops),
-                };
-                (node, dependence)
-            })
-            .collect::<LookupMap<_, _>>();
-        let mut block_controls = graph
-            .skeleton
-            .blocks
-            .keys()
-            .map(|block| (block, StageDependence::constant()))
-            .collect::<LookupMap<_, _>>();
+        let mut values = GrowingFacts::new(graph.nodes.iter().map(|(node, definition)| {
+            let dependence = match &definition.kind {
+                ValueKind::Constant(_) => StageDependence::constant(),
+                ValueKind::FuncParam { parameter } => {
+                    parameter_dependences.get(parameter).cloned().unwrap_or_else(unknown_dependence)
+                }
+                ValueKind::BlockParam { .. }
+                | ValueKind::Pure { .. }
+                | ValueKind::Union { .. }
+                | ValueKind::CallResult { .. }
+                | ValueKind::PlaceLength { .. }
+                | ValueKind::PlaceView { .. } => StageDependence::constant(),
+                ValueKind::SideEffectResult => side_effect_dependence(node, producers, loops),
+            };
+            (node, dependence)
+        }));
+        let mut block_controls = GrowingFacts::new(
+            graph.skeleton.blocks.keys().map(|block| (block, StageDependence::constant())),
+        );
 
         // `Constant` plus empty dependence sets is the optimistic lattice
         // bottom. Facts only accumulate, so CFG cycles converge.
@@ -213,29 +297,29 @@ impl StageDependenceAnalysis {
                 if block == graph.skeleton.entry {
                     continue;
                 }
-                let next = match interface.edges() {
-                    edges if !edges.is_empty() => {
-                        edges.iter().fold(StageDependence::constant(), |dependence, edge| {
-                            dependence.join(&edge_dependence(
-                                &block_controls,
-                                &values,
-                                edge.source(),
-                                edge.condition(),
-                            ))
-                        })
-                    }
-                    _ => unknown_dependence(),
+                let mut next = if interface.edges().is_empty() {
+                    unknown_dependence()
+                } else {
+                    StageDependence::constant()
                 };
-                changed |= accumulate(&mut block_controls, block, next);
+                for edge in interface.edges() {
+                    join_edge(
+                        &mut next,
+                        &block_controls,
+                        &values,
+                        edge.source(),
+                        edge.condition(),
+                    )?;
+                }
+                changed |= block_controls.join(block, &next)?;
             }
 
             for (node, definition) in &graph.nodes {
                 let next = match &definition.kind {
-                    ValueKind::Constant(_) => StageDependence::constant(),
-                    ValueKind::FuncParam { parameter } => {
-                        parameter_dependences.get(parameter).cloned().unwrap_or_else(unknown_dependence)
+                    // These seeds do not depend on any evolving graph fact.
+                    ValueKind::Constant(_) | ValueKind::FuncParam { .. } | ValueKind::SideEffectResult => {
+                        continue
                     }
-                    ValueKind::SideEffectResult => side_effect_dependence(node, producers, loops),
                     ValueKind::BlockParam { block, index } => {
                         let incoming = match interfaces.get(block).and_then(|interface| {
                             interface
@@ -246,39 +330,40 @@ impl StageDependenceAnalysis {
                                 })
                                 .map(|column| interface.edges().iter().zip(column.arguments()))
                         }) {
-                            Some(incoming) => incoming.fold(
-                                StageDependence::constant(),
-                                |dependence, (edge, argument)| {
-                                    dependence.join(&value_dependence(&values, argument.value())).join(
-                                        &edge_dependence(
-                                            &block_controls,
-                                            &values,
-                                            edge.source(),
-                                            edge.condition(),
-                                        ),
-                                    )
-                                },
-                            ),
+                            Some(incoming) => {
+                                let mut dependence = StageDependence::constant();
+                                for (edge, argument) in incoming {
+                                    dependence.join_assign(values.get(argument.value())?);
+                                    join_edge(
+                                        &mut dependence,
+                                        &block_controls,
+                                        &values,
+                                        edge.source(),
+                                        edge.condition(),
+                                    )?;
+                                }
+                                dependence
+                            }
                             _ => unknown_dependence(),
                         };
                         incoming
                             .with_loop_dependencies(loops.dependencies(*block).unwrap_or(&LookupSet::new()))
                     }
-                    ValueKind::Pure { op, operands } => pure_dependence(op, operands, &values),
+                    ValueKind::Pure { op, operands } => pure_dependence(op, operands, &values)?,
                     ValueKind::CallResult { call, .. } => {
-                        call_result_dependence(graph, *call, &values, producers, loops)
+                        call_result_dependence(graph, *call, &values, producers, loops)?
                     }
                     ValueKind::PlaceLength { place } | ValueKind::PlaceView { place } => graph
                         .place_value_dependencies(*place)
                         .into_iter()
-                        .fold(StageDependence::constant(), |dependence, value| {
-                            dependence.join(&value_dependence(&values, value))
-                        }),
+                        .try_fold(StageDependence::constant(), |dependence, value| {
+                            Ok::<_, String>(dependence.join(values.get(value)?))
+                        })?,
                     ValueKind::Union { left, right } => {
-                        value_dependence(&values, *left).join(&value_dependence(&values, *right))
+                        values.get(*left)?.clone().join(values.get(*right)?)
                     }
                 };
-                changed |= accumulate(&mut values, node, next);
+                changed |= values.join(node, &next)?;
             }
 
             if !changed {
@@ -286,7 +371,10 @@ impl StageDependenceAnalysis {
             }
         }
 
-        Ok(Self { values })
+        Ok(Self {
+            values: values.facts,
+            unknown: unknown_dependence(),
+        })
     }
 
     /// Analyze an entry or a graph projected from it. Function-parameter indices are
@@ -326,15 +414,15 @@ impl StageDependenceAnalysis {
         seg_body_parameter_dependences(parameter_count, enclosing, body)
     }
 
-    pub(crate) fn dependence(&self, node: ValueId) -> StageDependence {
-        self.values.get(&node).cloned().unwrap_or_else(unknown_dependence)
+    pub(crate) fn dependence(&self, node: ValueId) -> &StageDependence {
+        self.values.get(&node).unwrap_or(&self.unknown)
     }
 
     pub(crate) fn call_arguments<P: Family>(
         &self,
         graph: &EGraph<P>,
         node: ValueId,
-    ) -> Option<CallArgumentDependences> {
+    ) -> Option<CallArgumentDependences<'_>> {
         let ValueKind::CallResult { call, .. } = &graph.nodes.get(node)?.kind else {
             return None;
         };
@@ -369,7 +457,9 @@ fn seg_body_parameter_dependences(
         leading
     ];
     parameter_dependences.extend(body.captures.iter().map(|capture| {
-        capture.value().map_or_else(unknown_dependence, |capture| enclosing.dependence(capture))
+        capture.value().map_or_else(unknown_dependence, |capture| {
+            enclosing.dependence(capture).clone()
+        })
     }));
     Ok(parameter_dependences)
 }
@@ -411,8 +501,8 @@ fn entry_input_dependence(kind: &EntryInputKind) -> StageDependence {
 fn pure_dependence<R>(
     op: &PureOp<R>,
     operands: &[ValueId],
-    values: &LookupMap<ValueId, StageDependence>,
-) -> StageDependence {
+    values: &GrowingFacts<ValueId>,
+) -> Result<StageDependence, String> {
     let known = catalog().known();
     let intrinsic = match op {
         PureOp::Intrinsic { id, .. }
@@ -437,8 +527,8 @@ fn pure_dependence<R>(
         }
         _ => StageDependence::constant(),
     };
-    operands.iter().fold(intrinsic, |dependence, operand| {
-        dependence.join(&value_dependence(values, *operand))
+    operands.iter().try_fold(intrinsic, |dependence, operand| {
+        Ok(dependence.join(values.get(*operand)?))
     })
 }
 
@@ -465,69 +555,58 @@ fn side_effect_dependence(
 fn call_result_dependence<P: Family>(
     graph: &EGraph<P>,
     call: CallSiteId,
-    values: &LookupMap<ValueId, StageDependence>,
+    values: &GrowingFacts<ValueId>,
     producers: &SideEffectIndex,
     loops: &LoopAnalysis,
-) -> StageDependence {
+) -> Result<StageDependence, String> {
     let site = graph.call(call);
-    let arguments = site.arguments().fold(StageDependence::constant(), |dependence, argument| {
-        dependence.join(&operand_dependence(graph, argument, values))
-    });
+    let mut arguments = StageDependence::constant();
+    for argument in site.arguments() {
+        join_operand(&mut arguments, graph, argument, values)?;
+    }
     if matches!(site.effects(), CallEffects::Pure) {
-        return arguments;
+        return Ok(arguments);
     }
     let effects = StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::SideEffect);
-    let effects = producers
-        .call_site(call)
-        .and_then(|site| loops.dependencies(site.block))
-        .map_or(effects.clone(), |loops| effects.with_loop_dependencies(loops));
-    arguments.join(&effects)
+    let effects = match producers.call_site(call).and_then(|site| loops.dependencies(site.block)) {
+        Some(loops) => effects.with_loop_dependencies(loops),
+        None => effects,
+    };
+    Ok(arguments.join(&effects))
 }
 
-fn operand_dependence<P: Family>(
+fn join_operand<P: Family>(
+    dependence: &mut StageDependence,
     graph: &EGraph<P>,
     operand: OperandRef,
-    values: &LookupMap<ValueId, StageDependence>,
-) -> StageDependence {
+    values: &GrowingFacts<ValueId>,
+) -> Result<(), String> {
     match operand {
-        OperandRef::Value(value) => value_dependence(values, value),
-        OperandRef::View(view) => value_dependence(values, view.value()),
-        OperandRef::Place(place) => graph
-            .place_value_dependencies(place)
-            .into_iter()
-            .fold(StageDependence::constant(), |dependence, value| {
-                dependence.join(&value_dependence(values, value))
-            }),
+        OperandRef::Value(value) => {
+            dependence.join_assign(values.get(value)?);
+        }
+        OperandRef::View(view) => {
+            dependence.join_assign(values.get(view.value())?);
+        }
+        OperandRef::Place(place) => {
+            for value in graph.place_value_dependencies(place) {
+                dependence.join_assign(values.get(value)?);
+            }
+        }
     }
+    Ok(())
 }
 
-fn value_dependence(values: &LookupMap<ValueId, StageDependence>, node: ValueId) -> StageDependence {
-    values.get(&node).cloned().unwrap_or_else(unknown_dependence)
-}
-
-fn edge_dependence(
-    block_controls: &LookupMap<BlockId, StageDependence>,
-    values: &LookupMap<ValueId, StageDependence>,
+fn join_edge(
+    dependence: &mut StageDependence,
+    block_controls: &GrowingFacts<BlockId>,
+    values: &GrowingFacts<ValueId>,
     source: BlockId,
     condition: Option<ValueId>,
-) -> StageDependence {
-    let control = block_controls.get(&source).cloned().unwrap_or_else(unknown_dependence);
-    condition.map_or(control.clone(), |condition| {
-        control.join(&value_dependence(values, condition))
-    })
-}
-
-fn accumulate<K: Eq + std::hash::Hash + Copy>(
-    facts: &mut LookupMap<K, StageDependence>,
-    key: K,
-    next: StageDependence,
-) -> bool {
-    let current = facts.get(&key).cloned().unwrap_or_else(StageDependence::constant);
-    let accumulated = current.clone().join(&next);
-    if current != accumulated {
-        facts.insert(key, accumulated);
-        true
-    } else {
-        false
+) -> Result<(), String> {
+    dependence.join_assign(block_controls.get(source)?);
+    if let Some(condition) = condition {
+        dependence.join_assign(values.get(condition)?);
     }
+    Ok(())
 }

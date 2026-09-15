@@ -39,6 +39,23 @@ fn parameter_dependences(
 }
 
 #[test]
+fn fact_updates_are_monotone_and_only_admit_seeded_keys() {
+    let uniform = StageDependence::from_source(Uniformity::StageUniform, DependenceSource::Uniform);
+    let varying = StageDependence::from_source(Uniformity::InvocationVarying, DependenceSource::StageInput);
+    let mut facts = GrowingFacts::new([(0usize, uniform.clone())]);
+    assert!(facts.join(0, &varying).unwrap());
+    assert!(!facts.join(0, &uniform).unwrap());
+    assert!(!facts.join(0, &varying).unwrap());
+    assert!(!facts.join(0, &StageDependence::constant()).unwrap());
+    let joined = facts.get(0).unwrap();
+    assert_eq!(joined.uniformity(), Uniformity::InvocationVarying);
+    assert!(joined.depends_on(DependenceSource::Uniform));
+    assert!(joined.depends_on(DependenceSource::StageInput));
+    assert!(facts.get(1).is_err());
+    assert!(facts.join(1, &uniform).is_err());
+}
+
+#[test]
 fn shared_graph_facts_keep_parameter_seed_results_separate() {
     let params = semantic_params([("capture", u32_ty())]);
     let mut graph = EGraph::<Semantic>::new();

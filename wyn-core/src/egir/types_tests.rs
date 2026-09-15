@@ -442,3 +442,26 @@ fn retype_node_does_not_leave_stale_hash_cons_key() {
     assert_ne!(old_call, reinterned_old_call);
     assert!(graph.verify_hash_cons().is_ok());
 }
+
+#[test]
+fn single_return_counts_leaves_and_ignores_place_destinations() {
+    let mut values = SlotMap::<ValueId, ()>::with_key();
+    let value = values.insert(());
+    let mut places = SlotMap::<PlaceId, ()>::with_key();
+    let place = places.insert(());
+    let returned = ResultBinding::destination((), ResultDestination::ReturnValue(value));
+    let stored = ResultBinding::destination((), ResultDestination::Place(PlaceDestination::Fixed(place)));
+    let mixed = ResultBinding::product(
+        (),
+        [stored.clone(), ResultBinding::product((), [returned.clone()])],
+    );
+    assert_eq!(returned.single_value(), Some(value));
+    assert_eq!(stored.single_value(), None);
+    assert_eq!(mixed.single_value(), Some(value));
+    assert_eq!(
+        ResultBinding::product((), [returned.clone(), returned]).single_value(),
+        None
+    );
+    assert_eq!(ResultBinding::product((), [stored]).single_value(), None);
+    assert_eq!(ResultBinding::<()>::product((), []).single_value(), None);
+}

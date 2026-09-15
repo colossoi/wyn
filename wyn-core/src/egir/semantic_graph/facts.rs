@@ -3,10 +3,12 @@ use super::{
     graph_ops, read_resources, screma, EGraph, GraphResource, ResourceAccess, SegResourceAccess, Semantic,
     SemanticOpId, SideEffectKind, SideEffectSite, Soac, SoacEffect, ValueId,
 };
+use crate::egir::analysis::GraphAnalysis;
 use crate::egir::ir::{BodySite, ResultDestination};
 use crate::egir::soac::SegmentedMetadata;
 use crate::egir::types::PureOp;
-use crate::egir::types::{CallEffects, EffectOp, ResultBinding, ValueKind};
+use crate::egir::types::{CallEffects, EffectOp, ValueKind};
+use crate::flow::BlockId;
 use crate::types::TypeExt;
 use crate::{LookupMap, SortedSet, StableMap};
 use wyn_fusion::{Builder, Error, GroupId, OrderingReason, PortId};
@@ -17,7 +19,7 @@ pub(crate) struct SourceValue {
     pub value: ValueId,
 }
 
-pub(crate) type ScopeKey = (BodySite, crate::flow::BlockId);
+pub(crate) type ScopeKey = (BodySite, BlockId);
 
 pub(crate) enum Incidence {
     Boundary,
@@ -68,27 +70,28 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
     pub fn add_body(
         &mut self,
         body: BodySite,
-        analysis: &crate::egir::analysis::GraphAnalysis<'_, Semantic<R>>,
-        observers: impl IntoIterator<Item = (crate::flow::BlockId, ValueId)>,
+        analysis: &GraphAnalysis<'_, Semantic<R>>,
+        observers: impl IntoIterator<Item = (BlockId, ValueId)>,
     ) -> Result<(), Error> {
         let graph = analysis.graph();
-        let mut producers = LookupMap::new();
-        let mut results = Vec::new();
+        let mut last_declared = LookupMap::new();
+        let mut first_origins = LookupMap::new();
+        let mut first_single_returns = LookupMap::new();
+        let mut field_order = 0;
         let mut groups = Vec::new();
         for (block, contents) in &graph.skeleton.blocks {
             for (index, effect) in contents.side_effects.iter().enumerate() {
                 let scope = (body, block);
-                let fields = graph
-                    .effect_result_binding(effect)
-                    .map(|result| result.top_level_fields())
-                    .unwrap_or_default();
+                let fields =
+                    graph.effect_result_binding(effect).map(|result| result.fields()).unwrap_or_default();
                 let group = self.builder.operation(scope, vec![], fields.len())?;
                 let ports = self.builder.outputs(group)?.to_vec();
-                for (field, port) in fields.into_iter().zip(ports) {
-                    for (path, leaf) in field.destination_leaves_with_paths() {
+                for (field, port) in fields.iter().zip(ports) {
+                    field.try_for_each_leaf_with_path(|path, leaf| {
                         let ResultDestination::ReturnValue(value) = leaf.destination() else {
-                            continue;
+                            return Ok(());
                         };
+                        let value = *value;
                         let (leaf_port, incidence) = if path.is_empty() {
                             (port, Incidence::Boundary)
                         } else {
@@ -101,21 +104,27 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
                             )
                         };
                         if matches!(body, BodySite::Entry(_))
-                            && graph.nodes[*value].ty.contains_runtime_sized_composite_array()
+                            && graph.nodes[value].ty.contains_runtime_sized_composite_array()
                         {
                             self.runtime_arrays.insert(port);
                         }
-                        producers.insert(*value, (block, leaf_port));
+                        last_declared.insert(value, (block, leaf_port));
                         self.values.insert(
                             leaf_port,
                             ValueFact {
                                 scope,
-                                value: *value,
+                                value,
                                 incidence,
                             },
                         );
+                        Ok(())
+                    })?;
+                    let ordered_port = (field_order, (block, port));
+                    first_origins.entry(field).or_insert(ordered_port);
+                    if let Some(value) = field.single_value() {
+                        first_single_returns.entry(value).or_insert(ordered_port);
                     }
-                    results.push((block, port, field));
+                    field_order += 1;
                 }
                 let captures = match &effect.kind {
                     SideEffectKind::Soac(SoacEffect(_, soac)) => soac.capture_nodes().collect(),
@@ -134,13 +143,29 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
                 groups.push(group);
             }
         }
+        // Incidence lookup keeps the last exact returned leaf. Its fallback
+        // selects the first matching field in skeleton order, independently of
+        // origin registration order. Borrowed keys live only while building this body.
+        let producer = |value| {
+            last_declared.get(&value).copied().or_else(|| {
+                let value = graph.canonical_value(value);
+                graph
+                    .value(value)
+                    .result_origins()
+                    .iter()
+                    .filter_map(|origin| first_origins.get(origin))
+                    .chain(first_single_returns.get(&value))
+                    .min_by_key(|(order, _)| *order)
+                    .map(|(_, port)| *port)
+            })
+        };
         for &group in &groups {
             let op = &self.operations[&group];
             let scope = op.scope;
             let effect = graph.skeleton.effect(op.site);
             let inputs = graph_ops::effect_value_inputs(graph, effect)
                 .into_iter()
-                .map(|value| self.port(scope, graph, value, &producers, &results))
+                .map(|value| self.port(scope, graph, value, &producer))
                 .collect::<Result<_, _>>()?;
             self.builder.set_inputs(group, inputs)?;
             let captures = self.operations[&group].captures.iter().copied();
@@ -195,7 +220,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
             })
             .chain(observers)
         {
-            let port = self.port((body, block), graph, value, &producers, &results)?;
+            let port = self.port((body, block), graph, value, &producer)?;
             self.builder.observe(port)?;
         }
         let interfaces = analysis.interfaces().map_err(|_| Error::Port)?;
@@ -223,23 +248,12 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
         scope: ScopeKey,
         graph: &EGraph<Semantic<R>>,
         value: ValueId,
-        producers: &LookupMap<ValueId, (crate::flow::BlockId, PortId)>,
-        results: &[(
-            crate::flow::BlockId,
-            PortId,
-            ResultBinding<polytype::Type<crate::ast::TypeName>>,
-        )],
+        producer: &impl Fn(ValueId) -> Option<(BlockId, PortId)>,
     ) -> Result<PortId, Error> {
         if let Some(port) = self.ports.get(&(scope, value)) {
             return Ok(*port);
         }
-        let producer = producers.get(&value).copied().or_else(|| {
-            results
-                .iter()
-                .find(|(_, _, result)| graph.value_has_result_origin(value, result))
-                .map(|(block, port, _)| (*block, *port))
-        });
-        let (port, incidence) = if let Some((block, port)) = producer {
+        let (port, incidence) = if let Some((block, port)) = producer(value) {
             if block == scope.1 {
                 self.ports.insert((scope, value), port);
                 return Ok(port);
@@ -251,7 +265,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
         } else {
             let node = graph.nodes.get(value).ok_or(Error::Port)?;
             if let Some(alias) = node.alias.or_else(|| graph_ops::projected_tuple_field(graph, value)) {
-                let port = self.port(scope, graph, alias, producers, results)?;
+                let port = self.port(scope, graph, alias, producer)?;
                 self.ports.insert((scope, value), port);
                 return Ok(port);
             }
@@ -262,7 +276,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
                 _ => crate::egir::slice::value_inputs(graph, value),
             }
             .into_iter()
-            .map(|value| self.port(scope, graph, value, producers, results))
+            .map(|value| self.port(scope, graph, value, producer))
             .collect::<Result<Vec<_>, _>>()?;
             if matches!(
                 node.kind(),
@@ -294,7 +308,7 @@ impl<R: GraphResource + Copy + Ord> Facts<R> {
 }
 
 fn resources<R: GraphResource + Copy + Ord>(
-    analysis: &crate::egir::analysis::GraphAnalysis<'_, Semantic<R>>,
+    analysis: &GraphAnalysis<'_, Semantic<R>>,
     effect: &super::SideEffect<Semantic<R>>,
 ) -> Vec<SegResourceAccess<R>> {
     let graph = analysis.graph();

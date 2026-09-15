@@ -201,14 +201,26 @@ pub struct SemanticGraph {
 
 impl SemanticGraph {
     pub fn new<R: GraphResource + Copy + Ord>(graph: &EGraph<Semantic<R>>) -> Self {
-        let mut facts = Facts::new();
-        facts.add_body(BodySite::Entry(0), &GraphAnalysis::new(graph), []).expect("valid EGIR incidences");
-        Self::from_facts(facts)
+        Self::for_bodies([(BodySite::Entry(0), &GraphAnalysis::new(graph))])
     }
 
     pub(crate) fn for_bodies<'a, R: GraphResource + Copy + Ord + 'a>(
         bodies: impl IntoIterator<Item = (BodySite, &'a GraphAnalysis<'a, Semantic<R>>)>,
     ) -> Self {
+        let bodies = bodies.into_iter().collect::<Vec<_>>();
+        // This index records SOAC dependencies. Without any SOACs it is empty,
+        // but mixed inputs still need ordinary effects to connect their producers.
+        if !bodies.iter().any(|(_, analysis)| {
+            analysis
+                .graph()
+                .skeleton
+                .blocks
+                .values()
+                .flat_map(|block| &block.side_effects)
+                .any(|effect| effect.kind.soac_id().is_some())
+        }) {
+            return Self::default();
+        }
         let mut facts = Facts::new();
         for (body, analysis) in bodies {
             facts.add_body(body, analysis, []).expect("valid EGIR incidences");

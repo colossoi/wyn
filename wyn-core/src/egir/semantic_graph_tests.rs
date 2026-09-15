@@ -1,12 +1,13 @@
 use super::*;
 use crate::ast::{Span, TypeName};
 use crate::egir;
+use crate::egir::ir::ResultBinding;
 use crate::egir::program::{semantic_program_for_test, Func, ProgramIdentities};
 use crate::egir::soac::screma;
 use crate::egir::soac::Lambda;
 use crate::egir::types::{
-    by_value_function_result, callable_parameter, CallEffects, OperandRef, Parameters, PureOp, SegBody,
-    Semantic, SoacEffect, SoacOwnership, WynLanguage,
+    by_value_function_result, callable_parameter, CallEffects, EffectOp, OperandRef, Parameters, PureOp,
+    SegBody, Semantic, SoacEffect, SoacOwnership, WynLanguage,
 };
 use crate::pipeline_descriptor::PipelineDescriptor;
 use crate::types;
@@ -41,6 +42,88 @@ fn unknown_ops_have_no_edges() {
     let graph = SemanticGraph::new(&egir);
     assert_eq!(graph.value_consumer_count(&op(1)), 0);
     assert_eq!(graph.value_consumers(&op(1)).count(), 0);
+}
+
+fn append_scalar_effect(graph: &mut EGraph<Semantic>, input: ValueId) -> ValueId {
+    let result = graph.alloc_side_effect_result(graph.nodes[input].ty.clone());
+    let binding = graph.value_result(result);
+    graph.skeleton.blocks[graph.skeleton.entry].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Op {
+            tag: PureOp::Materialize,
+        }),
+        operands: smallvec![OperandRef::Value(input)],
+        result: Some(binding),
+        effects: None,
+        span: None,
+    });
+    result
+}
+
+#[test]
+fn scalar_only_bodies_have_no_semantic_dependencies() {
+    let mut graph = EGraph::<Semantic>::new();
+    let input = graph.intern_pure(
+        PureOp::Int("1".into()),
+        smallvec![],
+        Type::Constructed(TypeName::Int(32), vec![]),
+        None,
+    );
+    append_scalar_effect(&mut graph, input);
+    let empty = EGraph::<Semantic>::new();
+    let scalar_analysis = GraphAnalysis::new(&graph);
+    let empty_analysis = GraphAnalysis::new(&empty);
+    for index in [
+        SemanticGraph::new(&graph),
+        SemanticGraph::for_bodies([
+            (BodySite::Entry(0), &empty_analysis),
+            (BodySite::Entry(1), &scalar_analysis),
+        ]),
+    ] {
+        assert!(index.sites.is_empty());
+        assert!(index.consumers.is_empty());
+        assert!(index.captures.is_empty());
+        assert!(index.array_residency_demands.is_empty());
+    }
+}
+
+#[test]
+fn mixed_bodies_keep_dependencies_through_ordinary_effects() {
+    let mut scalar = EGraph::<Semantic>::new();
+    let value = scalar.add_block_param(scalar.skeleton.entry, Type::Constructed(TypeName::Unit, vec![]));
+    append_scalar_effect(&mut scalar, value);
+
+    let mut mixed = EGraph::<Semantic>::new();
+    let producer = append_capturing_map(&mut mixed, 0, vec![]);
+    let intermediate = append_scalar_effect(&mut mixed, producer);
+    append_capturing_map(&mut mixed, 1, vec![intermediate]);
+    let scalar_analysis = GraphAnalysis::new(&scalar);
+    let mixed_analysis = GraphAnalysis::new(&mixed);
+    let bodies = [
+        (BodySite::Entry(0), &scalar_analysis),
+        (BodySite::Entry(1), &mixed_analysis),
+    ];
+    let index = SemanticGraph::for_bodies(bodies);
+    assert_eq!(index.value_consumers(&op(0)).collect::<Vec<_>>(), vec![op(1)]);
+    assert_eq!(index.operation_site(&op(1)).map(|site| site.index), Some(2));
+    assert_eq!(
+        index
+            .capture_consumers(SourceValue {
+                body: BodySite::Entry(1),
+                value: intermediate
+            })
+            .collect::<Vec<_>>(),
+        vec![op(1)]
+    );
+
+    let mut facts = Facts::new();
+    for (body, analysis) in bodies {
+        facts.add_body(body, analysis, []).unwrap();
+    }
+    let full = SemanticGraph::from_facts(facts);
+    assert_eq!(index.sites, full.sites);
+    assert_eq!(index.consumers, full.consumers);
+    assert_eq!(index.captures, full.captures);
+    assert_eq!(index.array_residency_demands, full.array_residency_demands);
 }
 
 fn append_capturing_map(graph: &mut EGraph<Semantic>, id: u32, captures: Vec<ValueId>) -> ValueId {
@@ -309,4 +392,71 @@ entry repeated(xs: [4]i32) [4]i32 =
     let index = SemanticGraph::from_facts(facts);
     assert_eq!(index.value_consumers(&maps[0]).collect::<Vec<_>>(), vec![maps[1]]);
     assert_eq!(index.value_consumer_count(&maps[1]), 0);
+}
+
+#[test]
+fn result_ports_preserve_occurrence_order_and_direct_precedence() {
+    let scalar = Type::Constructed(TypeName::UInt(32), vec![]);
+    let pair = Type::Constructed(TypeName::Tuple(2), vec![scalar.clone(), scalar.clone()]);
+    let mut graph = EGraph::<Semantic>::new();
+    let values = (0..4).map(|_| graph.alloc_side_effect_result(scalar.clone())).collect::<Vec<_>>();
+    let first = ResultBinding::product(
+        pair.clone(),
+        values[..2].iter().map(|value| graph.value_result(*value)),
+    );
+    let second = ResultBinding::product(
+        pair.clone(),
+        values[2..].iter().map(|value| graph.value_result(*value)),
+    );
+    let packed = graph.intern_pure(
+        PureOp::Tuple(2),
+        smallvec![values[0], values[1]],
+        pair.clone(),
+        None,
+    );
+    graph.register_result_origin(packed, second.clone());
+    graph.register_result_origin(packed, first.clone());
+    let aliased = graph.alloc_side_effect_result(pair.clone());
+    let direct = graph.alloc_side_effect_result(pair.clone());
+    graph.install_aliases([(aliased, packed), (direct, packed)]);
+    let result = ResultBinding::product(
+        Type::Constructed(TypeName::Tuple(4), vec![pair; 4]),
+        [first.clone(), second, first, graph.value_result(direct)],
+    );
+    let site = SideEffectSite {
+        block: graph.skeleton.entry,
+        index: 0,
+    };
+    graph.skeleton.blocks[site.block].side_effects.push(SideEffect {
+        kind: SideEffectKind::Effect(EffectOp::Op {
+            tag: PureOp::Materialize,
+        }),
+        operands: smallvec![],
+        result: Some(result),
+        effects: None,
+        span: None,
+    });
+
+    let scope = (BodySite::Entry(0), site.block);
+    let mut facts = Facts::new();
+    facts
+        .add_body(
+            scope.0,
+            &GraphAnalysis::new(&graph),
+            [packed, aliased, direct, values[0], values[1]].map(|value| (site.block, value)),
+        )
+        .unwrap();
+    let group = *facts.operations.keys().next().unwrap();
+    let outputs = facts.builder.outputs(group).unwrap();
+    assert_eq!(facts.ports[&(scope, packed)], outputs[0]);
+    assert_eq!(facts.ports[&(scope, aliased)], outputs[0]);
+    assert_eq!(facts.ports[&(scope, direct)], outputs[3]);
+    for (index, value) in values[..2].iter().enumerate() {
+        let port = facts.ports[&(scope, *value)];
+        let Incidence::Project { base, path } = &facts.values[&port].incidence else {
+            panic!("nested return must project from its producer");
+        };
+        assert_eq!(*base, outputs[2]);
+        assert_eq!(path, &[index]);
+    }
 }

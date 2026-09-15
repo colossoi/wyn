@@ -6382,6 +6382,65 @@ def fold_events(events: []u32) u32 =
     (state ^ events[k]) * 1664525u32 + 1013904223u32
 "#;
 
+#[test]
+fn scalar_only_graphics_still_materializes_an_expensive_prelude() {
+    run_with_large_stack(|| {
+        let source = r#"
+entry scalar_graphics(time: f32, target: render_target<f32>) render_target<f32> =
+  let raster = rasterize_triangles(
+    direct_draw(3u32, 1u32),
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+  shade(target, raster, |_, _, _, _, _|
+    let a = f32.sin(time) + f32.cos(time * 2.0)
+    let b = f32.sin(a) + f32.cos(a * 3.0)
+    let c = f32.sin(b) + f32.cos(b * 4.0) in
+    f32.sin(c) + f32.cos(c * 5.0))
+"#;
+        let program = egir::optimize_semantic_operations(compile_to_segmented_egir(source))
+            .expect("optimize scalar-only graphics");
+        let program = egir::lift_stage_uniform_values(program);
+        let program = egir::allocate_semantic_resources(program).expect("allocate scalar-only graphics");
+        assert!(program.data.stages.stages().all(|(_, _, entry)| entry
+            .graph
+            .skeleton
+            .blocks
+            .values()
+            .flat_map(|block| &block.side_effects)
+            .all(|effect| effect.kind.soac_id().is_none())));
+        let stage_count = program.data.stages.stage_count();
+        let program = egir::resolve_residency(program, PipelineTopologyPolicy::AllowGenerated)
+            .expect("resolve scalar-only graphics");
+        assert!(
+            program.data.stages.stage_count() > stage_count,
+            "residency creates a scalar prelude"
+        );
+        let program = plan_residency(
+            program,
+            LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Parallel),
+        )
+        .expect("plan scalar-only graphics");
+        let lowered = lower_ssa_to_spirv(lower_egir_to_ssa(program).expect("scalar-only SSA"))
+            .expect("scalar-only SPIR-V");
+        let stages = lowered
+            .pipeline
+            .pipelines
+            .iter()
+            .filter_map(|pipeline| match pipeline {
+                pipeline_descriptor::Pipeline::Compute(compute) => Some(compute.stages.as_slice()),
+                pipeline_descriptor::Pipeline::Graphics(_) => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(!stages.is_empty());
+        assert!(stages.iter().all(|stage| is_singleton_stage(stage)));
+        assert!(
+            stages.iter().all(|stage| !stage.writes.is_empty()),
+            "preludes publish scalar results"
+        );
+        assert_naga_accepts_spirv(&lowered.spirv);
+    });
+}
+
 fn scalar_prelude_pipeline<'a>(
     lowered: &'a Lowered,
     source_entry: &str,

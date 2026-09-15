@@ -6,6 +6,7 @@ use crate::ssa;
 use crate::EntryId;
 use crate::LookupMap;
 use crate::ResourceId;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use polytype::Type;
@@ -43,7 +44,7 @@ fn analyze_parallel_scremas(
     origin: &StageOrigin,
     entry: &egir::program::AllocatedEntry,
 ) -> ParallelScremas {
-    let semantic_graph = egir::semantic_graph::SemanticGraph::new(&entry.graph);
+    let semantic_graph = OnceCell::new();
     let mut parallel = HashSet::new();
     let mut folds = Vec::new();
     for (_, block) in &entry.graph.skeleton.blocks {
@@ -58,7 +59,10 @@ fn analyze_parallel_scremas(
             };
             if entry.execution_model.is_compute()
                 && (!output_slots.is_empty() || origin.generated_kind().is_some())
-                && semantic_graph.value_consumer_count(owner) == 0
+                && semantic_graph
+                    .get_or_init(|| egir::semantic_graph::SemanticGraph::new(&entry.graph))
+                    .value_consumer_count(owner)
+                    == 0
             {
                 parallel.insert(*owner);
                 if op.form.layout().operator_input_count() != 0 {
