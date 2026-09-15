@@ -33,6 +33,7 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egir;
+pub mod egglog;
 pub use egir::program::ResourceId;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the

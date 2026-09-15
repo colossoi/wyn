@@ -57,6 +57,12 @@ struct Compilation {
     auxiliary: Vec<TextArtifact>,
 }
 
+struct TlcCompilation {
+    program: wyn_core::tlc::stage::InputSliceBoundsInferred,
+    source_graph: SourceGraph,
+    auxiliary: Vec<TextArtifact>,
+}
+
 enum CompiledCode {
     Spirv(Vec<u32>),
     Wgsl(String),
@@ -109,6 +115,10 @@ enum Commands {
         /// Output MIR (SSA post-EGIR, pre-backend-lowering)
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
+
+        /// Convert TLC to egglog, print the program to stdout, and stop.
+        #[arg(long, conflicts_with_all = ["output", "output_mir"])]
+        egglog: bool,
 
         /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
@@ -188,6 +198,9 @@ enum DriverError {
     // so render it directly rather than force one prefix onto every variant.
     #[error("{0}")]
     EgirConversionError(#[from] wyn_core::egir::from_tlc::ConvertError),
+
+    #[error(transparent)]
+    EgglogConversionError(#[from] wyn_core::egglog::from_tlc::ConvertError),
 
     #[error("invalid command-line option: {0}")]
     InvalidOption(String),
@@ -503,6 +516,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             target,
             output_tlc,
             output_mir,
+            egglog,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -515,6 +529,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             target,
             output_tlc,
             output_mir,
+            egglog,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -537,6 +552,7 @@ fn build(
     target: Target,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
+    egglog: bool,
     graphics: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
@@ -558,7 +574,6 @@ fn build(
     let build_start = Instant::now();
 
     let normalized_input = normalize_input(&input)?;
-    let output_path = output_path(&normalized_input, output, target)?;
     let package_plan = match find_build_input(&normalized_input)? {
         BuildInput::Package { root, root_module } => prepare_package(root, root_module)?,
         BuildInput::Standalone(source) => prepare_standalone(source)?,
@@ -566,19 +581,38 @@ fn build(
     let parsed_modules = time("load_modules", verbose, || {
         ParsedModules::load(package_plan, CompilerOptions { graphics })
     })?;
-    let compilation = compile(
-        parsed_modules,
-        CompileOptions {
-            target,
-            direct,
-            wgsl_emulate_u64,
-            fill_holes,
-            output_tlc,
-            output_mir,
-            warning_limit,
-            verbose,
-        },
-    )?;
+    let options = CompileOptions {
+        target,
+        direct,
+        wgsl_emulate_u64,
+        fill_holes,
+        output_tlc,
+        output_mir,
+        warning_limit,
+        verbose,
+    };
+    if egglog {
+        let tlc = compile_tlc(parsed_modules, &options)?;
+        let converted = time("from_tlc_egglog", verbose, || {
+            wyn_core::egglog::from_tlc::convert_program(&tlc.program)
+        })?;
+        let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+        for command in &converted.program {
+            writeln!(stdout, "{command}")?;
+        }
+        stdout.flush()?;
+        for artifact in tlc.auxiliary {
+            fs::write(artifact.path, artifact.contents)?;
+        }
+        eprintln!(
+            "Converted {} to egglog in {:.2}s",
+            input.display(),
+            build_start.elapsed().as_secs_f64(),
+        );
+        return Ok(());
+    }
+    let output_path = output_path(&normalized_input, output, target)?;
+    let compilation = compile(parsed_modules, options)?;
     write_artifacts(&output_path, compilation, verbose)?;
 
     // Always-on wall-clock summary (per-pass breakdown is available via
@@ -593,18 +627,9 @@ fn build(
     Ok(())
 }
 
-fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilation, DriverError> {
-    let CompileOptions {
-        target,
-        direct,
-        wgsl_emulate_u64,
-        fill_holes,
-        output_tlc,
-        output_mir,
-        warning_limit,
-        verbose,
-    } = options;
-    let program = finish_type_check(modules, !fill_holes, warning_limit, verbose)?;
+fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCompilation, DriverError> {
+    let verbose = options.verbose;
+    let program = finish_type_check(modules, !options.fill_holes, options.warning_limit, verbose)?;
     let source_graph = program.source_graph().clone();
 
     let program = retain_source(
@@ -633,9 +658,9 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         }),
         &source_graph,
     )?;
-    if let Some(path) = output_tlc {
+    if let Some(path) = &options.output_tlc {
         auxiliary.push(TextArtifact {
-            path,
+            path: path.clone(),
             contents: format!("{program}"),
         });
     }
@@ -686,10 +711,31 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         wyn_core::tlc::filter_reachable(program)
     });
 
-    // Build raw EGIR, then cross each semantic and physical typestate boundary.
     let program = time("infer_input_slice_bounds", verbose, || {
         wyn_core::tlc::infer_input_slice_bounds(program)
     });
+    Ok(TlcCompilation {
+        program,
+        source_graph,
+        auxiliary,
+    })
+}
+
+fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilation, DriverError> {
+    let TlcCompilation {
+        program,
+        source_graph,
+        mut auxiliary,
+    } = compile_tlc(modules, &options)?;
+    let CompileOptions {
+        target,
+        direct,
+        wgsl_emulate_u64,
+        output_mir,
+        verbose,
+        ..
+    } = options;
+    // Build raw EGIR, then cross each semantic and physical typestate boundary.
     let program = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
     let program = time("egir_reify_soacs", verbose, || {
         wyn_core::egir::reify_soacs(program)

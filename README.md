@@ -644,6 +644,9 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
+# Convert TLC to an egglog program on stdout and stop
+cargo run --bin wyn -- build input.wyn --egglog > output.egg
+
 # Compile a graphics program directly, without compiler-created prepasses
 cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --graphics --direct

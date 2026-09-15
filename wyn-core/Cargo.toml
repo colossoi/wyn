@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+egglog-engine = { package = "egglog", version = "3.0.0", default-features = false }
 thiserror.workspace = true
 nom.workspace = true
 polytype.workspace = true
