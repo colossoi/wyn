@@ -27,6 +27,7 @@ pub fn readout(data: &AssociatedData) -> Result<String, OptimizeError> {
         pending: VecDeque::new(),
         queued: LookupSet::new(),
         definitions: data.definitions.iter().map(|(&id, def)| (def.symbol, id)).collect(),
+        named_regions: data.definitions.iter().map(|(&id, def)| (def.body, id)).collect(),
     };
     for entry in data.entries.values() {
         printer.enqueue(entry.definition);
@@ -51,6 +52,7 @@ struct Printer<'a> {
     pending: VecDeque<DefinitionId>,
     queued: LookupSet<DefinitionId>,
     definitions: LookupMap<SymbolId, DefinitionId>,
+    named_regions: LookupMap<RegionId, DefinitionId>,
 }
 
 impl Printer<'_> {
@@ -190,22 +192,26 @@ impl Printer<'_> {
     }
     fn body(&mut self, body: &SoacBody, indent: usize, printed: &mut LookupSet<ExprId>) -> String {
         match body {
+            SoacBody::Route { indices, .. } => format!("select{indices:?}"),
+            SoacBody::Parallel { left, right } => format!(
+                "parallel({}, {})",
+                self.body(left, indent, printed),
+                self.body(right, indent, printed)
+            ),
             SoacBody::Compose { first, then } => format!(
                 "compose({}, {})",
                 self.body(first, indent, printed),
                 self.body(then, indent, printed)
             ),
             SoacBody::Identity(types) => format!("identity/{}", types.len()),
-            SoacBody::Function {
-                function, captures, ..
-            } => format!(
-                "{} captures [{}]",
-                self.symbol(*function),
-                self.values(captures, indent, printed)
-            ),
-            SoacBody::Inline { region, captures, .. } => {
+            SoacBody::Apply { region, captures, .. } => {
                 let captures = self.values(captures, indent, printed);
-                let body = self.nested(*region, indent);
+                let body = if let Some(&definition) = self.named_regions.get(region) {
+                    self.enqueue(definition);
+                    self.name(self.data.definitions[definition].symbol)
+                } else {
+                    self.nested(*region, indent)
+                };
                 format!("{body} captures [{captures}]")
             }
         }

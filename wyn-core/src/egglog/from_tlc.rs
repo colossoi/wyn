@@ -56,7 +56,9 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
         converter.symbols.insert(source, id);
     }
     for def in &program.defs {
-        if converter.globals.insert(def.name, (def.arity, def.ty.clone())).is_some() {
+        // Reserve callable identities before importing bodies, including forward references.
+        let region = converter.data.regions.alloc_id();
+        if converter.globals.insert(def.name, (def.arity, def.ty.clone(), region)).is_some() {
             return Err(ConvertError::DuplicateDefinition(def.name));
         }
     }
@@ -95,7 +97,8 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
                 DefinitionKind::Entry(entry_id)
             }
         };
-        let mut scope = converter.scope(id, None, LookupMap::new());
+        let region = converter.globals[&def.name].2;
+        let mut scope = converter.scope(region, id, None, LookupMap::new());
         let result = if let TermKind::Lambda(lambda) = &def.body.kind {
             converter.parameters(&lambda.params, &mut scope)?;
             converter.term(&lambda.body, &mut scope)?
@@ -134,7 +137,7 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
 struct Converter {
     data: AssociatedData,
     symbols: LookupMap<crate::SymbolId, SymbolId>,
-    globals: LookupMap<crate::SymbolId, (usize, types::Type)>,
+    globals: LookupMap<crate::SymbolId, (usize, types::Type, RegionId)>,
     types: Interner<TypeId, TypeData>,
     expressions: Interner<ExprId, ExprData>,
     origins: Interner<OriginId, OriginData>,
@@ -171,12 +174,13 @@ impl Converter {
     }
     fn scope(
         &mut self,
+        id: RegionId,
         definition: DefinitionId,
         parent: Option<RegionId>,
         locals: LookupMap<crate::SymbolId, ExprId>,
     ) -> Scope {
         Scope {
-            id: self.data.regions.alloc_id(),
+            id,
             locals,
             data: RegionData {
                 definition,
@@ -188,7 +192,8 @@ impl Converter {
         }
     }
     fn child(&mut self, scope: &Scope) -> Scope {
-        self.scope(scope.data.definition, Some(scope.id), scope.locals.clone())
+        let id = self.data.regions.alloc_id();
+        self.scope(id, scope.data.definition, Some(scope.id), scope.locals.clone())
     }
     fn finish(&mut self, mut scope: Scope, results: Vec<ExprId>) -> RegionId {
         scope.data.results = results;
@@ -238,7 +243,7 @@ impl Converter {
                 if let Some(&value) = scope.locals.get(&source) {
                     return Ok(self.retype(value, ty));
                 }
-                if self.globals.get(&source).is_some_and(|(arity, _)| *arity == 0) {
+                if self.globals.get(&source).is_some_and(|(arity, _, _)| *arity == 0) {
                     return Ok(self.operation(OperationKind::EvalGlobal(symbol), ty, span, scope));
                 }
                 Ok(self.expr(ty, ExprKind::Global(symbol)))
@@ -269,29 +274,33 @@ impl Converter {
             captures.push(self.term(capture, scope)?);
         }
         let results = vec![self.ty(&body.lam.ret_ty)];
+        let parameters = body.lam.params.iter().map(|(_, ty)| self.ty(ty)).collect();
         // Closure conversion stores a callable reference here. Its arguments
         // are the SOAC inputs followed by the explicit capture values.
         if let TermKind::Var(VarRef::Symbol(function)) = &body.lam.body.kind {
-            if self.globals.get(function).is_some_and(|(arity, _)| *arity > 0) {
-                let function = self.symbol(*function)?;
-                let parameters = body.lam.params.iter().map(|(_, ty)| self.ty(ty)).collect();
-                return Ok(SoacBody::Function {
-                    function,
-                    parameters,
-                    results,
-                    captures,
-                });
+            if let Some(&(arity, _, region)) = self.globals.get(function) {
+                if arity > 0 {
+                    return Ok(SoacBody::Apply {
+                        region,
+                        parameters,
+                        results,
+                        captures,
+                    });
+                }
             }
         }
-        let mut inner = self.child(scope);
-        for ((symbol, _, _), &capture) in body.data.captures.iter().zip(&captures) {
-            inner.locals.insert(*symbol, capture);
-        }
+        // A callable has an explicit interface: no inherited local bindings.
+        let id = self.data.regions.alloc_id();
+        let mut inner = self.scope(id, scope.data.definition, Some(scope.id), LookupMap::new());
         self.parameters(&body.lam.params, &mut inner)?;
+        let capture_parameters =
+            body.data.captures.iter().map(|(symbol, ty, _)| (*symbol, ty.clone())).collect::<Vec<_>>();
+        self.parameters(&capture_parameters, &mut inner)?;
         let result = self.term(&body.lam.body, &mut inner)?;
         let region = self.finish(inner, vec![result]);
-        Ok(SoacBody::Inline {
+        Ok(SoacBody::Apply {
             region,
+            parameters,
             results,
             captures,
         })
@@ -322,7 +331,7 @@ impl Converter {
             let ty = self
                 .globals
                 .get(&place.id)
-                .map(|(_, ty)| ty.clone())
+                .map(|(_, ty, _)| ty.clone())
                 .unwrap_or_else(|| place.elem_ty.clone());
             let ty = self.ty(&ty);
             self.var(VarRef::Symbol(place.id), ty, Span::generated(), scope)?

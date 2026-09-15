@@ -269,21 +269,27 @@ pub struct Place {
 
 #[derive(Clone, Debug)]
 pub enum SoacBody {
+    /// Select whole logical arguments, without flattening tuple-valued elements.
+    Route {
+        parameters: Vec<TypeId>,
+        indices: Vec<usize>,
+    },
+    /// Both bodies receive the same arguments; results are left then right.
+    Parallel {
+        left: Box<SoacBody>,
+        right: Box<SoacBody>,
+    },
     /// Apply `first` to the inputs, then pass its logical results to `then`.
     /// Each body retains its own capture arguments.
     Compose {
         first: Box<SoacBody>,
         then: Box<SoacBody>,
     },
-    /// Lambda-lifted TLC names a function, applied to inputs then captures.
-    Function {
-        function: SymbolId,
-        parameters: Vec<TypeId>,
-        results: Vec<TypeId>,
-        captures: Vec<ExprId>,
-    },
-    Inline {
+    /// Apply a parameterized region to logical inputs followed by captures.
+    /// Naming/export metadata, when present, belongs to DefinitionData.
+    Apply {
         region: RegionId,
+        parameters: Vec<TypeId>,
         results: Vec<TypeId>,
         captures: Vec<ExprId>,
     },

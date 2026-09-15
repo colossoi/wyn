@@ -738,12 +738,11 @@ fn canonical_scremas_preserve_tuple_components_callable_captures_and_ownership()
                 .chain(form.scans.iter().map(|scan| &scan.operator))
                 .chain(form.reductions.iter().map(|reduction| &reduction.operator));
             for body in bodies {
-                if let super::SoacBody::Function { function, parameters, results, captures } = body {
+                if let super::SoacBody::Apply { region, parameters, results, captures } = body {
                     saw_capture |= !captures.is_empty();
                     assert_eq!(results.len(), 1);
                     saw_tuple |= matches!(converted.data.types[results[0]].ty, types::Type::Constructed(TypeName::Tuple(_), _));
-                    let def = converted.data.definitions.values().find(|def| def.symbol == *function).unwrap();
-                    assert_eq!(converted.data.regions[def.body].parameters.len(), parameters.len() + captures.len());
+                    assert_eq!(converted.data.regions[*region].parameters.len(), parameters.len() + captures.len());
                 }
             }
             for scan in &form.scans { assert_eq!(scan.neutral.len(), 1); }
@@ -755,4 +754,78 @@ fn canonical_scremas_preserve_tuple_components_callable_captures_and_ownership()
         }
     }
     assert!(saw_capture && saw_tuple && saw_unique);
+}
+
+#[test]
+fn anonymous_body_captures_are_trailing_region_parameters() {
+    let mut f = Fixture::new();
+    let mut body = f.soac_body();
+    body.lam.body = Box::new(f.term(TermKind::Var(VarRef::Symbol(f.y))));
+    let input = f.array();
+    let map = f.term(TermKind::Soac(SoacOp::Map {
+        lam: body,
+        inputs: vec![input],
+        destination: types::SoacOwnership::Fresh,
+    }));
+    let program = f.program(vec![map]);
+    let converted = convert_program(&program).unwrap();
+    verify_sources(&program, &converted);
+    let operation = converted.data.operations.values().next().unwrap();
+    let OperationKind::Screma { form, .. } = &operation.kind else {
+        panic!("map")
+    };
+    let super::SoacBody::Apply {
+        region,
+        parameters,
+        captures,
+        ..
+    } = &form.pre
+    else {
+        panic!("body application")
+    };
+    let body = &converted.data.regions[*region];
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(captures.len(), 1);
+    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(
+        converted.data.expressions[body.results[0]].kind,
+        ExprKind::Parameter(body.parameters[1])
+    );
+    assert_eq!(
+        converted.data.expressions[captures[0]].kind,
+        ExprKind::Int("37".into())
+    );
+    assert!(converted.data.definitions.values().all(|def| def.body != *region));
+}
+
+#[test]
+fn named_body_regions_resolve_forward_references() {
+    let mut program = source("entry mapped(xs: [4]i32, offset: i32) [4]i32 = map(|x: i32| x + offset, xs)");
+    // Import the caller before its lifted body, regardless of pipeline ordering.
+    program.defs.sort_by_key(|def| !matches!(def.meta, tlc::DefMeta::EntryPoint(_)));
+    assert!(matches!(program.defs[0].meta, tlc::DefMeta::EntryPoint(_)));
+    let converted = convert_program(&program).unwrap();
+    verify_sources(&program, &converted);
+    let entry = converted.data.entries.values().next().unwrap();
+    let caller = converted.data.definitions[entry.definition].body;
+    let op = *converted.data.regions[caller].members.first().unwrap();
+    let OperationKind::Screma { form, .. } = &converted.data.operations[op].kind else {
+        panic!("map")
+    };
+    let super::SoacBody::Apply {
+        region,
+        parameters,
+        captures,
+        ..
+    } = &form.pre
+    else {
+        panic!("body application")
+    };
+    assert_ne!(*region, caller);
+    assert_eq!(captures.len(), 1);
+    assert_eq!(
+        converted.data.regions[*region].parameters.len(),
+        parameters.len() + captures.len()
+    );
+    assert!(converted.data.definitions.values().any(|def| def.body == *region));
 }

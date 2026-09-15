@@ -18,6 +18,7 @@
 (datatype Ownership (Fresh) (UniqueInput))
 (datatype Ownerships (NoOwnerships) (OwnershipsCons Ownership Ownerships))
 (datatype Types (NoTypes) (TypesCons Type Types))
+(datatype Indices (NoIndices) (IndicesCons i64 Indices))
 
 (datatype*
   ; Pure values carry no occurrence ID. ExprId is attached by Expression facts.
@@ -67,10 +68,13 @@
   (LoopKind (For Expr) (ForRange Expr) (While))
   (SoacBody
     (ComposeBody SoacBody SoacBody)
-    ; Function inputs are parameter types followed by capture arguments.
+    ; Select/reorder logical arguments; ParallelBody runs both bodies on the
+    ; same arguments and concatenates their logical results.
+    (RouteBody Types Indices)
+    (ParallelBody SoacBody SoacBody)
+    ; Apply a region to logical inputs followed by capture arguments.
     ; Results remain logical values: a tuple is ONE result, not flattened.
-    (FunctionBody Symbol Types Types Exprs)
-    (InlineBody RegionKey Types Exprs)
+    (ApplyBody RegionKey Types Types Exprs)
     (IdentityBody Types))
   ; pre returns scan inputs, reduction inputs, then mapped values.
   ; post receives scan results and mapped values; reductions bypass it.
@@ -93,8 +97,10 @@
 (relation ParentRegion (RegionKey RegionKey))
 (relation RegionParameter (RegionKey i64 ParameterKey Type))
 (relation RegionResult (RegionKey i64 Expr))
+(relation RegionSignature (RegionKey Types Types))
 ; One selected action per execution. Membership has no list order.
 (relation Operation (RegionKey OperationKey Type Action))
+(relation ResultArity (OperationKey i64))
 ; Source positions orient effects; they impose no order on independent pure work.
 (relation SourcePosition (OperationKey i64))
 (relation CopyType (Type))

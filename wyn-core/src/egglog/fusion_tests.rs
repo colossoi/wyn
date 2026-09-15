@@ -42,9 +42,12 @@ fn functions<'a>(body: &'a SoacBody, out: &mut Vec<&'a SoacBody>) {
             functions(first, out);
             functions(then, out);
         }
-        SoacBody::Function { .. } => out.push(body),
-        SoacBody::Identity(_) => {}
-        SoacBody::Inline { .. } => panic!("source fixture should be lambda-lifted"),
+        SoacBody::Parallel { left, right } => {
+            functions(left, out);
+            functions(right, out);
+        }
+        SoacBody::Apply { .. } => out.push(body),
+        SoacBody::Identity(_) | SoacBody::Route { .. } => {}
     }
 }
 
@@ -70,7 +73,7 @@ fn vertical_fusion_preserves_body_order_captures_and_consumer_identity() {
     functions(&form(&result.data, consumer).pre, &mut after);
     assert_eq!(format!("{after:?}"), format!("{before:?}"));
     for body in after {
-        let SoacBody::Function { captures, .. } = body else {
+        let SoacBody::Apply { captures, .. } = body else {
             unreachable!()
         };
         assert_eq!(captures.len(), 1);
@@ -148,7 +151,7 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
     let result = optimized(input);
     assert_eq!(entry_ops(&result.data).len(), 1);
     let fused = form(&result.data, entry_ops(&result.data)[0]);
-    let SoacBody::Function { results, .. } = &fused.pre else {
+    let SoacBody::Apply { results, .. } = &fused.pre else {
         panic!("identity consumer pre disappears")
     };
     assert_eq!(results.len(), 1);
@@ -159,7 +162,7 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
     assert_eq!(fused.reductions.len(), 1);
     assert_eq!(fused.reductions[0].neutral.len(), 1);
     assert!(!fused.reductions[0].commutative);
-    let SoacBody::Function {
+    let SoacBody::Apply {
         parameters, results, ..
     } = &fused.reductions[0].operator
     else {

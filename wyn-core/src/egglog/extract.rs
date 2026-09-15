@@ -242,6 +242,30 @@ impl Reader<'_> {
             return Err(invalid("expected a SOAC body"));
         };
         Ok(match name.as_str() {
+            "RouteBody" => {
+                let args = self.app(node, name, 2)?;
+                let indices = self
+                    .list(args[1], "NoIndices", "IndicesCons")?
+                    .into_iter()
+                    .map(|node| {
+                        let Term::Lit(Literal::Int(index)) = self.dag.get(node) else {
+                            return Err(invalid("expected a body argument index"));
+                        };
+                        usize::try_from(*index).map_err(|_| invalid("body argument index is out of range"))
+                    })
+                    .collect::<Result<_>>()?;
+                SoacBody::Route {
+                    parameters: self.types(args[0])?,
+                    indices,
+                }
+            }
+            "ParallelBody" => {
+                let args = self.app(node, name, 2)?;
+                SoacBody::Parallel {
+                    left: Box::new(self.body(args[0])?),
+                    right: Box::new(self.body(args[1])?),
+                }
+            }
             "ComposeBody" => {
                 let args = self.app(node, name, 2)?;
                 SoacBody::Compose {
@@ -249,22 +273,13 @@ impl Reader<'_> {
                     then: Box::new(self.body(args[1])?),
                 }
             }
-            "FunctionBody" => {
+            "ApplyBody" => {
                 let args = self.app(node, name, 4)?;
-                SoacBody::Function {
-                    function: self.key(args[0], "SymbolId")?,
+                SoacBody::Apply {
+                    region: self.key(args[0], "RegionId")?,
                     parameters: self.types(args[1])?,
                     results: self.types(args[2])?,
                     captures: self.exprs(args[3])?,
-                }
-            }
-            "InlineBody" => {
-                let args = self.app(node, name, 3)?;
-
-                SoacBody::Inline {
-                    region: self.key(args[0], "RegionId")?,
-                    results: self.types(args[1])?,
-                    captures: self.exprs(args[2])?,
                 }
             }
             "IdentityBody" => SoacBody::Identity(self.types(self.app(node, name, 1)?[0])?),

@@ -6,6 +6,7 @@ use super::data::{
 };
 use super::SCHEMA;
 use crate::{
+    ast::TypeName,
     types::{self, SoacOwnership},
     LookupSet,
 };
@@ -106,6 +107,13 @@ impl Emitter<'_> {
             values.iter().map(|id| id.egglog()).collect(),
         )
     }
+    fn indices(&mut self, values: &[usize]) -> String {
+        self.list(
+            "NoIndices",
+            "IndicesCons",
+            values.iter().map(usize::to_string).collect(),
+        )
+    }
     fn exprs(&mut self, values: &[ExprId]) -> String {
         let values = values.iter().map(|&id| self.expr(id)).collect();
         self.list("NoExprs", "ExprsCons", values)
@@ -186,29 +194,29 @@ impl Emitter<'_> {
     }
     fn soac_body(&mut self, body: &SoacBody) -> String {
         let body = match body {
+            SoacBody::Route { parameters, indices } => {
+                format!("(RouteBody {} {})", self.types(parameters), self.indices(indices))
+            }
+            SoacBody::Parallel { left, right } => {
+                format!(
+                    "(ParallelBody {} {})",
+                    self.soac_body(left),
+                    self.soac_body(right)
+                )
+            }
             SoacBody::Compose { first, then } => {
                 format!("(ComposeBody {} {})", self.soac_body(first), self.soac_body(then))
             }
             SoacBody::Identity(types) => format!("(IdentityBody {})", self.types(types)),
-            SoacBody::Function {
-                function,
+            SoacBody::Apply {
+                region,
                 parameters,
                 results,
                 captures,
             } => format!(
-                "(FunctionBody {} {} {} {})",
-                function.egglog(),
-                self.types(parameters),
-                self.types(results),
-                self.exprs(captures)
-            ),
-            SoacBody::Inline {
-                region,
-                results,
-                captures,
-            } => format!(
-                "(InlineBody {} {} {})",
+                "(ApplyBody {} {} {} {})",
                 self.region(*region),
+                self.types(parameters),
                 self.types(results),
                 self.exprs(captures)
             ),
@@ -355,6 +363,11 @@ impl Emitter<'_> {
             id.egglog(),
             operation.source_position
         ));
+        let arity = match &self.data.types[operation.ty].ty {
+            types::Type::Constructed(TypeName::Tuple(_), fields) => fields.len(),
+            _ => 1,
+        };
+        self.emit(format!("(ResultArity {} {arity})", id.egglog()));
         name
     }
     fn region(&mut self, id: RegionId) -> String {
@@ -365,6 +378,11 @@ impl Emitter<'_> {
         let region = &self.data.regions[id];
         self.emit(format!("(let {name} {})", id.egglog()));
         self.emit(format!("(Region {name})"));
+        let parameters =
+            self.types(&region.parameters.iter().map(|p| self.data.parameters[*p].ty).collect::<Vec<_>>());
+        let results =
+            self.types(&region.results.iter().map(|e| self.data.expressions[*e].ty).collect::<Vec<_>>());
+        self.emit(format!("(RegionSignature {name} {parameters} {results})"));
         if let Some(parent) = region.parent {
             self.emit(format!("(ParentRegion {name} {})", parent.egglog()));
         }
