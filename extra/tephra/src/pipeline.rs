@@ -3,7 +3,7 @@
 //! Allows running compute shaders from JSON configuration files, supporting
 //! multi-buffer setups and push constants for iterative dispatch patterns.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

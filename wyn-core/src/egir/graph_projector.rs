@@ -789,6 +789,14 @@ impl<'a, R: GraphResource> GraphProjector<'a, R> {
             selected.extend(allowed.iter().filter(|site| site.block != continuation).copied());
         }
         let mut demands = self.projected_terminator_values(mode, &blocks);
+        if matches!(mode, ProjectionMode::StructuredPrefix { .. }) {
+            // Detaching the prefix removes every block before the continuation.
+            // Include all of their parameters so an independent earlier result
+            // still observed by the consumer is exported as a live-out too.
+            demands.extend(blocks.iter().flat_map(|block| {
+                self.source.skeleton.blocks[*block].params.iter().map(|parameter| parameter.value())
+            }));
+        }
         if matches!(mode, ProjectionMode::ValueFlow | ProjectionMode::Component) {
             demands.extend(blocks.iter().filter_map(
                 |block| match &self.source.skeleton.blocks[*block].term {

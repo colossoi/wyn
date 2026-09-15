@@ -6,11 +6,7 @@ fn main() {
     // this repository keeps it at the Tree-sitter package root.
     let packaged_src = manifest_dir.join("src");
     let repository_src = manifest_dir.join("../../src");
-    let src_dir = if packaged_src.join("parser.c").exists() {
-        packaged_src
-    } else {
-        repository_src
-    };
+    let src_dir = if packaged_src.join("parser.c").exists() { packaged_src } else { repository_src };
 
     let mut c_config = cc::Build::new();
     c_config.std("c11").include(&src_dir);

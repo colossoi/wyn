@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
 use crate::pipeline::load_spirv;

@@ -19,7 +19,7 @@
 //! summary. Drop those into an mdBook `src/` and `SUMMARY.md` and you
 //! have rendered prelude docs.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,11 @@ fn extract_module(src_path: &Path, source: &str) -> Result<ModuleDoc> {
         if let Some(rest) = trimmed.strip_prefix("-- | ").or_else(|| {
             // Bare `-- |` with no following text is still a valid start
             // (an empty leading line).
-            if trimmed.trim_end() == "-- |" { Some("") } else { None }
+            if trimmed.trim_end() == "-- |" {
+                Some("")
+            } else {
+                None
+            }
         }) {
             // Stash any orphan block (e.g. file intro with a blank line
             // between it and the next item).
@@ -327,7 +331,11 @@ fn item_kind_of_line(trimmed: &str) -> Option<ItemKind> {
         "module" => {
             // `module type foo = …` vs `module foo = …`.
             let rest = trimmed.trim_start_matches("module").trim_start();
-            if rest.starts_with("type") { Some(ItemKind::ModuleType) } else { Some(ItemKind::Module) }
+            if rest.starts_with("type") {
+                Some(ItemKind::ModuleType)
+            } else {
+                Some(ItemKind::Module)
+            }
         }
         _ => None,
     }
@@ -429,9 +437,7 @@ fn collect_signature(lines: &[&str], start: usize) -> (String, Vec<ParamNote>, u
         }
         let trimmed = sig_part.trim();
         let has_eq = signature_has_body_eq(&sig_part);
-        if depth <= 0
-            && (has_eq || opens_body || trimmed.is_empty() || is_terminal_sig_line(trimmed))
-        {
+        if depth <= 0 && (has_eq || opens_body || trimmed.is_empty() || is_terminal_sig_line(trimmed)) {
             i += 1;
             break;
         }

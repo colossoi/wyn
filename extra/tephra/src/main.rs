@@ -9,7 +9,7 @@ mod miner;
 mod pipeline;
 mod vk_helpers;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use vk_helpers::{ComputeContext, StorageBuffer};
@@ -191,7 +191,7 @@ fn run_simple(shader: &PathBuf, entry: &str, size: usize, workgroup: u32, input:
 }
 
 fn run_pipeline(config_path: &PathBuf) -> Result<()> {
-    use pipeline::{PipelineConfig, ShaderInterface, load_buffer_data, load_spirv};
+    use pipeline::{load_buffer_data, load_spirv, PipelineConfig, ShaderInterface};
 
     // Load and resolve config
     let mut config = PipelineConfig::load(config_path)?;

@@ -1,6 +1,6 @@
 //! Vulkan helper abstractions for compute shaders
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use std::ffi::CStr;
 
@@ -451,12 +451,10 @@ impl<'a> ComputePipeline<'a> {
 
             // Push constant range (if any)
             let push_constant_ranges = if push_constant_size > 0 {
-                vec![
-                    vk::PushConstantRange::default()
-                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                        .offset(0)
-                        .size(push_constant_size),
-                ]
+                vec![vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .offset(0)
+                    .size(push_constant_size)]
             } else {
                 vec![]
             };
@@ -736,12 +734,10 @@ impl<'a> MultiStagePipeline<'a> {
                 .context("Failed to create descriptor set layout")?;
 
             let push_constant_ranges = if push_constant_size > 0 {
-                vec![
-                    vk::PushConstantRange::default()
-                        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                        .offset(0)
-                        .size(push_constant_size),
-                ]
+                vec![vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .offset(0)
+                    .size(push_constant_size)]
             } else {
                 vec![]
             };

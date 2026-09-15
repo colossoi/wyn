@@ -1,0 +1,13 @@
+-- Regression: a zero-trip composite loop feeds a map after a separate serial loop.
+def prefix(events: []i32) =
+  let (state, last) = loop _ = (0, [0, 0]) for k < 0 do
+    (0, [0, 0]) in
+  { state = state }
+
+def update(events: []i32, points: []i32, items: []i32) =
+  let ui = loop s = 0 for k < 32 do s
+  let c = prefix(events) in
+  { ui = [ui], items = map(|i| c.state, iota(1)), head = [0] }
+
+entry repro(events: []i32, points: []i32, items: []i32) ([]i32, []i32, []i32, []i32) =
+  let w = update(events, points, items) in (w.ui, points, w.items, w.head)

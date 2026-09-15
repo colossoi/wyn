@@ -6756,6 +6756,22 @@ entry authored_prefix(xs: []u32, events: []u32) []u32 =
 }
 
 #[test]
+fn zero_trip_composite_prefix_after_serial_loop_emits_valid_spirv() {
+    let source =
+        include_str!("../../testfiles/regressions/zero_trip_composite_prefix_after_serial_loop.wyn");
+    let lowered = compile_thru_spirv(source)
+        .expect("zero-trip composite prefix after a serial loop compiles to SPIR-V");
+    assert_naga_accepts_spirv(&lowered.spirv);
+}
+
+#[test]
+fn zero_trip_composite_prefix_after_serial_loop_emits_valid_wgsl() {
+    let source =
+        include_str!("../../testfiles/regressions/zero_trip_composite_prefix_after_serial_loop.wyn");
+    assert_scalar_prefix_emits_valid_wgsl(source);
+}
+
+#[test]
 fn composite_serial_prefix_is_one_singleton_feeding_two_map_domains() {
     use crate::pipeline_descriptor::{Binding, DispatchLen, DispatchSize};
 
