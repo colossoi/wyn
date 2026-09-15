@@ -31,6 +31,7 @@ pub fn optimize_skeleton(program: super::rewrite::Rewritten) -> SkeletonOptimize
         .map_graphs(|_, mut graph| {
             let aliases = run_one_body(&mut graph);
             graph.install_aliases(aliases);
+            super::flow_liveness::prune_unused_allocations(&mut graph);
             graph
         })
         .retag_physical()

@@ -45,6 +45,9 @@ use crate::SymbolTable;
 #[path = "kernel_schedule_integration_tests.rs"]
 mod kernel_schedule;
 
+#[path = "tinyporto_codegen_tests.rs"]
+mod tinyporto_codegen;
+
 #[test]
 fn graphics_vocabulary_is_absent_without_opt_in() {
     let error = compile_thru_frontend_with_options(
@@ -2526,7 +2529,7 @@ entry sums() (i32, i32) =
             ..
         }
     )));
-    assert!(scratch[2..].iter().all(|item| item.3 == LogicalSize::FixedBytes(4 * 64 * 4)));
+    assert!(scratch[2..].iter().all(|item| item.3 == LogicalSize::FixedBytes(4 * 4)));
 }
 
 #[test]
@@ -2684,17 +2687,14 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
 "#;
     let converted = compile_thru_ssa(r4).expect("runtime filter reaches SSA");
     let phases: Vec<_> = converted.global_context.physical_kernels.phases().collect();
-    assert_eq!(phases.len(), 5);
+    assert_eq!(phases.len(), 4);
     assert_eq!(phases[0].entry_point, "r_filter_flags");
     assert_eq!(phases[1].entry_point, "r_filter_scan");
     assert_eq!(phases[2].entry_point, "r_filter_scan_phase2_scan_sums");
-    assert_eq!(phases[3].entry_point, "r_filter_scan_phase3_add_offsets");
-    assert_eq!(phases[4].entry_point, "r");
+    assert_eq!(phases[3].entry_point, "r");
     assert!(matches!(phases[0].domain, KernelDomain::ResourceElements { .. }));
-    // Scan phases 1 and 3 run the same fixed worker grid: phase 1 records one
-    // block sum per worker, and phase 3 uses that same worker id to load and
-    // apply the block's exclusive offset. Dispatching either phase per element
-    // would give the two phases different chunk ownership.
+    // The scan records one block sum per worker. Scatter dispatches per
+    // element and uses the chunk owner to read its exclusive block offset.
     assert!(matches!(
         phases[1].domain,
         KernelDomain::Fixed {
@@ -2711,17 +2711,10 @@ entry r(xs: []u32) ?k. [k]u32 = filter(|x| x < 100u32, xs)
         phases[2].domain,
         KernelDomain::Fixed { x: 1, y: 1, z: 1 }
     ));
-    assert_eq!(phases[3].domain, phases[1].domain);
-    assert_eq!(phases[3].workgroup_size, phases[1].workgroup_size);
-    assert!(matches!(phases[4].domain, KernelDomain::ResourceElements { .. }));
+    assert!(matches!(phases[3].domain, KernelDomain::ResourceElements { .. }));
 
     let thread_id = catalog().known().thread_id;
-    for name in [
-        "r_filter_flags",
-        "r_filter_scan",
-        "r_filter_scan_phase3_add_offsets",
-        "r",
-    ] {
+    for name in ["r_filter_flags", "r_filter_scan", "r"] {
         let entry = converted
             .entry_points
             .iter()
@@ -2754,12 +2747,10 @@ entry r(xs: []u32) (?k. [k]u32, [1]u32) =
             _ => None,
         })
         .expect("filter compute pipeline");
-    assert_eq!(compute.stages.len(), 5);
+    assert_eq!(compute.stages.len(), 4);
     assert_eq!(compute.stages[1].entry_point, "r_filter_scan");
     assert_eq!(compute.stages[2].entry_point, "r_filter_scan_phase2_scan_sums");
-    assert_eq!(compute.stages[3].entry_point, "r_filter_scan_phase3_add_offsets");
-    assert_eq!(compute.stages[3].dispatch_size, compute.stages[1].dispatch_size);
-    assert_eq!(compute.stages[3].workgroup_size, compute.stages[1].workgroup_size);
+    assert_eq!(compute.stages[3].entry_point, "r");
 }
 
 /// A scan scratch allocation is `Intermediate` for its pipeline lifetime, but
@@ -2855,7 +2846,6 @@ entry mixed() ([]i32, []i32) =
             "filter_flags",
             "filter_scan",
             "filter_combine",
-            "filter_apply_offsets",
             "filter_scatter",
         ]
     );
@@ -2867,7 +2857,7 @@ entry mixed() ([]i32, []i32) =
         }]
     );
     assert_eq!(
-        phases[5].output_routes,
+        phases[4].output_routes,
         [OutputRouteProjection {
             semantic_slot: OutputSlotId(1),
             physical_slot: OutputSlotId(0),
@@ -3002,7 +2992,7 @@ entry compact_i32() []i32 =
 }
 
 #[test]
-fn filter_iota_scan_apply_offsets_reuses_phase1_worker_grid() {
+fn filter_iota_scatter_consumes_offsets_without_an_apply_pass() {
     use crate::pipeline_descriptor::{DispatchSize, Pipeline};
 
     let lowered = compile_thru_spirv(
@@ -3026,14 +3016,14 @@ entry compact_iota() []i32 =
         .iter()
         .find(|stage| stage.entry_point == "compact_iota_filter_scan")
         .expect("filter scan phase 1");
-    let phase3 = compute
-        .stages
-        .iter()
-        .find(|stage| stage.entry_point == "compact_iota_filter_scan_phase3_add_offsets")
-        .expect("filter scan phase 3");
+    let scatter =
+        compute.stages.iter().find(|stage| stage.entry_point == "compact_iota").expect("filter scatter");
 
-    assert_eq!(phase3.workgroup_size, phase1.workgroup_size);
-    assert_eq!(phase3.dispatch_size, phase1.dispatch_size);
+    assert_eq!(compute.stages.len(), 4);
+    assert_ne!(scatter.dispatch_size, phase1.dispatch_size);
+    assert!(phase1.writes.iter().any(|binding| scatter.reads.contains(binding)));
+    let combine = &compute.stages[2];
+    assert!(combine.writes.iter().all(|binding| scatter.reads.contains(binding)));
     assert!(matches!(
         phase1.dispatch_size,
         DispatchSize::Fixed {
@@ -11635,14 +11625,13 @@ entry filt_out(xs: []i32) ?k. [k]i32 =
             .filter(|binding| matches!(
                 binding,
                 Binding::StorageBuffer {
-                    length: Some(BufferLen::Fixed { bytes: 1024 }),
+                    length: Some(BufferLen::Fixed { bytes: 16 }),
                     ..
                 }
             ))
             .count(),
         2,
-        "scan block sums and block offsets have a fixed length (FILTER_SCAN_GROUPS \
-         * REDUCE_PHASE1_WIDTH = 256 u32s = 1024 bytes), bounding the serial phase-2"
+        "scan block sums and block offsets hold one u32 per workgroup (4 u32s = 16 bytes)"
     );
 }
 

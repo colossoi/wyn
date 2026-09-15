@@ -1,0 +1,7 @@
+entry repro(events: []i32) [1]i32 =
+  let (state, last) =
+    loop (state, last) = (0, [0, 0, 0, 0]) for k < 32 do
+      if events[k] > 0 then
+        (state + events[k], last with [k % 4] = events[k])
+      else (state, last) in
+  [state]

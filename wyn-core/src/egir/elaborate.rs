@@ -24,7 +24,7 @@ use crate::ssa::types::{
 };
 use crate::types;
 use crate::types::{ExternDecl, TypeExt};
-use crate::{BindingRef, EntryId, LookupMap, LookupSet, ResourceAccess};
+use crate::{BindingRef, EntryId, FunctionId, LookupMap, LookupSet, ResourceAccess};
 use polytype::Type;
 use smallvec::SmallVec;
 use wyn_graph::ReplacementForest;
@@ -286,6 +286,7 @@ pub fn elaborate_graph(
         elaborated: ScopedMap::new(),
         elaborated_places: ScopedMap::new(),
         elaborated_calls: ScopedMap::new(),
+        pure_calls: ScopedMap::new(),
         builder: FuncBuilder::new(
             params.iter().map(|parameter| (parameter.ty().clone(), parameter.name().to_owned())).collect(),
             return_ty,
@@ -398,6 +399,7 @@ struct Elaborator<'a> {
     /// handles that via its scope-depth pop).
     elaborated_places: ScopedMap<EgirPlaceId, (PlaceId, SkelBlockId)>,
     elaborated_calls: ScopedMap<CallSiteId, Option<(SsaValueId, SkelBlockId)>>,
+    pure_calls: ScopedMap<(FunctionId, Vec<ValueRef>), (SsaValueId, SkelBlockId)>,
     builder: FuncBuilder,
     block_map: LookupMap<SkelBlockId, BlockId>,
     current_block: Option<BlockId>,
@@ -416,6 +418,7 @@ impl<'a> Elaborator<'a> {
         self.elaborated.push_scope();
         self.elaborated_places.push_scope();
         self.elaborated_calls.push_scope();
+        self.pure_calls.push_scope();
         let pushed_loop = self.maybe_push_loop(skel_bid);
 
         let out_bid = self.block_map[&skel_bid];
@@ -446,6 +449,7 @@ impl<'a> Elaborator<'a> {
         }
         self.elaborated_places.pop_scope();
         self.elaborated_calls.pop_scope();
+        self.pure_calls.pop_scope();
         self.elaborated.pop_scope();
     }
 
@@ -571,6 +575,10 @@ impl<'a> Elaborator<'a> {
         } else {
             forced_block
         };
+        let key = (
+            call.callee(),
+            arguments.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+        );
         let kind = InstKind::Op {
             tag: OpTag::Call(call.callee()),
             operands: arguments.into_iter().map(|(value, _)| value).collect(),
@@ -583,7 +591,29 @@ impl<'a> Elaborator<'a> {
             return None;
         }
 
-        let root = self.emit_at(placed, kind, call.result().ty().clone(), None);
+        // Reuse a pure call only while its defining dominator scope is visible.
+        // Loop-invariant calls follow the same outer-scope placement as values.
+        let (root, placed) = if call.effects() == CallEffects::Pure {
+            if let Some(cached) = self.pure_calls.get(&key) {
+                cached
+            } else {
+                let result = (
+                    self.emit_at(placed, kind, call.result().ty().clone(), None),
+                    placed,
+                );
+                if let Some(depth) = self.placement_scope_depth(placed) {
+                    self.pure_calls.insert_at_depth(depth, key, result);
+                } else {
+                    self.pure_calls.insert(key, result);
+                }
+                result
+            }
+        } else {
+            (
+                self.emit_at(placed, kind, call.result().ty().clone(), None),
+                placed,
+            )
+        };
         self.record_call_placement(site, Some((root, placed)), placed);
         for (value, path, ty) in result_value_paths(call.result()) {
             let mut projected = root;

@@ -1,4 +1,4 @@
-//! Runtime-filter candidate analysis and five-phase kernel emission.
+//! Runtime-filter candidate analysis and four-phase kernel emission.
 
 use super::model::{FILTER_SCAN_GROUPS, REDUCE_PHASE1_WIDTH};
 use super::planning::{OperationRef, ScratchRef};
@@ -22,7 +22,6 @@ impl KernelPlanBuilder<'_> {
             self.schedule.allocate_kernel(),
             self.schedule.allocate_kernel(),
             self.schedule.allocate_kernel(),
-            self.schedule.allocate_kernel(),
         ];
         family.prepare(kernel, ids, output_projection)
     }
@@ -35,7 +34,6 @@ struct FilterKernelFamily {
     flags: BuiltPhase,
     scan: BuiltPhase,
     combine: BuiltPhase,
-    apply_offsets: BuiltPhase,
     scatter: BuiltPhase,
     scan_grid: FilterScanGrid,
 }
@@ -94,7 +92,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
             .unwrap_or(schedule::KernelDomain::Fixed { x: 1, y: 1, z: 1 });
         let flags = self.build_flags()?;
         let mut scan = self.build_scan()?;
-        let (combine, apply_offsets) = self.build_scan_tail(&mut scan)?;
+        let combine = self.build_scan_tail(&mut scan)?;
         let scatter = self.build_scatter()?;
         Ok(FilterKernelFamily {
             domain,
@@ -103,7 +101,6 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
             flags,
             scan,
             combine,
-            apply_offsets,
             scatter,
             scan_grid: self.candidate.scan_grid,
         })
@@ -161,7 +158,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
         )?))
     }
 
-    fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> ParallelizeResult<(BuiltPhase, BuiltPhase)> {
+    fn build_scan_tail(&mut self, scan: &mut BuiltPhase) -> ParallelizeResult<BuiltPhase> {
         let zero = graph_ops::intern_u32(&mut scan.body.graph, 0, None);
         let add_name = format!("{}_filter_scan_add", self.entry.name);
         let span = self.entry.span;
@@ -197,29 +194,7 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
                     self.entry.name
                 )
             })?;
-        let swap_wrapper_name = format!("{}_filter_scan_add_offsets", self.entry.name);
-        let elem_ty = self.elem_ty.clone();
-        let swap_region = self.lowering.define_callable(swap_wrapper_name, |region, name| {
-            synthesize_swap_wrapper(region, name, &add_function, elem_ty, Vec::new(), span)
-        })?;
-        let apply_offsets = ScanPhase3Spec {
-            entry_name: scan.body.name.clone(),
-            swap_region,
-            elem_ty: self.elem_ty.clone(),
-            source_graph: &scan.body.graph,
-            operator_captures: Vec::new(),
-            capture_inputs: Vec::new(),
-            output_resource: self.work.offsets.0,
-            block_offsets: self.work.block_offsets.0,
-            width: self.candidate.scan_grid.workgroup_width(),
-            post: None,
-        };
-        let apply_offsets = apply_offsets.build(
-            &mut self.lowering.identities,
-            self.lowering.semantic_ids,
-            self.lowering.effect_ids,
-        )?;
-        Ok((combine, apply_offsets))
+        Ok(combine)
     }
 
     fn build_scatter(&self) -> ParallelizeResult<BuiltPhase> {
@@ -230,6 +205,9 @@ impl<'lowering, 'effects> FilterKernelFamilyBuilder<'lowering, 'effects> {
             if declaration.resource == self.candidate.storage.length {
                 declaration.role = StorageRole::Input;
             }
+        }
+        if !resources.iter().any(|declaration| declaration.resource == self.candidate.storage.length) {
+            resources.push(self.declaration(self.candidate.storage.length, StorageRole::Input));
         }
         resources.push(self.declaration(self.work.flags, StorageRole::Input));
         resources.push(self.declaration(self.work.offsets, StorageRole::Input));
@@ -255,7 +233,7 @@ impl FilterKernelFamily {
     fn prepare(
         self,
         kernel: schedule::KernelId,
-        ids: [schedule::KernelId; 4],
+        ids: [schedule::KernelId; 3],
         output_projection: Option<Vec<usize>>,
     ) -> ParallelizeResult<schedule::PreparedRecipe> {
         use schedule::KernelDomain;
@@ -267,7 +245,6 @@ impl FilterKernelFamily {
             flags,
             scan,
             combine,
-            apply_offsets,
             scatter,
             scan_grid,
         } = self;
@@ -293,10 +270,10 @@ impl FilterKernelFamily {
             },
             storage,
         );
-        // The scan runs a fixed worker grid so each worker scans a large chunk;
-        // flags and scatter remain one-thread-per-input-element.
+        // Each scan workgroup cooperates on consecutive tiles. Flags and scatter
+        // remain one-thread-per-input-element.
         let scan = scan.filter(
-            scan_dispatch.clone(),
+            scan_dispatch,
             filter_soac::ParallelStage::Scan,
             filter_soac::ParallelConfig {
                 buffers: work,
@@ -308,13 +285,11 @@ impl FilterKernelFamily {
             schedule::KernelDispatch::explicit(KernelDomain::Fixed { x: 1, y: 1, z: 1 }),
             "filter_combine",
         );
-        let apply_offsets = apply_offsets.compute(scan_dispatch, "filter_apply_offsets");
         Ok(schedule::PreparedRecipe::sequence(
             vec![
                 (ids[0], flags),
                 (ids[1], scan),
                 (ids[2], combine),
-                (ids[3], apply_offsets),
                 (kernel, scatter),
             ],
             kernel,
@@ -393,8 +368,7 @@ pub(super) fn construct_filter_recipe(
         },
         _ => egir::program::LogicalSize::SameAsDispatch { elem_bytes: 4 },
     };
-    let workers =
-        egir::program::LogicalSize::FixedBytes(u64::from(REDUCE_PHASE1_WIDTH * FILTER_SCAN_GROUPS) * 4);
+    let workers = egir::program::LogicalSize::FixedBytes(u64::from(FILTER_SCAN_GROUPS) * 4);
     let scratch = |kind, slot, size| {
         ScratchRef::new(
             *semantic_id,

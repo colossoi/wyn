@@ -2912,6 +2912,23 @@ impl<P: Family, Lang: Language> EGraph<P, Lang> {
         }
         let arguments = self.bind_call_arguments(callee, parameters, arguments)?;
         self.validate_call_destinations(callee, parameters, function_result)?;
+        // Pure copy-value calls in the same block observe identical inputs.
+        // Reuse the complete result binding, including every product leaf.
+        if effects == CallEffects::Pure {
+            for effect in &self.skeleton.blocks[block].side_effects {
+                let SideEffectKind::Effect(EffectOp::Call { site }) = effect.kind() else {
+                    continue;
+                };
+                let call = self.call(*site);
+                if call.effects() == CallEffects::Pure
+                    && call.callee() == callee
+                    && call.argument_bindings() == arguments.as_ref()
+                    && call.result().ty() == function_result.ty()
+                {
+                    return Ok((*site, call.result().clone()));
+                }
+            }
+        }
         let nodes = &mut self.nodes;
         let site = self.calls.try_insert_with_key(|site| {
             let binding = function_result.try_bind(

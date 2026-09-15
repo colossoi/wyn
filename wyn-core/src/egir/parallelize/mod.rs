@@ -60,7 +60,7 @@ use projection::{
     partition_entry_output_domains, project_kernel_body, project_single_effect_body, ProjectionSpec,
 };
 use reduce::{construct_reduce_recipe, ReduceRecipe};
-use scan::{construct_scan_recipe, ScanPhase2Spec, ScanPhase3Spec, ScanRecipe, ScanScratch};
+use scan::{construct_scan_recipe, ScanPhase2Spec, ScanRecipe, ScanScratch};
 pub(crate) use schedule::stage_dispatch;
 pub use schedule::{
     KernelDispatch, KernelDomain, KernelId, KernelPlan, OutputRouteProjection, PhysicalKernel,

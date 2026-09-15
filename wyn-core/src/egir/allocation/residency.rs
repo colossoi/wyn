@@ -647,7 +647,17 @@ fn plan_direct_stage_prelude(
     program: &ResidencyDraft,
     analyses: &[GraphAnalysis<'_, AllocatedSemantic>],
 ) -> Option<StagePreludePlan> {
-    for (entry_index, (stage, _, entry)) in program.data.stages.stages().enumerate() {
+    for (entry_index, (stage, origin, entry)) in program.data.stages.stages().enumerate() {
+        // This generated producer already evaluates its scalar work once.
+        if matches!(
+            origin,
+            StageOrigin::Generated {
+                kind: GeneratedStageKind::Scalar,
+                space: None
+            }
+        ) {
+            continue;
+        }
         let Ok(analysis) = StageDependenceAnalysis::for_entry(entry, &analyses[entry_index]) else {
             continue;
         };
@@ -842,7 +852,8 @@ fn source_observers_support_prelude(
     // rewrites their value dependencies to the same handoff load. Retained
     // terminators can also use that load when the consumer block dominates
     // them, since the load is inserted before the first consumer. Earlier
-    // terminators and other serial effects still keep the prefix in place.
+    // terminators still keep the prefix in place. Serial effects following the load
+    // in the consumer block can observe the same handoff value.
     let output_effects = entry
         .routes()
         .flat_map(|route| &route.writers)
@@ -854,6 +865,8 @@ fn source_observers_support_prelude(
     let observers = uses.pure_observers(root);
     if !observers.effect_sites().all(|site| {
         consumers.contains(&site)
+            || (site.block == consumer_block
+                && consumers.iter().any(|consumer| consumer.index <= site.index))
             || entry
                 .graph
                 .skeleton

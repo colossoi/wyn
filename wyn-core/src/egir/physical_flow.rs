@@ -309,7 +309,7 @@ pub(crate) fn type_contains_materialized_flow(ty: &Type<TypeName>) -> bool {
 /// only scalar/view parameters and fixed places, and every target edge is
 /// emitted against that final representation.
 pub(crate) fn construct_physical_graph(
-    source: EGraph<Scheduled>,
+    mut source: EGraph<Scheduled>,
     bindings: &PhysicalResourceTable,
     effect_ids: &mut IdSource<EffectToken>,
 ) -> Result<
@@ -320,6 +320,7 @@ pub(crate) fn construct_physical_graph(
     ),
     String,
 > {
+    super::flow_liveness::prune_unused_state(&mut source)?;
     let interfaces = super::block_interface::extract(&source)?;
     let mut remap = GraphPhaseRemap::<Scheduled, Physical>::new(source);
     let mut merges = LookupMap::new();

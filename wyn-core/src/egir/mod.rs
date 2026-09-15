@@ -16,6 +16,7 @@ pub(crate) mod block_interface;
 pub mod elaborate;
 pub(crate) mod eliminate_call_places;
 mod extract;
+mod flow_liveness;
 mod fold;
 pub(crate) mod inlining;
 pub mod ir;

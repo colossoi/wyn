@@ -7,7 +7,7 @@ use crate::builtins::catalog;
 use crate::egir::graph_ops::{
     alloca, emit_place_index_store, emit_storage_store, intern_storage_view, intern_u32, load, store,
 };
-use crate::egir::kernel_index::{emit_chunk_arithmetic, emit_invocation_index};
+use crate::egir::kernel_index::emit_invocation_index;
 use crate::egir::soac::filter;
 use crate::egir::soac::lambda::emit_physical_call;
 use crate::egir::soac::Lambda;
@@ -24,6 +24,9 @@ use crate::BindingRef;
 use polytype::Type;
 use smallvec::smallvec;
 use wyn_base::IdSource;
+
+#[path = "filter_scan.rs"]
+mod cooperative_scan;
 
 /// Scan: `new_acc = func(acc, elem, ...caps); out[i] = new_acc` per iteration.
 /// Two loop-carried values: the output array (built via `_w_intrinsic_array_with`)
@@ -92,7 +95,7 @@ pub(super) fn expand_filter(
             filter::ParallelStage::Flags => {
                 build_filter_flags(graph, bid, idx, spec, plan.buffers.flags, next_effect)?
             }
-            filter::ParallelStage::Scan => build_filter_scan(
+            filter::ParallelStage::Scan => cooperative_scan::build(
                 graph,
                 bid,
                 idx,
@@ -101,9 +104,16 @@ pub(super) fn expand_filter(
                 plan.scan_workgroup_width,
                 next_effect,
             )?,
-            filter::ParallelStage::Scatter => {
-                build_filter_scatter(graph, bid, idx, spec, plan.buffers, *storage, next_effect)?
-            }
+            filter::ParallelStage::Scatter => build_filter_scatter(
+                graph,
+                bid,
+                idx,
+                spec,
+                plan.buffers,
+                *storage,
+                plan.scan_workgroup_width,
+                next_effect,
+            )?,
         },
     }
     Ok(())
@@ -400,100 +410,6 @@ pub(super) fn build_filter_flags(
     Ok(())
 }
 
-pub(super) fn build_filter_scan(
-    graph: &mut EGraph<Physical>,
-    bid: BlockId,
-    idx: usize,
-    spec: FilterLoop<'_>,
-    work: filter::WorkBuffers<BindingRef>,
-    scan_workgroup_width: u32,
-    next_effect: &mut IdSource<EffectToken>,
-) -> Result<(), String> {
-    graph.skeleton.blocks[bid].side_effects.drain(idx..);
-    let header = graph.skeleton.create_block();
-    let body = graph.skeleton.create_block();
-    let after = graph.skeleton.create_block();
-    let u32_ty = Type::Constructed(TypeName::UInt(32), vec![]);
-    let zero = intern_u32(graph, 0, None);
-    let one = intern_u32(graph, 1, None);
-    let input_len = emit_length(
-        graph,
-        filter_primary_input(&spec).0,
-        &filter_primary_input(&spec).1,
-        &u32_ty,
-    );
-    let (gid, chunk_start, chunk_len) = emit_chunk_arithmetic(graph, scan_workgroup_width, input_len)?;
-    graph.skeleton.blocks[bid].term = SkeletonTerminator::Branch {
-        target: header,
-        args: graph.admit_flow_values([zero, zero]),
-    };
-    let i = graph.add_block_param(header, u32_ty.clone());
-    let acc = graph.add_block_param(header, u32_ty.clone());
-    let cond = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Less),
-        smallvec![i, chunk_len],
-        Type::Constructed(TypeName::Bool, vec![]),
-        None,
-    );
-    let exit_args = graph.admit_flow_values([acc]);
-    install_loop(graph, header, cond, body, after, exit_args, body);
-    let flags = intern_storage_view(graph, work.flags, u32_ty.clone(), None);
-    let offsets = intern_storage_view(graph, work.offsets, u32_ty.clone(), None);
-    let global_i = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Add),
-        smallvec![chunk_start, i],
-        u32_ty.clone(),
-        None,
-    );
-    let flag_place = graph.add_view_index_place(graph.view_id(flags), global_i, u32_ty.clone(), None);
-    let flag =
-        load(graph, flag_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, body);
-    let next = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Add),
-        smallvec![acc, flag],
-        u32_ty.clone(),
-        None,
-    );
-    emit_storage_store(
-        graph,
-        body,
-        offsets,
-        global_i,
-        next,
-        u32_ty.clone(),
-        next_effect,
-        None,
-    );
-    let next_i = graph.intern_pure(
-        PureOp::BinOp(op::BinaryOperator::Add),
-        smallvec![i, one],
-        u32_ty.clone(),
-        None,
-    );
-    graph.skeleton.blocks[body].term = SkeletonTerminator::Branch {
-        target: header,
-        args: graph.admit_flow_values([next_i, next]),
-    };
-    let final_count = graph.add_block_param(after, u32_ty.clone());
-    let block_sums = intern_storage_view(graph, work.block_sums, u32_ty.clone(), None);
-    emit_storage_store(
-        graph,
-        after,
-        block_sums,
-        gid,
-        final_count,
-        u32_ty.clone(),
-        next_effect,
-        None,
-    );
-    graph.skeleton.blocks[after].term = SkeletonTerminator::Return(None);
-    graph.replace_node_preserving_type(
-        spec.result_node,
-        ValueKind::Constant(ssa::types::ConstantValue::Bool(false)),
-    );
-    Ok(())
-}
-
 pub(super) fn build_filter_scatter(
     graph: &mut EGraph<Physical>,
     bid: BlockId,
@@ -501,6 +417,7 @@ pub(super) fn build_filter_scatter(
     spec: FilterLoop<'_>,
     work: filter::WorkBuffers<BindingRef>,
     storage: filter::RuntimeStorage<BindingRef>,
+    scan_workgroup_width: u32,
     next_effect: &mut IdSource<EffectToken>,
 ) -> Result<(), String> {
     let replacement = replace_effect_with_continuation(
@@ -548,6 +465,27 @@ pub(super) fn build_filter_scatter(
     let offset_place = graph.add_view_index_place(graph.view_id(offsets), gid, u32_ty.clone(), None);
     let inclusive =
         load(graph, offset_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, write);
+    // Scan groups own contiguous runs of tiles, independent of the scatter grid.
+    let block_offsets = intern_storage_view(graph, work.block_offsets, u32_ty.clone(), None);
+    let block_offsets_ty = graph.nodes[block_offsets].ty.clone();
+    let groups = emit_length(graph, block_offsets, &block_offsets_ty, &u32_ty);
+    let index_op = |graph: &mut EGraph<Physical>, operator, left, right| {
+        graph.intern_pure(
+            PureOp::BinOp(operator),
+            smallvec![left, right],
+            u32_ty.clone(),
+            None,
+        )
+    };
+    let (_, tiles_per_group) = cooperative_scan::tile_partition(graph, len, groups, scan_workgroup_width)?;
+    let width = intern_u32(graph, scan_workgroup_width, None);
+    let tile = index_op(graph, op::BinaryOperator::Divide, gid, width);
+    let worker = index_op(graph, op::BinaryOperator::Divide, tile, tiles_per_group);
+    let block_place =
+        graph.add_view_index_place(graph.view_id(block_offsets), worker, u32_ty.clone(), None);
+    let block_offset =
+        load(graph, block_place, u32_ty.clone(), next_effect, None).append_to(&mut graph.skeleton, write);
+    let inclusive = index_op(graph, op::BinaryOperator::Add, block_offset, inclusive);
     let output_index = graph.intern_pure(
         PureOp::BinOp(op::BinaryOperator::Subtract),
         smallvec![inclusive, one],

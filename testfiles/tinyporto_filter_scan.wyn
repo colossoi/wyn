@@ -1,0 +1,2 @@
+entry repro(xs: []f32, n: i32) []f32 =
+  map(|i| f32(i + 1), filter(|i| xs[i] > 0.0, iota(n)))

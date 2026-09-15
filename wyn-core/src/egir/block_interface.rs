@@ -1,7 +1,10 @@
 //! Checked extraction and atomic column selection for one CFG snapshot.
+use super::graph_ops::pack_result_values;
 use super::ir::{EGraph, Family, FlowValueId, Language, ValueId, ValueKind};
+use super::types::{by_value_function_result, PureOp, ResultDestination, WynLanguage};
 use crate::flow::{BlockId, Terminator};
 use crate::{LookupMap, LookupSet};
+use smallvec::smallvec;
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, Debug, Eq)]
@@ -148,6 +151,63 @@ pub(crate) fn dependencies(
         std::iter::once((edge.source(), value.value()))
             .chain(edge.condition().map(|condition| (edge.source(), condition)))
     })
+}
+
+/// Expand product parameters into independent leaf columns. Existing value
+/// references keep their product shape through a reconstructed result binding.
+pub(crate) fn split_product_columns<P: Family>(graph: &mut EGraph<P, WynLanguage>) -> Result<(), String> {
+    let interfaces = extract(graph)?;
+    for (&block, interface) in &interfaces {
+        graph.skeleton.blocks[block].params.clear();
+        for parameter in interface.parameters() {
+            let value = parameter.value();
+            let abi = by_value_function_result::<WynLanguage>(graph.nodes[value].ty().clone());
+            if abi.is_product() {
+                let binding = abi.map_destinations(|ty, _| {
+                    ResultDestination::ReturnValue(graph.add_block_param(block, ty.clone()))
+                });
+                let packed = pack_result_values(graph, &binding)?;
+                graph.install_aliases([(value, packed)]);
+            } else {
+                let index = graph.skeleton.blocks[block].params.len();
+                graph.nodes[value].kind = ValueKind::BlockParam { block, index };
+                graph.skeleton.blocks[block].params.push(parameter);
+            }
+        }
+    }
+    for interface in interfaces.values() {
+        for (edge, arguments) in interface.rows() {
+            let mut leaves = Vec::new();
+            for (parameter, argument) in interface.parameters().zip(arguments) {
+                let value = graph.canonical_value(argument.value());
+                let abi =
+                    by_value_function_result::<WynLanguage>(graph.nodes[parameter.value()].ty().clone());
+                for (path, _) in abi.destination_leaves_with_paths() {
+                    let mut projected = value;
+                    let mut field = abi.clone();
+                    for &index in &path {
+                        let Some(child) = field.field(index) else {
+                            return Err("block argument projection has an invalid result path".into());
+                        };
+                        field = child;
+                        // Keep the interface's declared field type even when a
+                        // literal's internal buffer/size variables differ.
+                        projected = graph.intern_pure(
+                            PureOp::Project { index: index as u32 },
+                            smallvec![projected],
+                            field.ty().clone(),
+                            None,
+                        );
+                    }
+                    leaves.push(projected);
+                }
+            }
+            let arguments = graph.admit_flow_values(leaves);
+            *edge.arguments_mut(&mut graph.skeleton.blocks[edge.source()].term) = arguments;
+        }
+    }
+    graph.canonicalize_boundary_operands();
+    Ok(())
 }
 
 #[cfg(test)]
