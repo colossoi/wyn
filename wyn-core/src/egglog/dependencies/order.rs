@@ -83,11 +83,16 @@ pub(super) enum Node {
 /// Keep gates explicit: expanding their fan-in/fan-out to operation pairs can
 /// require quadratic space. Cross-region data edges are invocation dependencies,
 /// not ordering constraints within either region.
-pub(super) fn predecessors(snapshot: &Snapshot, data: &AssociatedData, node: Node, out: &mut Vec<Node>) {
+pub(super) fn predecessors(
+    dependencies: &Dependencies,
+    data: &AssociatedData,
+    node: Node,
+    out: &mut Vec<Node>,
+) {
     match node {
         Node::Operation(op) => {
             out.extend(
-                snapshot
+                dependencies
                     .data_predecessors
                     .get(&op)
                     .into_iter()
@@ -96,24 +101,25 @@ pub(super) fn predecessors(snapshot: &Snapshot, data: &AssociatedData, node: Nod
                     .copied()
                     .map(Node::Operation),
             );
-            out.extend(snapshot.effects.waits.get(&op).into_iter().flatten().copied().map(Node::Gate));
+            out.extend(dependencies.effects.waits.get(&op).into_iter().flatten().copied().map(Node::Gate));
         }
-        Node::Gate(g) => out.extend(snapshot.effects.groups[g].iter().copied().map(Node::Operation)),
+        Node::Gate(g) => out.extend(dependencies.effects.groups[g].iter().copied().map(Node::Operation)),
     }
 }
 
 pub(super) fn schedules(
-    snapshot: &Snapshot,
+    dependencies: &Dependencies,
     data: &AssociatedData,
 ) -> Result<BTreeMap<RegionId, Vec<OperationId>>, OptimizeError> {
     // Ready gates precede operations, matching immediate release of their
     // waiters. Ready operations retain their deterministic OperationId order.
-    let nodes = (0..snapshot.effects.groups.len())
+    let nodes = (0..dependencies.effects.groups.len())
         .map(Node::Gate)
-        .chain(snapshot.live.iter().copied().map(Node::Operation));
-    let ordered =
-        wyn_graph::topo_sort_by_dependencies(nodes, |node, out| predecessors(snapshot, data, node, out))
-            .map_err(|_| OptimizeError::Extraction("cycle in the selected execution graph".into()))?;
+        .chain(dependencies.live.iter().copied().map(Node::Operation));
+    let ordered = wyn_graph::topo_sort_by_dependencies(nodes, |node, out| {
+        predecessors(dependencies, data, node, out)
+    })
+    .map_err(|_| OptimizeError::Extraction("cycle in the selected execution graph".into()))?;
     let mut regions = BTreeMap::<RegionId, Vec<OperationId>>::new();
     for node in ordered {
         if let Node::Operation(op) = node {
@@ -220,7 +226,7 @@ mod tests {
             storage <= 4 * ids.len(),
             "no quadratic operation pairs inside the sorter"
         );
-        let snapshot = Snapshot {
+        let dependencies = Dependencies {
             live,
             effects,
             data_predecessors: BTreeMap::new(),
@@ -228,17 +234,17 @@ mod tests {
             discardable: BTreeSet::new(),
             safe_regions: BTreeSet::new(),
         };
-        let sorted = snapshot.schedules(&data).unwrap();
+        let sorted = dependencies.schedules(&data).unwrap();
         assert_eq!(sorted[&data.operations[ids[0]].region], ids);
         let mut reached = Vec::new();
-        snapshot.walk_dependencies(&data, *ids.last().unwrap(), |op| reached.push(op));
+        dependencies.walk_dependencies(&data, *ids.last().unwrap(), |op| reached.push(op));
         assert_eq!(reached.len(), ids.len() / 2 + 1);
         let mut edges = 0;
         wyn_graph::for_each_reachable(
             ids.iter().copied().map(Node::Operation),
             wyn_graph::WalkOrder::DepthFirst,
             |node, out| {
-                predecessors(&snapshot, &data, node, out);
+                predecessors(&dependencies, &data, node, out);
                 edges += out.len();
             },
             |_| {},
@@ -249,7 +255,7 @@ mod tests {
     #[test]
     fn ready_gates_release_lower_id_operations_immediately_and_detect_cycles() {
         let (data, ids) = graph(3);
-        let mut snapshot = Snapshot {
+        let mut dependencies = Dependencies {
             live: ids.iter().copied().collect(),
             data_predecessors: BTreeMap::new(),
             effects: Effects {
@@ -261,10 +267,10 @@ mod tests {
             safe_regions: BTreeSet::new(),
         };
         assert_eq!(
-            snapshot.schedules(&data).unwrap()[&data.operations[ids[0]].region],
+            dependencies.schedules(&data).unwrap()[&data.operations[ids[0]].region],
             [ids[1], ids[0], ids[2]]
         );
-        snapshot.effects.groups[0] = vec![ids[0]];
-        assert!(snapshot.schedules(&data).is_err());
+        dependencies.effects.groups[0] = vec![ids[0]];
+        assert!(dependencies.schedules(&data).is_err());
     }
 }

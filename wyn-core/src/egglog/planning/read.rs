@@ -43,7 +43,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         if matches!(value, Resource::Output(_)) {
             produced.insert(value.clone());
         }
-        types.insert(value, super::super::extract::key::<TypeId>(dag, a[1], "TypeId")?);
+        types.insert(value, super::super::term::key::<TypeId>(dag, a[1], "TypeId")?);
         Ok(())
     })?;
     let mut allocations = BTreeSet::new();
@@ -167,9 +167,9 @@ fn extent(d: &TermDag, id: usize, buffers: &BTreeMap<Resource, BufferId>) -> Res
         ("Fixed", [n]) => Value::Int(number(d, *n)?),
         ("Length", [e]) => Value::op(
             "length",
-            [Value::Source(super::super::extract::key(d, *e, "ExprId")?)],
+            [Value::Source(super::super::term::key(d, *e, "ExprId")?)],
         ),
-        ("Scalar", [e]) => Value::Source(super::super::extract::key(d, *e, "ExprId")?),
+        ("Scalar", [e]) => Value::Source(super::super::term::key(d, *e, "ExprId")?),
         ("ChunkCount", [n, width]) => Value::op(
             "max",
             [
@@ -197,7 +197,7 @@ fn resource(d: &TermDag, id: usize) -> Result<Resource, OptimizeError> {
     };
     Ok(match (name.as_str(), a.as_slice()) {
         ("Output", [id]) => Resource::Output(OutputId::from(number(d, *id)?)),
-        ("Source", [e]) => Resource::Source(super::super::extract::key(d, *e, "ExprId")?),
+        ("Source", [e]) => Resource::Source(super::super::term::key(d, *e, "ExprId")?),
         ("Result", [o, i]) => Resource::Result(operation(d, *o)?, number(d, *i)?),
         ("Temporary", [o, name, i]) => {
             Resource::Temporary(operation(d, *o)?, string(d, *name)?, number(d, *i)?)
@@ -206,11 +206,11 @@ fn resource(d: &TermDag, id: usize) -> Result<Resource, OptimizeError> {
     })
 }
 fn stage(d: &TermDag, id: usize) -> Result<(OperationId, String), OptimizeError> {
-    let a = super::super::extract::app(d, id, "Stage", 2)?;
+    let a = super::super::term::app(d, id, "Stage", 2)?;
     Ok((operation(d, a[0])?, string(d, a[1])?))
 }
 fn operation(d: &TermDag, id: usize) -> Result<OperationId, OptimizeError> {
-    super::super::extract::key(d, id, "OperationId")
+    super::super::term::key(d, id, "OperationId")
 }
 fn number(d: &TermDag, id: usize) -> Result<u32, OptimizeError> {
     let Term::Lit(Literal::Int(n)) = d.get(id) else {
@@ -232,7 +232,7 @@ fn rows(
 ) -> Result<(), OptimizeError> {
     let (rows, _, dag) = graph.function_to_dag(name, usize::MAX, false)?;
     for row in rows {
-        f(&dag, super::super::extract::app(&dag, row, name, arity)?)?;
+        f(&dag, super::super::term::app(&dag, row, name, arity)?)?;
     }
     Ok(())
 }

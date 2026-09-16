@@ -1,5 +1,5 @@
 //! Topological binding propagation and placement with shared scope sets.
-use super::super::super::snapshot;
+use super::super::super::dependencies;
 use super::*;
 use bounds::{Bounds, Interval};
 use wyn_base::persistent_sets::{Set, EMPTY};
@@ -12,7 +12,7 @@ pub(super) struct Analysis {
 impl Analysis {
     pub(super) fn new(data: &AssociatedData) -> Result<Self, OptimizeError> {
         let _timing = timing::span("analyze placements");
-        let summary = timing::time("analyze dependencies", || snapshot::analyze(data));
+        let summary = timing::time("analyze dependencies", || dependencies::analyze(data));
         let schedules = timing::time("validate dependency order", || summary.schedules(data))?;
         let control = timing::time("derive binding bounds", || bounds::analyze(data, &schedules))?;
         let uses = timing::time("collect expression uses", || uses::analyze(data, &summary.live));

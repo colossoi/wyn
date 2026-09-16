@@ -37,8 +37,8 @@ fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Co
     run(converted);
     // Every imported shape must also support dependency/effect analysis and a
     // valid scoped schedule, including nested loops and all SOAC constructors.
-    super::optimize::analyze(&converted.data).unwrap();
-    super::snapshot::analyze(&converted.data).schedules(&converted.data).unwrap();
+    super::graph_tests::fusion_dependencies(&converted.data);
+    super::dependencies::analyze(&converted.data).schedules(&converted.data).unwrap();
     assert_eq!(program.defs.len(), converted.data.definitions.len());
     assert_eq!(program.symbols.len(), converted.data.symbols.len());
     let mut expressions = crate::LookupSet::new();
@@ -76,7 +76,7 @@ fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Co
         "ParameterId",
         "TypeId",
         "Definition",
-        "Origin",
+        "(Origin ",
         "FloatBits",
         "BinOp",
         "ApplyBody",
@@ -172,14 +172,14 @@ fn fusion_graph_does_not_grow_with_scalar_body_structure() {
     let small_graph = run(&small);
     let large_graph = run(&large);
     for relation in [
-        "Operation",
-        "Screma",
-        "InputFrom",
-        "Use",
-        "DependsOn",
-        "EffectBefore",
-        "Safe",
-        "Movable",
+        "Current",
+        "ScremaPlan",
+        "InputFact",
+        "GroupUseFact",
+        "GroupEdge",
+        "GroupBefore",
+        "SafePlan",
+        "MovablePlan",
     ] {
         let (small_rows, _, _) = small_graph.function_to_dag(relation, usize::MAX, false).unwrap();
         let (large_rows, _, _) = large_graph.function_to_dag(relation, usize::MAX, false).unwrap();
@@ -204,10 +204,10 @@ fn scalar_only_effects_stay_in_the_sidecar_without_fusion_facts() {
     let converted = convert_program(&program).unwrap();
     verify_sources(&program, &converted);
     let graph = run(&converted);
-    let (rows, _, _) = graph.function_to_dag("Operation", usize::MAX, false).unwrap();
-    assert!(rows.is_empty(), "no SOACs to optimize");
+    let (rows, _, _) = graph.function_to_dag("Current", usize::MAX, false).unwrap();
+    assert!(rows.is_empty(), "no SOACs to fuse");
     assert_eq!(converted.data.operations.len(), 1);
-    let schedules = super::snapshot::analyze(&converted.data).schedules(&converted.data).unwrap();
+    let schedules = super::dependencies::analyze(&converted.data).schedules(&converted.data).unwrap();
     assert_eq!(
         schedules.values().map(Vec::len).sum::<usize>(),
         1,

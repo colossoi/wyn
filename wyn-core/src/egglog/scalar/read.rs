@@ -67,6 +67,7 @@ pub(super) fn extract(
 pub(super) fn constants(
     graph: &mut EGraph,
     data: &mut AssociatedData,
+    live_operations: &BTreeSet<OperationId>,
     round: usize,
     seen: &mut BTreeSet<(ExprId, ExprId)>,
 ) -> Result<bool, OptimizeError> {
@@ -100,7 +101,8 @@ pub(super) fn constants(
         return Ok(false);
     }
     timing::time("insert evaluated constants", || -> Result<(), OptimizeError> {
-        graph.run_program(expressions::additional(reader.data, &extra, &prefix)?)?;
+        let source = expressions::emit_additional(reader.data, live_operations, &extra, &prefix)?;
+        graph.run_program(term::parse("wyn-evaluated.egg", &source)?)?;
         graph.parse_and_run_program(None, &facts)?;
         Ok(())
     })?;
@@ -116,18 +118,18 @@ impl Reader<'_> {
         if let Some(&v) = self.memo.get(&id) {
             return Ok(v);
         }
-        let args = extract::app(dag, id, "Typed", 2)?;
-        let ty = extract::key(dag, args[0], "TypeId")?;
+        let args = term::app(dag, id, "Typed", 2)?;
+        let ty = term::key(dag, args[0], "TypeId")?;
         let Term::App(tag, a) = dag.get(args[1]) else {
             return Err(error("expected expression node"));
         };
         let kind = match (tag.as_str(), a.as_slice()) {
-            ("Global", &[x]) => ExprKind::Global(extract::key(dag, x, "SymbolId")?),
-            ("Parameter", &[x]) => ExprKind::Parameter(extract::key(dag, x, "ParameterId")?),
-            ("Builtin", &[x]) => ExprKind::Builtin(extract::key(dag, x, "BuiltinId")?),
-            ("Extern", &[x]) => ExprKind::Extern(extract::key(dag, x, "ExternId")?),
-            ("OperationResult", &[x]) => ExprKind::OperationResult(extract::key(dag, x, "OperationId")?),
-            ("Lambda", &[x]) => ExprKind::Lambda(extract::key(dag, x, "RegionId")?),
+            ("Global", &[x]) => ExprKind::Global(term::key(dag, x, "SymbolId")?),
+            ("Parameter", &[x]) => ExprKind::Parameter(term::key(dag, x, "ParameterId")?),
+            ("Builtin", &[x]) => ExprKind::Builtin(term::key(dag, x, "BuiltinId")?),
+            ("Extern", &[x]) => ExprKind::Extern(term::key(dag, x, "ExternId")?),
+            ("OperationResult", &[x]) => ExprKind::OperationResult(term::key(dag, x, "OperationId")?),
+            ("Lambda", &[x]) => ExprKind::Lambda(term::key(dag, x, "RegionId")?),
             ("BinOp", &[x]) => ExprKind::BinOp(string(dag, x)?),
             ("UnOp", &[x]) => ExprKind::UnOp(string(dag, x)?),
             ("Int", &[x]) => ExprKind::Int(string(dag, x)?),
@@ -156,7 +158,7 @@ impl Reader<'_> {
                 else_value: self.value(dag, b)?,
             },
             ("Closure", &[code, count, xs]) => ExprKind::Closure {
-                code: extract::key(dag, code, "SymbolId")?,
+                code: term::key(dag, code, "SymbolId")?,
                 param_count: usize::try_from(integer(dag, count)?).map_err(|_| error("closure arity"))?,
                 captures: self.values(dag, xs)?,
             },

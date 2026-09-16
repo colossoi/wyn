@@ -1,52 +1,89 @@
-//! Sidecar algebra for fusion decisions. Egglog sees ports and legality facts;
-//! scalar bodies remain parameterized regions or compositions of opaque bodies.
-
-use super::data::*;
+//! Materialize the completed plan. Construction helpers stay inside this module.
+use super::analysis::{counts, input_slices, references, routes};
+use super::plan::Step;
+use crate::egglog::data::{
+    body_signature as signature, intern_expr as expr, intern_type as ty, is_slice, value_source, Array,
+    AssociatedData, ExprId, ExprKind, OperationId, OperationKind, RegionId, ScremaForm, SoacBody, TypeId,
+};
+use crate::egglog::{rewrite, OptimizeError};
 use crate::types::{self, TypeExt};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod body;
 mod envelope;
 mod filter;
 mod indexed;
-mod project;
-use super::rewrite;
 mod slices;
-pub(super) use envelope::{envelope, memory_compatible};
-pub(super) use filter::{length_source, masked};
-pub(super) use indexed::{demands, indexed};
-pub(super) use slices::is_slice;
+use body::{finish, invoke, region};
+use envelope::envelope;
+use filter::masked;
+use indexed::indexed;
 
-pub(super) fn ty(data: &mut AssociatedData, value: types::Type) -> TypeId {
-    if let Some((&id, _)) = data.types.iter().find(|(_, t)| t.ty == value) {
-        return id;
-    }
-    data.types.alloc(TypeData { ty: value })
+#[derive(Clone, Debug)]
+enum Input {
+    External(Array),
+    Produced(usize, Vec<(ExprId, ExprId)>),
+    Tuple(Vec<Input>),
 }
-pub(super) fn expr(data: &mut AssociatedData, ty: TypeId, kind: ExprKind) -> ExprId {
-    let value = ExprData { ty, kind };
-    if let Some((&id, _)) = data.expressions.iter().find(|(_, e)| **e == value) {
-        return id;
+fn input(data: &AssociatedData, array: &Array, producer: Option<OperationId>) -> Input {
+    match array {
+        Array::Zip(arrays) => Input::Tuple(arrays.iter().map(|a| input(data, a, producer)).collect()),
+        Array::Value(id) => match &data.expressions[value_source(data, *id)].kind {
+            ExprKind::OperationResult(op) if Some(*op) == producer => Input::Produced(0, vec![]),
+            ExprKind::Coerce(v) => input(data, &Array::Value(*v), producer),
+            ExprKind::Array(a) => input(data, a, producer),
+            ExprKind::Project { tuple, index } if matches!(data.expressions[*tuple].kind, ExprKind::OperationResult(op) if Some(op) == producer) => {
+                Input::Produced(*index, vec![])
+            }
+            ExprKind::PureApp { function, args } if is_slice(data, *function) => {
+                if let [base, start, end] = args.as_slice() {
+                    if let Input::Produced(slot, mut transforms) =
+                        input(data, &Array::Value(*base), producer)
+                    {
+                        transforms.push((*start, *end));
+                        return Input::Produced(slot, transforms);
+                    }
+                }
+                Input::External(array.clone())
+            }
+            _ => Input::External(array.clone()),
+        },
+        _ => Input::External(array.clone()),
     }
-    data.expressions.alloc(value)
 }
-pub(super) fn signature(body: &SoacBody) -> (Vec<TypeId>, Vec<TypeId>) {
-    match body {
-        SoacBody::Apply {
-            parameters, results, ..
-        } => (parameters.clone(), results.clone()),
-        SoacBody::Identity(ts) => (ts.clone(), ts.clone()),
-        SoacBody::Route { parameters, indices } => (
-            parameters.clone(),
-            indices.iter().map(|&i| parameters[i]).collect(),
-        ),
-        SoacBody::Compose { first, then } => (signature(first).0, signature(then).1),
-        SoacBody::Parallel { left, right } => {
-            let (p, mut r) = signature(left);
-            r.extend(signature(right).1);
-            (p, r)
-        }
+
+pub(super) fn apply_step(
+    data: &mut AssociatedData,
+    Step {
+        family,
+        region,
+        producer,
+        consumer,
+        retained,
+        lengths,
+        demands,
+    }: Step,
+) -> Result<(), OptimizeError> {
+    let valid = data
+        .regions
+        .get(region)
+        .is_some_and(|scope| scope.members.contains(&producer) && scope.members.contains(&consumer));
+    if !valid || (producer == consumer && family != 4 && family != 5) {
+        return Err(OptimizeError::Extraction(
+            "fusion candidate does not belong to the selected graph".into(),
+        ));
     }
+    match family {
+        0 | 1 => scremas(data, producer, consumer, family == 1, retained),
+        2 => envelope(data, producer, consumer),
+        3 | 5 => masked(data, producer, consumer, &lengths),
+        4 => indexed(data, producer, &demands),
+        _ => None,
+    }.ok_or_else(|| OptimizeError::Extraction(format!(
+        "fusion body composition disagrees with its legality facts: family {family}, {producer:?} -> {consumer:?}"
+    )))
 }
+
 fn compose(first: SoacBody, then: SoacBody) -> SoacBody {
     if matches!(first, SoacBody::Identity(_)) {
         return then;
@@ -102,38 +139,6 @@ impl Wiring {
     }
 }
 
-#[derive(Clone, Debug)]
-enum Input {
-    External(Array),
-    Produced(usize, Vec<(ExprId, ExprId)>),
-    Tuple(Vec<Input>),
-}
-fn input(data: &AssociatedData, array: &Array, producer: Option<OperationId>) -> Input {
-    match array {
-        Array::Zip(arrays) => Input::Tuple(arrays.iter().map(|a| input(data, a, producer)).collect()),
-        Array::Value(id) => match &data.expressions[*id].kind {
-            ExprKind::OperationResult(op) if Some(*op) == producer => Input::Produced(0, vec![]),
-            ExprKind::Coerce(v) => input(data, &Array::Value(*v), producer),
-            ExprKind::Array(a) => input(data, a, producer),
-            ExprKind::Project { tuple, index } if matches!(data.expressions[*tuple].kind, ExprKind::OperationResult(op) if Some(op) == producer) => {
-                Input::Produced(*index, vec![])
-            }
-            ExprKind::PureApp { function, args } if slices::is_slice(data, *function) => {
-                if let [base, start, end] = args.as_slice() {
-                    if let Input::Produced(slot, mut transforms) =
-                        input(data, &Array::Value(*base), producer)
-                    {
-                        transforms.push((*start, *end));
-                        return Input::Produced(slot, transforms);
-                    }
-                }
-                Input::External(array.clone())
-            }
-            _ => Input::External(array.clone()),
-        },
-        _ => Input::External(array.clone()),
-    }
-}
 fn flatten(tree: &Input, arrays: &mut Vec<Array>) {
     match tree {
         Input::External(a) => {
@@ -150,20 +155,20 @@ fn flatten(tree: &Input, arrays: &mut Vec<Array>) {
     }
 }
 fn element(data: &mut AssociatedData, array: &Array) -> Option<TypeId> {
+    let value = element_type(data, array)?;
+    Some(ty(data, value))
+}
+fn element_type(data: &AssociatedData, array: &Array) -> Option<types::Type> {
     match array {
         Array::Value(id) => {
             let array_ty = types::canonical_storage_buffer_ty(&data.types[data.expressions[*id].ty].ty);
-            Some(ty(data, array_ty.elem_type()?.clone()))
+            array_ty.elem_type().cloned()
         }
-        Array::Literal(xs) => Some(data.expressions[*xs.first()?].ty),
-        Array::Range { start, .. } => Some(data.expressions[*start].ty),
-        Array::Zip(xs) => {
-            let ts = xs.iter().map(|x| element(data, x)).collect::<Option<Vec<_>>>()?;
-            Some(ty(
-                data,
-                types::tuple(ts.iter().map(|t| data.types[*t].ty.clone()).collect()),
-            ))
-        }
+        Array::Literal(xs) => Some(data.types[data.expressions[*xs.first()?].ty].ty.clone()),
+        Array::Range { start, .. } => Some(data.types[data.expressions[*start].ty].ty.clone()),
+        Array::Zip(xs) => Some(types::tuple(
+            xs.iter().map(|x| element_type(data, x)).collect::<Option<_>>()?,
+        )),
     }
 }
 fn wire_input(
@@ -194,16 +199,10 @@ fn wire_input_at(
                 .map(|x| wire_input_at(data, region, wiring, x, arrays, produced, base))
                 .collect::<Option<Vec<_>>>()?;
             let types = args.iter().map(|&i| wiring.types[i]).collect();
-            let body = project::tuple(data, region, types);
+            let body = body::tuple(data, region, types);
             Some(wiring.call(body, args)[0])
         }
     }
-}
-fn counts(form: &ScremaForm) -> (usize, usize) {
-    (
-        form.scans.iter().map(|s| s.neutral.len()).sum(),
-        form.reductions.iter().map(|r| r.neutral.len()).sum(),
-    )
 }
 fn result_types(data: &mut AssociatedData, op: OperationId) -> Vec<TypeId> {
     // Operation results are always a tuple, even for a single logical result.
@@ -214,126 +213,9 @@ fn result_types(data: &mut AssociatedData, op: OperationId) -> Vec<TypeId> {
     };
     fields.into_iter().map(|t| ty(data, t)).collect()
 }
-pub(super) fn routes(
-    data: &AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-) -> BTreeSet<usize> {
-    fn visit(data: &AssociatedData, producer: OperationId, i: Input, out: &mut BTreeSet<usize>) -> bool {
-        match i {
-            Input::Produced(i, _) => {
-                out.insert(i);
-                true
-            }
-            Input::Tuple(xs) => xs.into_iter().all(|x| visit(data, producer, x, out)),
-            Input::External(a) => {
-                let mut refs = BTreeSet::new();
-                project::array_references(data, &a, &mut refs);
-                !refs.iter().any(|v| matches!(data.expressions[*v].kind, ExprKind::OperationResult(op) if op == producer))
-            }
-        }
-    }
-    let mut out = BTreeSet::new();
-    if input_slices(data, producer, consumer).is_none() {
-        return out;
-    }
-    for a in inputs(&data.operations[consumer].kind) {
-        // A partially routed input would leave a self-dependency after fusion.
-        if !visit(data, producer, input(data, a, Some(producer)), &mut out) {
-            return BTreeSet::new();
-        }
-    }
-    out
-}
-pub(super) fn input_slices(
-    data: &AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-) -> Option<Vec<(ExprId, ExprId)>> {
-    let mut selected = None;
-    fn visit(tree: Input, selected: &mut Option<Vec<(ExprId, ExprId)>>) -> Option<()> {
-        match tree {
-            Input::Produced(_, transforms) => {
-                if selected.as_ref().is_some_and(|old| *old != transforms) {
-                    return None;
-                }
-                *selected = Some(transforms);
-            }
-            Input::Tuple(xs) => {
-                for x in xs {
-                    visit(x, selected)?;
-                }
-            }
-            _ => {}
-        }
-        Some(())
-    }
-    for a in inputs(&data.operations[consumer].kind) {
-        visit(input(data, a, Some(producer)), &mut selected)?;
-    }
-    Some(selected.unwrap_or_default())
-}
-pub(super) fn inputs(kind: &OperationKind) -> Vec<&Array> {
-    match kind {
-        OperationKind::Screma { inputs, .. }
-        | OperationKind::Scatter { inputs, .. }
-        | OperationKind::BucketScatter { inputs, .. } => inputs.iter().collect(),
-        OperationKind::Filter { inputs, .. } => inputs.iter().collect(),
-        OperationKind::ReduceByIndex { inputs, .. } => inputs.iter().collect(),
-        _ => vec![],
-    }
-}
-
-/// Prove equal iteration domains without assuming unrelated runtime lengths are equal.
-pub(super) fn same_domain(data: &AssociatedData, a: OperationId, b: OperationId) -> bool {
-    fn domain(data: &AssociatedData, a: &Array) -> Array {
-        match a {
-            Array::Zip(xs) if !xs.is_empty() => domain(data, &xs[0]),
-            Array::Value(id) => match &data.expressions[*id].kind {
-                ExprKind::Coerce(v) => domain(data, &Array::Value(*v)),
-                ExprKind::Array(a) => domain(data, a),
-                ExprKind::Project { tuple, .. } => {
-                    if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
-                        if let OperationKind::Screma { inputs, .. } = &data.operations[op].kind {
-                            if let Some(first) = inputs.first() {
-                                return domain(data, first);
-                            }
-                        }
-                        a.clone()
-                    } else {
-                        a.clone()
-                    }
-                }
-                _ => a.clone(),
-            },
-            _ => a.clone(),
-        }
-    }
-    let aa = inputs(&data.operations[a].kind);
-    let bb = inputs(&data.operations[b].kind);
-    let (Some(a), Some(b)) = (aa.first(), bb.first()) else {
-        return false;
-    };
-    let (a, b) = (domain(data, a), domain(data, b));
-    if a == b {
-        return true;
-    }
-    fn fixed(data: &AssociatedData, a: &Array) -> Option<u64> {
-        match a {
-            Array::Literal(xs) => Some(xs.len() as u64),
-            Array::Value(id) => match data.types[data.expressions[*id].ty].ty.array_size() {
-                Some(types::Type::Constructed(types::TypeName::Size(n), _)) => Some(*n as u64),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-    fixed(data, &a).is_some_and(|n| Some(n) == fixed(data, &b))
-}
-
 /// Construct one combined Screma and the mapping from each old result slot to
 /// its new slot. Producer outputs with observers survive the contraction.
-pub(super) fn scremas(
+fn scremas(
     data: &mut AssociatedData,
     producer: OperationId,
     consumer: OperationId,
@@ -451,7 +333,7 @@ pub(super) fn scremas(
             post.finish(cb.into_iter().chain(keep).collect()),
         )
     } else {
-        return project::across_barrier(data, producer, consumer, retain);
+        return across_barrier(data, producer, consumer, retain);
     };
     let form = ScremaForm {
         pre,
@@ -540,4 +422,141 @@ fn install(
     data.regions[data.operations[producer].region].members.remove(&producer);
     rewrite::all(data, &substitutions);
     Some(())
+}
+fn input_value(
+    data: &mut AssociatedData,
+    tree: &Input,
+    arrays: &[Array],
+    external: &[ExprId],
+    produced: &[ExprId],
+) -> Option<ExprId> {
+    match tree {
+        Input::External(a) => external.get(arrays.iter().position(|x| x == a)?).copied(),
+        Input::Produced(i, _) => produced.get(*i).copied(),
+        Input::Tuple(xs) => {
+            let vs = xs
+                .iter()
+                .map(|x| input_value(data, x, arrays, external, produced))
+                .collect::<Option<Vec<_>>>()?;
+            let ts = vs.iter().map(|v| data.types[data.expressions[*v].ty].ty.clone()).collect();
+            let t = ty(data, types::tuple(ts));
+            Some(expr(data, t, ExprKind::Tuple(vs)))
+        }
+    }
+}
+fn across_barrier(
+    data: &mut AssociatedData,
+    producer: OperationId,
+    consumer: OperationId,
+    retain: bool,
+) -> Option<()> {
+    let OperationKind::Screma {
+        form: a, inputs: ai, ..
+    } = data.operations[producer].kind.clone()
+    else {
+        return None;
+    };
+    let OperationKind::Screma {
+        form: b, inputs: bi, ..
+    } = data.operations[consumer].kind.clone()
+    else {
+        return None;
+    };
+    let parent = data.operations[consumer].region;
+    let (sa, ra) = counts(&a);
+    let (sb, rb) = counts(&b);
+    let at = signature(&a.pre).1;
+    let bt = signature(&b.pre).1;
+    let trees_a: Vec<_> = ai.iter().map(|i| input(data, i, None)).collect();
+    let trees_b: Vec<_> = bi.iter().map(|i| input(data, i, Some(producer))).collect();
+    let mut arrays = vec![];
+    for t in trees_a.iter().chain(&trees_b) {
+        flatten(t, &mut arrays);
+    }
+    let params = arrays.iter().map(|a| element(data, a)).collect::<Option<Vec<_>>>()?;
+    let mut pre = Wiring::new(params.clone());
+    let aa = trees_a
+        .iter()
+        .map(|t| wire_input(data, parent, &mut pre, t, &arrays, &[]))
+        .collect::<Option<Vec<_>>>()?;
+    let av = pre.call(a.pre.clone(), aa);
+    let collective = if sb + rb == 0 {
+        vec![]
+    } else {
+        let projection_params: Vec<_> = at[sa + ra..].iter().chain(&params).copied().collect();
+        let (r, args) = region(data, parent, &projection_params);
+        let (_, holes) = region(data, parent, &at[..sa]);
+        let args_a = holes.iter().chain(&args[..at.len() - sa - ra]).copied().collect();
+        let produced = invoke(data, &a.post, args_a)?;
+        if ra > 0 && routes(data, producer, consumer).iter().any(|&r| r < ra) {
+            return None;
+        }
+        // Reduction result slots are never selected by a streamed input.
+        let mut outputs = vec![args[0]; ra];
+        outputs.extend(produced);
+        let external = &args[at.len() - sa - ra..];
+        let args_b = trees_b
+            .iter()
+            .map(|t| input_value(data, t, &arrays, external, &outputs))
+            .collect::<Option<Vec<_>>>()?;
+        let values = invoke(data, &b.pre, args_b)?;
+        let selected = values[..sb + rb].to_vec();
+        let mut refs = BTreeSet::new();
+        for &v in &selected {
+            references(data, v, &mut refs);
+        }
+        if holes.iter().any(|h| refs.contains(h)) {
+            return None;
+        }
+        let body = finish(data, r, projection_params, selected);
+        pre.call(
+            body,
+            av[sa + ra..].iter().copied().chain(0..params.len()).collect(),
+        )
+    };
+    let pre_outputs = av[..sa]
+        .iter()
+        .chain(&collective[..sb])
+        .chain(&av[sa..sa + ra])
+        .chain(&collective[sb..])
+        .chain(&av[sa + ra..])
+        .copied()
+        .chain(0..params.len())
+        .collect();
+    let post_params: Vec<_> =
+        at[..sa].iter().chain(&bt[..sb]).chain(&at[sa + ra..]).chain(&params).copied().collect();
+    let mut post = Wiring::new(post_params);
+    let produced = post.call(
+        a.post.clone(),
+        (0..sa).chain(sa + sb..sa + sb + at.len() - sa - ra).collect(),
+    );
+    let mut outputs = vec![usize::MAX; ra];
+    outputs.extend(&produced);
+    let base = sa + sb + at.len() - sa - ra;
+    let args = trees_b
+        .iter()
+        .map(|t| wire_input_at(data, parent, &mut post, t, &arrays, &outputs, base))
+        .collect::<Option<Vec<_>>>()?;
+    if args.contains(&usize::MAX) {
+        return None;
+    }
+    let middle = post.call(b.pre.clone(), args);
+    let results = post.call(
+        b.post.clone(),
+        (sa..sa + sb).chain(middle[sb + rb..].iter().copied()).collect(),
+    );
+    let mut origins: Vec<_> = (0..ra)
+        .map(|i| (producer, i))
+        .chain((0..rb + signature(&b.post).1.len()).map(|i| (consumer, i)))
+        .collect();
+    if retain {
+        origins.extend((0..produced.len()).map(|i| (producer, ra + i)));
+    }
+    let form = ScremaForm {
+        pre: pre.finish(pre_outputs),
+        scans: a.scans.into_iter().chain(b.scans).collect(),
+        reductions: a.reductions.into_iter().chain(b.reductions).collect(),
+        post: post.finish(results.into_iter().chain(if retain { produced } else { vec![] }).collect()),
+    };
+    install(data, producer, consumer, form, arrays, origins)
 }

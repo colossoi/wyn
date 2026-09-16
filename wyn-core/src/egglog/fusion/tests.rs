@@ -1,19 +1,117 @@
-use super::{
-    convert_program, emit, optimize, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData,
-    OperationData, OperationId, OperationKind, RegionId, ScremaForm, SoacBody,
+use super::super::{
+    convert_program, fuse, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData, OperationData,
+    OperationId, OperationKind, RegionId, ScremaForm, SoacBody,
 };
 use crate::{ast::TypeName, compile_thru_tlc, tlc, types};
-use egglog_engine::{ast::Parser, EGraph};
+use egglog_engine::EGraph;
 
 fn imported(source: &str) -> Converted {
     convert_program(&tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap()
 }
 
-fn optimized(mut input: Converted) -> Converted {
+#[test]
+fn selection_uses_the_complete_lexicographic_priority() {
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(None, crate::egglog::SCHEMA).unwrap();
+    graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
+    graph
+        .parse_and_run_program(
+            None,
+            r#"
+        (PlanningRound 0)
+        (Current (Group (OperationId 0)) (Source (OperationId 0)))
+        (set (Owner (Source (OperationId 0))) (OperationId 0))
+        (set (Scope (Source (OperationId 0))) (RegionId 2))
+        (Current (Group (OperationId 3)) (Source (OperationId 3)))
+        (set (Owner (Source (OperationId 3))) (OperationId 3))
+        (set (Scope (Source (OperationId 3))) (RegionId 1))
+        (Current (Group (OperationId 4)) (Source (OperationId 4)))
+        (set (Owner (Source (OperationId 4))) (OperationId 4))
+        (set (Scope (Source (OperationId 4))) (RegionId 1))
+        (Current (Group (OperationId 5)) (Source (OperationId 5)))
+        (set (Owner (Source (OperationId 5))) (OperationId 5))
+        (Current (Group (OperationId 6)) (Source (OperationId 6)))
+        (set (Owner (Source (OperationId 6))) (OperationId 6))
+        (PlanCandidate 0 1 (Group (OperationId 0)) (Group (OperationId 0)))
+        (PlanCandidate 0 0 (Group (OperationId 0)) (Group (OperationId 0)))
+        (PlanCandidate 0 0 (Group (OperationId 4)) (Group (OperationId 0)))
+        (PlanCandidate 0 0 (Group (OperationId 3)) (Group (OperationId 6)))
+        (PlanCandidate 0 0 (Group (OperationId 3)) (Group (OperationId 5)))
+        (run-schedule (saturate fusion-select) fusion-choose)
+        (check (Chosen 0 0 (Group (OperationId 3)) (Group (OperationId 5))))
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        graph.function_to_dag("Chosen", usize::MAX, false).unwrap().0.len(),
+        1
+    );
+}
+
+#[test]
+fn empty_planning_schedule_terminates_without_advancing() {
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(None, crate::egglog::SCHEMA).unwrap();
+    graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
+    graph.parse_and_run_program(None, include_str!("schedule.egg")).unwrap();
+    graph.parse_and_run_program(None, "(check (PlanningRound 0))").unwrap();
+    assert!(graph.function_to_dag("FusionStep", usize::MAX, false).unwrap().0.is_empty());
+}
+
+#[test]
+fn source_import_emits_linear_facts_for_a_map_chain() {
+    let commands = |n: usize| {
+        // Build the execution graph directly, isolating fact import from TLC's
+        // recursive processing of deeply nested source lets.
+        let mut data = imported("entry chain(xs:[4]i32) [4]i32=map(|x:i32|x+1,xs)").data;
+        let region = entry(&data);
+        let template = data.operations[*data.regions[region].members.first().unwrap()].clone();
+        let OperationKind::Screma { inputs, .. } = &template.kind else {
+            unreachable!()
+        };
+        let Array::Value(mut previous) = inputs[0] else {
+            unreachable!()
+        };
+        let array_ty = data.expressions[previous].ty;
+        data.regions[region].members.clear();
+        for source_position in 0..n {
+            let mut operation = template.clone();
+            operation.source_position = source_position;
+            let OperationKind::Screma { inputs, .. } = &mut operation.kind else {
+                unreachable!()
+            };
+            inputs[0] = Array::Value(previous);
+            let id = data.operations.alloc(operation);
+            data.regions[region].members.insert(id);
+            let result = data.expressions.alloc(ExprData {
+                ty: template.ty,
+                kind: ExprKind::OperationResult(id),
+            });
+            previous = data.expressions.alloc(ExprData {
+                ty: array_ty,
+                kind: ExprKind::Project {
+                    tuple: result,
+                    index: 0,
+                },
+            });
+        }
+        data.regions[region].results = vec![previous];
+        let mut sink = super::analysis::Egglog::new();
+        super::analysis::emit(&data, &mut sink).unwrap();
+        crate::egglog::term::parse("scaling.egg", &sink.text).unwrap().len()
+    };
+    let small = commands(32);
+    let large = commands(128);
+    assert!(
+        large <= 4 * small,
+        "import grew faster than its source: {small} -> {large}"
+    );
+}
+
+fn optimized(input: Converted) -> Converted {
     // Some tests modify the imported graph to introduce a precise effect/use,
     // just as the corresponding EGIR tests modify its semantic graph.
-    input.program = Parser::default().get_program_from_string(None, &emit::program(&input.data)).unwrap();
-    let result = optimize(input).unwrap();
+    let result = fuse(input).unwrap();
     EGraph::default().run_program(result.program.clone()).expect("extracted program must execute");
     result
 }
@@ -23,7 +121,11 @@ fn entry(data: &AssociatedData) -> RegionId {
 }
 
 fn entry_ops(data: &AssociatedData) -> Vec<OperationId> {
-    super::snapshot::analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
+    super::super::dependencies::analyze(data)
+        .schedules(data)
+        .unwrap()
+        .remove(&entry(data))
+        .unwrap_or_default()
 }
 
 fn form(data: &AssociatedData, id: OperationId) -> &ScremaForm {
@@ -103,7 +205,7 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
         result.data.expressions[*input].kind,
         ExprKind::Parameter(_)
     ));
-    let again = optimize(result.clone()).unwrap();
+    let again = fuse(result.clone()).unwrap();
     assert_eq!(
         format!("{:?}", result.data),
         format!("{:?}", again.data),
@@ -114,7 +216,7 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
 #[test]
 fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
     // Port of EGIR fusion::mod_tests with its original gather/scan fixture.
-    let input = imported(include_str!("../../../testfiles/gather_scan_chain.wyn"));
+    let input = imported(include_str!("../../../../testfiles/gather_scan_chain.wyn"));
     let original = entry_ops(&input.data).to_vec();
     let scan = original.iter().copied().find(|&id| {
         matches!(&input.data.operations[id].kind, OperationKind::Screma { form, .. } if !form.scans.is_empty())
@@ -148,7 +250,7 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
     let result = optimized(input);
     assert_eq!(entry_ops(&result.data).len(), 1);
     let fused = form(&result.data, entry_ops(&result.data)[0]);
-    let results = super::fusion::signature(&fused.pre).1;
+    let results = super::super::data::body_signature(&fused.pre).1;
     assert_eq!(results.len(), 1);
     assert!(matches!(
         &result.data.types[results[0]].ty,
@@ -219,7 +321,7 @@ fn cross_region_uses_keep_the_producer_materialized() {
     let result = optimized(input);
     assert_eq!(entry_ops(&result.data), before);
     assert_eq!(
-        super::snapshot::analyze(&result.data)
+        super::super::dependencies::analyze(&result.data)
             .schedules(&result.data)
             .unwrap()
             .values()
@@ -241,7 +343,9 @@ fn separate_bodies_and_loop_parameters_do_not_alias() {
     );
     let result = optimized(input);
     let mut parameters = Vec::new();
-    for (region_id, ops) in super::snapshot::analyze(&result.data).schedules(&result.data).unwrap() {
+    for (region_id, ops) in
+        super::super::dependencies::analyze(&result.data).schedules(&result.data).unwrap()
+    {
         let region = &result.data.regions[region_id];
         for op in ops {
             if let OperationKind::Screma { inputs, .. } = &result.data.operations[op].kind {

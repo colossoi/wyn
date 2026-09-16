@@ -1,12 +1,8 @@
-use super::*;
-
-pub(in crate::egglog) fn is_slice(data: &AssociatedData, mut function: ExprId) -> bool {
-    while let ExprKind::Coerce(inner) = data.expressions[function].kind {
-        function = inner;
-    }
-    matches!(data.expressions[function].kind, ExprKind::Builtin(id)
-        if data.builtins[id].builtin == crate::builtins::catalog().known().slice)
-}
+use super::element;
+use crate::egglog::data::{
+    intern_expr as expr, intern_type as ty, Array, AssociatedData, ExprId, ExprKind,
+};
+use crate::types;
 
 /// Push a common slice chain onto every original input of a pure map.
 pub(super) fn apply(

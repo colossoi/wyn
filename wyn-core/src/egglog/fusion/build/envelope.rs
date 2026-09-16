@@ -1,37 +1,9 @@
-use super::*;
+use super::super::analysis::{counts, inputs};
+use super::{element, flatten, input, wire_input, Wiring};
+use crate::egglog::data::{AssociatedData, BucketShapeData, OperationId, OperationKind};
+use crate::types;
 
-pub(in crate::egglog) fn memory_compatible(
-    data: &AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-) -> bool {
-    if !input_slices(data, producer, consumer).is_some_and(|s| s.is_empty()) {
-        return false;
-    }
-    let destination = match &data.operations[consumer].kind {
-        OperationKind::Scatter { destination, .. }
-        | OperationKind::BucketScatter { destination, .. }
-        | OperationKind::ReduceByIndex { destination, .. } => destination.value,
-        OperationKind::Filter { .. } => return true,
-        _ => return false,
-    };
-    fn reads(data: &AssociatedData, a: &Array, dest: ExprId) -> bool {
-        match a {
-            Array::Value(id) => {
-                *id == dest
-                    || match &data.expressions[*id].kind {
-                        ExprKind::Coerce(v) => reads(data, &Array::Value(*v), dest),
-                        ExprKind::Array(a) => reads(data, a, dest),
-                        _ => false,
-                    }
-            }
-            Array::Zip(xs) => xs.iter().any(|a| reads(data, a, dest)),
-            _ => false,
-        }
-    }
-    !inputs(&data.operations[producer].kind).into_iter().any(|a| reads(data, a, destination))
-}
-pub(in crate::egglog) fn envelope(
+pub(super) fn envelope(
     data: &mut AssociatedData,
     producer: OperationId,
     consumer: OperationId,

@@ -1,28 +1,28 @@
 //! Execution dependencies, liveness and safety shared by compiler passes.
-use super::data::{AssociatedData, ExprId, ExprKind, OperationId, OperationKind, RegionId, SoacBody};
-use super::optimize::OptimizeError;
+use super::data::{
+    value_source, AssociatedData, ExprId, ExprKind, OperationId, OperationKind, RegionId, SoacBody,
+};
 use super::visit::Operand;
+use super::OptimizeError;
 use crate::{types, LookupMap};
 use std::collections::{BTreeMap, BTreeSet};
 use wyn_base::persistent_sets::{Set, Sets, EMPTY};
-mod fusion;
 mod order;
 mod worklists;
-pub(super) use fusion::{analyze as fusion, Role};
 
 /// Stop at operation results. Nested regions are visited separately so dead
 /// work inside a lambda or branch cannot keep an enclosing producer alive.
 #[derive(Clone, Copy, Default)]
-struct References {
+pub(super) struct References {
     operations: Set,
     regions: Set,
 }
 impl References {
-    fn extend(&mut self, other: &Self, sets: &mut Sets) {
+    pub(super) fn extend(&mut self, other: &Self, sets: &mut Sets) {
         self.operations = sets.union(self.operations, other.operations);
         self.regions = sets.union(self.regions, other.regions);
     }
-    fn dependencies(&self, external: &BTreeMap<RegionId, Set>, sets: &mut Sets) -> Set {
+    pub(super) fn dependencies(&self, external: &BTreeMap<RegionId, Set>, sets: &mut Sets) -> Set {
         let mut result = self.operations;
         let regions: Vec<_> = sets.iter(self.regions).map(RegionId::from).collect();
         for region in regions {
@@ -31,7 +31,7 @@ impl References {
         result
     }
 }
-pub(super) struct Snapshot {
+pub(super) struct Dependencies {
     pub live: BTreeSet<OperationId>,
     data_predecessors: BTreeMap<OperationId, Vec<OperationId>>,
     pub effects: order::Effects,
@@ -40,21 +40,21 @@ pub(super) struct Snapshot {
     pub safe_regions: BTreeSet<RegionId>,
 }
 
-pub(super) fn analyze(data: &AssociatedData) -> Snapshot {
-    Analysis::new(data).snapshot
+pub(super) fn analyze(data: &AssociatedData) -> Dependencies {
+    Analysis::new(data).dependencies
 }
 
 // Retain the expression cache while deriving optional fusion facts. Core callers
-// keep only the execution snapshot; they never materialize fusion use tables.
-struct Analysis<'a> {
-    snapshot: Snapshot,
-    visitor: Visitor<'a>,
-    external: BTreeMap<RegionId, Set>,
-    results: BTreeMap<RegionId, References>,
-    active: BTreeSet<RegionId>,
+// keep only the execution dependencies; they never materialize fusion use tables.
+pub(super) struct Analysis<'a> {
+    pub(super) dependencies: Dependencies,
+    pub(super) visitor: Visitor<'a>,
+    pub(super) external: BTreeMap<RegionId, Set>,
+    pub(super) results: BTreeMap<RegionId, References>,
+    pub(super) active: BTreeSet<RegionId>,
 }
 impl<'a> Analysis<'a> {
-    fn new(data: &'a AssociatedData) -> Self {
+    pub(super) fn new(data: &'a AssociatedData) -> Self {
         let mut visitor = Visitor {
             data,
             expressions: LookupMap::new(),
@@ -75,7 +75,7 @@ impl<'a> Analysis<'a> {
             data_predecessors.insert(consumer, visitor.sets.iter(deps).map(OperationId::from).collect());
         }
         let effects = order::effects(data, &live, &movable);
-        let snapshot = Snapshot {
+        let dependencies = Dependencies {
             live,
             data_predecessors,
             effects,
@@ -84,7 +84,7 @@ impl<'a> Analysis<'a> {
             safe_regions,
         };
         Self {
-            snapshot,
+            dependencies,
             visitor,
             external,
             results,
@@ -92,7 +92,7 @@ impl<'a> Analysis<'a> {
         }
     }
 }
-impl Snapshot {
+impl Dependencies {
     /// Consumer/producer pairs, derived from the canonical adjacency index.
     pub(super) fn dependencies(&self) -> impl Iterator<Item = (OperationId, OperationId)> + '_ {
         self.data_predecessors.iter().flat_map(|(&after, before)| before.iter().map(move |&b| (after, b)))
@@ -137,13 +137,13 @@ pub(super) fn safe_body(body: &SoacBody, regions: &BTreeSet<RegionId>) -> bool {
     safe
 }
 
-struct Visitor<'a> {
+pub(super) struct Visitor<'a> {
     data: &'a AssociatedData,
     expressions: LookupMap<ExprId, References>,
-    sets: Sets,
+    pub(super) sets: Sets,
 }
 impl Visitor<'_> {
-    fn expressions(&mut self, ids: &[ExprId]) -> References {
+    pub(super) fn expressions(&mut self, ids: &[ExprId]) -> References {
         let mut refs = References::default();
         for &id in ids {
             let value = self.expression(id);
@@ -151,13 +151,25 @@ impl Visitor<'_> {
         }
         refs
     }
-    fn expression(&mut self, id: ExprId) -> References {
+    pub(super) fn expression(&mut self, id: ExprId) -> References {
         let order = wyn_graph::dag_postorder(
             [id],
             |e| self.expressions.contains_key(&e),
-            |e, out| out.extend(self.data.expressions[e].kind.children()),
+            |e, out| {
+                let source = value_source(self.data, e);
+                if source != e {
+                    out.push(source);
+                } else {
+                    out.extend(self.data.expressions[e].kind.children());
+                }
+            },
         );
         for e in order {
+            let source = value_source(self.data, e);
+            if source != e {
+                self.expressions.insert(e, self.expressions[&source]);
+                continue;
+            }
             let mut refs = References::default();
             match self.data.expressions[e].kind {
                 ExprKind::OperationResult(op) => refs.operations = self.sets.singleton(op.as_u32()),

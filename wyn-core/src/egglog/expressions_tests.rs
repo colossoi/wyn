@@ -1,11 +1,11 @@
 use super::insert_expressions;
-use crate::egglog::{convert_program, optimize, Converted, ExprKind, OperationKind};
+use crate::egglog::{convert_program, fuse, Converted, ExprKind, OperationKind};
 use crate::{compile_thru_tlc, tlc};
 use egglog_engine::EGraph;
 
 fn compile(source: &str) -> Converted {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()
+    insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap()
 }
 
 fn graph(result: &Converted) -> EGraph {
@@ -26,7 +26,7 @@ fn inserts_scalar_only_entry_and_derives_its_dependencies() {
         )
         .unwrap();
     assert_eq!(
-        graph.function_to_dag("Operation", usize::MAX, false).unwrap().0.len(),
+        graph.function_to_dag("Current", usize::MAX, false).unwrap().0.len(),
         0
     );
 }
@@ -64,8 +64,8 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         )
         .unwrap(),
     );
-    let selected = optimize(convert_program(&tlc).unwrap()).unwrap();
-    let live = crate::egglog::snapshot::analyze(&selected.data).live;
+    let selected = fuse(convert_program(&tlc).unwrap()).unwrap();
+    let live = crate::egglog::dependencies::analyze(&selected.data).live;
     let dead: Vec<_> = selected
         .data
         .operations
@@ -99,7 +99,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         1
     );
     // Fusion still uses its original summary and has no expression declarations.
-    let fusion = crate::egglog::optimize::analyze(&result.data).unwrap();
+    let fusion = crate::egglog::graph_tests::fusion_dependencies(&result.data);
     assert!(fusion.function_to_dag("SourceExpression", 1, false).is_err());
 }
 
@@ -191,7 +191,7 @@ fn expression_export_starts_at_entries_and_ignores_dead_arena_records() {
 fn later_passes_cannot_leave_stale_expression_facts() {
     let result = compile("entry main(x: i32) i32 = x + 1");
     assert!(insert_expressions(result.clone()).is_err());
-    assert!(optimize(result).is_err());
+    assert!(fuse(result).is_err());
 }
 
 #[test]

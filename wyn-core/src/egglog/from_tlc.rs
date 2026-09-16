@@ -7,7 +7,7 @@ use super::data::{
     ProgramData, Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId,
     TypeData, TypeId,
 };
-use super::emit;
+use super::{fusion, timing};
 use crate::ast::Span;
 use crate::builtins::lowering::PrimOp;
 use crate::builtins::BuiltinLowering;
@@ -134,10 +134,15 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
     converter.data.expressions = converter.expressions.into_arena();
     converter.data.origins = converter.origins.into_arena();
     drop(import);
-    let output = emit::program(&converter.data);
+
+    let mut sink = fusion::analysis::Egglog::new();
+    timing::time("derive fusion facts", || {
+        fusion::analysis::emit(&converter.data, &mut sink)
+    })
+    .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     let _parse = super::timing::span("parse fusion facts");
     let program = egglog_engine::ast::Parser::default()
-        .get_program_from_string(Some("wyn-from-tlc.egg".into()), &output)
+        .get_program_from_string(Some("wyn-from-tlc.egg".into()), &sink.text)
         .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     Ok(Converted {
         program,
@@ -422,7 +427,7 @@ impl Converter {
             } => {
                 let body = self.soac_body(pred, scope)?;
                 OperationKind::Filter {
-                    map: SoacBody::Identity(super::fusion::signature(&body).0),
+                    map: SoacBody::Identity(super::data::body_signature(&body).0),
                     body,
                     inputs: vec![self.array(input, scope)?],
                     ownership: *destination,

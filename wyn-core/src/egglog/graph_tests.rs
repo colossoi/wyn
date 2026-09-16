@@ -1,6 +1,5 @@
-use super::optimize::analyze;
 use super::{
-    convert_program, optimize, snapshot, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData,
+    convert_program, dependencies, fuse, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData,
     OperationData, OperationId, OperationKind, RegionId,
 };
 use crate::{compile_thru_tlc, tlc, types};
@@ -18,7 +17,7 @@ fn entry(data: &AssociatedData) -> RegionId {
 }
 
 fn schedule(data: &AssociatedData) -> Vec<OperationId> {
-    snapshot::analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
+    dependencies::analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
 }
 
 fn parameter(data: &AssociatedData) -> super::ExprId {
@@ -43,7 +42,7 @@ fn fusion_follows_dependencies_across_an_independent_reduction() {
     );
     let before = schedule(&input.data);
     assert_eq!(before.len(), 3);
-    let result = optimize(input).unwrap();
+    let result = fuse(input).unwrap();
     assert_eq!(schedule(&result.data), before[2..]);
     // The reduction joins the maps horizontally; only the surviving execution
     // remains a member, while old arena records remain available as provenance.
@@ -59,7 +58,7 @@ fn fusion_follows_dependencies_across_an_independent_reduction() {
         .parse_and_run_program(
             None,
             &format!(
-                "(check (Operation {} {})) (fail (check (Operation {} {})))",
+                "(check (Current g p) (= (Scope p) {}) (= (Owner p) {})) (fail (check (Current g p) (= (Scope p) {}) (= (Owner p) {})))",
                 entry(&result.data).egglog(),
                 before[2].egglog(),
                 entry(&result.data).egglog(),
@@ -94,14 +93,14 @@ fn schedule_is_topological_even_when_membership_ids_and_source_positions_disagre
     };
     ownership[0] = types::SoacOwnership::Fresh;
     assert_eq!(schedule(&input.data), [producer, consumer]);
-    let mut graph = analyze(&input.data).unwrap();
+    let mut graph = fusion_dependencies(&input.data);
     graph
         .parse_and_run_program(
             None,
             &format!(
-                "(check (DependsOn {} {})) (fail (check (EffectBefore {} {})))",
-                consumer.egglog(),
+                "(check (GroupEdge (Group {}) (Group {}))) (fail (check (GroupBefore (Group {}) (Group {}))))",
                 producer.egglog(),
+                consumer.egglog(),
                 consumer.egglog(),
                 producer.egglog(),
             ),
@@ -117,7 +116,7 @@ fn backward_traversal_does_not_root_unused_members_or_metadata() {
     // not an externally observable effect requiring either unused map to run.
     input.data.regions[region].results = vec![parameter(&input.data)];
     assert!(schedule(&input.data).is_empty());
-    let result = optimize(input).unwrap();
+    let result = fuse(input).unwrap();
     assert!(schedule(&result.data).is_empty());
     assert_eq!(result.data.regions[region].members.len(), 2);
 }
@@ -154,12 +153,12 @@ fn effect_roots_keep_their_value_dependencies_but_not_unrelated_ordered_work() {
     input.data.regions[region].results = vec![parameter(&input.data)];
     assert_eq!(schedule(&input.data), [producer, effect]);
     // The dead consumer supplies neither demand nor a fusion constraint.
-    let mut graph = analyze(&input.data).unwrap();
+    let mut graph = fusion_dependencies(&input.data);
     graph
         .parse_and_run_program(
             None,
             &format!(
-                "(fail (check (EffectBefore {} {}))) (check (Operation {} {}))",
+                "(fail (check (GroupBefore (Group {}) (Group {})))) (check (Current g p) (= (Scope p) {}) (= (Owner p) {}))",
                 consumer.egglog(),
                 effect.egglog(),
                 region.egglog(),
@@ -167,7 +166,7 @@ fn effect_roots_keep_their_value_dependencies_but_not_unrelated_ordered_work() {
             ),
         )
         .unwrap();
-    assert_eq!(schedule(&optimize(input).unwrap().data), [producer, effect]);
+    assert_eq!(schedule(&fuse(input).unwrap().data), [producer, effect]);
 }
 
 #[test]
@@ -192,7 +191,7 @@ fn inactive_nested_regions_do_not_keep_enclosing_pure_work_alive() {
     input.data.regions[region].members.remove(&control);
     input.data.regions[region].results = vec![parameter(&input.data)];
     assert!(schedule(&input.data).is_empty());
-    let schedules = snapshot::analyze(&input.data).schedules(&input.data).unwrap();
+    let schedules = dependencies::analyze(&input.data).schedules(&input.data).unwrap();
     assert!(!schedules.contains_key(&then_region));
 }
 
@@ -205,6 +204,17 @@ fn cyclic_execution_graphs_are_rejected() {
         panic!("map")
     };
     inputs[0] = Array::Value(consumer_array);
-    let error = snapshot::analyze(&input.data).schedules(&input.data).unwrap_err();
+    let error = dependencies::analyze(&input.data).schedules(&input.data).unwrap_err();
     assert!(error.to_string().contains("cycle"));
+}
+
+/// Load only the fusion summary and its dependency rules for relation assertions.
+pub(super) fn fusion_dependencies(data: &AssociatedData) -> EGraph {
+    let mut sink = super::fusion::analysis::Egglog::new();
+    super::fusion::analysis::emit(data, &mut sink).unwrap();
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(None, &sink.text).unwrap();
+    graph.parse_and_run_program(None, include_str!("fusion/fusion.egg")).unwrap();
+    graph.parse_and_run_program(None, "(run-schedule (saturate (run fusion-dependencies)))").unwrap();
+    graph
 }

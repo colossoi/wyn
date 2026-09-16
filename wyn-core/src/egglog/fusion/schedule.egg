@@ -1,0 +1,25 @@
+; A round advances only after a successful choice. With no choice, facts remain
+; stable and the outer saturation stops, including for an empty source graph.
+(PlanningRound 0)
+(run-schedule
+  (saturate
+    (saturate fusion-dependencies)
+    (saturate fusion-candidates)
+    (saturate fusion-select)
+    fusion-choose
+    (saturate fusion-record)
+    (saturate fusion-commit)
+    fusion-clear-candidates
+    fusion-union
+    fusion-clear)
+  (saturate fusion-indexed-analysis)
+  (saturate fusion-indexed)
+  (saturate
+    (saturate fusion-indexed-candidates)
+    (saturate fusion-select)
+    fusion-choose
+    (saturate fusion-record)
+    fusion-indexed-finish
+    fusion-clear-candidates
+    fusion-clear)
+  fusion-indexed-retire)

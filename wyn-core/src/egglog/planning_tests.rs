@@ -213,8 +213,14 @@ fn imported_source_plans_before_block_generation() {
     ] {
         let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
         let mut converted = super::super::convert_program(&tlc).unwrap();
-        let summary = snapshot::analyze(&converted.data);
-        let (_, g) = analyze(&mut converted.data, &summary).unwrap();
+        let summary = dependencies::analyze(&converted.data);
+        let input_fields = outputs(&mut converted.data);
+        let count_type = super::super::data::intern_type(
+            &mut converted.data,
+            crate::types::Type::Constructed(crate::types::TypeName::UInt(32), vec![]),
+        );
+        let source = facts(&converted.data, &summary, count_type, &input_fields);
+        let g = graph(&source);
         assert!(count(&g, "Phase") > 0);
         assert!(count(&g, "Allocation") > 0);
         assert!(converted.data.blocks.is_empty());

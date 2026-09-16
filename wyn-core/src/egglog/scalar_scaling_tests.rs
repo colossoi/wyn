@@ -1,6 +1,6 @@
 //! Synthetic graph shapes isolate placement costs from parsing and EqSat.
 use super::*;
-use crate::egglog::{convert_program, snapshot};
+use crate::egglog::{convert_program, dependencies};
 
 fn imported(source: &str) -> AssociatedData {
     convert_program(&crate::tlc::infer_input_slice_bounds(
@@ -133,7 +133,7 @@ fn placement_scaling() {
                 let mut candidate = data.clone();
                 let start = std::time::Instant::now();
                 if shape == "effects" || shape == "regions" {
-                    let s = snapshot::analyze(&candidate);
+                    let s = dependencies::analyze(&candidate);
                     s.schedules(&candidate).unwrap();
                 } else {
                     hoist::run(&mut candidate).unwrap();

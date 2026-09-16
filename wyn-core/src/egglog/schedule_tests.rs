@@ -1,5 +1,5 @@
 use super::super::{
-    convert_program, insert_expressions, optimize, optimize_expressions, AssociatedData, Converted, Exit,
+    convert_program, fuse, insert_expressions, optimize_expressions, AssociatedData, Converted, Exit,
     FunctionKind, Instruction, OperationKind,
 };
 use super::{schedule, validation};
@@ -13,10 +13,8 @@ use exec::{run, Value};
 fn compile(source: &str) -> Converted {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let result = schedule(
-        optimize_expressions(
-            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
-        )
-        .unwrap(),
+        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
+            .unwrap(),
     )
     .unwrap();
     // The actual final fact program must typecheck and execute in egglog.

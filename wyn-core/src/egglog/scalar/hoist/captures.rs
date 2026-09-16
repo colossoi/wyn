@@ -1,5 +1,5 @@
 //! Specialize callees before callers, so new captures flow outward in one visit.
-use super::super::super::{regions::Regions, snapshot};
+use super::super::super::{dependencies, regions::Regions};
 use super::*;
 
 pub(super) struct Context<'a> {
@@ -17,7 +17,7 @@ pub(super) struct Context<'a> {
 }
 
 pub(super) fn run(data: &mut AssociatedData, placements: &mut Placements) -> Result<(), OptimizeError> {
-    let summary = timing::time("analyze dependencies", || snapshot::analyze(data));
+    let summary = timing::time("analyze dependencies", || dependencies::analyze(data));
     timing::time("validate dependency order", || summary.schedules(data))?;
     let uses = timing::time("collect expression uses", || uses::analyze(data, &summary.live));
     let regions: Vec<_> = uses.scopes.keys().copied().collect();

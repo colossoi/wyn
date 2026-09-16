@@ -1,5 +1,5 @@
+use super::super::super::data::body_signature;
 use super::super::super::data::ExprId;
-use super::super::super::fusion::signature as body_signature;
 use super::super::{error, length, OperationId, OperationKind, ScremaForm};
 use super::{chunks, singleton, Array, BlockId, BufferId, OptimizeError, Planner, Storage, Value, WIDTH};
 

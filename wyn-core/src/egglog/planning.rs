@@ -2,14 +2,12 @@
 //! which values to materialize, which resources to allocate, or which phase writes
 //! an output. Those decisions belong to the .egg rules.
 
+use super::data::body_signature as signature;
 use super::data::*;
-use super::fusion::{is_slice, signature};
+
 use super::visit::{Operand, OperandRole};
-use super::{expressions, snapshot, timing, OptimizeError};
-use egglog_engine::{
-    ast::{Command, Literal},
-    EGraph, Term,
-};
+use super::{dependencies, timing, OptimizeError};
+use egglog_engine::{ast::Literal, EGraph, Term};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
@@ -28,49 +26,13 @@ pub(super) const RULES: &str = concat!(
     include_str!("dispatch.egg"),
     "\n",
 );
-const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
+pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
 pub(super) const RUN: &str =
     "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))))";
 
-/// Return replayable planning commands and the same evaluated graph used by the
-/// recipe reader. ExprKey/TypeKey are shared with the separately loaded expression
-/// layer in --egg-out; no scalar syntax is needed to run the planner itself.
-pub(super) fn analyze(
-    data: &mut AssociatedData,
-    summary: &snapshot::Snapshot,
-) -> Result<(Vec<Command>, EGraph), OptimizeError> {
-    let _timing = timing::span("relational planning");
-    let input_fields = outputs(data);
-    let count_type = super::fusion::ty(
-        data,
-        crate::types::Type::Constructed(crate::types::TypeName::UInt(32), vec![]),
-    );
-    let source = timing::time("import planning facts", || {
-        facts(data, summary, count_type, &input_fields)
-    });
-    let mut commands = expressions::parse(RULES)?;
-    commands.extend(expressions::parse(&source)?);
-    commands.extend(expressions::parse(RUN)?);
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
-    graph.parse_and_run_program(None, KEYS)?;
-    timing::time("derive stages and storage", || {
-        graph.run_program(commands.clone())
-    })?;
-    Ok((commands, graph))
-}
-
 /// Assign the derived order to emitted launch IDs. Kernel emission contributes
 /// identities only; it cannot add its own dependency decisions.
-pub(super) fn dispatch_order(
-    graph: &mut EGraph,
-    launches: &str,
-    data: &mut AssociatedData,
-) -> Result<Vec<Command>, OptimizeError> {
-    let _timing = timing::span("read dispatch order");
-    let mut commands = expressions::parse(launches)?;
-    commands.extend(expressions::parse("(run-schedule (saturate (run dispatch)))")?);
-    graph.run_program(commands.clone())?;
+pub(super) fn read_dispatch_order(graph: &EGraph, data: &mut AssociatedData) -> Result<(), OptimizeError> {
     let (rows, _, dag) = graph.function_to_dag("DispatchDependency", usize::MAX, false)?;
     for row in rows {
         let Term::App(_, args) = dag.get(row) else {
@@ -94,7 +56,7 @@ pub(super) fn dispatch_order(
         };
         dispatch.dependencies.insert(before);
     }
-    Ok(commands)
+    Ok(())
 }
 
 fn invalid_order() -> OptimizeError {
@@ -108,9 +70,9 @@ fn ty(t: TypeId) -> String {
     format!("(TypeId {})", t.as_u32())
 }
 
-fn facts(
+pub(super) fn facts(
     data: &AssociatedData,
-    summary: &snapshot::Snapshot,
+    summary: &dependencies::Dependencies,
     count_type: TypeId,
     input_fields: &BTreeMap<ExprId, Vec<ExprId>>,
 ) -> String {
@@ -247,8 +209,8 @@ fn facts(
             OperationKind::Filter {
                 map, body, inputs, ..
             } => {
-                let safe = snapshot::safe_body(map, &summary.safe_regions)
-                    && snapshot::safe_body(body, &summary.safe_regions);
+                let safe = dependencies::safe_body(map, &summary.safe_regions)
+                    && dependencies::safe_body(body, &summary.safe_regions);
                 writeln!(out, "(FilterShape {key} {safe})").unwrap();
                 if let Some(t) = signature(map).1.first() {
                     writeln!(out, "(FilterResult {key} {})", ty(*t)).unwrap();
@@ -392,7 +354,7 @@ fn extent(array: &Array) -> String {
 
 /// Expose source result slots once; tuple projection is structural import, not
 /// an allocation decision. Use the same global identities for existing values.
-fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>> {
+pub(super) fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>> {
     use crate::types::{Type, TypeExt, TypeName};
     let mut types: std::collections::HashMap<_, _> =
         data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();

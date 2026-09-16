@@ -1,28 +1,19 @@
-use super::*;
-
-pub(in crate::egglog) fn length_source(data: &AssociatedData, kind: &OperationKind) -> Option<ExprId> {
-    let OperationKind::Call { function, args } = kind else {
-        return None;
-    };
-    let [array] = args.as_slice() else {
-        return None;
-    };
-    let mut function = *function;
-    while let ExprKind::Coerce(inner) = data.expressions[function].kind {
-        function = inner;
-    }
-    let ExprKind::Builtin(id) = data.expressions[function].kind else {
-        return None;
-    };
-    (data.builtins[id].builtin == crate::builtins::catalog().known().length).then_some(*array)
-}
+use super::{body, result_types};
+use crate::egglog::data::{
+    body_signature as signature, intern_expr as expr, intern_type as ty, AssociatedData, ExprKind,
+    OperationId, OperationKind, Reduction, ScremaForm, SoacBody,
+};
+use crate::egglog::rewrite;
+use crate::types;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Mask reduction inputs and, when needed, append a shared count reduction.
 /// Passing the filter as both IDs requests the length-only transformation.
-pub(in crate::egglog) fn masked(
+pub(super) fn masked(
     data: &mut AssociatedData,
     producer: OperationId,
     consumer: OperationId,
+    lengths: &BTreeSet<OperationId>,
 ) -> Option<()> {
     let OperationKind::Filter {
         map, body, inputs, ..
@@ -32,23 +23,6 @@ pub(in crate::egglog) fn masked(
     };
     let parent = data.operations[producer].region;
     let only_count = producer == consumer;
-    let summary = super::super::snapshot::fusion(data);
-    let mut lengths = BTreeSet::new();
-    for &(p, c, role) in &summary.uses {
-        if p != producer || role != super::super::snapshot::Role::Length {
-            continue;
-        }
-        let array = length_source(data, &data.operations[c].kind)?;
-        if data.operations[c].region != parent
-            || !matches!(input(data, &Array::Value(array), Some(producer)), Input::Produced(0, ref s) if s.is_empty())
-        {
-            return None;
-        }
-        lengths.insert(c);
-    }
-    if only_count && lengths.is_empty() {
-        return None;
-    }
     let (mut form, consumer_inputs) = if only_count {
         (
             ScremaForm {
@@ -63,22 +37,12 @@ pub(in crate::egglog) fn masked(
         let OperationKind::Screma { form, inputs, .. } = data.operations[consumer].kind.clone() else {
             return None;
         };
-        if !form.scans.is_empty()
-            || form.reductions.is_empty()
-            || !signature(&form.post).1.is_empty()
-            || inputs.is_empty()
-            || inputs.iter().any(
-                |a| !matches!(input(data, a, Some(producer)), Input::Produced(0, ref s) if s.is_empty()),
-            )
-        {
-            return None;
-        }
         (form, inputs.len())
     };
     let parameters = signature(&map).0;
-    let (region, args) = project::region(data, parent, &parameters);
-    let mapped = project::invoke(data, &map, args)?;
-    let predicate = project::invoke(data, &body, mapped.clone())?;
+    let (region, args) = body::region(data, parent, &parameters);
+    let mapped = body::invoke(data, &map, args)?;
+    let predicate = body::invoke(data, &body, mapped.clone())?;
     let [condition] = predicate.as_slice() else {
         return None;
     };
@@ -86,7 +50,7 @@ pub(in crate::egglog) fn masked(
         return None;
     };
     let values =
-        if only_count { vec![] } else { project::invoke(data, &form.pre, vec![*mapped; consumer_inputs])? };
+        if only_count { vec![] } else { body::invoke(data, &form.pre, vec![*mapped; consumer_inputs])? };
     let neutrals: Vec<_> = form.reductions.iter().flat_map(|r| &r.neutral).copied().collect();
     if values.len() != neutrals.len() {
         return None;
@@ -110,9 +74,6 @@ pub(in crate::egglog) fn masked(
     let count_slot = fields.len();
     if let Some(&length) = lengths.first() {
         let count_ty = data.operations[length].ty;
-        if lengths.iter().any(|&id| data.operations[id].ty != count_ty) {
-            return None;
-        }
         let zero = expr(data, count_ty, ExprKind::Int("0".into()));
         let one = expr(data, count_ty, ExprKind::Int("1".into()));
         values.push(expr(
@@ -124,12 +85,12 @@ pub(in crate::egglog) fn masked(
                 else_value: zero,
             },
         ));
-        let (combine, args) = project::region(data, parent, &[count_ty, count_ty]);
+        let (combine, args) = body::region(data, parent, &[count_ty, count_ty]);
         let t = data.types[count_ty].ty.clone();
         let function_ty = ty(data, types::function(t.clone(), types::function(t.clone(), t)));
         let function = expr(data, function_ty, ExprKind::BinOp("+".into()));
         let sum = expr(data, count_ty, ExprKind::PureApp { function, args });
-        let operator = project::finish(data, combine, vec![count_ty, count_ty], vec![sum]);
+        let operator = body::finish(data, combine, vec![count_ty, count_ty], vec![sum]);
         form.reductions.push(Reduction {
             operator,
             neutral: vec![zero],
@@ -137,7 +98,7 @@ pub(in crate::egglog) fn masked(
         });
         fields.push(count_ty);
     }
-    form.pre = project::finish(data, region, parameters, values);
+    form.pre = body::finish(data, region, parameters, values);
 
     let old_ty = data.operations[consumer].ty;
     let result_ty = ty(
@@ -178,7 +139,7 @@ pub(in crate::egglog) fn masked(
         data.regions[parent].members.remove(&producer);
     }
     for id in lengths {
-        data.regions[parent].members.remove(&id);
+        data.regions[parent].members.remove(id);
     }
     rewrite::all(data, &substitutions);
     Some(())

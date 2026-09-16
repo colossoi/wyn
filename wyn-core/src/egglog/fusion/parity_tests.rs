@@ -1,7 +1,7 @@
-use super::*;
+use super::super::*;
 use crate::{compile_thru_tlc, tlc};
 #[allow(dead_code)]
-#[path = "schedule_test_exec.rs"]
+#[path = "../schedule_test_exec.rs"]
 mod exec;
 use exec::{run, Value};
 
@@ -10,11 +10,11 @@ fn imported(source: &str) -> Converted {
 }
 fn count(data: &AssociatedData) -> usize {
     let root = data.definitions[data.entries.values().next().unwrap().definition].body;
-    snapshot::analyze(data).live.iter().filter(|&&id| data.operations[id].region == root).count()
+    dependencies::analyze(data).live.iter().filter(|&&id| data.operations[id].region == root).count()
 }
 fn check(source: &str, operations: usize) {
     let input = imported(source);
-    let fused = optimize(input.clone()).unwrap();
+    let fused = fuse(input.clone()).unwrap();
     assert_eq!(
         count(&fused.data),
         operations,
@@ -92,7 +92,7 @@ fn returned_filter_array_prevents_masking_away_compaction() {
 
 fn check_args(source: &str, operations: usize, args: impl Fn() -> Vec<Value>) -> Converted {
     let input = imported(source);
-    let fused = optimize(input.clone()).unwrap();
+    let fused = fuse(input.clone()).unwrap();
     assert_eq!(
         count(&fused.data),
         operations,

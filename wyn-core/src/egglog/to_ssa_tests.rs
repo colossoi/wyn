@@ -1,15 +1,11 @@
-use crate::egglog::{
-    convert_program, insert_expressions, optimize, optimize_expressions, schedule, to_ssa,
-};
+use crate::egglog::{convert_program, fuse, insert_expressions, optimize_expressions, schedule, to_ssa};
 use crate::{compile_thru_tlc, lower_ssa_to_wgsl, tlc};
 
 fn compile(source: &str) -> naga::Module {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(
-            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
-        )
-        .unwrap(),
+        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
+            .unwrap(),
     )
     .unwrap();
     let ssa = to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap();
@@ -115,10 +111,8 @@ fn host_control_requires_a_runtime_cfg_instead_of_a_false_static_descriptor() {
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)";
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(
-            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
-        )
-        .unwrap(),
+        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
+            .unwrap(),
     )
     .unwrap();
     let error = to_ssa(&program.data, crate::CodegenTarget::Wgsl).err().unwrap();
@@ -131,10 +125,8 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
         compile_thru_tlc("entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)").unwrap(),
     );
     let program = schedule(
-        optimize_expressions(
-            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
-        )
-        .unwrap(),
+        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
+            .unwrap(),
     )
     .unwrap();
     let ssa = to_ssa(&program.data, crate::CodegenTarget::Spirv).unwrap();
@@ -170,10 +162,8 @@ fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
 fn pipeline(source: &str) -> crate::LoweredWgsl {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(
-            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
-        )
-        .unwrap(),
+        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
+            .unwrap(),
     )
     .unwrap();
     crate::lower_ssa_to_wgsl_with_pipeline(to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap())

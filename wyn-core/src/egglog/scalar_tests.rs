@@ -1,5 +1,5 @@
 use super::*;
-use crate::egglog::{convert_program, insert_expressions, optimize, schedule, to_ssa};
+use crate::egglog::{convert_program, fuse, insert_expressions, schedule, to_ssa};
 use crate::{compile_thru_tlc, tlc, types};
 
 #[path = "schedule_test_exec.rs"]
@@ -8,7 +8,7 @@ use exec::{run, Value};
 
 fn input(source: &str) -> Converted {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()
+    insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap()
 }
 fn compile(source: &str) -> Converted {
     optimize_expressions(input(source)).unwrap()
@@ -25,7 +25,7 @@ fn integer(data: &mut AssociatedData, ty: TypeId, n: i64) -> ExprId {
 }
 fn binary(data: &mut AssociatedData, op: &str, a: ExprId, b: ExprId) -> ExprId {
     let t = data.expressions[a].ty;
-    let fty = super::super::fusion::ty(
+    let fty = super::super::data::intern_type(
         data,
         types::function(
             data.types[t].ty.clone(),
@@ -462,7 +462,7 @@ fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
             builtin: builtin.id,
             overload_idx: 0,
         });
-        let ft = super::super::fusion::ty(
+        let ft = super::super::data::intern_type(
             data,
             types::function(
                 data.types[data.expressions[arg].ty].ty.clone(),
@@ -482,7 +482,7 @@ fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
     let mut c = input("entry main(x:u32) u32=x");
     let x = parameter(&mut c.data, 0);
     let u = c.data.expressions[x].ty;
-    let i = super::super::fusion::ty(
+    let i = super::super::data::intern_type(
         &mut c.data,
         types::Type::Constructed(types::TypeName::Int(32), vec![]),
     );
@@ -494,7 +494,7 @@ fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
 
     let mut c = input("entry main(x:f32) f32=x");
     let f = c.data.expressions[result(&c.data)].ty;
-    let u = super::super::fusion::ty(
+    let u = super::super::data::intern_type(
         &mut c.data,
         types::Type::Constructed(types::TypeName::UInt(32), vec![]),
     );

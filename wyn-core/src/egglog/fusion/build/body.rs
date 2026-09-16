@@ -1,6 +1,12 @@
-//! Project pure scalar results in the sidecar. Missing scan values are represented
-//! by distinct parameters and must disappear from the selected pre-barrier slice.
-use super::*;
+//! Construct callback regions and project their pure scalar results.
+use super::super::analysis::references;
+use crate::egglog::data::{
+    intern_expr as expr, intern_type as ty, AssociatedData, ExprData, ExprId, ExprKind, OperationData,
+    OperationKind, ParameterData, RegionData, RegionId, SoacBody, TypeId,
+};
+use crate::egglog::rewrite;
+use crate::types;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn tuple(data: &mut AssociatedData, parent: RegionId, parameters: Vec<TypeId>) -> SoacBody {
     let (region, args) = region(data, parent, &parameters);
@@ -92,59 +98,6 @@ pub(super) fn finish(
         parameters,
         results,
         captures,
-    }
-}
-
-pub(super) fn references(data: &AssociatedData, v: ExprId, out: &mut BTreeSet<ExprId>) {
-    match &data.expressions[v].kind {
-        ExprKind::Parameter(_) | ExprKind::OperationResult(_) => {
-            out.insert(v);
-        }
-        ExprKind::Project { tuple, .. } | ExprKind::Coerce(tuple) => references(data, *tuple, out),
-        ExprKind::Tuple(vs) | ExprKind::Vector(vs) | ExprKind::Closure { captures: vs, .. } => {
-            for &v in vs {
-                references(data, v, out)
-            }
-        }
-        ExprKind::PureApp { function, args } => {
-            references(data, *function, out);
-            for &v in args {
-                references(data, v, out)
-            }
-        }
-        ExprKind::If {
-            condition,
-            then_value,
-            else_value,
-        } => {
-            for v in [condition, then_value, else_value] {
-                references(data, *v, out)
-            }
-        }
-        ExprKind::Array(a) => array_references(data, a, out),
-        _ => {}
-    }
-}
-pub(super) fn array_references(data: &AssociatedData, a: &Array, out: &mut BTreeSet<ExprId>) {
-    match a {
-        Array::Value(v) => references(data, *v, out),
-        Array::Literal(vs) => {
-            for &v in vs {
-                references(data, v, out)
-            }
-        }
-        Array::Zip(xs) => {
-            for a in xs {
-                array_references(data, a, out)
-            }
-        }
-        Array::Range { start, len, step } => {
-            references(data, *start, out);
-            references(data, *len, out);
-            if let Some(s) = step {
-                references(data, *s, out);
-            }
-        }
     }
 }
 
@@ -330,141 +283,4 @@ pub(super) fn invoke(data: &mut AssociatedData, body: &SoacBody, args: Vec<ExprI
             record.results.into_iter().map(|v| scalar(data, v, &mut memo)).collect()
         }
     }
-}
-fn input_value(
-    data: &mut AssociatedData,
-    tree: &Input,
-    arrays: &[Array],
-    external: &[ExprId],
-    produced: &[ExprId],
-) -> Option<ExprId> {
-    match tree {
-        Input::External(a) => external.get(arrays.iter().position(|x| x == a)?).copied(),
-        Input::Produced(i, _) => produced.get(*i).copied(),
-        Input::Tuple(xs) => {
-            let vs = xs
-                .iter()
-                .map(|x| input_value(data, x, arrays, external, produced))
-                .collect::<Option<Vec<_>>>()?;
-            let ts = vs.iter().map(|v| data.types[data.expressions[*v].ty].ty.clone()).collect();
-            let t = ty(data, types::tuple(ts));
-            Some(expr(data, t, ExprKind::Tuple(vs)))
-        }
-    }
-}
-pub(super) fn across_barrier(
-    data: &mut AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-    retain: bool,
-) -> Option<()> {
-    let OperationKind::Screma {
-        form: a, inputs: ai, ..
-    } = data.operations[producer].kind.clone()
-    else {
-        return None;
-    };
-    let OperationKind::Screma {
-        form: b, inputs: bi, ..
-    } = data.operations[consumer].kind.clone()
-    else {
-        return None;
-    };
-    let parent = data.operations[consumer].region;
-    let (sa, ra) = counts(&a);
-    let (sb, rb) = counts(&b);
-    let at = signature(&a.pre).1;
-    let bt = signature(&b.pre).1;
-    let trees_a: Vec<_> = ai.iter().map(|i| input(data, i, None)).collect();
-    let trees_b: Vec<_> = bi.iter().map(|i| input(data, i, Some(producer))).collect();
-    let mut arrays = vec![];
-    for t in trees_a.iter().chain(&trees_b) {
-        flatten(t, &mut arrays);
-    }
-    let params = arrays.iter().map(|a| element(data, a)).collect::<Option<Vec<_>>>()?;
-    let mut pre = Wiring::new(params.clone());
-    let aa = trees_a
-        .iter()
-        .map(|t| wire_input(data, parent, &mut pre, t, &arrays, &[]))
-        .collect::<Option<Vec<_>>>()?;
-    let av = pre.call(a.pre.clone(), aa);
-    let collective = if sb + rb == 0 {
-        vec![]
-    } else {
-        let projection_params: Vec<_> = at[sa + ra..].iter().chain(&params).copied().collect();
-        let (r, args) = region(data, parent, &projection_params);
-        let (_, holes) = region(data, parent, &at[..sa]);
-        let args_a = holes.iter().chain(&args[..at.len() - sa - ra]).copied().collect();
-        let produced = invoke(data, &a.post, args_a)?;
-        if ra > 0 && routes(data, producer, consumer).iter().any(|&r| r < ra) {
-            return None;
-        }
-        // Reduction result slots are never selected by a streamed input.
-        let mut outputs = vec![args[0]; ra];
-        outputs.extend(produced);
-        let external = &args[at.len() - sa - ra..];
-        let args_b = trees_b
-            .iter()
-            .map(|t| input_value(data, t, &arrays, external, &outputs))
-            .collect::<Option<Vec<_>>>()?;
-        let values = invoke(data, &b.pre, args_b)?;
-        let selected = values[..sb + rb].to_vec();
-        let mut refs = BTreeSet::new();
-        for &v in &selected {
-            references(data, v, &mut refs);
-        }
-        if holes.iter().any(|h| refs.contains(h)) {
-            return None;
-        }
-        let body = finish(data, r, projection_params, selected);
-        pre.call(
-            body,
-            av[sa + ra..].iter().copied().chain(0..params.len()).collect(),
-        )
-    };
-    let pre_outputs = av[..sa]
-        .iter()
-        .chain(&collective[..sb])
-        .chain(&av[sa..sa + ra])
-        .chain(&collective[sb..])
-        .chain(&av[sa + ra..])
-        .copied()
-        .chain(0..params.len())
-        .collect();
-    let post_params: Vec<_> =
-        at[..sa].iter().chain(&bt[..sb]).chain(&at[sa + ra..]).chain(&params).copied().collect();
-    let mut post = Wiring::new(post_params);
-    let produced = post.call(
-        a.post.clone(),
-        (0..sa).chain(sa + sb..sa + sb + at.len() - sa - ra).collect(),
-    );
-    let mut outputs = vec![usize::MAX; ra];
-    outputs.extend(&produced);
-    let base = sa + sb + at.len() - sa - ra;
-    let args = trees_b
-        .iter()
-        .map(|t| wire_input_at(data, parent, &mut post, t, &arrays, &outputs, base))
-        .collect::<Option<Vec<_>>>()?;
-    if args.contains(&usize::MAX) {
-        return None;
-    }
-    let middle = post.call(b.pre.clone(), args);
-    let results = post.call(
-        b.post.clone(),
-        (sa..sa + sb).chain(middle[sb + rb..].iter().copied()).collect(),
-    );
-    let mut origins: Vec<_> = (0..ra)
-        .map(|i| (producer, i))
-        .chain((0..rb + signature(&b.post).1.len()).map(|i| (consumer, i)))
-        .collect();
-    if retain {
-        origins.extend((0..produced.len()).map(|i| (producer, ra + i)));
-    }
-    let form = ScremaForm {
-        pre: pre.finish(pre_outputs),
-        scans: a.scans.into_iter().chain(b.scans).collect(),
-        reductions: a.reductions.into_iter().chain(b.reductions).collect(),
-        post: post.finish(results.into_iter().chain(if retain { produced } else { vec![] }).collect()),
-    };
-    install(data, producer, consumer, form, arrays, origins)
 }

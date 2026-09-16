@@ -8,7 +8,7 @@ use super::data::{
     Array, AssociatedData, BlockId, BodyId, BufferId, DefinitionId, DispatchId, ExprId, ExprKind, LoopKind,
     OperationId, OperationKind, RegionId, ScremaForm, SoacBody,
 };
-use super::{from_tlc::Converted, optimize::OptimizeError, snapshot, timing};
+use super::{dependencies, from_tlc::Converted, planning, term, timing, OptimizeError};
 use crate::types;
 use egglog_engine::{
     ast::{Literal, Parser},
@@ -35,10 +35,28 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let Some(expressions) = converted.expression_program.as_ref() else {
         return Err(error("insert expressions before scheduling"));
     };
-    let summary = timing::time("analyze dependencies", || snapshot::analyze(&converted.data));
+    let summary = timing::time("analyze dependencies", || dependencies::analyze(&converted.data));
     let schedules = timing::time("validate dependency order", || summary.schedules(&converted.data))?;
     let entries: Vec<_> = converted.data.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
-    let (mut planning, mut graph) = super::planning::analyze(&mut converted.data, &summary)?;
+    let input_fields = planning::outputs(&mut converted.data);
+    let count_type = super::data::intern_type(
+        &mut converted.data,
+        types::Type::Constructed(types::TypeName::UInt(32), vec![]),
+    );
+    let facts = timing::time("derive planning facts", || {
+        planning::facts(&converted.data, &summary, count_type, &input_fields)
+    });
+    let mut planning = term::parse("planning-rules.egg", planning::RULES)?;
+    planning.extend(term::parse("wyn-planning.egg", &facts)?);
+    let mut graph = EGraph::default();
+    timing::time("load planning graph", || {
+        graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
+        graph.parse_and_run_program(None, planning::KEYS)?;
+        graph.run_program(planning.clone())
+    })?;
+    let run = term::parse("planning-run.egg", planning::RUN)?;
+    timing::time("derive stages and storage", || graph.run_program(run.clone()))?;
+    planning.extend(run);
     let recipes = timing::time("read kernel recipes", || recipes(&graph))?;
     let resources = super::planning::read(&graph, &mut converted.data)?;
     let plan = timing::span("build blocks and dispatches");
@@ -78,14 +96,19 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
         }
     }
     drop(plan);
-    planning.extend(super::planning::dispatch_order(
-        &mut graph,
-        &planner.launches,
-        planner.data,
+    let mut launches = term::parse("wyn-launches.egg", &planner.launches)?;
+    launches.extend(term::parse(
+        "dispatch-run.egg",
+        "(run-schedule (saturate (run dispatch)))",
     )?);
+    timing::time("dispatch rules", || graph.run_program(launches.clone()))?;
+    planning.extend(launches);
+    timing::time("read dispatch order", || {
+        planning::read_dispatch_order(&graph, planner.data)
+    })?;
     timing::time("validate blocks", || validation::validate(planner.data))?;
     let _output = timing::span("export block facts");
-    converted.program = super::expressions::parse(include_str!("ids.egg"))?;
+    converted.program = term::parse("ids.egg", include_str!("ids.egg"))?;
     converted.program.extend(expressions.iter().cloned());
     converted.program.extend(planning);
     converted.program.extend(

@@ -391,3 +391,77 @@ pub struct BucketShapeData {
     pub input_dimensions: Vec<Vec<u8>>,
     pub domain_rank: u8,
 }
+
+pub(super) fn intern_type(data: &mut AssociatedData, value: types::Type) -> TypeId {
+    if let Some((&id, _)) = data.types.iter().find(|(_, t)| t.ty == value) {
+        return id;
+    }
+    data.types.alloc(TypeData { ty: value })
+}
+pub(super) fn intern_expr(data: &mut AssociatedData, ty: TypeId, kind: ExprKind) -> ExprId {
+    let value = ExprData { ty, kind };
+    if let Some((&id, _)) = data.expressions.iter().find(|(_, e)| **e == value) {
+        return id;
+    }
+    data.expressions.alloc(value)
+}
+pub(super) fn body_signature(body: &SoacBody) -> (Vec<TypeId>, Vec<TypeId>) {
+    match body {
+        SoacBody::Apply {
+            parameters, results, ..
+        } => (parameters.clone(), results.clone()),
+        SoacBody::Identity(ts) => (ts.clone(), ts.clone()),
+        SoacBody::Route { parameters, indices } => (
+            parameters.clone(),
+            indices.iter().map(|&i| parameters[i]).collect(),
+        ),
+        SoacBody::Compose { first, then } => (body_signature(first).0, body_signature(then).1),
+        SoacBody::Parallel { left, right } => {
+            let (p, mut r) = body_signature(left);
+            r.extend(body_signature(right).1);
+            (p, r)
+        }
+    }
+}
+pub(in crate::egglog) fn length_source(data: &AssociatedData, kind: &OperationKind) -> Option<ExprId> {
+    let OperationKind::Call { function, args } = kind else {
+        return None;
+    };
+    let [array] = args.as_slice() else {
+        return None;
+    };
+    let mut function = *function;
+    while let ExprKind::Coerce(inner) = data.expressions[function].kind {
+        function = inner;
+    }
+    let ExprKind::Builtin(id) = data.expressions[function].kind else {
+        return None;
+    };
+    (data.builtins[id].builtin == crate::builtins::catalog().known().length).then_some(*array)
+}
+
+/// Resolve structural aliases without rewriting the sidecar.
+pub(super) fn value_source(data: &AssociatedData, mut value: ExprId) -> ExprId {
+    loop {
+        match data.expressions[value].kind {
+            ExprKind::Coerce(inner) => value = inner,
+            ExprKind::Project { tuple, index } => {
+                let tuple = value_source(data, tuple);
+                let ExprKind::Tuple(fields) = &data.expressions[tuple].kind else {
+                    return value;
+                };
+                value = fields[index];
+            }
+            _ => return value,
+        }
+    }
+}
+
+/// Recognize the shared slice builtin through type coercions.
+pub(super) fn is_slice(data: &AssociatedData, mut function: ExprId) -> bool {
+    while let ExprKind::Coerce(inner) = data.expressions[function].kind {
+        function = inner;
+    }
+    matches!(data.expressions[function].kind, ExprKind::Builtin(id)
+        if data.builtins[id].builtin == crate::builtins::catalog().known().slice)
+}

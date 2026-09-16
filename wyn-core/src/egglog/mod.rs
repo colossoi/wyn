@@ -1,7 +1,7 @@
 //! Experimental TLC import into [egglog](https://github.com/egraphs-good/egglog).
 //!
 //! [`from_tlc::convert_program`] accepts the same TLC checkpoint as EGIR and
-//! returns an egglog fusion graph together with [`AssociatedData`]. [`optimize`]
+//! returns an egglog fusion graph together with [`AssociatedData`]. [`fuse`]
 //! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
 //! separate typed expression DAG with region uses and dependency facts.
 //! [`optimize_expressions`] uses equality saturation for scalar algebra and
@@ -24,18 +24,16 @@
 
 mod blocks;
 mod data;
-mod emit;
+mod dependencies;
 mod expressions;
-mod extract;
 pub mod from_tlc;
 mod fusion;
-mod optimize;
 mod planning;
 mod regions;
 mod rewrite;
 mod scalar;
 mod schedule;
-mod snapshot;
+mod term;
 mod timing;
 mod to_ssa;
 mod visit;
@@ -47,20 +45,26 @@ pub use blocks::{
 pub use data::*;
 pub use expressions::insert_expressions;
 pub use from_tlc::{convert_program, ConvertError, Converted};
-pub use optimize::{optimize, OptimizeError};
+pub use fusion::fuse;
 pub use scalar::optimize_expressions;
 pub use schedule::schedule;
 pub use timing::with_timings;
 pub use to_ssa::to_ssa;
 
+#[derive(Debug, thiserror::Error)]
+pub enum OptimizeError {
+    #[error("egglog optimization: {0}")]
+    Engine(#[from] egglog_engine::Error),
+    #[error("egglog extraction: {0}")]
+    Extraction(String),
+    #[error("egglog output: {0}")]
+    Output(String),
+}
+
 /// Declarations included at the start of fusion fact programs (egglog 3.0).
-pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("schema.egg"));
+pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("fusion/schema.egg"));
 
 #[cfg(test)]
 mod from_tlc_tests;
-#[cfg(test)]
-mod fusion_parity_tests;
-#[cfg(test)]
-mod fusion_tests;
 #[cfg(test)]
 mod graph_tests;

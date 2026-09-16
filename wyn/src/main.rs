@@ -734,7 +734,7 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     let ssa = if egglog {
         let (converted, ssa) = wyn_core::egglog::with_timings(verbose, || -> Result<_, DriverError> {
             let converted = wyn_core::egglog::convert_program(&program)?;
-            let converted = wyn_core::egglog::optimize(converted)?;
+            let converted = wyn_core::egglog::fuse(converted)?;
             let converted = wyn_core::egglog::insert_expressions(converted)?;
             let converted = wyn_core::egglog::optimize_expressions(converted)?;
             let converted = wyn_core::egglog::schedule(converted)?;

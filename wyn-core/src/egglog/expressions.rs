@@ -6,34 +6,42 @@ use super::data::{
     Array, AssociatedData, ExprId, ExprKind, LoopKind, OperationId, OperationKind, RegionId, SoacBody,
     SymbolId,
 };
-use super::{from_tlc::Converted, optimize::OptimizeError, snapshot, timing};
-use egglog_engine::ast::{Command, Parser};
+use super::{dependencies, from_tlc::Converted, term, timing, OptimizeError};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 
 /// Add typed expressions, region interfaces, structured control, and data-flow
 /// facts to the selected fusion result. Scalar values retain their globally
 /// interned sidecar identities. This pass does not rewrite or place expressions.
 /// Execution is deferred to scalar optimization or replay of the exported program.
-/// Run after `optimize` and before `schedule`; repeated insertion is an error.
+/// Run after `fuse` and before `schedule`; repeated insertion is an error.
 pub fn insert_expressions(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let _timing = timing::span("insert expressions");
     if converted.expression_program.is_some() || !converted.data.blocks.is_empty() {
         return Err(error("expression insertion must run once, before scheduling"));
     }
-    let (commands, _) = program(&converted.data, &[])?;
+    let dependencies = timing::time("analyze dependencies", || dependencies::analyze(&converted.data));
+    timing::time("validate dependency order", || {
+        dependencies.schedules(&converted.data)
+    })?;
+    let (source, _) = timing::time("emit expression facts", || {
+        emit_facts(&converted.data, &dependencies, &[])
+    })?;
+    let mut commands = timing::time("parse expression facts", || {
+        term::parse("wyn-expressions.egg", &source)
+    })?;
+    commands.extend(term::parse("expressions-run.egg", RUN)?);
     converted.program.extend(commands.iter().cloned());
     converted.expression_program = Some(commands);
     Ok(converted)
 }
 
-pub(super) fn program(
+pub(super) fn emit_facts(
     data: &AssociatedData,
+    summary: &dependencies::Dependencies,
     extra: &[ExprId],
-) -> Result<(Vec<Command>, BTreeSet<ExprId>), OptimizeError> {
-    let _timing = timing::span("export expressions");
-    let summary = timing::time("analyze dependencies", || snapshot::analyze(data));
-    timing::time("validate dependency order", || summary.schedules(data))?;
-    let emit = timing::span("emit facts");
+) -> Result<(String, BTreeSet<ExprId>), OptimizeError> {
     let mut emitter = Emitter {
         data,
         live: &summary.live,
@@ -60,24 +68,19 @@ pub(super) fn program(
     for (before, after) in summary.effects.pairs(&emitter.operations.clone()) {
         emitter.fact(format!("(ExecutionOrder {} {})", before.egglog(), after.egglog()));
     }
-    emitter.fact("(run-schedule (saturate (run expressions)))".into());
-    drop(emit);
-    Ok((
-        timing::time("parse facts", || parse(&emitter.output))?,
-        emitter.expressions,
-    ))
+    Ok((emitter.output, emitter.expressions))
 }
 
 /// Add terms to an existing graph without redeclaring its schema or globals.
-pub(super) fn additional(
+pub(super) fn emit_additional(
     data: &AssociatedData,
+    live: &BTreeSet<OperationId>,
     extra: &[ExprId],
     prefix: &str,
-) -> Result<Vec<Command>, OptimizeError> {
-    let summary = snapshot::analyze(data);
+) -> Result<String, OptimizeError> {
     let mut emitter = Emitter {
         data,
-        live: &summary.live,
+        live,
         symbols: data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
         output: String::new(),
         prefix: prefix.into(),
@@ -93,13 +96,7 @@ pub(super) fn additional(
     while let Some(region) = emitter.pending.pop_front() {
         emitter.region(region)?;
     }
-    parse(&emitter.output)
-}
-
-pub(super) fn parse(source: &str) -> Result<Vec<Command>, OptimizeError> {
-    Parser::default()
-        .get_program_from_string(Some("wyn-expressions.egg".into()), source)
-        .map_err(|e| error(&e.to_string()))
+    Ok(emitter.output)
 }
 
 fn error(message: &str) -> OptimizeError {
