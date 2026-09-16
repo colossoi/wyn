@@ -140,6 +140,7 @@ pub(super) fn program(data: &AssociatedData) -> String {
             Storage::Device => "DeviceBuffer",
             Storage::Function => "LocalBuffer",
             Storage::External(_) => "InputBuffer",
+            Storage::Discarded => continue,
         };
         text.push_str(&format!("({relation} (BufferId {}))\n", id.as_u32()));
     }

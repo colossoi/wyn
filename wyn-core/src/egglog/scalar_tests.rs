@@ -248,7 +248,11 @@ fn soac_capture_computations_move_out_and_refresh_between_launches() {
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    wgsl(&c.data);
+    assert!(to_ssa(&c.data, crate::CodegenTarget::Wgsl)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("conditional or repeated host dispatches"));
 }
 
 #[test]
@@ -296,7 +300,11 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    wgsl(&c.data);
+    assert!(to_ssa(&c.data, crate::CodegenTarget::Wgsl)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("conditional or repeated host dispatches"));
 }
 
 #[test]

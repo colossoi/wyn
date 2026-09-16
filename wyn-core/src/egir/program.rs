@@ -191,6 +191,11 @@ pub enum NoStorageDeclaration {}
 pub struct ResourceId(u32);
 
 impl ResourceId {
+    /// A finalized egglog resource uses its sidecar buffer arena identity.
+    pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
+        Self(index)
+    }
+
     pub const fn index(self) -> usize {
         self.0 as usize
     }

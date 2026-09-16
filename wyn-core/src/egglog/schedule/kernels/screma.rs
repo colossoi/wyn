@@ -1,8 +1,7 @@
-use super::super::super::data::{ExprId, TypeId};
-use super::super::{error, length, OperationId, OperationKind, ScremaForm, SoacBody};
-use super::{
-    chunks, groups, singleton, Array, BlockId, BufferId, OptimizeError, Planner, Storage, Value, WIDTH,
-};
+use super::super::super::data::ExprId;
+use super::super::super::fusion::signature as body_signature;
+use super::super::{error, length, OperationId, OperationKind, ScremaForm};
+use super::{chunks, singleton, Array, BlockId, BufferId, OptimizeError, Planner, Storage, Value, WIDTH};
 
 impl Planner<'_> {
     pub(super) fn parallel_screma(
@@ -28,15 +27,7 @@ impl Planner<'_> {
             let values = self.invoke_body(active, &form.post, pre, "post")?;
             self.write_values(active, &arrays, i, values)?;
             self.finish_loop(&invocation, active, vec![]);
-            self.dispatch(
-                op,
-                host,
-                kernel,
-                groups(n),
-                captures,
-                Default::default(),
-                outputs.iter().copied().collect(),
-            );
+            self.dispatch(op, host, kernel, captures);
             return Ok((result(&reductions, &arrays), outputs));
         }
 
@@ -71,7 +62,8 @@ impl Planner<'_> {
         let mapped: Vec<_> = if ns == 0 {
             vec![]
         } else {
-            output_types(&form.pre)
+            body_signature(&form.pre)
+                .1
                 .into_iter()
                 .skip(ns + nr)
                 .map(|ty| {
@@ -121,22 +113,7 @@ impl Planner<'_> {
         self.finish_loop(&loop_, loop_.body, next);
         self.write_values(loop_.done, &partials, chunk, loop_.state.clone())?;
         self.finish_loop(&invocation, loop_.done, vec![]);
-        let writes = partials
-            .iter()
-            .chain(&prefixes)
-            .chain(&mapped)
-            .chain(if ns == 0 { arrays.iter() } else { [].iter() })
-            .copied()
-            .collect();
-        self.dispatch(
-            op,
-            host,
-            kernel,
-            groups(chunks.clone()),
-            captures.clone(),
-            Default::default(),
-            writes,
-        );
+        self.dispatch(op, host, kernel, captures.clone());
 
         // Dispatch boundaries supply device-wide visibility. No workgroup
         // barrier is used as a substitute for global synchronization.
@@ -158,15 +135,7 @@ impl Planner<'_> {
         self.finish_loop(&loop_, loop_.body, next);
         self.write_values(loop_.done, &reductions, Value::Int(0), loop_.state[ns..].to_vec())?;
         self.returns(loop_.done, vec![]);
-        self.dispatch(
-            op,
-            host,
-            combine,
-            Value::Int(1),
-            captures.clone(),
-            partials.iter().copied().collect(),
-            offsets.iter().chain(&reductions).copied().collect(),
-        );
+        self.dispatch(op, host, combine, captures.clone());
 
         if ns > 0 {
             let finish = self.kernel("offsets", &captures, WIDTH);
@@ -193,16 +162,7 @@ impl Planner<'_> {
             let post = self.invoke_body(active, &form.post, scan_values, "post")?;
             self.write_values(active, &arrays, i, post)?;
             self.finish_loop(&invocation, active, vec![]);
-            let reads = prefixes.iter().chain(&mapped).chain(&offsets).copied().collect();
-            self.dispatch(
-                op,
-                host,
-                finish,
-                groups(n),
-                captures,
-                reads,
-                arrays.iter().copied().collect(),
-            );
+            self.dispatch(op, host, finish, captures);
         }
         Ok((result(&reductions, &arrays), outputs))
     }
@@ -263,7 +223,8 @@ impl Planner<'_> {
                 self.allocate(allocate, "total", Value::Int(1), ty, storage)
             })
             .collect();
-        let arrays = output_types(&form.post)
+        let arrays = body_signature(&form.post)
+            .1
             .into_iter()
             .map(|ty| {
                 self.allocate(
@@ -352,16 +313,4 @@ fn neutrals(form: &ScremaForm) -> Vec<ExprId> {
         .chain(form.reductions.iter().flat_map(|r| r.neutral.iter()))
         .copied()
         .collect()
-}
-
-fn output_types(body: &SoacBody) -> Vec<TypeId> {
-    match body {
-        SoacBody::Apply { results, .. } => results.clone(),
-        SoacBody::Identity(types) => types.clone(),
-        SoacBody::Route { parameters, indices } => indices.iter().map(|&i| parameters[i]).collect(),
-        SoacBody::Compose { then, .. } => output_types(then),
-        SoacBody::Parallel { left, right } => {
-            output_types(left).into_iter().chain(output_types(right)).collect()
-        }
-    }
 }

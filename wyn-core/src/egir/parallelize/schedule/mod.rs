@@ -475,6 +475,22 @@ pub struct PhysicalKernelGraph {
 }
 
 impl PhysicalKernelGraph {
+    /// Readout of an already ordered plan from another compiler IR.
+    pub(crate) fn from_ordered(kernels: Vec<PhysicalKernel>) -> Result<Self, String> {
+        let mut seen = HashSet::new();
+        for kernel in &kernels {
+            if kernel.dependencies.iter().any(|id| !seen.contains(id)) {
+                return Err("physical kernels are not in dependency order".into());
+            }
+            if !seen.insert(kernel.id) {
+                return Err("duplicate physical kernel identity".into());
+            }
+        }
+        let graph = Self { kernels };
+        graph.validate()?;
+        Ok(graph)
+    }
+
     pub fn len(&self) -> usize {
         self.kernels.len()
     }

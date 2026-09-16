@@ -113,11 +113,12 @@ pub struct GridData {
 
 #[derive(Clone, Debug)]
 pub struct DispatchData {
+    /// Source entry and logical phase supplied by the relational plan.
+    pub owner: EntryId,
     pub kernel: BlockId,
     pub grid: GridId,
     pub dependencies: BTreeSet<DispatchId>,
-    /// Conservative resource summaries. Opaque source views can alias; these
-    /// sets alone are not permission to reorder host effects or launches.
+    /// Physical readout of the plan's Access facts.
     pub reads: BTreeSet<BufferId>,
     pub writes: BTreeSet<BufferId>,
     /// Explicit scalar environment passed from the containing host scope.
@@ -141,6 +142,8 @@ pub enum Storage {
     /// A source view, possibly selected by a host branch or call. Its aliasing
     /// and physical binding remain described by the source sidecar expression.
     External(ExprId),
+    /// An unused result slot. It has no allocation or shader binding.
+    Discarded,
 }
 
 impl Value {

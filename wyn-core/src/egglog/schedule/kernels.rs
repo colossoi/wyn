@@ -1,14 +1,13 @@
 //! Instantiate the selected GPU recipe with ordinary calls, loads, stores and
 //! control edges. No source SOAC survives as an executable instruction.
 
-use super::super::data::{Array, ExprKind};
+use super::super::data::Array;
 use super::{
     array_value, error, length, BlockId, BufferId, DispatchData, DispatchId, ExprId, FunctionKind,
     GridData, Instruction, OperationId, OperationKind, OptimizeError, Planner, Recipe, SoacBody, Storage,
     Value, WIDTH,
 };
-use crate::ast::TypeName;
-use crate::types::{self, TypeExt};
+use crate::types;
 use std::collections::BTreeSet;
 
 mod filter;
@@ -26,10 +25,11 @@ struct Loop {
 
 impl Planner<'_> {
     pub(super) fn parallel(&mut self, op: OperationId, host: BlockId) -> Result<BlockId, OptimizeError> {
+        let previous = self.current_operation.replace(op);
         let Some(recipe) = self.recipes.get(&op).copied() else {
             return Err(error("missing execution recipe"));
         };
-        let (value, outputs) = match recipe {
+        let (value, _) = match recipe {
             Recipe::Elements | Recipe::Totals | Recipe::Prefixes => self.parallel_screma(op, host)?,
             Recipe::Compact => self.parallel_filter(op, host)?,
             Recipe::Serial => {
@@ -37,12 +37,11 @@ impl Planner<'_> {
                 let kernel = self.kernel("ordered", &captures, 1);
                 let (end, value, outputs) = self.serial_body(op, kernel, host, Storage::Device)?;
                 self.returns(end, vec![]);
-                let writes = outputs.iter().copied().chain(self.destination_buffer(op)).collect();
-                self.dispatch(op, host, kernel, Value::Int(1), captures, BTreeSet::new(), writes);
+                self.dispatch(op, host, kernel, captures);
                 (value, outputs)
             }
         };
-        self.outputs.insert(op, outputs);
+        self.current_operation = previous;
         self.emit(host, Instruction::BindResult(op, value));
         Ok(host)
     }
@@ -152,8 +151,18 @@ impl Planner<'_> {
         element: types::Type,
         storage: Storage,
     ) -> BufferId {
-        let buffer = self.buffer(name, n, element, storage);
-        self.emit(host, Instruction::Allocate(buffer));
+        let buffer = if storage == Storage::Device {
+            let op = self.current_operation.expect("device allocation belongs to an operation");
+            let index = self.allocation_counts.entry((op, name.into())).or_default();
+            let buffer = self.resources.slots[&(op, name.into(), *index)];
+            *index += 1;
+            buffer
+        } else {
+            self.buffer(name, n, element, storage)
+        };
+        if self.data.buffers[buffer].storage != Storage::Discarded {
+            self.emit(host, Instruction::Allocate(buffer));
+        }
         buffer
     }
 
@@ -175,6 +184,9 @@ impl Planner<'_> {
     }
 
     fn store(&mut self, block: BlockId, buffer: BufferId, index: Value, value: Value) {
+        if self.data.buffers[buffer].storage == Storage::Discarded {
+            return;
+        }
         self.emit(
             block,
             Instruction::Store {
@@ -194,112 +206,38 @@ impl Planner<'_> {
         op: OperationId,
         host: BlockId,
         kernel: BlockId,
-        groups: Value,
         captures: Vec<ExprId>,
-        mut reads: BTreeSet<BufferId>,
-        writes: BTreeSet<BufferId>,
     ) -> DispatchId {
-        // These dependencies are static sites within the same lexical scope.
-        // Host CFG edges handle conditional paths, calls, and repeated launches.
-        let mut dependencies = BTreeSet::new();
-        self.summary.walk_dependencies(&self.data, op, |current| {
-            if let Some(previous) = self.dispatches.get(&current).and_then(|ds| ds.last()) {
-                dependencies.insert(*previous);
-            }
-            if let Some(buffers) = self.outputs.get(&current) {
-                reads.extend(buffers);
-            }
-        });
-        for &capture in &captures {
-            if let Some(buffer) = self.external_buffer(capture) {
-                reads.insert(buffer);
-            }
-        }
+        let name = self.data.blocks[kernel].interface.as_ref().expect("kernel interface").name.clone();
+        let stage = &self.resources.stages[&(op, name.clone())];
         let grid = self.data.grids.alloc(GridData {
-            groups: [groups, Value::Int(1), Value::Int(1)],
+            groups: [
+                stage.groups.clone().expect("phase domain"),
+                Value::Int(1),
+                Value::Int(1),
+            ],
         });
+        let owner = stage.owner.expect("phase entry owner");
+        let reads = stage.reads.clone();
+        let writes = stage.writes.clone();
         let dispatch = self.data.dispatches.alloc(DispatchData {
+            owner,
             kernel,
             grid,
-            dependencies,
+            dependencies: BTreeSet::new(),
             reads,
             writes,
             captures,
         });
-        self.dispatches.entry(op).or_default().push(dispatch);
+        let name = &self.data.blocks[kernel].interface.as_ref().expect("kernel interface").name;
+        self.launches.push_str(&format!(
+            "(check (Phase (Stage {} \"{name}\") r))\n(Emitted (Stage {} \"{name}\") {})\n",
+            op.egglog(),
+            op.egglog(),
+            dispatch.as_u32()
+        ));
         self.emit(host, Instruction::Dispatch(dispatch));
         dispatch
-    }
-
-    fn external_buffer(&mut self, expr: ExprId) -> Option<BufferId> {
-        // Reuse a materialized producer's resource identity where the source
-        // value gives us an exact alias. Branch/call-selected views stay opaque.
-        match &self.data.expressions[expr].kind {
-            ExprKind::Coerce(inner) | ExprKind::Array(Array::Value(inner)) => {
-                return self.external_buffer(*inner)
-            }
-            ExprKind::Project { tuple, index } => {
-                let mut tuple = *tuple;
-                while let ExprKind::Coerce(inner) = self.data.expressions[tuple].kind {
-                    tuple = inner;
-                }
-                match &self.data.expressions[tuple].kind {
-                    ExprKind::OperationResult(op) => {
-                        let component = match &self.data.operations[*op].kind {
-                            OperationKind::Screma { .. } => Some(*index),
-                            OperationKind::Filter { .. } => Some(0),
-                            OperationKind::BucketScatter { destination, .. } if *index == 0 => {
-                                return self.external_buffer(destination.value)
-                            }
-                            OperationKind::BucketScatter { .. } => index.checked_sub(1),
-                            _ => None,
-                        };
-                        if let Some(&buffer) =
-                            component.and_then(|index| self.outputs.get(op).and_then(|ids| ids.get(index)))
-                        {
-                            return Some(buffer);
-                        }
-                    }
-                    ExprKind::Tuple(fields) => {
-                        if let Some(&field) = fields.get(*index) {
-                            return self.external_buffer(field);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            ExprKind::OperationResult(op) => {
-                if matches!(self.data.operations[*op].kind, OperationKind::Filter { .. }) {
-                    if let Some(&buffer) = self.outputs.get(op).and_then(|ids| ids.first()) {
-                        return Some(buffer);
-                    }
-                }
-            }
-            _ => {}
-        }
-        let ty = &self.data.types[self.data.expressions[expr].ty].ty;
-        let element = logical_element(ty)?;
-        if let Some(&buffer) = self.external_buffers.get(&expr) {
-            return Some(buffer);
-        }
-        let buffer = self.buffer(
-            "capture",
-            Value::op("length", [Value::Source(expr)]),
-            element,
-            Storage::External(expr),
-        );
-        self.external_buffers.insert(expr, buffer);
-        Some(buffer)
-    }
-
-    fn destination_buffer(&mut self, op: OperationId) -> Option<BufferId> {
-        let expr = match &self.data.operations[op].kind {
-            OperationKind::Scatter { destination, .. }
-            | OperationKind::BucketScatter { destination, .. }
-            | OperationKind::ReduceByIndex { destination, .. } => destination.value,
-            _ => return None,
-        };
-        self.external_buffer(expr)
     }
 
     fn captures(&self, op: OperationId) -> Vec<ExprId> {
@@ -366,21 +304,6 @@ impl Planner<'_> {
     }
 }
 
-fn logical_element(ty: &types::Type) -> Option<types::Type> {
-    if let Some(element) = ty.elem_type() {
-        return Some(element.clone());
-    }
-    // TLC can retain an array of tuples as a tuple of component arrays.
-    if let types::Type::Constructed(TypeName::Tuple(_), fields) = ty {
-        if !fields.is_empty() {
-            return Some(types::tuple(
-                fields.iter().map(logical_element).collect::<Option<_>>()?,
-            ));
-        }
-    }
-    None
-}
-
 fn array_captures(array: &Array, result: &mut BTreeSet<ExprId>) {
     match array {
         Array::Value(expr) => {
@@ -419,9 +342,6 @@ fn chunks(n: Value) -> Value {
         "max",
         [Value::Int(1), Value::op("ceil_div", [n, Value::Int(WIDTH)])],
     )
-}
-fn groups(n: Value) -> Value {
-    Value::op("min", [Value::Int(65_535), chunks(n)])
 }
 fn singleton(buffer: BufferId) -> Value {
     Value::op("index", [Value::Buffer(buffer), Value::Int(0)])

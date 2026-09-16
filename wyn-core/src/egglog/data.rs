@@ -25,7 +25,7 @@ macro_rules! ids {
 ids! {
     ProgramId, SymbolId, TypeId, ExprId, OperationId, RegionId, ParameterId,
     OriginId, DefinitionId, EntryId, EntryParamId, InputBoundId, BuiltinId,
-    ExternId, BucketShapeId, BlockId, BodyId, BufferId, DispatchId, GridId, PlacementId,
+    ExternId, BucketShapeId, BlockId, BodyId, BufferId, DispatchId, GridId, PlacementId, OutputId,
 }
 
 impl RegionId {
@@ -47,6 +47,7 @@ impl OperationId {
 #[derive(Clone, Debug, Default)]
 pub struct AssociatedData {
     pub placements: IdArena<PlacementId, PlacementData>,
+    pub outputs: IdArena<OutputId, OutputData>,
     pub blocks: IdArena<BlockId, BlockData>,
     pub bodies: IdArena<BodyId, BodyData>,
     pub buffers: IdArena<BufferId, BufferData>,
@@ -346,6 +347,17 @@ pub struct DefinitionData {
 pub struct EntryData {
     pub definition: DefinitionId,
     pub declaration: interface::EntryDecl,
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputData {
+    pub entry: EntryId,
+    pub index: usize,
+    pub expression: ExprId,
+    /// Filled by the plan's OutputBacking relation.
+    pub buffer: Option<BufferId>,
+    /// Scalar results are published by the entry's final scalar kernel.
+    pub scalar: bool,
 }
 
 /// Includes unbound parameters, preserving the original parameter positions.

@@ -10,36 +10,60 @@ use crate::ssa::types::{ConstantValue, Terminator, ValueRef};
 use crate::types;
 
 impl Body<'_, '_> {
-    pub(super) fn placeholder(&mut self, key: &str, ty: &Type) -> Result<Typed, OptimizeError> {
-        if let Type::Constructed(TypeName::Tuple(_), fields) = ty {
-            let values = fields
-                .iter()
-                .enumerate()
-                .map(|(i, t)| self.placeholder(&format!("{key}_{i}"), t))
-                .collect::<Result<Vec<_>, _>>()?;
-            return self.tuple(values);
+    pub(super) fn input(&mut self, id: super::ParameterId) -> Result<Typed, OptimizeError> {
+        if let Some(value) = self.environment.parameters.get(&id) {
+            return Ok(value.clone());
         }
-        let (element, len, array) = if let Some(element) = ty.elem_type().filter(|_| ty.is_array()) {
-            let len = match ty.array_size() {
-                Some(Type::Constructed(TypeName::Size(n), _)) => *n as u32,
-                _ => 64,
+        if self.entry.is_none() {
+            return Err(error(format!("unbound helper parameter {id:?}")));
+        }
+        let inputs = self
+            .compiler
+            .inputs
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| error(format!("no source ABI for parameter {id:?}")))?;
+        let mut values = vec![];
+        for input in inputs {
+            let (ty, binding) = if let Some(binding) = input.storage_binding() {
+                let element = super::interface::storage_type(
+                    input.ty.elem_type().ok_or_else(|| error("storage input element"))?,
+                )?;
+                (
+                    types::view_array_of(&element, types::buffer_tag(binding)),
+                    Some((binding, element)),
+                )
+            } else {
+                (concrete(&input.ty)?, None)
             };
-            (concrete(element)?, len, true)
-        } else {
-            (
-                if *ty == types::bool_type() { u32_type() } else { concrete(ty)? },
-                1,
-                false,
-            )
-        };
-        let binding = self.compiler.binding(key.into(), element.clone())?;
-        let view = self.view(binding, element, len)?;
-        if array {
-            Ok(view)
-        } else {
-            let value = self.index(view, Self::number(0))?;
-            self.cast(value, ty)
+            let id = self.builder.func_mut().add_function_param(ty.clone(), input.name.clone());
+            let value = if let Some((binding, element)) = binding {
+                let length = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
+                    Self::number(u32::try_from(*n).map_err(|_| error("array size exceeds u32"))?)
+                } else {
+                    self.op(
+                        OpTag::Intrinsic {
+                            id: builtins::catalog().known().storage_len,
+                            overload_idx: 0,
+                        },
+                        vec![Self::number(binding.set), Self::number(binding.binding)],
+                        u32_type(),
+                    )?
+                };
+                self.view(binding, element, length)?
+            } else {
+                Typed { value: id.into(), ty }
+            };
+            self.inputs.push(input);
+            values.push(value);
         }
+        let value = if values.len() == 1 { values.remove(0) } else { self.tuple(values)? };
+        let value = self.cast(
+            value,
+            &self.compiler.data.types[self.compiler.data.parameters[id].ty].ty,
+        )?;
+        self.environment.parameters.insert(id, value.clone());
+        Ok(value)
     }
     pub(super) fn seed(&mut self, id: ExprId) -> Result<Typed, OptimizeError> {
         let data = self.compiler.data;
@@ -59,23 +83,21 @@ impl Body<'_, '_> {
             ExprKind::Int(_) | ExprKind::FloatBits(_) | ExprKind::Bool(_) | ExprKind::Unit => {
                 self.expression(id)
             }
-            // Preserve exact identities of materialized producer buffers where
-            // scheduling already knows the alias. Other captures are ABI inputs.
+            ExprKind::Parameter(p) => self.input(*p),
+            ExprKind::OperationResult(op) => {
+                let value = self
+                    .compiler
+                    .results
+                    .get(op)
+                    .cloned()
+                    .ok_or_else(|| error(format!("unmaterialized capture {op:?}")))?;
+                self.value(&value)
+            }
             ExprKind::Project { tuple, index } => {
                 if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
-                    if let Some(value) =
-                        data.bodies.values().flat_map(|b| &b.instructions).find_map(|i| match i {
-                            super::Instruction::BindResult(candidate, value) if *candidate == op => {
-                                Some(value)
-                            }
-                            _ => None,
-                        })
-                    {
-                        if let Value::Tuple(fields) = value {
-                            if let Some(Value::Buffer(buffer)) = fields.get(*index) {
-                                return self.value(&Value::Buffer(*buffer));
-                            }
-                        }
+                    if let Some(Value::Tuple(fields)) = self.compiler.results.get(&op) {
+                        let value = fields.get(*index).cloned().ok_or_else(|| error("result slot"))?;
+                        return self.value(&value);
                     }
                 }
                 let value = self.seed(*tuple)?;
@@ -90,10 +112,7 @@ impl Body<'_, '_> {
                 self.apply(*function, args, data.types[data.expressions[id].ty].ty.clone())
             }
             ExprKind::Array(array) => self.seed_array(array),
-            _ => self.placeholder(
-                &format!("capture{}", id.as_u32()),
-                &data.types[data.expressions[id].ty].ty,
-            ),
+            _ => Err(error(format!("no physical source for capture {id:?}"))),
         }
     }
     fn seed_array(&mut self, array: &Array) -> Result<Typed, OptimizeError> {
@@ -123,7 +142,7 @@ impl Body<'_, '_> {
         &mut self,
         binding: crate::BindingRef,
         element: Type,
-        len: u32,
+        len: Typed,
     ) -> Result<Typed, OptimizeError> {
         let ty = types::view_array_with_size(
             &element,
@@ -132,7 +151,7 @@ impl Body<'_, '_> {
         );
         self.op(
             OpTag::StorageView(PureViewSource::Storage(binding)),
-            vec![Self::number(0), Self::number(len)],
+            vec![Self::number(0), len],
             ty,
         )
     }
@@ -179,10 +198,16 @@ impl Body<'_, '_> {
                 if buffer.storage == Storage::Function {
                     return Err(error("local buffer used before allocation"));
                 }
-                let element = concrete(&buffer.element)?;
-                let binding = self.compiler.binding(format!("buffer{}", id.as_u32()), element.clone())?;
-                let len = if let Value::Int(n) = buffer.length { n } else { 64 };
-                self.view(binding, element, len)
+                let declaration = self
+                    .compiler
+                    .bindings
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| error(format!("buffer {id:?} has no Allocation fact")))?;
+                self.compiler.used.insert(*id);
+                let len = self.value(&buffer.length)?;
+                let len = self.cast(len, &u32_type())?;
+                self.view(declaration.binding, declaration.elem_ty, len)
             }
             Value::Primitive(name, args) => {
                 let values = self.values(args)?;
@@ -198,18 +223,14 @@ impl Body<'_, '_> {
         let record = &data.expressions[id];
         let ty = data.types[record.ty].ty.clone();
         match &record.kind {
-            ExprKind::Parameter(p) => self
-                .environment
-                .parameters
-                .get(p)
-                .cloned()
-                .ok_or_else(|| error(format!("unbound parameter {p:?}"))),
-            ExprKind::OperationResult(op) => self
-                .environment
-                .operations
-                .get(op)
-                .cloned()
-                .ok_or_else(|| error(format!("unbound operation result {op:?}"))),
+            ExprKind::Parameter(p) => self.input(*p),
+            ExprKind::OperationResult(op) => {
+                if let Some(v) = self.environment.operations.get(op) {
+                    Ok(v.clone())
+                } else {
+                    self.seed(id)
+                }
+            }
             ExprKind::Int(s) => self.op(
                 if matches!(ty, Type::Constructed(TypeName::UInt(_), _)) {
                     OpTag::Uint(s.clone())
@@ -242,6 +263,11 @@ impl Body<'_, '_> {
                 self.op(OpTag::Vector(items.len()), values, ty)
             }
             ExprKind::Project { tuple, index } => {
+                if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
+                    if !self.environment.operations.contains_key(&op) {
+                        return self.seed(id);
+                    }
+                }
                 let value = self.expression(*tuple)?;
                 self.field(value, *index)
             }
@@ -378,7 +404,9 @@ impl Body<'_, '_> {
     }
     pub(super) fn field(&mut self, value: Typed, index: usize) -> Result<Typed, OptimizeError> {
         let ty = match &value.ty {
-            Type::Constructed(TypeName::Tuple(_), fields) => fields.get(index).cloned(),
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
+                fields.get(index).cloned()
+            }
             Type::Constructed(TypeName::Vec, fields) => fields.first().cloned(),
             _ => None,
         }
@@ -433,6 +461,18 @@ impl Body<'_, '_> {
     pub(super) fn cast(&mut self, value: Typed, ty: &Type) -> Result<Typed, OptimizeError> {
         if value.ty == *ty || (value.ty.is_array() && ty.is_array()) {
             return Ok(value);
+        }
+        if let (Type::Constructed(TypeName::Tuple(_), a), Type::Constructed(TypeName::Tuple(_), b)) =
+            (&value.ty, ty)
+        {
+            if a.len() == b.len() {
+                let mut fields = vec![];
+                for (i, target) in b.iter().enumerate() {
+                    let field = self.field(value.clone(), i)?;
+                    fields.push(self.cast(field, target)?);
+                }
+                return self.tuple(fields);
+            }
         }
         if *ty == types::bool_type() {
             return self.binary(BinaryOperator::NotEqual, value, Self::number(0));

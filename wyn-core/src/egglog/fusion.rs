@@ -14,6 +14,7 @@ mod slices;
 pub(super) use envelope::{envelope, memory_compatible};
 pub(super) use filter::{length_source, masked};
 pub(super) use indexed::{demands, indexed};
+pub(super) use slices::is_slice;
 
 pub(super) fn ty(data: &mut AssociatedData, value: types::Type) -> TypeId {
     if let Some((&id, _)) = data.types.iter().find(|(_, t)| t.ty == value) {

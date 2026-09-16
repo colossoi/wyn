@@ -22,9 +22,9 @@ mod validation;
 
 const WIDTH: u32 = 64;
 
-/// Produce a compute scaffold, preserving scalar implementation in sidecar
-/// payloads. This is a pre-codegen IR: physical buffer layout and shader emission
-/// remain later work. No executable block contains a SOAC operation.
+/// Derive a relational GPU plan, then generate blocks with opaque scalar bodies.
+/// Recipes, resources, domains and dispatch order come from that plan.
+/// No executable block contains a SOAC operation.
 /// Requires `insert_expressions`; the expression layer is retained alongside
 /// block facts, linked by source-region provenance rather than scalar placement.
 pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
@@ -38,17 +38,19 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let summary = timing::time("analyze dependencies", || snapshot::analyze(&converted.data));
     let schedules = timing::time("validate dependency order", || summary.schedules(&converted.data))?;
     let entries: Vec<_> = converted.data.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
-    let recipes = timing::time("select kernel recipes", || recipes(&converted.data, &summary))?;
+    let (mut planning, mut graph) = super::planning::analyze(&mut converted.data, &summary)?;
+    let recipes = timing::time("read kernel recipes", || recipes(&graph))?;
+    let resources = super::planning::read(&graph, &mut converted.data)?;
     let plan = timing::span("build blocks and dispatches");
     let mut planner = Planner {
         placements: super::scalar::placement_index(&converted.data),
         data: &mut converted.data,
         schedules,
         functions: BTreeMap::new(),
-        summary,
-        dispatches: BTreeMap::new(),
-        outputs: BTreeMap::new(),
-        external_buffers: BTreeMap::new(),
+        launches: resources.identities.clone(),
+        resources,
+        allocation_counts: BTreeMap::new(),
+        current_operation: None,
         recipes,
         current_region: None,
     };
@@ -59,10 +61,16 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
         }
     }
     drop(plan);
+    planning.extend(super::planning::dispatch_order(
+        &mut graph,
+        &planner.launches,
+        planner.data,
+    )?);
     timing::time("validate blocks", || validation::validate(planner.data))?;
     let _output = timing::span("export block facts");
     converted.program = super::expressions::parse(include_str!("ids.egg"))?;
     converted.program.extend(expressions.iter().cloned());
+    converted.program.extend(planning);
     converted.program.extend(
         Parser::default()
             .get_program_from_string(Some("wyn-blocks.egg".into()), &output::program(&converted.data))
@@ -80,10 +88,10 @@ struct Planner<'a> {
     data: &'a mut AssociatedData,
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
     functions: BTreeMap<(RegionId, bool), BlockId>,
-    summary: snapshot::Snapshot,
-    dispatches: BTreeMap<OperationId, Vec<DispatchId>>,
-    outputs: BTreeMap<OperationId, Vec<BufferId>>,
-    external_buffers: BTreeMap<ExprId, BufferId>,
+    launches: String,
+    resources: super::planning::Readout,
+    allocation_counts: BTreeMap<(OperationId, String), u32>,
+    current_operation: Option<OperationId>,
     recipes: BTreeMap<OperationId, Recipe>,
     current_region: Option<RegionId>,
 }
@@ -489,38 +497,7 @@ enum Recipe {
     Serial,
 }
 
-fn recipes(
-    data: &AssociatedData,
-    summary: &snapshot::Snapshot,
-) -> Result<BTreeMap<OperationId, Recipe>, OptimizeError> {
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(Some("schedule.egg".into()), include_str!("schedule.egg"))?;
-    let mut facts = String::new();
-    for &op in &summary.live {
-        match &data.operations[op].kind {
-            OperationKind::Screma { form, .. } => facts.push_str(&format!(
-                "(Collectives {} {} {} {})\n",
-                op.egglog(),
-                form.scans.len(),
-                form.reductions.len(),
-                summary.discardable.contains(&op)
-            )),
-            OperationKind::Filter { map, body, .. } => facts.push_str(&format!(
-                "(Filter {} {})\n",
-                op.egglog(),
-                snapshot::safe_body(body, &summary.safe_regions)
-                    && snapshot::safe_body(map, &summary.safe_regions)
-            )),
-            OperationKind::Scatter { .. }
-            | OperationKind::BucketScatter { .. }
-            | OperationKind::ReduceByIndex { .. } => {
-                facts.push_str(&format!("(IndexedWrite {})\n", op.egglog()))
-            }
-            _ => {}
-        }
-    }
-    graph.parse_and_run_program(None, &facts)?;
-    graph.parse_and_run_program(None, "(run-schedule (saturate (run schedule)))")?;
+fn recipes(graph: &EGraph) -> Result<BTreeMap<OperationId, Recipe>, OptimizeError> {
     let (rows, _, dag) = graph.function_to_dag("Plan", usize::MAX, false)?;
     let mut result = BTreeMap::new();
     for row in rows {

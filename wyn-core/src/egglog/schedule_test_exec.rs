@@ -15,6 +15,8 @@ pub(super) enum Value {
     Tuple(Vec<Value>),
     Array(Rc<RefCell<Vec<Value>>>),
     Uninitialized,
+    /// A dead tuple slot may exist as a handle, but arithmetic cannot observe it.
+    Discarded,
 }
 
 impl Value {
@@ -52,6 +54,9 @@ impl Value {
         self.elements().iter().map(Self::int).collect()
     }
     fn at(&self, i: usize) -> Self {
+        if matches!(self, Self::Discarded) {
+            return Self::Discarded;
+        }
         let result = self.elements()[i].clone();
         assert_ne!(result, Self::Uninitialized, "read uninitialized element {i}");
         result
@@ -233,6 +238,9 @@ impl Machine<'_> {
             Code::Source(id) => self.source(*id, frame),
             Code::Array(array) => self.array(array, frame),
             Code::Buffer(id) => {
+                if self.data.buffers[*id].storage == Storage::Discarded {
+                    return Value::Discarded;
+                }
                 if let Storage::External(expr) = self.data.buffers[*id].storage {
                     self.source(expr, frame)
                 } else {

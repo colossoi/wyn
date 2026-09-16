@@ -107,6 +107,7 @@ impl Snapshot {
 
     /// Visit the root and its transitive dependencies in the same lexical region.
     /// Shared effect gates are ordinary graph vertices, visited only once.
+    #[cfg(test)]
     pub(super) fn walk_dependencies(
         &self,
         data: &AssociatedData,

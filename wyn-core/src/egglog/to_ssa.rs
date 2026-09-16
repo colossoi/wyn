@@ -1,5 +1,4 @@
-//! Inspection-only SSA handoff. Computations and kernel control flow are real;
-//! the shader interface is provisional. See TODOs below before executing output.
+//! SSA handoff from scheduled blocks and the derived resource plan.
 
 use super::blocks::{Exit, FunctionKind, Instruction, Storage, Value};
 use super::data::{AssociatedData, BlockId, BufferId, ExprId, OperationId, OperationKind, ParameterId};
@@ -18,15 +17,13 @@ use crate::{BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, Sch
 use std::collections::{BTreeMap, BTreeSet};
 
 mod control;
+mod interface;
+mod publish;
 mod values;
 
-/// Lower scheduled kernels and their helpers to backend-bound SSA for inspection.
-///
-/// TODO(egglog-interface): replace synthetic group-0 bindings and placeholder
-/// lengths with the actual entry/storage/uniform ABI and allocation sizes.
-/// TODO(egglog-host): publish the host CFG, allocations, grids, and repeated or
-/// conditional launches. Every kernel is emitted independently for now.
-/// No runtime pipeline descriptor is published by this provisional adapter.
+/// Lower scheduled kernels with their authored inputs and planned storage.
+/// Static compute pipelines publish the same resources and dispatch order.
+/// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
 pub fn to_ssa(
     data: &AssociatedData,
     target: CodegenTarget,
@@ -35,92 +32,132 @@ pub fn to_ssa(
     if data.blocks.is_empty() && !data.entries.is_empty() {
         return Err(error("schedule the program before lowering to SSA"));
     }
+    if data.entries.values().any(|e| e.declaration.entry_kind != crate::interface::EntryKind::Compute) {
+        return Err(error("TODO: graphics pipeline publication on the egglog route"));
+    }
+    let results = data
+        .bodies
+        .values()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match i {
+            Instruction::BindResult(op, value) => Some((*op, value.clone())),
+            _ => None,
+        })
+        .collect();
     let mut compiler = Compiler {
         placements: super::scalar::placement_index(data),
         data,
         functions: vec![],
         specializations: vec![],
-        bindings: vec![],
-        slots: BTreeMap::new(),
+        inputs: interface::inputs(data)?,
+        bindings: BTreeMap::new(),
+        results,
+        used: BTreeSet::new(),
     };
-    let mut roots: Vec<_> = data
-        .blocks
-        .iter()
-        .filter_map(|(&id, b)| {
-            b.interface.as_ref().and_then(|f| match f.kind {
-                FunctionKind::Kernel(_) => Some(id),
-                FunctionKind::Entry(_) if !contains_dispatch(data, id) => Some(id),
-                _ => None,
-            })
-        })
-        .collect();
-    roots.sort();
+    super::timing::time("assign physical bindings", || compiler.allocate_bindings())?;
+    let owners: BTreeMap<_, _> = data.dispatches.values().map(|d| (d.kernel, d.owner)).collect();
+    let mut roots = vec![];
+    for (&id, block) in &data.blocks {
+        let Some(f) = &block.interface else {
+            continue;
+        };
+        match f.kind {
+            FunctionKind::Kernel(size) => roots.push((id, owners[&id], size, false)),
+            FunctionKind::Entry(entry) => {
+                if contains_dispatch(data, id) && !static_host(data, id) {
+                    return Err(error(
+                        "TODO: runtime publication of conditional or repeated host dispatches",
+                    ));
+                }
+                if data.outputs.values().any(|o| o.entry == entry && o.scalar)
+                    || !contains_dispatch(data, id)
+                {
+                    roots.push((id, entry, [1, 1, 1], true));
+                }
+            }
+            _ => {}
+        }
+    }
+    roots.sort_by_key(|r| r.0);
     let mut entries = vec![];
-    for root in roots {
+    for &(root, owner, size, finish) in &roots {
         let _entry = super::timing::span("lower entry or kernel");
-        let Some(interface) = &data.blocks[root].interface else {
-            return Err(error("missing entry interface"));
-        };
-        let size = match interface.kind {
-            FunctionKind::Kernel(size) => size,
-            _ => [1, 1, 1],
-        };
+        compiler.used.clear();
         let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
-        // Input captures keep their identities, but use provisional storage
-        // slots instead of an authored uniform/buffer interface.
-        for instruction in &data.bodies[data.blocks[root].body].instructions {
-            let (name, id, ty) = match instruction {
-                Instruction::BindExpression(id, Value::Local(name)) => {
-                    (name, Some(*id), data.types[data.expressions[*id].ty].ty.clone())
+        lower.entry = Some(owner);
+        lower.finish_outputs = finish;
+        // Root parameters are source ABI values. Kernel captures are resolved
+        // lazily, so a combine phase does not declare unused input arrays.
+        if finish {
+            for instruction in &data.bodies[data.blocks[root].body].instructions {
+                if let Instruction::BindParameter(p, Value::Local(name)) = instruction {
+                    let value = lower.input(*p)?;
+                    lower.environment.locals.insert(name.clone(), value);
                 }
-                Instruction::BindParameter(p, Value::Local(name)) => {
-                    (name, None, data.types[data.parameters[*p].ty].ty.clone())
-                }
-                _ => continue,
-            };
-            let key = id.map_or_else(
-                || format!("entry{}_{}", root.as_u32(), name),
-                |id| format!("capture{}", id.as_u32()),
-            );
-            let value = if let Some(id) = id { lower.seed(id)? } else { lower.placeholder(&key, &ty)? };
-            lower.environment.locals.insert(name.clone(), value);
+            }
         }
         lower.visit(root)?;
-        let (mut body, _) = lower.finish()?;
-        // Shader return values need an observable sink, even for scalar-only
-        // source entries. TODO(egglog-interface): route actual authored outputs.
-        compiler.store_entry_results(&mut body, root)?;
+        let inputs = lower.inputs.clone();
+        let (body, _) = lower.finish()?;
+        let storage_bindings =
+            compiler.used.iter().filter_map(|id| compiler.bindings.get(id).cloned()).collect();
         entries.push(ssa::types::EntryPoint {
             id: EntryId::from(root.as_u32()),
-            name: format!(
-                "egg_{}_{}",
-                if matches!(interface.kind, FunctionKind::Kernel(_)) { "kernel" } else { "entry" },
-                root.as_u32()
-            ),
+            name: entry_name(root),
             body,
             execution_model: crate::flow::ExecutionModel::Compute {
                 local_size: (size[0], size[1], size[2]),
             },
-            inputs: vec![],
-            parameter_inputs: vec![],
+            parameter_inputs: (0..inputs.len()).map(|i| vec![i]).collect(),
+            inputs,
             outputs: vec![],
-            storage_bindings: vec![],
+            storage_bindings,
             stage_descriptor_storage_accesses: Default::default(),
             pipeline_storage_accesses: Default::default(),
             span: Span::generated(),
         });
     }
-    // TODO(egglog-interface): each entry should declare only its actual uses;
-    // all preview entries currently share the same conservative binding table.
-    for entry in &mut entries {
-        entry.storage_bindings = compiler.bindings.clone();
-    }
+    let (pipeline, physical_kernels) = compiler.publish(&mut entries, &roots)?;
     Ok(ssa::Program::bare(compiler.functions, entries, vec![])
         .with_context::<ssa::stage::ElaboratedTag, _>(ssa::context::BackendGlobal {
-            pipeline: Default::default(),
-            physical_kernels: Default::default(),
+            pipeline,
+            physical_kernels,
             profile: LoweringProfile::new(target, SchedulePolicy::Parallel),
         }))
+}
+
+fn entry_name(root: BlockId) -> String {
+    format!("egg_kernel_{}", root.as_u32())
+}
+
+/// The existing runtime executes a static sequence. Do not advertise a
+/// conditional or repeated launch as an unconditional executable pipeline.
+fn static_host(data: &AssociatedData, root: BlockId) -> bool {
+    // Scalar memory reads need their own stage if a later launch can overwrite
+    // their inputs. Until those stages exist, moving the read to the final
+    // publication kernel would change the observed value.
+    let mut pending = vec![root];
+    let mut read = false;
+    while let Some(id) = pending.pop() {
+        let block = &data.blocks[id];
+        for instruction in &data.bodies[block.body].instructions {
+            match instruction {
+                Instruction::Evaluate(_) | Instruction::Call { .. } => read = true,
+                Instruction::Dispatch(_) if read => return false,
+                _ => {}
+            }
+        }
+        if let Exit::Jump(edge) = &block.exit {
+            pending.push(edge.target);
+        }
+        if matches!(block.exit, Exit::Branch { .. }) {
+            return false;
+        }
+    }
+    data.blocks.iter().filter(|(_, b)| b.function == root).all(|(_, b)| {
+        !matches!(b.exit, Exit::Branch { .. })
+            && !data.bodies[b.body].instructions.iter().any(|i| matches!(i, Instruction::Call { .. }))
+    })
 }
 
 fn error(message: impl Into<String>) -> OptimizeError {
@@ -165,26 +202,12 @@ struct Compiler<'a> {
     data: &'a AssociatedData,
     functions: Vec<ssa::types::Function>,
     specializations: Vec<Specialization>,
-    bindings: Vec<StorageBindingDecl>,
-    slots: BTreeMap<String, BindingRef>,
+    inputs: BTreeMap<ParameterId, Vec<crate::interface::EntryInput>>,
+    bindings: BTreeMap<BufferId, StorageBindingDecl>,
+    results: BTreeMap<OperationId, Value>,
+    used: BTreeSet<BufferId>,
 }
 impl Compiler<'_> {
-    fn binding(&mut self, key: String, element: Type) -> Result<BindingRef, OptimizeError> {
-        if let Some(&binding) = self.slots.get(&key) {
-            return Ok(binding);
-        }
-        let index = u32::try_from(self.bindings.len()).map_err(|_| error("too many preview bindings"))?;
-        let binding = BindingRef::new(0, index);
-        self.bindings.push(StorageBindingDecl {
-            binding,
-            elem_ty: element,
-            role: StorageRole::Intermediate,
-            logical_resource: Some(key.clone()),
-            length: None,
-        });
-        self.slots.insert(key, binding);
-        Ok(binding)
-    }
     fn function(
         &mut self,
         source: BlockId,
@@ -219,52 +242,6 @@ impl Compiler<'_> {
         });
         Ok((id, result))
     }
-    fn store_entry_results(&mut self, body: &mut FuncBody, root: BlockId) -> Result<(), OptimizeError> {
-        // Reuse the normal SSA storage operations; this only supplies the
-        // provisional output ABI, not a second shader text generator.
-        let returns: Vec<_> = body
-            .inner
-            .blocks
-            .iter()
-            .filter_map(|(b, data)| match data.term {
-                Terminator::Return(Some(v)) => Some((b, v)),
-                _ => None,
-            })
-            .collect();
-        for (block, value) in returns {
-            let ty = body.return_ty.clone();
-            if ty == types::unit() {
-                body.inner.blocks[block].term = Terminator::Return(None);
-                continue;
-            }
-            let binding = self.binding(format!("result{}", root.as_u32()), ty.clone())?;
-            let view_ty = types::view_array_of(&ty, types::buffer_tag(binding));
-            let view = body.inner.append_inst(
-                block,
-                InstKind::Op {
-                    tag: OpTag::StorageView(PureViewSource::Storage(binding)),
-                    operands: vec![uint(0), uint(1)],
-                },
-                view_ty,
-            );
-            let place = body.places.insert(ssa::types::PlaceInfo {
-                elem_ty: ty,
-                origin: ssa::types::PlaceOrigin::Instruction,
-            });
-            body.inner.append_void_inst(
-                block,
-                InstKind::ViewIndex {
-                    view: view.into(),
-                    index: uint(0),
-                    result: place,
-                },
-            );
-            body.inner.append_void_inst(block, InstKind::Store { place, value });
-            body.inner.blocks[block].term = Terminator::Return(None);
-        }
-        body.return_ty = types::unit();
-        Ok(())
-    }
 }
 
 #[derive(Clone)]
@@ -291,6 +268,9 @@ struct Body<'a, 'b> {
     parameter_types: BTreeMap<BlockId, Vec<Type>>,
     return_types: Option<Vec<Type>>,
     width: u32,
+    entry: Option<super::EntryId>,
+    finish_outputs: bool,
+    inputs: Vec<crate::interface::EntryInput>,
 }
 impl<'a, 'b> Body<'a, 'b> {
     fn new(
@@ -334,6 +314,9 @@ impl<'a, 'b> Body<'a, 'b> {
             parameter_types: BTreeMap::new(),
             return_types: None,
             width,
+            entry: None,
+            finish_outputs: false,
+            inputs: vec![],
         })
     }
     fn finish(mut self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
@@ -387,7 +370,20 @@ impl<'a, 'b> Body<'a, 'b> {
         }
         match &data.blocks[id].exit {
             Exit::Return(body) => {
-                let values = self.values(&data.bodies[*body].results)?;
+                let values = if self.finish_outputs {
+                    let owner = self.entry.unwrap();
+                    for output in data.outputs.values().filter(|o| o.entry == owner && o.scalar) {
+                        let buffer = output.buffer.ok_or_else(|| error("missing planned output buffer"))?;
+                        self.instruction(&Instruction::Store {
+                            buffer: Value::Buffer(buffer),
+                            index: Value::Int(0),
+                            value: Value::Source(output.expression),
+                        })?;
+                    }
+                    vec![]
+                } else {
+                    self.values(&data.bodies[*body].results)?
+                };
                 let types: Vec<_> = values.iter().map(|v| v.ty.clone()).collect();
                 if self.return_types.as_ref().is_some_and(|known| *known != types) {
                     return Err(error("inconsistent function return types"));
@@ -482,11 +478,28 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.environment.parameters.insert(*id, v);
             }
             Instruction::BindExpression(id, value) => {
+                if matches!(value, Value::Local(name) if !self.environment.locals.contains_key(name))
+                    && self.entry.is_some()
+                {
+                    return Ok(());
+                }
                 self.environment.expressions.remove(id);
                 let v = self.value(value)?;
                 self.environment.expressions.insert(*id, v);
             }
             Instruction::BindResult(id, value) => {
+                if self.finish_outputs
+                    && matches!(
+                        self.compiler.data.operations[*id].kind,
+                        OperationKind::Screma { .. }
+                            | OperationKind::Filter { .. }
+                            | OperationKind::Scatter { .. }
+                            | OperationKind::BucketScatter { .. }
+                            | OperationKind::ReduceByIndex { .. }
+                    )
+                {
+                    return Ok(());
+                }
                 let v = self.value(value)?;
                 self.environment.operations.insert(*id, v);
             }
@@ -575,8 +588,11 @@ impl<'a, 'b> Body<'a, 'b> {
             Instruction::Allocate(id) => {
                 let buffer = &self.compiler.data.buffers[*id];
                 if buffer.storage == Storage::Function {
-                    // TODO(egglog-interface): dynamic invocation-local allocation.
-                    let count = if let Value::Int(n) = buffer.length { n.max(1) as usize } else { 64 };
+                    let count = self
+                        .compiler
+                        .constant(&buffer.length)
+                        .ok_or_else(|| error("TODO: dynamic invocation-local allocation"))?
+                        .max(1) as usize;
                     let ty = types::sized_array(count, concrete(&buffer.element)?);
                     let place = self.builder.new_place(ty.clone());
                     self.builder
@@ -588,6 +604,7 @@ impl<'a, 'b> Body<'a, 'b> {
                     self.environment.buffers.insert(*id, (place, ty));
                 }
             }
+            Instruction::Dispatch(_) if self.finish_outputs => {}
             Instruction::Dispatch(_) => return Err(error("host dispatches do not belong in shader SSA")),
         }
         Ok(())
@@ -644,7 +661,7 @@ fn concrete(ty: &Type) -> Result<Type, OptimizeError> {
     if let Some(element) = ty.elem_type().filter(|_| ty.is_array()) {
         let count = match ty.array_size() {
             Some(Type::Constructed(TypeName::Size(n), _)) => *n as usize,
-            _ => 64,
+            _ => return Err(error("runtime-sized array requires a storage view")),
         };
         return Ok(types::sized_array(count.max(1), concrete(element)?));
     }

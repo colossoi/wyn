@@ -1,0 +1,33 @@
+; Direct producer/consumer edges suffice: do not materialize transitive closure.
+(rule ((Crossing a b value) (Phase a r) (Phase b r)) ((Before a b)) :ruleset dispatch)
+; An authored update may share backing, but readers of the old value must finish
+; first. Join on that particular value version, never on all pairs of stages.
+(rule ((Clobbers writer old) (Needs reader old) (Phase writer r) (Phase reader r) (!= reader writer))
+      ((Before reader writer)) :ruleset dispatch)
+
+; An operation has separate start/end boundaries so its internal phases remain
+; ordered without a cycle through one source-operation node.
+(rule ((FirstPhase op stage)) ((OrderEdge (Start op) (At stage))) :ruleset dispatch)
+(rule ((LastPhase op stage)) ((OrderEdge (At stage) (End op))) :ruleset dispatch)
+(rule ((ScalarSite op)) ((OrderEdge (Start op) (End op))) :ruleset dispatch)
+(rule ((Before a b)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
+(rule ((EffectInput gate op)) ((OrderEdge (End op) (Gate gate))) :ruleset dispatch)
+(rule ((EffectWait op gate)) ((OrderEdge (Gate gate) (Start op))) :ruleset dispatch)
+; Scalar control/calls have no kernel phase here. Preserve their direct source
+; dependencies as boundaries; SOAC-to-SOAC flow uses the actual result writer.
+(rule ((SourceDependency after before) (ScalarSite after) (Site after r) (Site before r))
+      ((OrderEdge (End before) (Start after))) :ruleset dispatch)
+(rule ((SourceDependency after before) (ScalarSite before) (Site after r) (Site before r))
+      ((OrderEdge (End before) (Start after))) :ruleset dispatch)
+(rule ((Requires (InOperation op) value) (Produces stage value) (Site op r) (Phase stage r))
+      ((OrderEdge (At stage) (Start op))) :ruleset dispatch)
+
+; Read out immediate dispatch predecessors, traversing only non-launch nodes.
+; Stop at a launch, so a chain remains linear instead of becoming its closure.
+(rule ((Emitted stage after) (OrderEdge before (At stage))) ((Waits after before)) :ruleset dispatch)
+(rule ((Waits after (Start op)) (OrderEdge before (Start op))) ((Waits after before)) :ruleset dispatch)
+(rule ((Waits after (End op)) (OrderEdge before (End op))) ((Waits after before)) :ruleset dispatch)
+(rule ((Waits after (Gate gate)) (OrderEdge before (Gate gate))) ((Waits after before)) :ruleset dispatch)
+(rule ((Waits after (At a)) (Emitted a before) (Emitted b after)
+       (Phase a r) (Phase b r) (!= before after))
+      ((DispatchDependency before after)) :ruleset dispatch)

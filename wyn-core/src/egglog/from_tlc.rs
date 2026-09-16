@@ -26,7 +26,7 @@ type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPa
 pub struct Converted {
     /// Facts from the last completed pass: a fusion summary after import or
     /// optimization, augmented with expressions after insertion; scheduling
-    /// replaces the fusion summary with block/dispatch facts.
+    /// replaces the fusion summary with planning and block/dispatch facts.
     pub program: Vec<egglog_engine::ast::Command>,
     /// Full bodies, expressions, arguments, types, and diagnostic metadata.
     pub data: AssociatedData,

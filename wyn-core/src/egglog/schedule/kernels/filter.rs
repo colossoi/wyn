@@ -1,7 +1,7 @@
 use super::super::{length, OperationId, OperationKind};
 use super::{
-    chunks, error, groups, singleton, Array, BlockId, BufferId, OptimizeError, Planner, SoacBody, Storage,
-    Value, WIDTH,
+    chunks, error, singleton, Array, BlockId, BufferId, OptimizeError, Planner, SoacBody, Storage, Value,
+    WIDTH,
 };
 use crate::{ast::TypeName, types};
 
@@ -39,15 +39,7 @@ impl Planner<'_> {
         };
         self.store(active, flags, i, Value::op("bool_to_u32", [predicate.clone()]));
         self.finish_loop(&invocation, active, vec![]);
-        self.dispatch(
-            op,
-            host,
-            flags_kernel,
-            groups(n.clone()),
-            captures.clone(),
-            Default::default(),
-            [flags].into(),
-        );
+        self.dispatch(op, host, flags_kernel, captures.clone());
 
         let prefix_kernel = self.kernel("local_offsets", &captures, WIDTH);
         let invocation = self.invocations(prefix_kernel, chunks.clone());
@@ -72,15 +64,7 @@ impl Planner<'_> {
         );
         self.store(loop_.done, totals, chunk, loop_.state[0].clone());
         self.finish_loop(&invocation, loop_.done, vec![]);
-        self.dispatch(
-            op,
-            host,
-            prefix_kernel,
-            groups(chunks.clone()),
-            captures.clone(),
-            [flags].into(),
-            [local_offsets, totals].into(),
-        );
+        self.dispatch(op, host, prefix_kernel, captures.clone());
 
         let combine = self.kernel("offsets", &captures, 1);
         let loop_ = self.start_loop(combine, Value::Int(0), chunks, vec![Value::Int(0)]);
@@ -93,15 +77,7 @@ impl Planner<'_> {
         );
         self.store(loop_.done, count, Value::Int(0), loop_.state[0].clone());
         self.returns(loop_.done, vec![]);
-        self.dispatch(
-            op,
-            host,
-            combine,
-            Value::Int(1),
-            captures.clone(),
-            [totals].into(),
-            [offsets, count].into(),
-        );
+        self.dispatch(op, host, combine, captures.clone());
 
         let write = self.kernel("compact", &captures, WIDTH);
         let invocation = self.invocations(write, n.clone());
@@ -125,15 +101,7 @@ impl Planner<'_> {
         self.store(selected, output, Value::op("add", [offset, local]), value.clone());
         self.jump(selected, done, vec![]);
         self.finish_loop(&invocation, done, vec![]);
-        self.dispatch(
-            op,
-            host,
-            write,
-            groups(n),
-            captures,
-            [flags, local_offsets, offsets].into(),
-            [output].into(),
-        );
+        self.dispatch(op, host, write, captures);
         Ok((
             Value::op("slice", [Value::Buffer(output), singleton(count)]),
             vec![output, count],

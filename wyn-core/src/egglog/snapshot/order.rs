@@ -8,6 +8,15 @@ pub(in crate::egglog) struct Effects {
     waits: BTreeMap<OperationId, Vec<usize>>,
 }
 impl Effects {
+    /// Preserve shared gates when exporting order constraints to other analyses.
+    pub(in crate::egglog) fn gates(&self) -> impl Iterator<Item = (usize, &[OperationId])> {
+        self.groups.iter().enumerate().map(|(i, ops)| (i, ops.as_slice()))
+    }
+
+    pub(in crate::egglog) fn waits(&self) -> impl Iterator<Item = (OperationId, usize)> + '_ {
+        self.waits.iter().flat_map(|(&op, gates)| gates.iter().map(move |&gate| (op, gate)))
+    }
+
     fn gate(&mut self, before: Vec<OperationId>) -> usize {
         let id = self.groups.len();
         self.groups.push(before);

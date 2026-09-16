@@ -6,13 +6,17 @@
 //! separate typed expression DAG with region uses and dependency facts.
 //! [`optimize_expressions`] uses equality saturation for scalar algebra and
 //! records common-branch and loop-invariant placements, including SOAC captures.
-//! [`schedule`] then selects parallel GPU recipes and builds functions, blocks,
-//! buffers and dispatches, retaining the expression layer. Generated scalar
-//! instructions remain opaque sidecar bodies. [`to_ssa`] hands those bodies to
-//! the existing shader backend with a provisional storage interface.
+//! [`schedule`] derives logical stages, residency, backing, scratch requirements,
+//! and dispatch constraints in egglog before building functions and blocks.
+//! Resources, aliases, capacities, accesses and dispatch order are read from
+//! that plan. Generated scalar instructions remain opaque sidecar bodies.
+//! [`to_ssa`] preserves source inputs and publishes static compute pipelines
+//! through the shared shader/runtime ABI. Runtime capacity formulas, host
+//! control flow and graphics publication still have explicit limitations.
 //! Map, reduce, and scan are constructed as Scremas during import. Types and
 //! pure values are interned in the sidecar. Fusion exports only SOAC layouts,
-//! uses, dependencies and motion constraints; scheduling exports block topology.
+//! uses, dependencies and motion constraints; scheduling retains its planning
+//! facts alongside expressions and emitted block topology.
 //!
 //! The languages are documented in `schema.egg`, `expressions.egg`, and
 //! `blocks.egg`. Identities are local to one conversion; keep each fact program
@@ -26,6 +30,7 @@ mod extract;
 pub mod from_tlc;
 mod fusion;
 mod optimize;
+mod planning;
 mod regions;
 mod rewrite;
 mod scalar;

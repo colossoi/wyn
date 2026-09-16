@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn is_slice(data: &AssociatedData, mut function: ExprId) -> bool {
+pub(in crate::egglog) fn is_slice(data: &AssociatedData, mut function: ExprId) -> bool {
     while let ExprKind::Coerce(inner) = data.expressions[function].kind {
         function = inner;
     }

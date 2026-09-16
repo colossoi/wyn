@@ -1,0 +1,74 @@
+; Only host invocations create launches; scalar callbacks stay invocation-local.
+(rule ((HostRoot entry r)) ((HostRegion r)) :ruleset residency)
+(rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
+(rule ((OwnedRegion entry r) (Site op r) (Enters op child))
+      ((OwnedRegion entry child)) :ruleset residency)
+(rule ((Phase stage r) (OwnedRegion entry r)) ((PhaseOwner stage entry)) :ruleset residency)
+(rule ((HostRegion r) (Site op r) (Enters op child))
+      ((HostRegion child)) :ruleset residency)
+
+; Resolve component references without merging value or execution identities.
+(rule ((ArrayResult op i t)) ((ResultSlot op i)) :ruleset residency)
+(rule ((TotalResult op i t)) ((ResultSlot op i)) :ruleset residency)
+(rule ((UpdatedResult op i e)) ((ResultSlot op i)) :ruleset residency)
+(rule ((FilterResult op t)) ((ResultSlot op 0) (ResultSlot op 1)) :ruleset residency)
+(rule ((BucketResult op destination)) ((ResultSlot op 1) (ResultSlot op 2)) :ruleset residency)
+(rule ((ParameterValue e r)) ((ValueRef e (Source e))) :ruleset residency)
+(rule ((DirectResult e op i)) ((ValueRef e (Result op i))) :ruleset residency)
+(rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
+      ((ValueRef e (Result op i))) :ruleset residency)
+(rule ((Projection e tuple i) (FieldValue tuple i field))
+      ((ForwardValue e field)) :ruleset residency)
+(rule ((Projection e tuple i) (ForwardValue tuple inner))
+      ((Projection e inner i)) :ruleset residency)
+(rule ((Projection e tuple i) (ValueRef tuple value))
+      ((ValueRef e value)) :ruleset residency)
+(rule ((ForwardValue e source) (ValueRef source value))
+      ((ValueRef e value)) :ruleset residency)
+(rule ((SliceView e source start end)) ((ForwardValue e source)) :ruleset residency)
+
+; Summarize the shared expression DAG once, stopping at execution results. A
+; shared scalar chain must not be traversed again for every consuming stage.
+(rule ((ValueRef e value)) ((References e value)) :ruleset residency)
+(rule ((ChildValue e child) (References child value)) ((References e value)) :ruleset residency)
+(rule ((ForwardValue e child) (References child value)) ((References e value)) :ruleset residency)
+(rule ((Projection e tuple i) (ComputedValue tuple) (References tuple value))
+      ((References e value)) :ruleset residency)
+(rule ((ResultTuple e op) (ResultSlot op i)) ((References e (Result op i))) :ruleset residency)
+(rule ((SliceView e source start end) (References start value)) ((References e value)) :ruleset residency)
+(rule ((SliceView e source start end) (References end value)) ((References e value)) :ruleset residency)
+
+; Only actual uses join those summaries; there is no stage x expression search.
+(rule ((PhaseInput stage op role) (Operand op role e)) ((Demand (InStage stage) e)) :ruleset residency)
+; Lengths follow view metadata; reading an allocation's size does not require
+; waiting for its element writer. Compacted lengths do require the count writer.
+(rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((Needs stage value) (Capacity value n)) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((ExtentDemand stage (Length e))) ((LengthDemand stage e)) :ruleset residency)
+(rule ((ExtentDemand stage (Scalar e))) ((Demand (InStage stage) e)) :ruleset residency)
+(rule ((ExtentDemand stage (ChunkCount n width))) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((ExtentDemand stage (Stored value))) ((Needs stage value)) :ruleset residency)
+(rule ((LengthDemand stage e) (ValueRef e (Source source))) ((Needs stage (Source source))) :ruleset residency)
+(rule ((LengthDemand stage e) (ValueRef e value) (LiveLength value n)) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((LengthDemand stage e) (ValueRef e value) (SameBacking value source)) ((LengthDemand stage source)) :ruleset residency)
+(rule ((LengthDemand stage e) (SliceView e source start end))
+      ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
+(rule ((HostRegion r) (Site op r) (ScalarSite op) (Operand op role e))
+      ((Demand (InOperation op) e)) :ruleset residency)
+(rule ((HostRegion r) (ExitValue r i e)) ((Demand (AtExit r) e)) :ruleset residency)
+(rule ((Demand site e) (References e value)) ((Requires site value)) :ruleset residency)
+(rule ((Requires (InStage stage) value)) ((Needs stage value)) :ruleset residency)
+
+; Region exits preserve loop/branch boundaries. They are not global returns.
+(rule ((HostRoot entry r) (ExitValue r i e)) ((OutputValue entry i e)) :ruleset residency)
+(rule ((Requires (AtExit r) value)) ((Escapes r value)) :ruleset residency)
+(rule ((Produces producer value) (Needs consumer value) (!= producer consumer))
+      ((Crossing producer consumer value) (Materialize value)) :ruleset residency)
+(rule ((Escapes r value) (Produces producer value)) ((Materialize value)) :ruleset residency)
+(rule ((Requires (InOperation op) value) (Produces producer value))
+      ((Materialize value)) :ruleset residency)
+
+; Every materialization has a reason. A cross-region use remains a host-control
+; handoff, never an unconditional edge between mutually exclusive launch sites.
+(rule ((Crossing a b value) (Phase a ra) (Phase b rb) (!= ra rb))
+      ((HostHandoff ra rb value)) :ruleset residency)
