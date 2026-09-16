@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::ast::TypeName;
+#[cfg(feature = "egir")]
 use crate::compile_thru_spirv;
 use crate::op;
 use crate::ssa::builder::FuncBuilder;
@@ -230,6 +231,7 @@ fn value_uses_does_not_traverse_places() {
 /// chain and confirm the place/value split emits valid SPIR-V without
 /// ValueId-keyed place tracking.
 #[test]
+#[cfg(feature = "egir")]
 fn spirv_storage_write_chain_lowers_cleanly() {
     // Minimal compute shader: the map's `[]f32 → []f32` writeback forces
     // the MapInto path → ViewIndex (place) + Store.

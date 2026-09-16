@@ -13,6 +13,7 @@ def main [
     --keep (-k)               # Keep generated SPIR-V / WGSL files
     --out-dir (-o): string    # Output directory (implies --keep)
     --wgsl                    # Compile to WGSL and validate via `viz validate`
+    --egir                    # Build and validate the optional EGIR compiler route
     --release                 # Build wyn (and viz, with --wgsl) in --release
                               #   (default: debug — builds faster, runs slower)
 ] {
@@ -29,10 +30,11 @@ def main [
     let playground_header = "scripts/playground_image_header.wyn"
 
     print $"Building wyn \(($profile))..."
+    let feature_flags = if $egir { ["--features", "egir"] } else { [] }
     if $release {
-        ^cargo build --release -p wyn
+        ^cargo build --release -p wyn ...$feature_flags
     } else {
-        ^cargo build -p wyn
+        ^cargo build -p wyn ...$feature_flags
     }
 
     if $wgsl {

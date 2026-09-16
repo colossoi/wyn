@@ -5,6 +5,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+egir = ["dep:wyn-fusion", "dep:wyn-staged-ir"]
+
 [dependencies]
 egglog-engine = { package = "egglog", version = "3.0.0", default-features = false }
 thiserror.workspace = true
@@ -23,10 +27,10 @@ wyn-base = { path = "../wyn-base" }
 wyn-pipeline-descriptor = { path = "../wyn-pipeline-descriptor" }
 wyn-graph = { path = "../wyn-graph" }
 wyn-slice = { path = "../wyn-slice" }
-wyn-fusion = { path = "../wyn-fusion" }
+wyn-fusion = { path = "../wyn-fusion", optional = true }
 wyn-kernel-graph = { path = "../wyn-kernel-graph" }
 wyn-module-graph = { path = "../wyn-module-graph" }
-wyn-staged-ir = { path = "../wyn-staged-ir" }
+wyn-staged-ir = { path = "../wyn-staged-ir", optional = true }
 wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }
 
 [dev-dependencies]

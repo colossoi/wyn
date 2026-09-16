@@ -5,6 +5,9 @@
 //! defines the concrete resource arenas, identifiers, and program data used
 //! by those states.
 
+pub use crate::interface::EntryPublication;
+pub use crate::ResourceId;
+
 use crate::builtins;
 use crate::egir::analysis::GraphAnalysis;
 use crate::egir::soac::SegmentedMetadata;
@@ -183,28 +186,6 @@ pub(crate) type SemanticOpIdSource = IdSource<SemanticOpId>;
 /// cannot be represented in `Converted`, `Segmented`, or `Optimized` EGIR.
 #[derive(Clone, Debug)]
 pub enum NoStorageDeclaration {}
-
-/// Target-independent identity of a semantic storage resource. Identities are
-/// issued only by logical-resource allocation and committed by the arena;
-/// callers can observe an id's dense index but cannot manufacture one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ResourceId(u32);
-
-impl ResourceId {
-    /// A finalized egglog resource uses its sidecar buffer arena identity.
-    pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
-        Self(index)
-    }
-
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn for_test(index: u32) -> Self {
-        Self(index)
-    }
-}
 
 /// Stable identity of an entry input position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -468,7 +449,7 @@ impl LogicalResourceArena {
         if let Some(id) = self.host.get(&resource.binding).copied() {
             return id;
         }
-        let id = ResourceId(self.resources.len() as u32);
+        let id = ResourceId::from_index(self.resources.len() as u32);
         self.host.insert(resource.binding, id);
         self.resources.push(LogicalResource {
             id,
@@ -487,7 +468,7 @@ impl LogicalResourceArena {
         if let Some(id) = resource.key().and_then(|key| self.compiler.get(&key).copied()) {
             return id;
         }
-        let id = ResourceId(self.resources.len() as u32);
+        let id = ResourceId::from_index(self.resources.len() as u32);
         if let Some(key) = resource.key() {
             self.compiler.insert(key, id);
         }
@@ -1330,17 +1311,6 @@ fn publish_entry(
         outputs: outputs.to_vec(),
         storage_bindings,
     })
-}
-
-#[derive(Clone, Debug)]
-pub struct EntryPublication {
-    /// Compiler identity. The name below remains emitted host ABI metadata.
-    pub id: EntryId,
-    pub name: String,
-    pub execution_model: ExecutionModel,
-    pub inputs: Vec<EntryInput>,
-    pub outputs: Vec<EntryOutput>,
-    pub storage_bindings: Vec<interface::StorageBindingDecl>,
 }
 
 /// A complete entry after a validated kernel recipe has been physicalized.

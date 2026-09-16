@@ -18,7 +18,7 @@ pub mod patterns;
 pub mod pin_entry_buffers;
 pub mod reachability;
 pub mod rep_specialize;
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;
 pub mod run;

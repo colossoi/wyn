@@ -17,9 +17,9 @@ use super::{
 use crate::ast;
 use crate::ast::Span;
 use crate::builtins;
-use crate::egir;
 use crate::err_type_at;
 use crate::error;
+use crate::interface::lowering::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryKind};
 use crate::op;
 use crate::pipeline_descriptor;
@@ -1309,7 +1309,7 @@ fn draw_buffer_source(
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
         {
             return Some(pipeline_descriptor::DrawBufferRef {
-                set: egir::from_tlc::AUTO_STORAGE_SET,
+                set: AUTO_STORAGE_SET,
                 binding: index as u32,
                 name: root_entry.declaration.params.get(index)?.name.clone(),
                 resource: None,
@@ -1319,7 +1319,7 @@ fn draw_buffer_source(
     let value = computed.iter().find(|value| value.symbol == symbol)?;
     let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
     Some(pipeline_descriptor::DrawBufferRef {
-        set: egir::from_tlc::AUTO_STORAGE_SET,
+        set: AUTO_STORAGE_SET,
         binding: leaf.binding,
         name: leaf.output_name.clone(),
         resource: Some(leaf.output_name.clone()),
@@ -1872,7 +1872,7 @@ fn append_target_captures(
                 span: Span::generated(),
                 ty: texture_ty,
                 attributes: vec![Attribute::Texture {
-                    set: egir::from_tlc::AUTO_STORAGE_SET,
+                    set: AUTO_STORAGE_SET,
                     binding,
                     backing: None,
                     resource: Some(name),
@@ -1931,7 +1931,7 @@ fn external_parameter_type(ty: &Type, binding: u32) -> Type {
         args[1] = Type::Constructed(TypeName::ArrayVariantView, vec![]);
         let slot = args.len() - 1;
         args[slot] = types::buffer_tag(BindingRef {
-            set: egir::from_tlc::AUTO_STORAGE_SET,
+            set: AUTO_STORAGE_SET,
             binding,
         });
     }
@@ -1941,23 +1941,23 @@ fn external_parameter_type(ty: &Type, binding: u32) -> Type {
 fn external_binding_attribute(ty: &Type, binding: u32) -> Option<interface::ResolvedAttribute> {
     match ty {
         Type::Constructed(TypeName::Array, _) => Some(Attribute::Storage {
-            set: egir::from_tlc::AUTO_STORAGE_SET,
+            set: AUTO_STORAGE_SET,
             binding,
             layout: interface::StorageLayout::Std430,
             access: interface::StorageAccess::ReadOnly,
         }),
         Type::Constructed(TypeName::Texture2D, _) => Some(Attribute::Texture {
-            set: egir::from_tlc::AUTO_STORAGE_SET,
+            set: AUTO_STORAGE_SET,
             binding,
             backing: None,
             resource: None,
         }),
         Type::Constructed(TypeName::Sampler, _) => Some(Attribute::Sampler {
-            set: egir::from_tlc::AUTO_STORAGE_SET,
+            set: AUTO_STORAGE_SET,
             binding,
         }),
         _ => Some(Attribute::Uniform {
-            set: egir::from_tlc::AUTO_STORAGE_SET,
+            set: AUTO_STORAGE_SET,
             binding,
         }),
     }
@@ -2028,7 +2028,7 @@ fn build_compute_stage(
         .map(|leaf| interface::EntryOutputDecl {
             ty: leaf.ty.clone(),
             attribute: Some(Attribute::Storage {
-                set: egir::from_tlc::AUTO_STORAGE_SET,
+                set: AUTO_STORAGE_SET,
                 binding: leaf.binding,
                 layout: interface::StorageLayout::Std430,
                 access: interface::StorageAccess::WriteOnly,

@@ -223,7 +223,7 @@ impl Body<'_, '_> {
         let data = self.compiler.data;
         let record = &data.expressions[id];
         let ty = data.types[record.ty].ty.clone();
-        match &record.kind {
+        let result = match &record.kind {
             ExprKind::Parameter(p) => self.input(*p),
             ExprKind::OperationResult(op) => {
                 if let Some(v) = self.environment.operations.get(op) {
@@ -338,7 +338,16 @@ impl Body<'_, '_> {
                 })
             }
             other => Err(error(format!("TODO: first-class value {other:?}"))),
+        }?;
+        // Interned values can have several source uses. Retain a concrete
+        // origin without replacing a more specific child expression's span.
+        if let (Some(&span), ValueRef::Ssa(value)) = (self.compiler.origins.get(&id), &result.value) {
+            let body = self.builder.func_mut();
+            if let Some(inst) = body.inst_of_value(*value) {
+                body.insts[inst].span.get_or_insert(span);
+            }
         }
+        Ok(result)
     }
     pub(super) fn apply(
         &mut self,

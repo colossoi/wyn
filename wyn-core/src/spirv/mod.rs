@@ -18,7 +18,7 @@ mod lower;
 mod lower_builtin;
 mod lower_index;
 mod lower_ops;
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 mod lowering_tests;
 mod pow;
 mod storage;

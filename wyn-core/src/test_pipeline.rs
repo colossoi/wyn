@@ -84,6 +84,7 @@ pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
 
 /// Through source-level SOAC ANF normalization, immediately before nested
 /// runtime-index producers are floated.
+#[cfg(feature = "egir")]
 pub(crate) fn compile_thru_expose_producers(src: &str) -> tlc::stage::SoacsAnfNormalized {
     optimize_tlc_for_test_thru_soac_normalization(front_end(src)).expect("TLC optimization")
 }

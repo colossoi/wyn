@@ -1,7 +1,7 @@
 //! Literal expansion and the disjoint inclusive-range spelling.
-use crate::{
-    compile_thru_frontend, compile_thru_spirv, compile_thru_ssa, compile_thru_tlc, lower_ssa_to_wgsl,
-};
+use crate::{compile_thru_frontend, compile_thru_tlc};
+#[cfg(feature = "egir")]
+use crate::{compile_thru_spirv, compile_thru_ssa, lower_ssa_to_wgsl};
 
 #[test]
 fn literal_expansion_accepts_all_vector_element_types_and_widths() {
@@ -56,6 +56,7 @@ fn inclusive_range_preserves_exclusive_ranges_and_slices() {
 }
 
 #[test]
+#[cfg(feature = "egir")]
 fn literal_expansion_lowers_to_both_shader_backends() {
     for source in [
         "entry e(v: vec3f32) vec4f32 = @[v..., 1.0]",

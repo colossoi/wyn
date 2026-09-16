@@ -163,23 +163,7 @@ pub type SkeletonTerminator = super::ir::SkeletonTerminator<WynLanguage>;
 pub type SoacInputType<Ty = Type<TypeName>> = super::ir::SoacInputType<Ty>;
 pub use super::ir::ArrayLayout;
 pub type EGraph<P = Semantic, Lang = WynLanguage> = super::ir::EGraph<P, Lang>;
-
-/// If `ty` is a structure-of-arrays tuple, return its array component types.
-pub(crate) fn as_soa_tuple(ty: &Type<TypeName>) -> Option<&[Type<TypeName>]> {
-    let Type::Constructed(TypeName::Tuple(_), components) = ty else {
-        return None;
-    };
-    if components.is_empty() {
-        return None;
-    }
-    components
-        .iter()
-        .all(|component| {
-            matches!(component, Type::Constructed(TypeName::Array, args) if args.len() == 4)
-                || as_soa_tuple(component).is_some()
-        })
-        .then_some(components)
-}
+pub(crate) use crate::types::{as_soa_tuple, strip_existentials};
 
 /// Derive the logical element represented by an array or SoA tuple type.
 pub(crate) fn soac_element_type(array: &Type<TypeName>) -> Type<TypeName> {
@@ -219,16 +203,6 @@ pub(crate) fn soac_leaf_type(array: &Type<TypeName>, rank: u8) -> Type<TypeName>
             .unwrap_or_else(|| panic!("SOAC input rank {rank} exceeds array type {array:?}"));
     }
     leaf
-}
-
-pub(crate) fn strip_existentials(mut ty: &Type<TypeName>) -> &Type<TypeName> {
-    while let Type::Constructed(TypeName::Existential(_), args) = ty {
-        let Some(inner) = args.first() else {
-            break;
-        };
-        ty = inner;
-    }
-    ty
 }
 
 impl super::ir::SoacInputType<Type<TypeName>> {

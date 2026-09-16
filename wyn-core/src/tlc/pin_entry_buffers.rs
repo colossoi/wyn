@@ -34,10 +34,10 @@ use crate::binding_layout::{
     compute_entry_binding_layout, extract_storage_binding, extract_storage_image_binding,
 };
 use crate::builtins;
-use crate::egir;
 use crate::err_type_at;
 use crate::error;
 use crate::interface;
+use crate::interface::lowering::AUTO_STORAGE_SET;
 use crate::interface::{EntryDecl, EntryParamBindingKind};
 use crate::types;
 use crate::types::{buffer_tag, TypeExt};
@@ -105,7 +105,7 @@ fn pin_definition(
                 &params,
                 &param_diets,
                 &entry.declaration,
-                egir::from_tlc::AUTO_STORAGE_SET,
+                AUTO_STORAGE_SET,
                 binding_ids,
             );
             let mut subst = BufferSubst::new();

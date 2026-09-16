@@ -13,7 +13,6 @@
 
 use crate::builtins;
 use crate::builtins::{by_id, catalog, BuiltinId};
-use crate::egir;
 use crate::err_wgsl;
 use crate::err_wgsl_at;
 use crate::interface;
@@ -38,6 +37,7 @@ use crate::ssa::storage_function_variants::StorageFunctionVariants;
 use crate::ssa::types::{
     EntryPoint, ExecutionModel, FuncBody, Function, InstKind, ValueId, ValueRef, WynInstNode,
 };
+use crate::types::as_soa_tuple;
 use crate::types::TypeExt;
 use crate::wgsl::int64_emulation::{self, U64Emulation};
 use crate::wgsl::{WgslInt64Mode, WgslOptions};
@@ -876,7 +876,7 @@ impl<'a> LowerCtx<'a> {
         ty: &PolyType<TypeName>,
         elements: &[String],
     ) -> Result<String> {
-        let Some(components) = egir::types::as_soa_tuple(ty) else {
+        let Some(components) = as_soa_tuple(ty) else {
             let wgsl_ty = self.type_emitter.type_to_wgsl(ty)?;
             return Ok(format!("{}({})", wgsl_ty, elements.join(", ")));
         };
@@ -1970,7 +1970,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         result_ty: &PolyType<TypeName>,
         elements: &[String],
     ) -> Result<String> {
-        let Some(components) = egir::types::as_soa_tuple(result_ty) else {
+        let Some(components) = as_soa_tuple(result_ty) else {
             let wgsl_ty = self.ctx.type_emitter.type_to_wgsl(result_ty)?;
             return Ok(format!("{}({})", wgsl_ty, elements.join(", ")));
         };

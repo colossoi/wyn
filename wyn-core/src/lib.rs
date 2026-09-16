@@ -10,6 +10,7 @@ pub mod error;
 pub mod flow;
 mod frontend;
 pub mod interface;
+pub mod kernel_graph;
 pub mod lexer;
 mod name_resolution;
 pub mod op;
@@ -33,8 +34,8 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egglog;
+#[cfg(feature = "egir")]
 pub mod egir;
-pub use egir::program::ResourceId;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
@@ -43,19 +44,23 @@ pub mod spirv;
 pub mod structured;
 pub mod wgsl;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 mod integration_tests;
 
 #[cfg(test)]
 mod test_pipeline;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 mod slice_range_tests;
 
+#[cfg(feature = "egir")]
 use egir::from_tlc::ConvertError;
-use wyn_base::{IdArena, IdSource};
+use wyn_base::IdArena;
+#[cfg(feature = "egir")]
+use wyn_base::IdSource;
 
 use ast::NodeCounter;
+use std::collections::BTreeMap;
 // =============================================================================
 // Collection aliases
 // =============================================================================
@@ -130,6 +135,7 @@ impl EntryId {
         Self(index as u32)
     }
 
+    #[cfg(feature = "egir")]
     pub(crate) const fn index(self) -> usize {
         self.0 as usize
     }
@@ -194,6 +200,54 @@ impl BindingRef {
 impl std::fmt::Display for BindingRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "set={},binding={}", self.set, self.binding)
+    }
+}
+
+/// Target-independent identity of a semantic storage resource. Identities are
+/// assigned by the selected compiler route. Callers can observe its dense
+/// index but cannot manufacture one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(u32);
+
+impl ResourceId {
+    #[cfg(feature = "egir")]
+    pub(crate) const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// A finalized egglog resource uses its sidecar buffer arena identity.
+    pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    #[cfg(all(test, feature = "egir"))]
+    pub(crate) const fn for_test(index: u32) -> Self {
+        Self(index)
+    }
+}
+
+/// Access to one resource in a compiler route's resource namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceUse<R> {
+    pub resource: R,
+    pub access: ResourceAccess,
+}
+
+impl<R: Copy + Ord> ResourceUse<R> {
+    /// Combine accesses to the same resource in ascending resource order.
+    pub fn merge(a: &[Self], b: &[Self]) -> Vec<Self> {
+        let mut merged: BTreeMap<R, ResourceAccess> = BTreeMap::new();
+        for resource in a.iter().chain(b) {
+            merged
+                .entry(resource.resource)
+                .and_modify(|access| *access = access.merge(resource.access))
+                .or_insert(resource.access);
+        }
+        merged.into_iter().map(|(resource, access)| Self { resource, access }).collect()
     }
 }
 
@@ -352,6 +406,7 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
 }
 
 /// Convert fully analyzed TLC into raw semantic EGIR.
+#[cfg(feature = "egir")]
 pub fn to_egraph(
     program: tlc::stage::InputSliceBoundsInferred,
 ) -> std::result::Result<egir::from_tlc::Converted, ConvertError> {
@@ -433,6 +488,7 @@ impl LoweringProfile {
 }
 
 /// Run the physical EGIR passes and construct backend-bound SSA.
+#[cfg(feature = "egir")]
 pub fn lower_egir_to_ssa(
     program: egir::parallelize::Planned,
 ) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
@@ -709,7 +765,7 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
 /// pre-built `tlc::stage::Reachable`. Both `compile_thru_ssa` and
 /// `compile_thru_spirv_serial` build the SSA the same way; only
 /// the downstream scheduling profile differs.
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 fn ssa_from_reachable(
     program: tlc::stage::Reachable,
     profile: LoweringProfile,
@@ -727,7 +783,7 @@ fn ssa_from_reachable(
 /// (matches the SPIR-V backend's requirements). Returns the boxed
 /// `Result<_, dyn Error>` so callers see both compiler errors and EGIR
 /// conversion errors uniformly.
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 pub fn compile_thru_ssa(
     source: &str,
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
@@ -735,7 +791,7 @@ pub fn compile_thru_ssa(
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(lower_ssa_to_spirv(ssa_from_reachable(
         compile_thru_tlc(source)?,
@@ -744,7 +800,7 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 }
 
 /// Serial-scheduling equivalent of `compile_thru_spirv` for scheduler tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
     Ok(lower_ssa_to_spirv(ssa_from_reachable(
         compile_thru_tlc(source)?,
@@ -752,7 +808,7 @@ pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, B
     )?)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "egir"))]
 mod host_length_tests;
 
 #[cfg(test)]

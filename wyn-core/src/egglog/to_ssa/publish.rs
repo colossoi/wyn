@@ -2,12 +2,12 @@
 
 use super::*;
 use crate::egglog::{DispatchId, EntryId as SourceEntryId};
-use crate::egir::parallelize::{KernelDomain, KernelId, PhysicalKernel, PhysicalKernelGraph};
-use crate::egir::program::EntryPublication;
-use crate::egir::publish::PipelineDescriptorPublish;
+use crate::interface::publish::PipelineDescriptorPublish;
+use crate::interface::EntryPublication;
 use crate::interface::{EntryInputKind, StorageAccess};
+use crate::kernel_graph::{KernelDomain, KernelId, PhysicalKernel, PhysicalKernelGraph};
 use crate::pipeline_descriptor::{self as pd, ComputePipeline, ComputeStage, Pipeline, PipelineDescriptor};
-use crate::ResourceAccess;
+use crate::{ResourceAccess, ResourceUse};
 
 impl Compiler<'_> {
     pub(super) fn publish(
@@ -203,7 +203,7 @@ impl Compiler<'_> {
                     domain,
                     resources: resources
                         .into_iter()
-                        .map(|(id, access)| crate::egir::ir::SegResourceAccess {
+                        .map(|(id, access)| ResourceUse {
                             resource: crate::ResourceId::from_egglog_buffer(id.as_u32()),
                             access,
                         })

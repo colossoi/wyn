@@ -9,6 +9,10 @@ license.workspace = true
 name = "wyn"
 path = "src/main.rs"
 
+[features]
+default = []
+egir = ["wyn-core/egir"]
+
 [dependencies]
 wyn-core = { path = "../wyn-core" }
 wyn-diagnostics = { path = "../wyn-diagnostics" }

@@ -1774,3 +1774,30 @@ pub fn format_scheme(scheme: &TypeScheme) -> String {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+/// If `ty` is a structure-of-arrays tuple, return its array component types.
+pub(crate) fn as_soa_tuple(ty: &Type) -> Option<&[Type]> {
+    let Type::Constructed(TypeName::Tuple(_), components) = ty else {
+        return None;
+    };
+    if components.is_empty() {
+        return None;
+    }
+    components
+        .iter()
+        .all(|component| {
+            matches!(component, Type::Constructed(TypeName::Array, args) if args.len() == 4)
+                || as_soa_tuple(component).is_some()
+        })
+        .then_some(components)
+}
+
+pub(crate) fn strip_existentials(mut ty: &Type) -> &Type {
+    while let Type::Constructed(TypeName::Existential(_), args) = ty {
+        let Some(inner) = args.first() else {
+            break;
+        };
+        ty = inner;
+    }
+    ty
+}

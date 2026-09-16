@@ -4,6 +4,7 @@
 use super::*;
 use crate::binding_layout::*;
 use crate::egglog::ExprKind;
+use crate::interface::lowering::extract_size_hint;
 use crate::interface::{
     self, BindingExposure, EntryInput, EntryInputKind, EntryParamBindingKind, IoDecoration,
     PushConstantSlot, StorageAccess, TextureSource,
@@ -119,7 +120,7 @@ pub(super) fn inputs(
                     } else {
                         types::canonical_storage_buffer_ty(ty)
                     },
-                    size_hint: crate::egir::from_tlc::extract_size_hint(source),
+                    size_hint: extract_size_hint(source),
                     kind,
                 }],
             );

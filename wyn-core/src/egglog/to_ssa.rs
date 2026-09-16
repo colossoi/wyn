@@ -5,6 +5,7 @@ use super::data::{AssociatedData, BlockId, BufferId, ExprId, OperationId, Operat
 use super::OptimizeError;
 use crate::ast::Span;
 use crate::flow::ControlHeader;
+use crate::interface::lowering::build_entry_outputs;
 use crate::interface::{StorageBindingDecl, StorageRole};
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::{
@@ -47,7 +48,12 @@ pub fn to_ssa(
             _ => None,
         })
         .collect();
+    let mut origins = BTreeMap::new();
+    for origin in data.origins.values().filter(|origin| origin.span.module().is_some()) {
+        origins.entry(origin.expression).or_insert(origin.span);
+    }
     let mut compiler = Compiler {
+        origins,
         placements: super::scalar::placement_index(data),
         data,
         functions: vec![],
@@ -109,7 +115,7 @@ pub fn to_ssa(
         let outputs = if compute {
             vec![]
         } else {
-            crate::egir::from_tlc::build_entry_outputs(
+            build_entry_outputs(
                 declaration,
                 &result_type(&return_types),
                 &[],
@@ -235,6 +241,7 @@ struct Specialization {
     result: Option<Vec<Type>>,
 }
 struct Compiler<'a> {
+    origins: BTreeMap<ExprId, Span>,
     placements: BTreeMap<super::PlacementSite, Vec<ExprId>>,
     data: &'a AssociatedData,
     functions: Vec<ssa::types::Function>,

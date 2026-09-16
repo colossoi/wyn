@@ -528,7 +528,7 @@ impl FuncBody {
 // =============================================================================
 
 pub mod context {
-    use crate::egir::parallelize::PhysicalKernelGraph;
+    use crate::kernel_graph::PhysicalKernelGraph;
     use crate::pipeline_descriptor::PipelineDescriptor;
     use crate::LoweringProfile;
 

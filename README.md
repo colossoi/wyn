@@ -637,6 +637,10 @@ entry image(screen: render_target<vec4f32>) render_target<vec4f32> =
 
 ## Usage
 
+Normal builds use the egglog compiler route. EGIR is an opt-in Cargo feature:
+`cargo build -p wyn --features egir` builds a compiler that defaults to EGIR and
+accepts `--egglog` to select egglog instead. `--direct` requires that EGIR build.
+
 ```bash
 # Compile to SPIR-V
 cargo run --bin wyn -- build input.wyn -o output.spv
@@ -648,8 +652,8 @@ cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --egg-out output.egg --output-mir output.ssa
 
 # Compile a graphics program directly, without compiler-created prepasses
-cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
-cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --graphics --direct
+cargo run --bin wyn --features egir -- build input.wyn -o output.spv --graphics --direct
+cargo run --bin wyn --features egir -- build input.wyn -o output.wgsl -t wgsl --graphics --direct
 
 # Opt in to backend-local u64 emulation for WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
@@ -665,7 +669,7 @@ cargo run --bin wyn -- build input.wyn --output-annotated out.ann  # Annotated s
 cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
 
-The experimental egglog route constructs `map`, `reduce`, and `scan` as Scremas
+The egglog route constructs `map`, `reduce`, and `scan` as Scremas
 in `egglog::from_tlc`. Full expressions, types, bodies, argument values, control
 flow, and metadata are retained in `IdArena` sidecars. Fusion receives only a
 summary: SOAC layouts, producer/consumer links, uses, and dependency/effect
@@ -675,12 +679,14 @@ region parameters/results, call and structured-loop links, and data dependencies
 through `expressions.egg`. Region-use facts associate globally interned syntax
 with its use sites; they do not place computations or share runtime values across
 invocations. Operation identities keep effectful executions distinct.
-`--egglog` selects this route through scheduling and `egglog::to_ssa`, then uses
-the existing backend and file output. Egglog timing goes to stderr. Within each function,
+This route runs through scheduling and `egglog::to_ssa`, then uses the shared
+backend and file output. `--egglog` explicitly selects it in builds that also
+enable EGIR. Egglog timing goes to stderr. Within each function,
 lowering walks backward from outputs and required effects, then topologically
 orders only reachable operations. Dead records can remain in the source sidecar.
 `--egg-out FILE` saves the last pass's block/dispatch facts (`blocks.egg`) alongside
-the expression layer, linked by source-region provenance. The fusion summary is
+the expression layer, linked by source-region provenance. It requires `--egglog`
+only in EGIR-enabled builds. The fusion summary is
 replaced, and executable blocks contain no SOACs. Block facts reference opaque body IDs,
 calls, branches, jumps, allocations and launches. Functions adorn entry blocks.
 A shared pass loop analyzes a complete graph, derives fusion candidates in
@@ -731,12 +737,24 @@ points or intermediate storage.
 
 ```bash
 cargo build --release
-cargo test
+cargo test --workspace
+cargo test --workspace --features egir
 ```
 
-Use `cargo test --workspace` for the full Rust suite. All SPIR-V testfiles in `testfiles/` compile and validate (`bash scripts/validate_testfiles.sh`); the WGSL subset also validates (`bash scripts/validate_testfiles.sh --wgsl` — a handful skip because they depend on linked SPIR-V helpers).
+Run both configurations: the default suite covers frontend, egglog, and independent
+backend tests; `--features egir` also runs the EGIR pass and end-to-end suites.
+EGIR is gated in `wyn-core` itself, including its route-specific dependencies.
+Consumers that use its public API must explicitly enable `wyn-core/egir`.
+
+Run `scripts/validate_testfiles.ps1` for SPIR-V testfile validation and add `-Wgsl`
+for WGSL. Add `-Egir` to validate the EGIR route. The Bash and Nushell variants
+accept `--wgsl` and `--egir` for the same choices.
 
 The two WebAssembly crates are excluded from the workspace and need separate checks, including their own lockfiles. Install the target with `rustup target add wasm32-unknown-unknown`, then run `bash scripts/check_wasm.sh` (or `./scripts/check_wasm.ps1` in PowerShell). Both checks use `--locked`; additional Cargo arguments such as `--offline` can be passed to the script.
+
+Both WASM crates explicitly enable EGIR for their compiler and visualization APIs.
+Their browser-target dependencies enable Web Crypto support for egglog's random
+number dependency; these opt-ins do not enable EGIR in the native workspace build.
 
 ## Language Overview
 

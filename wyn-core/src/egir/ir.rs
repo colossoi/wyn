@@ -1,10 +1,12 @@
 //! Phase-agnostic, low-level data structures for EGIR.
 
+pub use crate::interface::OutputSlotId;
+pub use crate::ResourceUse as SegResourceAccess;
+
 use crate::flow;
 use crate::op;
 use crate::EntryId;
 use crate::GlobalId;
-use crate::ResourceAccess;
 use slotmap::{new_key_type, SlotMap};
 use smallvec::SmallVec;
 
@@ -2087,25 +2089,6 @@ impl SegBody {
             bindings.insert(node, capture);
         }
         Ok(bindings)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SegResourceAccess<R> {
-    pub resource: R,
-    pub access: ResourceAccess,
-}
-
-impl<R: Copy + Ord> SegResourceAccess<R> {
-    pub fn merge(a: &[Self], b: &[Self]) -> Vec<Self> {
-        let mut merged: std::collections::BTreeMap<R, ResourceAccess> = std::collections::BTreeMap::new();
-        for resource in a.iter().chain(b) {
-            merged
-                .entry(resource.resource)
-                .and_modify(|access| *access = access.merge(resource.access))
-                .or_insert(resource.access);
-        }
-        merged.into_iter().map(|(resource, access)| Self { resource, access }).collect()
     }
 }
 
@@ -4192,10 +4175,6 @@ pub struct SlotSource {
     pub block: BlockId,
     pub value: ValueId,
 }
-
-/// Stable identity of a declared entry-output position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct OutputSlotId(pub usize);
 
 /// The concrete side effect that fulfils an output route after realization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
