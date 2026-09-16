@@ -216,8 +216,10 @@ pub enum OperationKind {
         ownership: Vec<types::SoacOwnership>,
     },
     Filter {
+        /// Element transformation before predicate evaluation and compaction.
+        map: SoacBody,
         body: SoacBody,
-        input: Array,
+        inputs: Vec<Array>,
         ownership: types::SoacOwnership,
     },
     Scatter {
@@ -233,10 +235,11 @@ pub enum OperationKind {
     },
     ReduceByIndex {
         destination: Place,
+        /// Maps input elements to two logical results: destination index, value.
+        map: SoacBody,
         body: SoacBody,
         neutral: ExprId,
-        indices: Array,
-        values: Array,
+        inputs: Vec<Array>,
     },
 }
 

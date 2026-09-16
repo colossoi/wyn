@@ -40,7 +40,9 @@ pub fn optimize(mut converted: Converted) -> Result<Converted, OptimizeError> {
         let mut graph = analyze(&converted.data)?;
         snapshot::analyze(&converted.data).schedules(&converted.data)?;
         graph.parse_and_run_program(Some("fusion.egg".into()), FUSION)?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate (run fusion)))")?;
+        // Candidates are terminal facts: no fusion rule consumes another
+        // candidate. One match round suffices; only dependency closure saturates.
+        graph.parse_and_run_program(None, "(run-schedule (run fusion))")?;
         if extract::fuse_one(&graph, &mut converted.data)? {
             continue;
         }

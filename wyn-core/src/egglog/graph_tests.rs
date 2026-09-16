@@ -44,9 +44,11 @@ fn fusion_follows_dependencies_across_an_independent_reduction() {
     let before = schedule(&input.data);
     assert_eq!(before.len(), 3);
     let result = optimize(input).unwrap();
-    assert_eq!(schedule(&result.data), before[1..]);
-    // Dead records remain; backward readout performs the actual selection.
-    assert_eq!(result.data.regions[entry(&result.data)].members.len(), 3);
+    assert_eq!(schedule(&result.data), before[2..]);
+    // The reduction joins the maps horizontally; only the surviving execution
+    // remains a member, while old arena records remain available as provenance.
+    assert_eq!(result.data.regions[entry(&result.data)].members.len(), 1);
+    assert_eq!(result.data.operations.len(), 3);
     let OperationKind::Screma { form, .. } = &result.data.operations[before[2]].kind else {
         panic!("map")
     };

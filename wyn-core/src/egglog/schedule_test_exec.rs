@@ -165,6 +165,13 @@ impl Machine<'_> {
                     OperationKind::Index { array, index } => {
                         self.source(array, frame).at(self.source(index, frame).int() as usize)
                     }
+                    OperationKind::Call { function, ref args } => {
+                        let ExprKind::Builtin(id) = self.data.expressions[function].kind else {
+                            panic!("unsupported oracle callee");
+                        };
+                        let name = builtins::by_id(self.data.builtins[id].builtin).raw.surface_name;
+                        primitive(name, args.iter().map(|&id| self.source(id, frame)).collect())
+                    }
                     ref other => panic!("unsupported source effect in oracle: {other:?}"),
                 };
                 frame.operations.insert(op, value);
@@ -307,6 +314,9 @@ impl Machine<'_> {
 }
 
 fn field(tuple: Value, index: usize) -> Value {
+    if let Value::Array(values) = &tuple {
+        return Value::values(values.borrow().iter().map(|v| field(v.clone(), index)).collect());
+    }
     let Value::Tuple(fields) = tuple else {
         panic!("expected tuple: {tuple:?}");
     };
@@ -318,6 +328,9 @@ fn primitive(name: &str, args: Vec<Value>) -> Value {
         "length" => Value::Int(args[0].elements().len() as i64),
         "index" => args[0].at(args[1].int() as usize),
         "slice" => Value::values(args[0].elements()[..args[1].int() as usize].to_vec()),
+        "_w_intrinsic_slice" => {
+            Value::values(args[0].elements()[args[1].int() as usize..args[2].int() as usize].to_vec())
+        }
         "dimension" => {
             let mut value = args[0].clone();
             for _ in 0..args[1].int() {

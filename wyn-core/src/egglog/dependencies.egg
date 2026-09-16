@@ -5,6 +5,10 @@
 (function Uses (OperationKey) UseSet :merge (set-union old new))
 (rule ((Operation r op)) ((set (Uses op) (set-empty))) :ruleset dependencies)
 (rule ((Use op site)) ((set (Uses op) (set-of site))) :ruleset dependencies)
+(function LengthUses (OperationKey) UseSet :merge (set-union old new))
+(rule ((Operation r op)) ((set (LengthUses op) (set-empty))) :ruleset dependencies)
+(rule ((Use op (OperationUse consumer (Length))))
+      ((set (LengthUses op) (set-of (OperationUse consumer (Length))))) :ruleset dependencies)
 
 (relation Precedes (OperationKey OperationKey))
 (rule ((DependsOn after before) (Operation r before) (Operation r after))
@@ -15,8 +19,24 @@
 ; Contracting producer->consumer must not create a cycle or cross a barrier.
 (sort OperationSet (Set OperationKey))
 (function Intermediates (OperationKey OperationKey) OperationSet :merge (set-union old new))
-(rule ((DependsOn consumer producer))
+(rule ((Operation region producer) (Operation region consumer))
       ((set (Intermediates producer consumer) (set-empty))) :ruleset dependencies)
 (rule ((DependsOn consumer producer) (Precedes producer middle) (Precedes middle consumer)
        (!= middle producer) (!= middle consumer))
       ((set (Intermediates producer consumer) (set-of middle))) :ruleset dependencies)
+
+; Complete pair summaries permit closed-world legality checks after saturation.
+(function Path (OperationKey OperationKey) OperationSet :merge (set-union old new))
+(function NonInputUse (OperationKey OperationKey) i64 :merge (max old new))
+(rule ((Operation r a) (Operation r b))
+      ((set (Path a b) (set-empty)) (set (NonInputUse a b) 0)) :ruleset dependencies)
+(rule ((Precedes a b)) ((set (Path a b) (set-of b))) :ruleset dependencies)
+(rule ((Use a (OperationUse b role)) (!= role (Input)))
+      ((set (NonInputUse a b) 1)) :ruleset dependencies)
+
+; Indexed replacement moves evaluation to every use, so every route must be clear.
+(function UseIntermediates (OperationKey) OperationSet :merge (set-union old new))
+(rule ((Operation r op)) ((set (UseIntermediates op) (set-empty))) :ruleset dependencies)
+(rule ((Use producer (OperationUse consumer role))
+       (= middle (Intermediates producer consumer)))
+      ((set (UseIntermediates producer) middle)) :ruleset dependencies)

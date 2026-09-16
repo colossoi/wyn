@@ -49,17 +49,21 @@ impl Planner<'_> {
             }
             OperationKind::ReduceByIndex {
                 destination,
+                map,
                 body,
-                indices,
-                values,
+                inputs,
                 ..
             } => {
                 // The supplied destination already contains the initial bins.
                 // The neutral is an algebraic identity, not a request to clear it.
                 let dest = Value::Source(destination.value);
-                let n = length(std::slice::from_ref(&indices));
+                let n = length(&inputs);
                 let loop_ = self.start_loop(entry, Value::Int(0), n, vec![]);
-                let key = self.load(loop_.body, array_value(&indices), loop_.index.clone(), "key");
+                let args = self.read_inputs(loop_.body, &inputs, loop_.index.clone());
+                let values = self.invoke_body(loop_.body, &map, args, "item")?;
+                let [key, value] = values.as_slice() else {
+                    return Err(error("indexed mapping must return an index and a value"));
+                };
                 let update = self.block(owner, vec![]);
                 let next = self.block(owner, vec![]);
                 self.branch(
@@ -69,8 +73,7 @@ impl Planner<'_> {
                     next,
                 );
                 let old = self.load(update, dest.clone(), key.clone(), "old");
-                let value = self.load(update, array_value(&values), loop_.index.clone(), "incoming");
-                let result = self.invoke_body(update, &body, vec![old, value], "updated")?;
+                let result = self.invoke_body(update, &body, vec![old, value.clone()], "updated")?;
                 let [value] = result.as_slice() else {
                     return Err(error("indexed reducer must return one logical value"));
                 };
@@ -78,7 +81,7 @@ impl Planner<'_> {
                     update,
                     Instruction::Store {
                         buffer: dest.clone(),
-                        index: key,
+                        index: key.clone(),
                         value: value.clone(),
                     },
                 );

@@ -24,6 +24,32 @@ fn fused_map_reduce_reaches_the_existing_wgsl_backend() {
 }
 
 #[test]
+fn fused_indexed_updates_reach_wgsl() {
+    compile(
+        "entry main(dest: *[3]i32, xs: [5]i32) [3]i32 =
+        reduce_by_index(dest, |a:i32,b:i32|a+b, 0,
+            map(|x:i32|x-1,xs), map(|x:i32|x*3,xs))",
+    );
+}
+
+#[test]
+fn filtered_reduction_and_shared_count_reach_wgsl() {
+    compile(
+        "entry main(xs: []i32) (i32,i32) =
+        let kept=filter(|x:i32|x>0,xs) in
+        (length(kept),reduce(|a:i32,b:i32|a+b,0,kept))",
+    );
+}
+
+#[test]
+fn sliced_fused_map_reaches_wgsl() {
+    compile(
+        "entry main(xs: []i32) [4]i32 =
+        let a=map(|x:i32|x+1,xs) in map(|x:i32|x*2,a[2..6])",
+    );
+}
+
+#[test]
 fn scalar_loop_reaches_the_existing_wgsl_backend() {
     compile("entry main(n: i32) i32 = loop acc = 0 for i < n do acc + i");
 }

@@ -80,9 +80,9 @@ impl Planner<'_> {
             OperationKind::Screma { form, inputs, .. } => {
                 self.serial_screma(block, allocate, storage, &form, &inputs)
             }
-            OperationKind::Filter { body, input, .. } => {
-                self.serial_filter(block, allocate, storage, &body, &input)
-            }
+            OperationKind::Filter {
+                map, body, inputs, ..
+            } => self.serial_filter(block, allocate, storage, &map, &body, &inputs),
             OperationKind::Scatter { .. }
             | OperationKind::BucketScatter { .. }
             | OperationKind::ReduceByIndex { .. } => self.serial_indexed(op, block, allocate, storage),
@@ -336,8 +336,13 @@ impl Planner<'_> {
                     body_captures(&reduction.operator, &mut result);
                 }
             }
-            OperationKind::Filter { input, body, .. } => {
-                array_captures(input, &mut result);
+            OperationKind::Filter {
+                inputs, map, body, ..
+            } => {
+                for input in inputs {
+                    array_captures(input, &mut result);
+                }
+                body_captures(map, &mut result);
                 body_captures(body, &mut result);
             }
             OperationKind::Scatter {
@@ -359,15 +364,17 @@ impl Planner<'_> {
             }
             OperationKind::ReduceByIndex {
                 destination,
+                map,
                 body,
                 neutral,
-                indices,
-                values,
+                inputs,
             } => {
                 result.extend([destination.value, *neutral]);
+                body_captures(map, &mut result);
                 body_captures(body, &mut result);
-                array_captures(indices, &mut result);
-                array_captures(values, &mut result);
+                for array in inputs {
+                    array_captures(array, &mut result);
+                }
             }
             _ => {}
         }

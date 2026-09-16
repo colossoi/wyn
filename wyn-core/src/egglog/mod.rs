@@ -22,6 +22,7 @@ mod emit;
 mod expressions;
 mod extract;
 pub mod from_tlc;
+mod fusion;
 mod optimize;
 mod schedule;
 mod snapshot;
@@ -43,6 +44,8 @@ pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("sc
 
 #[cfg(test)]
 mod from_tlc_tests;
+#[cfg(test)]
+mod fusion_parity_tests;
 #[cfg(test)]
 mod fusion_tests;
 #[cfg(test)]

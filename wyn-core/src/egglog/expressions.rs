@@ -374,8 +374,11 @@ impl Emitter<'_> {
                     self.neutrals(op, &role, &reduction.neutral)?;
                 }
             }
-            OperationKind::Filter { body, input, .. } => {
-                self.inputs(op, std::slice::from_ref(input))?;
+            OperationKind::Filter {
+                map, body, inputs, ..
+            } => {
+                self.inputs(op, inputs)?;
+                self.operation_body(op, "(Pre)", map)?;
                 self.operation_body(op, "(Callback)", body)?;
             }
             OperationKind::Scatter {
@@ -395,13 +398,14 @@ impl Emitter<'_> {
             }
             OperationKind::ReduceByIndex {
                 destination,
+                map,
                 body,
                 neutral,
-                indices,
-                values,
+                inputs,
             } => {
                 self.operand("Destination", op, destination.value)?;
-                self.inputs(op, &[indices.clone(), values.clone()])?;
+                self.inputs(op, inputs)?;
+                self.operation_body(op, "(Pre)", map)?;
                 self.operation_body(op, "(Callback)", body)?;
                 self.neutrals(op, "(Callback)", &[*neutral])?;
             }

@@ -306,10 +306,10 @@ fn final_roots_exclude_dead_functions_and_pure_array_work() {
 #[test]
 fn producer_buffers_are_shared_by_identity_with_consumer_dispatches() {
     let result =
-        compile("entry main(xs: []i32) []i32 = map(|x: i32| x * 2, scan(|a: i32, b: i32| a + b, 0, xs))");
+        compile("entry main(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, scan(|a: i32, b: i32| a + b, 0, xs))");
     let dispatches: Vec<_> = result.data.dispatches.values().collect();
-    assert_eq!(dispatches.len(), 4);
+    assert_eq!(dispatches.len(), 5);
     assert!(dispatches[2].writes.is_subset(&dispatches[3].reads));
     let output = run(&result.data, vec![Value::array(0..65)]);
-    assert_eq!(output[0].ints(), (0..65).map(|x| x * (x + 1)).collect::<Vec<_>>());
+    assert_eq!(output, [Value::Int(64 * 65 * 66 / 6)]);
 }

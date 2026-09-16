@@ -415,11 +415,15 @@ impl Converter {
                 pred,
                 input,
                 destination,
-            } => OperationKind::Filter {
-                body: self.soac_body(pred, scope)?,
-                input: self.array(input, scope)?,
-                ownership: *destination,
-            },
+            } => {
+                let body = self.soac_body(pred, scope)?;
+                OperationKind::Filter {
+                    map: SoacBody::Identity(super::fusion::signature(&body).0),
+                    body,
+                    inputs: vec![self.array(input, scope)?],
+                    ownership: *destination,
+                }
+            }
             SoacOp::Scatter { dest, lam, inputs } => OperationKind::Scatter {
                 destination: self.place(dest, scope)?,
                 body: self.soac_body(lam, scope)?,
@@ -449,13 +453,23 @@ impl Converter {
                 ne,
                 indices,
                 values,
-            } => OperationKind::ReduceByIndex {
-                destination: self.place(dest, scope)?,
-                body: self.soac_body(op, scope)?,
-                neutral: self.term(ne, scope)?,
-                indices: self.array(indices, scope)?,
-                values: self.array(values, scope)?,
-            },
+            } => {
+                let mut parameters = Vec::new();
+                for input in [indices, values] {
+                    let array_ty = types::canonical_storage_buffer_ty(&input.array_type());
+                    let element = types::array_elem(&array_ty).ok_or_else(|| {
+                        ConvertError::InvalidProgram("reduce-by-index input must be an array".into())
+                    })?;
+                    parameters.push(self.ty(element));
+                }
+                OperationKind::ReduceByIndex {
+                    destination: self.place(dest, scope)?,
+                    map: SoacBody::Identity(parameters),
+                    body: self.soac_body(op, scope)?,
+                    neutral: self.term(ne, scope)?,
+                    inputs: vec![self.array(indices, scope)?, self.array(values, scope)?],
+                }
+            }
         };
         let ty = self.ty(&term.ty);
         if matches!(&kind, OperationKind::Screma { .. }) {
@@ -530,6 +544,10 @@ impl Converter {
             ExprKind::Builtin(id) => {
                 let record = &self.data.builtins[*id];
                 let builtin = record.builtin;
+                // Slicing constructs a view; it does not read or write elements.
+                if builtin == builtins::catalog().known().slice {
+                    return true;
+                }
                 let definition = builtins::by_id(builtin);
                 let Some(overload) = definition.overloads().get(record.overload_idx) else {
                     return false;

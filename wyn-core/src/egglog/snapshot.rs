@@ -14,6 +14,7 @@ pub(super) enum Role {
     Capture,
     Neutral,
     Argument,
+    Length,
 }
 
 impl Role {
@@ -23,6 +24,7 @@ impl Role {
             Self::Capture => "(Capture)",
             Self::Neutral => "(Neutral)",
             Self::Argument => "(Argument)",
+            Self::Length => "(Length)",
         }
     }
 }
@@ -104,8 +106,13 @@ pub(super) fn analyze(data: &AssociatedData) -> Snapshot {
         }
         for &id in &members {
             match &data.operations[id].kind {
+                kind if super::fusion::length_source(data, kind).is_some() => {
+                    movable.insert(id);
+                    discardable.insert(id);
+                }
                 OperationKind::Index { array, .. }
-                    if types::is_copy(&data.types[data.expressions[*array].ty].ty) =>
+                    if types::is_copy(&data.types[data.expressions[*array].ty].ty)
+                        || fresh_array(data, *array, &movable) =>
                 {
                     movable.insert(id);
                     discardable.insert(id);
@@ -116,7 +123,9 @@ pub(super) fn analyze(data: &AssociatedData) -> Snapshot {
                         movable.insert(id);
                     }
                 }
-                OperationKind::Filter { body, ownership, .. } if safe_body(body, &safe_regions) => {
+                OperationKind::Filter {
+                    map, body, ownership, ..
+                } if safe_body(body, &safe_regions) && safe_body(map, &safe_regions) => {
                     discardable.insert(id);
                     if *ownership == types::SoacOwnership::Fresh {
                         movable.insert(id);
@@ -229,6 +238,22 @@ pub(super) fn analyze(data: &AssociatedData) -> Snapshot {
         movable,
         discardable,
         safe_regions,
+    }
+}
+
+// Fresh SOAC output storage is immutable until an ordered consumer writes it.
+// Its imported array type may still be abstract, so Copy alone is insufficient.
+fn fresh_array(data: &AssociatedData, value: super::ExprId, movable: &BTreeSet<OperationId>) -> bool {
+    match data.expressions[value].kind {
+        ExprKind::Project { tuple, .. } | ExprKind::Coerce(tuple) => fresh_array(data, tuple, movable),
+        ExprKind::OperationResult(op) => {
+            movable.contains(&op)
+                && matches!(
+                    data.operations[op].kind,
+                    OperationKind::Screma { .. } | OperationKind::Filter { .. }
+                )
+        }
+        _ => false,
     }
 }
 
@@ -402,7 +427,12 @@ impl Visitor<'_> {
         match kind {
             OperationKind::Call { function, args } => {
                 self.values(&mut out, Role::Argument, &[*function]);
-                self.values(&mut out, Role::Argument, args);
+                let role = if super::fusion::length_source(self.data, kind).is_some() {
+                    Role::Length
+                } else {
+                    Role::Argument
+                };
+                self.values(&mut out, role, args);
             }
             OperationKind::EvalGlobal(_) => {}
             OperationKind::If {
@@ -441,9 +471,12 @@ impl Visitor<'_> {
                     self.values(&mut out, Role::Neutral, &reduction.neutral);
                 }
             }
-            OperationKind::Filter { body, input, .. } => {
+            OperationKind::Filter {
+                map, body, inputs, ..
+            } => {
+                self.body(&mut out, map);
                 self.body(&mut out, body);
-                self.inputs(&mut out, std::slice::from_ref(input));
+                self.inputs(&mut out, inputs);
             }
             OperationKind::Scatter {
                 destination,
@@ -462,16 +495,16 @@ impl Visitor<'_> {
             }
             OperationKind::ReduceByIndex {
                 destination,
+                map,
                 body,
                 neutral,
-                indices,
-                values,
+                inputs,
             } => {
                 self.values(&mut out, Role::Argument, &[destination.value]);
                 self.values(&mut out, Role::Neutral, &[*neutral]);
+                self.body(&mut out, map);
                 self.body(&mut out, body);
-                self.inputs(&mut out, std::slice::from_ref(indices));
-                self.inputs(&mut out, std::slice::from_ref(values));
+                self.inputs(&mut out, inputs);
             }
         }
         out

@@ -9,12 +9,22 @@
 (relation IdentityPost (OperationKey))
 (relation Safe (OperationKey))
 (relation Movable (OperationKey))
+; Proven iteration-space equality and routable element streams. Scalar bodies
+; are inspected only to summarize whether collective inputs cross a scan barrier.
+(relation SameDomain (OperationKey OperationKey))
+(relation Stream (OperationKey OperationKey))
+(relation BarrierCompatible (OperationKey OperationKey))
+(relation ElementConsumer (OperationKey))
+(relation Filter (OperationKey))
+(relation MemoryCompatible (OperationKey OperationKey))
+(relation Maskable (OperationKey OperationKey))
+(relation IndexedDemands (OperationKey))
 ; Consumer input slot -> producer result slot. No scalar argument syntax.
 (relation InputFrom (OperationKey i64 OperationKey i64))
 (relation DependsOn (OperationKey OperationKey))
 (relation EffectBefore (OperationKey OperationKey))
 
 ; A streamed use must not hide a capture, neutral, or externally observed use.
-(datatype OperandRole (Input) (Capture) (Neutral) (Argument))
+(datatype OperandRole (Input) (Capture) (Neutral) (Argument) (Length))
 (datatype UseSite (OperationUse OperationKey OperandRole) (ReturnUse))
 (relation Use (OperationKey UseSite))

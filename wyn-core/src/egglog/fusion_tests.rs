@@ -148,9 +148,7 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
     let result = optimized(input);
     assert_eq!(entry_ops(&result.data).len(), 1);
     let fused = form(&result.data, entry_ops(&result.data)[0]);
-    let SoacBody::Apply { results, .. } = &fused.pre else {
-        panic!("identity consumer pre disappears")
-    };
+    let results = super::fusion::signature(&fused.pre).1;
     assert_eq!(results.len(), 1);
     assert!(matches!(
         &result.data.types[results[0]].ty,
@@ -266,20 +264,28 @@ fn separate_bodies_and_loop_parameters_do_not_alias() {
 }
 
 #[test]
-fn returned_producer_and_capture_dependencies_prevent_absorption() {
-    for source in [
-        "entry shared(xs: [4]i32) ([4]i32,[4]i32) =
-          let a = map(|x: i32| x + 1, xs) in (a, map(|x: i32| x * 2, a))",
-        "entry captured(xs: [4]i32) [4]i32 =
+fn capture_dependencies_prevent_absorption() {
+    for (source, expected) in [
+        (
+            "entry captured(xs: [4]i32) [4]i32 =
           let a = map(|x: i32| x + 1, xs) in map(|x: i32| x + a[0], a)",
-        "entry cycle(xs: [4]i32) [4]i32 =
+            2,
+        ),
+        (
+            "entry cycle(xs: [4]i32) [4]i32 =
           let a = map(|x: i32| x + 1, xs) in
           let b = map(|x: i32| x * 2, a) in map(|x: i32| x + b[0], a)",
+            2,
+        ),
     ] {
         let input = imported(source);
         let before = entry_ops(&input.data).to_vec();
         let result = optimized(input);
-        assert_eq!(entry_ops(&result.data), before, "{source}");
+        // A and B may combine while retaining A, but the final consumer must
+        // still run separately because its capture needs the completed array.
+        let after = entry_ops(&result.data);
+        assert_eq!(after.len(), expected, "{source}");
+        assert_eq!(after.last(), before.last(), "{source}");
     }
 }
 

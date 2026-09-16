@@ -1,18 +1,66 @@
-; Egglog selects legal contractions. Bodies and input expressions remain opaque:
-; applying a decision composes the two sidecar bodies and preserves the consumer.
+; Decide graph contractions, leaving scalar bodies and argument wiring opaque.
+; Candidates contain: transformation family, region, producer, consumer.
+;
+; Differences from EGIR:
+; - Bucket-scatter fusion supports rank 1 only.
+; - Domain equality uses input identity or equal fixed extents; horizontal
+;   fusion permits distinct inputs with equal fixed extents (EGIR requires sharing).
+; - Memory checks do not yet provide EGIR's full resource accounting.
+; - Cross-scan projection requires pure bodies without operation nodes.
+; Indexed replacement currently requires all demands in the producer's region.
 (ruleset fusion)
-(relation FusionCandidate (RegionKey OperationKey OperationKey))
+(relation FusionCandidate (i64 RegionKey OperationKey OperationKey))
 
+; Indexed demands: map(f, xs)[i] -> f(xs[i]). Only when all uses are a few
+; direct indices with no intervening barrier. Both candidate IDs name the map.
+(rule ((Operation region producer) (Movable producer) (IndexedDemands producer)
+       (= 0 (set-length (UseIntermediates producer))))
+      ((FusionCandidate 4 region producer producer)) :ruleset fusion)
+
+; Vertical fusion: stream producer elements into the consumer, preserving scan
+; barriers and ordering. Retain producer outputs needed by other observers.
 (rule (
     (Operation region producer) (Operation region consumer)
-    ; Current vertical case: a map with one result feeds a single-input Screma.
-    (Screma producer producer-inputs 1 0 0) (IdentityPost producer)
-    (Screma consumer 1 1 scans reductions)
-    (InputFrom consumer 0 producer 0)
-    (!= producer consumer)
+    (Screma producer pi po ps pr) (Screma consumer ci co cs cr)
+    (Stream producer consumer) (BarrierCompatible producer consumer)
     (Movable producer) (Safe consumer)
-    ; Complete uses include captures, neutrals, returns, and cross-scope observers.
+    (= 0 (NonInputUse producer consumer))
+    (= 0 (set-length (Intermediates producer consumer))))
+  ((FusionCandidate 0 region producer consumer)) :ruleset fusion)
+
+; Horizontal fusion: combine independent Scremas over the same domain.
+; Paths in either direction would impose an ordering that prevents fusion.
+(rule (
+    (Operation region left) (Operation region right) (!= left right)
+    (Screma left li lo ls lr) (Screma right ri ro rs rr)
+    (SameDomain left right) (Movable left) (Movable right)
+    (= 0 (set-length (Path left right)))
+    (= 0 (set-length (Path right left))))
+  ((FusionCandidate 1 region left right)) :ruleset fusion)
+
+; Map into filter/scatter/reduce-by-index: prepend the map to the element work.
+; Require exclusive input use, compatible storage, and no intervening barrier.
+(rule (
+    (Operation region producer) (Operation region consumer)
+    (Screma producer pi po 0 0) (ElementConsumer consumer)
+    (Stream producer consumer) (MemoryCompatible producer consumer)
+    (Movable producer)
     (= (Uses producer) (set-of (OperationUse consumer (Input))))
     (= 0 (set-length (Intermediates producer consumer))))
-  ((FusionCandidate region producer consumer))
-  :ruleset fusion)
+  ((FusionCandidate 2 region producer consumer)) :ruleset fusion)
+
+; Filter into reduction: rejected elements contribute the reduction's neutral.
+; Length observers share a count result; no observer may need the array itself.
+(rule (
+    (Operation region producer) (Operation region consumer)
+    (Filter producer) (Movable producer) (Safe consumer)
+    (Maskable producer consumer)
+    (= (Uses producer) (set-union (LengthUses producer) (set-of (OperationUse consumer (Input)))))
+    (= 0 (set-length (Intermediates producer consumer))))
+  ((FusionCandidate 3 region producer consumer)) :ruleset fusion)
+
+; Length-only filter: count accepted elements without building the array.
+; All observers must be lengths, which share the single count reduction.
+(rule ((Operation region producer) (Filter producer) (Movable producer)
+       (Maskable producer producer) (= (Uses producer) (LengthUses producer)))
+      ((FusionCandidate 5 region producer producer)) :ruleset fusion)

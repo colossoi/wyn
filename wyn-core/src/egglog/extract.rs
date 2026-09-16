@@ -1,8 +1,7 @@
 //! Apply one fusion decision to the complete program retained in the sidecar.
 
-use super::data::{AssociatedData, OperationId, OperationKind, RegionId, SoacBody};
+use super::data::{AssociatedData, OperationId, RegionId};
 use super::optimize::OptimizeError;
-use crate::types::SoacOwnership;
 use egglog_engine::{ast::Literal, EGraph, Term, TermDag};
 
 /// Choose deterministically, then refresh the summary before the next decision.
@@ -11,57 +10,39 @@ pub(super) fn fuse_one(graph: &EGraph, data: &mut AssociatedData) -> Result<bool
     let (rows, _, dag) = graph.function_to_dag("FusionCandidate", usize::MAX, false)?;
     let mut choices = Vec::new();
     for row in rows {
-        let args = app(&dag, row, "FusionCandidate", 3)?;
-        let region: RegionId = key(&dag, args[0], "RegionId")?;
-        let producer: OperationId = key(&dag, args[1], "OperationId")?;
-        let consumer: OperationId = key(&dag, args[2], "OperationId")?;
-        choices.push((region, producer, consumer));
+        let args = app(&dag, row, "FusionCandidate", 4)?;
+        let Term::Lit(Literal::Int(family)) = dag.get(args[0]) else {
+            return Err(invalid("fusion family"));
+        };
+        let region: RegionId = key(&dag, args[1], "RegionId")?;
+        let producer: OperationId = key(&dag, args[2], "OperationId")?;
+        let consumer: OperationId = key(&dag, args[3], "OperationId")?;
+        choices.push((*family, region, producer, consumer));
     }
     choices.sort();
-    let Some((region, producer, consumer)) = choices.into_iter().next() else {
+    let Some((family, region, producer, consumer)) = choices.into_iter().next() else {
         return Ok(false);
     };
     let Some(scope) = data.regions.get(region) else {
         return Err(invalid("fusion region has no sidecar record"));
     };
-    if producer == consumer || !scope.members.contains(&producer) || !scope.members.contains(&consumer) {
+    if (producer == consumer && family != 4 && family != 5)
+        || !scope.members.contains(&producer)
+        || !scope.members.contains(&consumer)
+    {
         return Err(invalid("fusion candidate does not belong to the selected graph"));
     }
-    let Some(source) = data.operations.get(producer) else {
-        return Err(invalid("fusion producer has no sidecar record"));
-    };
-    let OperationKind::Screma {
-        form: producer_form,
-        inputs: producer_inputs,
-        ..
-    } = &source.kind
-    else {
-        return Err(invalid("fusion producer is not a Screma"));
-    };
-    let first = producer_form.pre.clone();
-    let inputs = producer_inputs.clone();
-    let Some(record) = data.operations.get_mut(consumer) else {
-        return Err(invalid("fusion consumer has no sidecar record"));
-    };
-    let OperationKind::Screma {
-        form,
-        inputs: consumer_inputs,
-        ownership,
-    } = &mut record.kind
-    else {
-        return Err(invalid("fusion consumer is not a Screma"));
-    };
-    form.pre = match (first, form.pre.clone()) {
-        (SoacBody::Identity(_), then) => then,
-        (first, SoacBody::Identity(_)) => first,
-        (first, then) => SoacBody::Compose {
-            first: Box::new(first),
-            then: Box::new(then),
-        },
-    };
-    *consumer_inputs = inputs;
-    ownership.fill(SoacOwnership::Fresh);
-    // Keep old records for provenance. Reachability omits the absorbed producer.
+    let summary = super::snapshot::analyze(data);
+    let retained = summary.observed.contains(&producer)
+        || summary.uses.iter().any(|&(p, c, _)| p == producer && c != consumer);
+    match family {
+        0|1=>super::fusion::scremas(data,producer,consumer,family==1,retained),
+        2=>super::fusion::envelope(data,producer,consumer),
+        3|5=>super::fusion::masked(data,producer,consumer),
+        4=>super::fusion::indexed(data,producer),
+        _=>None,
+    }
+        .ok_or_else(||invalid(&format!("fusion body composition disagrees with its legality facts: family {family}, {producer:?} -> {consumer:?}")))?;
     Ok(true)
 }
 

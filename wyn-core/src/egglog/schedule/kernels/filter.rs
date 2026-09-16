@@ -1,7 +1,7 @@
 use super::super::{length, OperationId, OperationKind};
 use super::{
-    array_value, chunks, error, groups, singleton, Array, BlockId, BufferId, OptimizeError, Planner,
-    SoacBody, Storage, Value, WIDTH,
+    chunks, error, groups, singleton, Array, BlockId, BufferId, OptimizeError, Planner, SoacBody, Storage,
+    Value, WIDTH,
 };
 use crate::{ast::TypeName, types};
 
@@ -11,11 +11,14 @@ impl Planner<'_> {
         op: OperationId,
         host: BlockId,
     ) -> Result<(Value, Vec<BufferId>), OptimizeError> {
-        let OperationKind::Filter { body, input, .. } = self.data.operations[op].kind.clone() else {
+        let OperationKind::Filter {
+            map, body, inputs, ..
+        } = self.data.operations[op].kind.clone()
+        else {
             return Err(error("invalid compaction recipe"));
         };
         let captures = self.captures(op);
-        let n = length(std::slice::from_ref(&input));
+        let n = length(&inputs);
         let chunks = chunks(n.clone());
         let element = self.filter_element(&body)?;
         let output = self.allocate(host, "output", n.clone(), element, Storage::Device);
@@ -28,8 +31,9 @@ impl Planner<'_> {
         let flags_kernel = self.kernel("flags", &captures, WIDTH);
         let invocation = self.invocations(flags_kernel, n.clone());
         let (active, i) = (invocation.body, invocation.index.clone());
-        let element = self.load(active, array_value(&input), i.clone(), "element");
-        let result = self.invoke_body(active, &body, vec![element], "predicate")?;
+        let elements = self.read_inputs(active, &inputs, i.clone());
+        let elements = self.invoke_body(active, &map, elements, "map")?;
+        let result = self.invoke_body(active, &body, elements, "predicate")?;
         let [predicate] = result.as_slice() else {
             return Err(error("filter predicate must return one value"));
         };
@@ -113,8 +117,12 @@ impl Planner<'_> {
             Value::op("div", [i.clone(), Value::Int(WIDTH)]),
             "offset",
         );
-        let value = self.load(selected, array_value(&input), i, "element");
-        self.store(selected, output, Value::op("add", [offset, local]), value);
+        let elements = self.read_inputs(selected, &inputs, i);
+        let values = self.invoke_body(selected, &map, elements, "map")?;
+        let [value] = values.as_slice() else {
+            return Err(error("filter map result arity"));
+        };
+        self.store(selected, output, Value::op("add", [offset, local]), value.clone());
         self.jump(selected, done, vec![]);
         self.finish_loop(&invocation, done, vec![]);
         self.dispatch(
@@ -137,15 +145,21 @@ impl Planner<'_> {
         entry: BlockId,
         allocate: BlockId,
         storage: Storage,
+        map: &SoacBody,
         body: &SoacBody,
-        input: &Array,
+        inputs: &[Array],
     ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
-        let n = length(std::slice::from_ref(input));
+        let n = length(inputs);
         let element = self.filter_element(body)?;
         let output = self.allocate(allocate, "output", n.clone(), element, storage);
         let count = self.allocate(allocate, "length", Value::Int(1), uint(), storage);
         let loop_ = self.start_loop(entry, Value::Int(0), n, vec![Value::Int(0)]);
-        let value = self.load(loop_.body, array_value(input), loop_.index.clone(), "element");
+        let elements = self.read_inputs(loop_.body, inputs, loop_.index.clone());
+        let mapped = self.invoke_body(loop_.body, map, elements, "map")?;
+        let [value] = mapped.as_slice() else {
+            return Err(error("filter map result arity"));
+        };
+        let value = value.clone();
         let values = self.invoke_body(loop_.body, body, vec![value.clone()], "predicate")?;
         let [predicate] = values.as_slice() else {
             return Err(error("filter predicate must return one value"));

@@ -332,7 +332,7 @@ impl Fixture {
     }
 
     fn array(&self) -> ArrayExpr {
-        ArrayExpr::Var(VarRef::Symbol(self.x), i32_ty())
+        ArrayExpr::Var(VarRef::Symbol(self.x), types::sized_array(4, i32_ty()))
     }
 }
 

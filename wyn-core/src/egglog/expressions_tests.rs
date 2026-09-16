@@ -89,7 +89,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         .parse_and_run_program(
             None,
             "
-        (check (OperationBody op (Pre) (Compose a b)) (BodyRegion a ra) (BodyRegion b rb) (!= ra rb))
+        (check (OperationBody op (Pre) body) (BodyRegion body ra) (BodyRegion body rb) (!= ra rb))
         (check (EntryRegion id r) (RegionParameter r 1 bias t) (OperationParameter op bias))
     ",
         )

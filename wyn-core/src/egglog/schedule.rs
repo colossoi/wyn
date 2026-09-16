@@ -243,6 +243,24 @@ impl Planner<'_> {
                 body,
             } => self.source_loop(op, block, init, header, &kind, body, device),
             OperationKind::Call { function, mut args } => {
+                if let ExprKind::Lambda(region) = self.data.expressions[function].kind {
+                    let target = self.region(region, device)?;
+                    let names: Vec<_> = (0..self.data.regions[region].results.len())
+                        .map(|i| format!("call{}_r{i}", op.as_u32()))
+                        .collect();
+                    self.emit(
+                        block,
+                        Instruction::Call {
+                            function: target,
+                            arguments: args.into_iter().map(Value::Source).collect(),
+                            results: names.clone(),
+                        },
+                    );
+                    let values: Vec<_> = names.into_iter().map(Value::Local).collect();
+                    let value = if values.len() == 1 { values[0].clone() } else { Value::Tuple(values) };
+                    self.emit(block, Instruction::BindResult(op, value));
+                    return Ok(block);
+                }
                 let code = match &self.data.expressions[function].kind {
                     ExprKind::Global(symbol) => Some(*symbol),
                     ExprKind::Closure { code, captures, .. } => {
@@ -476,10 +494,11 @@ fn recipes(
                 form.reductions.len(),
                 summary.discardable.contains(&op)
             )),
-            OperationKind::Filter { body, .. } => facts.push_str(&format!(
+            OperationKind::Filter { map, body, .. } => facts.push_str(&format!(
                 "(Filter {} {})\n",
                 op.egglog(),
                 snapshot::safe_body(body, &summary.safe_regions)
+                    && snapshot::safe_body(map, &summary.safe_regions)
             )),
             OperationKind::Scatter { .. }
             | OperationKind::BucketScatter { .. }
