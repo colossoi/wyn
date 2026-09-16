@@ -6,7 +6,7 @@ use super::data::{
     Array, AssociatedData, ExprId, ExprKind, LoopKind, OperationId, OperationKind, RegionId, SoacBody,
     SymbolId,
 };
-use super::{from_tlc::Converted, optimize::OptimizeError, snapshot};
+use super::{from_tlc::Converted, optimize::OptimizeError, snapshot, timing};
 use egglog_engine::{
     ast::{Command, Parser},
     EGraph,
@@ -18,26 +18,47 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// interned sidecar identities. This pass does not rewrite or place expressions.
 /// Run after `optimize` and before `schedule`; repeated insertion is an error.
 pub fn insert_expressions(mut converted: Converted) -> Result<Converted, OptimizeError> {
+    let _timing = timing::span("insert expressions");
     if converted.expression_program.is_some() || !converted.data.blocks.is_empty() {
         return Err(error("expression insertion must run once, before scheduling"));
     }
-    let summary = snapshot::analyze(&converted.data);
-    summary.schedules(&converted.data)?;
+    let (commands, _) = program(&converted.data, &[])?;
+    let _load = timing::span("load and run expression graph");
+    let mut graph = EGraph::default();
+    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
+    graph.run_program(commands.clone())?;
+    converted.program.extend(commands.iter().cloned());
+    converted.expression_program = Some(commands);
+    Ok(converted)
+}
+
+pub(super) fn program(
+    data: &AssociatedData,
+    extra: &[ExprId],
+) -> Result<(Vec<Command>, BTreeSet<ExprId>), OptimizeError> {
+    let _timing = timing::span("export expressions");
+    let summary = timing::time("analyze dependencies", || snapshot::analyze(data));
+    timing::time("validate dependency order", || summary.schedules(data))?;
+    let emit = timing::span("emit facts");
     let mut emitter = Emitter {
-        data: &converted.data,
+        data,
         live: &summary.live,
-        symbols: converted.data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
+        symbols: data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
         output: include_str!("expressions.egg").into(),
+        prefix: "$expr".into(),
         expressions: BTreeSet::new(),
         operations: BTreeSet::new(),
         declared: BTreeSet::new(),
         queued: BTreeSet::new(),
         pending: VecDeque::new(),
     };
-    for (&id, entry) in &converted.data.entries {
-        let region = converted.data.definitions[entry.definition].body;
+    for (&id, entry) in &data.entries {
+        let region = data.definitions[entry.definition].body;
         emitter.queue(region);
         emitter.fact(format!("(EntryRegion {} {})", id.as_u32(), region.egglog()));
+    }
+    for &value in extra {
+        emitter.expression(value)?;
     }
     while let Some(region) = emitter.pending.pop_front() {
         emitter.region(region)?;
@@ -48,15 +69,39 @@ pub fn insert_expressions(mut converted: Converted) -> Result<Converted, Optimiz
         }
     }
     emitter.fact("(run-schedule (saturate (run expressions)))".into());
-    let commands = parse(&emitter.output)?;
-    // Validate the independent layer with only the shared identity declarations.
-    // No fusion rule or relation is required to interpret it.
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
-    graph.run_program(commands.clone())?;
-    converted.program.extend(commands.iter().cloned());
-    converted.expression_program = Some(commands);
-    Ok(converted)
+    drop(emit);
+    Ok((
+        timing::time("parse facts", || parse(&emitter.output))?,
+        emitter.expressions,
+    ))
+}
+
+/// Add terms to an existing graph without redeclaring its schema or globals.
+pub(super) fn additional(
+    data: &AssociatedData,
+    extra: &[ExprId],
+    prefix: &str,
+) -> Result<Vec<Command>, OptimizeError> {
+    let summary = snapshot::analyze(data);
+    let mut emitter = Emitter {
+        data,
+        live: &summary.live,
+        symbols: data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
+        output: String::new(),
+        prefix: prefix.into(),
+        expressions: BTreeSet::new(),
+        operations: BTreeSet::new(),
+        declared: BTreeSet::new(),
+        queued: BTreeSet::new(),
+        pending: VecDeque::new(),
+    };
+    for &id in extra {
+        emitter.expression(id)?;
+    }
+    while let Some(region) = emitter.pending.pop_front() {
+        emitter.region(region)?;
+    }
+    parse(&emitter.output)
 }
 
 pub(super) fn parse(source: &str) -> Result<Vec<Command>, OptimizeError> {
@@ -74,6 +119,7 @@ struct Emitter<'a> {
     live: &'a BTreeSet<OperationId>,
     symbols: BTreeMap<SymbolId, RegionId>,
     output: String,
+    prefix: String,
     expressions: BTreeSet<ExprId>,
     operations: BTreeSet<OperationId>,
     declared: BTreeSet<RegionId>,
@@ -144,7 +190,7 @@ impl Emitter<'_> {
         Ok(vector(values))
     }
     fn expression(&mut self, id: ExprId) -> Result<String, OptimizeError> {
-        let name = format!("$expr-{}", id.as_u32());
+        let name = format!("{}-{}", self.prefix, id.as_u32());
         if !self.expressions.insert(id) {
             return Ok(name);
         }

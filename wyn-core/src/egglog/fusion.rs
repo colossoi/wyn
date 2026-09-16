@@ -9,7 +9,7 @@ mod envelope;
 mod filter;
 mod indexed;
 mod project;
-mod rewrite;
+use super::rewrite;
 mod slices;
 pub(super) use envelope::{envelope, memory_compatible};
 pub(super) use filter::{length_source, masked};

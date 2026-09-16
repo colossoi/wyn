@@ -4,6 +4,8 @@
 //! returns an egglog fusion graph together with [`AssociatedData`]. [`optimize`]
 //! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
 //! separate typed expression DAG with region uses and dependency facts.
+//! [`optimize_expressions`] uses equality saturation for scalar algebra and
+//! records common-branch and loop-invariant placements, including SOAC captures.
 //! [`schedule`] then selects parallel GPU recipes and builds functions, blocks,
 //! buffers and dispatches, retaining the expression layer. Generated scalar
 //! instructions remain opaque sidecar bodies. [`to_ssa`] hands those bodies to
@@ -24,8 +26,11 @@ mod extract;
 pub mod from_tlc;
 mod fusion;
 mod optimize;
+mod rewrite;
+mod scalar;
 mod schedule;
 mod snapshot;
+mod timing;
 mod to_ssa;
 
 pub use blocks::{
@@ -36,7 +41,9 @@ pub use data::*;
 pub use expressions::insert_expressions;
 pub use from_tlc::{convert_program, ConvertError, Converted};
 pub use optimize::{optimize, OptimizeError};
+pub use scalar::optimize_expressions;
 pub use schedule::schedule;
+pub use timing::with_timings;
 pub use to_ssa::to_ssa;
 
 /// Declarations included at the start of fusion fact programs (egglog 3.0).

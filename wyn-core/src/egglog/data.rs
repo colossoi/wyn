@@ -25,7 +25,7 @@ macro_rules! ids {
 ids! {
     ProgramId, SymbolId, TypeId, ExprId, OperationId, RegionId, ParameterId,
     OriginId, DefinitionId, EntryId, EntryParamId, InputBoundId, BuiltinId,
-    ExternId, BucketShapeId, BlockId, BodyId, BufferId, DispatchId, GridId,
+    ExternId, BucketShapeId, BlockId, BodyId, BufferId, DispatchId, GridId, PlacementId,
 }
 
 impl RegionId {
@@ -46,6 +46,7 @@ impl OperationId {
 /// used during conversion are temporary and do not escape into this sidecar.
 #[derive(Clone, Debug, Default)]
 pub struct AssociatedData {
+    pub placements: IdArena<PlacementId, PlacementData>,
     pub blocks: IdArena<BlockId, BlockData>,
     pub bodies: IdArena<BodyId, BodyData>,
     pub buffers: IdArena<BufferId, BufferData>,
@@ -66,6 +67,20 @@ pub struct AssociatedData {
     pub builtins: IdArena<BuiltinId, BuiltinData>,
     pub externs: IdArena<ExternId, ExternData>,
     pub bucket_shapes: IdArena<BucketShapeId, BucketShapeData>,
+}
+
+/// Evaluate once at this control site, each time the site is reached. This is
+/// deliberately separate from a globally interned expression's identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlacementData {
+    pub before: PlacementSite,
+    pub expression: ExprId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PlacementSite {
+    Operation(OperationId),
+    Expression(ExprId),
 }
 
 #[derive(Clone, Debug)]

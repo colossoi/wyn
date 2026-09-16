@@ -259,6 +259,13 @@ impl Body<'_, '_> {
                 then_value,
                 else_value,
             } => {
+                let saved = self.environment.expressions.clone();
+                for value in
+                    crate::egglog::scalar::placements(data, crate::egglog::PlacementSite::Expression(id))
+                {
+                    let computed = self.expression(value)?;
+                    self.environment.expressions.insert(value, computed);
+                }
                 let c = self.expression(*condition)?;
                 let start = self.builder.current_block().ok_or_else(|| error("no current block"))?;
                 let yes = self.builder.create_block();
@@ -293,6 +300,7 @@ impl Body<'_, '_> {
                     })
                     .map_err(builder_error)?;
                 self.builder.switch_to_block_unchecked(end);
+                self.environment.expressions = saved;
                 Ok(Typed {
                     value: p.into(),
                     ty: a.ty,

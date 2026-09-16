@@ -1,0 +1,88 @@
+; Scalar equality saturation between fusion and scheduling. Integer laws use
+; wrapping arithmetic. Float reassociation, x*0 and x+0 are excluded because of
+; rounding, NaNs, infinities and signed zero. Extraction chooses by cost.
+(ruleset arithmetic)
+(ruleset algebra)
+(relation Evaluated (Expr Expr))
+(relation Zero (Expr))
+(relation One (Expr))
+(relation Bitcast (Expr))
+(relation IntegerType (TypeKey))
+
+; Vec primitives are not invertible patterns; expose their operands once.
+(relation Binary (Expr TypeKey Expr Expr Expr))
+(relation Unary (Expr TypeKey Expr Expr))
+(rule ((= e (Typed t (PureApp f xs))) (= (vec-length xs) 2)
+       (= a (vec-get xs 0)) (= b (vec-get xs 1)))
+      ((Binary e t f a b)) :ruleset arithmetic)
+(rule ((= e (Typed t (PureApp f xs))) (= (vec-length xs) 1) (= a (vec-get xs 0)))
+      ((Unary e t f a)) :ruleset arithmetic)
+
+; Literal evaluation uses declared widths and f32 rounding, including new terms
+; discovered by rewriting. Undefined conversions/divisions produce no fact.
+(rule ((Evaluated e value)) ((union e value)) :ruleset arithmetic)
+(rule ((= e (Typed t (Int "0")))) ((Zero e)) :ruleset arithmetic)
+(rule ((= e (Typed t (Int "1")))) ((One e)) :ruleset arithmetic)
+(rule ((= e (Typed t (FloatBits 1065353216)))) ((One e)) :ruleset arithmetic)
+
+; Integer zero identities preserve the result type.
+(rule ((Binary e t (Typed ft (BinOp "+")) z x) (IntegerType t) (Zero z)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "+")) x z) (IntegerType t) (Zero z)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "-")) x z) (IntegerType t) (Zero z)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "-")) x x) (IntegerType t))
+      ((union e (Typed t (Int "0")))) :ruleset arithmetic)
+
+; Unit identities also handle vector/scalar applications without changing type.
+(rule ((Binary e t (Typed ft (BinOp "*")) one x) (One one)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "*")) x one) (One one)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "/")) x one) (One one)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+
+; A scalar zero cannot replace an entire vector result.
+(rule ((Binary e t (Typed ft (BinOp "*")) z x) (IntegerType t) (Zero z)
+       (= z (Typed t node))) ((union e z)) :ruleset arithmetic)
+(rule ((Binary e t (Typed ft (BinOp "*")) x z) (IntegerType t) (Zero z)
+       (= z (Typed t node))) ((union e z)) :ruleset arithmetic)
+
+; Both supported unary operators are involutions: -(-x), !(!x).
+(rule ((Unary e t (Typed ft (UnOp op)) inner)
+       (Unary inner it (Typed ift (UnOp op)) x) (= x (Typed t node)))
+      ((union e x)) :ruleset arithmetic)
+
+; Known selections and projections have no runtime work.
+(rewrite (Typed t (Select (Typed ct (Bool true)) yes no)) yes :ruleset arithmetic)
+(rewrite (Typed t (Select (Typed ct (Bool false)) yes no)) no :ruleset arithmetic)
+(rewrite (Typed t (Select c x x)) x :ruleset arithmetic)
+(rewrite (Typed t (Project (Typed tt (Tuple xs)) i)) (vec-get xs i)
+  :when ((>= i 0) (< i (vec-length xs))) :ruleset arithmetic)
+(rewrite (Typed t (Project (Typed tt (Vector xs)) i)) (vec-get xs i)
+  :when ((>= i 0) (< i (vec-length xs))) :ruleset arithmetic)
+(rewrite (Typed t (Coerce (Typed t node))) (Typed t node) :ruleset arithmetic)
+
+; Remove identity bitcasts and inverse pairs, without changing numeric casts.
+(rule ((Unary e t f x) (Bitcast f) (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+(rule ((Unary e t f inner) (Unary inner it g x) (Bitcast f) (Bitcast g)
+       (= x (Typed t node))) ((union e x)) :ruleset arithmetic)
+
+; Expanding alternatives have a separate budget from constant propagation.
+; Commutativity and associativity expose shared integer terms and constants.
+(rule ((Binary e t f a b) (IntegerType t) (= f (Typed ft (BinOp "+"))))
+      ((union e (Typed t (PureApp f (vec-of b a))))) :ruleset algebra)
+(rule ((Binary e t f a b) (IntegerType t) (= f (Typed ft (BinOp "*"))))
+      ((union e (Typed t (PureApp f (vec-of b a))))) :ruleset algebra)
+(rule ((Binary e t f ab c) (Binary ab t f a b) (IntegerType t)
+       (= f (Typed ft (BinOp "+"))))
+      ((union e (Typed t (PureApp f (vec-of a (Typed t (PureApp f (vec-of b c)))))))) :ruleset algebra)
+(rule ((Binary e t f ab c) (Binary ab t f a b) (IntegerType t)
+       (= f (Typed ft (BinOp "*"))))
+      ((union e (Typed t (PureApp f (vec-of a (Typed t (PureApp f (vec-of b c)))))))) :ruleset algebra)
+
+; Retain both forms; extraction chooses factoring when it costs less.
+(rule ((Binary e t add ab ac) (Binary ab t mul a b) (Binary ac t mul a c)
+       (IntegerType t) (= add (Typed aft (BinOp "+"))) (= mul (Typed mft (BinOp "*"))))
+      ((union e (Typed t (PureApp mul (vec-of a (Typed t (PureApp add (vec-of b c)))))))) :ruleset algebra)

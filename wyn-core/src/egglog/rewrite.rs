@@ -1,4 +1,6 @@
-use super::*;
+//! Rebuild interned expressions when changing their operands or bindings.
+use super::{data::*, fusion::expr};
+use std::collections::BTreeMap;
 
 pub(super) fn all(data: &mut AssociatedData, replacements: &BTreeMap<ExprId, ExprId>) {
     let mut memo = replacements.clone();

@@ -50,7 +50,7 @@ fn invalid(message: &str) -> OptimizeError {
     OptimizeError::Extraction(message.into())
 }
 
-fn app<'a>(
+pub(super) fn app<'a>(
     dag: &'a TermDag,
     node: usize,
     expected: &str,
@@ -64,7 +64,7 @@ fn app<'a>(
     }
 }
 
-fn key<Id: From<u32>>(dag: &TermDag, node: usize, name: &str) -> Result<Id, OptimizeError> {
+pub(super) fn key<Id: From<u32>>(dag: &TermDag, node: usize, name: &str) -> Result<Id, OptimizeError> {
     let args = app(dag, node, name, 1)?;
     let Term::Lit(Literal::Int(value)) = dag.get(args[0]) else {
         return Err(invalid("expected an integer sidecar ID"));

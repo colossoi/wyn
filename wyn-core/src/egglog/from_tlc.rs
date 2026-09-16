@@ -52,6 +52,8 @@ pub enum ConvertError {
 /// Egglog receives only the fusion summary. This conversion neither mutates TLC
 /// nor runs optimization or extraction.
 pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result<Converted, ConvertError> {
+    let _timing = super::timing::span("from TLC");
+    let import = super::timing::span("import sidecar");
     let mut converter = Converter::default();
     converter.data.programs.alloc(ProgramData {
         next_auto_storage_binding: program.global_context.auto_storage_binding_ids.peek_id(),
@@ -131,7 +133,9 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
     converter.data.types = converter.types.into_arena();
     converter.data.expressions = converter.expressions.into_arena();
     converter.data.origins = converter.origins.into_arena();
+    drop(import);
     let output = emit::program(&converter.data);
+    let _parse = super::timing::span("parse fusion facts");
     let program = egglog_engine::ast::Parser::default()
         .get_program_from_string(Some("wyn-from-tlc.egg".into()), &output)
         .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;

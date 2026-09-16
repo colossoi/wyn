@@ -145,6 +145,7 @@ impl Machine<'_> {
                 frame.parameters.insert(id, self.value(&value, frame));
             }
             Instruction::BindExpression(id, value) => {
+                frame.expressions.remove(&id);
                 frame.expressions.insert(id, self.value(&value, frame));
             }
             Instruction::BindResult(id, value) => {

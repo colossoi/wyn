@@ -1,10 +1,17 @@
-use crate::egglog::{convert_program, insert_expressions, optimize, schedule, to_ssa};
+use crate::egglog::{
+    convert_program, insert_expressions, optimize, optimize_expressions, schedule, to_ssa,
+};
 use crate::{compile_thru_tlc, lower_ssa_to_wgsl, tlc};
 
 fn compile(source: &str) -> naga::Module {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    let program =
-        schedule(insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()).unwrap();
+    let program = schedule(
+        optimize_expressions(
+            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let ssa = to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap();
     let source = lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&source)
@@ -91,8 +98,13 @@ fn kernels_inside_host_control_are_emitted_without_a_host_descriptor() {
     let source =
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)";
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    let program =
-        schedule(insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()).unwrap();
+    let program = schedule(
+        optimize_expressions(
+            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let ssa = to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap();
     let lowered = crate::lower_ssa_to_wgsl_with_pipeline(ssa).unwrap();
     assert!(lowered.pipeline.pipelines.is_empty());
@@ -106,8 +118,13 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
     let tlc = tlc::infer_input_slice_bounds(
         compile_thru_tlc("entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)").unwrap(),
     );
-    let program =
-        schedule(insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()).unwrap();
+    let program = schedule(
+        optimize_expressions(
+            insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let ssa = to_ssa(&program.data, crate::CodegenTarget::Spirv).unwrap();
     let output = crate::lower_ssa_to_spirv(ssa).unwrap();
     let module = wspirv::dr::load_words(output.spirv).unwrap();

@@ -5,7 +5,8 @@ use super::{snapshot, SCHEMA};
 use std::collections::BTreeSet;
 
 pub(super) fn program(data: &AssociatedData) -> String {
-    let snapshot = snapshot::analyze(data);
+    let _timing = super::timing::span("emit fusion facts");
+    let snapshot = super::timing::time("analyze dependencies", || snapshot::analyze(data));
     let scopes: BTreeSet<_> = snapshot
         .live
         .iter()

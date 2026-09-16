@@ -732,29 +732,21 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         ..
     } = options;
     let ssa = if egglog {
-        let start = Instant::now();
-        let converted = time("from_tlc_egglog", verbose, || {
-            wyn_core::egglog::convert_program(&program)
-        })?;
-        let converted = time("optimize_egglog", verbose, || {
-            wyn_core::egglog::optimize(converted)
-        })?;
-        let converted = time("insert_expressions_egglog", verbose, || {
-            wyn_core::egglog::insert_expressions(converted)
-        })?;
-        let converted = time("schedule_egglog", verbose, || {
-            wyn_core::egglog::schedule(converted)
-        })?;
-        let ssa = time("egglog_to_ssa", verbose, || {
-            wyn_core::egglog::to_ssa(
+        let (converted, ssa) = wyn_core::egglog::with_timings(verbose, || -> Result<_, DriverError> {
+            let converted = wyn_core::egglog::convert_program(&program)?;
+            let converted = wyn_core::egglog::optimize(converted)?;
+            let converted = wyn_core::egglog::insert_expressions(converted)?;
+            let converted = wyn_core::egglog::optimize_expressions(converted)?;
+            let converted = wyn_core::egglog::schedule(converted)?;
+            let ssa = wyn_core::egglog::to_ssa(
                 &converted.data,
                 match target {
                     Target::Spirv => CodegenTarget::Spirv,
                     Target::Wgsl => CodegenTarget::Wgsl,
                 },
-            )
+            )?;
+            Ok((converted, ssa))
         })?;
-        eprintln!("egglog: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
         if let Some(path) = egg_out {
             auxiliary.push(TextArtifact {
                 path,

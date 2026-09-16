@@ -1,0 +1,75 @@
+; Placement analysis of the extracted scalar DAG. Binding identities stay opaque:
+; loop parameters vary per iteration; SOAC captures vary per invocation. Never
+; merge bindings to assert invariance. Availability comes from structured scopes
+; and execution order. TotalNode excludes reads, calls and partial arithmetic.
+(ruleset hoist)
+(sort Values (Set Expr))
+(relation LocalInputs (Expr Exprs))
+(relation Leaf (Expr))
+(relation TotalNode (Expr))
+(relation Computation (Expr))
+(function Dependencies (Expr) Values :merge (set-intersect old new))
+(function InputDependencies (Exprs i64) Values :merge (set-intersect old new))
+(relation TotalInputs (Exprs i64))
+(relation Total (Expr))
+
+; Free bindings and totality propagate through all operands, not just one.
+(rule ((Leaf e)) ((set (Dependencies e) (set-of e)) (Total e)) :ruleset hoist)
+(rule ((LocalInputs e xs))
+      ((set (InputDependencies xs 0) (set-empty)) (TotalInputs xs 0)) :ruleset hoist)
+(rule ((= ds (InputDependencies xs i)) (< i (vec-length xs))
+       (= child (Dependencies (vec-get xs i))))
+      ((set (InputDependencies xs (+ i 1)) (set-union ds child))) :ruleset hoist)
+(rule ((LocalInputs e xs) (= ds (InputDependencies xs (vec-length xs))))
+      ((set (Dependencies e) ds)) :ruleset hoist)
+(rule ((TotalInputs xs i) (< i (vec-length xs)) (Total (vec-get xs i)))
+      ((TotalInputs xs (+ i 1))) :ruleset hoist)
+(rule ((LocalInputs e xs) (TotalNode e) (TotalInputs xs (vec-length xs)))
+      ((Total e)) :ruleset hoist)
+
+; Structured children execute in this scope; calls have separate environments.
+(relation ChildScope (RegionKey RegionKey))
+(relation ScopeExpr (RegionKey Expr))
+(rule ((Execution r op t) (Conditional op c yes no))
+      ((ChildScope r yes) (ChildScope r no)) :ruleset hoist)
+(rule ((Execution r op t) (LoopRegions op header body))
+      ((ChildScope r header) (ChildScope r body)) :ruleset hoist)
+(rule ((RegionExpr r e)) ((ScopeExpr r e)) :ruleset hoist)
+(rule ((ChildScope r child) (ScopeExpr child e)) ((ScopeExpr r e)) :ruleset hoist)
+(relation Descendant (Expr Expr))
+(rule ((SourceExpression id e)) ((Descendant e e)) :ruleset hoist)
+(rule ((ExprChild e x)) ((Descendant e x)) :ruleset hoist)
+(rule ((ExprChild e x) (Descendant x child)) ((Descendant e child)) :ruleset hoist)
+
+(relation AvailableBefore (OperationKey Values))
+(relation CaptureParameters (OperationKey RegionKey Values))
+(relation CanMoveBefore (OperationKey Expr))
+(rule ((AvailableBefore op available) (Computation e) (Total e)
+       (= needed (Dependencies e)) (= (set-diff needed available) (set-empty)))
+      ((CanMoveBefore op e)) :ruleset hoist)
+
+; An invariant can move before a loop only if it is safe on zero-trip paths too.
+(relation HoistBefore (OperationKey ExprKey))
+(rule ((LoopRegions op header body) (ScopeExpr body e) (CanMoveBefore op e)
+       (SourceExpression id e)) ((HoistBefore op id)) :ruleset hoist)
+(rule ((LoopRegions op header body) (ScopeExpr header e) (CanMoveBefore op e)
+       (SourceExpression id e)) ((HoistBefore op id)) :ruleset hoist)
+
+; Common work in both arms moves to their dominating conditional site.
+(rule ((Conditional op c yes no) (ScopeExpr yes e) (ScopeExpr no e)
+       (CanMoveBefore op e) (SourceExpression id e)) ((HoistBefore op id)) :ruleset hoist)
+(relation HoistSelect (ExprKey ExprKey))
+(rule ((SourceExpression choice (Typed t (Select c yes no)))
+       (Descendant yes e) (Descendant no e) (Computation e) (Total e)
+       (SourceExpression id e)) ((HoistSelect choice id)) :ruleset hoist)
+
+; Callback specialization replaces capture-only work with a new capture formal.
+(relation HoistCapture (OperationKey RegionKey ExprKey))
+(rule ((OperationBody op role body) (BodyRegion body r)
+       (CaptureParameters op r available) (ScopeExpr r e) (Computation e) (Total e)
+       (= needed (Dependencies e)) (= (set-diff needed available) (set-empty))
+       (SourceExpression id e)) ((HoistCapture op r id)) :ruleset hoist)
+
+; The chosen evaluation sites survive scheduling alongside expression uses.
+(relation EvaluateBefore (OperationKey ExprKey))
+(relation EvaluateBeforeSelect (ExprKey ExprKey))

@@ -8,7 +8,7 @@ use super::data::{
     Array, AssociatedData, BlockId, BodyId, BufferId, DefinitionId, DispatchId, ExprId, ExprKind, LoopKind,
     OperationId, OperationKind, RegionId, ScremaForm, SoacBody,
 };
-use super::{from_tlc::Converted, optimize::OptimizeError, snapshot};
+use super::{from_tlc::Converted, optimize::OptimizeError, snapshot, timing};
 use crate::types;
 use egglog_engine::{
     ast::{Literal, Parser},
@@ -28,16 +28,18 @@ const WIDTH: u32 = 64;
 /// Requires `insert_expressions`; the expression layer is retained alongside
 /// block facts, linked by source-region provenance rather than scalar placement.
 pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
+    let _timing = timing::span("scheduling");
     if !converted.data.blocks.is_empty() {
         return Err(error("program has already been scheduled"));
     }
     let Some(expressions) = converted.expression_program.as_ref() else {
         return Err(error("insert expressions before scheduling"));
     };
-    let summary = snapshot::analyze(&converted.data);
-    let schedules = summary.schedules(&converted.data)?;
+    let summary = timing::time("analyze dependencies", || snapshot::analyze(&converted.data));
+    let schedules = timing::time("validate dependency order", || summary.schedules(&converted.data))?;
     let entries: Vec<_> = converted.data.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
-    let recipes = recipes(&converted.data, &summary)?;
+    let recipes = timing::time("select kernel recipes", || recipes(&converted.data, &summary))?;
+    let plan = timing::span("build blocks and dispatches");
     let mut planner = Planner {
         data: &mut converted.data,
         schedules,
@@ -55,7 +57,9 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
             interface.kind = FunctionKind::Entry(entry);
         }
     }
-    validation::validate(planner.data)?;
+    drop(plan);
+    timing::time("validate blocks", || validation::validate(planner.data))?;
+    let _output = timing::span("export block facts");
     converted.program = super::expressions::parse(include_str!("ids.egg"))?;
     converted.program.extend(expressions.iter().cloned());
     converted.program.extend(
@@ -196,6 +200,9 @@ impl Planner<'_> {
         let previous_region = self.current_region.replace(region);
         self.data.blocks[block].source_regions.insert(region);
         for op in self.schedules.get(&region).cloned().unwrap_or_default() {
+            for value in super::scalar::placements(self.data, super::PlacementSite::Operation(op)) {
+                self.emit(block, Instruction::BindExpression(value, Value::Source(value)));
+            }
             block = self.operation(op, block, device)?;
             self.data.blocks[block].source_regions.insert(region);
         }

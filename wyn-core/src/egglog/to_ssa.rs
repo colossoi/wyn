@@ -31,6 +31,7 @@ pub fn to_ssa(
     data: &AssociatedData,
     target: CodegenTarget,
 ) -> Result<ssa::stage::Elaborated, OptimizeError> {
+    let _timing = super::timing::span("to SSA");
     if data.blocks.is_empty() && !data.entries.is_empty() {
         return Err(error("schedule the program before lowering to SSA"));
     }
@@ -55,6 +56,7 @@ pub fn to_ssa(
     roots.sort();
     let mut entries = vec![];
     for root in roots {
+        let _entry = super::timing::span("lower entry or kernel");
         let Some(interface) = &data.blocks[root].interface else {
             return Err(error("missing entry interface"));
         };
@@ -478,6 +480,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.environment.parameters.insert(*id, v);
             }
             Instruction::BindExpression(id, value) => {
+                self.environment.expressions.remove(id);
                 let v = self.value(value)?;
                 self.environment.expressions.insert(*id, v);
             }
