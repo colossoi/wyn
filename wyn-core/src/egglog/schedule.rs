@@ -25,10 +25,15 @@ const WIDTH: u32 = 64;
 /// Produce a compute scaffold, preserving scalar implementation in sidecar
 /// payloads. This is a pre-codegen IR: physical buffer layout and shader emission
 /// remain later work. No executable block contains a SOAC operation.
+/// Requires `insert_expressions`; the expression layer is retained alongside
+/// block facts, linked by source-region provenance rather than scalar placement.
 pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
     if !converted.data.blocks.is_empty() {
         return Err(error("program has already been scheduled"));
     }
+    let Some(expressions) = converted.expression_program.as_ref() else {
+        return Err(error("insert expressions before scheduling"));
+    };
     let summary = snapshot::analyze(&converted.data);
     let schedules = summary.schedules(&converted.data)?;
     let entries: Vec<_> = converted.data.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
@@ -42,6 +47,7 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
         outputs: BTreeMap::new(),
         external_buffers: BTreeMap::new(),
         recipes,
+        current_region: None,
     };
     for (entry, definition) in entries {
         let root = planner.definition(definition, false)?;
@@ -50,18 +56,14 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
         }
     }
     validation::validate(planner.data)?;
-    converted.program = Parser::default()
-        .get_program_from_string(Some("wyn-blocks.egg".into()), &output::program(&converted.data))
-        .map_err(|e| error(&e.to_string()))?;
+    converted.program = super::expressions::parse(include_str!("ids.egg"))?;
+    converted.program.extend(expressions.iter().cloned());
+    converted.program.extend(
+        Parser::default()
+            .get_program_from_string(Some("wyn-blocks.egg".into()), &output::program(&converted.data))
+            .map_err(|e| error(&e.to_string()))?,
+    );
     Ok(converted)
-}
-
-/// Print reachable scheduled functions and blocks, leaving scalar bodies opaque.
-pub fn readout(data: &AssociatedData) -> Result<String, OptimizeError> {
-    if data.blocks.is_empty() && !data.entries.is_empty() {
-        return Err(error("schedule the program before readout"));
-    }
-    Ok(output::readout(data))
 }
 
 fn error(message: &str) -> OptimizeError {
@@ -77,6 +79,7 @@ struct Planner<'a> {
     outputs: BTreeMap<OperationId, Vec<BufferId>>,
     external_buffers: BTreeMap<ExprId, BufferId>,
     recipes: BTreeMap<OperationId, Recipe>,
+    current_region: Option<RegionId>,
 }
 
 impl Planner<'_> {
@@ -94,6 +97,8 @@ impl Planner<'_> {
         let returns = self.values(vec![]);
         self.data.blocks.alloc(BlockData {
             function,
+            source_regions: self.current_region.into_iter().collect(),
+            loop_exit: None,
             interface: None,
             parameters,
             body,
@@ -114,6 +119,8 @@ impl Planner<'_> {
             id,
             BlockData {
                 function: id,
+                source_regions: self.current_region.into_iter().collect(),
+                loop_exit: None,
                 interface: Some(Function { name, kind, results }),
                 parameters,
                 body,
@@ -160,6 +167,7 @@ impl Planner<'_> {
             return Ok(entry);
         }
         let source = self.data.regions[region].clone();
+        let previous_region = self.current_region.replace(region);
         let names: Vec<_> = (0..source.parameters.len()).map(|i| format!("p{i}")).collect();
         let entry = self.function(
             format!("r{}", region.as_u32()),
@@ -176,6 +184,7 @@ impl Planner<'_> {
             end,
             self.data.regions[region].results.iter().copied().map(Value::Source).collect(),
         );
+        self.current_region = previous_region;
         Ok(entry)
     }
     fn region_into(
@@ -184,9 +193,13 @@ impl Planner<'_> {
         mut block: BlockId,
         device: bool,
     ) -> Result<BlockId, OptimizeError> {
+        let previous_region = self.current_region.replace(region);
+        self.data.blocks[block].source_regions.insert(region);
         for op in self.schedules.get(&region).cloned().unwrap_or_default() {
             block = self.operation(op, block, device)?;
+            self.data.blocks[block].source_regions.insert(region);
         }
+        self.current_region = previous_region;
         Ok(block)
     }
     fn result(&self, region: RegionId) -> Value {
@@ -314,6 +327,7 @@ impl Planner<'_> {
         let test = self.block(owner, vec![acc_name, index_name]);
         let iterate = self.block(owner, vec![]);
         let after = self.block(owner, vec![]);
+        self.data.blocks[test].loop_exit = Some(after);
         self.jump(from, test, vec![Value::Source(init), Value::Int(0)]);
         let parameters = self.data.regions[header].parameters.clone();
         if let Some(&parameter) = parameters.first() {

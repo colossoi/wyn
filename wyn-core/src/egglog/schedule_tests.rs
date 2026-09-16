@@ -1,5 +1,6 @@
 use super::super::{
-    convert_program, optimize, AssociatedData, Converted, Exit, FunctionKind, Instruction, OperationKind,
+    convert_program, insert_expressions, optimize, AssociatedData, Converted, Exit, FunctionKind,
+    Instruction, OperationKind,
 };
 use super::{schedule, validation};
 use crate::{compile_thru_tlc, tlc};
@@ -11,7 +12,8 @@ use exec::{run, Value};
 
 fn compile(source: &str) -> Converted {
     let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    let result = schedule(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap();
+    let result =
+        schedule(insert_expressions(optimize(convert_program(&tlc).unwrap()).unwrap()).unwrap()).unwrap();
     // The actual final fact program must typecheck and execute in egglog.
     EGraph::default().run_program(result.program.clone()).unwrap();
     result
@@ -115,6 +117,30 @@ fn host_loop_reexecutes_launch_sites_and_handles_zero_iterations() {
 }
 
 #[test]
+fn scalar_only_array_counted_and_while_loops_execute_accumulator_updates() {
+    let result = compile(
+        "entry main(xs: [4]i32, n: i32) (i32, i32, i32) =
+        let a = loop acc = 0 for x in xs do acc + x in
+        let b = loop acc = 0 for i < n do acc + i in
+        let (c, _) = loop (acc, i) = (0, 0) while i < n do (acc + i, i + 1) in
+        (a, b, c)",
+    );
+    assert_eq!(kernel_count(&result.data), 0);
+    for n in [0, 1, 4] {
+        let output = run(&result.data, vec![Value::array(1..5), Value::Int(n)]);
+        let sum = n * (n - 1) / 2;
+        assert_eq!(
+            output,
+            [Value::Tuple(vec![
+                Value::Int(10),
+                Value::Int(sum),
+                Value::Int(sum)
+            ])]
+        );
+    }
+}
+
+#[test]
 fn noncommutative_associative_reduction_preserves_chunk_order() {
     let result = compile("entry main(xs: []i32) (i32, i32) = reduce(|a: (i32, i32), b: (i32, i32)| (a.0 * b.0 % 97, (a.1 * b.0 + b.1) % 97), (1, 0), map(|x: i32| (x % 3 + 1, x), xs))");
     for n in [0, 65, 137] {
@@ -184,27 +210,25 @@ fn indexed_updates_preserve_collisions_existing_bins_and_invalid_index_guards() 
 }
 
 #[test]
-fn final_graph_contains_only_scheduled_topology_and_opaque_ids() {
+fn final_graph_keeps_expressions_alongside_scheduled_topology() {
     let result =
         compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * 2, xs))");
     let mut graph = EGraph::default();
     graph.run_program(result.program).unwrap();
-    // Query topology, not diagnostic text formatting. Source constructors must
-    // no longer be part of the final schema at all.
+    // The final layer retains expressions, without reviving the fusion schema.
     assert_eq!(
         graph.function_to_dag("Dispatch", usize::MAX, false).unwrap().0.len(),
         3
     );
-    for name in [
-        "Screma",
-        "Collectives",
-        "Operation",
-        "ExprId",
-        "FloatBits",
-        "BinOp",
-    ] {
+    for name in ["Screma", "Collectives", "Operation"] {
         assert!(graph.function_to_dag(name, 1, false).is_err());
     }
+    graph
+        .parse_and_run_program(
+            None,
+            "(check (BlockSourceRegion b r) (RegionExpr r e) (SourceExpression id e))",
+        )
+        .unwrap();
     for body in result.data.bodies.values() {
         for instruction in &body.instructions {
             if let Instruction::Evaluate(op) = instruction {

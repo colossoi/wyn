@@ -7,6 +7,14 @@ use std::collections::BTreeSet;
 pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
     let mut launches = BTreeSet::new();
     for (&id, block) in &data.blocks {
+        if block.source_regions.iter().any(|r| data.regions.get(*r).is_none()) {
+            return Err(error("block refers to a missing source region"));
+        }
+        if let Some(exit) = block.loop_exit {
+            if !data.blocks.get(exit).is_some_and(|b| b.function == block.function) {
+                return Err(error("loop exit is outside its function"));
+            }
+        }
         let Some(owner) = data.blocks.get(block.function) else {
             return Err(error("block has a missing owner"));
         };

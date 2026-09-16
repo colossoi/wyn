@@ -13,6 +13,9 @@
 (relation Kernel (BlockKey i64 i64 i64))
 ; Block, owning entry, opaque body, parameter arity.
 (relation Block (BlockKey BlockKey BodyKey i64))
+; Source provenance joins the expression layer; it is not a placement decision.
+(relation BlockSourceRegion (BlockKey RegionKey))
+(relation LoopExit (BlockKey BlockKey))
 (relation Return (BlockKey BodyKey))
 (relation Jump (BlockKey BlockKey BodyKey))
 (relation Branch (BlockKey BodyKey BlockKey BodyKey BlockKey BodyKey))

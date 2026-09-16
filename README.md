@@ -644,8 +644,8 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
-# Use the egglog route; print the GPU scaffold and optionally save its facts
-cargo run --bin wyn -- build input.wyn --egglog --egg-out output.egg
+# Use the egglog route with the existing WGSL output and optional fact/SSA dumps
+cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --egg-out output.egg --output-mir output.ssa
 
 # Compile a graphics program directly, without compiler-created prepasses
 cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
@@ -667,14 +667,21 @@ cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 
 The experimental egglog route constructs `map`, `reduce`, and `scan` as Scremas
 in `egglog::from_tlc`. Full expressions, types, bodies, argument values, control
-flow, and metadata stay in `IdArena` sidecars. Egglog receives only a fusion
+flow, and metadata are retained in `IdArena` sidecars. Fusion receives only a
 summary: SOAC layouts, producer/consumer links, uses, and dependency/effect
-constraints. Scalar expression syntax and lambda bodies are opaque to the rules.
-`--egglog` prints a GPU scaffold starting at entries. Within each function,
+constraints. Scalar expression syntax and lambda bodies are opaque to fusion.
+After fusion, `egglog::insert_expressions` adds a separate typed expression DAG,
+region parameters/results, call and structured-loop links, and data dependencies
+through `expressions.egg`. Region-use facts associate globally interned syntax
+with its use sites; they do not place computations or share runtime values across
+invocations. Operation identities keep effectful executions distinct.
+`--egglog` selects this route through scheduling and `egglog::to_ssa`, then uses
+the existing backend and file output. Egglog timing goes to stderr. Within each function,
 lowering walks backward from outputs and required effects, then topologically
 orders only reachable operations. Dead records can remain in the source sidecar.
-`--egg-out FILE` saves the last pass's block/dispatch facts (`blocks.egg`), with
-no SOAC or scalar-expression constructors. Printed blocks show opaque body IDs,
+`--egg-out FILE` saves the last pass's block/dispatch facts (`blocks.egg`) alongside
+the expression layer, linked by source-region provenance. The fusion summary is
+replaced, and executable blocks contain no SOACs. Block facts reference opaque body IDs,
 calls, branches, jumps, allocations and launches. Functions adorn entry blocks.
 A shared pass loop analyzes a complete graph, derives fusion candidates in
 `fusion.egg`, applies the selected composition to sidecar bodies, and repeats
@@ -684,7 +691,7 @@ reductions across independent operations, preserving captures and logical tuple
 elements. Shared live observers, effect barriers, and region boundaries prevent
 absorption. Horizontal fusion and fusion across scan barriers remain unimplemented.
 
-After fusion, `schedule.egg` selects execution recipes. Rust instantiates their
+After expression insertion, `schedule.egg` selects execution recipes. Rust instantiates their
 CFGs and scalar payloads in sidecar arenas. Maps use parallel elementwise kernels;
 reductions use chunk and combine dispatches; scans add an offset application
 dispatch; filters use flags, local offsets, combined offsets and compaction.
@@ -697,9 +704,20 @@ writes and effectful bodies use ordered single-invocation kernels.
 The scaffold preserves host branches and loops, including conditional and
 repeated dispatch sites. A launch completes and makes its writes visible before
 host control continues; explicit dispatch dependencies describe stage ordering.
-Buffer element types and dynamic grid formulas remain in the sidecar. Physical
-buffer packing, bindings, transfers, shader emission and runtime submission are
-not implemented by this experimental route yet.
+Buffer element types and dynamic grid formulas remain in the sidecar.
+
+The provisional SSA adapter emits kernels and their reachable helpers, plus
+scalar-only entries, through the existing shader backend. `--output-mir` exposes
+that SSA; the old scaffold printer has been removed. Output is for inspection:
+TODOs in `egglog/to_ssa.rs` cover the authored buffer/uniform ABI, physical
+layouts, actual allocation sizes, output routing, and host dispatch packaging.
+For now it assigns synthetic group-0 storage bindings, uses 64 for unknown array
+lengths/local capacities, and exposes scalar captures through one-element buffers.
+Literal captures retain their actual values. Kernels are emitted independently;
+host branches/loops, grids, and dispatch ordering are not yet translated into a
+runtime pipeline descriptor. These provisional policies do not change WGSL
+formatting or the normal output-file handling. Unsupported scalar constructs
+produce explicit diagnostics.
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, and

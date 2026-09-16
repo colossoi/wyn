@@ -2,6 +2,7 @@
 
 use super::data::{
     Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
+    RegionId,
 };
 use crate::types;
 use std::collections::BTreeSet;
@@ -10,6 +11,11 @@ use std::collections::BTreeSet;
 pub struct BlockData {
     /// The entry block owning this block. Functions are adornments of entries.
     pub function: BlockId,
+    /// Source scopes contributing code or generated control to this block.
+    /// Provenance only: this does not assert expression placement or loop membership.
+    pub source_regions: BTreeSet<RegionId>,
+    /// Structured loop exit, retained for SSA/WGSL reconstruction.
+    pub loop_exit: Option<BlockId>,
     pub interface: Option<Function>,
     pub parameters: Vec<String>,
     pub body: BodyId,
@@ -55,7 +61,7 @@ pub struct BodyData {
     pub results: Vec<Value>,
 }
 
-/// Expressions in this payload never become egglog facts. Source expressions
+/// Generated scalar instructions remain opaque. Source expressions
 /// resolve through the parameter/result bindings of their enclosing invocation.
 /// Array loads, stores, length and dimension operate on logical arrays, including
 /// TLC's tuple-of-component-arrays representation; physical layout is deferred.

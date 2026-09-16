@@ -1,7 +1,5 @@
 ; Fusion graph only. Scalar expressions, types, bodies, argument values, and
 ; control-flow structure live in AssociatedData, indexed by these opaque IDs.
-(datatype RegionKey (RegionId i64))
-(datatype OperationKey (OperationId i64))
 
 ; Live executions in scopes containing SOACs. Other executions appear only as
 ; dependency/effect constraints or external observers of a SOAC's result.

@@ -25,10 +25,14 @@ type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPa
 #[derive(Clone, Debug)]
 pub struct Converted {
     /// Facts from the last completed pass: a fusion summary after import or
-    /// optimization, and a block/dispatch graph after scheduling.
+    /// optimization, augmented with expressions after insertion; scheduling
+    /// replaces the fusion summary with block/dispatch facts.
     pub program: Vec<egglog_engine::ast::Command>,
     /// Full bodies, expressions, arguments, types, and diagnostic metadata.
     pub data: AssociatedData,
+    /// Independent post-fusion layer. Scheduling retains these commands when
+    /// replacing the fusion summary with block topology.
+    pub(super) expression_program: Option<Vec<egglog_engine::ast::Command>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +138,7 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
     Ok(Converted {
         program,
         data: converter.data,
+        expression_program: None,
     })
 }
 

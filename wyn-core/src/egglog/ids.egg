@@ -1,0 +1,3 @@
+; Identities shared by the fusion, expression, and block layers.
+(datatype RegionKey (RegionId i64))
+(datatype OperationKey (OperationId i64))

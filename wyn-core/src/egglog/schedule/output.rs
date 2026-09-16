@@ -39,6 +39,15 @@ pub(super) fn program(data: &AssociatedData) -> String {
     for id in reachable(data) {
         let block = &data.blocks[id];
         let b = id.as_u32();
+        if let Some(exit) = block.loop_exit {
+            text.push_str(&format!("(LoopExit (BlockId {b}) (BlockId {}))\n", exit.as_u32()));
+        }
+        for region in &block.source_regions {
+            text.push_str(&format!(
+                "(BlockSourceRegion (BlockId {b}) {})\n",
+                region.egglog()
+            ));
+        }
         if let Some(function) = &block.interface {
             text.push_str(&format!(
                 "(Function (BlockId {b}) {} {})\n",
@@ -133,82 +142,6 @@ pub(super) fn program(data: &AssociatedData) -> String {
             Storage::External(_) => "InputBuffer",
         };
         text.push_str(&format!("({relation} (BufferId {}))\n", id.as_u32()));
-    }
-    text
-}
-
-pub(super) fn readout(data: &AssociatedData) -> String {
-    let live = reachable(data);
-    let mut text = String::from("// GPU scaffold; scalar bodies and grid formulas are opaque sidecar IDs.\n// Dispatch sites complete before host control continues.\n");
-    for &entry in &live {
-        let Some(function) = &data.blocks[entry].interface else {
-            continue;
-        };
-        let kind = match function.kind {
-            FunctionKind::Entry(_) => "entry",
-            FunctionKind::Host => "host fn",
-            FunctionKind::Device => "device fn",
-            FunctionKind::Kernel(_) => "kernel",
-        };
-        text.push_str(&format!(
-            "\n{kind} {} @b{} ({} params) -> {} results",
-            function.name,
-            entry.as_u32(),
-            data.blocks[entry].parameters.len(),
-            function.results
-        ));
-        if let FunctionKind::Kernel(size) = function.kind {
-            text.push_str(&format!(" workgroup {size:?}"));
-        }
-        text.push_str(" {\n");
-        for &id in &live {
-            let block = &data.blocks[id];
-            if block.function != entry {
-                continue;
-            }
-            text.push_str(&format!(
-                "  b{} ({} params):\n    body#{}\n",
-                id.as_u32(),
-                block.parameters.len(),
-                block.body.as_u32()
-            ));
-            for (i, instruction) in data.bodies[block.body].instructions.iter().enumerate() {
-                match instruction {
-                    Instruction::Call { function, .. } => {
-                        text.push_str(&format!("      [{i}] call b{}\n", function.as_u32()))
-                    }
-                    Instruction::Allocate(id) => {
-                        text.push_str(&format!("      [{i}] allocate buffer#{}\n", id.as_u32()))
-                    }
-                    Instruction::Dispatch(id) => {
-                        let d = &data.dispatches[*id];
-                        let after: Vec<_> =
-                            d.dependencies.iter().map(|id| format!("d{}", id.as_u32())).collect();
-                        let reads: Vec<_> = d.reads.iter().map(|id| id.as_u32()).collect();
-                        let writes: Vec<_> = d.writes.iter().map(|id| id.as_u32()).collect();
-                        text.push_str(&format!("      [{i}] dispatch d{}: b{} grid#{} after [{}]\n          read buffers {reads:?}; write buffers {writes:?}\n", id.as_u32(), d.kernel.as_u32(), d.grid.as_u32(), after.join(", ")));
-                    }
-                    _ => {}
-                }
-            }
-            match &block.exit {
-                Exit::Return(body) => text.push_str(&format!("    return body#{}\n", body.as_u32())),
-                Exit::Jump(edge) => text.push_str(&format!(
-                    "    jump b{} args body#{}\n",
-                    edge.target.as_u32(),
-                    edge.arguments.as_u32()
-                )),
-                Exit::Branch { condition, yes, no } => text.push_str(&format!(
-                    "    branch body#{} -> b{}(body#{}) | b{}(body#{})\n",
-                    condition.as_u32(),
-                    yes.target.as_u32(),
-                    yes.arguments.as_u32(),
-                    no.target.as_u32(),
-                    no.arguments.as_u32()
-                )),
-            }
-        }
-        text.push_str("}\n");
     }
     text
 }

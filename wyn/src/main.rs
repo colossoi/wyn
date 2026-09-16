@@ -42,6 +42,8 @@ impl Target {
 
 struct CompileOptions {
     target: Target,
+    egglog: bool,
+    egg_out: Option<PathBuf>,
     direct: bool,
     wgsl_emulate_u64: bool,
     fill_holes: bool,
@@ -112,15 +114,15 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         output_tlc: Option<PathBuf>,
 
-        /// Output MIR (SSA post-EGIR, pre-backend-lowering)
+        /// Output MIR (SSA before backend lowering)
         #[arg(long, value_name = "FILE")]
         output_mir: Option<PathBuf>,
 
-        /// Use the egglog compiler route and print a reconstructed program to stdout.
-        #[arg(long, conflicts_with_all = ["output", "output_mir"])]
+        /// Use the experimental egglog compiler route.
+        #[arg(long, conflicts_with = "direct")]
         egglog: bool,
 
-        /// Save the final egglog block/dispatch graph to this file (requires --egglog).
+        /// Save final egglog expression and block/dispatch facts (requires --egglog).
         #[arg(long, value_name = "FILE", requires = "egglog")]
         egg_out: Option<PathBuf>,
 
@@ -593,6 +595,8 @@ fn build(
     })?;
     let options = CompileOptions {
         target,
+        egglog,
+        egg_out,
         direct,
         wgsl_emulate_u64,
         fill_holes,
@@ -601,45 +605,6 @@ fn build(
         warning_limit,
         verbose,
     };
-    if egglog {
-        let tlc = compile_tlc(parsed_modules, &options)?;
-        let egglog_start = Instant::now();
-        let converted = time("from_tlc_egglog", verbose, || {
-            wyn_core::egglog::from_tlc::convert_program(&tlc.program)
-        })?;
-        let converted = time("optimize_egglog", verbose, || {
-            wyn_core::egglog::optimize(converted)
-        })?;
-        let converted = time("schedule_egglog", verbose, || {
-            wyn_core::egglog::schedule(converted)
-        })?;
-        let printed_program = wyn_core::egglog::readout(&converted.data)?;
-        let egglog_elapsed = egglog_start.elapsed();
-        if let Some(path) = egg_out {
-            let mut file = std::io::BufWriter::new(fs::File::create(path)?);
-            for command in &converted.program {
-                writeln!(file, "{command}")?;
-            }
-            file.flush()?;
-        }
-        let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
-        writeln!(
-            stdout,
-            "// egglog: {:.3} ms",
-            egglog_elapsed.as_secs_f64() * 1000.0
-        )?;
-        write!(stdout, "{printed_program}")?;
-        stdout.flush()?;
-        for artifact in tlc.auxiliary {
-            fs::write(artifact.path, artifact.contents)?;
-        }
-        eprintln!(
-            "Converted {} to egglog in {:.2}s",
-            input.display(),
-            build_start.elapsed().as_secs_f64(),
-        );
-        return Ok(());
-    }
     let output_path = output_path(&normalized_input, output, target)?;
     let compilation = compile(parsed_modules, options)?;
     write_artifacts(&output_path, compilation, verbose)?;
@@ -758,48 +723,83 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     } = compile_tlc(modules, &options)?;
     let CompileOptions {
         target,
+        egglog,
+        egg_out,
         direct,
         wgsl_emulate_u64,
         output_mir,
         verbose,
         ..
     } = options;
-    // Build raw EGIR, then cross each semantic and physical typestate boundary.
-    let program = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
-    let program = time("egir_reify_soacs", verbose, || {
-        wyn_core::egir::reify_soacs(program)
-    });
-    let program = retain_source(
-        time("egir_optimize_semantic_operations", verbose, || {
-            wyn_core::egir::optimize_semantic_operations(program)
-        }),
-        &source_graph,
-    )?;
-    let profile = if direct {
-        LoweringProfile::with_topology(
-            match target {
-                Target::Spirv => CodegenTarget::Spirv,
-                Target::Wgsl => CodegenTarget::Wgsl,
-            },
-            SchedulePolicy::Serial,
-            PipelineTopologyPolicy::AuthoredOnly,
-        )
+    let ssa = if egglog {
+        let start = Instant::now();
+        let converted = time("from_tlc_egglog", verbose, || {
+            wyn_core::egglog::convert_program(&program)
+        })?;
+        let converted = time("optimize_egglog", verbose, || {
+            wyn_core::egglog::optimize(converted)
+        })?;
+        let converted = time("insert_expressions_egglog", verbose, || {
+            wyn_core::egglog::insert_expressions(converted)
+        })?;
+        let converted = time("schedule_egglog", verbose, || {
+            wyn_core::egglog::schedule(converted)
+        })?;
+        let ssa = time("egglog_to_ssa", verbose, || {
+            wyn_core::egglog::to_ssa(
+                &converted.data,
+                match target {
+                    Target::Spirv => CodegenTarget::Spirv,
+                    Target::Wgsl => CodegenTarget::Wgsl,
+                },
+            )
+        })?;
+        eprintln!("egglog: {:.3} ms", start.elapsed().as_secs_f64() * 1000.0);
+        if let Some(path) = egg_out {
+            auxiliary.push(TextArtifact {
+                path,
+                contents: converted.program.iter().map(|command| format!("{command}\n")).collect(),
+            });
+        }
+        ssa
     } else {
-        LoweringProfile::new(
-            match target {
-                Target::Spirv => CodegenTarget::Spirv,
-                Target::Wgsl => CodegenTarget::Wgsl,
-            },
-            SchedulePolicy::Parallel,
-        )
+        // Build raw EGIR, then cross each semantic and physical typestate boundary.
+        let program = time("to_egraph", verbose, || wyn_core::to_egraph(program))?;
+        let program = time("egir_reify_soacs", verbose, || {
+            wyn_core::egir::reify_soacs(program)
+        });
+        let program = retain_source(
+            time("egir_optimize_semantic_operations", verbose, || {
+                wyn_core::egir::optimize_semantic_operations(program)
+            }),
+            &source_graph,
+        )?;
+        let profile = if direct {
+            LoweringProfile::with_topology(
+                match target {
+                    Target::Spirv => CodegenTarget::Spirv,
+                    Target::Wgsl => CodegenTarget::Wgsl,
+                },
+                SchedulePolicy::Serial,
+                PipelineTopologyPolicy::AuthoredOnly,
+            )
+        } else {
+            LoweringProfile::new(
+                match target {
+                    Target::Spirv => CodegenTarget::Spirv,
+                    Target::Wgsl => CodegenTarget::Wgsl,
+                },
+                SchedulePolicy::Parallel,
+            )
+        };
+        let program = time("egir_apply_pipeline_topology_policy", verbose, || {
+            wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology)
+        });
+        let program = time("egir_plan", verbose, || wyn_core::egir::plan(program, profile))?;
+        time("egir_lower_to_ssa", verbose, || {
+            wyn_core::lower_egir_to_ssa(program)
+        })?
     };
-    let program = time("egir_apply_pipeline_topology_policy", verbose, || {
-        wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology)
-    });
-    let program = time("egir_plan", verbose, || wyn_core::egir::plan(program, profile))?;
-    let ssa = time("egir_lower_to_ssa", verbose, || {
-        wyn_core::lower_egir_to_ssa(program)
-    })?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

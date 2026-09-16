@@ -126,6 +126,7 @@ impl Planner<'_> {
         let header = self.block(owner, names);
         let body = self.block(owner, vec![]);
         let done = self.block(owner, vec![]);
+        self.data.blocks[header].loop_exit = Some(done);
         self.jump(from, header, std::iter::once(start).chain(state).collect());
         self.branch(header, Value::op("lt", [index.clone(), bound]), body, done);
         Loop {

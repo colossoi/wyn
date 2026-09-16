@@ -86,6 +86,8 @@ pub struct TypeData {
 }
 
 /// Sidecar values are interned by content, independently of diagnostic metadata.
+/// This shares computation syntax, not runtime values across invocations or
+/// loop iterations. Parameters and operation results carry binding identities.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExprData {
     pub ty: TypeId,

@@ -31,6 +31,11 @@ pub(super) fn analyze(data: &AssociatedData) -> Result<EGraph, OptimizeError> {
 /// dead records remain in the sidecar until readout selects reachable work.
 /// The returned egglog program summarizes the last selected graph.
 pub fn optimize(mut converted: Converted) -> Result<Converted, OptimizeError> {
+    if converted.expression_program.is_some() || !converted.data.blocks.is_empty() {
+        return Err(OptimizeError::Output(
+            "fusion must precede expression insertion and scheduling".into(),
+        ));
+    }
     loop {
         let mut graph = analyze(&converted.data)?;
         snapshot::analyze(&converted.data).schedules(&converted.data)?;
