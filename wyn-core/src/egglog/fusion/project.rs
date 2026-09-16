@@ -79,13 +79,14 @@ pub(super) fn finish(
         let e = expr(data, ty, ExprKind::Parameter(p));
         replacements.insert(v, e);
     }
+    let mut rewrite = rewrite::Rewriter::new(data);
     for op in data.regions[region].members.clone() {
         let mut kind = data.operations[op].kind.clone();
-        rewrite::operation(data, &mut kind, &mut replacements);
+        rewrite.operation(data, &mut kind, &mut replacements);
         data.operations[op].kind = kind;
     }
     data.regions[region].results =
-        values.into_iter().map(|v| rewrite::value(data, v, &mut replacements)).collect();
+        values.into_iter().map(|v| rewrite.value(data, v, &mut replacements)).collect();
     SoacBody::Apply {
         region,
         parameters,

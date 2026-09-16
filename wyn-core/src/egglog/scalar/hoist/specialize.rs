@@ -6,11 +6,23 @@ pub(super) fn apply(
     op: OperationId,
     region: RegionId,
     values: &[ExprId],
+    context: &mut captures::Context<'_>,
 ) -> Result<(), OptimizeError> {
-    let replacement = clone_region(data, region, values);
+    // Parameterizing the same computations produces the same callable interface,
+    // regardless of each invocation's actual capture values.
+    let key = (region, values.to_vec());
+    let replacement = match context.specializations.get(&key) {
+        Some(&r) => r,
+        None => {
+            let r = timing::time("clone body", || clone_region(data, region, values, context));
+            context.specializations.insert(key, r);
+            r
+        }
+    };
+    let _timing = timing::span("rewrite capture arguments");
     let mut kind = data.operations[op].kind.clone();
     let mut changed = false;
-    bodies(&mut kind, &mut |body| {
+    kind.for_each_callback_mut(&mut |body| {
         let SoacBody::Apply {
             region: target,
             parameters,
@@ -29,17 +41,18 @@ pub(super) fn apply(
             .zip(captures.iter().copied())
             .collect();
         let mut substitutions = BTreeMap::new();
-        for (&id, e) in &data.expressions {
-            if let ExprKind::Parameter(p) = e.kind {
+        let needed = context.uses.dag.include(data, values);
+        for id in context.uses.dag.sets.iter(needed).map(ExprId::from) {
+            if let ExprKind::Parameter(p) = data.expressions[id].kind {
                 if let Some(&v) = pairs.get(&p) {
                     substitutions.insert(id, v);
                 }
             }
         }
         for &value in values {
-            let argument = rewrite::value(data, value, &mut substitutions);
+            let argument = context.rewrite.value(data, value, &mut substitutions);
             captures.push(argument);
-            place(data, PlacementSite::Operation(op), argument);
+            context.placements.insert(PlacementSite::Operation(op), argument);
         }
         *target = replacement;
         changed = true;
@@ -51,26 +64,43 @@ pub(super) fn apply(
     Ok(())
 }
 
-fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) -> RegionId {
-    let regions: Vec<_> = data
-        .regions
-        .ids()
-        .filter(|&id| {
-            let mut parent = Some(id);
-            while let Some(p) = parent {
-                if p == root {
-                    return true;
-                }
-                parent = data.regions[p].parent;
-            }
-            false
-        })
-        .collect();
+fn clone_region(
+    data: &mut AssociatedData,
+    root: RegionId,
+    values: &[ExprId],
+    context: &mut captures::Context<'_>,
+) -> RegionId {
+    // Follow current live references, not historical lexical arena records.
+    let mut regions = vec![];
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut needed = wyn_base::persistent_sets::EMPTY;
+    while let Some(r) = pending.pop() {
+        if !seen.insert(r) {
+            continue;
+        }
+        if !context.lexical.contains(context.original(root), context.original(r)) {
+            continue;
+        }
+        regions.push(r);
+        let mut roots = data.regions[r].results.clone();
+        for &op in data.regions[r].members.intersection(&context.live) {
+            data.operations[op].kind.operands(&mut roots, &mut pending);
+        }
+        let set = context.uses.dag.include(data, &roots);
+        let mut lambdas = wyn_base::persistent_sets::EMPTY;
+        for e in roots {
+            lambdas = context.uses.dag.sets.union(lambdas, context.uses.dag.lambdas[&e]);
+        }
+        pending.extend(context.uses.dag.sets.iter(lambdas).map(RegionId::from));
+        needed = context.uses.dag.sets.union(needed, set);
+    }
     let region_map: BTreeMap<_, _> = regions.iter().map(|&r| (r, data.regions.alloc_id())).collect();
     let mut parameters = BTreeMap::new();
     let mut operations = BTreeMap::new();
     for &r in &regions {
         let record = data.regions[r].clone();
+        context.originals.insert(region_map[&r], context.original(r));
         let target = region_map[&r];
         let new_params = record
             .parameters
@@ -85,7 +115,7 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
             .collect();
         let new_ops = record
             .members
-            .iter()
+            .intersection(&context.live)
             .map(|&op| {
                 let new = data.operations.alloc_id();
                 operations.insert(op, new);
@@ -103,7 +133,14 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
         );
     }
     let mut substitutions = BTreeMap::new();
-    let old: Vec<_> = data.expressions.iter().map(|(&id, e)| (id, e.clone())).collect();
+    let old: Vec<_> = context
+        .uses
+        .dag
+        .sets
+        .iter(needed)
+        .map(ExprId::from)
+        .map(|id| (id, data.expressions[id].clone()))
+        .collect();
     for (id, e) in old {
         let kind = match e.kind {
             ExprKind::Parameter(p) => parameters.get(&p).copied().map(ExprKind::Parameter),
@@ -112,7 +149,7 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
             _ => None,
         };
         if let Some(kind) = kind {
-            substitutions.insert(id, expr(data, e.ty, kind));
+            substitutions.insert(id, context.rewrite.intern(data, e.ty, kind));
         }
     }
     let target = region_map[&root];
@@ -125,12 +162,12 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
             ty,
         });
         data.regions[target].parameters.push(p);
-        substitutions.insert(value, expr(data, ty, ExprKind::Parameter(p)));
+        substitutions.insert(value, context.rewrite.intern(data, ty, ExprKind::Parameter(p)));
     }
     for (&old, &new) in &operations {
         let mut record = data.operations[old].clone();
         record.region = region_map[&record.region];
-        rewrite::operation(data, &mut record.kind, &mut substitutions);
+        context.rewrite.operation(data, &mut record.kind, &mut substitutions);
         match &mut record.kind {
             OperationKind::If {
                 then_region,
@@ -146,7 +183,7 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
             }
             _ => {}
         }
-        bodies(&mut record.kind, &mut |b| {
+        record.kind.for_each_callback_mut(&mut |b| {
             if let SoacBody::Apply { region, .. } = b {
                 if let Some(&new) = region_map.get(region) {
                     *region = new;
@@ -154,56 +191,22 @@ fn clone_region(data: &mut AssociatedData, root: RegionId, values: &[ExprId]) ->
             }
         });
         data.operations.insert(new, record);
+        context.live.insert(new);
     }
     for &old in &regions {
         let results = data.regions[old].results.clone();
         data.regions[region_map[&old]].results =
-            results.into_iter().map(|e| rewrite::value(data, e, &mut substitutions)).collect();
+            results.into_iter().map(|e| context.rewrite.value(data, e, &mut substitutions)).collect();
     }
-    let placements: Vec<_> = data.placements.values().cloned().collect();
-    for placement in placements {
-        if let PlacementSite::Operation(op) = placement.before {
-            if let Some(&new) = operations.get(&op) {
-                let value = rewrite::value(data, placement.expression, &mut substitutions);
-                if !matches!(data.expressions[value].kind, ExprKind::Parameter(_)) {
-                    place(data, PlacementSite::Operation(new), value);
-                }
+    for (&old, &new) in &operations {
+        let values =
+            context.placements.sites.get(&PlacementSite::Operation(old)).cloned().unwrap_or_default();
+        for e in values {
+            let value = context.rewrite.value(data, e, &mut substitutions);
+            if !matches!(data.expressions[value].kind, ExprKind::Parameter(_)) {
+                context.placements.insert(PlacementSite::Operation(new), value);
             }
         }
     }
     target
-}
-
-fn bodies(kind: &mut OperationKind, f: &mut impl FnMut(&mut SoacBody)) {
-    fn body(b: &mut SoacBody, f: &mut impl FnMut(&mut SoacBody)) {
-        match b {
-            SoacBody::Compose { first, then } => {
-                body(first, f);
-                body(then, f);
-            }
-            SoacBody::Parallel { left, right } => {
-                body(left, f);
-                body(right, f);
-            }
-            _ => f(b),
-        }
-    }
-    match kind {
-        OperationKind::Screma { form, .. } => {
-            body(&mut form.pre, f);
-            body(&mut form.post, f);
-            for scan in &mut form.scans {
-                body(&mut scan.operator, f);
-            }
-            for reduce in &mut form.reductions {
-                body(&mut reduce.operator, f);
-            }
-        }
-        OperationKind::Filter { map, body: b, .. } | OperationKind::ReduceByIndex { map, body: b, .. } => {
-            body(map, f);
-            body(b, f);
-        }
-        OperationKind::Scatter { body: b, .. } | OperationKind::BucketScatter { body: b, .. } => body(b, f),
-        _ => {}
-    }
 }

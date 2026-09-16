@@ -143,6 +143,7 @@ impl Machine<'_> {
         match instruction {
             Instruction::BindParameter(id, value) => {
                 frame.parameters.insert(id, self.value(&value, frame));
+                self.invalidate(frame, &ExprKind::Parameter(id));
             }
             Instruction::BindExpression(id, value) => {
                 frame.expressions.remove(&id);
@@ -150,6 +151,7 @@ impl Machine<'_> {
             }
             Instruction::BindResult(id, value) => {
                 frame.operations.insert(id, self.value(&value, frame));
+                self.invalidate(frame, &ExprKind::OperationResult(id));
             }
             Instruction::Call {
                 function,
@@ -176,6 +178,7 @@ impl Machine<'_> {
                     ref other => panic!("unsupported source effect in oracle: {other:?}"),
                 };
                 frame.operations.insert(op, value);
+                self.invalidate(frame, &ExprKind::OperationResult(op));
             }
             Instruction::Allocate(id) => {
                 let buffer = &self.data.buffers[id];
@@ -270,6 +273,57 @@ impl Machine<'_> {
                 )
             }
         }
+    }
+
+    // A static binding has a new runtime value on each loop iteration. A cached
+    // projection used in the body must not leak into the next header evaluation.
+    fn invalidate(&self, frame: &mut Frame, binding: &ExprKind) {
+        fn depends(
+            data: &AssociatedData,
+            id: ExprId,
+            binding: &ExprKind,
+            memo: &mut BTreeMap<ExprId, bool>,
+        ) -> bool {
+            if let Some(&known) = memo.get(&id) {
+                return known;
+            }
+            let kind = &data.expressions[id].kind;
+            let mut inputs = vec![];
+            match kind {
+                ExprKind::PureApp { function, args } => {
+                    inputs.push(*function);
+                    inputs.extend(args);
+                }
+                ExprKind::Tuple(xs) | ExprKind::Vector(xs) | ExprKind::Closure { captures: xs, .. } => {
+                    inputs.extend(xs)
+                }
+                ExprKind::Project { tuple, .. } | ExprKind::Coerce(tuple) => inputs.push(*tuple),
+                ExprKind::If {
+                    condition,
+                    then_value,
+                    else_value,
+                } => inputs.extend([*condition, *then_value, *else_value]),
+                ExprKind::Array(a) => {
+                    fn array(a: &Array, inputs: &mut Vec<ExprId>) {
+                        match a {
+                            Array::Value(e) => inputs.push(*e),
+                            Array::Literal(xs) => inputs.extend(xs),
+                            Array::Zip(xs) => xs.iter().for_each(|a| array(a, inputs)),
+                            Array::Range { start, len, step } => {
+                                inputs.extend([Some(*start), Some(*len), *step].into_iter().flatten())
+                            }
+                        }
+                    }
+                    array(a, &mut inputs);
+                }
+                _ => {}
+            }
+            let result = kind == binding || inputs.into_iter().any(|e| depends(data, e, binding, memo));
+            memo.insert(id, result);
+            result
+        }
+        let mut memo = BTreeMap::new();
+        frame.expressions.retain(|&id, _| !depends(self.data, id, binding, &mut memo));
     }
 
     fn source(&self, id: ExprId, frame: &Frame) -> Value {

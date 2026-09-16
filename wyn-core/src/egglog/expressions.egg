@@ -81,6 +81,9 @@
 (relation Destination (OperationKey Expr))
 ; Order constraints are retained independently of value dependencies.
 (relation ExecutionOrder (OperationKey OperationKey))
+; Evaluation sites chosen by dependency traversal after arithmetic extraction.
+(relation EvaluateBefore (OperationKey ExprKey))
+(relation EvaluateBeforeSelect (ExprKey ExprKey))
 
 (ruleset expressions)
 (relation ValueVector (Exprs))

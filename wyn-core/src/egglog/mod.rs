@@ -26,12 +26,14 @@ mod extract;
 pub mod from_tlc;
 mod fusion;
 mod optimize;
+mod regions;
 mod rewrite;
 mod scalar;
 mod schedule;
 mod snapshot;
 mod timing;
 mod to_ssa;
+mod visit;
 
 pub use blocks::{
     BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, GridData,

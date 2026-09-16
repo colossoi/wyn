@@ -32,7 +32,7 @@ pub(super) fn fuse_one(graph: &EGraph, data: &mut AssociatedData) -> Result<bool
     {
         return Err(invalid("fusion candidate does not belong to the selected graph"));
     }
-    let summary = super::snapshot::analyze(data);
+    let summary = super::snapshot::fusion(data);
     let retained = summary.observed.contains(&producer)
         || summary.uses.iter().any(|&(p, c, _)| p == producer && c != consumer);
     match family {

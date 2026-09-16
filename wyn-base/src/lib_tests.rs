@@ -1,4 +1,4 @@
-use super::{IdArena, IdSource, Interner};
+use super::{IdArena, IdSource, InternIndex, Interner};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TestId(u32);
@@ -83,4 +83,23 @@ fn interner_checks_equality_when_hashes_collide() {
     assert_ne!(first, second);
     assert_eq!(values.intern(&Collision(1)), first);
     assert_eq!(values.resolve(second), &Collision(2));
+}
+
+#[test]
+fn interning_an_existing_arena_preserves_ids_and_allocation_state() {
+    let mut arena = IdArena::<TestId, String>::new();
+    let reserved = arena.alloc_id();
+    let first = arena.alloc("first".into());
+    let duplicate = arena.alloc("first".into());
+    arena.insert(reserved, "reserved".into());
+    let mut index = InternIndex::from_arena(&arena);
+    assert_eq!(index.intern(&mut arena, "first"), duplicate);
+    assert_eq!(index.intern(&mut arena, "reserved"), reserved);
+    let next = index.intern(&mut arena, "next");
+    assert_eq!(next, TestId(3));
+    assert_eq!(index.intern(&mut arena, "next"), next);
+    assert_eq!(arena.len(), 4);
+    assert_eq!(arena[first], "first");
+    let rebuilt = InternIndex::from_arena(&arena);
+    assert_eq!(rebuilt.get("next"), Some(next));
 }

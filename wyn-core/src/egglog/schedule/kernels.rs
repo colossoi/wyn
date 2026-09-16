@@ -201,31 +201,15 @@ impl Planner<'_> {
     ) -> DispatchId {
         // These dependencies are static sites within the same lexical scope.
         // Host CFG edges handle conditional paths, calls, and repeated launches.
-        let mut pending = vec![op];
-        let mut seen = BTreeSet::new();
         let mut dependencies = BTreeSet::new();
-        while let Some(current) = pending.pop() {
-            if !seen.insert(current) {
-                continue;
-            }
+        self.summary.walk_dependencies(&self.data, op, |current| {
             if let Some(previous) = self.dispatches.get(&current).and_then(|ds| ds.last()) {
                 dependencies.insert(*previous);
             }
-            pending.extend(
-                self.summary.dependencies.iter().filter_map(|&(consumer, producer)| {
-                    (consumer == current
-                        && self.data.operations[producer].region == self.data.operations[op].region)
-                        .then_some(producer)
-                }),
-            );
-            pending.extend(self.summary.effects.iter().filter_map(|&(before, after)| {
-                (after == current && self.data.operations[before].region == self.data.operations[op].region)
-                    .then_some(before)
-            }));
             if let Some(buffers) = self.outputs.get(&current) {
                 reads.extend(buffers);
             }
-        }
+        });
         for &capture in &captures {
             if let Some(buffer) = self.external_buffer(capture) {
                 reads.insert(buffer);

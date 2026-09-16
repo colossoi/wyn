@@ -36,6 +36,7 @@ pub fn to_ssa(
         return Err(error("schedule the program before lowering to SSA"));
     }
     let mut compiler = Compiler {
+        placements: super::scalar::placement_index(data),
         data,
         functions: vec![],
         specializations: vec![],
@@ -160,6 +161,7 @@ struct Specialization {
     result: Option<Vec<Type>>,
 }
 struct Compiler<'a> {
+    placements: BTreeMap<super::PlacementSite, Vec<ExprId>>,
     data: &'a AssociatedData,
     functions: Vec<ssa::types::Function>,
     specializations: Vec<Specialization>,

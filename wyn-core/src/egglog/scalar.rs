@@ -7,11 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 mod fold;
 mod hoist;
 mod read;
-pub(super) use hoist::at as placements;
+pub(super) use hoist::index as placement_index;
 
 /// Run after expression insertion and before scheduling. Arithmetic uses equality
-/// saturation and cost-based extraction; hoisting records evaluation sites separately
-/// from expression identity. Memory reads and opaque calls are never speculated.
+/// saturation and cost-based extraction; hoisting traverses the extracted DAG and
+/// structured regions to place computations separately from expression identity.
+/// Memory reads and opaque calls are never speculated.
 pub fn optimize_expressions(mut converted: Converted) -> Result<Converted, OptimizeError> {
     if converted.expression_program.is_none() || !converted.data.blocks.is_empty() {
         return Err(error("insert expressions first, and optimize before scheduling"));
@@ -19,10 +20,8 @@ pub fn optimize_expressions(mut converted: Converted) -> Result<Converted, Optim
     simplify(&mut converted.data)?;
     hoist::run(&mut converted.data)?;
     let _output = timing::span("export optimized expressions");
-    let (mut program, live) = expressions::program(&converted.data, &[])?;
+    let (mut program, _) = expressions::program(&converted.data, &[])?;
     program.extend(expressions::parse(include_str!("arithmetic.egg"))?);
-    program.extend(expressions::parse(include_str!("hoist.egg"))?);
-    program.extend(expressions::parse(&hoist::facts(&converted.data, &live)?)?);
     program.extend(expressions::parse(&hoist::output(&converted.data))?);
     converted.program = expressions::parse(include_str!("ids.egg"))?;
     converted.program.extend(program.iter().cloned());
@@ -89,38 +88,10 @@ fn simplify(data: &mut AssociatedData) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-/// Direct children only: executions and lexical lambda bodies are separate graphs.
-fn children(data: &AssociatedData, id: ExprId) -> Vec<ExprId> {
-    match &data.expressions[id].kind {
-        ExprKind::PureApp { function, args } => {
-            std::iter::once(*function).chain(args.iter().copied()).collect()
-        }
-        ExprKind::Tuple(xs) | ExprKind::Vector(xs) | ExprKind::Closure { captures: xs, .. } => xs.clone(),
-        ExprKind::Coerce(x) | ExprKind::Project { tuple: x, .. } => vec![*x],
-        ExprKind::If {
-            condition,
-            then_value,
-            else_value,
-        } => vec![*condition, *then_value, *else_value],
-        ExprKind::Array(a) => {
-            fn array(a: &Array, out: &mut Vec<ExprId>) {
-                match a {
-                    Array::Value(x) => out.push(*x),
-                    Array::Literal(xs) => out.extend(xs),
-                    Array::Zip(xs) => xs.iter().for_each(|a| array(a, out)),
-                    Array::Range { start, len, step } => {
-                        out.extend([Some(*start), Some(*len), *step].into_iter().flatten())
-                    }
-                }
-            }
-            let mut out = vec![];
-            array(a, &mut out);
-            out
-        }
-        _ => vec![],
-    }
-}
-
 #[cfg(test)]
 #[path = "scalar_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "scalar_scaling_tests.rs"]
+mod scaling_tests;

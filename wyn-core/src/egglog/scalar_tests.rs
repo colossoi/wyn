@@ -223,6 +223,20 @@ fn common_if_and_zero_trip_safety() {
 }
 
 #[test]
+fn while_header_reuses_syntax_without_reusing_the_previous_iterations_value() {
+    let c = compile("entry main(n:i32) i32 = let (_,value)=loop (i,total)=(0,0) while i<n do (i+1,total+(loop v=0 for j<3 do v+i*i+j)) in value");
+    assert!(!c.data.placements.is_empty());
+    let c = schedule(c).unwrap();
+    for n in [0, 1, 3] {
+        assert_eq!(
+            run(&c.data, vec![Value::Int(n)]),
+            vec![Value::Int((0..n).map(|i| 3 * i * i + 3).sum())]
+        );
+    }
+    wgsl(&c.data);
+}
+
+#[test]
 fn soac_capture_computations_move_out_and_refresh_between_launches() {
     let c = compile("entry main(xs:[4]i32, n:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i,acc)");
     assert!(c.data.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.data.operations[op].kind, OperationKind::Screma { .. }))));
@@ -245,6 +259,127 @@ fn nested_soac_capture_hoisting_preserves_element_dependence() {
         run(&c.data, vec![Value::array(0..5), Value::Int(2)])[0].ints(),
         (0..5).map(|x| 3 + 3 * x * x + 12).collect::<Vec<_>>()
     );
+    wgsl(&c.data);
+}
+
+#[test]
+fn capture_bounds_stop_at_the_loop_binding_that_varies() {
+    let c = compile("entry main(xs:[4]i32, n:i32, bias:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i+bias*bias,acc)");
+    let d = &c.data;
+    let bias = d.regions[root(d)].parameters[2];
+    let outer =
+        d.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Loop { .. })).unwrap().0;
+    let outside: Vec<_> =
+        d.placements.values().filter(|p| p.before == PlacementSite::Operation(*outer)).collect();
+    assert!(
+        !outside.is_empty(),
+        "capture-only work should leave both the map and loop"
+    );
+    for p in outside {
+        let ExprKind::PureApp { args, .. } = &d.expressions[p.expression].kind else {
+            panic!("product")
+        };
+        assert!(
+            args.iter().all(|&e| d.expressions[e].kind == ExprKind::Parameter(bias)),
+            "iteration-dependent work cannot cross the outer loop"
+        );
+    }
+    assert!(
+        d.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op)
+        if matches!(d.operations[op].kind, OperationKind::Screma { .. })))
+    );
+    let c = schedule(c).unwrap();
+    for n in [0, 1, 5] {
+        let add: i64 = (0..n).map(|i| i * i + 9).sum();
+        assert_eq!(
+            run(&c.data, vec![Value::array(1..5), Value::Int(n), Value::Int(3)])[0].ints(),
+            (1..5).map(|x| x + add).collect::<Vec<_>>()
+        );
+    }
+    wgsl(&c.data);
+}
+
+#[test]
+fn operation_result_bounds_preserve_order_and_branch_scope() {
+    for source in [
+        "entry main(xs:[]i32, n:i32) i32 = loop total=0 for i<n do let v=xs[i] in total+(loop acc=0 for j<3 do acc+v*v+j)",
+        "entry main(xs:[]i32, n:i32) i32 = if n>0 then let v=xs[0] in (loop acc=0 for j<3 do acc+v*v+j) else 0",
+    ] {
+        let c = compile(source);
+        let read = c.data.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Index { .. })).unwrap().0;
+        assert!(!c.data.placements.is_empty(), "reuse the value after the read, before the inner loop");
+        for p in c.data.placements.values() {
+            let PlacementSite::Operation(op) = p.before else { panic!("loop placement") };
+            assert_eq!(c.data.operations[op].region, c.data.operations[*read].region,
+                "a binding cannot escape its defining loop/branch");
+        }
+        let c = schedule(c).unwrap();
+        assert_eq!(run(&c.data, vec![Value::array([]), Value::Int(0)]), vec![Value::Int(0)]);
+        assert_eq!(run(&c.data, vec![Value::array([4]), Value::Int(1)]), vec![Value::Int(51)]);
+        wgsl(&c.data);
+    }
+}
+
+#[test]
+fn shared_callback_bounds_translate_captures_for_each_invocation() {
+    let mut c = input("entry main(xs:[2]i32, ys:[3]i32, a:i32, b:i32) ([2]i32,[3]i32) = (map(|x:i32|x+a*a,xs),map(|x:i32|x+b*b,ys))");
+    let ops: Vec<_> = c
+        .data
+        .operations
+        .iter()
+        .filter_map(|(&id, op)| matches!(op.kind, OperationKind::Screma { .. }).then_some(id))
+        .collect();
+    assert_eq!(ops.len(), 2);
+    let OperationKind::Screma { form, .. } = &c.data.operations[ops[0]].kind else {
+        panic!("map")
+    };
+    let SoacBody::Apply { region: shared, .. } = form.pre else {
+        panic!("callback")
+    };
+    // Identical code, but separate actual arguments; sharing syntax must not
+    // equate the two invocations' capture values.
+    let OperationKind::Screma { form, .. } = &mut c.data.operations[ops[1]].kind else {
+        panic!("map")
+    };
+    let SoacBody::Apply { region, .. } = &mut form.pre else {
+        panic!("callback")
+    };
+    *region = shared;
+    let c = optimize_expressions(c).unwrap();
+    assert!(c.data.placements.values().any(|p| p.before == PlacementSite::Operation(ops[0])));
+    assert!(c.data.placements.values().any(|p| p.before == PlacementSite::Operation(ops[1])));
+    let regions: BTreeSet<_> = ops
+        .iter()
+        .map(|&op| {
+            let OperationKind::Screma { form, .. } = &c.data.operations[op].kind else {
+                panic!("map")
+            };
+            let SoacBody::Apply { region, .. } = form.pre else {
+                panic!("callback")
+            };
+            region
+        })
+        .collect();
+    assert_eq!(
+        regions.len(),
+        1,
+        "share specialized code, while preserving different actual captures"
+    );
+    let c = schedule(c).unwrap();
+    let values = run(
+        &c.data,
+        vec![
+            Value::array([1, 2]),
+            Value::array([3, 4, 5]),
+            Value::Int(2),
+            Value::Int(5),
+        ],
+    );
+    let Value::Tuple(arrays) = &values[0] else {
+        panic!("two outputs")
+    };
+    assert_eq!(arrays[0].ints(), vec![5, 6]);
+    assert_eq!(arrays[1].ints(), vec![28, 29, 30]);
     wgsl(&c.data);
 }
 
@@ -308,7 +443,7 @@ fn cancellation_drops_dependencies_in_the_final_fact_base() {
     );
     let mut graph = EGraph::default();
     graph.run_program(c.program).unwrap();
-    graph.parse_and_run_program(None, "(check (RegionResult r 0 e) (= (Dependencies e) (set-empty))) (fail (check (RegionResult r 0 e) (ExprParameter e p)))").unwrap();
+    graph.parse_and_run_program(None, "(check (RegionResult r 0 (Typed t (Int \"0\")))) (fail (check (RegionResult r 0 e) (ExprParameter e p)))").unwrap();
 }
 
 #[test]

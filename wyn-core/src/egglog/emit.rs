@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 
 pub(super) fn program(data: &AssociatedData) -> String {
     let _timing = super::timing::span("emit fusion facts");
-    let snapshot = super::timing::time("analyze dependencies", || snapshot::analyze(data));
+    let snapshot = super::timing::time("analyze dependencies", || snapshot::fusion(data));
     let scopes: BTreeSet<_> = snapshot
+        .execution
         .live
         .iter()
         .filter_map(|&op| {
@@ -18,8 +19,13 @@ pub(super) fn program(data: &AssociatedData) -> String {
             .then_some(data.operations[op].region)
         })
         .collect();
-    let included: BTreeSet<_> =
-        snapshot.live.iter().copied().filter(|&op| scopes.contains(&data.operations[op].region)).collect();
+    let included: BTreeSet<_> = snapshot
+        .execution
+        .live
+        .iter()
+        .copied()
+        .filter(|&op| scopes.contains(&data.operations[op].region))
+        .collect();
     let mut output = SCHEMA.to_owned();
     let mut emit = |fact: String| {
         output.push_str(&fact);
@@ -32,41 +38,41 @@ pub(super) fn program(data: &AssociatedData) -> String {
         if super::fusion::demands(data, id).is_some() {
             emit(format!("(IndexedDemands {op})"));
         }
-        if snapshot.discardable.contains(&id) {
+        if snapshot.execution.discardable.contains(&id) {
             emit(format!("(Safe {op})"));
         }
-        if snapshot.movable.contains(&id) {
+        if snapshot.execution.movable.contains(&id) {
             emit(format!("(Movable {op})"));
         }
         match &operation.kind {
             OperationKind::Filter { map, body, .. } => {
                 emit(format!("(Filter {op})"));
-                if snapshot.movable.contains(&id)
+                if snapshot.execution.movable.contains(&id)
                     && super::fusion::masked(&mut data.clone(), id, id).is_some()
                 {
                     emit(format!("(Maskable {op} {op})"));
                 }
-                if snapshot::safe_body(map, &snapshot.safe_regions)
-                    && snapshot::safe_body(body, &snapshot.safe_regions)
+                if snapshot::safe_body(map, &snapshot.execution.safe_regions)
+                    && snapshot::safe_body(body, &snapshot.execution.safe_regions)
                 {
                     emit(format!("(ElementConsumer {op})"));
                 }
             }
             OperationKind::Scatter { body, .. } => {
-                if snapshot::safe_body(body, &snapshot.safe_regions) {
+                if snapshot::safe_body(body, &snapshot.execution.safe_regions) {
                     emit(format!("(ElementConsumer {op})"));
                 }
             }
             OperationKind::ReduceByIndex { map, body, .. } => {
-                if snapshot::safe_body(map, &snapshot.safe_regions)
-                    && snapshot::safe_body(body, &snapshot.safe_regions)
+                if snapshot::safe_body(map, &snapshot.execution.safe_regions)
+                    && snapshot::safe_body(body, &snapshot.execution.safe_regions)
                 {
                     emit(format!("(ElementConsumer {op})"));
                 }
             }
             OperationKind::BucketScatter { body, shape, .. } => {
                 if data.bucket_shapes[*shape].domain_rank == 1
-                    && snapshot::safe_body(body, &snapshot.safe_regions)
+                    && snapshot::safe_body(body, &snapshot.execution.safe_regions)
                 {
                     emit(format!("(ElementConsumer {op})"));
                 }
@@ -89,10 +95,10 @@ pub(super) fn program(data: &AssociatedData) -> String {
             if matches!(form.post, SoacBody::Identity(_)) {
                 emit(format!("(IdentityPost {op})"));
             }
-            if snapshot.discardable.contains(&id) {
+            if snapshot.execution.discardable.contains(&id) {
                 emit(format!("(Safe {op})"));
             }
-            if snapshot.movable.contains(&id) {
+            if snapshot.execution.movable.contains(&id) {
                 emit(format!("(Movable {op})"));
             }
             for (slot, input) in inputs.iter().enumerate() {
@@ -109,7 +115,7 @@ pub(super) fn program(data: &AssociatedData) -> String {
             }
         }
     }
-    for &(consumer, producer) in &snapshot.dependencies {
+    for (consumer, producer) in snapshot.execution.dependencies() {
         if included.contains(&consumer) && included.contains(&producer) {
             emit(format!("(DependsOn {} {})", consumer.egglog(), producer.egglog()));
         }
@@ -150,10 +156,8 @@ pub(super) fn program(data: &AssociatedData) -> String {
             }
         }
     }
-    for &(before, after) in &snapshot.effects {
-        if included.contains(&before) && included.contains(&after) {
-            emit(format!("(EffectBefore {} {})", before.egglog(), after.egglog()));
-        }
+    for (before, after) in snapshot.execution.effects.pairs(&included) {
+        emit(format!("(EffectBefore {} {})", before.egglog(), after.egglog()));
     }
     for &(producer, consumer, role) in &snapshot.uses {
         if included.contains(&producer) {

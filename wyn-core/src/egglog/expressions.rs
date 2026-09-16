@@ -63,10 +63,8 @@ pub(super) fn program(
     while let Some(region) = emitter.pending.pop_front() {
         emitter.region(region)?;
     }
-    for &(before, after) in &summary.effects {
-        if emitter.operations.contains(&before) && emitter.operations.contains(&after) {
-            emitter.fact(format!("(ExecutionOrder {} {})", before.egglog(), after.egglog()));
-        }
+    for (before, after) in summary.effects.pairs(&emitter.operations.clone()) {
+        emitter.fact(format!("(ExecutionOrder {} {})", before.egglog(), after.egglog()));
     }
     emitter.fact("(run-schedule (saturate (run expressions)))".into());
     drop(emit);

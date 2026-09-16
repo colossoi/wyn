@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod persistent_sets;
+
 use std::hash::Hash;
 use std::marker::PhantomData;
 
@@ -183,37 +185,50 @@ impl<'a, Id: From<u32> + Copy + Eq + Hash, T> IntoIterator for &'a mut IdArena<I
     }
 }
 
-/// Append-only bidirectional interner for values with compiler-assigned IDs.
+/// Value-to-ID index for an externally owned arena.
 ///
-/// Equal values share one ID. The arena provides ID-to-value resolution while
-/// the lookup map provides value-to-ID lookup and deduplication.
+/// Build once per rewrite session and allocate through this index thereafter.
+/// The caller must use the same arena throughout the session and must not
+/// mutate indexed values or allocate behind the index's back. Rebuild the index
+/// after such changes. This lets a sidecar retain ownership of its arenas.
 #[derive(Debug, Clone)]
-pub struct Interner<Id, T> {
-    arena: IdArena<Id, T>,
+pub struct InternIndex<Id, T> {
     by_value: LookupMap<T, Id>,
 }
 
-impl<Id, T> Interner<Id, T>
-where
-    Id: From<u32> + Copy + Eq + Hash,
-{
-    pub fn new() -> Self {
+impl<Id, T> Default for InternIndex<Id, T> {
+    fn default() -> Self {
         Self {
-            arena: IdArena::new(),
             by_value: LookupMap::new(),
         }
     }
+}
 
-    pub fn intern<Q>(&mut self, value: &Q) -> Id
+impl<Id, T> InternIndex<Id, T>
+where
+    Id: From<u32> + Copy + Eq + Hash,
+{
+    /// Index existing records without changing their IDs. If the arena contains
+    /// duplicates, the last record in iteration order becomes the lookup result.
+    pub fn from_arena(arena: &IdArena<Id, T>) -> Self
+    where
+        T: Clone + Eq + Hash,
+    {
+        Self {
+            by_value: arena.iter().map(|(&id, value)| (value.clone(), id)).collect(),
+        }
+    }
+
+    pub fn intern<Q>(&mut self, arena: &mut IdArena<Id, T>, value: &Q) -> Id
     where
         T: std::borrow::Borrow<Q> + Clone + Eq + Hash,
         Q: Eq + Hash + ToOwned<Owned = T> + ?Sized,
     {
-        if let Some(id) = self.by_value.get(value) {
-            return *id;
+        if let Some(id) = self.get(value) {
+            return id;
         }
         let value = value.to_owned();
-        let id = self.arena.alloc(value.clone());
+        let id = arena.alloc(value.clone());
         self.by_value.insert(value, id);
         id
     }
@@ -224,6 +239,44 @@ where
         Q: Eq + Hash + ?Sized,
     {
         self.by_value.get(value).copied()
+    }
+}
+
+/// Append-only bidirectional interner for values with compiler-assigned IDs.
+///
+/// Equal values share one ID. The arena provides ID-to-value resolution while
+/// the lookup map provides value-to-ID lookup and deduplication.
+#[derive(Debug, Clone)]
+pub struct Interner<Id, T> {
+    arena: IdArena<Id, T>,
+    index: InternIndex<Id, T>,
+}
+
+impl<Id, T> Interner<Id, T>
+where
+    Id: From<u32> + Copy + Eq + Hash,
+{
+    pub fn new() -> Self {
+        Self {
+            arena: IdArena::new(),
+            index: InternIndex::default(),
+        }
+    }
+
+    pub fn intern<Q>(&mut self, value: &Q) -> Id
+    where
+        T: std::borrow::Borrow<Q> + Clone + Eq + Hash,
+        Q: Eq + Hash + ToOwned<Owned = T> + ?Sized,
+    {
+        self.index.intern(&mut self.arena, value)
+    }
+
+    pub fn get<Q>(&self, value: &Q) -> Option<Id>
+    where
+        T: std::borrow::Borrow<Q> + Eq + Hash,
+        Q: Eq + Hash + ?Sized,
+    {
+        self.index.get(value)
     }
 
     pub fn resolve(&self, id: Id) -> &T {

@@ -41,6 +41,7 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let recipes = timing::time("select kernel recipes", || recipes(&converted.data, &summary))?;
     let plan = timing::span("build blocks and dispatches");
     let mut planner = Planner {
+        placements: super::scalar::placement_index(&converted.data),
         data: &mut converted.data,
         schedules,
         functions: BTreeMap::new(),
@@ -75,6 +76,7 @@ fn error(message: &str) -> OptimizeError {
 }
 
 struct Planner<'a> {
+    placements: BTreeMap<super::PlacementSite, Vec<ExprId>>,
     data: &'a mut AssociatedData,
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
     functions: BTreeMap<(RegionId, bool), BlockId>,
@@ -200,7 +202,9 @@ impl Planner<'_> {
         let previous_region = self.current_region.replace(region);
         self.data.blocks[block].source_regions.insert(region);
         for op in self.schedules.get(&region).cloned().unwrap_or_default() {
-            for value in super::scalar::placements(self.data, super::PlacementSite::Operation(op)) {
+            for value in
+                self.placements.get(&super::PlacementSite::Operation(op)).cloned().unwrap_or_default()
+            {
                 self.emit(block, Instruction::BindExpression(value, Value::Source(value)));
             }
             block = self.operation(op, block, device)?;

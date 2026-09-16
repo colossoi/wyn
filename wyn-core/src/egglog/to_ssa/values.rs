@@ -260,8 +260,12 @@ impl Body<'_, '_> {
                 else_value,
             } => {
                 let saved = self.environment.expressions.clone();
-                for value in
-                    crate::egglog::scalar::placements(data, crate::egglog::PlacementSite::Expression(id))
+                for value in self
+                    .compiler
+                    .placements
+                    .get(&crate::egglog::PlacementSite::Expression(id))
+                    .cloned()
+                    .unwrap_or_default()
                 {
                     let computed = self.expression(value)?;
                     self.environment.expressions.insert(value, computed);

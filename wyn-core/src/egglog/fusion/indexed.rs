@@ -12,7 +12,7 @@ pub(in crate::egglog) fn demands(
     if counts(form) != (0, 0) {
         return None;
     }
-    let summary = super::super::snapshot::analyze(data);
+    let summary = super::super::snapshot::fusion(data);
     if summary.observed.contains(&producer) {
         return None;
     }

@@ -32,7 +32,7 @@ pub(in crate::egglog) fn masked(
     };
     let parent = data.operations[producer].region;
     let only_count = producer == consumer;
-    let summary = super::super::snapshot::analyze(data);
+    let summary = super::super::snapshot::fusion(data);
     let mut lengths = BTreeSet::new();
     for &(p, c, role) in &summary.uses {
         if p != producer || role != super::super::snapshot::Role::Length {
