@@ -24,6 +24,30 @@ struct Loop {
 }
 
 impl Planner<'_> {
+    pub(super) fn scalar_dispatch(
+        &mut self,
+        op: OperationId,
+        host: BlockId,
+    ) -> Result<BlockId, OptimizeError> {
+        let captures = self.scalar_captures(op);
+        let kernel = self.kernel("scalar", &captures, 1);
+        let end = self.operation(op, kernel, true)?;
+        let result =
+            *self.operation_values.get(&op).ok_or_else(|| error("missing scalar result expression"))?;
+        let buffer = self.resources.slots[&(op, "scalar".into(), 0)];
+        if self.data.buffers[buffer].storage != Storage::Discarded {
+            self.emit(host, Instruction::Allocate(buffer));
+        }
+        self.store(end, buffer, Value::Int(0), Value::Source(result));
+        self.returns(end, vec![]);
+        self.dispatch(op, host, kernel, captures);
+        self.emit(
+            host,
+            Instruction::BindResult(op, Value::op("index", [Value::Buffer(buffer), Value::Int(0)])),
+        );
+        Ok(host)
+    }
+
     pub(super) fn parallel(&mut self, op: OperationId, host: BlockId) -> Result<BlockId, OptimizeError> {
         let previous = self.current_operation.replace(op);
         let Some(recipe) = self.recipes.get(&op).copied() else {
@@ -301,6 +325,52 @@ impl Planner<'_> {
             _ => {}
         }
         result.into_iter().collect()
+    }
+
+    // Capture external leaves, not whole expressions: branches and partial
+    // expressions must still execute inside the scalar invocation that owns them.
+    fn scalar_captures(&self, op: OperationId) -> Vec<ExprId> {
+        use super::super::data::ExprKind;
+        use super::super::visit::Operand;
+        let mut operations = vec![op];
+        let mut regions = BTreeSet::new();
+        let mut pending_regions = self.data.operations[op].kind.structured_regions();
+        let mut pending = vec![];
+        while let Some(r) = pending_regions.pop() {
+            if !regions.insert(r) {
+                continue;
+            }
+            let region = &self.data.regions[r];
+            pending.extend(&region.results);
+            for &child in &region.members {
+                operations.push(child);
+                pending_regions.extend(self.data.operations[child].kind.structured_regions());
+            }
+        }
+        for op in operations {
+            self.data.operations[op].kind.for_each_operand(&mut |operand| {
+                if let Operand::Value(_, e) = operand {
+                    pending.push(e);
+                }
+            });
+        }
+        let mut seen = BTreeSet::new();
+        let mut captures = BTreeSet::new();
+        while let Some(e) = pending.pop() {
+            if !seen.insert(e) {
+                continue;
+            }
+            match &self.data.expressions[e].kind {
+                ExprKind::Parameter(p) if !regions.contains(&self.data.parameters[*p].region) => {
+                    captures.insert(e);
+                }
+                ExprKind::OperationResult(op) if !regions.contains(&self.data.operations[*op].region) => {
+                    captures.insert(e);
+                }
+                kind => pending.extend(kind.children()),
+            }
+        }
+        captures.into_iter().collect()
     }
 }
 

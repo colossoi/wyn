@@ -560,7 +560,9 @@ fn adapt_pipeline_descriptor_for_wgsl(
                 access: Access::ReadOnly,
                 usage: BufferUsage::Input,
                 name,
-                resource: None,
+                // Parameter blocks belong to one entry, even when two entries
+                // both have a single parameter with the same source name.
+                resource: Some(format!("{}_parameters", block.entry_point)),
                 length: Some(BufferLen::Fixed {
                     bytes: u64::from(block.size),
                 }),

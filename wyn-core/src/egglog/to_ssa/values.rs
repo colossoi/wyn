@@ -91,7 +91,8 @@ impl Body<'_, '_> {
                     .get(op)
                     .cloned()
                     .ok_or_else(|| error(format!("unmaterialized capture {op:?}")))?;
-                self.value(&value)
+                let value = self.value(&value)?;
+                self.cast(value, &data.types[data.expressions[id].ty].ty)
             }
             ExprKind::Project { tuple, index } => {
                 if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
@@ -462,8 +463,10 @@ impl Body<'_, '_> {
         if value.ty == *ty || (value.ty.is_array() && ty.is_array()) {
             return Ok(value);
         }
-        if let (Type::Constructed(TypeName::Tuple(_), a), Type::Constructed(TypeName::Tuple(_), b)) =
-            (&value.ty, ty)
+        if let (
+            Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), a),
+            Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), b),
+        ) = (&value.ty, ty)
         {
             if a.len() == b.len() {
                 let mut fields = vec![];
@@ -471,7 +474,8 @@ impl Body<'_, '_> {
                     let field = self.field(value.clone(), i)?;
                     fields.push(self.cast(field, target)?);
                 }
-                return self.tuple(fields);
+                let ty = Type::Constructed(name.clone(), fields.iter().map(|f| f.ty.clone()).collect());
+                return self.op(OpTag::Tuple(fields.len()), fields, ty);
             }
         }
         if *ty == types::bool_type() {

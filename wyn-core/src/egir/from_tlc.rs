@@ -3645,7 +3645,7 @@ fn shape_preserving_result_ty(
     ))
 }
 
-fn build_entry_outputs(
+pub(crate) fn build_entry_outputs(
     entry: &interface::EntryDecl,
     ret_type: &Type<TypeName>,
     slot_value_tys: &[Option<Type<TypeName>>],

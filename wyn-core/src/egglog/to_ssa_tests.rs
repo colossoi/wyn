@@ -62,6 +62,22 @@ fn scalar_loop_reaches_the_existing_wgsl_backend() {
 }
 
 #[test]
+fn scalar_loop_result_is_stored_before_parallel_consumers() {
+    use crate::pipeline_descriptor::Pipeline;
+    let source = "entry main(xs: []i32, n: i32) []i32 =
+        let bias = loop acc = 0 for i < n do acc + i in
+        map(|x: i32| x + bias, xs)";
+    compile(source);
+    let output = pipeline(source);
+    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+        panic!("compute pipeline");
+    };
+    assert_eq!(p.stages.len(), 2);
+    assert_eq!(p.stages[0].workgroup_size, (1, 1, 1));
+    assert_eq!(p.stages[1].workgroup_size, (64, 1, 1));
+}
+
+#[test]
 fn scan_and_filter_emit_all_scheduled_kernels() {
     let scan = compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
@@ -130,6 +146,25 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
 #[test]
 fn vector_input_and_runtime_gather_after_scan_reach_wgsl() {
     compile(include_str!("../../../testfiles/gather_scan_chain.wyn"));
+}
+
+#[test]
+fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
+    use crate::pipeline_descriptor::{Pipeline, ShaderStage};
+    let source = include_str!("../../../testfiles/unified_triangle.wyn");
+    let module = compile(source);
+    assert_eq!(module.entry_points.len(), 2);
+    assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Vertex));
+    assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Fragment));
+    let output = pipeline(source);
+    let [Pipeline::Graphics(graphics)] = output.pipeline.pipelines.as_slice() else {
+        panic!("one graphics pipeline");
+    };
+    assert_eq!(graphics.stages.len(), 2);
+    assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Vertex)));
+    assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Fragment)));
+    assert!(!graphics.fragment_outputs.is_empty());
+    assert!(output.pipeline.source_results.is_empty());
 }
 
 fn pipeline(source: &str) -> crate::LoweredWgsl {

@@ -95,7 +95,9 @@ pub(super) fn inputs(
                     size,
                     resource: extract_storage_image_resource(source),
                 }
-            } else if matches!(decoration, Some(IoDecoration::BuiltIn(_))) {
+            } else if entry.declaration.entry_kind != interface::EntryKind::Compute
+                || matches!(decoration, Some(IoDecoration::BuiltIn(_)))
+            {
                 EntryInputKind::Value { decoration }
             } else {
                 let size = ssa::layout::type_byte_size(&storage_type(ty)?)

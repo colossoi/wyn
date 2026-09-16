@@ -21,6 +21,12 @@
 (relation KernelPhase (OperationKey String Extent i64))
 (relation PhaseEnds (OperationKey String String))
 (relation PhaseLink (OperationKey String String))
+; A scalar execution crossing dispatches runs once and publishes its value.
+; Its called regions belong to that invocation, not the host launch graph.
+(rule ((ScalarValue op t) (Site op r) (SplitRegion r))
+      ((KernelPhase op "scalar" (Fixed 1) 1) (PhaseEnds op "scalar" "scalar")) :ruleset schedule)
+(rule ((ScalarValue op t) (Phase (Stage op "scalar") r))
+      ((Produces (Stage op "scalar") (Result op 0))) :ruleset schedule)
 (rule ((Plan op (Elements)) (InputDomain op n))
       ((KernelPhase op "elements" n 64) (PhaseEnds op "elements" "elements")) :ruleset schedule)
 (rule ((Plan op (Totals)) (InputDomain op n))

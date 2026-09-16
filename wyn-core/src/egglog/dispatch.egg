@@ -13,8 +13,8 @@
 (rule ((Before a b)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
 (rule ((EffectInput gate op)) ((OrderEdge (End op) (Gate gate))) :ruleset dispatch)
 (rule ((EffectWait op gate)) ((OrderEdge (Gate gate) (Start op))) :ruleset dispatch)
-; Scalar control/calls have no kernel phase here. Preserve their direct source
-; dependencies as boundaries; SOAC-to-SOAC flow uses the actual result writer.
+; Preserve direct dependencies through scalar/control boundaries;
+; SOAC-to-SOAC flow uses the actual component writer.
 (rule ((SourceDependency after before) (ScalarSite after) (Site after r) (Site before r))
       ((OrderEdge (End before) (Start after))) :ruleset dispatch)
 (rule ((SourceDependency after before) (ScalarSite before) (Site after r) (Site before r))

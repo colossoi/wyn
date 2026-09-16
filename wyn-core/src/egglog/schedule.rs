@@ -42,6 +42,20 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let recipes = timing::time("read kernel recipes", || recipes(&graph))?;
     let resources = super::planning::read(&graph, &mut converted.data)?;
     let plan = timing::span("build blocks and dispatches");
+    let operation_values = converted
+        .data
+        .expressions
+        .iter()
+        .filter_map(
+            |(&id, e)| {
+                if let ExprKind::OperationResult(op) = e.kind {
+                    Some((op, id))
+                } else {
+                    None
+                }
+            },
+        )
+        .collect();
     let mut planner = Planner {
         placements: super::scalar::placement_index(&converted.data),
         data: &mut converted.data,
@@ -53,9 +67,12 @@ pub fn schedule(mut converted: Converted) -> Result<Converted, OptimizeError> {
         current_operation: None,
         recipes,
         current_region: None,
+        operation_values,
     };
     for (entry, definition) in entries {
-        let root = planner.definition(definition, false)?;
+        let device =
+            planner.data.entries[entry].declaration.entry_kind != crate::interface::EntryKind::Compute;
+        let root = planner.definition(definition, device)?;
         if let Some(interface) = &mut planner.data.blocks[root].interface {
             interface.kind = FunctionKind::Entry(entry);
         }
@@ -94,6 +111,7 @@ struct Planner<'a> {
     current_operation: Option<OperationId>,
     recipes: BTreeMap<OperationId, Recipe>,
     current_region: Option<RegionId>,
+    operation_values: BTreeMap<OperationId, ExprId>,
 }
 
 impl Planner<'_> {
@@ -235,6 +253,9 @@ impl Planner<'_> {
         block: BlockId,
         device: bool,
     ) -> Result<BlockId, OptimizeError> {
+        if !device && self.resources.stages.contains_key(&(op, "scalar".into())) {
+            return self.scalar_dispatch(op, block);
+        }
         let kind = self.data.operations[op].kind.clone();
         let owner = self.data.blocks[block].function;
         match kind {

@@ -7,15 +7,13 @@ use super::data::{
     SymbolId,
 };
 use super::{from_tlc::Converted, optimize::OptimizeError, snapshot, timing};
-use egglog_engine::{
-    ast::{Command, Parser},
-    EGraph,
-};
+use egglog_engine::ast::{Command, Parser};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Add typed expressions, region interfaces, structured control, and data-flow
 /// facts to the selected fusion result. Scalar values retain their globally
 /// interned sidecar identities. This pass does not rewrite or place expressions.
+/// Execution is deferred to scalar optimization or replay of the exported program.
 /// Run after `optimize` and before `schedule`; repeated insertion is an error.
 pub fn insert_expressions(mut converted: Converted) -> Result<Converted, OptimizeError> {
     let _timing = timing::span("insert expressions");
@@ -23,10 +21,6 @@ pub fn insert_expressions(mut converted: Converted) -> Result<Converted, Optimiz
         return Err(error("expression insertion must run once, before scheduling"));
     }
     let (commands, _) = program(&converted.data, &[])?;
-    let _load = timing::span("load and run expression graph");
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
-    graph.run_program(commands.clone())?;
     converted.program.extend(commands.iter().cloned());
     converted.expression_program = Some(commands);
     Ok(converted)

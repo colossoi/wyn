@@ -15,6 +15,10 @@
       ((Allocation value n)) :ruleset allocation)
 
 ; Capacity describes allocation, while LiveLength describes the usable view.
+(rule ((ScalarValue op t))
+      ((ResultSlot op 0) (ElementType (Result op 0) t)
+       (Capacity (Result op 0) (Fixed 1)) (FreshValue (Result op 0))
+       (BufferSlot op "scalar" 0 (Result op 0))) :ruleset allocation)
 (rule ((ArrayResult op i t) (InputDomain op n))
       ((ElementType (Result op i) t) (Capacity (Result op i) n)
        (LiveLength (Result op i) n) (FreshValue (Result op i))) :ruleset allocation)

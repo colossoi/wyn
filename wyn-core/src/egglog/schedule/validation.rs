@@ -24,7 +24,13 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
         if owner.function != block.function || (block.interface.is_some() && block.function != id) {
             return Err(error("invalid function adornment"));
         }
-        let device = matches!(function.kind, FunctionKind::Device | FunctionKind::Kernel(_));
+        let device = match function.kind {
+            FunctionKind::Device | FunctionKind::Kernel(_) => true,
+            FunctionKind::Entry(entry) => {
+                data.entries[entry].declaration.entry_kind != crate::interface::EntryKind::Compute
+            }
+            FunctionKind::Host => false,
+        };
         let Some(body) = data.bodies.get(block.body) else {
             return Err(error("missing block body"));
         };

@@ -32,15 +32,18 @@ pub fn to_ssa(
     if data.blocks.is_empty() && !data.entries.is_empty() {
         return Err(error("schedule the program before lowering to SSA"));
     }
-    if data.entries.values().any(|e| e.declaration.entry_kind != crate::interface::EntryKind::Compute) {
-        return Err(error("TODO: graphics pipeline publication on the egglog route"));
-    }
     let results = data
-        .bodies
+        .blocks
         .values()
-        .flat_map(|b| &b.instructions)
+        .filter(|b| {
+            matches!(
+                data.blocks[b.function].interface.as_ref().map(|f| &f.kind),
+                Some(FunctionKind::Host | FunctionKind::Entry(_))
+            )
+        })
+        .flat_map(|b| &data.bodies[b.body].instructions)
         .filter_map(|i| match i {
-            Instruction::BindResult(op, value) => Some((*op, value.clone())),
+            Instruction::BindResult(op, value) if materialized(value) => Some((*op, value.clone())),
             _ => None,
         })
         .collect();
@@ -65,9 +68,10 @@ pub fn to_ssa(
             FunctionKind::Kernel(size) => roots.push((id, owners[&id], size, false)),
             FunctionKind::Entry(entry) => {
                 if contains_dispatch(data, id) && !static_host(data, id) {
-                    return Err(error(
-                        "TODO: runtime publication of conditional or repeated host dispatches",
-                    ));
+                    return Err(error(format!(
+                        "TODO: runtime publication of conditional or repeated host dispatches in {} ({id:?})",
+                        data.entries[entry].declaration.name
+                    )));
                 }
                 if data.outputs.values().any(|o| o.entry == entry && o.scalar)
                     || !contains_dispatch(data, id)
@@ -85,7 +89,10 @@ pub fn to_ssa(
         compiler.used.clear();
         let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
         lower.entry = Some(owner);
-        lower.finish_outputs = finish;
+        let declaration = &data.entries[owner].declaration;
+        let compute = !finish || declaration.entry_kind == crate::interface::EntryKind::Compute;
+        lower.finish_outputs = finish && compute;
+        lower.graphics_outputs = !compute;
         // Root parameters are source ABI values. Kernel captures are resolved
         // lazily, so a combine phase does not declare unused input arrays.
         if finish {
@@ -96,21 +103,42 @@ pub fn to_ssa(
                 }
             }
         }
-        lower.visit(root)?;
+        lower.visit(root).map_err(|e| error(format!("{} ({root:?}): {e}", declaration.name)))?;
         let inputs = lower.inputs.clone();
-        let (body, _) = lower.finish()?;
+        let (body, return_types) = lower.finish()?;
+        let outputs = if compute {
+            vec![]
+        } else {
+            crate::egir::from_tlc::build_entry_outputs(
+                declaration,
+                &result_type(&return_types),
+                &[],
+                &inputs,
+                false,
+                &mut wyn_base::IdSource::new(),
+            )
+            .map_err(|e| error(e.to_string()))?
+        };
         let storage_bindings =
             compiler.used.iter().filter_map(|id| compiler.bindings.get(id).cloned()).collect();
         entries.push(ssa::types::EntryPoint {
             id: EntryId::from(root.as_u32()),
             name: entry_name(root),
             body,
-            execution_model: crate::flow::ExecutionModel::Compute {
-                local_size: (size[0], size[1], size[2]),
+            execution_model: if compute {
+                crate::flow::ExecutionModel::Compute {
+                    local_size: (size[0], size[1], size[2]),
+                }
+            } else {
+                match declaration.entry_kind {
+                    crate::interface::EntryKind::Vertex => crate::flow::ExecutionModel::Vertex,
+                    crate::interface::EntryKind::Fragment => crate::flow::ExecutionModel::Fragment,
+                    _ => return Err(error("unextracted graphics root")),
+                }
             },
             parameter_inputs: (0..inputs.len()).map(|i| vec![i]).collect(),
             inputs,
-            outputs: vec![],
+            outputs,
             storage_bindings,
             stage_descriptor_storage_accesses: Default::default(),
             pipeline_storage_accesses: Default::default(),
@@ -128,6 +156,15 @@ pub fn to_ssa(
 
 fn entry_name(root: BlockId) -> String {
     format!("egg_kernel_{}", root.as_u32())
+}
+
+fn materialized(value: &Value) -> bool {
+    match value {
+        Value::Buffer(_) => true,
+        Value::Field(value, _) => materialized(value),
+        Value::Tuple(values) | Value::Primitive(_, values) => values.iter().any(materialized),
+        _ => false,
+    }
 }
 
 /// The existing runtime executes a static sequence. Do not advertise a
@@ -270,6 +307,7 @@ struct Body<'a, 'b> {
     width: u32,
     entry: Option<super::EntryId>,
     finish_outputs: bool,
+    graphics_outputs: bool,
     inputs: Vec<crate::interface::EntryInput>,
 }
 impl<'a, 'b> Body<'a, 'b> {
@@ -316,6 +354,7 @@ impl<'a, 'b> Body<'a, 'b> {
             width,
             entry: None,
             finish_outputs: false,
+            graphics_outputs: false,
             inputs: vec![],
         })
     }
@@ -343,7 +382,7 @@ impl<'a, 'b> Body<'a, 'b> {
         }
         let types = self.return_types.unwrap_or_default();
         let mut body = self.builder.finish().map_err(builder_error)?;
-        body.return_ty = result_type(&types);
+        body.return_ty = if self.graphics_outputs { types::unit() } else { result_type(&types) };
         control::annotate_selections(&mut body)?;
         Ok((body, types))
     }
@@ -389,7 +428,33 @@ impl<'a, 'b> Body<'a, 'b> {
                     return Err(error("inconsistent function return types"));
                 }
                 self.return_types = Some(types);
-                let value = if values.is_empty() { None } else { Some(self.pack(values)?.value) };
+                let value = if values.is_empty() {
+                    None
+                } else if self.graphics_outputs {
+                    let packed = self.pack(values)?;
+                    let fields = match &packed.ty {
+                        Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => (0..fields
+                            .len())
+                            .map(|i| self.field(packed.clone(), i))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        _ => vec![packed],
+                    };
+                    for (index, field) in fields.into_iter().enumerate() {
+                        let result = self.builder.new_place(field.ty);
+                        self.builder
+                            .push_void_inst(InstKind::OutputSlot { index, result })
+                            .map_err(builder_error)?;
+                        self.builder
+                            .push_void_inst(InstKind::Store {
+                                place: result,
+                                value: field.value,
+                            })
+                            .map_err(builder_error)?;
+                    }
+                    None
+                } else {
+                    Some(self.pack(values)?.value)
+                };
                 self.builder.terminate(Terminator::Return(value)).map_err(builder_error)?;
             }
             Exit::Jump(edge) => {
@@ -488,16 +553,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.environment.expressions.insert(*id, v);
             }
             Instruction::BindResult(id, value) => {
-                if self.finish_outputs
-                    && matches!(
-                        self.compiler.data.operations[*id].kind,
-                        OperationKind::Screma { .. }
-                            | OperationKind::Filter { .. }
-                            | OperationKind::Scatter { .. }
-                            | OperationKind::BucketScatter { .. }
-                            | OperationKind::ReduceByIndex { .. }
-                    )
-                {
+                if self.finish_outputs && self.compiler.results.contains_key(id) {
                     return Ok(());
                 }
                 let v = self.value(value)?;

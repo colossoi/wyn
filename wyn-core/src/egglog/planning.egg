@@ -24,6 +24,11 @@
 (relation EffectWait (OperationKey i64))
 (relation SourceDependency (OperationKey OperationKey))
 (relation ScalarSite (OperationKey))
+(relation ScalarCandidate (OperationKey TypeKey))
+(function ContainsCollective (OperationKey) bool :merge (or old new))
+(function ScalarBoundary (OperationKey) bool :merge (or old new))
+(relation SplitRegion (RegionKey))
+(relation ScalarValue (OperationKey TypeKey))
 (relation InputDomain (OperationKey Extent))
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))
@@ -96,5 +101,7 @@
 (relation DispatchDependency (i64 i64))
 
 (ruleset residency)
+(ruleset structure)
+(ruleset classify)
 (ruleset allocation)
 (ruleset dispatch)

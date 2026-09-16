@@ -50,7 +50,51 @@ impl Compiler<'_> {
         let output_buffers: BTreeSet<_> = self.data.outputs.values().filter_map(|o| o.buffer).collect();
         let mut physical = vec![];
         let mut kernel_ids = BTreeMap::<DispatchId, KernelId>::new();
+        let mut graphics_groups = BTreeMap::new();
+        let symbol_names: BTreeMap<_, _> =
+            self.data.symbols.values().map(|s| (s.source.0, &s.name)).collect();
         for (owner, blocks) in by_owner {
+            let declaration = &self.data.entries[owner].declaration;
+            if declaration.entry_kind != crate::interface::EntryKind::Compute {
+                let group = declaration
+                    .graphics_group
+                    .as_ref()
+                    .ok_or_else(|| error("graphics entry is missing its operation identity"))?;
+                let key = (group.root.0, group.operation);
+                let index = *graphics_groups.entry(key).or_insert_with(|| {
+                    let index = pipeline.pipelines.len();
+                    pipeline.pipelines.push(Pipeline::Graphics(pd::GraphicsPipeline {
+                        invocation: group.invocation.clone(),
+                        stages: vec![],
+                        bindings: vec![],
+                        vertex_inputs: vec![],
+                        fragment_outputs: vec![],
+                    }));
+                    associations.push(vec![]);
+                    index
+                });
+                let Pipeline::Graphics(graphics) = &mut pipeline.pipelines[index] else {
+                    unreachable!()
+                };
+                for root in blocks {
+                    let entry = &entries[entry_indices[&EntryId::from(root.as_u32())]];
+                    graphics.stages.push(pd::GraphicsStage {
+                        entry_point: entry.name.clone(),
+                        owner: symbol_names
+                            .get(&group.root.0)
+                            .ok_or_else(|| error("missing graphics owner"))?
+                            .to_string(),
+                        stage: match entry.execution_model {
+                            crate::flow::ExecutionModel::Vertex => pd::ShaderStage::Vertex,
+                            crate::flow::ExecutionModel::Fragment => pd::ShaderStage::Fragment,
+                            _ => return Err(error("compute dispatch in graphics entry")),
+                        },
+                        uses: Default::default(),
+                    });
+                    associations[index].push(entry.id);
+                }
+                continue;
+            }
             let pipeline_index = pipeline.pipelines.len();
             let source_name = &self.data.entries[owner].declaration.name;
             let mut stages = vec![];
@@ -211,7 +255,7 @@ impl Compiler<'_> {
                 name: e.name.clone(),
                 execution_model: e.execution_model.clone(),
                 inputs: e.inputs.clone(),
-                outputs: vec![],
+                outputs: e.outputs.clone(),
                 storage_bindings: e.storage_bindings.clone(),
             })
             .collect();
@@ -222,7 +266,7 @@ impl Compiler<'_> {
         // The shared publisher deliberately leaves storage traffic to the
         // finalized plan; it adds only non-storage interfaces itself.
         for (index, p) in pipeline.pipelines.iter_mut().enumerate() {
-            let Pipeline::Compute(p) = p else { unreachable!() };
+            let Pipeline::Compute(p) = p else { continue };
             let slots: BTreeMap<_, _> = p
                 .bindings
                 .iter()
@@ -253,8 +297,12 @@ impl Compiler<'_> {
             }
         }
         pipeline.publish_stage_binding_uses(&publications, &associations);
+        pipeline.publish_graphics_io(&publications, &associations);
         for (index, p) in pipeline.pipelines.iter_mut().enumerate() {
-            let Pipeline::Compute(p) = p else { unreachable!() };
+            let bindings = match p {
+                Pipeline::Compute(p) => &mut p.bindings,
+                Pipeline::Graphics(p) => &mut p.bindings,
+            };
             let outputs: BTreeSet<_> = pipeline
                 .source_results
                 .iter()
@@ -262,7 +310,7 @@ impl Compiler<'_> {
                 .map(|o| (o.set, o.binding))
                 .collect();
             let mut union = crate::LookupMap::new();
-            for b in &mut p.bindings {
+            for b in bindings {
                 if let pd::Binding::StorageBuffer {
                     set,
                     binding,

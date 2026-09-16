@@ -30,7 +30,7 @@ pub(super) const RULES: &str = concat!(
 );
 const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
 pub(super) const RUN: &str =
-    "(run-schedule (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch))))";
+    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))))";
 
 /// Return replayable planning commands and the same evaluated graph used by the
 /// recipe reader. ExprKey/TypeKey are shared with the separately loaded expression
@@ -155,6 +155,9 @@ fn facts(
     let symbols: BTreeMap<_, _> = data.definitions.values().map(|d| (d.symbol, d.body)).collect();
     for (&id, entry) in &data.entries {
         regions.insert(data.definitions[entry.definition].body);
+        if entry.declaration.entry_kind != crate::interface::EntryKind::Compute {
+            continue;
+        }
         writeln!(
             out,
             "(HostRoot {} {})",
@@ -167,6 +170,19 @@ fn facts(
         let op = &data.operations[id];
         regions.insert(op.region);
         let key = id.egglog();
+        let collective = matches!(
+            op.kind,
+            OperationKind::Screma { .. }
+                | OperationKind::Filter { .. }
+                | OperationKind::Scatter { .. }
+                | OperationKind::BucketScatter { .. }
+                | OperationKind::ReduceByIndex { .. }
+        );
+        writeln!(
+            out,
+            "(set (ContainsCollective {key}) {collective})\n(set (ScalarBoundary {key}) false)"
+        )
+        .unwrap();
         writeln!(out, "(Site {key} {})", op.region.egglog()).unwrap();
         for r in op.kind.structured_regions() {
             regions.insert(r);
@@ -261,6 +277,11 @@ fn facts(
             }
             _ => {
                 writeln!(out, "(ScalarSite {key})").unwrap();
+                if data.types[op.ty].ty == crate::types::bool_type()
+                    || crate::ssa::layout::type_byte_size(&data.types[op.ty].ty).is_some_and(|n| n > 0)
+                {
+                    writeln!(out, "(ScalarCandidate {key} {})", ty(op.ty)).unwrap();
+                }
                 None
             }
         };
@@ -380,13 +401,18 @@ fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>> {
     let entries: Vec<_> =
         data.entries.iter().map(|(&id, e)| (id, data.definitions[e.definition].body)).collect();
     for (entry, region) in entries {
+        if data.entries[entry].declaration.entry_kind != crate::interface::EntryKind::Compute {
+            continue;
+        }
         for e in data.regions[region].results.clone() {
             let mut ty = &data.types[data.expressions[e].ty].ty;
             while let Type::Constructed(TypeName::Existential(_), fields) = ty {
                 ty = &fields[0];
             }
             let fields = match ty {
-                Type::Constructed(TypeName::Unit | TypeName::SideEffect, _) => continue,
+                Type::Constructed(TypeName::Unit | TypeName::SideEffect | TypeName::StorageTexture, _) => {
+                    continue
+                }
                 Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => Some(fields.clone()),
                 _ => None,
             };
