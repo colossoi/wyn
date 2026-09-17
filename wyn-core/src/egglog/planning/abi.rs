@@ -1,20 +1,20 @@
 //! Source interface facts and final ABI readout. No generated bodies are re-imported.
 use crate::egglog::abi::{error, storage_type};
-use crate::egglog::blocks::Storage;
+use crate::egglog::blocks::{Storage, Value};
 use crate::egglog::data::{
     BlockId, BufferId, DispatchId, EntryData, EntryId, OutputData, OutputId, ParameterId, TypeData, TypeId,
 };
 use crate::egglog::planning::{number, rows};
 use crate::egglog::{OptimizeError, Program, Scheduled};
 use crate::interface::{
-    Attribute, EntryInput, EntryInputKind, StorageBindingDecl, StorageLayout, StorageRole,
+    Attribute, EntryInput, EntryInputKind, EntryKind, StorageBindingDecl, StorageLayout, StorageRole,
 };
-use crate::pipeline_descriptor::{BufferLen, DispatchSize, HostSizeInput, HostSizeScalar};
+use crate::pipeline_descriptor::{BufferLen, DispatchLen, DispatchSize, HostSizeInput, HostSizeScalar};
 use crate::ssa::layout::{block_layout, storage_elem_stride, type_byte_size};
 use crate::types::{Type, TypeExt, TypeName};
 use crate::{BindingRef, ResourceAccess};
 use egglog_engine::sort::S;
-use egglog_engine::{EGraph, Error, FullState, Value as EggValue, Write};
+use egglog_engine::{EGraph, Error, FullState, Read, Value as EggValue, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use wyn_base::IdArena;
 
@@ -40,7 +40,24 @@ pub(in crate::egglog) fn facts(
                         (i64::from(binding.set), i64::from(binding.binding)),
                     )?;
                     sink.add("AbiStorage", (value, binding_key, i64::from(stride)))?;
+                    let length = sink.add("AbiBufferLength", (binding_key, i64::from(stride)))?;
+                    sink.add("AbiArrayLength", (value, length))?;
                 }
+            }
+            if let EntryInputKind::PushConstant { slot } = input.kind {
+                if matches!(
+                    input.ty,
+                    Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
+                ) {
+                    sink.add("AbiParameterCount", (value, i64::from(slot.offset)))?;
+                }
+            }
+            if let Some((binding, ..)) = input.storage_image_binding() {
+                let binding = sink.add(
+                    "InputBinding",
+                    (i64::from(binding.set), i64::from(binding.binding)),
+                )?;
+                sink.add("AbiImage", (value, binding))?;
             }
             if let EntryInputKind::Uniform { binding } = input.kind {
                 uniform(sink, value, &input.ty, binding, 0, &input.name, uniforms)?;
@@ -273,55 +290,189 @@ pub(in crate::egglog) fn read(
         status.is_ok()
     })?;
     status?;
-    let mut capacities = BTreeMap::new();
-    rows(graph, "AbiFixedCapacity", |a| {
-        capacities.insert(
-            buffers[&a[0]],
-            BufferLen::Fixed {
-                bytes: graph.value_to_base::<i64>(a[1]) as u64,
-            },
-        );
-        Ok(())
+    let bindings = &mut data.state.abi.bindings;
+    let mut status = Ok(());
+    graph.function_entries_while("BufferCapacity", |entry| {
+        status = (|| {
+            let Some(binding) = bindings.get_mut(&buffers[&entry.inputs[0]]) else {
+                return Err(error("capacity without binding"));
+            };
+            binding.length = Some(capacity(graph, entry.output, &binding_ids)?);
+            Ok(())
+        })();
+        status.is_ok()
     })?;
-    rows(graph, "AbiInputCapacity", |a| {
-        capacities.insert(
-            buffers[&a[0]],
-            BufferLen::LikeInput {
-                set: binding_ids[&a[1]].set,
-                binding: binding_ids[&a[1]].binding,
-                elem_bytes: number(graph, a[2])?,
-                src_elem_bytes: number(graph, a[3])?,
-            },
-        );
-        Ok(())
-    })?;
-    let mut capacity_inputs: BTreeMap<BufferId, BTreeSet<HostSizeInput>> = BTreeMap::new();
-    rows(graph, "AbiCapacityInput", |a| {
-        capacity_inputs
-            .entry(buffers[&a[0]])
-            .or_default()
-            .insert(uniforms[number(graph, a[1])? as usize].clone());
-        Ok(())
-    })?;
-    for (&id, binding) in &mut data.state.abi.bindings {
-        let Some(stride) = storage_elem_stride(&binding.elem_ty) else {
-            return Err(error("buffer element has no byte layout"));
+    status?;
+    rows(graph, "AbiHostCapacityInput", |a| {
+        let Some(binding) = bindings.get_mut(&buffers[&a[0]]) else {
+            return Err(error("capacity without binding"));
         };
-        // TODO: extend the shared ABI with checked capacity formulas; this is
-        // the explicit host-provided policy for formulas it cannot yet encode.
-        binding.length = Some(capacities.remove(&id).unwrap_or_else(|| BufferLen::HostProvided {
-            inputs: capacity_inputs.remove(&id).unwrap_or_default().into_iter().collect(),
-            elem_bytes: stride,
-        }));
+        let Some(BufferLen::HostProvided { inputs, .. }) = &mut binding.length else {
+            return Err(error("host-size input without a host-provided capacity"));
+        };
+        inputs.push(uniforms[number(graph, a[1])? as usize].clone());
+        Ok(())
+    })?;
+    for (&id, binding) in bindings {
+        match &mut binding.length {
+            None => {
+                return Err(error(format!(
+                    "no capacity policy for {id:?}: {:?}",
+                    data.state.buffers[id].length
+                )))
+            }
+            Some(BufferLen::HostProvided { inputs, .. }) => {
+                inputs.sort();
+                inputs.dedup();
+            }
+            _ => {}
+        }
     }
-    rows(graph, "AbiFixedGrid", |a| {
-        data.state.dispatches[stages[&a[0]]].size = DispatchSize::Fixed {
-            x: number(graph, a[1])?,
-            y: number(graph, a[2])?,
-            z: number(graph, a[3])?,
-            explicit: true,
-        };
-        Ok(())
+    let sizes = &mut data.state.abi.dispatch_sizes;
+    let mut status = Ok(());
+    graph.function_entries_while("RootLaunch", |entry| {
+        status = launch(graph, entry.output, &binding_ids).map(|size| {
+            sizes.insert(roots[&entry.inputs[0]], size);
+        });
+        status.is_ok()
     })?;
+    status?;
+    for &(root, owner, width, _) in &data.state.abi.roots {
+        if data.ir.entries[owner].declaration.entry_kind != EntryKind::Compute {
+            continue;
+        }
+        let Some(size) = sizes.get(&root) else {
+            return Err(error(format!(
+                "no dispatch policy for {root:?} in {}",
+                data.ir.entries[owner].declaration.name
+            )));
+        };
+        if let DispatchSize::Fixed { x, y, z, .. } = size {
+            if [*x, *y, *z].iter().any(|&n| n == 0 || n > 65_535)
+                || x.checked_mul(*y)
+                    .and_then(|n| n.checked_mul(*z))
+                    .and_then(|n| n.checked_mul(width[0]))
+                    .is_none()
+            {
+                return Err(error(format!(
+                    "dispatch grid {x}x{y}x{z} exceeds supported dimensions"
+                )));
+            }
+        }
+    }
+    for dispatch in data.state.dispatches.values() {
+        if let DispatchSize::Fixed { x, y, z, .. } = data.state.abi.dispatch_sizes[&dispatch.kernel] {
+            data.state.grids[dispatch.grid].groups = [Value::Int(x), Value::Int(y), Value::Int(z)];
+        }
+    }
     Ok(roots)
+}
+
+fn capacity(
+    graph: &EGraph,
+    value: EggValue,
+    bindings: &HashMap<EggValue, BindingRef>,
+) -> Result<BufferLen, OptimizeError> {
+    // Indexed constructor lookups decode only this selected policy.
+    for name in [
+        "FixedCapacity",
+        "InputCapacity",
+        "DispatchCapacity",
+        "HostCapacity",
+    ] {
+        let mut result = None;
+        graph.read(|state| {
+            state.enodes_for_eclass(name, value, |node| {
+                result = Some((|| {
+                    let a = node.children;
+                    Ok(match name {
+                        "FixedCapacity" => BufferLen::Fixed {
+                            bytes: graph.value_to_base::<i64>(a[0]) as u64,
+                        },
+                        "InputCapacity" => BufferLen::LikeInput {
+                            set: bindings[&a[0]].set,
+                            binding: bindings[&a[0]].binding,
+                            elem_bytes: number(graph, a[1])?,
+                            src_elem_bytes: number(graph, a[2])?,
+                        },
+                        "DispatchCapacity" => BufferLen::SameAsDispatch {
+                            elem_bytes: number(graph, a[0])?,
+                        },
+                        "HostCapacity" => BufferLen::HostProvided {
+                            inputs: vec![],
+                            elem_bytes: number(graph, a[0])?,
+                        },
+                        _ => unreachable!(),
+                    })
+                })());
+            })
+        })?;
+        if let Some(result) = result {
+            return result;
+        }
+    }
+    Err(error("unknown buffer capacity policy"))
+}
+
+fn launch(
+    graph: &EGraph,
+    value: EggValue,
+    bindings: &HashMap<EggValue, BindingRef>,
+) -> Result<DispatchSize, OptimizeError> {
+    for name in [
+        "FixedLaunch",
+        "InputLaunch",
+        "ParameterLaunch",
+        "HostLaunch",
+        "ImageLaunch",
+    ] {
+        let mut result = None;
+        graph.read(|state| {
+            state.enodes_for_eclass(name, value, |node| {
+                result = Some((|| {
+                    let a = node.children;
+                    Ok(match name {
+                        "FixedLaunch" => DispatchSize::Fixed {
+                            x: number(graph, a[0])?,
+                            y: number(graph, a[1])?,
+                            z: number(graph, a[2])?,
+                            explicit: true,
+                        },
+                        "InputLaunch" => DispatchSize::DerivedFrom {
+                            len: DispatchLen::InputBinding {
+                                set: bindings[&a[0]].set,
+                                binding: bindings[&a[0]].binding,
+                                elem_bytes: number(graph, a[1])?,
+                            },
+                            workgroup_size: number(graph, a[2])?,
+                        },
+                        "ParameterLaunch" => DispatchSize::DerivedFrom {
+                            len: DispatchLen::PushConstant {
+                                offset: number(graph, a[0])?,
+                            },
+                            workgroup_size: number(graph, a[1])?,
+                        },
+                        "HostLaunch" => DispatchSize::Fixed {
+                            x: 1,
+                            y: 1,
+                            z: 1,
+                            explicit: false,
+                        },
+                        "ImageLaunch" => DispatchSize::DerivedFrom {
+                            len: DispatchLen::StorageImage {
+                                set: bindings[&a[0]].set,
+                                binding: bindings[&a[0]].binding,
+                            },
+                            workgroup_size: 1,
+                        },
+                        _ => unreachable!(),
+                    })
+                })());
+            })
+        })?;
+        if let Some(result) = result {
+            return result;
+        }
+    }
+    Err(error("unknown dispatch policy"))
 }

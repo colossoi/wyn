@@ -209,6 +209,14 @@ impl KernelPlan {
                         len: len.clone(),
                         workgroup_size: phase.workgroup_size().0,
                     },
+                    KernelDomain::ChunkedElements { len, chunk_size } => DispatchSize::DerivedFrom {
+                        len: len.clone(),
+                        workgroup_size: phase
+                            .workgroup_size()
+                            .0
+                            .checked_mul(*chunk_size)
+                            .ok_or_else(|| "chunked dispatch divisor overflow".to_string())?,
+                    },
                     KernelDomain::ResourceElements { resource, elem_bytes } => {
                         let binding = physical_resources.binding(*resource);
                         DispatchSize::DerivedFrom {

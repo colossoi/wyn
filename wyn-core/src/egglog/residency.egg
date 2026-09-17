@@ -59,7 +59,7 @@
 ; Lengths follow view metadata; reading an allocation's size does not require
 ; waiting for its element writer. Compacted lengths do require the count writer.
 (rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)
-(rule ((Needs stage value) (Capacity value n)) ((ExtentDemand stage n)) :ruleset residency)
+(rule ((Needs stage value) (CapacityExtent value n)) ((ExtentDemand stage n)) :ruleset residency)
 (rule ((ExtentDemand stage (Length e))) ((LengthDemand stage e)) :ruleset residency)
 (rule ((ExtentDemand stage (Scalar e))) ((Demand (InStage stage) e)) :ruleset residency)
 (rule ((ExtentDemand stage (ChunkCount n width))) ((ExtentDemand stage n)) :ruleset residency)

@@ -4,13 +4,18 @@
 use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
 use crate::egglog::data::{
-    is_slice, Array, ExprData, ExprKind, OperationKind, OutputData, SoacBody, TypeData, TypeId,
+    is_slice, length_source, Array, ExprData, ExprKind, OperationKind, OutputData, SoacBody, TypeData,
+    TypeId,
 };
 use crate::egglog::dependencies::{safe_body, Dependencies};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use crate::ssa::layout::type_byte_size;
-use crate::types::{bool_type, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName};
+use crate::types::{
+    bool_type, canonical_storage_buffer_ty, is_array_variant_bounded, strip_existentials, Type, TypeExt,
+    TypeName,
+};
+use crate::PipelineTopologyPolicy;
 use egglog_engine::{Error, FullState, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -38,6 +43,7 @@ pub(super) fn facts(
     data: &Program<Scheduled>,
     summary: &Dependencies,
     count_type: TypeId,
+    topology: PipelineTopologyPolicy,
     sink: &mut FullState<'_, '_>,
 ) -> Result<(), Error> {
     let count_type = sink.add("TypeId", i64::from(count_type.as_u32()))?;
@@ -64,16 +70,27 @@ pub(super) fn facts(
         let r = sink.add("RegionId", i64::from(region.as_u32()))?;
         let compute = entry.declaration.entry_kind == EntryKind::Compute;
         sink.add("SourceEntry", (i64::from(id.as_u32()), r, compute))?;
+        if let Some(grid) = &entry.declaration.compute_dispatch {
+            sink.add(
+                "SourceGrid",
+                (
+                    i64::from(id.as_u32()),
+                    i64::from(grid.x),
+                    i64::from(grid.y),
+                    i64::from(grid.z),
+                ),
+            )?;
+        }
         let root = sink.add("EntryRoot", i64::from(id.as_u32()))?;
         for &e in &data.regions[region].results {
             values.insert(e);
             let e = sink.add("AbiExpr", i64::from(e.as_u32()))?;
             sink.add("AbiRootNeed", (root, e))?;
         }
-        if !compute {
+        if !compute || topology == PipelineTopologyPolicy::AuthoredOnly {
             sink.add("DeviceRegion", r)?;
         }
-        if compute {
+        if compute && topology == PipelineTopologyPolicy::AllowGenerated {
             let region = sink.add("RegionId", i64::from(region.as_u32()))?;
             sink.add("HostRoot", (i64::from(id.as_u32()), region))?;
         }
@@ -94,6 +111,31 @@ pub(super) fn facts(
         sink.set("ScalarBoundary", key, false)?;
         let region = sink.add("RegionId", i64::from(op.region.as_u32()))?;
         sink.add("Site", (key, region))?;
+        if let Some(array) = length_source(data, &op.kind) {
+            let result = sink.add("Result", (key, 0i64))?;
+            let result = sink.add("AbiResource", result)?;
+            let array = sink.add("AbiExpr", i64::from(array.as_u32()))?;
+            let length = sink.add("AbiLength", array)?;
+            sink.add("AbiAlias", (result, length))?;
+        }
+        if let OperationKind::If {
+            then_region,
+            else_region,
+            ..
+        } = &op.kind
+        {
+            let result = sink.add("Result", (key, 0i64))?;
+            let result = sink.add("AbiResource", result)?;
+            let yes = sink.add(
+                "AbiExpr",
+                i64::from(data.regions[*then_region].results[0].as_u32()),
+            )?;
+            let no = sink.add(
+                "AbiExpr",
+                i64::from(data.regions[*else_region].results[0].as_u32()),
+            )?;
+            sink.add("AbiChoice", (result, yes, no))?;
+        }
         for r in op.kind.structured_regions() {
             regions.insert(r);
             let r = sink.add("RegionId", i64::from(r.as_u32()))?;
@@ -278,7 +320,15 @@ pub(super) fn facts(
             strip_existentials(&data.types[value.ty].ty).array_size()
         {
             let n = sink.add("AbiNumber", *n as i64)?;
-            sink.add("AbiArrayLength", (abi_value, n))?;
+            let relation = if strip_existentials(&data.types[value.ty].ty)
+                .array_variant()
+                .is_some_and(is_array_variant_bounded)
+            {
+                "AbiArrayBound"
+            } else {
+                "AbiArrayLength"
+            };
+            sink.add(relation, (abi_value, n))?;
         }
         match &value.kind {
             ExprKind::Parameter(p) => {

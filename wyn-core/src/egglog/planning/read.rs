@@ -9,10 +9,9 @@ use crate::egglog::data::{
 use crate::egglog::timing::span;
 use crate::egglog::visit::Operand;
 use crate::egglog::{OptimizeError, Program, Scheduled};
-use crate::pipeline_descriptor::DispatchSize;
 use crate::types::TypeExt;
 use egglog_engine::sort::S;
-use egglog_engine::{EGraph, Value as EggValue};
+use egglog_engine::{EGraph, Read, Value as EggValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Clone, Copy, Debug)]
@@ -42,22 +41,28 @@ pub(in crate::egglog) fn read(
     let mut result = Readout::default();
     let operations = keys(graph, "OperationId")?;
     let expressions = keys(graph, "ExprId")?;
-    let mut recipes = HashMap::new();
-    for (name, recipe) in [
-        ("Elements", Recipe::Elements),
-        ("Totals", Recipe::Totals),
-        ("Prefixes", Recipe::Prefixes),
-        ("Compact", Recipe::Compact),
-        ("Serial", Recipe::Serial),
-    ] {
-        graph.constructor_enodes(name, |e| {
-            recipes.insert(e.eclass, recipe);
-        })?;
-    }
-    rows(graph, "Plan", |a| {
-        result.recipes.insert(OperationId::from(operations[&a[0]]), recipes[&a[1]]);
-        Ok(())
+    let mut status = Ok(());
+    graph.function_entries_while("Plan", |entry| {
+        status = graph.read(|state| {
+            for (name, recipe) in [
+                ("Elements", Recipe::Elements),
+                ("Totals", Recipe::Totals),
+                ("Prefixes", Recipe::Prefixes),
+                ("Compact", Recipe::Compact),
+                ("Serial", Recipe::Serial),
+            ] {
+                let mut selected = false;
+                state.enodes_for_eclass(name, entry.output, |_| selected = true)?;
+                if selected {
+                    result.recipes.insert(OperationId::from(operations[&entry.inputs[0]]), recipe);
+                    return Ok(());
+                }
+            }
+            Err(invalid("unknown scheduling recipe"))
+        });
+        status.is_ok()
     })?;
+    status?;
 
     // Reserve identities before translating extents: a capacity can read the
     // live count stored in another planned resource.
@@ -214,14 +219,6 @@ pub(in crate::egglog) fn read(
             owner,
             kernel,
             grid,
-            // Runtime domains use the kernel's grid-stride loop until the ABI
-            // can express their formulas; fixed grids are filled by ABI readout.
-            size: DispatchSize::Fixed {
-                x: 1,
-                y: 1,
-                z: 1,
-                explicit: true,
-            },
             captures,
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
@@ -352,13 +349,7 @@ fn extent(
         return Err(invalid("extent has no value or stored length"));
     };
     let n = extent(graph, n, values, chunks)?;
-    let value = Value::op(
-        "max",
-        [
-            Value::Int(1),
-            Value::op("ceil_div", [n, Value::Int(number(graph, width)?)]),
-        ],
-    );
+    let value = Value::op("ceil_div", [n, Value::Int(number(graph, width)?)]);
     values.insert(id, value.clone());
     Ok(value)
 }

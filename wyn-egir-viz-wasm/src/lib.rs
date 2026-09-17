@@ -1830,6 +1830,9 @@ fn graph_domain(domain: &wyn_core::egir::parallelize::KernelDomain) -> JsonValue
     match domain {
         KernelDomain::Fixed { x, y, z } => json!({ "kind": "fixed", "x": x, "y": y, "z": z }),
         KernelDomain::Elements(length) => json!({ "kind": "elements", "length": length }),
+        KernelDomain::ChunkedElements { len, chunk_size } => {
+            json!({ "kind": "chunked_elements", "length": len, "chunk_size": chunk_size })
+        }
         KernelDomain::ResourceElements { resource, elem_bytes } => {
             json!({ "kind": "resource_elements", "resource": resource_id_name(*resource), "elem_bytes": elem_bytes })
         }

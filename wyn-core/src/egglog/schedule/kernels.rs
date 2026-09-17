@@ -321,10 +321,7 @@ impl Planner<'_> {
 }
 
 fn chunks(n: Value) -> Value {
-    Value::op(
-        "max",
-        [Value::Int(1), Value::op("ceil_div", [n, Value::Int(WIDTH)])],
-    )
+    Value::op("ceil_div", [n, Value::Int(WIDTH)])
 }
 fn singleton(buffer: BufferId) -> Value {
     Value::op("index", [Value::Buffer(buffer), Value::Int(0)])

@@ -30,7 +30,6 @@ pub(super) fn build_physical_kernel_graph(
             abi.entry_roots.entry(owner).or_default().push(root);
         }
     }
-    let dispatches: BTreeMap<_, _> = dispatches.values().map(|d| (d.kernel, d)).collect();
     let by_binding: BTreeMap<_, _> =
         abi.buffer_bindings.iter().map(|(&id, &binding)| (binding, id)).collect();
     let mut kernels = vec![];
@@ -42,17 +41,29 @@ pub(super) fn build_physical_kernel_graph(
         for &root in roots {
             let id = KernelId::from(kernels.len() as u32);
             identities.insert(root, id);
-            let domain = match dispatches.get(&root).map(|d| &d.size) {
-                Some(DispatchSize::Fixed { x, y, z, .. }) => KernelDomain::Fixed { x: *x, y: *y, z: *z },
-                Some(DispatchSize::DerivedFrom { len, .. }) => KernelDomain::Elements(len.clone()),
-                None => KernelDomain::Fixed { x: 1, y: 1, z: 1 },
-            };
             let Some(function) = &blocks[root].interface else {
                 return Err(error("shader root has no interface"));
             };
             let size = match function.kind {
                 FunctionKind::Kernel([x, y, z]) => (x, y, z),
                 _ => (1, 1, 1),
+            };
+            let domain = match &abi.dispatch_sizes[&root] {
+                DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
+                DispatchSize::DerivedFrom { len, workgroup_size } if *workgroup_size == size.0 => {
+                    KernelDomain::Elements(len.clone())
+                }
+                DispatchSize::DerivedFrom { len, workgroup_size }
+                    if *workgroup_size > 0 && *workgroup_size % size.0 == 0 =>
+                {
+                    KernelDomain::ChunkedElements {
+                        len: len.clone(),
+                        chunk_size: *workgroup_size / size.0,
+                    }
+                }
+                DispatchSize::DerivedFrom { .. } => {
+                    return Err(error("launch divisor is not a whole number of workgroups"))
+                }
             };
             kernels.push(PhysicalKernel {
                 id,

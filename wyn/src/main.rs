@@ -14,11 +14,12 @@ use wyn_core::egir::{apply_pipeline_topology_policy, optimize_semantic_operation
 use wyn_core::pipeline_descriptor::PipelineDescriptor;
 use wyn_core::ssa::stage::Elaborated;
 use wyn_core::tlc::stage::InputSliceBoundsInferred;
+use wyn_core::PipelineTopologyPolicy;
 #[cfg(feature = "egir")]
 use wyn_core::{lower_egir_to_ssa, to_egraph};
 use wyn_core::{CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError, ParsedModules};
 #[cfg(feature = "egir")]
-use wyn_core::{LoweringProfile, PipelineTopologyPolicy, SchedulePolicy};
+use wyn_core::{LoweringProfile, SchedulePolicy};
 use wyn_diagnostics::{render_error, render_error_message, render_warning, render_warning_message};
 use wyn_module_graph::{
     BuildError, BuildFailure, LocalSourceError, ModuleKey, PackageGraph, PackagePlan, SourceGraph, Span,
@@ -53,7 +54,6 @@ struct CompileOptions {
     algebra: bool,
     #[cfg(feature = "egir")]
     egglog: bool,
-    #[cfg(feature = "egir")]
     direct: bool,
     wgsl_emulate_u64: bool,
     fill_holes: bool,
@@ -129,7 +129,7 @@ enum Commands {
         output_mir: Option<PathBuf>,
 
         /// Use the egglog compiler route (the default without the egir build feature).
-        #[arg(long, conflicts_with = "direct")]
+        #[arg(long)]
         egglog: bool,
 
         /// Enable egglog algebraic rewrites (constant folding is always enabled).
@@ -583,11 +583,6 @@ fn build(
     warning_limit: usize,
     verbose: bool,
 ) -> Result<(), DriverError> {
-    if direct && !cfg!(feature = "egir") {
-        return Err(DriverError::InvalidOption(
-            "--direct requires a compiler built with --features egir".to_string(),
-        ));
-    }
     if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
         return Err(DriverError::InvalidOption(
             "--wgsl-emulate-u64 requires --target wgsl".to_string(),
@@ -614,7 +609,6 @@ fn build(
         algebra,
         #[cfg(feature = "egir")]
         egglog: _egglog,
-        #[cfg(feature = "egir")]
         direct,
         wgsl_emulate_u64,
         fill_holes,
@@ -737,6 +731,7 @@ fn compile_egglog(
     program: &InputSliceBoundsInferred,
     target: Target,
     algebra: bool,
+    direct: bool,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
     with_timings(verbose, || -> Result<_, DriverError> {
@@ -745,7 +740,12 @@ fn compile_egglog(
         let program = insert_expressions(program)?;
         let program = simplify(program, algebra)?;
         let program = place(program)?;
-        let program = schedule(program)?;
+        let topology = if direct {
+            PipelineTopologyPolicy::AuthoredOnly
+        } else {
+            PipelineTopologyPolicy::AllowGenerated
+        };
+        let program = schedule(program, topology)?;
         let ssa = to_ssa(
             &program,
             match target {
@@ -810,7 +810,6 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         algebra,
         #[cfg(feature = "egir")]
         egglog,
-        #[cfg(feature = "egir")]
         direct,
         wgsl_emulate_u64,
         output_mir,
@@ -819,12 +818,12 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     } = options;
     #[cfg(feature = "egir")]
     let ssa = if egglog {
-        compile_egglog(&program, target, algebra, verbose)?
+        compile_egglog(&program, target, algebra, direct, verbose)?
     } else {
         compile_egir(program, target, direct, verbose, &source_graph)?
     };
     #[cfg(not(feature = "egir"))]
-    let ssa = compile_egglog(&program, target, algebra, verbose)?;
+    let ssa = compile_egglog(&program, target, algebra, direct, verbose)?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

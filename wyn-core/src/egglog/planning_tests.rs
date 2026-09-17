@@ -118,7 +118,7 @@ fn compacted_capacity_and_live_count_are_distinct() {
     check(
         &mut g,
         r#"
-        (Capacity (Result (OperationId 0) 0) (Length (ExprId 0)))
+        (CapacityExtent (Result (OperationId 0) 0) (Length (ExprId 0)))
         (LiveLength (Result (OperationId 0) 0) (Stored (Result (OperationId 0) 1)))
         (Allocation (Result (OperationId 0) 1) (Fixed 1))
         (Produces (Stage (OperationId 0) "offsets") (Result (OperationId 0) 1))
@@ -140,11 +140,16 @@ fn compacted_capacity_and_live_count_are_distinct() {
     check(
         &mut g,
         r#"
-        (AbiFixedCapacity (Result (OperationId 0) 0) 256)
+        (= (BufferCapacity (Result (OperationId 0) 0)) (FixedCapacity 256))
         (AbiArrayLength (AbiExpr 1) (AbiExtent (Stored (Result (OperationId 0) 1))))
-        (= (AbiKnown (AbiExtent (Length (ExprId 1)))) false)
+        (= (AbiBoundKnown (AbiExtent (Length (ExprId 1)))) true)
     "#,
     );
+    g.parse_and_run_program(
+        None,
+        "(fail (check (= (AbiConstant (AbiExtent (Length (ExprId 1)))) 64)))",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -266,7 +271,13 @@ fn imported_source_plans_before_block_generation() {
         g.parse_and_run_program(None, RULES).unwrap();
         g.update(|mut sink| {
             outputs(&mut converted, &mut sink)?;
-            facts(&converted, &summary, count_type, &mut sink)?;
+            facts(
+                &converted,
+                &summary,
+                count_type,
+                crate::PipelineTopologyPolicy::AllowGenerated,
+                &mut sink,
+            )?;
             abi::facts(
                 &converted.state.abi.inputs,
                 &converted.state.outputs,
@@ -282,7 +293,9 @@ fn imported_source_plans_before_block_generation() {
         assert!(count(&g, "Allocation") > 0);
         assert!(count(&g, "AbiRoot") > 0);
         assert!(count(&g, "AbiBufferBinding") > 0);
-        assert!(count(&g, "AbiFixedCapacity") > 0);
+        let mut capacities = 0;
+        g.function_entries("BufferCapacity", |_| capacities += 1).unwrap();
+        assert!(capacities > 0);
         assert_eq!(count(&g, "AbiInvalidHost"), 0);
         assert!(converted.state.blocks.is_empty());
         assert!(converted.state.buffers.is_empty());
@@ -340,8 +353,8 @@ fn local_allocations_and_binding_aliases_are_resolved_without_backend_ids() {
         &mut g,
         r#"
         (AbiRoot (KernelRoot (Stage (OperationId 0) "elements")) 0 64 1 1 false)
-        (AbiFixedGrid (Stage (OperationId 0) "elements") 2 1 1)
-        (AbiFixedCapacity (Result (OperationId 0) 0) 512)
+        (= (RootLaunch (KernelRoot (Stage (OperationId 0) "elements"))) (FixedLaunch 2 1 1))
+        (= (BufferCapacity (Result (OperationId 0) 0)) (FixedCapacity 512))
         (= (AbiAccess (KernelRoot (Stage (OperationId 0) "elements")) (InputBinding 0 5)) 3)
         (LocalBuffer (OperationId 1) "output" 0 (TypeId 0) (Fixed 0))
         (AbiLocalLength (OperationId 1) "output" 0 1)
@@ -615,4 +628,44 @@ fn whole_tuple_captures_publish_all_materialized_fields() {
         (AbiRootStorage (EntryRoot 101) (InputBinding 0 5)) (AbiRootStorage (EntryRoot 101) (InputBinding 0 6))
     "#,
     );
+}
+
+#[test]
+fn conflicting_capacity_policies_fail_inside_egglog() {
+    let mut g = graph("");
+    let result = g.parse_and_run_program(
+        None,
+        r#"
+        (set (BufferCapacity (Output 0)) (FixedCapacity 64))
+        (set (BufferCapacity (Output 0)) (HostCapacity 4))
+    "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn conflicting_launch_policies_fail_inside_egglog() {
+    let mut g = graph("");
+    let result = g.parse_and_run_program(
+        None,
+        r#"
+        (set (RootLaunch (EntryRoot 0)) (FixedLaunch 2 3 4))
+        (set (RootLaunch (EntryRoot 0)) (ParameterLaunch 0 64))
+    "#,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn conflicting_scheduling_recipes_fail_inside_egglog() {
+    let mut g = graph("");
+    let result = g.parse_and_run_program(
+        None,
+        r#"
+        (CollectiveShape (OperationId 0) 0 0 true)
+        (FilterShape (OperationId 0) true)
+        (run schedule)
+    "#,
+    );
+    assert!(result.is_err());
 }

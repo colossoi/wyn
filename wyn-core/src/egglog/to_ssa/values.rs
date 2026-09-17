@@ -589,14 +589,48 @@ impl Body<'_, '_> {
     fn primitive(&mut self, name: &str, args: Vec<Typed>) -> Result<Typed, OptimizeError> {
         let known = catalog().known();
         match (name, args.as_slice()) {
-            ("global_id", [_]) => self.op(
-                OpTag::Intrinsic {
-                    id: known.thread_id,
-                    overload_idx: 0,
-                },
-                vec![],
-                u32_type(),
-            ),
+            ("global_id", [_]) => {
+                let mut index = self.op(
+                    OpTag::Intrinsic {
+                        id: known.thread_id,
+                        overload_idx: 0,
+                    },
+                    vec![],
+                    u32_type(),
+                )?;
+                if self.grid_yz != [1, 1] {
+                    let y = self.op(
+                        OpTag::Intrinsic {
+                            id: known.thread_id_y,
+                            overload_idx: 0,
+                        },
+                        vec![],
+                        u32_type(),
+                    )?;
+                    let z = self.op(
+                        OpTag::Intrinsic {
+                            id: known.thread_id_z,
+                            overload_idx: 0,
+                        },
+                        vec![],
+                        u32_type(),
+                    )?;
+                    let z = self.binary(BinaryOperator::Multiply, z, Self::number(self.grid_yz[0]))?;
+                    let yz = self.binary(BinaryOperator::Add, y, z)?;
+                    let nx = self.op(
+                        OpTag::Intrinsic {
+                            id: known.num_workgroups,
+                            overload_idx: 0,
+                        },
+                        vec![],
+                        u32_type(),
+                    )?;
+                    let nx = self.binary(BinaryOperator::Multiply, nx, Self::number(self.width))?;
+                    let offset = self.binary(BinaryOperator::Multiply, yz, nx)?;
+                    index = self.binary(BinaryOperator::Add, index, offset)?;
+                }
+                Ok(index)
+            }
             ("global_size", [_]) => {
                 let n = self.op(
                     OpTag::Intrinsic {
@@ -606,7 +640,11 @@ impl Body<'_, '_> {
                     vec![],
                     u32_type(),
                 )?;
-                self.binary(BinaryOperator::Multiply, n, Self::number(self.width))
+                self.binary(
+                    BinaryOperator::Multiply,
+                    n,
+                    Self::number(self.width * self.grid_yz[0] * self.grid_yz[1]),
+                )
             }
             ("length", [a]) => {
                 let a = if matches!(a.ty, Type::Constructed(TypeName::Tuple(_), _)) {

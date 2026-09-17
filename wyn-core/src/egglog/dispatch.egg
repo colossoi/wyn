@@ -54,10 +54,55 @@
       ((AbiRoot (EntryRoot entry) entry 1 1 1 true)) :ruleset abi-final)
 (rule ((PhaseOwner stage entry) (PhaseDomain stage n width))
       ((AbiRoot (KernelRoot stage) entry width 1 1 false)) :ruleset abi-final)
-; Grid-stride kernels use one workgroup when the runtime ABI cannot express the domain.
+; Explicit grids apply to parallel phases; singleton combine/serial phases stay
+; singleton. Dynamic grids name their actual ABI source, never a guessed size.
+(rule ((SourceEntry entry r compute)) ((set (HasSourceGrid entry) false)) :ruleset abi)
+(rule ((SourceGrid entry x y z)) ((set (HasSourceGrid entry) true)) :ruleset abi)
 (rule ((Phase stage r) (PhaseDomain stage n width)) ((AbiExtent n)) :ruleset abi)
-(rule ((Phase stage r) (PhaseDomain stage n width) (> width 0) (= count (AbiConstant (AbiExtent n))))
-      ((AbiFixedGrid stage (min 65535 (max 1 (+ (/ count width) (min 1 (% count width))))) 1 1)) :ruleset abi-final)
+(rule ((PhaseOwner stage entry) (= (HasSourceGrid entry) false) (PhaseDomain stage n width))
+      ((AbiLaunchDomain stage n width)) :ruleset abi-final)
+(rule ((PhaseOwner stage entry) (PhaseDomain stage n 1))
+      ((AbiLaunchDomain stage n 1)) :ruleset abi-final)
+; ceil(ceil(n / chunk) / width) = ceil(n / (chunk * width)). Keep
+; this division in the launch policy, independently of scratch capacity.
+(rule ((AbiLaunchDomain stage (ChunkCount n chunk) width) (> chunk 0)
+       (<= width (/ 4294967295 chunk)))
+      ((AbiLaunchDomain stage n (* width chunk))) :ruleset abi-final)
+(rule ((AbiLaunchDomain stage (Fixed n) width)) ((AbiGridDomain stage (AbiExtent (Fixed n)) width)) :ruleset abi-final)
+(rule ((AbiLaunchDomain stage (Length e) width)) ((AbiGridDomain stage (AbiExtent (Length e)) width)) :ruleset abi-final)
+(rule ((AbiLaunchDomain stage (Scalar e) width)) ((AbiGridDomain stage (AbiExtent (Scalar e)) width)) :ruleset abi-final)
+(rule ((AbiLaunchDomain stage (Stored value) width)) ((AbiGridDomain stage (AbiExtent (Stored value)) width)) :ruleset abi-final)
+(rule ((PhaseOwner stage entry) (SourceGrid entry x y z) (PhaseDomain stage n width) (> width 1))
+      ((set (RootLaunch (KernelRoot stage)) (FixedLaunch x y z))) :ruleset abi-final)
+(rule ((AbiGridDomain stage n width) (> width 0) (= count (AbiBoundConstant n)))
+      ((set (RootLaunch (KernelRoot stage)) (FixedLaunch (min 65535 (max 1 (+ (/ count width) (min 1 (% count width))))) 1 1))) :ruleset abi-final)
+(rule ((AbiGridDomain stage n width) (= (AbiBoundKnown n) false) (AbiBoundInput n binding stride))
+      ((set (RootLaunch (KernelRoot stage)) (InputLaunch binding stride width))) :ruleset abi-final)
+(rule ((AbiGridDomain stage n width) (= (AbiBoundKnown n) false) (AbiParameterCount n offset))
+      ((set (RootLaunch (KernelRoot stage)) (ParameterLaunch offset width))) :ruleset abi-final)
+; Only the application knows a HostProvided domain. Preserve inferred status so
+; the runtime's existing host-sizing hook can choose its grid.
+(rule ((AbiGridDomain stage n width)) ((AbiGridNeed stage n)) :ruleset abi-final)
+(rule ((AbiGridNeed stage n) (AbiChild n child)) ((AbiGridNeed stage child)) :ruleset abi-final)
+(rule ((AbiGridDomain stage n width)) ((set (AbiGridResolved stage) false)) :ruleset abi-final)
+(rule ((= launch (RootLaunch (KernelRoot stage)))) ((set (AbiGridResolved stage) true)) :ruleset abi-final)
+(rule ((AbiGridNeed stage n) (AbiUniform n input) (= (AbiGridResolved stage) false))
+      ((set (RootLaunch (KernelRoot stage)) (HostLaunch))) :ruleset readout)
+(rule ((SourceGrid entry x y z) (SourceEntry entry r true) (= (AbiHasLaunch r) false)
+       (AbiRoot (EntryRoot entry) entry wx wy wz finish))
+      ((set (RootLaunch (EntryRoot entry)) (FixedLaunch x y z))) :ruleset abi-final)
+; A generated publication copy executes once, independently of the source grid.
+(rule ((SourceEntry entry r true) (= (AbiHasLaunch r) true) (AbiCopyEntry entry))
+      ((set (RootLaunch (EntryRoot entry)) (FixedLaunch 1 1 1))) :ruleset abi-final)
+(rule ((SourceEntry entry r compute)) ((set (AbiHasImage entry) false)) :ruleset abi-final)
+(rule ((= (RootLaunch (EntryRoot entry)) (ImageLaunch binding))) ((set (AbiHasImage entry) true)) :ruleset abi-final)
+(rule ((SourceEntry entry r true) (AbiRoot (EntryRoot entry) entry wx wy wz finish)
+       (= (HasSourceGrid entry) false) (= (AbiHasImage entry) false))
+      ((set (RootLaunch (EntryRoot entry)) (FixedLaunch 1 1 1))) :ruleset readout)
+(rule ((SourceEntry entry r true) (AbiRoot (EntryRoot entry) entry wx wy wz finish)
+       (= (AbiHasLaunch r) false)
+       (AbiRootNeed (EntryRoot entry) value) (AbiImage value binding) (= (HasSourceGrid entry) false))
+      ((set (RootLaunch (EntryRoot entry)) (ImageLaunch binding))) :ruleset abi-final)
 
 ; Copy kernels publish after every launch belonging to their source entry.
 (rule ((AbiCopyEntry entry) (PhaseOwner before entry))
@@ -86,3 +131,4 @@
       ((AbiRootNeed root (AbiExpr e))) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Enters op child)) ((AbiInvokes root child)) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Callback op child)) ((AbiInvokes root child)) :ruleset abi)
+(rule ((SourceEntry entry r compute) (DeviceRegion r)) ((AbiInvokes (EntryRoot entry) r)) :ruleset abi)

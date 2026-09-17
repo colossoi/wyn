@@ -7,6 +7,7 @@ use crate::compile_thru_tlc;
 use crate::egglog::data::OperationKind;
 use crate::egglog::Scheduled;
 use crate::tlc::infer_input_slice_bounds;
+use crate::PipelineTopologyPolicy;
 use exec::{run, Value};
 
 #[path = "schedule_test_exec.rs"]
@@ -16,6 +17,7 @@ fn compile(source: &str) -> Program<Scheduled> {
     let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let result = schedule(
         simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
     result
@@ -48,6 +50,10 @@ fn fused_map_chain_becomes_one_guarded_kernel_with_explicit_captures() {
 fn reduction_handles_empty_tail_chunks_and_tuple_accumulators() {
     let result = compile("entry main(xs: []i32) (i32, i32) = reduce(|a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1), (0, 0), map(|x: i32| (x, 1), xs))");
     assert_eq!(kernel_count(&result), 2);
+    assert!(matches!(
+        result.state.physical_kernels.kernels().next().unwrap().domain,
+        crate::kernel_graph::KernelDomain::ChunkedElements { chunk_size: 64, .. }
+    ));
     for n in [0, 1, 63, 64, 65, 137, 4097] {
         let output = run(&result, vec![Value::array(0..n)]);
         assert_eq!(
@@ -245,7 +251,10 @@ fn verifier_rejects_incorrect_block_arguments_and_cyclic_dispatches() {
     let mut result = compile("entry main(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, xs)");
     let first = result.state.dispatches.ids().next().unwrap();
     result.state.dispatches[first].dependencies.insert(first);
-    assert!(validate(&result).unwrap_err().to_string().contains("cyclic"));
+    assert!(validate(&result, PipelineTopologyPolicy::AllowGenerated)
+        .unwrap_err()
+        .to_string()
+        .contains("cyclic"));
     result.state.dispatches[first].dependencies.remove(&first);
     let edge = result
         .state
@@ -254,7 +263,10 @@ fn verifier_rejects_incorrect_block_arguments_and_cyclic_dispatches() {
         .find_map(|b| if let Exit::Jump(edge) = &b.exit { Some(edge.clone()) } else { None })
         .unwrap();
     result.state.bodies[edge.arguments].results.clear();
-    assert!(validate(&result).unwrap_err().to_string().contains("arity"));
+    assert!(validate(&result, PipelineTopologyPolicy::AllowGenerated)
+        .unwrap_err()
+        .to_string()
+        .contains("arity"));
 }
 
 #[test]

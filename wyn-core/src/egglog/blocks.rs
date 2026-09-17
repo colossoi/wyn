@@ -2,7 +2,6 @@
 use crate::egglog::data::{
     Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
 };
-use crate::pipeline_descriptor::DispatchSize;
 use crate::types::Type;
 use std::collections::BTreeSet;
 use wyn_base::IdArena;
@@ -126,7 +125,6 @@ pub struct DispatchData {
     pub owner: EntryId,
     pub kernel: BlockId,
     pub grid: GridId,
-    pub size: DispatchSize,
     pub dependencies: BTreeSet<DispatchId>,
     /// Physical readout of the plan's Access facts.
     pub reads: BTreeSet<BufferId>,

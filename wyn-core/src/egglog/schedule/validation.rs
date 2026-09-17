@@ -2,9 +2,13 @@ use super::{error, Control, Edge, Exit, FunctionKind, Instruction, OptimizeError
 use crate::egglog::data::{BlockId, BodyId, DispatchId, OperationKind};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
+use crate::PipelineTopologyPolicy;
 use std::collections::BTreeSet;
 
-pub(super) fn validate(data: &Program<Scheduled>) -> Result<Vec<DispatchId>, OptimizeError> {
+pub(super) fn validate(
+    data: &Program<Scheduled>,
+    topology: PipelineTopologyPolicy,
+) -> Result<Vec<DispatchId>, OptimizeError> {
     let mut launches = BTreeSet::new();
     for (&id, block) in &data.state.blocks {
         if let Some(control) = block.control {
@@ -29,7 +33,10 @@ pub(super) fn validate(data: &Program<Scheduled>) -> Result<Vec<DispatchId>, Opt
         }
         let device = match function.kind {
             FunctionKind::Device | FunctionKind::Kernel(_) => true,
-            FunctionKind::Entry(entry) => data.entries[entry].declaration.entry_kind != EntryKind::Compute,
+            FunctionKind::Entry(entry) => {
+                topology == PipelineTopologyPolicy::AuthoredOnly
+                    || data.entries[entry].declaration.entry_kind != EntryKind::Compute
+            }
             FunctionKind::Host => false,
         };
         let Some(body) = data.state.bodies.get(block.body) else {

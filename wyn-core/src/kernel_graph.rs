@@ -130,6 +130,11 @@ pub enum KernelDomain {
     },
     /// One logical invocation per element of a concrete length source.
     Elements(DispatchLen),
+    /// One logical invocation per chunk, including a partially filled tail.
+    ChunkedElements {
+        len: DispatchLen,
+        chunk_size: u32,
+    },
     /// One invocation per element of a logical storage resource. The
     /// descriptor binding is resolved only while publishing a validated plan.
     ResourceElements {

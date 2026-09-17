@@ -2,6 +2,7 @@ use crate::egglog::{from_tlc, fuse, insert_expressions, schedule, simplify_and_p
 use crate::interface::EntryParamBindingKind;
 use crate::pipeline_descriptor::Pipeline;
 use crate::tlc::infer_input_slice_bounds;
+use crate::PipelineTopologyPolicy;
 use crate::{
     compile_thru_tlc, lower_ssa_to_spirv, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_pipeline,
     pipeline_descriptor, CodegenTarget, LoweredWgsl,
@@ -11,6 +12,7 @@ fn compile(source: &str) -> naga::Module {
     let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
         simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
     let ssa = to_ssa(&program, CodegenTarget::Wgsl).unwrap();
@@ -178,6 +180,7 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
         let program = schedule(
             simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap())
                 .unwrap(),
+            PipelineTopologyPolicy::AllowGenerated,
         )
         .unwrap();
         let ssa = to_ssa(&program, CodegenTarget::Spirv).unwrap();
@@ -222,6 +225,7 @@ fn pipeline(source: &str) -> LoweredWgsl {
     let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
         simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
     lower_ssa_to_wgsl_with_pipeline(to_ssa(&program, CodegenTarget::Wgsl).unwrap()).unwrap()
@@ -479,4 +483,151 @@ fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
         compiler.used.contains(&buffer),
         "cached helper still needs its storage in each shader"
     );
+}
+
+#[test]
+fn runtime_launches_use_buffer_and_scalar_domains() {
+    use pipeline_descriptor::{DispatchLen, DispatchSize};
+    for source in [
+        "entry main(xs: []i32) []i32 = map(|x:i32|x+1,xs)",
+        "entry main(n: i32) []i32 = map(|i|i+1,iota(n))",
+    ] {
+        let output = pipeline(source);
+        let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+            panic!("compute")
+        };
+        assert!(matches!(
+            p.stages[0].dispatch_size,
+            DispatchSize::DerivedFrom {
+                len: DispatchLen::InputBinding { .. } | DispatchLen::StorageBuffer { .. },
+                workgroup_size: 64
+            }
+        ));
+    }
+}
+
+#[test]
+fn runtime_collective_scratch_has_an_input_capacity_and_chunk_grid() {
+    use pipeline_descriptor::{Binding, BufferLen, DispatchLen, DispatchSize};
+    let output = pipeline("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
+    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+        panic!("compute")
+    };
+    assert!(matches!(
+        p.stages[0].dispatch_size,
+        DispatchSize::DerivedFrom {
+            len: DispatchLen::InputBinding { elem_bytes: 4, .. },
+            workgroup_size: 4096
+        }
+    ));
+    assert!(p.bindings.iter().all(|b| !matches!(
+        b,
+        Binding::StorageBuffer {
+            length: Some(BufferLen::HostProvided { .. }),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
+    use pipeline_descriptor::{Binding, BufferLen};
+    let output = pipeline(include_str!("../../../testfiles/filter_then_map.wyn"));
+    let result = &output.pipeline.source_results[0];
+    let Pipeline::Compute(p) = &output.pipeline.pipelines[result.pipeline_index] else {
+        panic!("compute")
+    };
+    assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
+        set, binding, length: Some(BufferLen::Fixed { bytes: 16384 }), ..
+    } if (*set, *binding) == (result.set, result.binding))));
+}
+
+#[test]
+fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
+    use crate::interface::ComputeDispatchGrid;
+    use pipeline_descriptor::DispatchSize;
+    for source in [
+        "entry main(xs:[4096]i32) [4096]i32 = map(|x:i32|x+1,xs)",
+        "entry main(xs:[4096]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
+    ] {
+        for (x, y, z) in [(1, 1, 1), (2, 3, 4)] {
+            let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+            let mut imported = from_tlc(&tlc).unwrap();
+            for (_, entry) in &mut imported.ir.entries {
+                entry.declaration.compute_dispatch = Some(ComputeDispatchGrid { x, y, z });
+            }
+            let scheduled = schedule(
+                simplify_and_place(insert_expressions(fuse(imported).unwrap()).unwrap()).unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap();
+            let output =
+                lower_ssa_to_wgsl_with_pipeline(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+            let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+                panic!("compute")
+            };
+            assert_eq!(
+                p.stages[0].dispatch_size,
+                DispatchSize::Fixed {
+                    x,
+                    y,
+                    z,
+                    explicit: true
+                }
+            );
+            for stage in &p.stages[1..] {
+                assert_eq!(
+                    stage.dispatch_size,
+                    DispatchSize::Fixed {
+                        x: 1,
+                        y: 1,
+                        z: 1,
+                        explicit: true
+                    }
+                );
+            }
+            let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            if y > 1 {
+                assert!(output.wgsl.contains(".y") && output.wgsl.contains(".z"));
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_mode_keeps_collectives_in_the_authored_entry() {
+    for source in [
+        "entry main(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
+        "entry main(xs:[137]i32) [137]i32 = map(|x:i32|x+1,xs)",
+        include_str!("../../../testfiles/unified_triangle.wyn"),
+    ] {
+        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let scheduled = schedule(
+            simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap())
+                .unwrap(),
+            PipelineTopologyPolicy::AuthoredOnly,
+        )
+        .unwrap();
+        assert!(scheduled.state.dispatches.is_empty());
+        let output =
+            lower_ssa_to_wgsl_with_pipeline(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+        for pipeline in &output.pipeline.pipelines {
+            if let Pipeline::Compute(p) = pipeline {
+                assert_eq!(p.stages.len(), 1);
+            }
+        }
+        let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
 }

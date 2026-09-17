@@ -11,6 +11,7 @@ use crate::op::{BinaryOperator, OpTag};
 use crate::ssa::types::InstKind;
 use crate::tlc::infer_input_slice_bounds;
 use crate::types::{function, Type, TypeName};
+use crate::PipelineTopologyPolicy;
 use crate::{compile_thru_tlc, lower_ssa_to_wgsl, CodegenTarget};
 use exec::{run, Value};
 use std::collections::BTreeSet;
@@ -104,7 +105,7 @@ fn eqsat_factors_and_folds_constants_inside_a_new_alternative() {
     };
     assert_eq!(c.ir.expressions[*function].kind, ExprKind::BinOp("*".into()));
     assert!(args.iter().any(|&a| c.ir.expressions[a].kind == ExprKind::Int("5".into())));
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for x in [-91, 0, 123] {
         assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(x * 5)]);
     }
@@ -123,7 +124,7 @@ fn algebra_is_optional_while_folding_and_strength_reduction_remain_enabled() {
             ExprKind::BinOp(if algebra { "*" } else { "+" }.into())
         );
         let c = super::simplify(input("entry main(x:i32) i32=x ** (1+2)"), algebra).unwrap();
-        let c = schedule(super::place(c).unwrap()).unwrap();
+        let c = schedule(super::place(c).unwrap(), PipelineTopologyPolicy::AllowGenerated).unwrap();
         assert_eq!(run(&c, vec![Value::Int(-3)]), vec![Value::Int(-27)]);
     }
 }
@@ -196,7 +197,7 @@ fn constant_power_chains_reach_wgsl_for_integer_and_float_scalars() {
         for exponent in 2..=8 {
             let suffix = if ty == "u32" { "u32" } else { "" };
             let c = compile(&format!("entry main(x:{ty}) {ty} = x ** {exponent}{suffix}"));
-            let c = schedule(c).unwrap();
+            let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
             if ty != "f32" {
                 for x in [0_i64, 2, 3] {
                     assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(x.pow(exponent))]);
@@ -245,14 +246,14 @@ fn constant_power_chains_fold_new_products_with_typed_arithmetic() {
         assert_eq!(c.ir.expressions[result(&c.ir)].kind, expected);
     }
     let c = compile("entry main(x:i32) i32 = x ** (1 + 2)");
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(run(&c, vec![Value::Int(-3)]), vec![Value::Int(-27)]);
 }
 
 #[test]
 fn constant_power_chains_do_not_duplicate_an_expensive_base() {
     let c = compile("entry main(x:f32) f32 = (x+1.5+2.5+3.5+4.5+5.5+6.5+7.5+8.5+9.5+10.5) ** 5");
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     let ssa = to_ssa(&c, CodegenTarget::Wgsl).unwrap();
     let count = |op| {
         ssa.entry_points[0]
@@ -311,7 +312,7 @@ fn constant_power_chains_leave_other_exponents_and_vectors_alone() {
 fn explicit_loop_hoists_invariants_but_keeps_iteration_and_accumulator_dependencies() {
     let c = compile("entry main(n:i32, bias:i32) i32 = loop acc=0 for i<n do acc + (bias * bias) + i");
     assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Loop { .. }))));
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for n in [0, 1, 7] {
         assert_eq!(
             run(&c, vec![Value::Int(n), Value::Int(3)]),
@@ -326,7 +327,7 @@ fn nested_loop_invariants_refresh_on_each_outer_iteration() {
     let c = compile(
         "entry main(n:i32) i32 = loop total=0 for i<n do total + (loop acc=0 for j<3 do acc + i*i + j)",
     );
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for n in [0, 1, 5] {
         assert_eq!(
             run(&c, vec![Value::Int(n)]),
@@ -340,7 +341,7 @@ fn nested_loop_invariants_refresh_on_each_outer_iteration() {
 fn common_if_and_zero_trip_safety() {
     let c = compile("entry main(flag:bool, x:i32) i32 = if flag then x*x+1 else x*x+2");
     assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Expression(_))));
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(
         run(&c, vec![Value::Bool(true), Value::Int(7)]),
         vec![Value::Int(50)]
@@ -370,7 +371,7 @@ fn common_if_and_zero_trip_safety() {
     wgsl(&c);
     let c = compile("entry main(n:i32, d:i32) i32 = loop acc=0 for i<n do acc + 12/d");
     assert!(c.state.placements.is_empty(), "division must not be speculated");
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(run(&c, vec![Value::Int(0), Value::Int(0)]), vec![Value::Int(0)]);
 }
 
@@ -378,7 +379,7 @@ fn common_if_and_zero_trip_safety() {
 fn while_header_reuses_syntax_without_reusing_the_previous_iterations_value() {
     let c = compile("entry main(n:i32) i32 = let (_,value)=loop (i,total)=(0,0) while i<n do (i+1,total+(loop v=0 for j<3 do v+i*i+j)) in value");
     assert!(!c.state.placements.is_empty());
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for n in [0, 1, 3] {
         assert_eq!(
             run(&c, vec![Value::Int(n)]),
@@ -392,7 +393,7 @@ fn while_header_reuses_syntax_without_reusing_the_previous_iterations_value() {
 fn soac_capture_computations_move_out_and_refresh_between_iterations() {
     let c = compile("entry main(xs:[4]i32, n:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i,acc)");
     assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Screma { .. }))));
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for n in [0, 1, 5] {
         let add: i64 = (0..n).map(|i| i * i).sum();
         assert_eq!(
@@ -406,7 +407,7 @@ fn soac_capture_computations_move_out_and_refresh_between_iterations() {
 #[test]
 fn nested_soac_capture_hoisting_preserves_element_dependence() {
     let c = compile("entry main(xs:[]i32, bias:i32) []i32 = map(|x:i32|reduce(|a:i32,b:i32|a+b,0,map(|y:i32|y+x*x+bias*bias,iota(3))),xs)");
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(
         run(&c, vec![Value::array(0..5), Value::Int(2)])[0].ints(),
         (0..5).map(|x| 3 + 3 * x * x + 12).collect::<Vec<_>>()
@@ -440,7 +441,7 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
         d.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op)
         if matches!(d.operations[op].kind, OperationKind::Screma { .. })))
     );
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for n in [0, 1, 5] {
         let add: i64 = (0..n).map(|i| i * i + 9).sum();
         assert_eq!(
@@ -465,7 +466,7 @@ fn operation_result_bounds_preserve_order_and_branch_scope() {
             assert_eq!(c.ir.operations[op].region, c.ir.operations[*read].region,
                 "a binding cannot escape its defining loop/branch");
         }
-        let c = schedule(c).unwrap();
+        let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
         assert_eq!(run(&c, vec![Value::array([]), Value::Int(0)]), vec![Value::Int(0)]);
         assert_eq!(run(&c, vec![Value::array([4]), Value::Int(1)]), vec![Value::Int(51)]);
         wgsl(&c);
@@ -516,7 +517,7 @@ fn shared_callback_bounds_translate_captures_for_each_invocation() {
         1,
         "share specialized code, while preserving different actual captures"
     );
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     let values = run(
         &c,
         vec![
@@ -538,7 +539,7 @@ fn shared_callback_bounds_translate_captures_for_each_invocation() {
 fn structured_if_hoists_shared_work_out_of_both_loop_bodies() {
     let c = compile("entry main(flag:bool, x:i32) i32 = if flag then (loop a=0 for i<2 do a+x*x) else (loop a=0 for i<3 do a+x*x)");
     assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::If { .. }))));
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     for flag in [false, true] {
         assert_eq!(
             run(&c, vec![Value::Bool(flag), Value::Int(7)]),
@@ -552,7 +553,7 @@ fn structured_if_hoists_shared_work_out_of_both_loop_bodies() {
 fn read_occurrences_and_partial_branch_expressions_are_not_speculated() {
     let c = compile("entry main(xs:[]i32, n:i32) i32 = loop a=0 for i<n do a+xs[0]*xs[0]");
     assert!(c.state.placements.is_empty());
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(
         run(&c, vec![Value::array([]), Value::Int(0)]),
         vec![Value::Int(0)]
@@ -569,7 +570,7 @@ fn read_occurrences_and_partial_branch_expressions_are_not_speculated() {
 fn tuple_captures_can_be_hoisted_without_flattening_element_arguments() {
     let c = compile("entry main(xs:[]i32, pair:(i32,i32)) []i32 = map(|x:i32|x+pair.0*pair.1,xs)");
     assert!(!c.state.placements.is_empty());
-    let c = schedule(c).unwrap();
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     let actual = run(
         &c,
         vec![

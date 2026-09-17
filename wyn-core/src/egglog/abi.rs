@@ -15,7 +15,7 @@ use crate::interface::{
     BindingExposure, EntryInput, EntryInputKind, EntryKind, EntryParamBinding, EntryParamBindingKind,
     IoDecoration, PushConstantSlot, StorageAccess, StorageBindingDecl, TextureSource,
 };
-use crate::pipeline_descriptor::BufferLen;
+use crate::pipeline_descriptor::{BufferLen, DispatchSize};
 use crate::ssa::layout::type_byte_size;
 use crate::types::{
     bool_type, canonical_storage_buffer_ty, sized_array, strip_existentials, Diet, Type, TypeExt, TypeName,
@@ -33,6 +33,7 @@ pub(super) struct Abi {
     pub buffer_bindings: BTreeMap<BufferId, BindingRef>,
     pub local_lengths: BTreeMap<BufferId, u64>,
     pub roots: Vec<(BlockId, EntryId, [u32; 3], bool)>,
+    pub dispatch_sizes: BTreeMap<BlockId, DispatchSize>,
 }
 
 pub(super) fn error(message: impl Into<String>) -> OptimizeError {

@@ -1,10 +1,7 @@
 //! Publish the finalized resource/dispatch readout through the shared ABI.
 use super::abi::error;
 use super::abi::Abi;
-use super::blocks::DispatchData;
-use super::data::{
-    DispatchId, EntryData, EntryId as SourceEntryId, OutputData, OutputId, SymbolData, SymbolId,
-};
+use super::data::{EntryData, EntryId as SourceEntryId, OutputData, OutputId, SymbolData, SymbolId};
 use super::timing::span;
 use super::OptimizeError;
 use crate::flow::ExecutionModel;
@@ -12,8 +9,8 @@ use crate::interface::publish::PipelineDescriptorPublish;
 use crate::interface::StorageRole;
 use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
 use crate::pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, GraphicsPipeline,
-    GraphicsStage, Pipeline, PipelineDescriptor, ShaderStage, SourceResultBinding,
+    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, GraphicsPipeline, GraphicsStage, Pipeline,
+    PipelineDescriptor, ShaderStage, SourceResultBinding,
 };
 use crate::ssa::types::EntryPoint;
 use crate::BindingRef;
@@ -26,14 +23,12 @@ pub(super) fn publish(
     source_entries: &IdArena<SourceEntryId, EntryData>,
     symbols: &IdArena<SymbolId, SymbolData>,
     outputs: &IdArena<OutputId, OutputData>,
-    dispatches: &IdArena<DispatchId, DispatchData>,
     entries: &mut [EntryPoint],
 ) -> Result<PipelineDescriptor, OptimizeError> {
     let _timing = span("publish pipeline ABI");
     let mut pipeline = PipelineDescriptor::default();
     let mut associations = vec![];
     let entry_indices: BTreeMap<_, _> = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-    let dispatches: BTreeMap<_, _> = dispatches.values().map(|d| (d.kernel, d)).collect();
     let mut graphics_groups = BTreeMap::new();
     let symbol_names: BTreeMap<_, _> = symbols.values().map(|s| (s.source.0, &s.name)).collect();
     for (&owner, blocks) in &abi.entry_roots {
@@ -88,16 +83,7 @@ pub(super) fn publish(
                 ExecutionModel::Compute { local_size } => local_size,
                 _ => unreachable!(),
             };
-            let dispatch = dispatches.get(&root).copied();
-            let dispatch_size = dispatch.map_or(
-                DispatchSize::Fixed {
-                    x: 1,
-                    y: 1,
-                    z: 1,
-                    explicit: true,
-                },
-                |d| d.size.clone(),
-            );
+            let dispatch_size = abi.dispatch_sizes[&root].clone();
             let accesses = &abi.root_accesses[&root];
             for declaration in &mut entry.storage_bindings {
                 let Some(access) = accesses.get(&declaration.binding) else {

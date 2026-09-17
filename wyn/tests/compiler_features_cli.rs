@@ -90,12 +90,13 @@ fn explicit_egglog_route_emits_shader() {
 
 #[test]
 #[cfg(not(feature = "egir"))]
-fn direct_requires_egir_before_writing_artifacts() {
+fn direct_works_without_the_egir_feature() {
     let case = Case::new();
+    fs::write(
+        case.directory.join("input.wyn"),
+        "entry main(xs: [4]i32) [4]i32 = map(|x| x+1, xs)",
+    )
+    .unwrap();
     let result = case.compile("wgsl", &["--direct"]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("--features egir"));
-    assert!(!case.directory.join("output.wgsl").exists());
-    assert!(!case.directory.join("output.json").exists());
-    assert!(!case.directory.join("output.ssa").exists());
+    case.assert_compiled("wgsl", &result, true);
 }

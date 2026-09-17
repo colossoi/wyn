@@ -23,7 +23,7 @@ use wyn_base::IdArena;
 /// Scheduling requires explicit placement, not just simplification:
 /// ```compile_fail
 /// use wyn_core::egglog::{schedule, Simplified, Program};
-/// fn invalid(program: Program<Simplified>) { let _ = schedule(program); }
+/// fn invalid(program: Program<Simplified>) { let _ = schedule(program, wyn_core::PipelineTopologyPolicy::AllowGenerated); }
 /// ```
 /// SSA lowering requires the scheduled blocks and resources:
 /// ```compile_fail

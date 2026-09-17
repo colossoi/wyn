@@ -11,6 +11,7 @@ use crate::flow::{ControlHeader, ExecutionModel};
 use crate::interface::lowering::build_entry_outputs;
 use crate::interface::{EntryInput, EntryKind};
 use crate::op::{OpTag, PureViewSource};
+use crate::pipeline_descriptor::DispatchSize;
 use crate::ssa::builder::{BuilderError, FuncBuilder};
 use crate::ssa::context::BackendGlobal;
 use crate::ssa::stage::{Elaborated, ElaboratedTag};
@@ -118,7 +119,6 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         &data.entries,
         &data.symbols,
         &data.state.outputs,
-        &data.state.dispatches,
         &mut entries,
     )?;
     Ok(
@@ -210,6 +210,7 @@ struct Body<'a, 'b> {
     parameter_types: BTreeMap<BlockId, Vec<Type>>,
     return_types: Option<Vec<Type>>,
     width: u32,
+    grid_yz: [u32; 2],
     entry: Option<super::EntryId>,
     finish_outputs: bool,
     graphics_outputs: bool,
@@ -247,6 +248,10 @@ impl<'a, 'b> Body<'a, 'b> {
                 blocks.insert(id, builder.create_block());
             }
         }
+        let grid_yz = match compiler.data.state.abi.dispatch_sizes.get(&entry) {
+            Some(DispatchSize::Fixed { y, z, .. }) => [*y, *z],
+            _ => [1, 1],
+        };
         Ok(Self {
             compiler,
             builder,
@@ -256,6 +261,7 @@ impl<'a, 'b> Body<'a, 'b> {
             parameter_types: BTreeMap::new(),
             return_types: None,
             width,
+            grid_yz,
             entry: None,
             finish_outputs: false,
             graphics_outputs: false,

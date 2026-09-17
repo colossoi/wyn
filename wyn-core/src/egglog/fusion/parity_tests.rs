@@ -3,6 +3,7 @@ use crate::compile_thru_tlc;
 use crate::egglog::dependencies::analyze;
 use crate::egglog::{from_tlc, insert_expressions, schedule, simplify_and_place, Imported, Ir, Scheduled};
 use crate::tlc::infer_input_slice_bounds;
+use crate::PipelineTopologyPolicy;
 use exec::{run, Value};
 
 #[allow(dead_code)]
@@ -30,8 +31,16 @@ fn check(source: &str, operations: usize) {
         ir: input.ir,
         state: Fused,
     };
-    let original = schedule(simplify_and_place(insert_expressions(input).unwrap()).unwrap()).unwrap();
-    let fused = schedule(simplify_and_place(insert_expressions(fused).unwrap()).unwrap()).unwrap();
+    let original = schedule(
+        simplify_and_place(insert_expressions(input).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let fused = schedule(
+        simplify_and_place(insert_expressions(fused).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
     for n in [0, 1, 4, 63, 64, 65, 137] {
         let args = || vec![Value::array((0..n).map(|i| i % 11 - 3))];
         assert_eq!(run(&fused, args()), run(&original, args()), "n={n}: {source}");
@@ -109,8 +118,16 @@ fn check_args(source: &str, operations: usize, args: impl Fn() -> Vec<Value>) ->
         ir: input.ir,
         state: Fused,
     };
-    let original = schedule(simplify_and_place(insert_expressions(input).unwrap()).unwrap()).unwrap();
-    let fused = schedule(simplify_and_place(insert_expressions(fused).unwrap()).unwrap()).unwrap();
+    let original = schedule(
+        simplify_and_place(insert_expressions(input).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let fused = schedule(
+        simplify_and_place(insert_expressions(fused).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
     assert_eq!(run(&fused, args()), run(&original, args()), "{source}");
     fused
 }

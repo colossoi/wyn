@@ -14,6 +14,7 @@ use crate::egglog::dependencies::analyze;
 use crate::egglog::timing::{span, time};
 use crate::interface::EntryKind;
 use crate::types::{Type, TypeName};
+use crate::PipelineTopologyPolicy;
 use egglog_engine::EGraph;
 use std::collections::BTreeMap;
 
@@ -27,7 +28,10 @@ const WIDTH: u32 = 64;
 /// Recipes, resources, domains and dispatch order come from that plan.
 /// No executable block contains a SOAC operation.
 /// Requires completed scalar placement.
-pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, OptimizeError> {
+pub fn schedule(
+    program: Program<Placed>,
+    topology: PipelineTopologyPolicy,
+) -> Result<Program<Scheduled>, OptimizeError> {
     let _timing = span("scheduling");
     let mut converted = Program {
         ir: program.ir,
@@ -60,7 +64,7 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     time("read planning facts", || {
         graph.update(|mut sink| {
             outputs(&mut converted, &mut sink)?;
-            facts(&converted, &summary, count_type, &mut sink)?;
+            facts(&converted, &summary, count_type, topology, &mut sink)?;
             abi::facts(
                 &converted.state.abi.inputs,
                 &converted.state.outputs,
@@ -102,7 +106,8 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     };
     let mut entry_roots = BTreeMap::new();
     for (entry, definition) in entries {
-        let device = planner.data.entries[entry].declaration.entry_kind != EntryKind::Compute;
+        let device = topology == PipelineTopologyPolicy::AuthoredOnly
+            || planner.data.entries[entry].declaration.entry_kind != EntryKind::Compute;
         let root = planner.definition(definition, device)?;
         entry_roots.insert(entry, root);
         if let Some(interface) = &mut planner.data.state.blocks[root].interface {
@@ -113,7 +118,7 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     if !planner.resources.stages.is_empty() {
         return Err(error("planned dispatches were not lowered"));
     }
-    let dispatch_order = time("validate blocks", || validation::validate(planner.data))?;
+    let dispatch_order = time("validate blocks", || validation::validate(planner.data, topology))?;
     let roots = time("read shader interfaces", || {
         abi::read(
             &graph,
