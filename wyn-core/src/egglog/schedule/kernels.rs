@@ -256,7 +256,10 @@ impl Planner<'_> {
             if storage == Storage::Function { &self.resources.local_slots } else { &self.resources.slots };
         let buffer = slots[&(op, name.into(), *index)];
         *index += 1;
-        if self.data.state.buffers[buffer].storage != Storage::Discarded {
+        if matches!(
+            self.data.state.buffers[buffer].storage,
+            Storage::Device | Storage::Function
+        ) {
             self.emit(host, Instruction::Allocate(buffer));
         }
         buffer

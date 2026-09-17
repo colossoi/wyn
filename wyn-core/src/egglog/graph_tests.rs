@@ -7,7 +7,6 @@ use crate::egglog::data::{
 use crate::egglog::dependencies::analyze;
 use crate::egglog::{parse_program, Fused, Imported, OptimizeError};
 use crate::tlc::infer_input_slice_bounds;
-use crate::types::SoacOwnership;
 use egglog_engine::EGraph;
 
 const CHAIN: &str = "entry chain(xs: [4]i32) [4]i32 =
@@ -102,10 +101,10 @@ fn schedule_is_topological_even_when_membership_ids_and_source_positions_disagre
     }
     input.ir.operations[producer].source_position = 10;
     input.ir.operations[consumer].source_position = 0;
-    let OperationKind::Screma { ownership, .. } = &mut input.ir.operations[consumer].kind else {
+    let OperationKind::Screma { reuse_inputs, .. } = &mut input.ir.operations[consumer].kind else {
         panic!("map")
     };
-    ownership[0] = SoacOwnership::Fresh;
+    reuse_inputs[0] = None;
     assert_eq!(schedule(&input.ir), [producer, consumer]);
     let mut graph = fusion_dependencies(&input.ir);
     graph

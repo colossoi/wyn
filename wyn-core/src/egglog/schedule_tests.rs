@@ -1,5 +1,6 @@
 use super::super::{
     from_tlc, fuse, insert_expressions, simplify_and_place, Exit, FunctionKind, Instruction, Program,
+    Storage,
 };
 use super::schedule;
 use super::validation::validate;
@@ -29,6 +30,60 @@ fn kernel_count(data: &Program<Scheduled>) -> usize {
         .values()
         .filter(|b| b.interface.as_ref().is_some_and(|f| matches!(f.kind, FunctionKind::Kernel(_))))
         .count()
+}
+
+#[test]
+fn consuming_fused_maps_reuse_the_input_without_allocating() {
+    let result = compile("entry main(xs:*[]i32) []i32 = let a=map(|x:i32|x+7,xs) in map(|x:i32|x*2,a)");
+    assert_eq!(kernel_count(&result), 1);
+    assert!(result.state.buffers.values().all(|b| b.storage != Storage::Device));
+    for n in [0, 1, 63, 64, 65, 137] {
+        let input = Value::array(0..n);
+        let output = run(&result, vec![input.clone()]);
+        let expected: Vec<_> = (0..n).map(|x| (x + 7) * 2).collect();
+        assert_eq!(output[0].ints(), expected);
+        assert_eq!(input.ints(), expected);
+    }
+}
+
+#[test]
+fn fused_maps_remap_reuse_slots_and_preserve_return_order() {
+    for (returns, order) in [("(a,c)", [0, 1]), ("(c,a)", [1, 0])] {
+        let result = compile(&format!("entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = let a=map(|x:i32|x+1,xs) in let b=map(|x:i32|x*2,ys) in let c=map(|x:i32|x+7,b) in {returns}"));
+        assert_eq!(kernel_count(&result), 1);
+        assert!(result.state.buffers.values().all(|b| b.storage != Storage::Device));
+        let xs = Value::array(0..4);
+        let ys = Value::array(10..14);
+        let output = run(&result, vec![xs.clone(), ys.clone()]);
+        let expected = [vec![1, 2, 3, 4], vec![27, 29, 31, 33]];
+        assert_eq!(xs.ints(), expected[0]);
+        assert_eq!(ys.ints(), expected[1]);
+        assert_eq!(
+            output,
+            [Value::Tuple(
+                order.into_iter().map(|i| Value::array(expected[i].iter().copied())).collect()
+            )]
+        );
+    }
+}
+
+#[test]
+fn retained_fused_outputs_have_distinct_storage() {
+    let result = compile("entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32,[4]i32) = let a=map(|x:i32|x+1,xs) in let b=map(|x:i32|x*2,ys) in let c=map(|x:i32|x+7,b) in (c,a,b)");
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
+        1
+    );
+    let output = run(&result, vec![Value::array(0..4), Value::array(10..14)]);
+    assert_eq!(
+        output,
+        [Value::Tuple(vec![
+            Value::array([27, 29, 31, 33]),
+            Value::array([1, 2, 3, 4]),
+            Value::array([20, 22, 24, 26])
+        ])]
+    );
 }
 
 #[test]

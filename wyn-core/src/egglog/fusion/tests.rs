@@ -10,7 +10,7 @@ use crate::egglog::data::{
 };
 use crate::egglog::{parse_program, Fused, Imported, SCHEMA};
 use crate::tlc::infer_input_slice_bounds;
-use crate::types::{SoacOwnership, Type};
+use crate::types::Type;
 use egglog_engine::EGraph;
 
 fn imported(source: &str) -> Program<Imported> {
@@ -229,16 +229,19 @@ fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
     let scan = original.iter().copied().find(|&id| {
         matches!(&input.ir.operations[id].kind, OperationKind::Screma { form, .. } if !form.scans.is_empty())
     }).unwrap();
-    let OperationKind::Screma { ownership, .. } = &input.ir.operations[scan].kind else {
+    let OperationKind::Screma { reuse_inputs, .. } = &input.ir.operations[scan].kind else {
         unreachable!()
     };
-    assert_eq!(ownership, &[SoacOwnership::UniqueInput]);
+    assert_eq!(reuse_inputs, &[Some(0)]);
     let result = optimized(input);
     assert_eq!(entry_ops(&result.ir).len(), original.len() - 1);
-    let OperationKind::Screma { ownership, form, .. } = &result.ir.operations[scan].kind else {
+    let OperationKind::Screma {
+        reuse_inputs, form, ..
+    } = &result.ir.operations[scan].kind
+    else {
         unreachable!()
     };
-    assert_eq!(ownership, &[SoacOwnership::Fresh]);
+    assert_eq!(reuse_inputs, &[None]);
     assert_eq!(form.scans.len(), 1);
     assert_eq!(form.scans[0].neutral.len(), 1);
     // The later gather still observes a materialized scan result.
@@ -395,16 +398,14 @@ fn capture_dependencies_prevent_absorption() {
 }
 
 #[test]
-fn input_write_hazards_and_unknown_body_calls_prevent_fusion() {
-    // The ownership-side equivalent of EGIR's input resource write hazard.
+fn reuse_permission_allows_fusion_but_unknown_body_reads_do_not() {
     let mut input = imported(CHAIN);
     let producer = entry_ops(&input.ir)[0];
-    let OperationKind::Screma { ownership, .. } = &mut input.ir.operations[producer].kind else {
+    let OperationKind::Screma { reuse_inputs, .. } = &mut input.ir.operations[producer].kind else {
         unreachable!()
     };
-    ownership[0] = SoacOwnership::UniqueInput;
-    let before = entry_ops(&input.ir).to_vec();
-    assert_eq!(entry_ops(&optimized(input).ir), before);
+    reuse_inputs[0] = Some(0);
+    assert_eq!(entry_ops(&optimized(input).ir).len(), 1);
 
     // A source body with an array read is conservatively kept as a separate
     // operation; scalar expression interning does not prove storage-read safety.

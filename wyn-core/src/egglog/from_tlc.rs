@@ -364,7 +364,7 @@ impl Converter {
                         post,
                     },
                     inputs,
-                    ownership: vec![*destination],
+                    reuse_inputs: vec![(*destination == SoacOwnership::UniqueInput).then_some(0)],
                 }
             }
             SoacOp::Reduce { op, ne, input } => {
@@ -385,7 +385,7 @@ impl Converter {
                 OperationKind::Screma {
                     form,
                     inputs: vec![input],
-                    ownership: vec![SoacOwnership::Fresh],
+                    reuse_inputs: vec![None],
                 }
             }
             SoacOp::Scan {
@@ -407,7 +407,7 @@ impl Converter {
                 OperationKind::Screma {
                     form,
                     inputs: vec![input],
-                    ownership: vec![*destination],
+                    reuse_inputs: vec![(*destination == SoacOwnership::UniqueInput).then_some(0)],
                 }
             }
             SoacOp::Filter {
@@ -420,7 +420,7 @@ impl Converter {
                     map: SoacBody::Identity(body_signature(&body).0),
                     body,
                     inputs: vec![self.array(input, scope)?],
-                    ownership: *destination,
+                    reuse_input: (*destination == SoacOwnership::UniqueInput).then_some(0),
                 }
             }
             SoacOp::Scatter { dest, lam, inputs } => OperationKind::Scatter {

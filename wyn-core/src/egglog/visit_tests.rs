@@ -42,7 +42,7 @@ fn screma_traversal_covers_composed_captures_collectives_and_array_descriptors()
                 step: Some(ExprId::from(13)),
             },
         ])],
-        ownership: vec![],
+        reuse_inputs: vec![],
     };
     let (mut values, mut regions) = (Vec::new(), Vec::new());
     operation.operands(&mut values, &mut regions);

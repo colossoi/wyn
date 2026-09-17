@@ -340,6 +340,55 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 }
 
 #[test]
+fn consuming_maps_publish_the_input_as_their_read_write_result() {
+    use pipeline_descriptor::{Access, Binding, BufferUsage};
+    let output = pipeline("entry main(xs:*[]i32) []i32 = map(|x:i32|x+7,xs)");
+    assert_eq!(output.pipeline.source_results[0].binding, 0);
+    let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+        panic!("compute")
+    };
+    assert_eq!(p.bindings.len(), 1);
+    assert!(matches!(
+        p.bindings[0],
+        Binding::StorageBuffer {
+            usage: BufferUsage::Input,
+            access: Access::ReadWrite,
+            ..
+        }
+    ));
+    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
+fn fused_maps_publish_reused_nonprimary_inputs() {
+    let output = pipeline(
+        "entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = (map(|x:i32|x+1,ys),map(|x:i32|x*2,xs))",
+    );
+    assert_eq!(
+        output.pipeline.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
+        [1, 0]
+    );
+    let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+        panic!("compute")
+    };
+    assert_eq!(p.bindings.len(), 2);
+    assert_eq!(p.stages.len(), 1);
+    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
 fn tuple_of_views_uses_the_tlc_component_bindings() {
     let source = "entry main(xs: ([]i32,[]i32)) ([]i32,[]i32) = xs";
     let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());

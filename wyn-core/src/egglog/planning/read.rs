@@ -83,7 +83,7 @@ pub(in crate::egglog) fn read(
                     name: format!("input{}", e.as_u32()),
                     length: Value::op("length", [Value::Source(e)]),
                     element: element.clone(),
-                    storage: Storage::External(e),
+                    storage: Storage::View(e),
                 })
             });
         }
@@ -141,6 +141,20 @@ pub(in crate::egglog) fn read(
         }
         Ok(())
     })?;
+    let mut status = Ok(());
+    graph.function_entries_while("StorageFor", |entry| {
+        status = graph.read(|state| -> Result<(), OptimizeError> {
+            if let Some(&id) = buffers.get(&entry.inputs[0]) {
+                state.enodes_for_eclass("Reuse", entry.output, |node| {
+                    data.state.buffers[id].storage =
+                        Storage::View(ExprId::from(expressions[&node.children[0]]));
+                })?;
+            }
+            Ok(())
+        });
+        status.is_ok()
+    })?;
+    status?;
     rows(graph, "BufferSlot", |a| {
         if let Some(&id) = buffers.get(&a[3]) {
             result.slots.insert(

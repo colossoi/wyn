@@ -32,12 +32,22 @@ pub(super) const RULES: &str = concat!(
     "\n",
     include_str!("allocation.egg"),
     "\n",
+    include_str!("reuse.egg"),
+    "\n",
     include_str!("dispatch.egg"),
     "\n",
 );
 pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
-pub(super) const RUN: &str =
-    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch))) (run materialize-outputs) (saturate (run allocation)) (saturate (run abi)) (saturate (run abi-final)) (run readout)))";
+pub(super) const RUN: &str = r#"(run-schedule (seq
+    (saturate (run structure))
+    (saturate (run classify))
+    (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))
+    (saturate (run reuse)) (run select-reuse) (run select-allocation)
+    (saturate (seq (run residency) (run allocation) (run dispatch)))
+    (run materialize-outputs) (run allocation) (run select-allocation)
+    (saturate (run allocation))
+    (saturate (run abi)) (saturate (run abi-final))
+    (run readout)))"#;
 
 pub(super) fn facts(
     data: &Program<Scheduled>,
@@ -198,7 +208,11 @@ pub(super) fn facts(
         });
         result?;
         let inputs = match &op.kind {
-            OperationKind::Screma { form, inputs, .. } => {
+            OperationKind::Screma {
+                form,
+                inputs,
+                reuse_inputs,
+            } => {
                 sink.add(
                     "CollectiveShape",
                     (
@@ -224,6 +238,15 @@ pub(super) fn facts(
                     sink.add("TotalResult", (key, i as i64, t))?;
                 }
                 for (i, t) in body_signature(&form.post).1.into_iter().enumerate() {
+                    if let Some(Some(input)) = reuse_inputs.get(total_count + i) {
+                        if let Some(Array::Value(e)) = inputs.get(*input) {
+                            if data.types[data.expressions[*e].ty].ty.elem_type() == Some(&data.types[t].ty)
+                            {
+                                let e = sink.add("ExprId", i64::from(e.as_u32()))?;
+                                sink.add("ReusePermission", (key, (total_count + i) as i64, e))?;
+                            }
+                        }
+                    }
                     let t = sink.add("TypeId", i64::from(t.as_u32()))?;
                     sink.add("ArrayResult", (key, (total_count + i) as i64, t))?;
                 }

@@ -757,9 +757,9 @@ fn canonical_scremas_preserve_tuple_components_callable_captures_and_ownership()
         let converted = from_tlc(&program).unwrap();
         verify_sources(&program, &converted);
         for op in converted.ir.operations.values() {
-            let OperationKind::Screma { form, ownership, .. } = &op.kind else { continue; };
-            assert_eq!(ownership.len(), 1);
-            saw_unique |= ownership[0] == SoacOwnership::UniqueInput;
+            let OperationKind::Screma { form, reuse_inputs, .. } = &op.kind else { continue; };
+            assert_eq!(reuse_inputs.len(), 1);
+            saw_unique |= reuse_inputs[0] == Some(0);
             let bodies = std::iter::once(&form.pre).chain(std::iter::once(&form.post))
                 .chain(form.scans.iter().map(|scan| &scan.operator))
                 .chain(form.reductions.iter().map(|reduction| &reduction.operator));

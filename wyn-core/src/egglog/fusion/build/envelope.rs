@@ -1,7 +1,6 @@
 use super::super::analysis::{counts, inputs};
 use super::{element, flatten, input, wire_input, Wiring};
 use crate::egglog::data::{BucketShapeData, Ir, OperationId, OperationKind};
-use crate::types::SoacOwnership;
 
 pub(super) fn envelope(data: &mut Ir, producer: OperationId, consumer: OperationId) -> Option<()> {
     let OperationKind::Screma {
@@ -49,12 +48,12 @@ pub(super) fn envelope(data: &mut Ir, producer: OperationId, consumer: Operation
         OperationKind::Filter {
             map,
             inputs,
-            ownership,
+            reuse_input,
             ..
         } => {
             *map = body;
             *inputs = arrays;
-            *ownership = SoacOwnership::Fresh;
+            *reuse_input = None;
         }
         OperationKind::ReduceByIndex { map, inputs, .. } => {
             *map = body;

@@ -44,6 +44,40 @@ const MAP: &str = r#"
 "#;
 
 #[test]
+fn map_reuse_is_selected_only_after_all_old_value_uses_are_known() {
+    for (extra, expected) in [
+        ("", "(Reuse (ExprId 0))"),
+        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true) (InputDomain (OperationId 1) (Length (ExprId 0)))", "(Reuse (ExprId 0))"),
+        ("(Operand (OperationId 0) \"environment\" (ExprId 0))", "(Allocate)"),
+        ("(Operand (OperationId 0) \"input\" (ExprId 3)) (ParameterValue (ExprId 3) (RegionId 0))", "(Reuse (ExprId 0))"),
+        ("(Operand (OperationId 0) \"input\" (ExprId 3)) (SliceView (ExprId 3) (ExprId 0) (ExprId 4) (ExprId 5))", "(Allocate)"),
+        ("(Operand (OperationId 0) \"input\" (ExprId 3)) (DirectResult (ExprId 3) (OperationId 1) 0) (UpdatedResult (OperationId 1) 0 (ExprId 0))", "(Allocate)"),
+        ("(ExitValue (RegionId 0) 1 (ExprId 0))", "(Allocate)"),
+        ("(AbiOutputBinding 0 0 7 \"out\") (ReturnArray 0 (ExprId 2))", "(Allocate)"),
+        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true) (InputDomain (OperationId 1) (Fixed 4)) (Operand (OperationId 1) \"input\" (ExprId 0))", "(Allocate)"),
+    ] {
+        let mut g = graph(&format!("{MAP} {extra} (ReusePermission (OperationId 0) 0 (ExprId 0)) (ExitValue (RegionId 0) 0 (ExprId 2))"));
+        check(&mut g, &format!("(= (StorageFor (Result (OperationId 0) 0)) {expected})"));
+        assert_eq!(count(&g, "Before"), 0, "reuse must not serialize independent readers");
+        assert_eq!(count(&g, "Allocation"), usize::from(expected == "(Allocate)"));
+    }
+}
+
+#[test]
+fn fused_outputs_cannot_both_claim_the_same_input() {
+    let mut g = graph(&format!(
+        r#"{MAP}
+        (ArrayResult (OperationId 0) 1 (TypeId 0))
+        (ReusePermission (OperationId 0) 0 (ExprId 0))
+        (ReusePermission (OperationId 0) 1 (ExprId 0))
+        (Materialize (Result (OperationId 0) 0))
+        (Materialize (Result (OperationId 0) 1))"#
+    ));
+    check(&mut g, "(= (StorageFor (Result (OperationId 0) 0)) (Allocate)) (= (StorageFor (Result (OperationId 0) 1)) (Allocate))");
+    assert_eq!(count(&g, "Allocation"), 2);
+}
+
+#[test]
 fn map_to_reduce_derives_materialization_scratch_and_order() {
     let mut g = graph(&format!(
         r#"{MAP}

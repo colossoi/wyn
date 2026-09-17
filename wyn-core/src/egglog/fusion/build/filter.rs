@@ -5,7 +5,7 @@ use crate::egglog::data::{
     ScremaForm, SoacBody,
 };
 use crate::egglog::rewrite::all;
-use crate::types::{function, tuple, SoacOwnership};
+use crate::types::{function, tuple};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Mask reduction inputs and, when needed, append a shared count reduction.
@@ -133,7 +133,7 @@ pub(super) fn masked(
     data.operations[consumer].kind = OperationKind::Screma {
         form,
         inputs,
-        ownership: vec![SoacOwnership::Fresh; fields.len()],
+        reuse_inputs: vec![None; fields.len()],
     };
     if !only_count {
         data.regions[parent].members.remove(&producer);

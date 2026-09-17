@@ -191,7 +191,7 @@ impl Body<'_, '_> {
                     });
                 }
                 let buffer = &self.compiler.data.state.buffers[*id];
-                if let Storage::External(expr) = buffer.storage {
+                if let Storage::View(expr) = buffer.storage {
                     return self.expression(expr);
                 }
                 if buffer.storage == Storage::Function {

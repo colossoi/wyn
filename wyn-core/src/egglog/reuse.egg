@@ -1,0 +1,74 @@
+; Optional reuse is selected after logical uses settle, before allocating.
+; It never introduces dependencies between otherwise independent dispatches.
+(ruleset reuse)
+(ruleset select-reuse)
+(ruleset select-allocation)
+(relation WholeValue (ExprKey ValueKey))
+(relation ReuseCandidate (ValueKey StageKey ExprKey ValueKey))
+(relation ReuseAlias (ValueKey ValueKey))
+(function ReuseBlocked (ValueKey) bool :merge (or old new))
+(function ReuseWitness (ValueKey) ValueKey :merge old)
+(function ReuseContested (ValueKey) bool :merge (or old new))
+
+; Slices retain offsets that the published result ABI cannot yet describe.
+(rule ((ParameterValue e r)) ((WholeValue e (Source e))) :ruleset reuse)
+(rule ((DirectResult e op i)) ((WholeValue e (Result op i))) :ruleset reuse)
+(rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
+      ((WholeValue e (Result op i))) :ruleset reuse)
+(rule ((Projection e tuple i) (FieldValue tuple i field) (WholeValue field value))
+      ((WholeValue e value)) :ruleset reuse)
+(rule ((ForwardValue e source) (WholeValue source value))
+      ((WholeValue e value)) :ruleset reuse)
+
+; An Elements recipe reads each element before writing the same index.
+(rule ((ReusePermission op i e) (= (Plan op) (Elements))
+       (Produces writer (Result op i)) (WholeValue e old) (Materialize (Result op i)))
+      ((ReuseCandidate (Result op i) writer e old)
+       (ReuseAlias (Result op i) old) (set (ReuseBlocked (Result op i)) false)) :ruleset reuse)
+
+; Follow existing authored updates in either direction, scoped to candidates.
+(rule ((ReuseAlias candidate old) (SameBacking alias e) (ValueRef e old))
+      ((ReuseAlias candidate alias)) :ruleset reuse)
+(rule ((ReuseAlias candidate alias) (SameBacking alias e) (ValueRef e old))
+      ((ReuseAlias candidate old)) :ruleset reuse)
+
+; Content reads block reuse. Length-only demands don't need the old elements.
+(rule ((ReuseCandidate candidate writer e old) (ReuseAlias candidate alias)
+       (Requires (InStage reader) alias) (!= reader writer))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; Scalar-stage dependencies can include reads hidden in nested source regions.
+(rule ((ReuseAlias candidate alias) (Needs (Stage op "scalar") alias))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+(rule ((ReuseAlias candidate alias) (Requires (InOperation op) alias))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+(rule ((ReuseAlias candidate alias) (Escapes region alias))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; An authored update can return a slice even when its result is a whole value.
+(rule ((ReuseAlias candidate alias) (SameBacking alias e) (SliceView e source start end))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; Captured reads may address a different element within the same dispatch.
+(rule ((ReuseCandidate candidate (Stage op name) e old) (ReuseAlias candidate alias)
+       (Operand op "environment" capture) (References capture alias))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; Another input view of the same backing may read a shifted index. Identical
+; input expressions are safe: the recipe loads them all before storing.
+(rule ((ReuseCandidate candidate (Stage op name) e old) (ReuseAlias candidate alias)
+       (Operand op "input" other) (!= other e) (References other alias))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; Any witness suffices to detect competing outputs without an all-pairs join.
+; No candidate wins a conflict: all competing destinations remain fresh.
+(rule ((ReuseAlias candidate old))
+      ((set (ReuseWitness old) candidate) (set (ReuseContested old) false)) :ruleset reuse)
+(rule ((ReuseAlias candidate old) (= witness (ReuseWitness old)) (!= candidate witness))
+      ((set (ReuseContested old) true)) :ruleset reuse)
+(rule ((ReuseAlias candidate old) (= (ReuseContested old) true))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+; An explicitly assigned output binding must remain a separate destination.
+(rule ((AbiOutputBinding output set binding name) (ReturnArray output e)
+       (ValueRef e candidate) (ReuseCandidate candidate writer source old))
+      ((set (ReuseBlocked candidate) true)) :ruleset reuse)
+
+(rule ((ReuseCandidate value writer e old) (= (ReuseBlocked value) false))
+      ((set (StorageFor value) (Reuse e)) (set (ReuseSelected value) true)) :ruleset select-reuse)
+(rule ((FreshValue value) (= (ReuseSelected value) false))
+      ((set (StorageFor value) (Allocate))) :ruleset select-allocation)

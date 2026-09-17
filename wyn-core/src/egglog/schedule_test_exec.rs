@@ -243,7 +243,7 @@ impl Machine<'_> {
                 if self.data.state.buffers[*id].storage == Storage::Discarded {
                     return Value::Discarded;
                 }
-                if let Storage::External(expr) = self.data.state.buffers[*id].storage {
+                if let Storage::View(expr) = self.data.state.buffers[*id].storage {
                     self.source(expr, frame)
                 } else {
                     frame

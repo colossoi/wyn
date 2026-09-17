@@ -1,7 +1,8 @@
 ; Backing identity is distinct from the version of a value stored there.
-; Start with fresh storage and authored updates; optional storage reuse needs
-; a separate, completed legality analysis before it can select alternatives.
-(rule ((Materialize value) (FreshValue value)) ((Backing value value)) :ruleset allocation)
+; Destination selection completes before fresh storage can be allocated.
+(rule ((FreshValue value)) ((set (ReuseSelected value) false)) :ruleset allocation)
+(rule ((Materialize value) (= (StorageFor value) (Allocate))) ((Backing value value)) :ruleset allocation)
+(rule ((= (StorageFor value) (Reuse e))) ((SameBacking value e)) :ruleset allocation)
 (rule ((Needs stage (Source e))) ((Backing (Source e) (Source e))) :ruleset allocation)
 (rule ((Requires (InOperation op) (Source e))) ((Backing (Source e) (Source e))) :ruleset allocation)
 (rule ((Escapes r (Source e))) ((Backing (Source e) (Source e))) :ruleset allocation)

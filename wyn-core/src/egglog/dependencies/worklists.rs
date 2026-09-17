@@ -3,7 +3,7 @@ use super::super::data::length_source;
 use super::super::regions::Regions;
 use super::{References, Set, Sets, EMPTY};
 use crate::egglog::data::{ExprId, ExprKind, Ir, OperationId, OperationKind, RegionId, SoacBody};
-use crate::types::{is_copy, SoacOwnership};
+use crate::types::is_copy;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) fn safety(
@@ -21,14 +21,13 @@ pub(super) fn safety(
     let mut remaining = BTreeMap::new();
     let mut on_region = BTreeMap::<RegionId, Vec<OperationId>>::new();
     let mut on_operation = BTreeMap::<OperationId, Vec<OperationId>>::new();
-    let mut can_move = BTreeSet::new();
     let mut ready = VecDeque::new();
     for &op in members {
         let kind = &data.operations[op].kind;
         let mut regions = BTreeSet::new();
         let mut producer = None;
-        let movable = match kind {
-            k if length_source(data, k).is_some() => true,
+        match kind {
+            k if length_source(data, k).is_some() => {}
             OperationKind::Index { array, .. } => {
                 if !is_copy(&data.types[data.expressions[*array].ty].ty) {
                     producer = fresh_source(data, *array);
@@ -36,19 +35,15 @@ pub(super) fn safety(
                         continue;
                     }
                 }
-                true
             }
-            OperationKind::Screma { ownership, .. } => ownership.iter().all(|o| *o == SoacOwnership::Fresh),
-            OperationKind::Filter { ownership, .. } => *ownership == SoacOwnership::Fresh,
+            // Ownership grants optional reuse; it is not an authored write.
+            OperationKind::Screma { .. } | OperationKind::Filter { .. } => {}
             _ => continue,
         };
         for body in kind.callbacks() {
             if let SoacBody::Apply { region, .. } = body {
                 regions.insert(*region);
             }
-        }
-        if movable {
-            can_move.insert(op);
         }
         regions.retain(|r| !safe.contains(r));
         let count = regions.len() + usize::from(producer.is_some());
@@ -81,7 +76,7 @@ pub(super) fn safety(
     let mut discardable = BTreeSet::new();
     while let Some(op) = ready.pop_front() {
         discardable.insert(op);
-        if !can_move.contains(&op) || !movable.insert(op) {
+        if !movable.insert(op) {
             continue;
         }
         release(on_operation.get(&op), &mut remaining, &mut ready);

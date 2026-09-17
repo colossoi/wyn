@@ -149,7 +149,7 @@ pub enum Storage {
     Function,
     /// A source view, possibly selected by a host branch or call. Its aliasing
     /// and physical binding remain described by the source sidecar expression.
-    External(ExprId),
+    View(ExprId),
     /// An unused result slot. It has no allocation or shader binding.
     Discarded,
 }

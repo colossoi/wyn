@@ -94,7 +94,7 @@ pub(super) fn validate(
                     let Some(buffer) = data.state.buffers.get(*id) else {
                         return Err(error("missing allocation"));
                     };
-                    if matches!(buffer.storage, Storage::External(_))
+                    if matches!(buffer.storage, Storage::View(_))
                         || device != matches!(buffer.storage, Storage::Function)
                     {
                         return Err(error("buffer allocation is in the wrong address space"));

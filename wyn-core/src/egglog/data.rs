@@ -3,7 +3,7 @@ use crate::ast::Span;
 use crate::builtins::catalog;
 use crate::interface::{EntryDecl, EntryParamBinding};
 use crate::pipeline_descriptor::BufferLen;
-use crate::types::{Diet, SoacOwnership, Type};
+use crate::types::{Diet, Type};
 use std::collections::BTreeSet;
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
@@ -224,14 +224,15 @@ pub enum OperationKind {
     Screma {
         form: ScremaForm,
         inputs: Vec<Array>,
-        ownership: Vec<SoacOwnership>,
+        /// Per-result permission to reuse an input slot; scheduling proves safety.
+        reuse_inputs: Vec<Option<usize>>,
     },
     Filter {
         /// Element transformation before predicate evaluation and compaction.
         map: SoacBody,
         body: SoacBody,
         inputs: Vec<Array>,
-        ownership: SoacOwnership,
+        reuse_input: Option<usize>,
     },
     Scatter {
         destination: Place,

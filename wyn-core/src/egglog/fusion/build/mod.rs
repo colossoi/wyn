@@ -7,12 +7,12 @@ use crate::egglog::data::{
 };
 use crate::egglog::rewrite::all;
 use crate::egglog::OptimizeError;
-use crate::types::{canonical_storage_buffer_ty, tuple, SoacOwnership, Type, TypeExt, TypeName};
+use crate::types::{canonical_storage_buffer_ty, tuple, Type, TypeExt, TypeName};
 use body::{finish, invoke, region};
 use envelope::envelope;
 use filter::masked;
 use indexed::indexed;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 mod body;
 mod envelope;
@@ -367,6 +367,42 @@ fn install(
         tuple(fields.iter().map(|t| data.types[*t].ty.clone()).collect()),
     );
     let result = intern_expr(data, result_ty, ExprKind::OperationResult(consumer));
+    // Follow each result's permission through absorbed producer outputs, then
+    // locate the unchanged input in the combined input list.
+    let input_indices: HashMap<_, _> = inputs.iter().enumerate().map(|(i, a)| (a, i)).collect();
+    let reuse_inputs = origins
+        .iter()
+        .map(|&(op, slot)| {
+            let OperationKind::Screma {
+                inputs: old,
+                reuse_inputs,
+                ..
+            } = &data.operations[op].kind
+            else {
+                return None;
+            };
+            let old = old.get((*reuse_inputs.get(slot)?)?)?;
+            if let Some(&index) = input_indices.get(old) {
+                return Some(index);
+            }
+            if op == consumer {
+                if let Input::Produced(i, slices) = input(data, old, Some(producer)) {
+                    if let OperationKind::Screma {
+                        inputs: source,
+                        reuse_inputs,
+                        ..
+                    } = &data.operations[producer].kind
+                    {
+                        if slices.is_empty() {
+                            let source = source.get((*reuse_inputs.get(i)?)?)?;
+                            return input_indices.get(source).copied();
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .collect();
     let mut substitutions = BTreeMap::new();
     for (old, ts) in [(producer, a), (consumer, b)] {
         let mut values = vec![];
@@ -420,7 +456,7 @@ fn install(
     data.operations[consumer].kind = OperationKind::Screma {
         form,
         inputs,
-        ownership: vec![SoacOwnership::Fresh; origins.len()],
+        reuse_inputs,
     };
     data.regions[data.operations[producer].region].members.remove(&producer);
     all(data, &substitutions);
