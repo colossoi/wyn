@@ -210,6 +210,97 @@ fn owned_reuse_selects_an_eligible_input_after_checking_each_candidate() {
 }
 
 #[test]
+fn scan_reuse_uses_recipe_boundaries_without_ordering_independent_readers() {
+    let scan = MAP.replace(
+        "(CollectiveShape (OperationId 0) 0 0 true)",
+        "(CollectiveShape (OperationId 0) 1 0 true)",
+    );
+    let reader = r#"
+        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true)
+        (InputDomain (OperationId 1) (Length (ExprId 0)))
+        (Operand (OperationId 1) "input" (ExprId 0))"#;
+    for (reads, order, allowed) in [
+        ("", "", true),
+        ("(ExitValue (RegionId 0) 1 (ExprId 0))", "", false),
+        ("(Operand (OperationId 0) \"environment\" (ExprId 0))", "", false),
+        (reader, "", false),
+        (
+            reader,
+            "(Before (Stage (OperationId 1) \"elements\") (Stage (OperationId 0) \"chunks\"))",
+            true,
+        ),
+        (
+            reader,
+            "(Before (Stage (OperationId 1) \"elements\") (Stage (OperationId 0) \"combine\"))",
+            true,
+        ),
+        (
+            reader,
+            "(Before (Stage (OperationId 0) \"offsets\") (Stage (OperationId 1) \"elements\"))",
+            false,
+        ),
+        (
+            reader,
+            "(EffectInput 1 (OperationId 1)) (EffectWait (OperationId 0) 1)",
+            true,
+        ),
+    ] {
+        let facts = format!(
+            r#"{scan} {reads} {order}
+            (Accumulator (OperationId 0) 0 (TypeId 0))
+            (ScanComponent (OperationId 0) 0 (TypeId 0))
+            (ExitValue (RegionId 0) 0 (ExprId 2))"#
+        );
+        let baseline = graph(&facts);
+        let mut g = graph(&format!("{facts} (ReusePermission (OperationId 0) 0 (ExprId 0))"));
+        let expected = if allowed { "(Reuse (ExprId 0))" } else { "(Allocate)" };
+        check(
+            &mut g,
+            &format!("(= (StorageFor (Result (OperationId 0) 0)) {expected})"),
+        );
+        check(
+            &mut g,
+            r#"(= (ReadFinished (Stage (OperationId 0) "offsets") (InStage (Stage (OperationId 0) "chunks"))) true)"#,
+        );
+        assert_eq!(count(&g, "Allocation"), if allowed { 3 } else { 4 });
+        assert_eq!(count(&g, "Before"), count(&baseline, "Before"));
+        assert_eq!(
+            count(&g, "DispatchDependency"),
+            count(&baseline, "DispatchDependency")
+        );
+        assert_eq!(
+            count(&g, "ReuseBoundary"),
+            3,
+            "only this recipe's phases are visited"
+        );
+    }
+}
+
+#[test]
+fn scan_can_reuse_an_owned_intermediate_without_a_permission_hint() {
+    let mut g = graph(&format!(
+        r#"{MAP}
+        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 1 0 true)
+        (InputDomain (OperationId 1) (Length (ExprId 2)))
+        (Operand (OperationId 1) "input" (ExprId 2))
+        (Accumulator (OperationId 1) 0 (TypeId 0)) (ScanComponent (OperationId 1) 0 (TypeId 0))
+        (ArrayResult (OperationId 1) 0 (TypeId 0)) (DirectResult (ExprId 3) (OperationId 1) 0)
+        (ExitValue (RegionId 0) 0 (ExprId 3))"#
+    ));
+    check(
+        &mut g,
+        r#"
+        (= (StorageFor (Result (OperationId 1) 0)) (Reuse (ExprId 2)))
+        (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
+        (Access (Stage (OperationId 1) "chunks") (Result (OperationId 0) 0) "read")
+        (Access (Stage (OperationId 1) "offsets") (Result (OperationId 0) 0) "write")"#,
+    );
+    assert_eq!(count(&g, "Allocation"), 4);
+    // The prefix scratch also connects chunks directly to offsets.
+    assert_eq!(count(&g, "DispatchDependency"), 4);
+}
+
+#[test]
 fn map_to_reduce_derives_materialization_scratch_and_order() {
     let mut g = graph(&format!(
         r#"{MAP}

@@ -9,6 +9,8 @@
 (ruleset select-allocation)
 (relation WholeValue (ExprKey ValueKey))
 (relation FitsInput (OperationKey ExprKey))
+(function ReuseWriter (OperationKey) StageKey :no-merge)
+(relation ReuseBoundary (StageKey StageKey))
 (relation ReuseCandidate (StageKey ExprKey ValueKey))
 (relation ReuseType (OperationKey TypeKey))
 (relation OwnedInput (OperationKey TypeKey ExprKey))
@@ -43,17 +45,27 @@
 
 ; Check each writer/input pair once, independently of the number of outputs.
 (rule ((ArrayResult op i t) (Materialize (Result op i))) ((ReuseType op t)) :ruleset reuse)
+; Maps load before storing each element. Scans preserve their input through
+; chunks and combine, then write the final output in the offsets phase.
+(rule ((= (Plan op) (Elements)) (FirstPhase op writer))
+      ((set (ReuseWriter op) writer)) :ruleset reuse)
+(rule ((= (Plan op) (Prefixes)) (LastPhase op writer))
+      ((set (ReuseWriter op) writer)) :ruleset reuse)
 ; Owned intermediates need no TLC hint. Source inputs still require permission.
-(rule ((= (Plan op) (Elements)) (FirstPhase op writer) (Phase writer region)
+(rule ((= writer (ReuseWriter op)) (Phase writer region)
        (ReuseType op t) (Operand op "input" e) (FitsInput op e) (WholeValue e old)
        (FreshValue old) (ElementType old t) (Produces producer old) (Phase producer region))
       ((ReuseCandidate writer e old) (OwnedInput op t e)) :ruleset reuse)
-; An Elements recipe loads its input elements before writing the same index.
-(rule ((ReusePermission op i e) (= (Plan op) (Elements))
+(rule ((ReusePermission op i e) (= writer (ReuseWriter op))
        (Produces writer (Result op i)) (WholeValue e old) (Materialize (Result op i)))
       ((ReuseCandidate writer e old)) :ruleset reuse)
 (rule ((ReuseCandidate writer e old))
       ((ReuseAlias writer e old) (set (ReuseBlocked writer e) false)) :ruleset reuse)
+; Walk only this recipe's bounded phase graph, not the whole dispatch graph.
+; Finishing before any of these boundaries also finishes before the writer.
+(rule ((ReuseCandidate writer e old)) ((ReuseBoundary writer writer)) :ruleset reuse)
+(rule ((ReuseBoundary (Stage op writer) (Stage op after)) (PhaseLink op before after))
+      ((ReuseBoundary (Stage op writer) (Stage op before))) :ruleset reuse)
 
 ; Follow authored aliases in both directions, scoped to actual candidates.
 (rule ((ReuseAlias writer e old) (SameBacking alias source) (ValueRef source old))
@@ -73,19 +85,22 @@
       ((ReuseRead writer e (InOperation op))) :ruleset reuse)
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e site))
       ((set (ReadFinished writer site) false)) :ruleset reuse)
+; Input-reading phases of this recipe finish before its final writer.
+(rule ((ReuseRead writer e (InStage reader)) (ReuseBoundary writer reader) (!= reader writer))
+      ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
 ; Existing immediate dependencies and complete recipes certify finished reads.
 ; Do not build a transitive closure over the dispatch graph.
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage reader))
-       (DispatchDependency reader writer))
+       (ReuseBoundary writer boundary) (DispatchDependency reader boundary))
       ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage (Stage op name)))
-       (LastPhase op last) (DispatchDependency last writer))
+       (LastPhase op last) (ReuseBoundary writer boundary) (DispatchDependency last boundary))
       ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage (Stage op name)))
-       (Waits writer (End op)))
+       (ReuseBoundary writer boundary) (Waits boundary (End op)))
       ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e (InOperation op))
-       (Waits writer (End op)))
+       (ReuseBoundary writer boundary) (Waits boundary (End op)))
       ((set (ReadFinished writer (InOperation op)) true)) :ruleset reuse)
 (rule ((ReuseCandidate writer e old) (ReuseRead writer e site)
        (= (ReadFinished writer site) false))
@@ -114,7 +129,7 @@
 ; Choose one safe owned input per element type before joining output slots.
 ; Additional compatible inputs remain separate rather than growing a Cartesian
 ; product of inputs and outputs to optimize this optional choice.
-(rule ((OwnedInput op t (ExprId id)) (FirstPhase op writer)
+(rule ((OwnedInput op t (ExprId id)) (= writer (ReuseWriter op))
        (= (ReuseBlocked writer (ExprId id)) false))
       ((set (OwnedInputChoice op t) id)) :ruleset reuse-owned-input)
 (rule ((ReusePermission op i (ExprId id)) (Produces writer (Result op i))

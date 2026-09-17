@@ -340,29 +340,35 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 }
 
 #[test]
-fn consuming_maps_publish_the_input_as_their_read_write_result() {
+fn consuming_maps_and_scans_publish_the_input_as_their_read_write_result() {
     use pipeline_descriptor::{Access, Binding, BufferUsage};
-    let output = pipeline("entry main(xs:*[]i32) []i32 = map(|x:i32|x+7,xs)");
-    assert_eq!(output.pipeline.source_results[0].binding, 0);
-    let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
-        panic!("compute")
-    };
-    assert_eq!(p.bindings.len(), 1);
-    assert!(matches!(
-        p.bindings[0],
-        Binding::StorageBuffer {
-            usage: BufferUsage::Input,
-            access: Access::ReadWrite,
-            ..
-        }
-    ));
-    let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
+    for (body, buffers, stages) in [
+        ("map(|x:i32|x+7,xs)", 1, 1),
+        ("scan(|a:i32,b:i32|a+b,0,xs)", 4, 3),
+    ] {
+        let output = pipeline(&format!("entry main(xs:*[]i32) []i32 = {body}"));
+        assert_eq!(output.pipeline.source_results[0].binding, 0);
+        let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+            panic!("compute")
+        };
+        assert_eq!(p.bindings.len(), buffers);
+        assert_eq!(p.stages.len(), stages);
+        assert!(matches!(
+            p.bindings[0],
+            Binding::StorageBuffer {
+                usage: BufferUsage::Input,
+                access: Access::ReadWrite,
+                ..
+            }
+        ));
+        let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
 }
 
 #[test]

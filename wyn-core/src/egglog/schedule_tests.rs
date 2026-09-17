@@ -189,6 +189,51 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
 }
 
 #[test]
+fn consuming_scans_reuse_the_input_only_for_final_prefixes() {
+    for (body, multiplier, scratch) in [
+        ("scan(|a:i32,b:i32|a+b,0,xs)", 1, 3),
+        // Fusion carries one mapped component across the scan barrier.
+        ("map(|x:i32|x*2,scan(|a:i32,b:i32|a+b,0,xs))", 2, 4),
+    ] {
+        let result = compile(&format!("entry main(xs:*[]i32) []i32 = {body}"));
+        assert_eq!(kernel_count(&result), 3);
+        assert_eq!(
+            result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
+            scratch,
+            "only collective scratch needs fresh storage"
+        );
+        for n in [0, 1, 63, 64, 65, 137] {
+            let input = Value::array(0..n);
+            let output = run(&result, vec![input.clone()]);
+            let expected: Vec<_> = (0..n).map(|i| multiplier * i * (i + 1) / 2).collect();
+            assert_eq!(output[0].ints(), expected);
+            assert_eq!(input.ints(), expected);
+        }
+    }
+}
+
+#[test]
+fn dependent_scans_share_owned_storage_without_overwriting_borrowed_input() {
+    let result = compile(
+        "entry main(xs:[]i32) []i32 = let a=scan(|x:i32,y:i32|x+y,0,xs) in scan(|x:i32,y:i32|x+y,0,a)",
+    );
+    assert_eq!(kernel_count(&result), 6);
+    assert_eq!(
+        result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
+        7
+    );
+    for n in [0, 1, 63, 64, 65, 137] {
+        let input = Value::array(0..n);
+        let output = run(&result, vec![input.clone()]);
+        assert_eq!(
+            output[0].ints(),
+            (0..n).map(|i| i * (i + 1) * (i + 2) / 6).collect::<Vec<_>>()
+        );
+        assert_eq!(input.ints(), (0..n).collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn conditional_dispatches_execute_only_the_selected_arm() {
     // Different collective shapes prevent TLC's if-over-map normalization.
     let result = compile("entry main(xs: []i32, flag: bool) []i32 = if flag then scan(|a: i32, b: i32| a + b, 0, xs) else map(|x: i32| x * 3, xs)");
