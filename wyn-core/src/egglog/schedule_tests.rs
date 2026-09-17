@@ -7,7 +7,6 @@ use crate::compile_thru_tlc;
 use crate::egglog::data::OperationKind;
 use crate::egglog::Scheduled;
 use crate::tlc::infer_input_slice_bounds;
-use egglog_engine::EGraph;
 use exec::{run, Value};
 
 #[path = "schedule_test_exec.rs"]
@@ -19,8 +18,6 @@ fn compile(source: &str) -> Program<Scheduled> {
         simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
     )
     .unwrap();
-    // The actual final fact program must typecheck and execute in egglog.
-    EGraph::default().run_program(result.state.facts.clone()).unwrap();
     result
 }
 
@@ -213,25 +210,10 @@ fn indexed_updates_preserve_collisions_existing_bins_and_invalid_index_guards() 
 }
 
 #[test]
-fn final_graph_keeps_expressions_alongside_scheduled_topology() {
+fn scheduling_replaces_all_soacs_with_blocks() {
     let result =
         compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, map(|x: i32| x * 2, xs))");
-    let mut graph = EGraph::default();
-    graph.run_program(result.state.facts).unwrap();
-    // The final layer retains expressions, without reviving the fusion schema.
-    assert_eq!(
-        graph.function_to_dag("Dispatch", usize::MAX, false).unwrap().0.len(),
-        3
-    );
-    for name in ["Screma", "Collectives", "Operation"] {
-        assert!(graph.function_to_dag(name, 1, false).is_err());
-    }
-    graph
-        .parse_and_run_program(
-            None,
-            "(check (BlockSourceRegion b r) (RegionExpr r e) (SourceExpression id e))",
-        )
-        .unwrap();
+    assert_eq!(result.state.dispatches.len(), 3);
     for body in result.state.bodies.values() {
         for instruction in &body.instructions {
             if let Instruction::Evaluate(op) = instruction {

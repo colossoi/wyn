@@ -82,20 +82,10 @@ fn default_route_compiles_spirv_and_wgsl() {
 }
 
 #[test]
-fn explicit_egglog_route_emits_facts_and_shader() {
+fn explicit_egglog_route_emits_shader() {
     let case = Case::new();
-    let result = case.compile("wgsl", &["--egglog", "--egg-out", "output.egg"]);
+    let result = case.compile("wgsl", &["--egglog"]);
     case.assert_compiled("wgsl", &result, true);
-    assert!(!fs::read_to_string(case.directory.join("output.egg")).expect("egglog facts").is_empty());
-}
-
-#[test]
-#[cfg(not(feature = "egir"))]
-fn default_egglog_route_accepts_fact_output_without_route_flag() {
-    let case = Case::new();
-    let result = case.compile("wgsl", &["--egg-out", "output.egg"]);
-    case.assert_compiled("wgsl", &result, true);
-    assert!(!fs::read_to_string(case.directory.join("output.egg")).expect("egglog facts").is_empty());
 }
 
 #[test]
@@ -108,14 +98,4 @@ fn direct_requires_egir_before_writing_artifacts() {
     assert!(!case.directory.join("output.wgsl").exists());
     assert!(!case.directory.join("output.json").exists());
     assert!(!case.directory.join("output.ssa").exists());
-}
-
-#[test]
-#[cfg(feature = "egir")]
-fn egir_default_requires_explicit_egglog_for_fact_output() {
-    let case = Case::new();
-    let result = case.compile("wgsl", &["--egg-out", "output.egg"]);
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("--egglog"));
-    assert!(!case.directory.join("output.egg").exists());
 }

@@ -12,9 +12,7 @@ fn compile(source: &str) -> Program<Expressions> {
 }
 
 fn graph(result: &Program<Expressions>) -> EGraph {
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, include_str!("ids.egg")).unwrap();
-    graph.run_program(result.state.facts.clone()).unwrap();
+    let mut graph = result.state.graph.clone();
     graph.parse_and_run_program(None, super::RUN).unwrap();
     graph
 }
@@ -97,7 +95,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
     );
     // Fusion still uses its original summary and has no expression declarations.
     let fusion = fusion_dependencies(&result.ir);
-    assert!(fusion.function_to_dag("SourceExpression", 1, false).is_err());
+    assert!(fusion.function_to_dag("Typed", 1, false).is_err());
 }
 
 #[test]
@@ -176,8 +174,8 @@ fn expression_export_starts_at_entries_and_ignores_dead_arena_records() {
             None,
             r#"
         (check (EntryRegion id r) (RegionResult r 0 (Typed t (Int "7"))))
-        (fail (check (SourceExpression id (Typed t (Int "909")))))
-        (fail (check (SourceExpression id (Typed t (Int "808")))))
+        (fail (check (= e (Typed t (Int "909")))))
+        (fail (check (= e (Typed t (Int "808")))))
         (fail (check (Execution r op t)))
     "#,
         )

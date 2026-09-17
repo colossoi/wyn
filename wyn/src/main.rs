@@ -52,7 +52,6 @@ struct CompileOptions {
     target: Target,
     #[cfg(feature = "egir")]
     egglog: bool,
-    egg_out: Option<PathBuf>,
     #[cfg(feature = "egir")]
     direct: bool,
     wgsl_emulate_u64: bool,
@@ -131,11 +130,6 @@ enum Commands {
         /// Use the egglog compiler route (the default without the egir build feature).
         #[arg(long, conflicts_with = "direct")]
         egglog: bool,
-
-        /// Save final egglog expression and block/dispatch facts.
-        #[arg(long, value_name = "FILE")]
-        #[cfg_attr(feature = "egir", arg(requires = "egglog"))]
-        egg_out: Option<PathBuf>,
 
         /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
@@ -538,7 +532,6 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
-            egg_out,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -552,7 +545,6 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
-            egg_out,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -575,8 +567,7 @@ fn build(
     target: Target,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
-    egglog: bool,
-    egg_out: Option<PathBuf>,
+    _egglog: bool,
     graphics: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
@@ -587,11 +578,6 @@ fn build(
     if direct && !cfg!(feature = "egir") {
         return Err(DriverError::InvalidOption(
             "--direct requires a compiler built with --features egir".to_string(),
-        ));
-    }
-    if egg_out.is_some() && cfg!(feature = "egir") && !egglog {
-        return Err(DriverError::InvalidOption(
-            "--egg-out requires --egglog".to_string(),
         ));
     }
     if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
@@ -618,8 +604,7 @@ fn build(
     let options = CompileOptions {
         target,
         #[cfg(feature = "egir")]
-        egglog,
-        egg_out,
+        egglog: _egglog,
         #[cfg(feature = "egir")]
         direct,
         wgsl_emulate_u64,
@@ -742,11 +727,9 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
 fn compile_egglog(
     program: &InputSliceBoundsInferred,
     target: Target,
-    egg_out: Option<PathBuf>,
     verbose: bool,
-    auxiliary: &mut Vec<TextArtifact>,
 ) -> Result<Elaborated, DriverError> {
-    let (program, ssa) = with_timings(verbose, || -> Result<_, DriverError> {
+    with_timings(verbose, || -> Result<_, DriverError> {
         let program = from_tlc(program)?;
         let program = fuse(program)?;
         let program = insert_expressions(program)?;
@@ -760,15 +743,8 @@ fn compile_egglog(
                 Target::Wgsl => CodegenTarget::Wgsl,
             },
         )?;
-        Ok((program, ssa))
-    })?;
-    if let Some(path) = egg_out {
-        auxiliary.push(TextArtifact {
-            path,
-            contents: program.facts().map(|command| format!("{command}\n")).collect(),
-        });
-    }
-    Ok(ssa)
+        Ok(ssa)
+    })
 }
 
 #[cfg(feature = "egir")]
@@ -823,7 +799,6 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
         target,
         #[cfg(feature = "egir")]
         egglog,
-        egg_out,
         #[cfg(feature = "egir")]
         direct,
         wgsl_emulate_u64,
@@ -833,12 +808,12 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     } = options;
     #[cfg(feature = "egir")]
     let ssa = if egglog {
-        compile_egglog(&program, target, egg_out, verbose, &mut auxiliary)?
+        compile_egglog(&program, target, verbose)?
     } else {
         compile_egir(program, target, direct, verbose, &source_graph)?
     };
     #[cfg(not(feature = "egir"))]
-    let ssa = compile_egglog(&program, target, egg_out, verbose, &mut auxiliary)?;
+    let ssa = compile_egglog(&program, target, verbose)?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

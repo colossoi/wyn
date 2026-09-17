@@ -225,15 +225,16 @@ fn imported_source_plans_before_block_generation() {
             state: Scheduled::default(),
         };
         let summary = analyze(&converted.ir);
-        let input_fields = outputs(&mut converted);
+        let mut source = String::new();
+        outputs(&mut converted, &mut source);
         let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
-        let source = facts(&converted, &summary, count_type, &input_fields);
+        facts(&converted, &summary, count_type, &mut source);
         let g = graph(&source);
         assert!(count(&g, "Phase") > 0);
         assert!(count(&g, "Allocation") > 0);
         assert!(converted.state.blocks.is_empty());
         assert!(converted.state.buffers.is_empty());
-        read(&g, &mut converted).unwrap();
+        read(&g, &mut converted, &mut String::new()).unwrap();
         assert_eq!(
             converted.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
             count(&g, "Allocation"),
@@ -460,4 +461,27 @@ fn selecting_a_tuple_field_does_not_materialize_its_siblings() {
         "(Allocation (Result (OperationId 0) 0) (Length (ExprId 0)))",
     );
     assert_eq!(count(&g, "Allocation"), 1);
+}
+
+#[test]
+fn tuple_input_fields_replace_the_parent_buffer_independent_of_fact_order() {
+    for (first, second) in [(false, true), (true, false)] {
+        let mut g = graph(&format!(
+            r#"
+            (SourceParameter (ExprId 0) (RegionId 0))
+            (set (HasInputFields (ExprId 0)) {first})
+            (set (HasInputFields (ExprId 0)) {second})
+            (FieldValue (ExprId 0) 0 (ExprId 1))
+            (ChildValue (ExprId 0) (ExprId 1))
+            (ParameterValue (ExprId 1) (RegionId 0))
+            (SourceParameter (ExprId 2) (RegionId 0))
+            (set (HasInputFields (ExprId 2)) false)
+        "#
+        ));
+        check(
+            &mut g,
+            "(ParameterValue (ExprId 1) (RegionId 0)) (ParameterValue (ExprId 2) (RegionId 0))",
+        );
+        g.parse_and_run_program(None, "(fail (check (ParameterValue (ExprId 0) r)))").unwrap();
+    }
 }

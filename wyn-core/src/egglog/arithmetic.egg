@@ -3,7 +3,6 @@
 ; rounding, NaNs, infinities and signed zero. Extraction chooses by cost.
 (ruleset arithmetic)
 (ruleset algebra)
-(relation Evaluated (Expr Expr))
 (relation Zero (Expr))
 (relation One (Expr))
 (relation Bitcast (Expr))
@@ -18,9 +17,6 @@
 (rule ((= e (Typed t (PureApp f xs))) (= (vec-length xs) 1) (= a (vec-get xs 0)))
       ((Unary e t f a)) :ruleset arithmetic)
 
-; Literal evaluation uses declared widths and f32 rounding, including new terms
-; discovered by rewriting. Undefined conversions/divisions produce no fact.
-(rule ((Evaluated e value)) ((union e value)) :ruleset arithmetic)
 (rule ((= e (Typed t (Int "0")))) ((Zero e)) :ruleset arithmetic)
 (rule ((= e (Typed t (Int "1")))) ((One e)) :ruleset arithmetic)
 (rule ((= e (Typed t (FloatBits 1065353216)))) ((One e)) :ruleset arithmetic)
@@ -86,3 +82,49 @@
 (rule ((Binary e t add ab ac) (Binary ab t mul a b) (Binary ac t mul a c)
        (IntegerType t) (= add (Typed aft (BinOp "+"))) (= mul (Typed mft (BinOp "*"))))
       ((union e (Typed t (PureApp mul (vec-of a (Typed t (PureApp add (vec-of b c)))))))) :ruleset algebra)
+
+; Constants are seeded from literals and propagated by pure primitives.
+(relation Literal (Expr String))
+(relation ScalarType (TypeKey String))
+(relation FoldUnary (Expr String))
+
+(rule ((= e (Typed t (Int n))) (IntegerType t)) ((Literal e n)) :ruleset arithmetic)
+(rule ((= e (Typed t (FloatBits n))) (ScalarType t "f32"))
+      ((Literal e (to-string n))) :ruleset arithmetic)
+(rule ((= e (Typed t (Bool true)))) ((Literal e "true")) :ruleset arithmetic)
+(rule ((= e (Typed t (Bool false)))) ((Literal e "false")) :ruleset arithmetic)
+(rule ((= f (Typed t (UnOp op)))) ((FoldUnary f op)) :ruleset arithmetic)
+
+; The pure primitives evaluate one matched operation; they never inspect the graph.
+(rule ((Binary e t (Typed ft (BinOp op)) a b)
+       (= a (Typed at an)) (ScalarType at input) (ScalarType t output)
+       (Literal a av) (Literal b bv)
+       (= value (wyn-binary op input output av bv)))
+      ((Literal e value)) :ruleset arithmetic)
+(rule ((Unary e t f a) (FoldUnary f op)
+       (= a (Typed at an)) (ScalarType at input) (ScalarType t output)
+       (Literal a av) (= value (wyn-unary op input output av)))
+      ((Literal e value)) :ruleset arithmetic)
+
+; Publish literals as equivalent terms so extraction can choose them.
+(rule ((= e (Typed t node)) (Literal e value) (IntegerType t))
+      ((union e (Typed t (Int value)))) :ruleset arithmetic)
+(rule ((= e (Typed t node)) (Literal e value) (ScalarType t "f32")
+       (= bits (wyn-i64 value)))
+      ((union e (Typed t (FloatBits bits)))) :ruleset arithmetic)
+(rule ((= e (Typed t node)) (Literal e "true") (ScalarType t "bool"))
+      ((union e (Typed t (Bool true)))) :ruleset arithmetic)
+(rule ((= e (Typed t node)) (Literal e "false") (ScalarType t "bool"))
+      ((union e (Typed t (Bool false)))) :ruleset arithmetic)
+
+; Literal indexing is safe only in bounds and when element/result types agree.
+(rule ((IndexOperands op (Typed at (Vector xs)) index)
+       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
+       (= value (vec-get xs n)) (= value (Typed t node))
+       (= e (Typed t (OperationResult op))))
+      ((union e value)) :ruleset arithmetic)
+(rule ((IndexOperands op (Typed at (ArrayValue (ArrayLiteral xs))) index)
+       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
+       (= value (vec-get xs n)) (= value (Typed t node))
+       (= e (Typed t (OperationResult op))))
+      ((union e value)) :ruleset arithmetic)

@@ -11,11 +11,10 @@ use crate::egglog::dependencies::{safe_body, Dependencies};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use crate::ssa::layout::type_byte_size;
-use crate::types;
-use crate::types::{bool_type, canonical_storage_buffer_ty};
+use crate::types::{bool_type, canonical_storage_buffer_ty, Type, TypeExt, TypeName};
 use egglog_engine::ast::Literal;
 use egglog_engine::{EGraph, Term};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 mod read;
 pub(super) use read::{read, Readout};
@@ -83,31 +82,10 @@ pub(super) fn facts(
     data: &Program<Scheduled>,
     summary: &Dependencies,
     count_type: TypeId,
-    input_fields: &BTreeMap<ExprId, Vec<ExprId>>,
-) -> String {
-    let mut out = String::new();
+    out: &mut String,
+) {
     out.push_str(&format!("(CounterType {})\n", ty(count_type)));
     let mut values = BTreeSet::new();
-    for (&parent, fields) in input_fields {
-        let ExprKind::Parameter(p) = data.expressions[parent].kind else {
-            unreachable!(
-                "input field source {parent:?} is not a parameter: {:?}",
-                data.expressions[parent].kind
-            )
-        };
-        for (i, &field) in fields.iter().enumerate() {
-            values.insert(field);
-            out.push_str(&format!(
-                "(FieldValue {} {i} {})\n(ChildValue {} {})\n(ParameterValue {} {})\n",
-                expr(parent),
-                expr(field),
-                expr(parent),
-                expr(field),
-                expr(field),
-                data.parameters[p].region.egglog()
-            ));
-        }
-    }
     for (&id, output) in &data.state.outputs {
         values.insert(output.expression);
         if output.scalar {
@@ -193,33 +171,29 @@ pub(super) fn facts(
                     form.reductions.len(),
                     summary.discardable.contains(&id)
                 ));
-                let scans: Vec<_> = form.scans.iter().flat_map(|s| s.neutral.iter()).copied().collect();
-                let totals: Vec<_> =
-                    form.reductions.iter().flat_map(|r| r.neutral.iter()).copied().collect();
-                out.push_str(&format!("(TotalCount {key} {})\n", totals.len()));
-                for (i, e) in scans.iter().chain(&totals).enumerate() {
+                let scans = form.scans.iter().flat_map(|s| &s.neutral);
+                let totals = form.reductions.iter().flat_map(|r| &r.neutral);
+                let scan_count = scans.clone().count();
+                let total_count = totals.clone().count();
+                out.push_str(&format!("(TotalCount {key} {total_count})\n"));
+                for (i, e) in scans.enumerate() {
+                    let t = ty(data.expressions[*e].ty);
                     out.push_str(&format!(
-                        "(Accumulator {key} {i} {})\n",
-                        ty(data.expressions[*e].ty)
+                        "(Accumulator {key} {i} {t})\n(ScanComponent {key} {i} {t})\n"
                     ));
                 }
-                for (i, e) in scans.iter().enumerate() {
+                for (i, e) in totals.enumerate() {
+                    let t = ty(data.expressions[*e].ty);
                     out.push_str(&format!(
-                        "(ScanComponent {key} {i} {})\n",
-                        ty(data.expressions[*e].ty)
-                    ));
-                }
-                for (i, e) in totals.iter().enumerate() {
-                    out.push_str(&format!(
-                        "(TotalResult {key} {i} {})\n",
-                        ty(data.expressions[*e].ty)
+                        "(Accumulator {key} {} {t})\n(TotalResult {key} {i} {t})\n",
+                        scan_count + i
                     ));
                 }
                 for (i, t) in body_signature(&form.post).1.into_iter().enumerate() {
-                    out.push_str(&format!("(ArrayResult {key} {} {})\n", totals.len() + i, ty(t)));
+                    out.push_str(&format!("(ArrayResult {key} {} {})\n", total_count + i, ty(t)));
                 }
                 for (i, t) in
-                    body_signature(&form.pre).1.into_iter().skip(scans.len() + totals.len()).enumerate()
+                    body_signature(&form.pre).1.into_iter().skip(scan_count + total_count).enumerate()
                 {
                     out.push_str(&format!("(MappedComponent {key} {i} {})\n", ty(t)));
                 }
@@ -304,11 +278,8 @@ pub(super) fn facts(
         let mut generic_children = false;
         match &value.kind {
             ExprKind::Parameter(p) => {
-                if input_fields.contains_key(&e) {
-                    continue;
-                }
                 out.push_str(&format!(
-                    "(ParameterValue {key} {})\n",
+                    "(SourceParameter {key} {})\n(set (HasInputFields {key}) false)\n",
                     data.parameters[*p].region.egglog()
                 ));
             }
@@ -356,7 +327,6 @@ pub(super) fn facts(
             }
         }
     }
-    out
 }
 
 fn extent(array: &Array) -> String {
@@ -370,12 +340,9 @@ fn extent(array: &Array) -> String {
 
 /// Expose source result slots once; tuple projection is structural import, not
 /// an allocation decision. Use the same global identities for existing values.
-pub(super) fn outputs(data: &mut Program<Scheduled>) -> BTreeMap<ExprId, Vec<ExprId>> {
-    use types::{Type, TypeExt, TypeName};
-    let mut types: std::collections::HashMap<_, _> =
-        data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();
-    let mut expressions: std::collections::HashMap<_, _> =
-        data.expressions.iter().map(|(&id, e)| (e.clone(), id)).collect();
+pub(super) fn outputs(data: &mut Program<Scheduled>, out: &mut String) {
+    let mut types: HashMap<_, _> = data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();
+    let mut expressions: HashMap<_, _> = data.expressions.iter().map(|(&id, e)| (e.clone(), id)).collect();
     let entries: Vec<_> =
         data.entries.iter().map(|(&id, e)| (id, data.definitions[e.definition].body)).collect();
     for (entry, region) in entries {
@@ -430,7 +397,6 @@ pub(super) fn outputs(data: &mut Program<Scheduled>) -> BTreeMap<ExprId, Vec<Exp
             }
         }
     }
-    let mut fields = BTreeMap::new();
     let entry_regions: BTreeSet<_> =
         data.entries.values().map(|e| data.definitions[e.definition].body).collect();
     let parameters: Vec<_> = data
@@ -448,21 +414,32 @@ pub(super) fn outputs(data: &mut Program<Scheduled>) -> BTreeMap<ExprId, Vec<Exp
         })
         .collect();
     for (tuple, ts) in parameters {
-        let values = ts
-            .into_iter()
-            .enumerate()
-            .map(|(index, ty)| {
-                let ty = *types.entry(ty.clone()).or_insert_with(|| data.ir.types.alloc(TypeData { ty }));
-                let value = ExprData {
-                    ty,
-                    kind: ExprKind::Project { tuple, index },
-                };
-                *expressions.entry(value.clone()).or_insert_with(|| data.ir.expressions.alloc(value))
-            })
-            .collect();
-        fields.insert(tuple, values);
+        let ExprKind::Parameter(parameter) = data.expressions[tuple].kind else {
+            unreachable!("input tuple {tuple:?} is not a parameter");
+        };
+        let region = data.parameters[parameter].region;
+        out.push_str(&format!(
+            "(set (HasInputFields {}) true)\n(SourceType {} {})\n",
+            expr(tuple),
+            expr(tuple),
+            ty(data.expressions[tuple].ty)
+        ));
+        for (index, field_type) in ts.into_iter().enumerate() {
+            let field_ty = *types
+                .entry(field_type.clone())
+                .or_insert_with(|| data.ir.types.alloc(TypeData { ty: field_type }));
+            let value = ExprData {
+                ty: field_ty,
+                kind: ExprKind::Project { tuple, index },
+            };
+            let field =
+                *expressions.entry(value.clone()).or_insert_with(|| data.ir.expressions.alloc(value));
+            out.push_str(&format!(
+                "(FieldValue {} {index} {})\n(ChildValue {} {})\n(ParameterValue {} {})\n(SourceType {} {})\n(Projection {} {} {index})\n",
+                expr(tuple), expr(field), expr(tuple), expr(field), expr(field), region.egglog(), expr(field), ty(field_ty), expr(field), expr(tuple),
+            ));
+        }
     }
-    fields
 }
 
 #[cfg(test)]

@@ -648,8 +648,8 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 
-# Use the egglog route with the existing WGSL output and optional fact/SSA dumps
-cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --egg-out output.egg --output-mir output.ssa
+# Use the egglog route with WGSL output and an optional SSA dump
+cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --output-mir output.ssa
 
 # Compile a graphics program directly, without compiler-created prepasses
 cargo run --bin wyn --features egir -- build input.wyn -o output.spv --graphics --direct
@@ -684,11 +684,9 @@ backend and file output. `--egglog` explicitly selects it in builds that also
 enable EGIR. Egglog timing goes to stderr. Within each function,
 lowering walks backward from outputs and required effects, then topologically
 orders only reachable operations. Dead records can remain in the source sidecar.
-`--egg-out FILE` saves the last pass's block/dispatch facts (`blocks.egg`) alongside
-the expression layer, linked by source-region provenance. It requires `--egglog`
-only in EGIR-enabled builds. The fusion summary is
-replaced, and executable blocks contain no SOACs. Block facts reference opaque body IDs,
-calls, branches, jumps, allocations and launches. Functions adorn entry blocks.
+Each egglog pass owns its graph; extracted expressions and scheduled blocks pass
+between stages in the IR. Executable blocks contain no SOACs. Functions adorn
+entry blocks.
 A shared pass loop analyzes a complete graph, derives fusion candidates in
 `fusion.egg`, applies the selected composition to sidecar bodies, and repeats
 with fresh facts. Selection is

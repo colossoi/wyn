@@ -1,5 +1,5 @@
 //! Synthetic graph shapes isolate placement costs from parsing and EqSat.
-use super::hoist::run;
+use super::run;
 use crate::compile_thru_tlc;
 use crate::egglog::data::{
     ExprData, ExprKind, ExternData, Ir, OperationData, OperationKind, PlacementSite, RegionData, RegionId,

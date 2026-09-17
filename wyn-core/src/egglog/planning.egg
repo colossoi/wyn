@@ -43,6 +43,8 @@
 (relation CounterType (TypeKey))
 (relation SourceType (ExprKey TypeKey))
 (relation ParameterValue (ExprKey RegionKey))
+(relation SourceParameter (ExprKey RegionKey))
+(function HasInputFields (ExprKey) bool :merge (or old new))
 (relation ResultTuple (ExprKey OperationKey))
 (relation DirectResult (ExprKey OperationKey i64))
 (relation FieldValue (ExprKey i64 ExprKey))
@@ -105,3 +107,7 @@
 (ruleset classify)
 (ruleset allocation)
 (ruleset dispatch)
+
+; Exposed tuple fields own input buffers; their parent tuple is only a container.
+(rule ((SourceParameter e r) (= (HasInputFields e) false))
+      ((ParameterValue e r)) :ruleset structure)

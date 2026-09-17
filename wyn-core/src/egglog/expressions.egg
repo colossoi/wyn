@@ -1,6 +1,5 @@
 ; Loaded only AFTER fusion. This layer joins through RegionId/OperationId;
 ; it does not change the fusion schema or its operation records.
-(datatype ExprKey (ExprId i64))
 (datatype TypeKey (TypeId i64))
 (datatype ParameterKey (ParameterId i64))
 (datatype SymbolKey (SymbolId i64))
@@ -14,6 +13,8 @@
 (sort Types (Vec TypeKey))
 (sort Indices (Vec i64))
 (constructor Typed (TypeKey Node) Expr)
+; Stable roots follow e-class unions until scalar extraction.
+(function SourceExpression (i64) Expr :no-merge)
 (constructor Global (SymbolKey) Node)
 (constructor Parameter (ParameterKey) Node)
 (constructor Builtin (BuiltinKey) Node)
@@ -51,7 +52,6 @@
   (Compose Body Body)
   (Parallel Body Body))
 (datatype BodyRole (Pre) (Post) (ScanOp i64) (ReduceOp i64) (Callback))
-(relation SourceExpression (ExprKey Expr))
 (relation Region (RegionKey))
 (relation RegionParent (RegionKey RegionKey))
 (relation NamedRegion (SymbolKey RegionKey))
@@ -81,9 +81,6 @@
 (relation Destination (OperationKey Expr))
 ; Order constraints are retained independently of value dependencies.
 (relation ExecutionOrder (OperationKey OperationKey))
-; Evaluation sites chosen by dependency traversal after arithmetic extraction.
-(relation EvaluateBefore (OperationKey ExprKey))
-(relation EvaluateBeforeSelect (ExprKey ExprKey))
 
 (ruleset expressions)
 (relation ValueVector (Exprs))

@@ -1,11 +1,10 @@
 //! Pass states own only the data available at that checkpoint.
 use super::blocks::{BlockData, BodyData, BufferData, DispatchData, GridData};
-use super::ExprId;
 use crate::egglog::data::{
     BlockId, BodyId, BufferId, DispatchId, GridId, Ir, OutputData, OutputId, PlacementData, PlacementId,
 };
 use egglog_engine::ast::Command;
-use std::collections::BTreeSet;
+use egglog_engine::EGraph;
 use wyn_base::IdArena;
 
 /// A compiler checkpoint. Only passes can construct or change its state.
@@ -46,11 +45,10 @@ pub struct Imported {
 /// Fusion is complete and its decisions have been materialized in the IR.
 #[derive(Clone, Debug)]
 pub struct Fused;
-/// Expression commands and roots prepared for scalar simplification.
-#[derive(Clone, Debug)]
+/// Native expression graph and roots prepared for scalar simplification.
+#[derive(Clone)]
 pub struct Expressions {
-    pub(super) live: BTreeSet<ExprId>,
-    pub(super) facts: Vec<Command>,
+    pub(super) graph: EGraph,
 }
 /// Extracted scalar expressions after arithmetic EqSat.
 #[derive(Clone, Debug)]
@@ -58,13 +56,11 @@ pub struct Simplified;
 /// Specialized callbacks and explicit evaluation sites for hoisted expressions.
 #[derive(Clone, Debug)]
 pub struct Placed {
-    pub(super) facts: Vec<Command>,
     pub(super) placements: IdArena<PlacementId, PlacementData>,
 }
 /// Final functions, blocks, resource allocations, and dispatches for SSA lowering.
 #[derive(Clone, Debug, Default)]
 pub struct Scheduled {
-    pub(super) facts: Vec<Command>,
     pub(super) placements: IdArena<PlacementId, PlacementData>,
     pub(super) outputs: IdArena<OutputId, OutputData>,
     pub(super) blocks: IdArena<BlockId, BlockData>,
@@ -78,11 +74,5 @@ impl<S> std::ops::Deref for Program<S> {
     type Target = Ir;
     fn deref(&self) -> &Ir {
         &self.ir
-    }
-}
-impl Program<Scheduled> {
-    /// Commands that reconstruct this checkpoint's egglog facts and declarations.
-    pub fn facts(&self) -> impl Iterator<Item = &Command> {
-        self.state.facts.iter()
     }
 }

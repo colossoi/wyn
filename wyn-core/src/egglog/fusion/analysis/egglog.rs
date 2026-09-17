@@ -10,7 +10,7 @@ pub(in crate::egglog) struct Egglog {
 impl Egglog {
     pub(in crate::egglog) fn new() -> Self {
         Self {
-            text: format!("{}\n(let dep-0 (NoDependency))\n", SCHEMA),
+            text: format!("{}\n(let $dep-0_ (NoDependency))\n", SCHEMA),
             next_dependency: 1,
         }
     }
@@ -20,7 +20,7 @@ impl Egglog {
     fn node(&mut self, text: std::fmt::Arguments<'_>) -> usize {
         let id = self.next_dependency;
         self.next_dependency += 1;
-        self.emit(format_args!("(let dep-{id} {text})"));
+        self.emit(format_args!("(let $dep-{id}_ {text})"));
         id
     }
 }
@@ -32,7 +32,7 @@ fn source(id: OperationId) -> String {
 }
 fn dependencies(values: &[usize]) -> String {
     values.iter().rev().fold("(NoDependencies)".to_owned(), |tail, id| {
-        format!("(MoreDependencies dep-{id} {tail})")
+        format!("(MoreDependencies $dep-{id}_ {tail})")
     })
 }
 fn domain(array: &Array) -> String {
@@ -242,7 +242,7 @@ impl Sink for Egglog {
         if value == 0 {
             return 0;
         }
-        self.node(format_args!("(FieldDependency dep-{value} {index})"))
+        self.node(format_args!("(FieldDependency $dep-{value}_ {index})"))
     }
     fn all(&mut self, values: &[usize]) -> usize {
         if values.iter().all(|v| *v == 0) {
@@ -255,18 +255,18 @@ impl Sink for Egglog {
             return 0;
         }
         self.node(format_args!(
-            "(ChoiceDependency dep-{condition} dep-{yes} dep-{no})"
+            "(ChoiceDependency $dep-{condition}_ $dep-{yes}_ $dep-{no}_)"
         ))
     }
     fn output_dependency(&mut self, operation: OperationId, slot: usize, value: usize) {
         self.emit(format_args!(
-            "(union (OutputDependency {} {slot}) dep-{value})",
+            "(union (OutputDependency {} {slot}) $dep-{value}_)",
             operation.egglog()
         ));
     }
     fn collective_dependency(&mut self, operation: OperationId, value: usize) {
         self.emit(format_args!(
-            "(CollectiveDependency {} dep-{value})",
+            "(CollectiveDependency {} $dep-{value}_)",
             operation.egglog()
         ));
     }

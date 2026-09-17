@@ -1,6 +1,5 @@
 use super::super::data::intern_type;
-use super::fold::evaluate;
-use super::{intern_expr, EGraph, Expressions, Placed, Program};
+use super::{intern_expr, Expressions, Placed, Program};
 use crate::builtins::catalog;
 use crate::egglog::data::{
     BuiltinData, ExprId, ExprKind, Ir, OperationKind, PlacementSite, RegionId, SoacBody, TypeId,
@@ -457,16 +456,13 @@ fn tuple_captures_can_be_hoisted_without_flattening_element_arguments() {
 }
 
 #[test]
-fn cancellation_drops_dependencies_in_the_final_fact_base() {
+fn cancellation_removes_the_parameter_from_the_result() {
     let mut c = input("entry main(x:i32) i32=x");
     let x = parameter(&mut c.ir, 0);
     let e = binary(&mut c.ir, "-", x, x);
     output(&mut c.ir, e);
     let c = simplify_and_place(c).unwrap();
     assert_eq!(c.ir.expressions[result(&c.ir)].kind, ExprKind::Int("0".into()));
-    let mut graph = EGraph::default();
-    graph.run_program(c.state.facts).unwrap();
-    graph.parse_and_run_program(None, "(check (RegionResult r 0 (Typed t (Int \"0\")))) (fail (check (RegionResult r 0 e) (ExprParameter e p)))").unwrap();
 }
 
 #[test]
@@ -508,11 +504,29 @@ fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
     let f = c.ir.expressions[result(&c.ir)].ty;
     let u = intern_type(&mut c.ir, Type::Constructed(TypeName::UInt(32), vec![]));
     let value = intern_expr(&mut c.ir, f, ExprKind::FloatBits(0x7fc01234));
-    // Exercise the constant evaluator directly: a bitcast must not canonicalize NaNs.
+    // Constant folding must preserve the bit pattern of a NaN.
     let app = builtin(&mut c.ir, "f32.to_bits", value, u);
-    let folded = evaluate(&mut c.ir, app).unwrap();
+    output(&mut c.ir, app);
+    let c = simplify_and_place(c).unwrap();
+    let folded = result(&c.ir);
     assert_eq!(
         c.ir.expressions[folded].kind,
         ExprKind::Int(0x7fc01234u32.to_string())
+    );
+}
+#[test]
+fn constant_folding_reaches_a_fixed_point_beyond_thirty_two_dependent_operations() {
+    let mut c = input("entry main(x:f32) f32=x");
+    let t = c.ir.expressions[result(&c.ir)].ty;
+    let mut value = intern_expr(&mut c.ir, t, ExprKind::FloatBits(2.0f32.powi(60).to_bits()));
+    let two = intern_expr(&mut c.ir, t, ExprKind::FloatBits(2.0f32.to_bits()));
+    for _ in 0..48 {
+        value = binary(&mut c.ir, "/", value, two);
+    }
+    output(&mut c.ir, value);
+    let c = simplify_and_place(c).unwrap();
+    assert_eq!(
+        c.ir.expressions[result(&c.ir)].kind,
+        ExprKind::FloatBits(4096.0f32.to_bits())
     );
 }

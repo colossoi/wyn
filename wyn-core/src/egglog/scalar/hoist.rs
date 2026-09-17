@@ -85,24 +85,6 @@ fn total_node(data: &Ir, id: ExprId) -> bool {
     }
 }
 
-pub(super) fn output(placements: &IdArena<PlacementId, PlacementData>) -> String {
-    placements
-        .values()
-        .map(|p| match p.before {
-            PlacementSite::Operation(op) => format!(
-                "(EvaluateBefore {} (ExprId {}))\n",
-                op.egglog(),
-                p.expression.as_u32()
-            ),
-            PlacementSite::Expression(e) => format!(
-                "(EvaluateBeforeSelect (ExprId {}) (ExprId {}))\n",
-                e.as_u32(),
-                p.expression.as_u32()
-            ),
-        })
-        .collect()
-}
-
 pub(in crate::egglog) fn index(
     data: &Ir,
     placements: &IdArena<PlacementId, PlacementData>,
@@ -126,3 +108,7 @@ pub(in crate::egglog) fn index(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "hoist_tests.rs"]
+mod tests;

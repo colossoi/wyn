@@ -27,7 +27,6 @@ pub(crate) struct Stage {
 
 #[derive(Default)]
 pub(crate) struct Readout {
-    pub identities: String,
     pub slots: BTreeMap<(OperationId, String, u32), BufferId>,
     pub stages: BTreeMap<(OperationId, String), Stage>,
 }
@@ -35,6 +34,7 @@ pub(crate) struct Readout {
 pub(in crate::egglog) fn read(
     graph: &EGraph,
     data: &mut Program<Scheduled>,
+    launches: &mut String,
 ) -> Result<Readout, OptimizeError> {
     let _timing = span("read resources and domains");
     let mut result = Readout::default();
@@ -164,7 +164,7 @@ pub(in crate::egglog) fn read(
             Resource::Result(op, slot) => format!("(Result {} {slot})", op.egglog()),
             Resource::Temporary(op, name, slot) => format!("(Temporary {} {name:?} {slot})", op.egglog()),
         };
-        result.identities.push_str(&format!("(EmittedResource {value} {})\n", id.as_u32()));
+        launches.push_str(&format!("(EmittedResource {value} {})\n", id.as_u32()));
     }
     Ok(result)
 }

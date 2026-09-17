@@ -15,12 +15,11 @@
 //! control flow and graphics publication still have explicit limitations.
 //! Map, reduce, and scan are constructed as Scremas during import. Types and
 //! pure values are interned in the sidecar. Fusion exports only SOAC layouts,
-//! uses, dependencies and motion constraints; scheduling retains its planning
-//! facts alongside expressions and emitted block topology.
+//! uses, dependencies and motion constraints. Each pass owns its egglog graph;
+//! extracted expressions and scheduled blocks remain in the IR.
 //!
-//! The languages are documented in `fusion/schema.egg`, `expressions.egg`, and
-//! `blocks.egg`. Identities are local to one conversion; keep each fact program
-//! and its sidecar together.
+//! The schemas are defined in `fusion/schema.egg`, `expressions.egg`, and
+//! `planning.egg`. Identities are local to one conversion.
 use egglog_engine::ast::{Command, Parser};
 use egglog_engine::Error;
 

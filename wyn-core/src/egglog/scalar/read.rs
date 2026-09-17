@@ -1,16 +1,13 @@
 //! Cost-based extraction of typed terms back into the interned sidecar DAG.
-use super::fold::evaluate;
 use super::term::{app, key};
-use super::{error, intern_expr, name, EGraph, OptimizeError};
-use crate::egglog::data::{Array, ExprId, ExprKind, Ir, OperationId};
-use crate::egglog::expressions::emit_additional;
-use crate::egglog::parse_program;
-use crate::egglog::timing::{span, time};
-use egglog_engine::ast::{Literal, Parser};
+use super::{error, intern_expr, OptimizeError};
+use crate::egglog::data::{Array, ExprId, ExprKind, Ir};
+use crate::egglog::timing::span;
+use egglog_engine::ast::Literal;
 use egglog_engine::extract::{CostModel, Extractor, TreeAdditiveCostModel};
 use egglog_engine::sort::S;
-use egglog_engine::{ArcSort, Enode, Function, Term, TermDag, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use egglog_engine::{ArcSort, EGraph, Enode, Function, Term, TermDag, Value};
+use std::collections::BTreeMap;
 
 struct Cost;
 impl CostModel<u64> for Cost {
@@ -31,19 +28,11 @@ impl CostModel<u64> for Cost {
     }
 }
 
-pub(super) fn extract(
-    graph: &mut EGraph,
-    data: &mut Ir,
-    live: &BTreeSet<ExprId>,
-) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
+pub(super) fn extract(graph: &EGraph, data: &mut Ir) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
     let _timing = span("extract expressions");
-    let mut roots = vec![];
-    for &id in live {
-        let ast =
-            Parser::default().get_expr_from_string(None, &name(id)).map_err(|e| error(&e.to_string()))?;
-        let (sort, value) = graph.eval_expr(&ast)?;
-        roots.push((id, sort, value));
-    }
+    let Some(sort) = graph.get_sort_by_name("Expr") else {
+        return Err(error("missing expression sort"));
+    };
     let extractor = Extractor::compute_costs_from_rootsorts(None, graph, Cost);
     let mut dag = TermDag::default();
     let mut reader = Reader {
@@ -51,63 +40,27 @@ pub(super) fn extract(
         memo: BTreeMap::new(),
     };
     let mut replacements = BTreeMap::new();
-    for (id, sort, value) in roots {
-        let Some((_, node)) = extractor.extract_best_with_sort(graph, &mut dag, value, sort) else {
-            return Err(error("no finite expression extraction"));
-        };
-        let value = reader.value(&dag, node)?;
-        if id != value {
-            replacements.insert(id, value);
-        }
-    }
-    Ok(replacements)
-}
-
-/// Evaluate newly discovered constant subterms too, even when the enclosing
-/// alternative has not yet become cheaper than the original expression.
-pub(super) fn constants(
-    graph: &mut EGraph,
-    data: &mut Ir,
-    live_operations: &BTreeSet<OperationId>,
-    round: usize,
-    seen: &mut BTreeSet<(ExprId, ExprId)>,
-) -> Result<bool, OptimizeError> {
-    let _timing = span("constant evaluation");
-    let (rows, _, dag) = time("read egraph terms", || {
-        graph.function_to_dag("Typed", usize::MAX, false)
-    })?;
-    let evaluation = span("evaluate terms");
-    let mut reader = Reader {
-        data,
-        memo: BTreeMap::new(),
-    };
-    let mut facts = String::new();
-    let mut extra = vec![];
-    let prefix = format!("$fold{round}");
-    for row in rows {
-        let id = reader.value(&dag, row)?;
-        if let Some(value) = evaluate(reader.data, id) {
-            if id != value && seen.insert((id, value)) {
-                extra.push(value);
-                facts.push_str(&format!(
-                    "(Evaluated {} {prefix}-{})\n",
-                    dag.to_string(row),
-                    value.as_u32()
-                ));
+    let mut result = Ok(());
+    graph.function_entries_while("SourceExpression", |entry| {
+        result = (|| {
+            let id = u32::try_from(graph.value_to_base::<i64>(entry.inputs[0]))
+                .map(ExprId::from)
+                .map_err(|_| error("invalid source expression ID"))?;
+            let Some((_, node)) =
+                extractor.extract_best_with_sort(graph, &mut dag, entry.output, sort.clone())
+            else {
+                return Err(error(&format!("no finite extraction for {id:?}")));
+            };
+            let value = reader.value(&dag, node)?;
+            if id != value {
+                replacements.insert(id, value);
             }
-        }
-    }
-    drop(evaluation);
-    if extra.is_empty() {
-        return Ok(false);
-    }
-    time("insert evaluated constants", || -> Result<(), OptimizeError> {
-        let source = emit_additional(reader.data, live_operations, &extra, &prefix)?;
-        graph.run_program(parse_program("wyn-evaluated.egg", &source)?)?;
-        graph.parse_and_run_program(None, &facts)?;
-        Ok(())
+            Ok(())
+        })();
+        result.is_ok()
     })?;
-    Ok(true)
+    result?;
+    Ok(replacements)
 }
 
 struct Reader<'a> {

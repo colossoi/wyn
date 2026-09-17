@@ -1,7 +1,6 @@
 //! Control-flow scaffold. Scalar instructions are opaque payloads outside egglog.
 use crate::egglog::data::{
     Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
-    RegionId,
 };
 use crate::types::Type;
 use std::collections::BTreeSet;
@@ -10,9 +9,6 @@ use std::collections::BTreeSet;
 pub struct BlockData {
     /// The entry block owning this block. Functions are adornments of entries.
     pub function: BlockId,
-    /// Source scopes contributing code or generated control to this block.
-    /// Provenance only: this does not assert expression placement or loop membership.
-    pub source_regions: BTreeSet<RegionId>,
     /// Structured loop exit, retained for SSA/WGSL reconstruction.
     pub loop_exit: Option<BlockId>,
     pub interface: Option<Function>,

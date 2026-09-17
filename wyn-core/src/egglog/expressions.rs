@@ -6,50 +6,44 @@ use crate::egglog::data::{
     Array, ExprId, ExprKind, Ir, LoopKind, OperationId, OperationKind, RegionId, SoacBody, SymbolId,
 };
 use crate::egglog::dependencies::{analyze, Dependencies};
-use crate::egglog::parse_program;
 use crate::egglog::timing::{span, time};
+use egglog_engine::sort::VecContainer;
+use egglog_engine::{Core, EGraph, FullState, RawValues, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+#[cfg(test)]
 pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 
-/// Add typed expressions, region interfaces, structured control, and data-flow
-/// facts to the selected fusion result. Scalar values retain their globally
-/// interned sidecar identities. This pass does not rewrite or place expressions.
-/// Commands are consumed by scalar optimization.
-/// The input state requires completed fusion; the output enables simplification.
-pub fn insert_expressions(converted: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
+/// Read typed expressions, region interfaces, structured control, and data-flow
+/// facts directly into egglog. The graph and its source-root table pass to
+/// scalar simplification without an intervening textual or command representation.
+pub fn insert_expressions(program: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
     let _timing = span("insert expressions");
-    let dependencies = time("analyze dependencies", || analyze(&converted.ir));
+    let dependencies = time("analyze dependencies", || analyze(&program.ir));
     time("validate dependency order", || {
-        dependencies.schedules(&converted.ir)
+        dependencies.schedules(&program.ir)
     })?;
-    let (source, live) = time("emit expression facts", || {
-        emit_facts(&converted.ir, &dependencies, &[])
+    let mut graph = EGraph::default();
+    time("load expression schema", || {
+        graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
+        graph.parse_and_run_program(Some("expressions.egg".into()), include_str!("expressions.egg"))
     })?;
-    let commands = time("parse expression facts", || {
-        parse_program("wyn-expressions.egg", &source)
-    })?;
+    time("read expression facts", || {
+        graph.update(|sink| Ok(read(&program.ir, &dependencies, sink)))
+    })??;
     Ok(Program {
-        ir: converted.ir,
-        state: Expressions {
-            live,
-            facts: commands,
-        },
+        ir: program.ir,
+        state: Expressions { graph },
     })
 }
 
-pub(super) fn emit_facts(
-    data: &Ir,
-    summary: &Dependencies,
-    extra: &[ExprId],
-) -> Result<(String, BTreeSet<ExprId>), OptimizeError> {
-    let mut emitter = Emitter {
+fn read(data: &Ir, summary: &Dependencies, sink: FullState<'_, '_>) -> Result<(), OptimizeError> {
+    let mut reader = Reader {
         data,
         live: &summary.live,
         symbols: data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
-        output: include_str!("expressions.egg").into(),
-        prefix: "$expr".into(),
-        expressions: BTreeSet::new(),
+        sink,
+        expressions: BTreeMap::new(),
         operations: BTreeSet::new(),
         declared: BTreeSet::new(),
         queued: BTreeSet::new(),
@@ -57,70 +51,46 @@ pub(super) fn emit_facts(
     };
     for (&id, entry) in &data.entries {
         let region = data.definitions[entry.definition].body;
-        emitter.queue(region);
-        emitter.fact(format!("(EntryRegion {} {})", id.as_u32(), region.egglog()));
+        reader.queue(region);
+        let region = reader.key("RegionId", region.as_u32())?;
+        reader.sink.add(
+            "EntryRegion",
+            (reader.sink.base_to_value(i64::from(id.as_u32())), region),
+        )?;
     }
-    for &value in extra {
-        emitter.expression(value)?;
+    while let Some(region) = reader.pending.pop_front() {
+        reader.region(region)?;
     }
-    while let Some(region) = emitter.pending.pop_front() {
-        emitter.region(region)?;
+    for (before, after) in summary.effects.pairs(&reader.operations) {
+        let before = reader.sink.add("OperationId", (i64::from(before.as_u32()),))?;
+        let after = reader.sink.add("OperationId", (i64::from(after.as_u32()),))?;
+        reader.sink.add("ExecutionOrder", (before, after))?;
     }
-    for (before, after) in summary.effects.pairs(&emitter.operations.clone()) {
-        emitter.fact(format!("(ExecutionOrder {} {})", before.egglog(), after.egglog()));
-    }
-    Ok((emitter.output, emitter.expressions))
-}
-
-/// Add terms to an existing graph without redeclaring its schema or globals.
-pub(super) fn emit_additional(
-    data: &Ir,
-    live: &BTreeSet<OperationId>,
-    extra: &[ExprId],
-    prefix: &str,
-) -> Result<String, OptimizeError> {
-    let mut emitter = Emitter {
-        data,
-        live,
-        symbols: data.definitions.values().map(|d| (d.symbol, d.body)).collect(),
-        output: String::new(),
-        prefix: prefix.into(),
-        expressions: BTreeSet::new(),
-        operations: BTreeSet::new(),
-        declared: BTreeSet::new(),
-        queued: BTreeSet::new(),
-        pending: VecDeque::new(),
-    };
-    for &id in extra {
-        emitter.expression(id)?;
-    }
-    while let Some(region) = emitter.pending.pop_front() {
-        emitter.region(region)?;
-    }
-    Ok(emitter.output)
+    Ok(())
 }
 
 fn error(message: &str) -> OptimizeError {
     OptimizeError::Output(format!("expression insertion: {message}"))
 }
 
-struct Emitter<'a> {
-    data: &'a Ir,
-    live: &'a BTreeSet<OperationId>,
+struct Reader<'ir, 'a, 'db> {
+    data: &'ir Ir,
+    live: &'ir BTreeSet<OperationId>,
     symbols: BTreeMap<SymbolId, RegionId>,
-    output: String,
-    prefix: String,
-    expressions: BTreeSet<ExprId>,
+    sink: FullState<'a, 'db>,
+    expressions: BTreeMap<ExprId, Value>,
     operations: BTreeSet<OperationId>,
     declared: BTreeSet<RegionId>,
     queued: BTreeSet<RegionId>,
     pending: VecDeque<RegionId>,
 }
 
-impl Emitter<'_> {
-    fn fact(&mut self, fact: String) {
-        self.output.push_str(&fact);
-        self.output.push('\n');
+impl Reader<'_, '_, '_> {
+    fn key(&mut self, name: &str, id: u32) -> Result<Value, OptimizeError> {
+        Ok(self.sink.add(name, (i64::from(id),))?)
+    }
+    fn vector(&mut self, data: Vec<Value>, do_rebuild: bool) -> Value {
+        self.sink.register_container(VecContainer { data, do_rebuild })
     }
     fn queue(&mut self, region: RegionId) {
         if self.queued.insert(region) {
@@ -139,26 +109,25 @@ impl Emitter<'_> {
         let Some(data) = self.data.regions.get(region) else {
             return Err(error("missing region"));
         };
-        self.fact(format!("(Region {})", region.egglog()));
+        let r = self.key("RegionId", region.as_u32())?;
+        self.sink.add("Region", (r,))?;
         if let Some(parent) = data.parent {
             self.scope(parent)?;
-            self.fact(format!("(RegionParent {} {})", region.egglog(), parent.egglog()));
+            let parent = self.key("RegionId", parent.as_u32())?;
+            self.sink.add("RegionParent", (r, parent))?;
         }
         for (i, &p) in data.parameters.iter().enumerate() {
-            self.fact(format!(
-                "(RegionParameter {} {i} (ParameterId {}) (TypeId {}))",
-                region.egglog(),
-                p.as_u32(),
-                self.data.parameters[p].ty.as_u32()
-            ));
+            let parameter = self.key("ParameterId", p.as_u32())?;
+            let ty = self.key("TypeId", self.data.parameters[p].ty.as_u32())?;
+            self.sink.add(
+                "RegionParameter",
+                (r, self.sink.base_to_value(i as i64), parameter, ty),
+            )?;
         }
         for (&symbol, &body) in &self.symbols {
             if body == region {
-                self.output.push_str(&format!(
-                    "(NamedRegion (SymbolId {}) {})\n",
-                    symbol.as_u32(),
-                    region.egglog()
-                ));
+                let symbol = self.sink.add("SymbolId", (i64::from(symbol.as_u32()),))?;
+                self.sink.add("NamedRegion", (symbol, r))?;
             }
         }
         Ok(())
@@ -166,23 +135,23 @@ impl Emitter<'_> {
     fn region(&mut self, region: RegionId) -> Result<(), OptimizeError> {
         self.scope(region)?;
         let source = &self.data.regions[region];
+        let r = self.key("RegionId", region.as_u32())?;
         for (i, &value) in source.results.iter().enumerate() {
             let value = self.expression(value)?;
-            self.fact(format!("(RegionResult {} {i} {value})", region.egglog()));
+            self.sink.add("RegionResult", (r, self.sink.base_to_value(i as i64), value))?;
         }
         for &op in source.members.intersection(self.live) {
             self.operation(op)?;
         }
         Ok(())
     }
-    fn values(&mut self, values: &[ExprId]) -> Result<String, OptimizeError> {
-        let values = values.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
-        Ok(vector(values))
+    fn values(&mut self, values: &[ExprId]) -> Result<Value, OptimizeError> {
+        let values = values.iter().map(|&id| self.expression(id)).collect::<Result<_, _>>()?;
+        Ok(self.vector(values, true))
     }
-    fn expression(&mut self, id: ExprId) -> Result<String, OptimizeError> {
-        let name = format!("{}-{}", self.prefix, id.as_u32());
-        if !self.expressions.insert(id) {
-            return Ok(name);
+    fn expression(&mut self, id: ExprId) -> Result<Value, OptimizeError> {
+        if let Some(value) = self.expressions.get(&id) {
+            return Ok(*value);
         }
         let Some(data) = self.data.expressions.get(id) else {
             return Err(error("missing interned expression"));
@@ -190,26 +159,39 @@ impl Emitter<'_> {
         let node = match &data.kind {
             ExprKind::Global(symbol) => {
                 self.named(*symbol);
-                format!("(Global (SymbolId {}))", symbol.as_u32())
+                let symbol = self.key("SymbolId", symbol.as_u32())?;
+                self.sink.add("Global", (symbol,))?
             }
             ExprKind::Parameter(p) => {
                 self.scope(self.data.parameters[*p].region)?;
-                format!("(Parameter (ParameterId {}))", p.as_u32())
+                let parameter = self.key("ParameterId", p.as_u32())?;
+                self.sink.add("Parameter", (parameter,))?
             }
-            ExprKind::Builtin(b) => format!("(Builtin (BuiltinId {}))", b.as_u32()),
-            ExprKind::Extern(e) => format!("(Extern (ExternId {}))", e.as_u32()),
-            ExprKind::BinOp(op) => format!("(BinOp {})", quote(op)?),
-            ExprKind::UnOp(op) => format!("(UnOp {})", quote(op)?),
-            ExprKind::Int(text) => format!("(Int {})", quote(text)?),
-            ExprKind::FloatBits(bits) => format!("(FloatBits {bits})"),
-            ExprKind::Bool(value) => format!("(Bool {value})"),
-            ExprKind::Unit => "(UnitValue)".into(),
+            ExprKind::Builtin(b) => {
+                let builtin = self.key("BuiltinId", b.as_u32())?;
+                self.sink.add("Builtin", (builtin,))?
+            }
+            ExprKind::Extern(e) => {
+                let external = self.key("ExternId", e.as_u32())?;
+                self.sink.add("Extern", (external,))?
+            }
+            ExprKind::BinOp(op) => self.sink.add("BinOp", (op.as_str(),))?,
+            ExprKind::UnOp(op) => self.sink.add("UnOp", (op.as_str(),))?,
+            ExprKind::Int(text) => self.sink.add("Int", (text.as_str(),))?,
+            ExprKind::FloatBits(bits) => {
+                self.sink.add("FloatBits", (self.sink.base_to_value(i64::from(*bits)),))?
+            }
+            ExprKind::Bool(value) => self.sink.add("Bool", (self.sink.base_to_value(*value),))?,
+            ExprKind::Unit => self.sink.add("UnitValue", RawValues(vec![]))?,
             ExprKind::PureApp { function, args } => {
-                format!("(PureApp {} {})", self.expression(*function)?, self.values(args)?)
+                let function = self.expression(*function)?;
+                let args = self.values(args)?;
+                self.sink.add("PureApp", (function, args))?
             }
             ExprKind::Lambda(region) => {
                 self.queue(*region);
-                format!("(Lambda {})", region.egglog())
+                let region = self.key("RegionId", region.as_u32())?;
+                self.sink.add("Lambda", (region,))?
             }
             ExprKind::Closure {
                 code,
@@ -217,142 +199,170 @@ impl Emitter<'_> {
                 captures,
             } => {
                 self.named(*code);
-                format!(
-                    "(Closure (SymbolId {}) {param_count} {})",
-                    code.as_u32(),
-                    self.values(captures)?
-                )
+                let code = self.key("SymbolId", code.as_u32())?;
+                let captures = self.values(captures)?;
+                self.sink.add(
+                    "Closure",
+                    (code, self.sink.base_to_value(*param_count as i64), captures),
+                )?
             }
-            ExprKind::Coerce(inner) => format!("(Coerce {})", self.expression(*inner)?),
+            ExprKind::Coerce(inner) => {
+                let inner = self.expression(*inner)?;
+                self.sink.add("Coerce", (inner,))?
+            }
             ExprKind::If {
                 condition,
                 then_value,
                 else_value,
-            } => format!(
-                "(Select {} {} {})",
-                self.expression(*condition)?,
-                self.expression(*then_value)?,
-                self.expression(*else_value)?
-            ),
-            ExprKind::Array(array) => format!("(ArrayValue {})", self.array(array)?),
-            ExprKind::Tuple(values) => format!("(Tuple {})", self.values(values)?),
-            ExprKind::Project { tuple, index } => format!("(Project {} {index})", self.expression(*tuple)?),
-            ExprKind::Vector(values) => format!("(Vector {})", self.values(values)?),
-            // Naming the result never duplicates its execution. In particular,
-            // effectful calls remain distinct even when their arguments match.
+            } => {
+                let condition = self.expression(*condition)?;
+                let then_value = self.expression(*then_value)?;
+                let else_value = self.expression(*else_value)?;
+                self.sink.add("Select", (condition, then_value, else_value))?
+            }
+            ExprKind::Array(array) => {
+                let array = self.array(array)?;
+                self.sink.add("ArrayValue", (array,))?
+            }
+            ExprKind::Tuple(values) => {
+                let values = self.values(values)?;
+                self.sink.add("Tuple", (values,))?
+            }
+            ExprKind::Project { tuple, index } => {
+                let tuple = self.expression(*tuple)?;
+                self.sink.add("Project", (tuple, self.sink.base_to_value(*index as i64)))?
+            }
+            ExprKind::Vector(values) => {
+                let values = self.values(values)?;
+                self.sink.add("Vector", (values,))?
+            }
+            // Result identity keeps effectful executions distinct even when
+            // their arguments match.
             ExprKind::OperationResult(op) => {
                 self.operation(*op)?;
-                format!("(OperationResult {})", op.egglog())
+                let op = self.key("OperationId", op.as_u32())?;
+                self.sink.add("OperationResult", (op,))?
             }
         };
-        self.fact(format!(
-            "(let {name} (Typed (TypeId {}) {node}))",
-            data.ty.as_u32()
-        ));
-        self.fact(format!("(SourceExpression (ExprId {}) {name})", id.as_u32()));
-        Ok(name)
+        let ty = self.key("TypeId", data.ty.as_u32())?;
+        let value = self.sink.add("Typed", (ty, node))?;
+        self.sink.set("SourceExpression", (i64::from(id.as_u32()),), value)?;
+        self.expressions.insert(id, value);
+        Ok(value)
     }
-    fn array(&mut self, array: &Array) -> Result<String, OptimizeError> {
+    fn array(&mut self, array: &Array) -> Result<Value, OptimizeError> {
         Ok(match array {
-            Array::Value(value) => format!("(ArrayInput {})", self.expression(*value)?),
-            Array::Literal(values) => format!("(ArrayLiteral {})", self.values(values)?),
-            Array::Zip(arrays) => format!(
-                "(Zip {})",
-                vector(arrays.iter().map(|a| self.array(a)).collect::<Result<Vec<_>, _>>()?)
-            ),
+            Array::Value(value) => {
+                let value = self.expression(*value)?;
+                self.sink.add("ArrayInput", (value,))?
+            }
+            Array::Literal(values) => {
+                let values = self.values(values)?;
+                self.sink.add("ArrayLiteral", (values,))?
+            }
+            Array::Zip(arrays) => {
+                let arrays = arrays.iter().map(|a| self.array(a)).collect::<Result<_, _>>()?;
+                let arrays = self.vector(arrays, true);
+                self.sink.add("Zip", (arrays,))?
+            }
             Array::Range { start, len, step } => {
                 let start = self.expression(*start)?;
                 let len = self.expression(*len)?;
                 if let Some(step) = step {
-                    format!("(StridedRange {start} {len} {})", self.expression(*step)?)
+                    let step = self.expression(*step)?;
+                    self.sink.add("StridedRange", (start, len, step))?
                 } else {
-                    format!("(Range {start} {len})")
+                    self.sink.add("Range", (start, len))?
                 }
             }
         })
     }
-    fn body(&mut self, body: &SoacBody) -> Result<String, OptimizeError> {
+    fn body(&mut self, body: &SoacBody) -> Result<Value, OptimizeError> {
         Ok(match body {
             SoacBody::Apply { region, captures, .. } => {
                 self.queue(*region);
-                format!("(ApplyRegion {} {})", region.egglog(), self.values(captures)?)
+                let region = self.key("RegionId", region.as_u32())?;
+                let captures = self.values(captures)?;
+                self.sink.add("ApplyRegion", (region, captures))?
             }
-            SoacBody::Identity(types) => format!(
-                "(Identity {})",
-                vector(types.iter().map(|t| format!("(TypeId {})", t.as_u32())))
-            ),
-            SoacBody::Route { parameters, indices } => format!(
-                "(Route {} {})",
-                vector(parameters.iter().map(|t| format!("(TypeId {})", t.as_u32()))),
-                vector(indices.iter().map(usize::to_string))
-            ),
+            SoacBody::Identity(types) => {
+                let types =
+                    types.iter().map(|t| self.key("TypeId", t.as_u32())).collect::<Result<_, _>>()?;
+                let types = self.vector(types, true);
+                self.sink.add("Identity", (types,))?
+            }
+            SoacBody::Route { parameters, indices } => {
+                let types =
+                    parameters.iter().map(|t| self.key("TypeId", t.as_u32())).collect::<Result<_, _>>()?;
+                let types = self.vector(types, true);
+                let indices = indices.iter().map(|&i| self.sink.base_to_value(i as i64)).collect();
+                let indices = self.vector(indices, false);
+                self.sink.add("Route", (types, indices))?
+            }
             SoacBody::Compose { first, then } => {
-                format!("(Compose {} {})", self.body(first)?, self.body(then)?)
+                let first = self.body(first)?;
+                let then = self.body(then)?;
+                self.sink.add("Compose", (first, then))?
             }
             SoacBody::Parallel { left, right } => {
-                format!("(Parallel {} {})", self.body(left)?, self.body(right)?)
+                let left = self.body(left)?;
+                let right = self.body(right)?;
+                self.sink.add("Parallel", (left, right))?
             }
         })
     }
-    fn operation_body(
-        &mut self,
-        op: OperationId,
-        role: &str,
-        body: &SoacBody,
-    ) -> Result<(), OptimizeError> {
+    fn operation_body(&mut self, op: Value, role: Value, body: &SoacBody) -> Result<(), OptimizeError> {
         let body = self.body(body)?;
-        self.fact(format!("(OperationBody {} {role} {body})", op.egglog()));
+        self.sink.add("OperationBody", (op, role, body))?;
         Ok(())
     }
-    fn inputs(&mut self, op: OperationId, inputs: &[Array]) -> Result<(), OptimizeError> {
+    fn inputs(&mut self, op: Value, inputs: &[Array]) -> Result<(), OptimizeError> {
         for (i, input) in inputs.iter().enumerate() {
             let input = self.array(input)?;
-            self.fact(format!("(OperationInput {} {i} {input})", op.egglog()));
+            self.sink.add("OperationInput", (op, self.sink.base_to_value(i as i64), input))?;
         }
         Ok(())
     }
-    fn operand(&mut self, relation: &str, op: OperationId, value: ExprId) -> Result<(), OptimizeError> {
+    fn operand(&mut self, relation: &str, op: Value, value: ExprId) -> Result<(), OptimizeError> {
         let value = self.expression(value)?;
-        self.fact(format!("({relation} {} {value})", op.egglog()));
+        self.sink.add(relation, (op, value))?;
         Ok(())
     }
-    fn neutrals(&mut self, op: OperationId, role: &str, values: &[ExprId]) -> Result<(), OptimizeError> {
+    fn neutrals(&mut self, op: Value, role: Value, values: &[ExprId]) -> Result<(), OptimizeError> {
         for (i, &value) in values.iter().enumerate() {
             let value = self.expression(value)?;
-            self.fact(format!("(OperationNeutral {} {role} {i} {value})", op.egglog()));
+            self.sink.add(
+                "OperationNeutral",
+                (op, role, self.sink.base_to_value(i as i64), value),
+            )?;
         }
         Ok(())
     }
-    fn operation(&mut self, op: OperationId) -> Result<(), OptimizeError> {
-        if !self.operations.insert(op) {
+    fn operation(&mut self, id: OperationId) -> Result<(), OptimizeError> {
+        if !self.operations.insert(id) {
             return Ok(());
         }
-        if !self.live.contains(&op) {
+        if !self.live.contains(&id) {
             return Err(error("reachable expression refers to an inactive operation"));
         }
-        let Some(source) = self.data.operations.get(op) else {
+        let Some(source) = self.data.operations.get(id) else {
             return Err(error("missing source operation"));
         };
         self.scope(source.region)?;
-        self.fact(format!(
-            "(Execution {} {} (TypeId {}))",
-            source.region.egglog(),
-            op.egglog(),
-            source.ty.as_u32()
-        ));
+        let op = self.key("OperationId", id.as_u32())?;
+        let region = self.key("RegionId", source.region.as_u32())?;
+        let ty = self.key("TypeId", source.ty.as_u32())?;
+        self.sink.add("Execution", (region, op, ty))?;
         match &source.kind {
             OperationKind::Call { function, args } => {
                 self.operand("Callee", op, *function)?;
                 let args = self.values(args)?;
-                self.fact(format!("(Arguments {} {args})", op.egglog()));
+                self.sink.add("Arguments", (op, args))?;
             }
             OperationKind::EvalGlobal(symbol) => {
                 self.named(*symbol);
-                self.fact(format!(
-                    "(GlobalEvaluation {} (SymbolId {}))",
-                    op.egglog(),
-                    symbol.as_u32()
-                ));
+                let symbol = self.key("SymbolId", symbol.as_u32())?;
+                self.sink.add("GlobalEvaluation", (op, symbol))?;
             }
             OperationKind::If {
                 condition,
@@ -362,12 +372,9 @@ impl Emitter<'_> {
                 let condition = self.expression(*condition)?;
                 self.queue(*then_region);
                 self.queue(*else_region);
-                self.fact(format!(
-                    "(Conditional {} {condition} {} {})",
-                    op.egglog(),
-                    then_region.egglog(),
-                    else_region.egglog()
-                ));
+                let then_region = self.key("RegionId", then_region.as_u32())?;
+                let else_region = self.key("RegionId", else_region.as_u32())?;
+                self.sink.add("Conditional", (op, condition, then_region, else_region))?;
             }
             OperationKind::Loop {
                 init,
@@ -377,45 +384,48 @@ impl Emitter<'_> {
             } => {
                 self.queue(*header);
                 self.queue(*body);
-                self.fact(format!(
-                    "(LoopRegions {} {} {})",
-                    op.egglog(),
-                    header.egglog(),
-                    body.egglog()
-                ));
+                let header = self.key("RegionId", header.as_u32())?;
+                let body = self.key("RegionId", body.as_u32())?;
+                self.sink.add("LoopRegions", (op, header, body))?;
                 self.operand("LoopInitial", op, *init)?;
                 match kind {
                     LoopKind::For(array) => self.operand("LoopArray", op, *array)?,
                     LoopKind::ForRange(bound) => self.operand("LoopBound", op, *bound)?,
-                    LoopKind::While => self.fact(format!("(WhileLoop {})", op.egglog())),
+                    LoopKind::While => {
+                        self.sink.add("WhileLoop", (op,))?;
+                    }
                 }
             }
             OperationKind::Index { array, index } => {
                 let array = self.expression(*array)?;
                 let index = self.expression(*index)?;
-                self.fact(format!("(IndexOperands {} {array} {index})", op.egglog()));
+                self.sink.add("IndexOperands", (op, array, index))?;
             }
             OperationKind::Screma { form, inputs, .. } => {
                 self.inputs(op, inputs)?;
-                self.operation_body(op, "(Pre)", &form.pre)?;
-                self.operation_body(op, "(Post)", &form.post)?;
+                let pre = self.sink.add("Pre", RawValues(vec![]))?;
+                let post = self.sink.add("Post", RawValues(vec![]))?;
+                self.operation_body(op, pre, &form.pre)?;
+                self.operation_body(op, post, &form.post)?;
                 for (i, scan) in form.scans.iter().enumerate() {
-                    let role = format!("(ScanOp {i})");
-                    self.operation_body(op, &role, &scan.operator)?;
-                    self.neutrals(op, &role, &scan.neutral)?;
+                    let role = self.sink.add("ScanOp", (self.sink.base_to_value(i as i64),))?;
+                    self.operation_body(op, role, &scan.operator)?;
+                    self.neutrals(op, role, &scan.neutral)?;
                 }
                 for (i, reduction) in form.reductions.iter().enumerate() {
-                    let role = format!("(ReduceOp {i})");
-                    self.operation_body(op, &role, &reduction.operator)?;
-                    self.neutrals(op, &role, &reduction.neutral)?;
+                    let role = self.sink.add("ReduceOp", (self.sink.base_to_value(i as i64),))?;
+                    self.operation_body(op, role, &reduction.operator)?;
+                    self.neutrals(op, role, &reduction.neutral)?;
                 }
             }
             OperationKind::Filter {
                 map, body, inputs, ..
             } => {
                 self.inputs(op, inputs)?;
-                self.operation_body(op, "(Pre)", map)?;
-                self.operation_body(op, "(Callback)", body)?;
+                let pre = self.sink.add("Pre", RawValues(vec![]))?;
+                let callback = self.sink.add("Callback", RawValues(vec![]))?;
+                self.operation_body(op, pre, map)?;
+                self.operation_body(op, callback, body)?;
             }
             OperationKind::Scatter {
                 destination,
@@ -430,7 +440,8 @@ impl Emitter<'_> {
             } => {
                 self.operand("Destination", op, destination.value)?;
                 self.inputs(op, inputs)?;
-                self.operation_body(op, "(Callback)", body)?;
+                let callback = self.sink.add("Callback", RawValues(vec![]))?;
+                self.operation_body(op, callback, body)?;
             }
             OperationKind::ReduceByIndex {
                 destination,
@@ -441,20 +452,15 @@ impl Emitter<'_> {
             } => {
                 self.operand("Destination", op, destination.value)?;
                 self.inputs(op, inputs)?;
-                self.operation_body(op, "(Pre)", map)?;
-                self.operation_body(op, "(Callback)", body)?;
-                self.neutrals(op, "(Callback)", &[*neutral])?;
+                let pre = self.sink.add("Pre", RawValues(vec![]))?;
+                let callback = self.sink.add("Callback", RawValues(vec![]))?;
+                self.operation_body(op, pre, map)?;
+                self.operation_body(op, callback, body)?;
+                self.neutrals(op, callback, &[*neutral])?;
             }
         }
         Ok(())
     }
-}
-
-fn vector(values: impl IntoIterator<Item = String>) -> String {
-    format!("(vec-of {})", values.into_iter().collect::<Vec<_>>().join(" "))
-}
-fn quote(value: &str) -> Result<String, OptimizeError> {
-    serde_json::to_string(value).map_err(|e| error(&e.to_string()))
 }
 
 #[cfg(test)]

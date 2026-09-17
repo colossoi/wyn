@@ -12,16 +12,14 @@ use crate::egglog::data::{
     RegionId, SoacBody,
 };
 use crate::egglog::dependencies::analyze;
-use crate::egglog::parse_program;
 use crate::egglog::timing::{span, time};
 use crate::interface::EntryKind;
 use crate::types::{Type, TypeName};
-use egglog_engine::ast::{Literal, Parser};
+use egglog_engine::ast::Literal;
 use egglog_engine::{EGraph, Term};
 use std::collections::BTreeMap;
 
 mod kernels;
-mod output;
 mod validation;
 
 const WIDTH: u32 = 64;
@@ -29,11 +27,9 @@ const WIDTH: u32 = 64;
 /// Derive a relational GPU plan, then generate blocks with opaque scalar bodies.
 /// Recipes, resources, domains and dispatch order come from that plan.
 /// No executable block contains a SOAC operation.
-/// Requires completed scalar placement; the expression layer is retained alongside
-/// block facts, linked by source-region provenance rather than scalar placement.
+/// Requires completed scalar placement.
 pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, OptimizeError> {
     let _timing = span("scheduling");
-    let expressions = program.state.facts;
     let mut converted = Program {
         ir: program.ir,
         state: Scheduled {
@@ -44,24 +40,25 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     let summary = time("analyze dependencies", || analyze(&converted));
     let schedules = time("validate dependency order", || summary.schedules(&converted))?;
     let entries: Vec<_> = converted.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
-    let input_fields = outputs(&mut converted);
+    let mut source = String::new();
+    outputs(&mut converted, &mut source);
     let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
-    let facts = time("derive planning facts", || {
-        facts(&converted, &summary, count_type, &input_fields)
+    time("derive planning facts", || {
+        facts(&converted, &summary, count_type, &mut source)
     });
-    let mut planning = parse_program("planning-rules.egg", RULES)?;
-    planning.extend(parse_program("wyn-planning.egg", &facts)?);
     let mut graph = EGraph::default();
     time("load planning graph", || {
         graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
         graph.parse_and_run_program(None, KEYS)?;
-        graph.run_program(planning.clone())
+        graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)?;
+        graph.parse_and_run_program(Some("wyn-planning.egg".into()), &source)
     })?;
-    let run = parse_program("planning-run.egg", RUN)?;
-    time("derive stages and storage", || graph.run_program(run.clone()))?;
-    planning.extend(run);
+    time("derive stages and storage", || {
+        graph.parse_and_run_program(None, RUN)
+    })?;
     let recipes = time("read kernel recipes", || recipes(&graph))?;
-    let resources = read(&graph, &mut converted)?;
+    let mut launches = String::new();
+    let resources = read(&graph, &mut converted, &mut launches)?;
     let plan = span("build blocks and dispatches");
     let operation_values = converted
         .ir
@@ -82,12 +79,11 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
         data: &mut converted,
         schedules,
         functions: BTreeMap::new(),
-        launches: resources.identities.clone(),
+        launches,
         resources,
         allocation_counts: BTreeMap::new(),
         current_operation: None,
         recipes,
-        current_region: None,
         operation_values,
     };
     for (entry, definition) in entries {
@@ -98,25 +94,14 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
         }
     }
     drop(plan);
-    let mut launches = parse_program("wyn-launches.egg", &planner.launches)?;
-    launches.extend(parse_program(
-        "dispatch-run.egg",
-        "(run-schedule (saturate (run dispatch)))",
-    )?);
-    time("dispatch rules", || graph.run_program(launches.clone()))?;
-    planning.extend(launches);
+    time("dispatch rules", || {
+        graph.parse_and_run_program(Some("wyn-launches.egg".into()), &planner.launches)?;
+        graph.parse_and_run_program(None, "(run-schedule (saturate (run dispatch)))")
+    })?;
     time("read dispatch order", || {
         read_dispatch_order(&graph, planner.data)
     })?;
     time("validate blocks", || validation::validate(planner.data))?;
-    let _output = span("export block facts");
-    converted.state.facts = expressions;
-    converted.state.facts.extend(planning);
-    converted.state.facts.extend(
-        Parser::default()
-            .get_program_from_string(Some("wyn-blocks.egg".into()), &output::program(&converted))
-            .map_err(|e| error(&e.to_string()))?,
-    );
     Ok(converted)
 }
 
@@ -134,7 +119,6 @@ struct Planner<'a> {
     allocation_counts: BTreeMap<(OperationId, String), u32>,
     current_operation: Option<OperationId>,
     recipes: BTreeMap<OperationId, Recipe>,
-    current_region: Option<RegionId>,
     operation_values: BTreeMap<OperationId, ExprId>,
 }
 
@@ -153,7 +137,6 @@ impl Planner<'_> {
         let returns = self.values(vec![]);
         self.data.state.blocks.alloc(BlockData {
             function,
-            source_regions: self.current_region.into_iter().collect(),
             loop_exit: None,
             interface: None,
             parameters,
@@ -175,7 +158,6 @@ impl Planner<'_> {
             id,
             BlockData {
                 function: id,
-                source_regions: self.current_region.into_iter().collect(),
                 loop_exit: None,
                 interface: Some(Function { name, kind, results }),
                 parameters,
@@ -223,7 +205,6 @@ impl Planner<'_> {
             return Ok(entry);
         }
         let source = self.data.regions[region].clone();
-        let previous_region = self.current_region.replace(region);
         let names: Vec<_> = (0..source.parameters.len()).map(|i| format!("p{i}")).collect();
         let entry = self.function(
             format!("r{}", region.as_u32()),
@@ -240,7 +221,6 @@ impl Planner<'_> {
             end,
             self.data.regions[region].results.iter().copied().map(Value::Source).collect(),
         );
-        self.current_region = previous_region;
         Ok(entry)
     }
     fn region_into(
@@ -249,16 +229,12 @@ impl Planner<'_> {
         mut block: BlockId,
         device: bool,
     ) -> Result<BlockId, OptimizeError> {
-        let previous_region = self.current_region.replace(region);
-        self.data.state.blocks[block].source_regions.insert(region);
         for op in self.schedules.get(&region).cloned().unwrap_or_default() {
             for value in self.placements.get(&PlacementSite::Operation(op)).cloned().unwrap_or_default() {
                 self.emit(block, Instruction::BindExpression(value, Value::Source(value)));
             }
             block = self.operation(op, block, device)?;
-            self.data.state.blocks[block].source_regions.insert(region);
         }
-        self.current_region = previous_region;
         Ok(block)
     }
     fn result(&self, region: RegionId) -> Value {

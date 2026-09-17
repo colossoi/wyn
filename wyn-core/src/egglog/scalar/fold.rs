@@ -1,26 +1,213 @@
-//! Typed literal evaluation shared with EGIR; algebraic identities live in .egg.
-use super::{intern_expr, name};
+//! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
-use crate::egglog::data::{Array, ExprData, ExprId, ExprKind, Ir, OperationKind, TypeId};
+use crate::egglog::data::{ExprId, ExprKind, Ir};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
 use crate::types::{Type, TypeName};
+use egglog_engine::ast::Span;
+use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
+use egglog_engine::prelude::BaseSort;
+use egglog_engine::sort::{I64Sort, StringSort, S};
+use egglog_engine::{Core, EGraph, Error, FullState, Primitive, PurePrim, PureState, Read, Value, Write};
 
-pub(super) fn facts(data: &Ir, id: ExprId, out: &mut String) {
-    let flag = match literal(data, id) {
-        Some(Scalar::Int(0)) => Some("Zero"),
-        Some(Scalar::Int(1)) => Some("One"),
-        Some(Scalar::Float(x)) if x == 0.0 => Some("Zero"),
-        Some(Scalar::Float(x)) if x == 1.0 => Some("One"),
-        _ => None,
+pub(super) fn register(graph: &mut EGraph) {
+    for primitive in [
+        ScalarPrimitive::Binary,
+        ScalarPrimitive::Unary,
+        ScalarPrimitive::Integer,
+    ] {
+        graph.add_pure_primitive(primitive, None);
+    }
+}
+
+#[derive(Clone)]
+enum ScalarPrimitive {
+    Binary,
+    Unary,
+    Integer,
+}
+impl Primitive for ScalarPrimitive {
+    fn name(&self) -> &str {
+        match self {
+            Self::Binary => "wyn-binary",
+            Self::Unary => "wyn-unary",
+            Self::Integer => "wyn-i64",
+        }
+    }
+    fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
+        let arity = match self {
+            Self::Binary => 5,
+            Self::Unary => 4,
+            Self::Integer => 1,
+        };
+        let mut sorts = vec![StringSort.to_arcsort(); arity];
+        sorts.push(if matches!(self, Self::Integer) {
+            I64Sort.to_arcsort()
+        } else {
+            StringSort.to_arcsort()
+        });
+        SimpleTypeConstraint::new(self.name(), sorts, span.clone()).into_box()
+    }
+}
+impl PurePrim for ScalarPrimitive {
+    fn apply<'a, 'db>(&self, state: PureState<'a, 'db>, args: &[Value]) -> Option<Value> {
+        // Sort constraints guarantee these are strings; this unwrap decodes an
+        // egglog base value, not an Option or Result.
+        let string = |v| state.base_values().unwrap::<S>(v);
+        let result = match (self, args) {
+            (Self::Integer, &[value]) => {
+                return string(value).as_str().parse::<i64>().ok().map(|v| state.base_values().get(v))
+            }
+            (Self::Binary, &[op, input, output, a, b]) => {
+                let input = scalar_type(string(input).as_str())?;
+                let output = scalar_type(string(output).as_str())?;
+                let value = binary(
+                    BinaryOperator::try_from(string(op).as_str()).ok()?,
+                    decode(&input, string(a).as_str())?,
+                    decode(&input, string(b).as_str())?,
+                    &input,
+                )?;
+                encode(&output, value)?
+            }
+            (Self::Unary, &[op, input, output, a]) => evaluate_unary(
+                string(op).as_str(),
+                string(input).as_str(),
+                string(output).as_str(),
+                string(a).as_str(),
+            )?,
+            _ => unreachable!("primitive {} received {} arguments", self.name(), args.len()),
+        };
+        Some(state.base_values().get(S::new(result)))
+    }
+}
+
+pub(super) fn facts(data: &Ir, mut sink: FullState<'_, '_>) -> Result<(), Error> {
+    for (&id, t) in &data.types {
+        let tag = match t.ty {
+            Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
+            Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
+            Type::Constructed(TypeName::Float(32), _) => "f32".into(),
+            Type::Constructed(TypeName::Bool, _) => "bool".into(),
+            _ => continue,
+        };
+        let ty = sink.add("TypeId", (i64::from(id.as_u32()),))?;
+        sink.add("ScalarType", (ty, S::new(tag)))?;
+        if matches!(t.ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)) {
+            sink.add("IntegerType", (ty,))?;
+        }
+    }
+    for (&id, _) in &data.expressions {
+        let Some(BuiltinLowering::PrimOp(prim)) = lowering(data, id) else {
+            continue;
+        };
+        let op = match prim {
+            PrimOp::Bitcast => "bitcast",
+            PrimOp::GlslExt(8) => "floor",
+            PrimOp::GlslExt(9) => "ceil",
+            PrimOp::FPToSI => "fptosi",
+            PrimOp::FPToUI => "fptoui",
+            PrimOp::SIToFP => "sitofp",
+            PrimOp::UIToFP => "uitofp",
+            PrimOp::SConvert | PrimOp::UConvert => "int-convert",
+            PrimOp::FPConvert => "float-convert",
+            _ => continue,
+        };
+        let Some(value) = sink.lookup("SourceExpression", (i64::from(id.as_u32()),))? else {
+            continue;
+        };
+        sink.add("FoldUnary", (value, S::new(op.to_owned())))?;
+        if *prim == PrimOp::Bitcast {
+            sink.add("Bitcast", (value,))?;
+        }
+    }
+    Ok(())
+}
+
+fn scalar_type(name: &str) -> Option<Type> {
+    let kind = if name == "bool" {
+        TypeName::Bool
+    } else if name == "f32" {
+        TypeName::Float(32)
+    } else {
+        let bits = name.get(1..)?.parse().ok()?;
+        match name.get(..1)? {
+            "i" => TypeName::Int(bits),
+            "u" => TypeName::UInt(bits),
+            _ => return None,
+        }
     };
-    if let Some(flag) = flag {
-        out.push_str(&format!("({flag} {})\n", name(id)));
+    Some(Type::Constructed(kind, vec![]))
+}
+
+fn decode(ty: &Type, text: &str) -> Option<Scalar> {
+    Some(match ty {
+        Type::Constructed(TypeName::Int(_), _) => Scalar::Int(text.parse().ok()?),
+        Type::Constructed(TypeName::UInt(_), _) => Scalar::Int(text.parse::<u64>().ok()? as i64),
+        Type::Constructed(TypeName::Float(32), _) => {
+            Scalar::Float(f32::from_bits(text.parse().ok()?) as f64)
+        }
+        Type::Constructed(TypeName::Bool, _) => Scalar::Bool(text.parse().ok()?),
+        _ => return None,
+    })
+}
+fn encode(ty: &Type, value: Scalar) -> Option<String> {
+    Some(match (value, ty) {
+        (Scalar::Int(v), Type::Constructed(TypeName::Int(_), _)) => wrap_int(v as i128, ty).to_string(),
+        (Scalar::Int(v), Type::Constructed(TypeName::UInt(_), _)) => {
+            (wrap_int(v as i128, ty) as u64).to_string()
+        }
+        (Scalar::Float(v), Type::Constructed(TypeName::Float(32), _)) => (v as f32).to_bits().to_string(),
+        (Scalar::Bool(v), Type::Constructed(TypeName::Bool, _)) => v.to_string(),
+        _ => return None,
+    })
+}
+
+fn evaluate_unary(op: &str, input: &str, output: &str, text: &str) -> Option<String> {
+    let input = scalar_type(input)?;
+    let output = scalar_type(output)?;
+    if op == "bitcast" {
+        let bits = match input {
+            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => text.parse::<u32>().ok()?,
+            Type::Constructed(TypeName::Int(32), _) => text.parse::<i32>().ok()? as u32,
+            _ => return None,
+        };
+        return Some(match output {
+            Type::Constructed(TypeName::Float(32) | TypeName::UInt(32), _) => bits.to_string(),
+            Type::Constructed(TypeName::Int(32), _) => (bits as i32).to_string(),
+            _ => return None,
+        });
     }
-    if matches!(lowering(data, id), Some(BuiltinLowering::PrimOp(PrimOp::Bitcast))) {
-        out.push_str(&format!("(Bitcast {})\n", name(id)));
+    let value = decode(&input, text)?;
+    if let Ok(op) = UnaryOperator::try_from(op) {
+        return encode(&output, unary(op, value, &input)?);
     }
+    encode(&output, conversion(op, &output, value)?)
+}
+fn conversion(op: &str, result: &Type, value: Scalar) -> Option<Scalar> {
+    Some(match (op, result, value) {
+        ("floor", _, Scalar::Float(v)) => Scalar::Float((v as f32).floor() as f64),
+        ("ceil", _, Scalar::Float(v)) => Scalar::Float((v as f32).ceil() as f64),
+        ("fptosi", Type::Constructed(TypeName::Int(32), _), Scalar::Float(v))
+            if v.is_finite() && v.trunc() >= -2147483648.0 && v.trunc() < 2147483648.0 =>
+        {
+            Scalar::Int(v.trunc() as i64)
+        }
+        ("fptoui", Type::Constructed(TypeName::UInt(32), _), Scalar::Float(v))
+            if v.is_finite() && v.trunc() >= 0.0 && v.trunc() < 4294967296.0 =>
+        {
+            Scalar::Int(v.trunc() as i64)
+        }
+        ("sitofp", Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
+            Scalar::Float(v as f32 as f64)
+        }
+        ("uitofp", Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
+            Scalar::Float((v as u64) as f32 as f64)
+        }
+        ("int-convert", _, Scalar::Int(v)) => Scalar::Int(wrap_int(v as i128, result)),
+        ("float-convert", Type::Constructed(TypeName::Float(32), _), Scalar::Float(v)) => Scalar::Float(v),
+        _ => return None,
+    })
 }
 
 pub(super) fn lowering(data: &Ir, f: ExprId) -> Option<&BuiltinLowering> {
@@ -31,132 +218,4 @@ pub(super) fn lowering(data: &Ir, f: ExprId) -> Option<&BuiltinLowering> {
     let def = by_id(b.builtin);
     (def.raw.purity == Purity::Pure).then_some(())?;
     Some(&def.overloads().get(b.overload_idx)?.lowering)
-}
-
-pub(super) fn literal(data: &Ir, id: ExprId) -> Option<Scalar> {
-    let e = &data.expressions[id];
-    match (&data.types[e.ty].ty, &e.kind) {
-        (Type::Constructed(TypeName::Int(_), _), ExprKind::Int(s)) => Some(Scalar::Int(s.parse().ok()?)),
-        (Type::Constructed(TypeName::UInt(_), _), ExprKind::Int(s)) => {
-            Some(Scalar::Int(s.parse::<u64>().ok()? as i64))
-        }
-        (Type::Constructed(TypeName::Float(32), _), ExprKind::FloatBits(b)) => {
-            Some(Scalar::Float(f32::from_bits(*b) as f64))
-        }
-        (Type::Constructed(TypeName::Bool, _), ExprKind::Bool(b)) => Some(Scalar::Bool(*b)),
-        _ => None,
-    }
-}
-
-fn constant(data: &mut Ir, ty: TypeId, value: Scalar) -> Option<ExprId> {
-    let kind = match (value, &data.types[ty].ty) {
-        (Scalar::Int(v), t @ Type::Constructed(TypeName::Int(_), _)) => {
-            ExprKind::Int(wrap_int(v as i128, t).to_string())
-        }
-        (Scalar::Int(v), t @ Type::Constructed(TypeName::UInt(_), _)) => {
-            ExprKind::Int((wrap_int(v as i128, t) as u64).to_string())
-        }
-        (Scalar::Float(v), Type::Constructed(TypeName::Float(32), _)) => {
-            ExprKind::FloatBits((v as f32).to_bits())
-        }
-        (Scalar::Bool(v), Type::Constructed(TypeName::Bool, _)) => ExprKind::Bool(v),
-        _ => return None,
-    };
-    Some(intern_expr(data, ty, kind))
-}
-
-pub(super) fn evaluate(data: &mut Ir, id: ExprId) -> Option<ExprId> {
-    let ExprData { ty, kind } = data.expressions[id].clone();
-    if let ExprKind::OperationResult(op) = kind {
-        let OperationKind::Index { array, index } = data.operations[op].kind else {
-            return None;
-        };
-        let Scalar::Int(i) = literal(data, index)? else {
-            return None;
-        };
-        let items = match &data.expressions[array].kind {
-            ExprKind::Vector(xs) | ExprKind::Array(Array::Literal(xs)) => xs,
-            _ => return None, // A tuple may describe a buffer view, not its elements.
-        };
-        let value = *items.get(usize::try_from(i).ok()?)?;
-        return (data.expressions[value].ty == ty).then_some(value);
-    }
-    let ExprKind::PureApp { function, args } = kind else {
-        return None;
-    };
-    let value = match (&data.expressions[function].kind, args.as_slice()) {
-        (ExprKind::BinOp(op), &[a, b]) => {
-            let op = BinaryOperator::try_from(op.as_str()).ok()?;
-            if let (Some(a_value), Some(b_value)) = (literal(data, a), literal(data, b)) {
-                binary(op, a_value, b_value, &data.types[data.expressions[a].ty].ty)?
-            } else {
-                return None;
-            }
-        }
-        (ExprKind::UnOp(op), &[a]) => unary(
-            UnaryOperator::try_from(op.as_str()).ok()?,
-            literal(data, a)?,
-            &data.types[data.expressions[a].ty].ty,
-        )?,
-        (ExprKind::Builtin(_), &[a]) => {
-            let BuiltinLowering::PrimOp(prim) = lowering(data, function)? else {
-                return None;
-            };
-            if *prim == PrimOp::Bitcast {
-                return bitcast(data, ty, a);
-            }
-            conversion(data, prim, ty, a)?
-        }
-        _ => return None,
-    };
-    constant(data, ty, value)
-}
-
-fn conversion(data: &Ir, prim: &PrimOp, ty: TypeId, a: ExprId) -> Option<Scalar> {
-    let value = literal(data, a)?;
-    let result = &data.types[ty].ty;
-    Some(match (prim, result, value) {
-        (PrimOp::GlslExt(8), _, Scalar::Float(v)) => Scalar::Float((v as f32).floor() as f64),
-        (PrimOp::GlslExt(9), _, Scalar::Float(v)) => Scalar::Float((v as f32).ceil() as f64),
-        (PrimOp::FPToSI, Type::Constructed(TypeName::Int(32), _), Scalar::Float(v))
-            if v.is_finite() && v.trunc() >= -2147483648.0 && v.trunc() < 2147483648.0 =>
-        {
-            Scalar::Int(v.trunc() as i64)
-        }
-        (PrimOp::FPToUI, Type::Constructed(TypeName::UInt(32), _), Scalar::Float(v))
-            if v.is_finite() && v.trunc() >= 0.0 && v.trunc() < 4294967296.0 =>
-        {
-            Scalar::Int(v.trunc() as i64)
-        }
-        (PrimOp::SIToFP, Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
-            Scalar::Float(v as f32 as f64)
-        }
-        (PrimOp::UIToFP, Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
-            Scalar::Float((v as u64) as f32 as f64)
-        }
-        (PrimOp::SConvert | PrimOp::UConvert, _, Scalar::Int(v)) => {
-            Scalar::Int(wrap_int(v as i128, result))
-        }
-        (PrimOp::FPConvert, Type::Constructed(TypeName::Float(32), _), Scalar::Float(v)) => {
-            Scalar::Float(v)
-        }
-        _ => return None,
-    })
-}
-
-fn bitcast(data: &mut Ir, ty: TypeId, a: ExprId) -> Option<ExprId> {
-    let input = &data.expressions[a];
-    let bits = match (&data.types[input.ty].ty, &input.kind) {
-        (Type::Constructed(TypeName::Float(32), _), ExprKind::FloatBits(bits)) => *bits,
-        (Type::Constructed(TypeName::Int(32), _), ExprKind::Int(s)) => s.parse::<i32>().ok()? as u32,
-        (Type::Constructed(TypeName::UInt(32), _), ExprKind::Int(s)) => s.parse::<u32>().ok()?,
-        _ => return None,
-    };
-    let value = match &data.types[ty].ty {
-        Type::Constructed(TypeName::Float(32), _) => ExprKind::FloatBits(bits),
-        Type::Constructed(TypeName::Int(32), _) => ExprKind::Int((bits as i32).to_string()),
-        Type::Constructed(TypeName::UInt(32), _) => ExprKind::Int(bits.to_string()),
-        _ => return None,
-    };
-    Some(intern_expr(data, ty, value))
 }
