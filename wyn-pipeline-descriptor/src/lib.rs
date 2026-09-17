@@ -403,6 +403,10 @@ impl std::ops::DerefMut for ComputeStage {
 /// Graphics pipeline (vertex + fragment stages).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphicsPipeline {
+    /// Authored graphics-operation ordinal within the stages' source owner.
+    /// Independent of pipeline ordering and generated shader entry-point names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_operation: Option<u32>,
     pub stages: Vec<GraphicsStage>,
     /// Primitive assembly and draw request selected by the unified invocation.
     #[serde(default)]

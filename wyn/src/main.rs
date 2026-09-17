@@ -50,6 +50,7 @@ impl Target {
 
 struct CompileOptions {
     target: Target,
+    algebra: bool,
     #[cfg(feature = "egir")]
     egglog: bool,
     #[cfg(feature = "egir")]
@@ -130,6 +131,10 @@ enum Commands {
         /// Use the egglog compiler route (the default without the egir build feature).
         #[arg(long, conflicts_with = "direct")]
         egglog: bool,
+
+        /// Enable egglog algebraic rewrites (constant folding is always enabled).
+        #[arg(short = 'O')]
+        algebra: bool,
 
         /// Enable the unified graphics pipeline vocabulary.
         #[arg(long)]
@@ -532,6 +537,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
+            algebra,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -545,6 +551,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             output_tlc,
             output_mir,
             egglog,
+            algebra,
             graphics,
             direct,
             wgsl_emulate_u64,
@@ -568,6 +575,7 @@ fn build(
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     _egglog: bool,
+    algebra: bool,
     graphics: bool,
     direct: bool,
     wgsl_emulate_u64: bool,
@@ -603,6 +611,7 @@ fn build(
     })?;
     let options = CompileOptions {
         target,
+        algebra,
         #[cfg(feature = "egir")]
         egglog: _egglog,
         #[cfg(feature = "egir")]
@@ -727,13 +736,14 @@ fn compile_tlc(modules: ParsedModules, options: &CompileOptions) -> Result<TlcCo
 fn compile_egglog(
     program: &InputSliceBoundsInferred,
     target: Target,
+    algebra: bool,
     verbose: bool,
 ) -> Result<Elaborated, DriverError> {
     with_timings(verbose, || -> Result<_, DriverError> {
         let program = from_tlc(program)?;
         let program = fuse(program)?;
         let program = insert_expressions(program)?;
-        let program = simplify(program)?;
+        let program = simplify(program, algebra)?;
         let program = place(program)?;
         let program = schedule(program)?;
         let ssa = to_ssa(
@@ -797,6 +807,7 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     } = compile_tlc(modules, &options)?;
     let CompileOptions {
         target,
+        algebra,
         #[cfg(feature = "egir")]
         egglog,
         #[cfg(feature = "egir")]
@@ -808,12 +819,12 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
     } = options;
     #[cfg(feature = "egir")]
     let ssa = if egglog {
-        compile_egglog(&program, target, verbose)?
+        compile_egglog(&program, target, algebra, verbose)?
     } else {
         compile_egir(program, target, direct, verbose, &source_graph)?
     };
     #[cfg(not(feature = "egir"))]
-    let ssa = compile_egglog(&program, target, verbose)?;
+    let ssa = compile_egglog(&program, target, algebra, verbose)?;
 
     if let Some(path) = output_mir {
         auxiliary.push(TextArtifact {

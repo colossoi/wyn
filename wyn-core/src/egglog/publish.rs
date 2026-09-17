@@ -46,6 +46,7 @@ pub(super) fn publish(
             let index = *graphics_groups.entry(key).or_insert_with(|| {
                 let index = pipeline.pipelines.len();
                 pipeline.pipelines.push(Pipeline::Graphics(GraphicsPipeline {
+                    source_operation: Some(group.operation),
                     invocation: group.invocation.clone(),
                     stages: vec![],
                     bindings: vec![],

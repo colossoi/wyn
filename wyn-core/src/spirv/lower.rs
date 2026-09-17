@@ -658,7 +658,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             InstKind::Load { place } => {
                 let ptr_id = self.place_ptr(*place)?;
-                if self.place_storage_class.get(place) == Some(&spirv::StorageClass::StorageBuffer) {
+                if matches!(
+                    self.place_storage_class.get(place),
+                    Some(spirv::StorageClass::StorageBuffer | spirv::StorageClass::PushConstant)
+                ) {
                     let elem_ty = self.body.place_elem_ty(*place).clone();
                     let storage_ty = self.constructor.storage_polytype_to_spirv(&elem_ty)?;
                     let loaded = self.constructor.builder.load(storage_ty, None, ptr_id, None, [])?;
@@ -833,7 +836,10 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         place
                     )
                 })?;
-                let elem_ty_id = if storage_class == spirv::StorageClass::StorageBuffer {
+                let elem_ty_id = if matches!(
+                    storage_class,
+                    spirv::StorageClass::StorageBuffer | spirv::StorageClass::PushConstant
+                ) {
                     self.constructor.storage_polytype_to_spirv(&place_elem)?
                 } else {
                     self.constructor.polytype_to_spirv(&place_elem)?
@@ -902,10 +908,18 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         [],
                     )?;
                 }
-                ControlHeader::Selection { merge } => {
+                ControlHeader::Selection { merge }
+                    if matches!(
+                        self.body.inner.blocks[block_id].term,
+                        Terminator::CondBranch { .. }
+                    ) =>
+                {
                     let merge_label = self.block_map[merge];
                     self.constructor.builder.selection_merge(merge_label, spirv::SelectionControl::NONE)?;
                 }
+                // Constant branch folding can leave the selection annotation.
+                // SPIR-V only permits its merge before a conditional branch.
+                ControlHeader::Selection { .. } => {}
             }
         }
 

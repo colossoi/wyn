@@ -115,11 +115,12 @@ fn conditional_dispatches_execute_only_the_selected_arm() {
 }
 
 #[test]
-fn host_loop_reexecutes_launch_sites_and_handles_zero_iterations() {
+fn device_loop_reexecutes_local_collectives_and_handles_zero_iterations() {
     let result = compile(
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
     );
     assert_eq!(kernel_count(&result), 1);
+    assert_eq!(result.state.dispatches.len(), 1);
     for n in [0, 1, 4] {
         let output = run(&result, vec![Value::array(1..5), Value::Int(n)]);
         assert_eq!(

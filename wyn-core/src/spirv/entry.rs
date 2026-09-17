@@ -96,7 +96,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         // Build member types for push constant block
         let member_types = pc_inputs
             .iter()
-            .map(|&(i, _)| constructor.polytype_to_spirv(&entry.inputs[i].ty))
+            .map(|&(i, _)| constructor.storage_polytype_to_spirv(&entry.inputs[i].ty))
             .collect::<Result<Vec<_>>>()?;
         let member_offsets: Vec<u32> = pc_inputs.iter().map(|&(_, off)| off).collect();
         let member_poly_types: Vec<&PolyType<TypeName>> =
@@ -475,7 +475,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
 
     for declaration in &entry.storage_bindings {
         let storage_use = constructor.storage_use(declaration.binding);
-        let var_id = constructor.create_storage_buffer(
+        let var_id = constructor.create_storage_buffer_for_element(
             &declaration.elem_ty,
             declaration.binding.set,
             declaration.binding.binding,
@@ -519,7 +519,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     if let Some(pc_var_id) = pc_var {
         for (member_idx, &(input_idx, _offset)) in pc_inputs.iter().enumerate() {
             let input = &entry.inputs[input_idx];
-            let member_type = constructor.polytype_to_spirv(&input.ty)?;
+            let member_type = constructor.storage_polytype_to_spirv(&input.ty)?;
             let member_ptr_type =
                 constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, member_type);
             let idx_const = constructor.const_u32(member_idx as u32);
@@ -530,6 +530,7 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
                     parameter_places.insert(place, (access_chain, spirv::StorageClass::PushConstant));
                 } else {
                     let loaded = constructor.builder.load(member_type, None, access_chain, None, [])?;
+                    let loaded = constructor.convert_storage_value(loaded, &input.ty, false)?;
                     constructor.env.insert(input_param, loaded);
                 }
             }

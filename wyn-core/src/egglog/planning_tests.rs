@@ -283,10 +283,7 @@ fn imported_source_plans_before_block_generation() {
         assert!(count(&g, "AbiRoot") > 0);
         assert!(count(&g, "AbiBufferBinding") > 0);
         assert!(count(&g, "AbiFixedCapacity") > 0);
-        assert_eq!(
-            count(&g, "AbiInvalidHost"),
-            usize::from(source.contains("loop acc"))
-        );
+        assert_eq!(count(&g, "AbiInvalidHost"), 0);
         assert!(converted.state.blocks.is_empty());
         assert!(converted.state.buffers.is_empty());
         let plan = read(&g, &mut converted).unwrap();
@@ -307,7 +304,10 @@ fn imported_source_plans_before_block_generation() {
             .dispatches
             .values()
             .all(|s| converted.state.blocks[s.kernel].interface.is_some()));
-        assert_eq!(plan.buffers.len(), converted.state.buffers.len());
+        assert_eq!(
+            plan.buffers.len() + plan.local_slots.len(),
+            converted.state.buffers.len()
+        );
         assert_eq!(plan.launches.len(), converted.state.dispatches.len());
         assert_eq!(
             converted.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),

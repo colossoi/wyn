@@ -83,7 +83,7 @@ mod graph_tests;
 
 #[cfg(test)]
 pub(super) fn simplify_and_place(program: Program<Expressions>) -> Result<Program<Placed>, OptimizeError> {
-    place(simplify(program)?)
+    place(simplify(program, true)?)
 }
 
 fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {

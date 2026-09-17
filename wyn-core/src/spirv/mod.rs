@@ -507,9 +507,14 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     for entry in &program.entry_points {
         let accesses = entry.spirv_storage_accesses();
         for sb in &entry.storage_bindings {
-            constructor.create_storage_buffer(&sb.elem_ty, sb.binding.set, sb.binding.binding, true)?;
+            constructor.create_storage_buffer_for_element(
+                &sb.elem_ty,
+                sb.binding.set,
+                sb.binding.binding,
+                true,
+            )?;
             if !accesses[&sb.binding].writes() {
-                constructor.create_storage_buffer(
+                constructor.create_storage_buffer_for_element(
                     &sb.elem_ty,
                     sb.binding.set,
                     sb.binding.binding,

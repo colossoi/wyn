@@ -627,6 +627,7 @@ fn generated_work_serving_graphics_gets_a_separate_compute_publication() {
     let stages = stages.finish().unwrap();
     let descriptor = PipelineDescriptor {
         pipelines: vec![Pipeline::Graphics(GraphicsPipeline {
+            source_operation: None,
             stages: vec![
                 GraphicsStage {
                     entry_point: "vertex".into(),

@@ -112,6 +112,23 @@ fn eqsat_factors_and_folds_constants_inside_a_new_alternative() {
 }
 
 #[test]
+fn algebra_is_optional_while_folding_and_strength_reduction_remain_enabled() {
+    for algebra in [false, true] {
+        let c = super::simplify(input("entry main(x:i32) i32=x*2+x*3"), algebra).unwrap();
+        let ExprKind::PureApp { function, .. } = c.ir.expressions[result(&c.ir)].kind else {
+            panic!("arithmetic result");
+        };
+        assert_eq!(
+            c.ir.expressions[function].kind,
+            ExprKind::BinOp(if algebra { "*" } else { "+" }.into())
+        );
+        let c = super::simplify(input("entry main(x:i32) i32=x ** (1+2)"), algebra).unwrap();
+        let c = schedule(super::place(c).unwrap()).unwrap();
+        assert_eq!(run(&c, vec![Value::Int(-3)]), vec![Value::Int(-27)]);
+    }
+}
+
+#[test]
 fn constant_folding_wraps_at_the_declared_width_and_keeps_partial_operations() {
     for (source, a, b, expected) in [
         ("entry main(x:i32) i32=x", i32::MAX as i64, 1, i32::MIN as i64),
@@ -171,6 +188,123 @@ fn float_folding_does_not_turn_invalid_ring_laws_into_equalities() {
             ExprKind::FloatBits((a + b).to_bits())
         );
     }
+}
+
+#[test]
+fn constant_power_chains_reach_wgsl_for_integer_and_float_scalars() {
+    for ty in ["i32", "u32", "f32"] {
+        for exponent in 2..=8 {
+            let suffix = if ty == "u32" { "u32" } else { "" };
+            let c = compile(&format!("entry main(x:{ty}) {ty} = x ** {exponent}{suffix}"));
+            let c = schedule(c).unwrap();
+            if ty != "f32" {
+                for x in [0_i64, 2, 3] {
+                    assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(x.pow(exponent))]);
+                }
+            }
+            let ssa = to_ssa(&c, CodegenTarget::Wgsl).unwrap();
+            let instructions = &ssa.entry_points[0].body.inner.insts;
+            assert!(!instructions.values().any(|i| matches!(
+                i.data,
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Power),
+                    ..
+                }
+            )));
+            let multiplies = instructions
+                .values()
+                .filter(|i| {
+                    matches!(
+                        i.data,
+                        InstKind::Op {
+                            tag: OpTag::BinOp(BinaryOperator::Multiply),
+                            ..
+                        }
+                    )
+                })
+                .count();
+            assert!(
+                (1..exponent as usize).contains(&multiplies),
+                "{ty} ** {exponent}: {multiplies}"
+            );
+            wgsl(&c);
+        }
+    }
+}
+
+#[test]
+fn constant_power_chains_fold_new_products_with_typed_arithmetic() {
+    for (ty, base, exponent, expected) in [
+        ("i32", "-3", "7", ExprKind::Int("-2187".into())),
+        ("i16", "32767i16", "2i16", ExprKind::Int("1".into())),
+        ("u32", "4294967295u32", "2u32", ExprKind::Int("1".into())),
+        ("f32", "-2.0", "3.0", ExprKind::FloatBits((-8.0_f32).to_bits())),
+        ("f32", "-0.0", "3", ExprKind::FloatBits((-0.0_f32).to_bits())),
+    ] {
+        let c = compile(&format!("entry main() {ty} = ({base}) ** {exponent}"));
+        assert_eq!(c.ir.expressions[result(&c.ir)].kind, expected);
+    }
+    let c = compile("entry main(x:i32) i32 = x ** (1 + 2)");
+    let c = schedule(c).unwrap();
+    assert_eq!(run(&c, vec![Value::Int(-3)]), vec![Value::Int(-27)]);
+}
+
+#[test]
+fn constant_power_chains_do_not_duplicate_an_expensive_base() {
+    let c = compile("entry main(x:f32) f32 = (x+1.5+2.5+3.5+4.5+5.5+6.5+7.5+8.5+9.5+10.5) ** 5");
+    let c = schedule(c).unwrap();
+    let ssa = to_ssa(&c, CodegenTarget::Wgsl).unwrap();
+    let count = |op| {
+        ssa.entry_points[0]
+            .body
+            .inner
+            .insts
+            .values()
+            .filter(|i| {
+                matches!(
+                    i.data, InstKind::Op { tag: OpTag::BinOp(actual), .. } if actual == op
+                )
+            })
+            .count()
+    };
+    assert_eq!(count(BinaryOperator::Power), 0);
+    assert_eq!(count(BinaryOperator::Add), 10);
+    assert_eq!(count(BinaryOperator::Multiply), 4);
+    wgsl(&c);
+}
+
+#[test]
+fn constant_power_chains_leave_other_exponents_and_vectors_alone() {
+    for ty in ["i32", "u32", "f32"] {
+        for exponent in ["0", "1", "9", "17", "y"] {
+            let suffix = if ty == "u32" && exponent != "y" { "u32" } else { "" };
+            let c = compile(&format!(
+                "entry main(x:{ty}, y:{ty}) {ty} = x ** {exponent}{suffix}"
+            ));
+            let ExprKind::PureApp { function, .. } = c.ir.expressions[result(&c.ir)].kind else {
+                panic!("expected residual power");
+            };
+            assert_eq!(c.ir.expressions[function].kind, ExprKind::BinOp("**".into()));
+        }
+    }
+    for exponent in [-1.0_f32, 2.5, f32::INFINITY, f32::NAN] {
+        let mut c = input("entry main(x:f32) f32=x");
+        let x = parameter(&mut c.ir, 0);
+        let ty = c.ir.expressions[x].ty;
+        let n = intern_expr(&mut c.ir, ty, ExprKind::FloatBits(exponent.to_bits()));
+        let power = binary(&mut c.ir, "**", x, n);
+        output(&mut c.ir, power);
+        let c = simplify_and_place(c).unwrap();
+        assert_eq!(result(&c.ir), power);
+    }
+    let mut c = input("entry main(x:vec3f32) vec3f32=x");
+    let x = parameter(&mut c.ir, 0);
+    let scalar = intern_type(&mut c.ir, Type::Constructed(TypeName::Float(32), vec![]));
+    let n = intern_expr(&mut c.ir, scalar, ExprKind::FloatBits(2.0_f32.to_bits()));
+    let power = binary(&mut c.ir, "**", x, n);
+    output(&mut c.ir, power);
+    let c = simplify_and_place(c).unwrap();
+    assert_eq!(result(&c.ir), power);
 }
 
 #[test]
@@ -255,7 +389,7 @@ fn while_header_reuses_syntax_without_reusing_the_previous_iterations_value() {
 }
 
 #[test]
-fn soac_capture_computations_move_out_and_refresh_between_launches() {
+fn soac_capture_computations_move_out_and_refresh_between_iterations() {
     let c = compile("entry main(xs:[4]i32, n:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i,acc)");
     assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Screma { .. }))));
     let c = schedule(c).unwrap();
@@ -266,11 +400,7 @@ fn soac_capture_computations_move_out_and_refresh_between_launches() {
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    assert!(to_ssa(&c, CodegenTarget::Wgsl)
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("conditional or repeated host dispatches"));
+    wgsl(&c);
 }
 
 #[test]
@@ -318,11 +448,7 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    assert!(to_ssa(&c, CodegenTarget::Wgsl)
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("conditional or repeated host dispatches"));
+    wgsl(&c);
 }
 
 #[test]

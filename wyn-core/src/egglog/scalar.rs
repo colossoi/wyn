@@ -9,8 +9,11 @@ mod hoist;
 mod read;
 pub(super) use hoist::index as placement_index;
 
-/// Simplify typed scalar expressions with equality saturation and cost-based extraction.
-pub fn simplify(mut program: Program<Expressions>) -> Result<Program<Simplified>, OptimizeError> {
+/// Fold constants and simplify scalar expressions, optionally exploring algebraic alternatives.
+pub fn simplify(
+    mut program: Program<Expressions>,
+    algebra: bool,
+) -> Result<Program<Simplified>, OptimizeError> {
     let data = &mut program.ir;
     let _timing = span("arithmetic EqSat");
     let Expressions { mut graph } = program.state;
@@ -24,7 +27,11 @@ pub fn simplify(mut program: Program<Expressions>) -> Result<Program<Simplified>
     time("arithmetic and algebra rules", || {
         graph.parse_and_run_program(
             None,
-            "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))",
+            if algebra {
+                "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
+            } else {
+                "(run-schedule (saturate (run arithmetic)))"
+            },
         )
     })?;
     let replacements = read::extract(&graph, data)?;

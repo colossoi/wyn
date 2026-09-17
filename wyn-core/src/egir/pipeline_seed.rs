@@ -88,6 +88,7 @@ pub(super) fn build(program: &Program) -> PipelineSeed {
                 let pipeline_index = pipelines.len();
                 unified_graphics.insert(key, pipeline_index);
                 pipelines.push(Pipeline::Graphics(GraphicsPipeline {
+                    source_operation: Some(group.operation),
                     invocation: group.invocation.clone(),
                     stages: vec![GraphicsStage {
                         entry_point: name,

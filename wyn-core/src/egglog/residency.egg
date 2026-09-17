@@ -7,6 +7,10 @@
 (rule ((Site op r) (= true (ContainsCollective op))) ((SplitRegion r)) :ruleset structure)
 (rule ((ScalarCandidate op t) (= false (ContainsCollective op)))
       ((ScalarValue op t) (set (ScalarBoundary op) true)) :ruleset classify)
+; Keep runtime control and its collectives in one device invocation. Nested
+; SOACs use local serial recipes instead of conditional/repeated host launches.
+(rule ((ScalarCandidate op t) (SourceControl op))
+      ((ScalarValue op t) (set (ScalarBoundary op) true)) :ruleset classify)
 (rule ((HostRoot entry r)) ((HostRegion r)) :ruleset residency)
 (rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
 (rule ((OwnedRegion entry r) (Site op r) (Enters op child))

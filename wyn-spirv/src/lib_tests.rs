@@ -1,5 +1,26 @@
 use super::*;
 
+#[test]
+fn buffer_array_layout_is_distinct_and_decorated_once() {
+    let mut builder = SpirvBuilder::new();
+    let element = builder.u32_type();
+    let count = builder.const_u32(4);
+    let logical = builder.type_array(element, *count);
+    let storage = builder.type_buffer_array(element, *count, 4);
+    assert_ne!(logical, storage);
+    builder.decorate_array_stride_once(storage, 4);
+    let module = builder.into_module();
+    let strides: Vec<_> = module
+        .annotations
+        .iter()
+        .filter(|i| {
+            i.operands.get(1) == Some(&rspirv::dr::Operand::Decoration(spirv::Decoration::ArrayStride))
+        })
+        .collect();
+    assert_eq!(strides.len(), 1);
+    assert_eq!(strides[0].operands[0], rspirv::dr::Operand::IdRef(*storage));
+}
+
 /// `Id<K>` for distinct `K`s are distinct types — a function expecting
 /// `TypeId` cannot be called with a `ValueId`. Compile-only check; if
 /// this file builds, the safety invariant holds.

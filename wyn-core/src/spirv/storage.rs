@@ -261,6 +261,19 @@ impl Constructor {
         binding: u32,
         writable: bool,
     ) -> Result<spirv::Word> {
+        let element = types::array_elem(array_ty).unwrap_or(array_ty);
+        self.create_storage_buffer_for_element(element, set, binding, writable)
+    }
+
+    /// Compiler storage declarations already specify an element, which may
+    /// itself be an array. Do not interpret it as an outer buffer view.
+    pub(super) fn create_storage_buffer_for_element(
+        &mut self,
+        elem_ty: &PolyType<TypeName>,
+        set: u32,
+        binding: u32,
+        writable: bool,
+    ) -> Result<spirv::Word> {
         let use_key = StorageBufferUse {
             binding: BindingRef::new(set, binding),
             writable,
@@ -269,20 +282,10 @@ impl Constructor {
         if let Some(buffer) = self.storage_buffers.get(&use_key) {
             return Ok(buffer.variable);
         }
-        // Storage buffers can be either an array-shaped view (`[]T` → elem is
-        // `T`) or a scalar / vec / struct output (e.g. a reduce result, which
-        // the SOAC pass packs into a single-element `[]T` buffer at the
-        // binding level even though the user-visible type is `T`). Use
-        // `array_elem` rather than `elem_type` here so a vec-typed buffer
-        // stays a vec instead of being unpacked into its component.
-        let elem_ty = match types::array_elem(array_ty) {
-            Some(elem) => elem.clone(),
-            None => array_ty.clone(),
-        };
-        if types::contains_16_bit_scalar(&elem_ty) {
+        if types::contains_16_bit_scalar(elem_ty) {
             self.builder.enable_capability(spirv::Capability::StorageBuffer16BitAccess);
         }
-        let elem_spirv = self.storage_polytype_to_spirv(&elem_ty)?;
+        let elem_spirv = self.storage_polytype_to_spirv(elem_ty)?;
 
         // The std430 array stride is the element size rounded up to the
         // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
@@ -291,17 +294,17 @@ impl Constructor {
         // elements take their aligned size from `block_layout`, which also
         // supplies the member offsets below (a tight `type_byte_size` sum
         // under-strides structs whose members pad).
-        let layout = ssa::layout::block_layout(&elem_ty, interface::StorageLayout::Std430);
+        let layout = ssa::layout::block_layout(elem_ty, interface::StorageLayout::Std430);
         let stride = match &layout {
             Some(l) => l.size,
             None => {
-                let Some(elem_size) = ssa::layout::storage_elem_stride(&elem_ty) else {
+                let Some(elem_size) = ssa::layout::storage_elem_stride(elem_ty) else {
                     return Err(err_spirv!(
                         "storage buffer element type has no known std430 size: {:?}",
                         elem_ty
                     ));
                 };
-                let elem_align = std430_alignment(&elem_ty).unwrap_or(elem_size.max(1));
+                let elem_align = std430_alignment(elem_ty).unwrap_or(elem_size.max(1));
                 elem_size.div_ceil(elem_align) * elem_align
             }
         };
@@ -310,7 +313,7 @@ impl Constructor {
         let runtime_array = self.get_or_create_runtime_array_type(elem_spirv, stride);
 
         // Create block struct (cached)
-        let matrix_stride = ssa::layout::std430_matrix_stride(&elem_ty);
+        let matrix_stride = ssa::layout::std430_matrix_stride(elem_ty);
         let block_struct = self.get_or_create_buffer_block_type(runtime_array, matrix_stride);
 
         let ptr_type = self.get_or_create_ptr_type(spirv::StorageClass::StorageBuffer, block_struct);

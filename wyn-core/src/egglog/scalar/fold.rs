@@ -1,10 +1,10 @@
 //! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
-use crate::egglog::data::{ExprId, ExprKind, Ir};
+use crate::egglog::data::{intern_type, ExprId, ExprKind, Ir};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
-use crate::types::{Type, TypeName};
+use crate::types::{function, Type, TypeName};
 use egglog_engine::ast::Span;
 use egglog_engine::constraint::{SimpleTypeConstraint, TypeConstraint};
 use egglog_engine::prelude::BaseSort;
@@ -16,6 +16,7 @@ pub(super) fn register(graph: &mut EGraph) {
         ScalarPrimitive::Binary,
         ScalarPrimitive::Unary,
         ScalarPrimitive::Integer,
+        ScalarPrimitive::ChainExponent,
     ] {
         graph.add_pure_primitive(primitive, None);
     }
@@ -26,6 +27,7 @@ enum ScalarPrimitive {
     Binary,
     Unary,
     Integer,
+    ChainExponent,
 }
 impl Primitive for ScalarPrimitive {
     fn name(&self) -> &str {
@@ -33,6 +35,7 @@ impl Primitive for ScalarPrimitive {
             Self::Binary => "wyn-binary",
             Self::Unary => "wyn-unary",
             Self::Integer => "wyn-i64",
+            Self::ChainExponent => "wyn-chain-exponent",
         }
     }
     fn get_type_constraints(&self, span: &Span) -> Box<dyn TypeConstraint> {
@@ -40,9 +43,10 @@ impl Primitive for ScalarPrimitive {
             Self::Binary => 5,
             Self::Unary => 4,
             Self::Integer => 1,
+            Self::ChainExponent => 2,
         };
         let mut sorts = vec![StringSort.to_arcsort(); arity];
-        sorts.push(if matches!(self, Self::Integer) {
+        sorts.push(if matches!(self, Self::Integer | Self::ChainExponent) {
             I64Sort.to_arcsort()
         } else {
             StringSort.to_arcsort()
@@ -58,6 +62,16 @@ impl PurePrim for ScalarPrimitive {
         let result = match (self, args) {
             (Self::Integer, &[value]) => {
                 return string(value).as_str().parse::<i64>().ok().map(|v| state.base_values().get(v))
+            }
+            (Self::ChainExponent, &[ty, value]) => {
+                let ty = scalar_type(string(ty).as_str())?;
+                let exponent = match decode(&ty, string(value).as_str())? {
+                    Scalar::Int(n) if (2..=8).contains(&n) => n,
+                    Scalar::Float(n) if (2.0..=8.0).contains(&n) && n.fract() == 0.0 => n as i64,
+                    _ => return None,
+                };
+                // Fewer than the modeled eight operations for general power.
+                return Some(state.base_values().get(exponent));
             }
             (Self::Binary, &[op, input, output, a, b]) => {
                 let input = scalar_type(string(input).as_str())?;
@@ -82,19 +96,37 @@ impl PurePrim for ScalarPrimitive {
     }
 }
 
-pub(super) fn facts(data: &Ir, mut sink: FullState<'_, '_>) -> Result<(), Error> {
-    for (&id, t) in &data.types {
-        let tag = match t.ty {
-            Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
-            Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
-            Type::Constructed(TypeName::Float(32), _) => "f32".into(),
-            Type::Constructed(TypeName::Bool, _) => "bool".into(),
-            _ => continue,
-        };
+pub(super) fn facts(data: &mut Ir, mut sink: FullState<'_, '_>) -> Result<(), Error> {
+    let scalars: Vec<_> = data
+        .types
+        .iter()
+        .filter_map(|(&id, t)| {
+            let tag = match t.ty {
+                Type::Constructed(TypeName::Int(bits), _) => format!("i{bits}"),
+                Type::Constructed(TypeName::UInt(bits), _) => format!("u{bits}"),
+                Type::Constructed(TypeName::Float(32), _) => "f32".into(),
+                Type::Constructed(TypeName::Bool, _) => "bool".into(),
+                _ => return None,
+            };
+            Some((id, tag))
+        })
+        .collect();
+    for (id, tag) in scalars {
         let ty = sink.add("TypeId", (i64::from(id.as_u32()),))?;
         sink.add("ScalarType", (ty, S::new(tag)))?;
-        if matches!(t.ty, Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)) {
+        if matches!(
+            data.types[id].ty,
+            Type::Constructed(TypeName::Int(_) | TypeName::UInt(_), _)
+        ) {
             sink.add("IntegerType", (ty,))?;
+        }
+        if !matches!(data.types[id].ty, Type::Constructed(TypeName::Bool, _)) {
+            // A float power can have an integer exponent; its function type
+            // therefore cannot be reused for multiplication of two floats.
+            let scalar = data.types[id].ty.clone();
+            let ft = intern_type(data, function(scalar.clone(), function(scalar.clone(), scalar)));
+            let ft = sink.add("TypeId", (i64::from(ft.as_u32()),))?;
+            sink.add("MultiplicationType", (ty, ft))?;
         }
     }
     for (&id, _) in &data.expressions {

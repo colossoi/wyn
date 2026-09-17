@@ -65,6 +65,27 @@ fn test_if_expression() {
 }
 
 #[test]
+fn folded_branches_do_not_emit_selection_merges_before_unconditional_branches() {
+    for source in [
+        include_str!("../../../testfiles/sum_payload_array.wyn"),
+        include_str!("../../../testfiles/sum_payload_array_construct.wyn"),
+    ] {
+        let words = compile_to_spirv(source).unwrap();
+        let module = wspirv::dr::load_words(words).unwrap();
+        for block in module.functions.iter().flat_map(|f| &f.blocks) {
+            for instructions in block.instructions.windows(2) {
+                if instructions[0].class.opcode == wspirv::spirv::Op::SelectionMerge {
+                    assert!(matches!(
+                        instructions[1].class.opcode,
+                        wspirv::spirv::Op::BranchConditional | wspirv::spirv::Op::Switch
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_if_literal_true_lowers() {
     // `fold_constant_branches` leaves the dead arm in `skeleton.blocks`
     // without a predecessor. Dominator analysis must ignore that arm when

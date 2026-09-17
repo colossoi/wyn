@@ -153,16 +153,14 @@ fn branching_loop_tests_and_header_array_reads_reach_wgsl() {
 }
 
 #[test]
-fn host_control_requires_a_runtime_cfg_instead_of_a_false_static_descriptor() {
-    let source =
-        "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)";
-    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    let program = schedule(
-        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
-    )
-    .unwrap();
-    let error = to_ssa(&program, CodegenTarget::Wgsl).err().unwrap();
-    assert!(error.to_string().contains("conditional or repeated host dispatches"));
+fn runtime_control_keeps_collectives_inside_device_execution() {
+    for source in [
+        "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
+        "entry main(xs: [4]i32, n: i32) i32 = loop acc = 0 for k < n do acc + reduce(|a:i32,b:i32|a+b, 0, map(|x:i32|x+k,xs))",
+        "entry main(xs: [4]i32, yes: bool) [4]i32 = if yes then map(|x:i32|x+1,xs) else map(|x:i32|x-1,xs)",
+    ] {
+        compile(source);
+    }
 }
 
 #[test]
@@ -171,6 +169,10 @@ fn existing_spirv_backend_also_accepts_the_handoff() {
         "entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)",
         "entry main(xs: []i32) [2]i32 = [xs[0], xs[1]]",
         include_str!("../../../testfiles/filter_captures_runtime_array.wyn"),
+        include_str!("../../../testfiles/reduce_over_map.wyn"),
+        include_str!("../../../testfiles/scan_compute.wyn"),
+        include_str!("../../../testfiles/filter_then_map.wyn"),
+        "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
     ] {
         let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
         let program = schedule(
@@ -209,6 +211,7 @@ fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
         panic!("one graphics pipeline");
     };
     assert_eq!(graphics.stages.len(), 2);
+    assert_eq!(graphics.source_operation, Some(0));
     assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Vertex)));
     assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Fragment)));
     assert!(!graphics.fragment_outputs.is_empty());

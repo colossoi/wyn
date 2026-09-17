@@ -521,11 +521,7 @@ impl SpirvBuilder {
         }
         let fresh_id = self.inner.id();
         let ty = TypeId::new(self.inner.type_array_id(Some(fresh_id), *elem, length));
-        self.inner.decorate(
-            *ty,
-            spirv::Decoration::ArrayStride,
-            [rspirv::dr::Operand::LiteralBit32(stride)],
-        );
+        self.decorate_array_stride_once(ty, stride);
         self.array_elem.insert(ty, elem);
         self.buffer_array_type_cache.insert(key, ty);
         ty

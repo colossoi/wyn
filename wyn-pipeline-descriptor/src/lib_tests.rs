@@ -222,6 +222,7 @@ fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
                 default_total_threads: None,
             }),
             Pipeline::Graphics(GraphicsPipeline {
+                source_operation: None,
                 invocation: GraphicsInvocation::default(),
                 stages: vec![GraphicsStage {
                     entry_point: "shade".to_string(),
@@ -273,6 +274,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
     let mut descriptor = PipelineDescriptor {
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
+                source_operation: None,
                 invocation: GraphicsInvocation::default(),
                 stages: vec![GraphicsStage {
                     entry_point: "scene_fragment".to_string(),
@@ -481,6 +483,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
     let mut descriptor = PipelineDescriptor {
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
+                source_operation: None,
                 invocation: GraphicsInvocation::default(),
                 stages: vec![GraphicsStage {
                     entry_point: "frag".to_string(),

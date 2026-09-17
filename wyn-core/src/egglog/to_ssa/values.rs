@@ -5,7 +5,7 @@ use super::{
 use crate::builtins::catalog;
 use crate::egglog::abi::storage_type;
 use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
-use crate::flow::ControlHeader;
+use crate::flow::{BlockId, ControlHeader};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::ssa::types::{ConstantValue, PlaceId, Terminator, ValueRef};
 use crate::types::{
@@ -13,6 +13,7 @@ use crate::types::{
     make_array1, no_buffer, sized_array, strip_existentials, view_array_of, view_array_with_size,
 };
 use crate::BindingRef;
+use std::collections::HashMap;
 
 impl Body<'_, '_> {
     pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
@@ -211,7 +212,19 @@ impl Body<'_, '_> {
         }
     }
     pub(super) fn expression(&mut self, id: ExprId) -> Result<Typed, OptimizeError> {
+        self.expression_cached(id, &mut HashMap::new())
+    }
+    // Share DAG nodes within one expression emission and one SSA block.
+    // The cache ends before later parameter bindings or memory effects.
+    fn expression_cached(
+        &mut self,
+        id: ExprId,
+        cache: &mut HashMap<(Option<BlockId>, ExprId), Typed>,
+    ) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.environment.expressions.get(&id) {
+            return Ok(value.clone());
+        }
+        if let Some(value) = cache.get(&(self.builder.current_block(), id)) {
             return Ok(value.clone());
         }
         let data = self.compiler.data;
@@ -250,11 +263,17 @@ impl Body<'_, '_> {
             }),
             ExprKind::Unit => self.op(OpTag::Unit, vec![], ty),
             ExprKind::Tuple(items) => {
-                let values = items.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
+                let values = items
+                    .iter()
+                    .map(|&id| self.expression_cached(id, cache))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.tuple(values)
             }
             ExprKind::Vector(items) => {
-                let values = items.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
+                let values = items
+                    .iter()
+                    .map(|&id| self.expression_cached(id, cache))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.op(OpTag::Vector(items.len()), values, ty)
             }
             ExprKind::Project { tuple, index } => {
@@ -263,16 +282,19 @@ impl Body<'_, '_> {
                         return self.seed(id);
                     }
                 }
-                let value = self.expression(*tuple)?;
+                let value = self.expression_cached(*tuple, cache)?;
                 self.field(value, *index)
             }
             ExprKind::Coerce(inner) => {
-                let value = self.expression(*inner)?;
+                let value = self.expression_cached(*inner, cache)?;
                 self.cast(value, &ty)
             }
             ExprKind::Array(array) => self.array(array),
             ExprKind::PureApp { function, args } => {
-                let args = args.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
+                let args = args
+                    .iter()
+                    .map(|&id| self.expression_cached(id, cache))
+                    .collect::<Result<Vec<_>, _>>()?;
                 self.apply(*function, args, ty)
             }
             ExprKind::If {
@@ -290,7 +312,7 @@ impl Body<'_, '_> {
                     let computed = self.expression(value)?;
                     self.environment.expressions.insert(value, computed);
                 }
-                let c = self.expression(*condition)?;
+                let c = self.expression_cached(*condition, cache)?;
                 let saved = self.environment.clone();
                 let Some(start) = self.builder.current_block() else {
                     return Err(error("no current block"));
@@ -309,7 +331,7 @@ impl Body<'_, '_> {
                     })
                     .map_err(builder_error)?;
                 self.builder.switch_to_block_unchecked(yes);
-                let a = self.expression(*then_value)?;
+                let a = self.expression_cached(*then_value, cache)?;
                 let p = self.builder.add_block_param(end, a.ty.clone());
                 self.builder
                     .terminate(Terminator::Branch {
@@ -319,7 +341,7 @@ impl Body<'_, '_> {
                     .map_err(builder_error)?;
                 self.builder.switch_to_block_unchecked(no);
                 self.environment = saved.clone();
-                let b = self.expression(*else_value)?;
+                let b = self.expression_cached(*else_value, cache)?;
                 let b = self.cast(b, &a.ty)?;
                 self.builder
                     .terminate(Terminator::Branch {
@@ -344,6 +366,7 @@ impl Body<'_, '_> {
                 body.insts[inst].span.get_or_insert(span);
             }
         }
+        cache.insert((self.builder.current_block(), id), result.clone());
         Ok(result)
     }
     pub(super) fn apply(
@@ -625,11 +648,15 @@ impl Body<'_, '_> {
             }
             ("max" | "min", [a, b]) => {
                 let b = self.cast(b.clone(), &a.ty)?;
+                let Type::Constructed(scalar, _) = &a.ty else {
+                    return Err(error("min/max requires a numeric scalar"));
+                };
+                let generic = if name == "min" { known.min } else { known.max };
+                let Some(id) = catalog().specialize_numeric(generic, scalar) else {
+                    return Err(error(format!("unsupported {name} type {:?}", a.ty)));
+                };
                 self.op(
-                    OpTag::Intrinsic {
-                        id: if name == "min" { known.min } else { known.max },
-                        overload_idx: 0,
-                    },
+                    OpTag::Intrinsic { id, overload_idx: 0 },
                     vec![a.clone(), b],
                     a.ty.clone(),
                 )
