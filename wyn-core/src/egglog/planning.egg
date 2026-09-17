@@ -96,11 +96,23 @@
 ; Shared gates keep effect fan-in/fan-out linear in the imported graph.
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))
 (relation OrderEdge (OrderKey OrderKey))
-; Mechanical readout associates a chosen phase with its emitted sidecar ID.
-(relation Emitted (StageKey i64))
-(relation EmittedResource (ValueKey i64))
-(relation Waits (i64 OrderKey))
-(relation DispatchDependency (i64 i64))
+; Dispatch order is complete before assigning sidecar IDs or building kernels.
+(relation Waits (StageKey OrderKey))
+(relation DispatchDependency (StageKey StageKey))
+
+; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
+(relation PlannedBuffer (ValueKey i64 Extent))
+(relation ExternalBuffer (ValueKey i64))
+(relation PlannedStage (StageKey i64 String i64 Extent i64))
+(ruleset readout)
+(rule ((Produces stage value) (ElementType value (TypeId ty)) (Capacity value n))
+      ((PlannedBuffer value ty n)) :ruleset readout)
+(rule ((ElementType (Output id) (TypeId ty)) (Capacity (Output id) n))
+      ((PlannedBuffer (Output id) ty n)) :ruleset readout)
+(rule ((Backing value source) (= source (Source (ExprId id))))
+      ((ExternalBuffer source id)) :ruleset readout)
+(rule ((PhaseOwner stage entry) (= stage (Stage (OperationId op) name)) (PhaseDomain stage n width))
+      ((PlannedStage stage op name entry n width)) :ruleset readout)
 
 (ruleset residency)
 (ruleset structure)

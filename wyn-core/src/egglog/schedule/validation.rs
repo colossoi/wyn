@@ -148,21 +148,10 @@ pub(super) fn validate(data: &Program<Scheduled>) -> Result<(), OptimizeError> {
     }
     // Dependencies order static launch sites; loop repetition belongs to the
     // host CFG. Inserting loop backedges here would create an invalid DAG.
-    let mut ordered = BTreeSet::new();
-    loop {
-        let before = ordered.len();
-        for (&id, dispatch) in &data.state.dispatches {
-            if dispatch.dependencies.is_subset(&ordered) {
-                ordered.insert(id);
-            }
-        }
-        if before == ordered.len() {
-            break;
-        }
-    }
-    if ordered.len() != launches.len() {
-        return Err(error("cyclic dispatch dependencies"));
-    }
+    wyn_graph::topo_sort_by_dependencies(data.state.dispatches.ids(), |id, out| {
+        out.extend(data.state.dispatches[id].dependencies.iter().copied());
+    })
+    .map_err(|_| error("cyclic dispatch dependencies"))?;
     Ok(())
 }
 

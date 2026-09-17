@@ -1,11 +1,12 @@
 use super::super::data::intern_type;
 use super::super::{from_tlc, Storage};
-use super::{facts, outputs, read, EGraph, KEYS, RULES, RUN};
+use super::{facts, outputs, read, KEYS, RULES, RUN};
 use crate::compile_thru_tlc;
 use crate::egglog::dependencies::analyze;
 use crate::egglog::{Program, Scheduled};
 use crate::tlc::infer_input_slice_bounds;
 use crate::types::{Type, TypeName};
+use egglog_engine::EGraph;
 use std::fmt::Write;
 
 fn graph(facts: &str) -> EGraph {
@@ -24,7 +25,9 @@ fn check(graph: &mut EGraph, facts: &str) {
 }
 
 fn count(graph: &EGraph, relation: &str) -> usize {
-    graph.function_to_dag(relation, usize::MAX, false).unwrap().0.len()
+    let mut count = 0;
+    graph.constructor_enodes(relation, |_| count += 1).unwrap();
+    count
 }
 
 const MAP: &str = r#"
@@ -225,16 +228,34 @@ fn imported_source_plans_before_block_generation() {
             state: Scheduled::default(),
         };
         let summary = analyze(&converted.ir);
-        let mut source = String::new();
-        outputs(&mut converted, &mut source);
         let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
-        facts(&converted, &summary, count_type, &mut source);
-        let g = graph(&source);
+        let mut g = EGraph::default();
+        g.parse_and_run_program(None, include_str!("ids.egg")).unwrap();
+        g.parse_and_run_program(None, KEYS).unwrap();
+        g.parse_and_run_program(None, RULES).unwrap();
+        g.update(|mut sink| {
+            outputs(&mut converted, &mut sink)?;
+            facts(&converted, &summary, count_type, &mut sink)
+        })
+        .unwrap();
+        g.parse_and_run_program(None, RUN).unwrap();
         assert!(count(&g, "Phase") > 0);
         assert!(count(&g, "Allocation") > 0);
         assert!(converted.state.blocks.is_empty());
         assert!(converted.state.buffers.is_empty());
-        read(&g, &mut converted, &mut String::new()).unwrap();
+        let plan = read(&g, &mut converted).unwrap();
+        assert_eq!(plan.stages.len(), count(&g, "Phase"));
+        assert_eq!(
+            plan.stages.values().map(|s| s.dependencies.len()).sum::<usize>(),
+            count(&g, "DispatchDependency")
+        );
+        let ids: std::collections::BTreeSet<_> = plan.stages.values().map(|s| s.id).collect();
+        assert!(plan.stages.values().all(|s| s.dependencies.iter().all(|id| ids.contains(id))));
+        assert!(converted.state.blocks.is_empty());
+        assert!(
+            converted.state.dispatches.is_empty(),
+            "IDs are reserved before bodies exist"
+        );
         assert_eq!(
             converted.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
             count(&g, "Allocation"),
@@ -260,12 +281,13 @@ fn consumers_wait_for_their_component_writer_not_the_last_recipe_phase() {
         (InputDomain (OperationId 1) (Fixed 256))
         (Operand (OperationId 1) "input" (ExprId 1))
         (SourceDependency (OperationId 1) (OperationId 0))
-        (Emitted (Stage (OperationId 0) "chunks") 0)
-        (Emitted (Stage (OperationId 0) "combine") 1)
-        (Emitted (Stage (OperationId 1) "elements") 2)
     "#,
     );
-    check(&mut g, "(DispatchDependency 0 1) (DispatchDependency 0 2)");
+    check(
+        &mut g,
+        r#"(DispatchDependency (Stage (OperationId 0) "chunks") (Stage (OperationId 0) "combine"))
+        (DispatchDependency (Stage (OperationId 0) "chunks") (Stage (OperationId 1) "elements"))"#,
+    );
     assert_eq!(count(&g, "DispatchDependency"), 2);
 }
 
@@ -279,11 +301,12 @@ fn effects_cross_scalar_sites_and_stop_at_the_next_launch() {
         (InputDomain (OperationId 2) (Fixed 4))
         (EffectInput 0 (OperationId 0)) (EffectWait (OperationId 1) 0)
         (EffectInput 1 (OperationId 1)) (EffectWait (OperationId 2) 1)
-        (Emitted (Stage (OperationId 0) "elements") 0)
-        (Emitted (Stage (OperationId 2) "elements") 1)
     "#
     ));
-    check(&mut g, "(DispatchDependency 0 1)");
+    check(
+        &mut g,
+        r#"(DispatchDependency (Stage (OperationId 0) "elements") (Stage (OperationId 2) "elements"))"#,
+    );
     assert_eq!(count(&g, "DispatchDependency"), 1);
 }
 
@@ -300,7 +323,6 @@ fn chain_planning_keeps_linear_fact_counts() {
                 (InputDomain (OperationId {i}) (Fixed 64))
                 (ArrayResult (OperationId {i}) 0 (TypeId 0))
                 (DirectResult (ExprId {i}) (OperationId {i}) 0)
-                (Emitted (Stage (OperationId {i}) "elements") {i})
             "#
             )
             .unwrap();

@@ -1,10 +1,10 @@
 //! Parallel dispatch planning and lowering to blocks with opaque scalar bodies.
 use super::blocks::{
-    BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, GridData,
-    Instruction, Storage, Value,
+    BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, Instruction,
+    Storage, Value,
 };
 use super::data::intern_type;
-use super::planning::{facts, outputs, read, read_dispatch_order, Readout, KEYS, RULES, RUN};
+use super::planning::{facts, outputs, read, Readout, Recipe, KEYS, RULES, RUN};
 use super::scalar::placement_index;
 use super::{OptimizeError, Placed, PlacementSite, Program, Scheduled};
 use crate::egglog::data::{
@@ -15,8 +15,7 @@ use crate::egglog::dependencies::analyze;
 use crate::egglog::timing::{span, time};
 use crate::interface::EntryKind;
 use crate::types::{Type, TypeName};
-use egglog_engine::ast::Literal;
-use egglog_engine::{EGraph, Term};
+use egglog_engine::EGraph;
 use std::collections::BTreeMap;
 
 mod kernels;
@@ -40,25 +39,24 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     let summary = time("analyze dependencies", || analyze(&converted));
     let schedules = time("validate dependency order", || summary.schedules(&converted))?;
     let entries: Vec<_> = converted.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
-    let mut source = String::new();
-    outputs(&mut converted, &mut source);
     let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
-    time("derive planning facts", || {
-        facts(&converted, &summary, count_type, &mut source)
-    });
     let mut graph = EGraph::default();
-    time("load planning graph", || {
+    time("load planning schema", || {
         graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
         graph.parse_and_run_program(None, KEYS)?;
-        graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)?;
-        graph.parse_and_run_program(Some("wyn-planning.egg".into()), &source)
+        graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)
     })?;
-    time("derive stages and storage", || {
+    time("read planning facts", || {
+        graph.update(|mut sink| {
+            outputs(&mut converted, &mut sink)?;
+            facts(&converted, &summary, count_type, &mut sink)
+        })
+    })?;
+    time("derive stages, storage and dispatch order", || {
         graph.parse_and_run_program(None, RUN)
     })?;
-    let recipes = time("read kernel recipes", || recipes(&graph))?;
-    let mut launches = String::new();
-    let resources = read(&graph, &mut converted, &mut launches)?;
+    let resources = read(&graph, &mut converted)?;
+    drop(graph);
     let plan = span("build blocks and dispatches");
     let operation_values = converted
         .ir
@@ -79,11 +77,9 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
         data: &mut converted,
         schedules,
         functions: BTreeMap::new(),
-        launches,
         resources,
         allocation_counts: BTreeMap::new(),
         current_operation: None,
-        recipes,
         operation_values,
     };
     for (entry, definition) in entries {
@@ -94,13 +90,9 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
         }
     }
     drop(plan);
-    time("dispatch rules", || {
-        graph.parse_and_run_program(Some("wyn-launches.egg".into()), &planner.launches)?;
-        graph.parse_and_run_program(None, "(run-schedule (saturate (run dispatch)))")
-    })?;
-    time("read dispatch order", || {
-        read_dispatch_order(&graph, planner.data)
-    })?;
+    if !planner.resources.stages.is_empty() {
+        return Err(error("planned dispatches were not lowered"));
+    }
     time("validate blocks", || validation::validate(planner.data))?;
     Ok(converted)
 }
@@ -114,11 +106,9 @@ struct Planner<'a> {
     data: &'a mut Program<Scheduled>,
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
     functions: BTreeMap<(RegionId, bool), BlockId>,
-    launches: String,
     resources: Readout,
     allocation_counts: BTreeMap<(OperationId, String), u32>,
     current_operation: Option<OperationId>,
-    recipes: BTreeMap<OperationId, Recipe>,
     operation_values: BTreeMap<OperationId, ExprId>,
 }
 
@@ -505,52 +495,6 @@ fn array_value(array: &Array) -> Value {
 }
 fn length(inputs: &[Array]) -> Value {
     inputs.first().map(|a| Value::op("length", [array_value(a)])).unwrap_or(Value::Int(0))
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Recipe {
-    Elements,
-    Totals,
-    Prefixes,
-    Compact,
-    Serial,
-}
-
-fn recipes(graph: &EGraph) -> Result<BTreeMap<OperationId, Recipe>, OptimizeError> {
-    let (rows, _, dag) = graph.function_to_dag("Plan", usize::MAX, false)?;
-    let mut result = BTreeMap::new();
-    for row in rows {
-        let Term::App(_, args) = dag.get(row) else {
-            return Err(error("invalid scheduling decision"));
-        };
-        let [operation, recipe] = args.as_slice() else {
-            return Err(error("invalid scheduling decision arity"));
-        };
-        let Term::App(_, key) = dag.get(*operation) else {
-            return Err(error("invalid operation key"));
-        };
-        let [key] = key.as_slice() else {
-            return Err(error("invalid operation key arity"));
-        };
-        let Term::Lit(Literal::Int(id)) = dag.get(*key) else {
-            return Err(error("invalid operation identity"));
-        };
-        let op =
-            OperationId::from(u32::try_from(*id).map_err(|_| error("operation identity is out of range"))?);
-        let Term::App(recipe, _) = dag.get(*recipe) else {
-            return Err(error("invalid kernel recipe"));
-        };
-        let recipe = match recipe.as_str() {
-            "Elements" => Recipe::Elements,
-            "Totals" => Recipe::Totals,
-            "Prefixes" => Recipe::Prefixes,
-            "Compact" => Recipe::Compact,
-            "Serial" => Recipe::Serial,
-            _ => return Err(error("unknown kernel recipe")),
-        };
-        result.insert(op, recipe);
-    }
-    Ok(result)
 }
 
 #[cfg(test)]

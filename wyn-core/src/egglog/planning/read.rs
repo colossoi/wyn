@@ -1,32 +1,35 @@
-//! Mechanical readout: allocate arena identities for derived resources and
-//! index recipe slots. All residency, aliasing and ordering choices are facts.
-use super::super::term::{app, key};
-use super::{EGraph, Literal, OptimizeError, Program, Scheduled, Term};
-use crate::egglog::blocks::{BufferData, Storage, Value};
-use crate::egglog::data::{BufferId, EntryId, ExprId, OperationId, OutputId, TypeId};
+//! Read a completed relational plan directly into compiler arenas.
+//! Native egglog values identify resources until their arena IDs are assigned.
+use crate::egglog::blocks::{BufferData, GridData, Storage, Value};
+use crate::egglog::data::{BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, OutputId, TypeId};
 use crate::egglog::timing::span;
+use crate::egglog::{OptimizeError, Program, Scheduled};
 use crate::types::TypeExt;
-use egglog_engine::TermDag;
-use std::collections::{BTreeMap, BTreeSet};
+use egglog_engine::sort::S;
+use egglog_engine::{EGraph, Value as EggValue};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Resource {
-    Output(OutputId),
-    Source(ExprId),
-    Result(OperationId, u32),
-    Temporary(OperationId, String, u32),
+#[derive(Clone, Copy, Debug)]
+pub(in crate::egglog) enum Recipe {
+    Elements,
+    Totals,
+    Prefixes,
+    Compact,
+    Serial,
 }
 
-#[derive(Default)]
-pub(crate) struct Stage {
-    pub owner: Option<EntryId>,
-    pub groups: Option<Value>,
+pub(in crate::egglog) struct Stage {
+    pub id: DispatchId,
+    pub owner: EntryId,
+    pub grid: GridId,
     pub reads: BTreeSet<BufferId>,
     pub writes: BTreeSet<BufferId>,
+    pub dependencies: BTreeSet<DispatchId>,
 }
 
 #[derive(Default)]
-pub(crate) struct Readout {
+pub(in crate::egglog) struct Readout {
+    pub recipes: BTreeMap<OperationId, Recipe>,
     pub slots: BTreeMap<(OperationId, String, u32), BufferId>,
     pub stages: BTreeMap<(OperationId, String), Stage>,
 }
@@ -34,214 +37,243 @@ pub(crate) struct Readout {
 pub(in crate::egglog) fn read(
     graph: &EGraph,
     data: &mut Program<Scheduled>,
-    launches: &mut String,
 ) -> Result<Readout, OptimizeError> {
-    let _timing = span("read resources and domains");
+    let _timing = span("read completed plan");
     let mut result = Readout::default();
-    let mut produced = BTreeSet::new();
-    rows(graph, "Produces", 2, |dag, a| {
-        produced.insert(resource(dag, a[1])?);
-        Ok(())
-    })?;
-    let mut types = BTreeMap::new();
-    rows(graph, "ElementType", 2, |dag, a| {
-        let value = resource(dag, a[0])?;
-        if matches!(value, Resource::Output(_)) {
-            produced.insert(value.clone());
-        }
-        types.insert(value, key::<TypeId>(dag, a[1], "TypeId")?);
-        Ok(())
-    })?;
-    let mut allocations = BTreeSet::new();
-    rows(graph, "Allocation", 2, |dag, a| {
-        allocations.insert(resource(dag, a[0])?);
-        Ok(())
-    })?;
-    let mut buffers = BTreeMap::new();
-    for value in &produced {
-        if types.contains_key(value) {
-            buffers.insert(value.clone(), data.state.buffers.alloc_id());
-        }
+    let operations = keys(graph, "OperationId")?;
+    let expressions = keys(graph, "ExprId")?;
+    let mut recipes = HashMap::new();
+    for (name, recipe) in [
+        ("Elements", Recipe::Elements),
+        ("Totals", Recipe::Totals),
+        ("Prefixes", Recipe::Prefixes),
+        ("Compact", Recipe::Compact),
+        ("Serial", Recipe::Serial),
+    ] {
+        graph.constructor_enodes(name, |e| {
+            recipes.insert(e.eclass, recipe);
+        })?;
     }
-    rows(graph, "Backing", 2, |dag, a| {
-        let value = resource(dag, a[1])?;
-        if let Resource::Source(e) = value {
-            let ty = &data.types[data.expressions[e].ty].ty;
-            if ty.is_array() && !buffers.contains_key(&value) {
-                let Some(element) = ty.elem_type() else {
-                    return Err(invalid("array resource has no element type"));
-                };
-                let element = element.clone();
-                let id = data.state.buffers.alloc(BufferData {
+    rows(graph, "Plan", |a| {
+        result.recipes.insert(OperationId::from(operations[&a[0]]), recipes[&a[1]]);
+        Ok(())
+    })?;
+
+    // Reserve identities before translating extents: a capacity can read the
+    // live count stored in another planned resource.
+    let mut buffers = HashMap::new();
+    rows(graph, "PlannedBuffer", |a| {
+        buffers.entry(a[0]).or_insert_with(|| data.state.buffers.alloc_id());
+        Ok(())
+    })?;
+    rows(graph, "ExternalBuffer", |a| {
+        let e = ExprId::from(number(graph, a[1])?);
+        let ty = &data.ir.types[data.ir.expressions[e].ty].ty;
+        if ty.is_array() {
+            let Some(element) = ty.elem_type() else {
+                return Err(invalid("array resource has no element type"));
+            };
+            buffers.entry(a[0]).or_insert_with(|| {
+                data.state.buffers.alloc(BufferData {
                     name: format!("input{}", e.as_u32()),
                     length: Value::op("length", [Value::Source(e)]),
-                    element,
+                    element: element.clone(),
                     storage: Storage::External(e),
-                });
-                buffers.insert(value, id);
-            }
+                })
+            });
         }
         Ok(())
     })?;
-    rows(graph, "Capacity", 2, |dag, a| {
-        let value = resource(dag, a[0])?;
-        if let Some(&id) = buffers.get(&value) {
-            if let Some(&ty) = types.get(&value) {
-                data.state.buffers.insert(
-                    id,
-                    BufferData {
-                        name: format!("resource{}", id.as_u32()),
-                        length: extent(dag, a[1], &buffers)?,
-                        element: data.types[ty].ty.clone(),
-                        storage: if allocations.contains(&value) {
-                            Storage::Device
-                        } else {
-                            Storage::Discarded
-                        },
-                    },
-                );
-            }
+
+    // Decode directly to the final grid/capacity representation. Only compound
+    // extents need a child index; memoization visits each such edge once.
+    let mut extents = HashMap::new();
+    for name in ["Fixed", "Length", "Scalar", "Stored"] {
+        let mut status: Result<(), OptimizeError> = Ok(());
+        graph.constructor_enodes_while(name, |e| {
+            status = (|| {
+                let arg = e.children[0];
+                let value = match name {
+                    "Fixed" => Value::Int(number(graph, arg)?),
+                    "Length" => Value::op("length", [Value::Source(ExprId::from(expressions[&arg]))]),
+                    "Scalar" => Value::Source(ExprId::from(expressions[&arg])),
+                    "Stored" => {
+                        let Some(&buffer) = buffers.get(&arg) else {
+                            // An unused live-length expression need not have storage.
+                            return Ok(());
+                        };
+                        Value::op("index", [Value::Buffer(buffer), Value::Int(0)])
+                    }
+                    _ => unreachable!("unknown extent constructor {name}"),
+                };
+                extents.insert(e.eclass, value);
+                Ok(())
+            })();
+            status.is_ok()
+        })?;
+        status?;
+    }
+    let mut chunks = HashMap::new();
+    graph.constructor_enodes("ChunkCount", |e| {
+        chunks.insert(e.eclass, (e.children[0], e.children[1]));
+    })?;
+    rows(graph, "PlannedBuffer", |a| {
+        let id = buffers[&a[0]];
+        data.state.buffers.insert(
+            id,
+            BufferData {
+                name: format!("resource{}", id.as_u32()),
+                length: extent(graph, a[2], &mut extents, &chunks)?,
+                element: data.types[TypeId::from(number(graph, a[1])?)].ty.clone(),
+                storage: Storage::Discarded,
+            },
+        );
+        Ok(())
+    })?;
+    rows(graph, "Allocation", |a| {
+        if let Some(&id) = buffers.get(&a[0]) {
+            data.state.buffers[id].storage = Storage::Device;
         }
         Ok(())
     })?;
-    rows(graph, "BufferSlot", 4, |dag, a| {
-        if let Some(&id) = buffers.get(&resource(dag, a[3])?) {
+    rows(graph, "BufferSlot", |a| {
+        if let Some(&id) = buffers.get(&a[3]) {
             result.slots.insert(
-                (operation(dag, a[0])?, string(dag, a[1])?, number(dag, a[2])?),
+                (
+                    OperationId::from(operations[&a[0]]),
+                    graph.value_to_base::<S>(a[1]).to_string(),
+                    number(graph, a[2])?,
+                ),
                 id,
             );
         }
         Ok(())
     })?;
-    rows(graph, "OutputBacking", 2, |dag, a| {
-        data.state.outputs[OutputId::from(number(dag, a[0])?)].buffer =
-            buffers.get(&resource(dag, a[1])?).copied();
+    rows(graph, "OutputBacking", |a| {
+        data.state.outputs[OutputId::from(number(graph, a[0])?)].buffer = buffers.get(&a[1]).copied();
         Ok(())
     })?;
-    rows(graph, "PhaseOwner", 2, |dag, a| {
-        let entry = result.stages.entry(stage(dag, a[0])?).or_default();
-        let owner = EntryId::from(number(dag, a[1])?);
-        if entry.owner.is_some_and(|other| other != owner) {
+
+    let mut stages = HashMap::new();
+    rows(graph, "PlannedStage", |a| {
+        let key = (
+            OperationId::from(number(graph, a[1])?),
+            graph.value_to_base::<S>(a[2]).to_string(),
+        );
+        let owner = EntryId::from(number(graph, a[3])?);
+        if result.stages.contains_key(&key) {
             return Err(invalid("shared host dispatch requires entry specialization"));
         }
-        entry.owner = Some(owner);
-        Ok(())
-    })?;
-    rows(graph, "PhaseDomain", 3, |dag, a| {
-        let n = extent(dag, a[1], &buffers)?;
-        let width = Value::Int(number(dag, a[2])?);
-        result.stages.entry(stage(dag, a[0])?).or_default().groups = Some(Value::op(
+        let n = extent(graph, a[4], &mut extents, &chunks)?;
+        let width = Value::Int(number(graph, a[5])?);
+        let groups = Value::op(
             "min",
             [
                 Value::Int(65_535),
                 Value::op("max", [Value::Int(1), Value::op("ceil_div", [n, width])]),
             ],
-        ));
+        );
+        let grid = data.state.grids.alloc(GridData {
+            groups: [groups, Value::Int(1), Value::Int(1)],
+        });
+        stages.insert(a[0], key.clone());
+        result.stages.insert(
+            key,
+            Stage {
+                id: data.state.dispatches.alloc_id(),
+                owner,
+                grid,
+                reads: BTreeSet::new(),
+                writes: BTreeSet::new(),
+                dependencies: BTreeSet::new(),
+            },
+        );
         Ok(())
     })?;
-    rows(graph, "Access", 3, |dag, a| {
-        if let Some(&id) = buffers.get(&resource(dag, a[1])?) {
-            let entry = result.stages.entry(stage(dag, a[0])?).or_default();
-            match string(dag, a[2])?.as_str() {
+    rows(graph, "Access", |a| {
+        if let Some(&id) = buffers.get(&a[1]) {
+            let Some(stage) = stages.get(&a[0]).and_then(|key| result.stages.get_mut(key)) else {
+                return Err(invalid("access without a planned stage"));
+            };
+            match graph.value_to_base::<S>(a[2]).as_str() {
                 "read" => {
-                    entry.reads.insert(id);
+                    stage.reads.insert(id);
                 }
                 "write" => {
-                    entry.writes.insert(id);
+                    stage.writes.insert(id);
                 }
                 _ => return Err(invalid("unknown access")),
             }
         }
         Ok(())
     })?;
-    for (value, id) in buffers {
-        if data.state.buffers[id].storage == Storage::Discarded {
-            continue;
-        }
-        let value = match value {
-            Resource::Output(id) => format!("(Output {})", id.as_u32()),
-            Resource::Source(e) => format!("(Source (ExprId {}))", e.as_u32()),
-            Resource::Result(op, slot) => format!("(Result {} {slot})", op.egglog()),
-            Resource::Temporary(op, name, slot) => format!("(Temporary {} {name:?} {slot})", op.egglog()),
+    rows(graph, "DispatchDependency", |a| {
+        let Some(before) = stages.get(&a[0]).and_then(|key| result.stages.get(key)).map(|s| s.id) else {
+            return Err(invalid("dependency without a planned predecessor"));
         };
-        launches.push_str(&format!("(EmittedResource {value} {})\n", id.as_u32()));
-    }
+        let Some(after) = stages.get(&a[1]).and_then(|key| result.stages.get_mut(key)) else {
+            return Err(invalid("dependency without a planned successor"));
+        };
+        after.dependencies.insert(before);
+        Ok(())
+    })?;
     Ok(result)
 }
 
-fn extent(d: &TermDag, id: usize, buffers: &BTreeMap<Resource, BufferId>) -> Result<Value, OptimizeError> {
-    let Term::App(name, a) = d.get(id) else {
-        return Err(invalid("extent"));
+fn extent(
+    graph: &EGraph,
+    id: EggValue,
+    values: &mut HashMap<EggValue, Value>,
+    chunks: &HashMap<EggValue, (EggValue, EggValue)>,
+) -> Result<Value, OptimizeError> {
+    if let Some(value) = values.get(&id) {
+        return Ok(value.clone());
+    }
+    let Some(&(n, width)) = chunks.get(&id) else {
+        return Err(invalid("extent has no value or stored length"));
     };
-    Ok(match (name.as_str(), a.as_slice()) {
-        ("Fixed", [n]) => Value::Int(number(d, *n)?),
-        ("Length", [e]) => Value::op("length", [Value::Source(key(d, *e, "ExprId")?)]),
-        ("Scalar", [e]) => Value::Source(key(d, *e, "ExprId")?),
-        ("ChunkCount", [n, width]) => Value::op(
-            "max",
-            [
-                Value::Int(1),
-                Value::op(
-                    "ceil_div",
-                    [extent(d, *n, buffers)?, Value::Int(number(d, *width)?)],
-                ),
-            ],
-        ),
-        ("Stored", [v]) => {
-            let Some(&buffer) = buffers.get(&resource(d, *v)?) else {
-                return Err(invalid("stored length"));
-            };
-            Value::op("index", [Value::Buffer(buffer), Value::Int(0)])
-        }
-        _ => return Err(invalid("extent")),
-    })
+    let n = extent(graph, n, values, chunks)?;
+    let value = Value::op(
+        "max",
+        [
+            Value::Int(1),
+            Value::op("ceil_div", [n, Value::Int(number(graph, width)?)]),
+        ],
+    );
+    values.insert(id, value.clone());
+    Ok(value)
 }
 
-fn resource(d: &TermDag, id: usize) -> Result<Resource, OptimizeError> {
-    let Term::App(name, a) = d.get(id) else {
-        return Err(invalid("resource"));
-    };
-    Ok(match (name.as_str(), a.as_slice()) {
-        ("Output", [id]) => Resource::Output(OutputId::from(number(d, *id)?)),
-        ("Source", [e]) => Resource::Source(key(d, *e, "ExprId")?),
-        ("Result", [o, i]) => Resource::Result(operation(d, *o)?, number(d, *i)?),
-        ("Temporary", [o, name, i]) => {
-            Resource::Temporary(operation(d, *o)?, string(d, *name)?, number(d, *i)?)
-        }
-        _ => return Err(invalid("resource")),
-    })
+fn keys(graph: &EGraph, name: &str) -> Result<HashMap<EggValue, u32>, OptimizeError> {
+    let mut keys = HashMap::new();
+    let mut status = Ok(());
+    graph.constructor_enodes_while(name, |e| {
+        status = number(graph, e.children[0]).map(|id| {
+            keys.insert(e.eclass, id);
+        });
+        status.is_ok()
+    })?;
+    status?;
+    Ok(keys)
 }
-fn stage(d: &TermDag, id: usize) -> Result<(OperationId, String), OptimizeError> {
-    let a = app(d, id, "Stage", 2)?;
-    Ok((operation(d, a[0])?, string(d, a[1])?))
+
+fn number(graph: &EGraph, value: EggValue) -> Result<u32, OptimizeError> {
+    u32::try_from(graph.value_to_base::<i64>(value)).map_err(|_| invalid("integer range"))
 }
-fn operation(d: &TermDag, id: usize) -> Result<OperationId, OptimizeError> {
-    key(d, id, "OperationId")
-}
-fn number(d: &TermDag, id: usize) -> Result<u32, OptimizeError> {
-    let Term::Lit(Literal::Int(n)) = d.get(id) else {
-        return Err(invalid("integer"));
-    };
-    u32::try_from(*n).map_err(|_| invalid("integer range"))
-}
-fn string(d: &TermDag, id: usize) -> Result<String, OptimizeError> {
-    let Term::Lit(Literal::String(s)) = d.get(id) else {
-        return Err(invalid("string"));
-    };
-    Ok(s.to_string())
-}
+
 fn rows(
     graph: &EGraph,
     name: &str,
-    arity: usize,
-    mut f: impl FnMut(&TermDag, &[usize]) -> Result<(), OptimizeError>,
+    mut f: impl FnMut(&[EggValue]) -> Result<(), OptimizeError>,
 ) -> Result<(), OptimizeError> {
-    let (rows, _, dag) = graph.function_to_dag(name, usize::MAX, false)?;
-    for row in rows {
-        f(&dag, app(&dag, row, name, arity)?)?;
-    }
-    Ok(())
+    let mut status = Ok(());
+    graph.constructor_enodes_while(name, |e| {
+        status = f(e.children);
+        status.is_ok()
+    })?;
+    status
 }
+
 fn invalid(what: &str) -> OptimizeError {
     OptimizeError::Output(format!("relational plan readout: {what}"))
 }

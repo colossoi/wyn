@@ -3,8 +3,8 @@
 use super::super::data::{Array, ExprKind};
 use super::super::visit::Operand;
 use super::{
-    array_value, error, length, DispatchData, FunctionKind, GridData, Instruction, OptimizeError, Planner,
-    Recipe, Storage, Value, WIDTH,
+    array_value, error, length, DispatchData, FunctionKind, Instruction, OptimizeError, Planner, Recipe,
+    Storage, Value, WIDTH,
 };
 use crate::egglog::data::{BlockId, BufferId, DispatchId, ExprId, OperationId, OperationKind, SoacBody};
 use crate::types::Type;
@@ -52,7 +52,7 @@ impl Planner<'_> {
 
     pub(super) fn parallel(&mut self, op: OperationId, host: BlockId) -> Result<BlockId, OptimizeError> {
         let previous = self.current_operation.replace(op);
-        let Some(recipe) = self.recipes.get(&op).copied() else {
+        let Some(recipe) = self.resources.recipes.get(&op).copied() else {
             return Err(error("missing execution recipe"));
         };
         let (value, _) = match recipe {
@@ -239,34 +239,23 @@ impl Planner<'_> {
         let Some(interface) = &self.data.state.blocks[kernel].interface else {
             unreachable!("dispatch target {kernel:?} has no kernel interface");
         };
-        let name = interface.name.clone();
-        let stage = &self.resources.stages[&(op, name.clone())];
-        let Some(groups) = stage.groups.clone() else {
-            unreachable!("planned stage {name} for {op:?} has no dispatch domain");
+        let name = &interface.name;
+        let Some(stage) = self.resources.stages.remove(&(op, name.clone())) else {
+            unreachable!("kernel {name} for {op:?} has no planned dispatch");
         };
-        let Some(owner) = stage.owner else {
-            unreachable!("planned stage {name} for {op:?} has no entry owner");
-        };
-        let grid = self.data.state.grids.alloc(GridData {
-            groups: [groups, Value::Int(1), Value::Int(1)],
-        });
-        let reads = stage.reads.clone();
-        let writes = stage.writes.clone();
-        let dispatch = self.data.state.dispatches.alloc(DispatchData {
-            owner,
-            kernel,
-            grid,
-            dependencies: BTreeSet::new(),
-            reads,
-            writes,
-            captures,
-        });
-        self.launches.push_str(&format!(
-            "(check (Phase (Stage {} \"{name}\") r))\n(Emitted (Stage {} \"{name}\") {})\n",
-            op.egglog(),
-            op.egglog(),
-            dispatch.as_u32()
-        ));
+        let dispatch = stage.id;
+        self.data.state.dispatches.insert(
+            dispatch,
+            DispatchData {
+                owner: stage.owner,
+                kernel,
+                grid: stage.grid,
+                dependencies: stage.dependencies,
+                reads: stage.reads,
+                writes: stage.writes,
+                captures,
+            },
+        );
         self.emit(host, Instruction::Dispatch(dispatch));
         dispatch
     }

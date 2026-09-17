@@ -63,10 +63,23 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
     assert_eq!(kernel_count(&scan), 3);
     assert_eq!(kernel_count(&filter), 4);
-    for result in [&scan, &filter] {
-        let ds: Vec<_> = result.state.dispatches.ids().collect();
-        for pair in ds.windows(2) {
-            assert!(result.state.dispatches[pair[1]].dependencies.contains(&pair[0]));
+    for (result, names) in [
+        (&scan, &["chunks", "combine", "offsets"][..]),
+        (&filter, &["flags", "local_offsets", "offsets", "compact"][..]),
+    ] {
+        let stages: std::collections::BTreeMap<_, _> = result
+            .state
+            .dispatches
+            .iter()
+            .map(|(&id, d)| {
+                (
+                    result.state.blocks[d.kernel].interface.as_ref().unwrap().name.as_str(),
+                    id,
+                )
+            })
+            .collect();
+        for pair in names.windows(2) {
+            assert!(result.state.dispatches[stages[pair[1]]].dependencies.contains(&stages[pair[0]]));
         }
     }
     for n in [0, 1, 63, 64, 65, 137] {
@@ -292,9 +305,24 @@ fn final_roots_exclude_dead_functions_and_pure_array_work() {
 fn producer_buffers_are_shared_by_identity_with_consumer_dispatches() {
     let result =
         compile("entry main(xs: []i32) i32 = reduce(|a: i32, b: i32| a + b, 0, scan(|a: i32, b: i32| a + b, 0, xs))");
-    let dispatches: Vec<_> = result.state.dispatches.values().collect();
-    assert_eq!(dispatches.len(), 5);
-    assert!(dispatches[2].writes.is_subset(&dispatches[3].reads));
+    assert_eq!(result.state.dispatches.len(), 5);
+    let (&producer_id, producer) = result
+        .state
+        .dispatches
+        .iter()
+        .find(|(_, d)| result.state.blocks[d.kernel].interface.as_ref().unwrap().name == "offsets")
+        .unwrap();
+    let consumer = result
+        .state
+        .dispatches
+        .values()
+        .find(|d| {
+            result.state.blocks[d.kernel].interface.as_ref().unwrap().name == "chunks"
+                && d.dependencies.contains(&producer_id)
+        })
+        .unwrap();
+    assert!(!producer.writes.is_empty());
+    assert!(producer.writes.is_subset(&consumer.reads));
     let output = run(&result, vec![Value::array(0..65)]);
     assert_eq!(output, [Value::Int(64 * 65 * 66 / 6)]);
 }

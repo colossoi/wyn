@@ -3,21 +3,19 @@
 //! an output. Those decisions belong to the .egg rules.
 use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
-use super::OptimizeError;
 use crate::egglog::data::{
-    is_slice, Array, DispatchId, ExprData, ExprId, ExprKind, OperationKind, OutputData, TypeData, TypeId,
+    is_slice, Array, ExprData, ExprKind, OperationKind, OutputData, TypeData, TypeId,
 };
 use crate::egglog::dependencies::{safe_body, Dependencies};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use crate::ssa::layout::type_byte_size;
 use crate::types::{bool_type, canonical_storage_buffer_ty, Type, TypeExt, TypeName};
-use egglog_engine::ast::Literal;
-use egglog_engine::{EGraph, Term};
+use egglog_engine::{Error, FullState, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 mod read;
-pub(super) use read::{read, Readout};
+pub(super) use read::{read, Readout, Recipe};
 
 pub(super) const RULES: &str = concat!(
     include_str!("planning.egg"),
@@ -33,93 +31,44 @@ pub(super) const RULES: &str = concat!(
 );
 pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
 pub(super) const RUN: &str =
-    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))))";
-
-/// Assign the derived order to emitted launch IDs. Kernel emission contributes
-/// identities only; it cannot add its own dependency decisions.
-pub(super) fn read_dispatch_order(
-    graph: &EGraph,
-    data: &mut Program<Scheduled>,
-) -> Result<(), OptimizeError> {
-    let (rows, _, dag) = graph.function_to_dag("DispatchDependency", usize::MAX, false)?;
-    for row in rows {
-        let Term::App(_, args) = dag.get(row) else {
-            return Err(invalid_order());
-        };
-        let [before, after] = args.as_slice() else {
-            return Err(invalid_order());
-        };
-        let (Term::Lit(Literal::Int(before)), Term::Lit(Literal::Int(after))) =
-            (dag.get(*before), dag.get(*after))
-        else {
-            return Err(invalid_order());
-        };
-        let before = DispatchId::from(u32::try_from(*before).map_err(|_| invalid_order())?);
-        let after = DispatchId::from(u32::try_from(*after).map_err(|_| invalid_order())?);
-        if data.state.dispatches.get(before).is_none() {
-            return Err(invalid_order());
-        }
-        let Some(dispatch) = data.state.dispatches.get_mut(after) else {
-            return Err(invalid_order());
-        };
-        dispatch.dependencies.insert(before);
-    }
-    Ok(())
-}
-
-fn invalid_order() -> OptimizeError {
-    OptimizeError::Output("invalid relational dispatch order".into())
-}
-
-fn expr(e: ExprId) -> String {
-    format!("(ExprId {})", e.as_u32())
-}
-fn ty(t: TypeId) -> String {
-    format!("(TypeId {})", t.as_u32())
-}
+    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch))) (run readout)))";
 
 pub(super) fn facts(
     data: &Program<Scheduled>,
     summary: &Dependencies,
     count_type: TypeId,
-    out: &mut String,
-) {
-    out.push_str(&format!("(CounterType {})\n", ty(count_type)));
+    sink: &mut FullState<'_, '_>,
+) -> Result<(), Error> {
+    let count_type = sink.add("TypeId", i64::from(count_type.as_u32()))?;
+    sink.add("CounterType", count_type)?;
     let mut values = BTreeSet::new();
     for (&id, output) in &data.state.outputs {
         values.insert(output.expression);
+        let e = sink.add("ExprId", i64::from(output.expression.as_u32()))?;
         if output.scalar {
-            out.push_str(&format!(
-                "(ReturnScalar {} {} {})\n",
-                id.as_u32(),
-                expr(output.expression),
-                ty(data.expressions[output.expression].ty)
-            ));
+            let ty = sink.add(
+                "TypeId",
+                i64::from(data.expressions[output.expression].ty.as_u32()),
+            )?;
+            sink.add("ReturnScalar", (i64::from(id.as_u32()), e, ty))?;
         } else {
-            out.push_str(&format!(
-                "(ReturnArray {} {})\n",
-                id.as_u32(),
-                expr(output.expression)
-            ));
+            sink.add("ReturnArray", (i64::from(id.as_u32()), e))?;
         }
     }
     let mut regions = BTreeSet::new();
     let symbols: BTreeMap<_, _> = data.definitions.values().map(|d| (d.symbol, d.body)).collect();
     for (&id, entry) in &data.entries {
-        regions.insert(data.definitions[entry.definition].body);
-        if entry.declaration.entry_kind != EntryKind::Compute {
-            continue;
+        let region = data.definitions[entry.definition].body;
+        regions.insert(region);
+        if entry.declaration.entry_kind == EntryKind::Compute {
+            let region = sink.add("RegionId", i64::from(region.as_u32()))?;
+            sink.add("HostRoot", (i64::from(id.as_u32()), region))?;
         }
-        out.push_str(&format!(
-            "(HostRoot {} {})\n",
-            id.as_u32(),
-            data.definitions[entry.definition].body.egglog()
-        ));
     }
     for &id in &summary.live {
         let op = &data.operations[id];
         regions.insert(op.region);
-        let key = id.egglog();
+        let key = sink.add("OperationId", i64::from(id.as_u32()))?;
         let collective = matches!(
             op.kind,
             OperationKind::Screma { .. }
@@ -128,20 +77,19 @@ pub(super) fn facts(
                 | OperationKind::BucketScatter { .. }
                 | OperationKind::ReduceByIndex { .. }
         );
-        out.push_str(&format!(
-            "(set (ContainsCollective {key}) {collective})\n(set (ScalarBoundary {key}) false)\n"
-        ));
-        out.push_str(&format!("(Site {key} {})\n", op.region.egglog()));
+        sink.set("ContainsCollective", key, collective)?;
+        sink.set("ScalarBoundary", key, false)?;
+        let region = sink.add("RegionId", i64::from(op.region.as_u32()))?;
+        sink.add("Site", (key, region))?;
         for r in op.kind.structured_regions() {
             regions.insert(r);
-            out.push_str(&format!("(Enters {key} {})\n", r.egglog()));
+            let r = sink.add("RegionId", i64::from(r.as_u32()))?;
+            sink.add("Enters", (key, r))?;
         }
         if let OperationKind::Loop { header, body, .. } = &op.kind {
-            out.push_str(&format!(
-                "(Repeated {key} {} {})\n",
-                header.egglog(),
-                body.egglog()
-            ));
+            let header = sink.add("RegionId", i64::from(header.as_u32()))?;
+            let body = sink.add("RegionId", i64::from(body.as_u32()))?;
+            sink.add("Repeated", (key, header, body))?;
         }
         let called = match &op.kind {
             OperationKind::Call { function, .. } => match &data.expressions[*function].kind {
@@ -154,48 +102,60 @@ pub(super) fn facts(
         };
         if let Some(r) = called {
             regions.insert(r);
-            out.push_str(&format!("(Enters {key} {})\n", r.egglog()));
+            let r = sink.add("RegionId", i64::from(r.as_u32()))?;
+            sink.add("Enters", (key, r))?;
         }
+        let mut result: Result<(), Error> = Ok(());
         op.kind.for_each_operand(&mut |operand| {
+            if result.is_err() {
+                return;
+            }
             if let Operand::Value(role, e) = operand {
                 let role = if matches!(role, OperandRole::Input) { "input" } else { "environment" };
                 values.insert(e);
-                out.push_str(&format!("(Operand {key} \"{role}\" {})\n", expr(e)));
+                result = (|| {
+                    let e = sink.add("ExprId", i64::from(e.as_u32()))?;
+                    sink.add("Operand", (key, role, e))?;
+                    Ok(())
+                })();
             }
         });
+        result?;
         let inputs = match &op.kind {
             OperationKind::Screma { form, inputs, .. } => {
-                out.push_str(&format!(
-                    "(CollectiveShape {key} {} {} {})\n",
-                    form.scans.len(),
-                    form.reductions.len(),
-                    summary.discardable.contains(&id)
-                ));
+                sink.add(
+                    "CollectiveShape",
+                    (
+                        key,
+                        form.scans.len() as i64,
+                        form.reductions.len() as i64,
+                        summary.discardable.contains(&id),
+                    ),
+                )?;
                 let scans = form.scans.iter().flat_map(|s| &s.neutral);
                 let totals = form.reductions.iter().flat_map(|r| &r.neutral);
                 let scan_count = scans.clone().count();
                 let total_count = totals.clone().count();
-                out.push_str(&format!("(TotalCount {key} {total_count})\n"));
+                sink.add("TotalCount", (key, total_count as i64))?;
                 for (i, e) in scans.enumerate() {
-                    let t = ty(data.expressions[*e].ty);
-                    out.push_str(&format!(
-                        "(Accumulator {key} {i} {t})\n(ScanComponent {key} {i} {t})\n"
-                    ));
+                    let t = sink.add("TypeId", i64::from(data.expressions[*e].ty.as_u32()))?;
+                    sink.add("Accumulator", (key, i as i64, t))?;
+                    sink.add("ScanComponent", (key, i as i64, t))?;
                 }
                 for (i, e) in totals.enumerate() {
-                    let t = ty(data.expressions[*e].ty);
-                    out.push_str(&format!(
-                        "(Accumulator {key} {} {t})\n(TotalResult {key} {i} {t})\n",
-                        scan_count + i
-                    ));
+                    let t = sink.add("TypeId", i64::from(data.expressions[*e].ty.as_u32()))?;
+                    sink.add("Accumulator", (key, (scan_count + i) as i64, t))?;
+                    sink.add("TotalResult", (key, i as i64, t))?;
                 }
                 for (i, t) in body_signature(&form.post).1.into_iter().enumerate() {
-                    out.push_str(&format!("(ArrayResult {key} {} {})\n", total_count + i, ty(t)));
+                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    sink.add("ArrayResult", (key, (total_count + i) as i64, t))?;
                 }
                 for (i, t) in
                     body_signature(&form.pre).1.into_iter().skip(scan_count + total_count).enumerate()
                 {
-                    out.push_str(&format!("(MappedComponent {key} {i} {})\n", ty(t)));
+                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    sink.add("MappedComponent", (key, i as i64, t))?;
                 }
                 Some(inputs)
             }
@@ -203,9 +163,10 @@ pub(super) fn facts(
                 map, body, inputs, ..
             } => {
                 let safe = safe_body(map, &summary.safe_regions) && safe_body(body, &summary.safe_regions);
-                out.push_str(&format!("(FilterShape {key} {safe})\n"));
+                sink.add("FilterShape", (key, safe))?;
                 if let Some(t) = body_signature(map).1.first() {
-                    out.push_str(&format!("(FilterResult {key} {})\n", ty(*t)));
+                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    sink.add("FilterResult", (key, t))?;
                 }
                 Some(inputs)
             }
@@ -218,129 +179,141 @@ pub(super) fn facts(
             | OperationKind::BucketScatter {
                 destination, inputs, ..
             } => {
-                out.push_str(&format!("(IndexedWrite {key})\n"));
-                out.push_str(&format!("(UpdatedResult {key} 0 {})\n", expr(destination.value)));
+                sink.add("IndexedWrite", key)?;
+                let destination = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
+                sink.add("UpdatedResult", (key, 0i64, destination))?;
                 if matches!(op.kind, OperationKind::BucketScatter { .. }) {
-                    out.push_str(&format!("(BucketResult {key} {})\n", expr(destination.value)));
-                    // Its ranked iteration space is still a source payload. The
-                    // selected serial phase has one invocation regardless of rank.
+                    sink.add("BucketResult", (key, destination))?;
+                    // Ranked iteration is a source payload; the serial phase
+                    // has one invocation regardless of rank.
                     None
                 } else {
                     Some(inputs)
                 }
             }
             _ => {
-                out.push_str(&format!("(ScalarSite {key})\n"));
+                sink.add("ScalarSite", key)?;
                 if data.types[op.ty].ty == bool_type()
                     || type_byte_size(&data.types[op.ty].ty).is_some_and(|n| n > 0)
                 {
-                    out.push_str(&format!("(ScalarCandidate {key} {})\n", ty(op.ty)));
+                    let t = sink.add("TypeId", i64::from(op.ty.as_u32()))?;
+                    sink.add("ScalarCandidate", (key, t))?;
                 }
                 None
             }
         };
         if let Some(inputs) = inputs {
-            out.push_str(&format!(
-                "(InputDomain {key} {})\n",
-                inputs.first().map(|a| extent(a)).unwrap_or("(Fixed 0)".into())
-            ));
+            let n = extent(inputs.first(), sink)?;
+            sink.add("InputDomain", (key, n))?;
         }
     }
     for r in regions {
+        let region = sink.add("RegionId", i64::from(r.as_u32()))?;
         for (i, &e) in data.regions[r].results.iter().enumerate() {
             values.insert(e);
-            out.push_str(&format!("(ExitValue {} {i} {})\n", r.egglog(), expr(e)));
+            let e = sink.add("ExprId", i64::from(e.as_u32()))?;
+            sink.add("ExitValue", (region, i as i64, e))?;
         }
     }
     for (after, before) in summary.dependencies() {
-        out.push_str(&format!(
-            "(SourceDependency {} {})\n",
-            after.egglog(),
-            before.egglog()
-        ));
+        let after = sink.add("OperationId", i64::from(after.as_u32()))?;
+        let before = sink.add("OperationId", i64::from(before.as_u32()))?;
+        sink.add("SourceDependency", (after, before))?;
     }
     for (gate, inputs) in summary.effects.gates() {
         for op in inputs {
-            out.push_str(&format!("(EffectInput {gate} {})\n", op.egglog()));
+            let op = sink.add("OperationId", i64::from(op.as_u32()))?;
+            sink.add("EffectInput", (gate as i64, op))?;
         }
     }
     for (op, gate) in summary.effects.waits() {
-        out.push_str(&format!("(EffectWait {} {gate})\n", op.egglog()));
+        let op = sink.add("OperationId", i64::from(op.as_u32()))?;
+        sink.add("EffectWait", (op, gate as i64))?;
     }
 
-    // Each expression is visited once. Only structural edges and view metadata
-    // enter the planner: no arithmetic AST or per-stage Rust dependency closure.
+    // Visit each expression once, importing only structural edges and views.
     let mut pending: Vec<_> = values.iter().copied().collect();
     while let Some(e) = pending.pop() {
         let value = &data.expressions[e];
-        let key = expr(e);
-        out.push_str(&format!("(SourceType {key} {})\n", ty(value.ty)));
+        let key = sink.add("ExprId", i64::from(e.as_u32()))?;
+        let ty = sink.add("TypeId", i64::from(value.ty.as_u32()))?;
+        sink.add("SourceType", (key, ty))?;
         let mut generic_children = false;
         match &value.kind {
             ExprKind::Parameter(p) => {
-                out.push_str(&format!(
-                    "(SourceParameter {key} {})\n(set (HasInputFields {key}) false)\n",
-                    data.parameters[*p].region.egglog()
-                ));
+                let region = sink.add("RegionId", i64::from(data.parameters[*p].region.as_u32()))?;
+                sink.add("SourceParameter", (key, region))?;
+                sink.set("HasInputFields", key, false)?;
             }
             ExprKind::OperationResult(op) => {
+                let operation = sink.add("OperationId", i64::from(op.as_u32()))?;
                 if matches!(
                     data.operations[*op].kind,
                     OperationKind::Screma { .. } | OperationKind::BucketScatter { .. }
                 ) {
-                    out.push_str(&format!("(ResultTuple {key} {})\n", op.egglog()));
+                    sink.add("ResultTuple", (key, operation))?;
                 } else {
-                    out.push_str(&format!("(DirectResult {key} {} 0)\n", op.egglog()));
+                    sink.add("DirectResult", (key, operation, 0i64))?;
                 }
             }
             ExprKind::Project { tuple, index } => {
-                out.push_str(&format!("(Projection {key} {} {index})\n", expr(*tuple)));
+                let tuple = sink.add("ExprId", i64::from(tuple.as_u32()))?;
+                sink.add("Projection", (key, tuple, *index as i64))?;
             }
             ExprKind::Tuple(fields) | ExprKind::Vector(fields) => {
-                for (i, &field) in fields.iter().enumerate() {
-                    out.push_str(&format!("(FieldValue {key} {i} {})\n", expr(field)));
+                for (i, field) in fields.iter().enumerate() {
+                    let field = sink.add("ExprId", i64::from(field.as_u32()))?;
+                    sink.add("FieldValue", (key, i as i64, field))?;
                 }
                 generic_children = true;
             }
             ExprKind::Coerce(inner) | ExprKind::Array(Array::Value(inner)) => {
-                out.push_str(&format!("(ForwardValue {key} {})\n", expr(*inner)));
+                let inner = sink.add("ExprId", i64::from(inner.as_u32()))?;
+                sink.add("ForwardValue", (key, inner))?;
             }
             ExprKind::PureApp { function, args } if is_slice(data, *function) && args.len() == 3 => {
-                out.push_str(&format!(
-                    "(SliceView {key} {} {} {})\n",
-                    expr(args[0]),
-                    expr(args[1]),
-                    expr(args[2])
-                ));
+                let array = sink.add("ExprId", i64::from(args[0].as_u32()))?;
+                let start = sink.add("ExprId", i64::from(args[1].as_u32()))?;
+                let len = sink.add("ExprId", i64::from(args[2].as_u32()))?;
+                sink.add("SliceView", (key, array, start, len))?;
             }
             _ => generic_children = true,
         }
         if generic_children && !matches!(value.kind, ExprKind::Tuple(_) | ExprKind::Vector(_)) {
-            out.push_str(&format!("(ComputedValue {key})\n"));
+            sink.add("ComputedValue", key)?;
         }
         for child in value.kind.children() {
             if generic_children {
-                out.push_str(&format!("(ChildValue {key} {})\n", expr(child)));
+                let child = sink.add("ExprId", i64::from(child.as_u32()))?;
+                sink.add("ChildValue", (key, child))?;
             }
             if values.insert(child) {
                 pending.push(child);
             }
         }
     }
+    Ok(())
 }
 
-fn extent(array: &Array) -> String {
+fn extent(array: Option<&Array>, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
     match array {
-        Array::Value(e) => format!("(Length {})", expr(*e)),
-        Array::Zip(xs) => xs.first().map(extent).unwrap_or("(Fixed 0)".into()),
-        Array::Literal(xs) => format!("(Fixed {})", xs.len()),
-        Array::Range { len, .. } => format!("(Scalar {})", expr(*len)),
+        Some(Array::Value(e)) => {
+            let e = sink.add("ExprId", i64::from(e.as_u32()))?;
+            sink.add("Length", e)
+        }
+        Some(Array::Zip(xs)) => extent(xs.first(), sink),
+        Some(Array::Literal(xs)) => sink.add("Fixed", xs.len() as i64),
+        Some(Array::Range { len, .. }) => {
+            let len = sink.add("ExprId", i64::from(len.as_u32()))?;
+            sink.add("Scalar", len)
+        }
+        None => sink.add("Fixed", 0i64),
     }
 }
 
 /// Expose source result slots once; tuple projection is structural import, not
 /// an allocation decision. Use the same global identities for existing values.
-pub(super) fn outputs(data: &mut Program<Scheduled>, out: &mut String) {
+pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_>) -> Result<(), Error> {
     let mut types: HashMap<_, _> = data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();
     let mut expressions: HashMap<_, _> = data.expressions.iter().map(|(&id, e)| (e.clone(), id)).collect();
     let entries: Vec<_> =
@@ -418,12 +391,11 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, out: &mut String) {
             unreachable!("input tuple {tuple:?} is not a parameter");
         };
         let region = data.parameters[parameter].region;
-        out.push_str(&format!(
-            "(set (HasInputFields {}) true)\n(SourceType {} {})\n",
-            expr(tuple),
-            expr(tuple),
-            ty(data.expressions[tuple].ty)
-        ));
+        let tuple_key = sink.add("ExprId", i64::from(tuple.as_u32()))?;
+        let tuple_type = sink.add("TypeId", i64::from(data.expressions[tuple].ty.as_u32()))?;
+        sink.set("HasInputFields", tuple_key, true)?;
+        sink.add("SourceType", (tuple_key, tuple_type))?;
+        let region = sink.add("RegionId", i64::from(region.as_u32()))?;
         for (index, field_type) in ts.into_iter().enumerate() {
             let field_ty = *types
                 .entry(field_type.clone())
@@ -434,12 +406,16 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, out: &mut String) {
             };
             let field =
                 *expressions.entry(value.clone()).or_insert_with(|| data.ir.expressions.alloc(value));
-            out.push_str(&format!(
-                "(FieldValue {} {index} {})\n(ChildValue {} {})\n(ParameterValue {} {})\n(SourceType {} {})\n(Projection {} {} {index})\n",
-                expr(tuple), expr(field), expr(tuple), expr(field), expr(field), region.egglog(), expr(field), ty(field_ty), expr(field), expr(tuple),
-            ));
+            let field = sink.add("ExprId", i64::from(field.as_u32()))?;
+            let field_ty = sink.add("TypeId", i64::from(field_ty.as_u32()))?;
+            sink.add("FieldValue", (tuple_key, index as i64, field))?;
+            sink.add("ChildValue", (tuple_key, field))?;
+            sink.add("ParameterValue", (field, region))?;
+            sink.add("SourceType", (field, field_ty))?;
+            sink.add("Projection", (field, tuple_key, index as i64))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
