@@ -100,8 +100,6 @@ pub fn schedule(
         schedules,
         functions: BTreeMap::new(),
         resources,
-        allocation_counts: BTreeMap::new(),
-        current_operation: None,
         operation_values,
     };
     let mut entry_roots = BTreeMap::new();
@@ -154,8 +152,6 @@ struct Planner<'a> {
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
     functions: BTreeMap<(RegionId, bool), BlockId>,
     resources: Readout,
-    allocation_counts: BTreeMap<String, u32>,
-    current_operation: Option<OperationId>,
     operation_values: BTreeMap<OperationId, ExprId>,
 }
 
@@ -583,7 +579,7 @@ mod schedule_tests;
 
 fn materialized(value: &Value) -> bool {
     match value {
-        Value::Buffer(_) => true,
+        Value::Buffer(_) | Value::Source(_) | Value::Discarded => true,
         Value::Field(value, _) => materialized(value),
         Value::Tuple(values) | Value::Primitive(_, values) => values.iter().any(materialized),
         _ => false,

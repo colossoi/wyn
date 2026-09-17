@@ -3,10 +3,10 @@
 use super::super::data::Array;
 use super::super::visit::Operand;
 use super::{
-    array_value, error, length, Control, FunctionKind, Instruction, OptimizeError, Planner, Recipe,
-    Storage, Value, WIDTH,
+    array_value, error, length, Control, FunctionKind, Instruction, OptimizeError, Planner, Recipe, Value,
+    WIDTH,
 };
-use crate::egglog::data::{BlockId, BufferId, DispatchId, ExprId, OperationId, OperationKind};
+use crate::egglog::data::{BlockId, DispatchId, ExprId, OperationId, OperationKind};
 use std::collections::BTreeSet;
 
 mod filter;
@@ -71,11 +71,11 @@ impl Planner<'_> {
                             vec![],
                         );
                         let value = self.load(loop_.body, source, loop_.index.clone(), "output");
-                        self.store(loop_.body, buffer, loop_.index.clone(), value);
+                        self.store(loop_.body, &Value::Buffer(buffer), loop_.index.clone(), value);
                         self.finish_loop(&loop_, loop_.body, vec![]);
                         end = loop_.done;
                     } else {
-                        self.store(end, buffer, Value::Int(0), source);
+                        self.store(end, &Value::Buffer(buffer), Value::Int(0), source);
                     }
                 }
                 self.returns(end, values);
@@ -95,39 +95,31 @@ impl Planner<'_> {
             return Err(error("missing scalar result expression"));
         };
         let result = *result;
-        let buffer = self.resources.slots[&(op, "scalar".into(), 0)];
-        if self.data.state.buffers[buffer].storage != Storage::Discarded {
-            self.emit(host, Instruction::Allocate(buffer));
-        }
-        self.store(end, buffer, Value::Int(0), Value::Source(result));
+        self.allocate_slots(op, host, false);
+        let destination = self.slot(op, "scalar", 0, false);
+        self.store(end, &destination, Value::Int(0), Value::Source(result));
         self.returns(end, vec![]);
         self.dispatch(op, host, kernel);
-        self.emit(
-            host,
-            Instruction::BindResult(op, Value::op("index", [Value::Buffer(buffer), Value::Int(0)])),
-        );
+        self.emit(host, Instruction::BindResult(op, singleton(destination)));
         Ok(host)
     }
 
     pub(super) fn parallel(&mut self, op: OperationId, host: BlockId) -> Result<BlockId, OptimizeError> {
-        let previous = self.current_operation.replace(op);
-        let counts = std::mem::take(&mut self.allocation_counts);
         let Some(recipe) = self.resources.recipes.get(&op).copied() else {
             return Err(error("missing execution recipe"));
         };
-        let (value, _) = match recipe {
+        self.allocate_slots(op, host, false);
+        let value = match recipe {
             Recipe::Elements | Recipe::Totals | Recipe::Prefixes => self.parallel_screma(op, host)?,
             Recipe::Compact => self.parallel_filter(op, host)?,
             Recipe::Serial => {
                 let kernel = self.kernel(op, "ordered");
-                let (end, value, outputs) = self.serial_body(op, kernel, host, Storage::Device)?;
+                let (end, value) = self.serial_body(op, kernel, false)?;
                 self.returns(end, vec![]);
                 self.dispatch(op, host, kernel);
-                (value, outputs)
+                value
             }
         };
-        self.current_operation = previous;
-        self.allocation_counts = counts;
         self.emit(host, Instruction::BindResult(op, value));
         Ok(host)
     }
@@ -139,11 +131,8 @@ impl Planner<'_> {
         let names = (0..captures.len()).map(|i| format!("c{i}")).collect();
         let function = self.function("local".into(), FunctionKind::Device, names, 1);
         self.bind_captures(function, &captures);
-        let previous = self.current_operation.replace(op);
-        let counts = std::mem::take(&mut self.allocation_counts);
-        let (end, value, _) = self.serial_body(op, function, function, Storage::Function)?;
-        self.current_operation = previous;
-        self.allocation_counts = counts;
+        self.allocate_slots(op, function, true);
+        let (end, value) = self.serial_body(op, function, true)?;
         self.returns(end, vec![value]);
         let name = format!("local{}", op.as_u32());
         self.emit(
@@ -162,19 +151,18 @@ impl Planner<'_> {
         &mut self,
         op: OperationId,
         block: BlockId,
-        allocate: BlockId,
-        storage: Storage,
-    ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
+        local: bool,
+    ) -> Result<(BlockId, Value), OptimizeError> {
         match self.data.operations[op].kind.clone() {
             OperationKind::Screma { form, inputs, .. } => {
-                self.serial_screma(block, allocate, storage, &form, &inputs)
+                self.serial_screma(op, block, local, &form, &inputs)
             }
             OperationKind::Filter {
                 map, body, inputs, ..
-            } => self.serial_filter(block, allocate, storage, &map, &body, &inputs),
+            } => self.serial_filter(op, block, local, &map, &body, &inputs),
             OperationKind::Scatter { .. }
             | OperationKind::BucketScatter { .. }
-            | OperationKind::ReduceByIndex { .. } => self.serial_indexed(op, block, allocate, storage),
+            | OperationKind::ReduceByIndex { .. } => self.serial_indexed(op, block, local),
             _ => Err(error("expected an array operation")),
         }
     }
@@ -247,22 +235,38 @@ impl Planner<'_> {
         );
     }
 
-    fn allocate(&mut self, host: BlockId, name: &str, storage: Storage) -> BufferId {
-        let Some(op) = self.current_operation else {
-            unreachable!("allocation {name} in {host:?} has no source operation");
-        };
-        let index = self.allocation_counts.entry(name.into()).or_default();
-        let slots =
-            if storage == Storage::Function { &self.resources.local_slots } else { &self.resources.slots };
-        let buffer = slots[&(op, name.into(), *index)];
-        *index += 1;
-        if matches!(
-            self.data.state.buffers[buffer].storage,
-            Storage::Device | Storage::Function
-        ) {
-            self.emit(host, Instruction::Allocate(buffer));
+    fn allocate_slots(&mut self, op: OperationId, block: BlockId, local: bool) {
+        let body = self.data.state.blocks[block].body;
+        let instructions = &mut self.data.state.bodies[body].instructions;
+        if local {
+            instructions.extend(
+                self.resources
+                    .local_slots
+                    .range((op, String::new(), 0)..)
+                    .take_while(|(key, _)| key.0 == op)
+                    .map(|(_, &buffer)| Instruction::Allocate(buffer)),
+            );
+        } else {
+            instructions.extend(
+                self.resources
+                    .slots
+                    .range((op, String::new(), 0)..)
+                    .take_while(|(key, _)| key.0 == op)
+                    .filter_map(|(_, value)| match value {
+                        Value::Buffer(buffer) => Some(Instruction::Allocate(*buffer)),
+                        _ => None,
+                    }),
+            );
         }
-        buffer
+    }
+
+    fn slot(&self, op: OperationId, name: &str, index: usize, local: bool) -> Value {
+        let key = (op, name.into(), index as u32);
+        if local {
+            Value::Buffer(self.resources.local_slots[&key])
+        } else {
+            self.resources.slots[&key].clone()
+        }
     }
 
     fn load(&mut self, block: BlockId, buffer: Value, index: Value, prefix: &str) -> Value {
@@ -282,14 +286,14 @@ impl Planner<'_> {
         Value::Local(name)
     }
 
-    fn store(&mut self, block: BlockId, buffer: BufferId, index: Value, value: Value) {
-        if self.data.state.buffers[buffer].storage == Storage::Discarded {
+    fn store(&mut self, block: BlockId, destination: &Value, index: Value, value: Value) {
+        if matches!(destination, Value::Discarded) {
             return;
         }
         self.emit(
             block,
             Instruction::Store {
-                buffer: Value::Buffer(buffer),
+                buffer: destination.clone(),
                 index,
                 value,
             },
@@ -326,6 +330,9 @@ impl Planner<'_> {
 fn chunks(n: Value) -> Value {
     Value::op("ceil_div", [n, Value::Int(WIDTH)])
 }
-fn singleton(buffer: BufferId) -> Value {
-    Value::op("index", [Value::Buffer(buffer), Value::Int(0)])
+fn singleton(buffer: Value) -> Value {
+    if matches!(buffer, Value::Discarded) {
+        return buffer;
+    }
+    Value::op("index", [buffer, Value::Int(0)])
 }

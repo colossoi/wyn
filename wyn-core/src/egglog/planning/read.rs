@@ -29,7 +29,7 @@ pub(in crate::egglog) struct Readout {
     pub launches: HashMap<EggValue, DispatchId>,
     pub local_slots: BTreeMap<(OperationId, String, u32), BufferId>,
     pub recipes: BTreeMap<OperationId, Recipe>,
-    pub slots: BTreeMap<(OperationId, String, u32), BufferId>,
+    pub slots: BTreeMap<(OperationId, String, u32), Value>,
     pub stages: BTreeMap<(OperationId, String), DispatchId>,
 }
 
@@ -130,44 +130,40 @@ pub(in crate::egglog) fn read(
                 name: format!("resource{}", id.as_u32()),
                 length: extent(graph, a[2], &mut extents, &chunks)?,
                 element: data.types[TypeId::from(number(graph, a[1])?)].ty.clone(),
-                storage: Storage::Discarded,
+                storage: Storage::Device,
             },
         );
         Ok(())
     })?;
-    rows(graph, "Allocation", |a| {
-        if let Some(&id) = buffers.get(&a[0]) {
-            data.state.buffers[id].storage = Storage::Device;
-        }
-        Ok(())
-    })?;
     let mut status = Ok(());
-    graph.function_entries_while("StorageFor", |entry| {
+    graph.function_entries_while("Slot", |entry| {
         status = graph.read(|state| -> Result<(), OptimizeError> {
-            if let Some(&id) = buffers.get(&entry.inputs[0]) {
-                state.enodes_for_eclass("Reuse", entry.output, |node| {
-                    data.state.buffers[id].storage =
-                        Storage::View(ExprId::from(expressions[&node.children[0]]));
-                })?;
-            }
+            let mut destination = None;
+            state.enodes_for_eclass("Buffer", entry.output, |node| {
+                destination = Some(Value::Buffer(buffers[&node.children[0]]));
+            })?;
+            state.enodes_for_eclass("View", entry.output, |node| {
+                destination = Some(Value::Source(ExprId::from(expressions[&node.children[0]])));
+            })?;
+            state.enodes_for_eclass("Unused", entry.output, |_| {
+                destination = Some(Value::Discarded);
+            })?;
+            let Some(destination) = destination else {
+                return Err(invalid("unknown slot destination"));
+            };
+            result.slots.insert(
+                (
+                    OperationId::from(operations[&entry.inputs[0]]),
+                    graph.value_to_base::<S>(entry.inputs[1]).to_string(),
+                    number(graph, entry.inputs[2])?,
+                ),
+                destination,
+            );
             Ok(())
         });
         status.is_ok()
     })?;
     status?;
-    rows(graph, "BufferSlot", |a| {
-        if let Some(&id) = buffers.get(&a[3]) {
-            result.slots.insert(
-                (
-                    OperationId::from(operations[&a[0]]),
-                    graph.value_to_base::<S>(a[1]).to_string(),
-                    number(graph, a[2])?,
-                ),
-                id,
-            );
-        }
-        Ok(())
-    })?;
     rows(graph, "OutputBacking", |a| {
         data.state.outputs[OutputId::from(number(graph, a[0])?)].buffer = buffers.get(&a[1]).copied();
         Ok(())

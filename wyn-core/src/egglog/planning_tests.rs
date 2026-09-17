@@ -125,7 +125,7 @@ fn shared_producer_has_one_backing_and_independent_consumers() {
     check(
         &mut g,
         r#"
-        (Backing (Result (OperationId 0) 0) (Result (OperationId 0) 0))
+        (= (Backing (Result (OperationId 0) 0)) (Result (OperationId 0) 0))
         (Access (Stage (OperationId 1) "elements") (Result (OperationId 0) 0) "read")
         (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0) "read")
     "#,
@@ -206,7 +206,7 @@ fn sliced_in_place_update_keeps_value_versions_and_shared_backing() {
     check(
         &mut g,
         r#"
-        (Backing (Result (OperationId 1) 0) (Result (OperationId 0) 0))
+        (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
         (Access (Stage (OperationId 1) "ordered") (Result (OperationId 0) 0) "write")
         (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0) "read")
         (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "ordered"))
@@ -516,7 +516,7 @@ fn old_value_readers_precede_updates_without_a_precomputed_effect_edge() {
         r#"
         (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "ordered"))
         (Before (Stage (OperationId 1) "ordered") (Stage (OperationId 3) "elements"))
-        (Backing (Result (OperationId 1) 0) (Result (OperationId 0) 0))
+        (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
     "#,
     );
     // Consumers of the new version do not acquire an anti-dependency back to it.
@@ -539,7 +539,7 @@ fn bucket_counts_and_overflow_are_typed_fresh_resources() {
     check(
         &mut g,
         r#"
-        (Backing (Result (OperationId 0) 0) (Source (ExprId 0)))
+        (= (Backing (Result (OperationId 0) 0)) (Source (ExprId 0)))
         (Allocation (Result (OperationId 0) 1) (Length (ExprId 0)))
         (Allocation (Result (OperationId 0) 2) (Fixed 1))
         (ElementType (Result (OperationId 0) 1) (TypeId 999))

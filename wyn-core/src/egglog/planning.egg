@@ -83,7 +83,8 @@
 (relation Escapes (RegionKey ValueKey))
 (relation OutputValue (i64 i64 ExprKey))
 (relation Materialize (ValueKey))
-(relation Backing (ValueKey ValueKey))
+(function IsMaterialized (ValueKey) bool :merge (or old new))
+(function Backing (ValueKey) ValueKey :no-merge)
 (relation Allocation (ValueKey Extent))
 ; Names identify slots in a kernel recipe, not a second allocation policy.
 (relation BufferSlot (OperationKey String i64 ValueKey))
@@ -110,6 +111,8 @@
 
 ; Final readout joins; Rust assigns arena IDs without reconstructing these joins.
 (relation PlannedBuffer (ValueKey i64 Extent))
+(datatype Destination (Buffer ValueKey) (View ExprKey) (Unused))
+(function Slot (OperationKey String i64) Destination :no-merge)
 (relation ExternalBuffer (ValueKey i64))
 (relation PlannedStage (StageKey i64 String i64 Extent i64))
 ; Logical roots and resources remain independent of backend numbering.
@@ -124,11 +127,15 @@
 (relation HostEvaluation (OperationKey))
 (relation OutputOwner (i64 i64))
 (ruleset readout)
-(rule ((Produces stage value) (ElementType value (TypeId ty)) (CapacityExtent value n))
+(rule ((Allocation value n) (ElementType value (TypeId ty)))
       ((PlannedBuffer value ty n)) :ruleset readout)
-(rule ((ElementType (Output id) (TypeId ty)) (CapacityExtent (Output id) n))
-      ((PlannedBuffer (Output id) ty n)) :ruleset readout)
-(rule ((Backing value source) (= source (Source (ExprId id))))
+(rule ((BufferSlot op name i value) (Allocation value n))
+      ((set (Slot op name i) (Buffer value))) :ruleset readout)
+(rule ((BufferSlot op name i value) (= (StorageFor value) (Reuse e)))
+      ((set (Slot op name i) (View e))) :ruleset readout)
+(rule ((BufferSlot op name i value) (Produces stage value) (= (IsMaterialized value) false))
+      ((set (Slot op name i) (Unused))) :ruleset readout)
+(rule ((= source (Backing value)) (= source (Source (ExprId id))))
       ((ExternalBuffer source id)) :ruleset readout)
 (rule ((PhaseOwner stage entry) (= stage (Stage (OperationId op) name)) (PhaseDomain stage n width))
       ((PlannedStage stage op name entry n width)) :ruleset readout)

@@ -1,20 +1,19 @@
 use super::super::super::data::{body_signature, ExprId};
 use super::super::{error, length};
-use super::{chunks, singleton, OptimizeError, Planner, Storage, Value, WIDTH};
-use crate::egglog::data::{Array, BlockId, BufferId, OperationId, OperationKind, ScremaForm};
+use super::{chunks, singleton, OptimizeError, Planner, Value, WIDTH};
+use crate::egglog::data::{Array, BlockId, OperationId, OperationKind, ScremaForm};
 
 impl Planner<'_> {
     pub(super) fn parallel_screma(
         &mut self,
         op: OperationId,
         host: BlockId,
-    ) -> Result<(Value, Vec<BufferId>), OptimizeError> {
+    ) -> Result<Value, OptimizeError> {
         let OperationKind::Screma { form, inputs, .. } = self.data.operations[op].kind.clone() else {
             return Err(error("invalid collective recipe"));
         };
         let n = length(&inputs);
-        let (reductions, arrays) = self.screma_outputs(host, &form, Storage::Device);
-        let outputs: Vec<_> = reductions.iter().chain(&arrays).copied().collect();
+        let (reductions, arrays) = self.screma_outputs(op, &form, false);
         let ns: usize = form.scans.iter().map(|s| s.neutral.len()).sum();
         let nr: usize = form.reductions.iter().map(|r| r.neutral.len()).sum();
         if ns + nr == 0 {
@@ -27,7 +26,7 @@ impl Planner<'_> {
             self.write_values(active, &arrays, i, values)?;
             self.finish_loop(&invocation, active, vec![]);
             self.dispatch(op, host, kernel);
-            return Ok((result(&reductions, &arrays), outputs));
+            return Ok(result(&reductions, &arrays));
         }
 
         // One invocation owns a contiguous chunk. This preserves operand order
@@ -36,11 +35,11 @@ impl Planner<'_> {
         let chunks = chunks(n.clone());
         let neutral = neutrals(&form);
         let partials: Vec<_> =
-            neutral.iter().map(|_| self.allocate(host, "partial", Storage::Device)).collect();
+            neutral.iter().enumerate().map(|(i, _)| self.slot(op, "partial", i, false)).collect();
         let prefixes: Vec<_> =
-            neutral.iter().take(ns).map(|_| self.allocate(host, "prefix", Storage::Device)).collect();
+            neutral.iter().take(ns).enumerate().map(|(i, _)| self.slot(op, "prefix", i, false)).collect();
         let offsets: Vec<_> =
-            neutral.iter().take(ns).map(|_| self.allocate(host, "offset", Storage::Device)).collect();
+            neutral.iter().take(ns).enumerate().map(|(i, _)| self.slot(op, "offset", i, false)).collect();
         let mapped: Vec<_> = if ns == 0 {
             vec![]
         } else {
@@ -48,7 +47,8 @@ impl Planner<'_> {
                 .1
                 .into_iter()
                 .skip(ns + nr)
-                .map(|_| self.allocate(host, "mapped", Storage::Device))
+                .enumerate()
+                .map(|(i, _)| self.slot(op, "mapped", i, false))
                 .collect()
         };
         let kernel = self.kernel(op, "chunks");
@@ -138,19 +138,19 @@ impl Planner<'_> {
             self.finish_loop(&invocation, active, vec![]);
             self.dispatch(op, host, finish);
         }
-        Ok((result(&reductions, &arrays), outputs))
+        Ok(result(&reductions, &arrays))
     }
 
     pub(super) fn serial_screma(
         &mut self,
+        op: OperationId,
         entry: BlockId,
-        allocate: BlockId,
-        storage: Storage,
+        local: bool,
         form: &ScremaForm,
         inputs: &[Array],
-    ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
+    ) -> Result<(BlockId, Value), OptimizeError> {
         let n = length(inputs);
-        let (reductions, arrays) = self.screma_outputs(allocate, form, storage);
+        let (reductions, arrays) = self.screma_outputs(op, form, local);
         let neutral = neutrals(form);
         let ns: usize = form.scans.iter().map(|s| s.neutral.len()).sum();
         let count = neutral.len();
@@ -177,26 +177,22 @@ impl Planner<'_> {
         self.write_values(loop_.body, &arrays, loop_.index.clone(), post)?;
         self.finish_loop(&loop_, loop_.body, next);
         self.write_values(loop_.done, &reductions, Value::Int(0), loop_.state[ns..].to_vec())?;
-        let outputs = reductions.iter().chain(&arrays).copied().collect();
-        Ok((loop_.done, result(&reductions, &arrays), outputs))
+        Ok((loop_.done, result(&reductions, &arrays)))
     }
 
-    fn screma_outputs(
-        &mut self,
-        allocate: BlockId,
-        form: &ScremaForm,
-        storage: Storage,
-    ) -> (Vec<BufferId>, Vec<BufferId>) {
+    fn screma_outputs(&self, op: OperationId, form: &ScremaForm, local: bool) -> (Vec<Value>, Vec<Value>) {
         let reductions = form
             .reductions
             .iter()
             .flat_map(|r| r.neutral.iter())
-            .map(|_| self.allocate(allocate, "total", storage))
+            .enumerate()
+            .map(|(i, _)| self.slot(op, "total", i, local))
             .collect();
         let arrays = body_signature(&form.post)
             .1
             .into_iter()
-            .map(|_| self.allocate(allocate, "output", storage))
+            .enumerate()
+            .map(|(i, _)| self.slot(op, "output", i, local))
             .collect();
         (reductions, arrays)
     }
@@ -236,36 +232,26 @@ impl Planner<'_> {
     fn write_values(
         &mut self,
         block: BlockId,
-        buffers: &[BufferId],
+        buffers: &[Value],
         index: Value,
         values: Vec<Value>,
     ) -> Result<(), OptimizeError> {
         if buffers.len() != values.len() {
             return Err(error("buffer result arity mismatch"));
         }
-        for (&buffer, value) in buffers.iter().zip(values) {
+        for (buffer, value) in buffers.iter().zip(values) {
             self.store(block, buffer, index.clone(), value);
         }
         Ok(())
     }
 
-    fn read_buffers(&mut self, block: BlockId, buffers: &[BufferId], index: Value) -> Vec<Value> {
-        buffers
-            .iter()
-            .map(|&buffer| self.load(block, Value::Buffer(buffer), index.clone(), "read"))
-            .collect()
+    fn read_buffers(&mut self, block: BlockId, buffers: &[Value], index: Value) -> Vec<Value> {
+        buffers.iter().map(|buffer| self.load(block, buffer.clone(), index.clone(), "read")).collect()
     }
 }
 
-fn result(reductions: &[BufferId], arrays: &[BufferId]) -> Value {
-    Value::Tuple(
-        reductions
-            .iter()
-            .copied()
-            .map(singleton)
-            .chain(arrays.iter().copied().map(Value::Buffer))
-            .collect(),
-    )
+fn result(reductions: &[Value], arrays: &[Value]) -> Value {
+    Value::Tuple(reductions.iter().cloned().map(singleton).chain(arrays.iter().cloned()).collect())
 }
 
 fn neutrals(form: &ScremaForm) -> Vec<ExprId> {

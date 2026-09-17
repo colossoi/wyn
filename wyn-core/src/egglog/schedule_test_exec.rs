@@ -233,6 +233,7 @@ impl Machine<'_> {
 
     fn value(&self, code: &Code, frame: &Frame) -> Value {
         match code {
+            Code::Discarded => Value::Discarded,
             Code::Int(i) => Value::Int(i64::from(*i)),
             Code::Local(name) => {
                 frame.locals.get(name).unwrap_or_else(|| panic!("unbound local {name}")).clone()
@@ -240,9 +241,6 @@ impl Machine<'_> {
             Code::Source(id) => self.source(*id, frame),
             Code::Array(array) => self.array(array, frame),
             Code::Buffer(id) => {
-                if self.data.state.buffers[*id].storage == Storage::Discarded {
-                    return Value::Discarded;
-                }
                 if let Storage::View(expr) = self.data.state.buffers[*id].storage {
                     self.source(expr, frame)
                 } else {

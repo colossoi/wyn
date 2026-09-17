@@ -162,6 +162,7 @@ impl Body<'_, '_> {
     }
     pub(super) fn value(&mut self, value: &Value) -> Result<Typed, OptimizeError> {
         match value {
+            Value::Discarded => Err(error("unused result has no value")),
             Value::Int(n) => Ok(Self::number(*n)),
             Value::Local(name) => {
                 let Some(value) = self.environment.locals.get(name).cloned() else {

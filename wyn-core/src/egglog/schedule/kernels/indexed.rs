@@ -1,14 +1,13 @@
-use super::{array_value, error, length, singleton, Instruction, OptimizeError, Planner, Storage, Value};
-use crate::egglog::data::{BlockId, BufferId, OperationId, OperationKind};
+use super::{array_value, error, length, singleton, Instruction, OptimizeError, Planner, Value};
+use crate::egglog::data::{BlockId, OperationId, OperationKind};
 
 impl Planner<'_> {
     pub(super) fn serial_indexed(
         &mut self,
         op: OperationId,
         entry: BlockId,
-        allocate: BlockId,
-        storage: Storage,
-    ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
+        local: bool,
+    ) -> Result<(BlockId, Value), OptimizeError> {
         let owner = self.data.state.blocks[entry].function;
         match self.data.operations[op].kind.clone() {
             OperationKind::Scatter {
@@ -43,7 +42,7 @@ impl Planner<'_> {
                 );
                 self.jump(write, next, vec![]);
                 self.finish_loop(&loop_, next, vec![]);
-                Ok((loop_.done, dest, vec![]))
+                Ok((loop_.done, dest))
             }
             OperationKind::ReduceByIndex {
                 destination,
@@ -86,7 +85,7 @@ impl Planner<'_> {
                 );
                 self.jump(update, next, vec![]);
                 self.finish_loop(&loop_, next, vec![]);
-                Ok((loop_.done, dest, vec![]))
+                Ok((loop_.done, dest))
             }
             OperationKind::BucketScatter {
                 destination,
@@ -123,11 +122,11 @@ impl Planner<'_> {
                 let dest = Value::Source(destination.value);
                 let buckets = Value::op("length", [dest.clone()]);
                 let capacity = Value::op("dimension", [dest.clone(), Value::Int(1)]);
-                let counts = self.allocate(allocate, "counts", storage);
-                let overflow = self.allocate(allocate, "overflow", storage);
-                self.store(entry, overflow, Value::Int(0), Value::Int(0));
+                let counts = self.slot(op, "counts", 0, local);
+                let overflow = self.slot(op, "overflow", 0, local);
+                self.store(entry, &overflow, Value::Int(0), Value::Int(0));
                 let clear = self.start_loop(entry, Value::Int(0), buckets.clone(), vec![]);
-                self.store(clear.body, counts, clear.index.clone(), Value::Int(0));
+                self.store(clear.body, &counts, clear.index.clone(), Value::Int(0));
                 self.finish_loop(&clear, clear.body, vec![]);
 
                 let loop_ = self.start_loop(clear.done, Value::Int(0), n, vec![]);
@@ -168,10 +167,10 @@ impl Planner<'_> {
                     invalid,
                     Some(checked),
                 );
-                let slot = self.load(reserve, Value::Buffer(counts), key.clone(), "slot");
+                let slot = self.load(reserve, counts.clone(), key.clone(), "slot");
                 self.store(
                     reserve,
-                    counts,
+                    &counts,
                     key.clone(),
                     Value::op("add", [slot.clone(), Value::Int(1)]),
                 );
@@ -192,18 +191,14 @@ impl Planner<'_> {
                     },
                 );
                 self.jump(write, reserved, vec![]);
-                self.store(full, overflow, Value::Int(0), Value::Int(1));
+                self.store(full, &overflow, Value::Int(0), Value::Int(1));
                 self.jump(full, reserved, vec![]);
                 self.jump(reserved, checked, vec![]);
-                self.store(invalid, overflow, Value::Int(0), Value::Int(1));
+                self.store(invalid, &overflow, Value::Int(0), Value::Int(1));
                 self.jump(invalid, checked, vec![]);
                 self.jump(checked, next, vec![]);
                 self.finish_loop(&loop_, next, vec![]);
-                Ok((
-                    loop_.done,
-                    Value::Tuple(vec![dest, Value::Buffer(counts), singleton(overflow)]),
-                    vec![counts, overflow],
-                ))
+                Ok((loop_.done, Value::Tuple(vec![dest, counts, singleton(overflow)])))
             }
             _ => Err(error("expected indexed memory operation")),
         }

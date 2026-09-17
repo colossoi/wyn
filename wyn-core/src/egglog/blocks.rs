@@ -75,6 +75,8 @@ pub struct BodyData {
 /// TLC's tuple-of-component-arrays representation; physical layout is deferred.
 #[derive(Clone, Debug)]
 pub enum Value {
+    /// An unobserved result component, with no storage or executable uses.
+    Discarded,
     Local(String),
     Int(u32),
     Source(ExprId),
@@ -150,8 +152,6 @@ pub enum Storage {
     /// A source view, possibly selected by a host branch or call. Its aliasing
     /// and physical binding remain described by the source sidecar expression.
     View(ExprId),
-    /// An unused result slot. It has no allocation or shader binding.
-    Discarded,
 }
 
 impl Value {

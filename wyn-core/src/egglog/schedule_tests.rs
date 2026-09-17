@@ -37,6 +37,11 @@ fn consuming_fused_maps_reuse_the_input_without_allocating() {
     let result = compile("entry main(xs:*[]i32) []i32 = let a=map(|x:i32|x+7,xs) in map(|x:i32|x*2,a)");
     assert_eq!(kernel_count(&result), 1);
     assert!(result.state.buffers.values().all(|b| b.storage != Storage::Device));
+    assert_eq!(
+        result.state.buffers.len(),
+        1,
+        "only the input resource needs a buffer record"
+    );
     for n in [0, 1, 63, 64, 65, 137] {
         let input = Value::array(0..n);
         let output = run(&result, vec![input.clone()]);
@@ -52,6 +57,11 @@ fn fused_maps_remap_reuse_slots_and_preserve_return_order() {
         let result = compile(&format!("entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = let a=map(|x:i32|x+1,xs) in let b=map(|x:i32|x*2,ys) in let c=map(|x:i32|x+7,b) in {returns}"));
         assert_eq!(kernel_count(&result), 1);
         assert!(result.state.buffers.values().all(|b| b.storage != Storage::Device));
+        assert_eq!(
+            result.state.buffers.len(),
+            2,
+            "reused outputs must not create buffer records"
+        );
         let xs = Value::array(0..4);
         let ys = Value::array(10..14);
         let output = run(&result, vec![xs.clone(), ys.clone()]);
