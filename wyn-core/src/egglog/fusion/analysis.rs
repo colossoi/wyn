@@ -1,11 +1,12 @@
 //! Read-only source queries shared by fact import and final body construction.
 use crate::egglog::data::{
-    is_slice, length_source, value_source, Array, AssociatedData, ExprId, ExprKind, OperationId,
-    OperationKind, ScremaForm,
+    is_slice, length_source, value_source, Array, ExprId, ExprKind, Ir, OperationId, OperationKind,
+    ScremaForm,
 };
 use crate::egglog::dependencies::{Analysis, References};
 use crate::egglog::visit::{Operand, OperandRole};
 use crate::egglog::OptimizeError;
+use sink::{InputSite, Kind, Operation, Sink};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod egglog;
@@ -13,7 +14,6 @@ mod facts;
 mod sink;
 mod summary;
 pub(in crate::egglog) use egglog::Egglog;
-use sink::{InputSite, Kind, Operation, Sink};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::egglog) enum Role {
@@ -35,7 +35,7 @@ impl From<OperandRole> for Role {
 }
 
 /// Read the source once and send facts directly to the selected backend.
-pub(in crate::egglog) fn emit(data: &AssociatedData, sink: &mut impl Sink) -> Result<(), OptimizeError> {
+pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), OptimizeError> {
     let mut analysis = Analysis::new(data);
     let mut schedules = analysis.dependencies.schedules(data)?;
     schedules.retain(|_, ops| {
@@ -124,7 +124,7 @@ pub(super) fn counts(form: &ScremaForm) -> (usize, usize) {
 }
 /// Decode a single producer output and its slices without constructing a tuple tree.
 fn produced_input(
-    data: &AssociatedData,
+    data: &Ir,
     array: &Array,
     producer: OperationId,
 ) -> Option<(usize, Vec<(ExprId, ExprId)>)> {
@@ -149,7 +149,7 @@ fn produced_input(
 }
 
 /// Visit leaves directly; slices of whole tuples remain opaque inputs.
-fn input_leaves(data: &AssociatedData, array: &Array, visit: &mut impl FnMut(&Array)) {
+fn input_leaves(data: &Ir, array: &Array, visit: &mut impl FnMut(&Array)) {
     match array {
         Array::Zip(arrays) => {
             for a in arrays {
@@ -165,11 +165,7 @@ fn input_leaves(data: &AssociatedData, array: &Array, visit: &mut impl FnMut(&Ar
     }
 }
 
-pub(super) fn routes(
-    data: &AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-) -> BTreeSet<usize> {
+pub(super) fn routes(data: &Ir, producer: OperationId, consumer: OperationId) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     if input_slices(data, producer, consumer).is_none() {
         return out;
@@ -194,7 +190,7 @@ pub(super) fn routes(
 }
 
 pub(super) fn input_slices(
-    data: &AssociatedData,
+    data: &Ir,
     producer: OperationId,
     consumer: OperationId,
 ) -> Option<Vec<(ExprId, ExprId)>> {
@@ -225,7 +221,7 @@ pub(super) fn inputs(kind: &OperationKind) -> Vec<&Array> {
 
 /// Read an element-demand edge. Egglog checks profitability and complete uses.
 pub(super) fn indexed_demand(
-    data: &AssociatedData,
+    data: &Ir,
     producer: OperationId,
     consumer: OperationId,
 ) -> Option<(usize, Vec<usize>)> {
@@ -239,13 +235,8 @@ pub(super) fn indexed_demand(
 }
 // TLC may represent an array of tuples as projected component arrays. The
 // first projection selects the operation result; the rest select its element.
-fn projection(data: &AssociatedData, value: ExprId, producer: OperationId) -> Option<(usize, Vec<usize>)> {
-    fn walk(
-        data: &AssociatedData,
-        value: ExprId,
-        producer: OperationId,
-        path: &mut Vec<usize>,
-    ) -> Option<()> {
+fn projection(data: &Ir, value: ExprId, producer: OperationId) -> Option<(usize, Vec<usize>)> {
+    fn walk(data: &Ir, value: ExprId, producer: OperationId, path: &mut Vec<usize>) -> Option<()> {
         match data.expressions[value].kind {
             ExprKind::Coerce(v) => walk(data, v, producer, path),
             ExprKind::Project { tuple, index } => {
@@ -262,7 +253,7 @@ fn projection(data: &AssociatedData, value: ExprId, producer: OperationId) -> Op
     let (&slot, path) = path.split_first()?;
     Some((slot, path.to_vec()))
 }
-pub(super) fn references(data: &AssociatedData, v: ExprId, out: &mut BTreeSet<ExprId>) {
+pub(super) fn references(data: &Ir, v: ExprId, out: &mut BTreeSet<ExprId>) {
     let v = value_source(data, v);
     match &data.expressions[v].kind {
         ExprKind::Parameter(_) | ExprKind::OperationResult(_) => {
@@ -293,7 +284,7 @@ pub(super) fn references(data: &AssociatedData, v: ExprId, out: &mut BTreeSet<Ex
         _ => {}
     }
 }
-fn array_references(data: &AssociatedData, a: &Array, out: &mut BTreeSet<ExprId>) {
+fn array_references(data: &Ir, a: &Array, out: &mut BTreeSet<ExprId>) {
     match a {
         Array::Value(v) => references(data, *v, out),
         Array::Literal(vs) => {

@@ -1,9 +1,13 @@
 //! Propagate newly proved facts through reverse edges; never rescan a fixed point.
-use super::*;
-use std::collections::VecDeque;
+use super::super::data::length_source;
+use super::super::regions::Regions;
+use super::{References, Set, Sets, EMPTY};
+use crate::egglog::data::{ExprId, ExprKind, Ir, OperationId, OperationKind, RegionId, SoacBody};
+use crate::types::{is_copy, SoacOwnership};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) fn safety(
-    data: &AssociatedData,
+    data: &Ir,
     members: &BTreeSet<OperationId>,
 ) -> (BTreeSet<RegionId>, BTreeSet<OperationId>, BTreeSet<OperationId>) {
     let mut safe = BTreeSet::new();
@@ -24,9 +28,9 @@ pub(super) fn safety(
         let mut regions = BTreeSet::new();
         let mut producer = None;
         let movable = match kind {
-            k if super::super::data::length_source(data, k).is_some() => true,
+            k if length_source(data, k).is_some() => true,
             OperationKind::Index { array, .. } => {
-                if !types::is_copy(&data.types[data.expressions[*array].ty].ty) {
+                if !is_copy(&data.types[data.expressions[*array].ty].ty) {
                     producer = fresh_source(data, *array);
                     if producer.is_none() {
                         continue;
@@ -34,10 +38,8 @@ pub(super) fn safety(
                 }
                 true
             }
-            OperationKind::Screma { ownership, .. } => {
-                ownership.iter().all(|o| *o == types::SoacOwnership::Fresh)
-            }
-            OperationKind::Filter { ownership, .. } => *ownership == types::SoacOwnership::Fresh,
+            OperationKind::Screma { ownership, .. } => ownership.iter().all(|o| *o == SoacOwnership::Fresh),
+            OperationKind::Filter { ownership, .. } => *ownership == SoacOwnership::Fresh,
             _ => continue,
         };
         for body in kind.callbacks() {
@@ -95,7 +97,7 @@ pub(super) fn safety(
     (safe, movable, discardable)
 }
 
-fn fresh_source(data: &AssociatedData, mut e: ExprId) -> Option<OperationId> {
+fn fresh_source(data: &Ir, mut e: ExprId) -> Option<OperationId> {
     loop {
         match data.expressions[e].kind {
             ExprKind::Project { tuple, .. } | ExprKind::Coerce(tuple) => e = tuple,
@@ -113,13 +115,13 @@ fn fresh_source(data: &AssociatedData, mut e: ExprId) -> Option<OperationId> {
 }
 
 pub(super) fn external(
-    data: &AssociatedData,
+    data: &Ir,
     members: &BTreeSet<OperationId>,
     operands: &BTreeMap<OperationId, References>,
     results: &BTreeMap<RegionId, References>,
     sets: &mut Sets,
 ) -> BTreeMap<RegionId, Set> {
-    let tree = super::super::regions::Regions::new(data);
+    let tree = Regions::new(data);
     let mut external: BTreeMap<_, _> = data.regions.ids().map(|r| (r, EMPTY)).collect();
     let mut users = BTreeMap::<RegionId, BTreeSet<RegionId>>::new();
     let mut pending = VecDeque::new();
@@ -159,7 +161,7 @@ pub(super) fn external(
 }
 
 pub(super) fn live(
-    data: &AssociatedData,
+    data: &Ir,
     members: &BTreeSet<OperationId>,
     discardable: &BTreeSet<OperationId>,
     operands: &BTreeMap<OperationId, References>,

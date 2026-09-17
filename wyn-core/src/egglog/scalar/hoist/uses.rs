@@ -1,5 +1,6 @@
 //! Shared expression closures and reachable structured scope uses.
-use super::*;
+use crate::egglog::data::{ExprId, ExprKind, Ir, OperationId, OperationKind, RegionId};
+use std::collections::{BTreeMap, BTreeSet};
 use wyn_base::persistent_sets::{Set, Sets, EMPTY};
 
 #[derive(Default)]
@@ -11,7 +12,7 @@ pub(super) struct Dag {
     pub roots: BTreeSet<ExprId>,
 }
 impl Dag {
-    pub fn include(&mut self, data: &AssociatedData, roots: &[ExprId]) -> Set {
+    pub fn include(&mut self, data: &Ir, roots: &[ExprId]) -> Set {
         self.roots.extend(roots);
         let order = wyn_graph::dag_postorder(
             roots.iter().copied(),
@@ -46,7 +47,7 @@ pub(super) struct Uses {
     pub scopes: BTreeMap<RegionId, Set>,
 }
 impl Uses {
-    pub fn region(&mut self, data: &AssociatedData, region: RegionId, live: &BTreeSet<OperationId>) {
+    pub fn region(&mut self, data: &Ir, region: RegionId, live: &BTreeSet<OperationId>) {
         let mut roots = data.regions[region].results.clone();
         let mut nested = vec![];
         for &op in data.regions[region].members.intersection(live) {
@@ -61,7 +62,7 @@ impl Uses {
     }
 }
 
-pub(super) fn analyze(data: &AssociatedData, live: &BTreeSet<OperationId>) -> Uses {
+pub(super) fn analyze(data: &Ir, live: &BTreeSet<OperationId>) -> Uses {
     let symbols: BTreeMap<_, _> = data.definitions.values().map(|d| (d.symbol, d.body)).collect();
     let mut pending: Vec<_> = data.entries.values().map(|e| data.definitions[e.definition].body).collect();
     let mut uses = Uses::default();

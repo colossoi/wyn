@@ -1,35 +1,40 @@
-use super::super::*;
-use crate::{compile_thru_tlc, tlc};
+use super::super::{fuse, Fused, Program};
+use crate::compile_thru_tlc;
+use crate::egglog::dependencies::analyze;
+use crate::egglog::{from_tlc, insert_expressions, schedule, simplify_and_place, Imported, Ir, Scheduled};
+use crate::tlc::infer_input_slice_bounds;
+use exec::{run, Value};
+
 #[allow(dead_code)]
 #[path = "../schedule_test_exec.rs"]
 mod exec;
-use exec::{run, Value};
 
-fn imported(source: &str) -> Converted {
-    convert_program(&tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap()
+fn imported(source: &str) -> Program<Imported> {
+    from_tlc(&infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap()
 }
-fn count(data: &AssociatedData) -> usize {
+fn count(data: &Ir) -> usize {
     let root = data.definitions[data.entries.values().next().unwrap().definition].body;
-    dependencies::analyze(data).live.iter().filter(|&&id| data.operations[id].region == root).count()
+    analyze(data).live.iter().filter(|&&id| data.operations[id].region == root).count()
 }
 fn check(source: &str, operations: usize) {
     let input = imported(source);
     let fused = fuse(input.clone()).unwrap();
     assert_eq!(
-        count(&fused.data),
+        count(&fused.ir),
         operations,
         "{source}\n{:#?}",
-        fused.data.operations
+        fused.ir.operations
     );
-    let original = schedule(insert_expressions(input).unwrap()).unwrap();
-    let fused = schedule(insert_expressions(fused).unwrap()).unwrap();
+    // Deliberately bypass fusion only for the unfused execution oracle.
+    let input = Program {
+        ir: input.ir,
+        state: Fused,
+    };
+    let original = schedule(simplify_and_place(insert_expressions(input).unwrap()).unwrap()).unwrap();
+    let fused = schedule(simplify_and_place(insert_expressions(fused).unwrap()).unwrap()).unwrap();
     for n in [0, 1, 4, 63, 64, 65, 137] {
         let args = || vec![Value::array((0..n).map(|i| i % 11 - 3))];
-        assert_eq!(
-            run(&fused.data, args()),
-            run(&original.data, args()),
-            "n={n}: {source}"
-        );
+        assert_eq!(run(&fused, args()), run(&original, args()), "n={n}: {source}");
     }
 }
 
@@ -90,18 +95,23 @@ fn returned_filter_array_prevents_masking_away_compaction() {
     check("entry main(xs: []i32) (?k. [k]i32,i32) = let kept=filter(|x:i32|x>0,xs) in (kept,reduce(|a:i32,b:i32|a+b,0,kept))",2);
 }
 
-fn check_args(source: &str, operations: usize, args: impl Fn() -> Vec<Value>) -> Converted {
+fn check_args(source: &str, operations: usize, args: impl Fn() -> Vec<Value>) -> Program<Scheduled> {
     let input = imported(source);
     let fused = fuse(input.clone()).unwrap();
     assert_eq!(
-        count(&fused.data),
+        count(&fused.ir),
         operations,
         "{source}\n{:#?}",
-        fused.data.operations
+        fused.ir.operations
     );
-    let original = schedule(insert_expressions(input).unwrap()).unwrap();
-    let fused = schedule(insert_expressions(fused).unwrap()).unwrap();
-    assert_eq!(run(&fused.data, args()), run(&original.data, args()), "{source}");
+    // Deliberately bypass fusion only for the unfused execution oracle.
+    let input = Program {
+        ir: input.ir,
+        state: Fused,
+    };
+    let original = schedule(simplify_and_place(insert_expressions(input).unwrap()).unwrap()).unwrap();
+    let fused = schedule(simplify_and_place(insert_expressions(fused).unwrap()).unwrap()).unwrap();
+    assert_eq!(run(&fused, args()), run(&original, args()), "{source}");
     fused
 }
 

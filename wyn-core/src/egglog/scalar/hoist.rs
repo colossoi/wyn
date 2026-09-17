@@ -1,33 +1,37 @@
 //! Binding availability is relative to an invocation, never to an ExprId alone.
-use super::*;
+use super::fold::lowering;
+use super::OptimizeError;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::egglog::data::{ExprId, ExprKind, Ir, PlacementData, PlacementId, PlacementSite};
+use crate::egglog::timing::{span, time};
+use crate::types::{Type, TypeName};
+use placements::Placements;
+use std::collections::{BTreeMap, BTreeSet};
+use wyn_base::IdArena;
 
 mod analysis;
+mod bounds;
 mod captures;
 mod placements;
-use placements::Placements;
-mod bounds;
 mod specialize;
 mod uses;
 
-pub(super) fn run(data: &mut AssociatedData) -> Result<(), OptimizeError> {
-    let _timing = timing::span("hoisting");
-    data.placements = Default::default();
+pub(super) fn run(data: &mut Ir) -> Result<IdArena<PlacementId, PlacementData>, OptimizeError> {
+    let _timing = span("hoisting");
     let mut placements = Placements::default();
-    timing::time("specialize SOAC captures", || {
+    time("specialize SOAC captures", || {
         captures::run(data, &mut placements)
     })?;
     let mut analysis = analysis::Analysis::new(data)?;
-    timing::time("select loop and branch placements", || {
+    time("select loop and branch placements", || {
         analysis.place(data, &mut placements)
     });
-    timing::time("prune placements", || {
+    Ok(time("prune placements", || {
         placements.finish(data, &analysis.uses, &analysis.control)
-    });
-    Ok(())
+    }))
 }
 
-pub(super) fn ordered(data: &AssociatedData, selected: &BTreeSet<ExprId>) -> Vec<ExprId> {
+pub(super) fn ordered(data: &Ir, selected: &BTreeSet<ExprId>) -> Vec<ExprId> {
     wyn_graph::dag_postorder(
         selected.iter().copied(),
         |_| false,
@@ -40,7 +44,7 @@ pub(super) fn ordered(data: &AssociatedData, selected: &BTreeSet<ExprId>) -> Vec
 
 // A whitelist is intentional: catalog purity alone does not prove that an
 // expression is safe on paths that previously did not evaluate it.
-fn total_node(data: &AssociatedData, id: ExprId) -> bool {
+fn total_node(data: &Ir, id: ExprId) -> bool {
     match &data.expressions[id].kind {
         ExprKind::Int(_)
         | ExprKind::FloatBits(_)
@@ -55,7 +59,7 @@ fn total_node(data: &AssociatedData, id: ExprId) -> bool {
         | ExprKind::Vector(_) => true,
         ExprKind::Project { tuple, .. } => matches!(
             data.types[data.expressions[*tuple].ty].ty,
-            crate::types::Type::Constructed(crate::types::TypeName::Tuple(_), _)
+            Type::Constructed(TypeName::Tuple(_), _)
         ),
         ExprKind::Coerce(x) => data.expressions[*x].ty == data.expressions[id].ty,
         ExprKind::PureApp { function, .. } => match &data.expressions[*function].kind {
@@ -65,7 +69,7 @@ fn total_node(data: &AssociatedData, id: ExprId) -> bool {
             ),
             ExprKind::UnOp(_) => true,
             _ => matches!(
-                fold::lowering(data, *function),
+                lowering(data, *function),
                 Some(BuiltinLowering::PrimOp(
                     PrimOp::Bitcast
                         | PrimOp::SIToFP
@@ -81,8 +85,8 @@ fn total_node(data: &AssociatedData, id: ExprId) -> bool {
     }
 }
 
-pub(super) fn output(data: &AssociatedData) -> String {
-    data.placements
+pub(super) fn output(placements: &IdArena<PlacementId, PlacementData>) -> String {
+    placements
         .values()
         .map(|p| match p.before {
             PlacementSite::Operation(op) => format!(
@@ -99,10 +103,13 @@ pub(super) fn output(data: &AssociatedData) -> String {
         .collect()
 }
 
-pub(in crate::egglog) fn index(data: &AssociatedData) -> BTreeMap<PlacementSite, Vec<ExprId>> {
+pub(in crate::egglog) fn index(
+    data: &Ir,
+    placements: &IdArena<PlacementId, PlacementData>,
+) -> BTreeMap<PlacementSite, Vec<ExprId>> {
     let mut sites: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     let mut values = BTreeSet::new();
-    for p in data.placements.values() {
+    for p in placements.values() {
         sites.entry(p.before).or_default().insert(p.expression);
         values.insert(p.expression);
     }

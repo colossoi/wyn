@@ -1,7 +1,9 @@
 //! Read completed egglog decisions. This module never inspects or mutates bodies.
 use crate::egglog::data::{OperationId, RegionId};
-use crate::egglog::{term, OptimizeError};
-use egglog_engine::{ast::Literal, EGraph, Term};
+use crate::egglog::term::{app, key};
+use crate::egglog::OptimizeError;
+use egglog_engine::ast::Literal;
+use egglog_engine::{EGraph, Term, TermDag};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Step {
@@ -15,7 +17,7 @@ pub(super) struct Step {
 }
 
 pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
-    fn integer(dag: &egglog_engine::TermDag, value: usize) -> Result<i64, OptimizeError> {
+    fn integer(dag: &TermDag, value: usize) -> Result<i64, OptimizeError> {
         match dag.get(value) {
             Term::Lit(Literal::Int(n)) => Ok(*n),
             _ => Err(OptimizeError::Extraction("expected fusion step number".into())),
@@ -24,14 +26,14 @@ pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
     let mut steps = BTreeMap::new();
     let (rows, _, dag) = graph.function_to_dag("FusionStep", usize::MAX, false)?;
     for row in rows {
-        let args = term::app(&dag, row, "FusionStep", 5)?;
+        let args = app(&dag, row, "FusionStep", 5)?;
         steps.insert(
             integer(&dag, args[0])?,
             Step {
                 family: integer(&dag, args[1])?,
-                region: term::key(&dag, args[2], "RegionId")?,
-                producer: term::key(&dag, args[3], "OperationId")?,
-                consumer: term::key(&dag, args[4], "OperationId")?,
+                region: key(&dag, args[2], "RegionId")?,
+                producer: key(&dag, args[3], "OperationId")?,
+                consumer: key(&dag, args[4], "OperationId")?,
                 retained: false,
                 lengths: BTreeSet::new(),
                 demands: BTreeSet::new(),
@@ -40,14 +42,15 @@ pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
     }
     let (rows, _, dag) = graph.function_to_dag("StepUse", usize::MAX, false)?;
     for row in rows {
-        let args = term::app(&dag, row, "StepUse", 3)?;
+        let args = app(&dag, row, "StepUse", 3)?;
         let n = integer(&dag, args[0])?;
-        let consumer = term::key(&dag, args[1], "OperationId")?;
+        let consumer = key(&dag, args[1], "OperationId")?;
         let Term::App(name, _) = dag.get(args[2]) else {
             return Err(OptimizeError::Extraction("expected operand role".into()));
         };
-        let step =
-            steps.get_mut(&n).ok_or_else(|| OptimizeError::Extraction("use without fusion step".into()))?;
+        let Some(step) = steps.get_mut(&n) else {
+            return Err(OptimizeError::Extraction("use without fusion step".into()));
+        };
         match name.as_str() {
             "Length" => {
                 step.lengths.insert(consumer);
@@ -60,11 +63,11 @@ pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
     }
     let (rows, _, dag) = graph.function_to_dag("StepObserved", usize::MAX, false)?;
     for row in rows {
-        let args = term::app(&dag, row, "StepObserved", 1)?;
+        let args = app(&dag, row, "StepObserved", 1)?;
         let n = integer(&dag, args[0])?;
-        let step = steps
-            .get_mut(&n)
-            .ok_or_else(|| OptimizeError::Extraction("observer without fusion step".into()))?;
+        let Some(step) = steps.get_mut(&n) else {
+            return Err(OptimizeError::Extraction("observer without fusion step".into()));
+        };
         step.retained = true;
     }
     Ok(steps.into_values().collect())

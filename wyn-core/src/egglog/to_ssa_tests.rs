@@ -1,14 +1,19 @@
-use crate::egglog::{convert_program, fuse, insert_expressions, optimize_expressions, schedule, to_ssa};
-use crate::{compile_thru_tlc, lower_ssa_to_wgsl, tlc};
+use crate::egglog::{from_tlc, fuse, insert_expressions, schedule, simplify_and_place, to_ssa};
+use crate::interface::EntryParamBindingKind;
+use crate::pipeline_descriptor::Pipeline;
+use crate::tlc::infer_input_slice_bounds;
+use crate::{
+    compile_thru_tlc, lower_ssa_to_spirv, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_pipeline,
+    pipeline_descriptor, CodegenTarget, LoweredWgsl,
+};
 
 fn compile(source: &str) -> naga::Module {
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
-            .unwrap(),
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
     )
     .unwrap();
-    let ssa = to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap();
+    let ssa = to_ssa(&program, CodegenTarget::Wgsl).unwrap();
     let source = lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("{}\n{source}", e.emit_to_string(&source)));
@@ -59,7 +64,7 @@ fn scalar_loop_reaches_the_existing_wgsl_backend() {
 
 #[test]
 fn scalar_loop_result_is_stored_before_parallel_consumers() {
-    use crate::pipeline_descriptor::Pipeline;
+    use Pipeline;
     let source = "entry main(xs: []i32, n: i32) []i32 =
         let bias = loop acc = 0 for i < n do acc + i in
         map(|x: i32| x + bias, xs)";
@@ -109,28 +114,26 @@ fn conditional_expressions_inside_device_loops_reach_wgsl() {
 fn host_control_requires_a_runtime_cfg_instead_of_a_false_static_descriptor() {
     let source =
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)";
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
-            .unwrap(),
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
     )
     .unwrap();
-    let error = to_ssa(&program.data, crate::CodegenTarget::Wgsl).err().unwrap();
+    let error = to_ssa(&program, CodegenTarget::Wgsl).err().unwrap();
     assert!(error.to_string().contains("conditional or repeated host dispatches"));
 }
 
 #[test]
 fn existing_spirv_backend_also_accepts_the_handoff() {
-    let tlc = tlc::infer_input_slice_bounds(
+    let tlc = infer_input_slice_bounds(
         compile_thru_tlc("entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)").unwrap(),
     );
     let program = schedule(
-        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
-            .unwrap(),
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
     )
     .unwrap();
-    let ssa = to_ssa(&program.data, crate::CodegenTarget::Spirv).unwrap();
-    let output = crate::lower_ssa_to_spirv(ssa).unwrap();
+    let ssa = to_ssa(&program, CodegenTarget::Spirv).unwrap();
+    let output = lower_ssa_to_spirv(ssa).unwrap();
     let module = wspirv::dr::load_words(output.spirv).unwrap();
     assert_eq!(module.entry_points.len(), 1);
 }
@@ -142,7 +145,7 @@ fn vector_input_and_runtime_gather_after_scan_reach_wgsl() {
 
 #[test]
 fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
-    use crate::pipeline_descriptor::{Pipeline, ShaderStage};
+    use pipeline_descriptor::{Pipeline, ShaderStage};
     let source = include_str!("../../../testfiles/unified_triangle.wyn");
     let module = compile(source);
     assert_eq!(module.entry_points.len(), 2);
@@ -159,20 +162,18 @@ fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
     assert!(output.pipeline.source_results.is_empty());
 }
 
-fn pipeline(source: &str) -> crate::LoweredWgsl {
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+fn pipeline(source: &str) -> LoweredWgsl {
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
     let program = schedule(
-        optimize_expressions(insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap())
-            .unwrap(),
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
     )
     .unwrap();
-    crate::lower_ssa_to_wgsl_with_pipeline(to_ssa(&program.data, crate::CodegenTarget::Wgsl).unwrap())
-        .unwrap()
+    lower_ssa_to_wgsl_with_pipeline(to_ssa(&program, CodegenTarget::Wgsl).unwrap()).unwrap()
 }
 
 #[test]
 fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
-    use crate::pipeline_descriptor::{Binding, BufferLen, Pipeline};
+    use pipeline_descriptor::{Binding, BufferLen, Pipeline};
     let output = pipeline("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias, xs)");
     let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
     naga::valid::Validator::new(
@@ -201,7 +202,7 @@ fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
 
 #[test]
 fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
-    use crate::pipeline_descriptor::{Binding, BufferLen, Pipeline};
+    use pipeline_descriptor::{Binding, BufferLen, Pipeline};
     let output = pipeline("entry main(xs: [137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)");
     let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
         panic!("compute pipeline")
@@ -259,7 +260,7 @@ fn scalar_results_after_collectives_are_executed_and_published() {
 
 #[test]
 fn in_place_results_keep_the_host_input_binding_and_upload_role() {
-    use crate::pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
     let output = pipeline("entry main(dest:*[3]i32,xs:[5]i32) [3]i32 = reduce_by_index(dest,|a:i32,b:i32|a+b,0,map(|x:i32|x%3,xs),xs)");
     let result = &output.pipeline.source_results[0];
     assert_eq!((result.set, result.binding), (0, 0));
@@ -281,16 +282,16 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 #[test]
 fn tuple_of_views_uses_the_tlc_component_bindings() {
     let source = "entry main(xs: ([]i32,[]i32)) ([]i32,[]i32) = xs";
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    let imported = convert_program(&tlc).unwrap();
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let imported = from_tlc(&tlc).unwrap();
     let expected: Vec<_> = imported
-        .data
+        .ir
         .entry_params
         .values()
         .filter_map(|p| p.binding.as_ref())
         .flat_map(|p| match &p.kind {
-            crate::interface::EntryParamBindingKind::Single { binding, .. } => vec![binding.binding],
-            crate::interface::EntryParamBindingKind::TupleOfViews(fields) => {
+            EntryParamBindingKind::Single { binding, .. } => vec![binding.binding],
+            EntryParamBindingKind::TupleOfViews(fields) => {
                 fields.iter().map(|f| f.binding.binding).collect()
             }
         })

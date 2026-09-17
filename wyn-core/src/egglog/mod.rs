@@ -1,11 +1,11 @@
 //! Experimental TLC import into [egglog](https://github.com/egraphs-good/egglog).
 //!
-//! [`from_tlc::convert_program`] accepts the same TLC checkpoint as EGIR and
-//! returns an egglog fusion graph together with [`AssociatedData`]. [`fuse`]
+//! [`from_tlc()`] accepts the same TLC checkpoint as EGIR and
+//! returns an egglog fusion graph together with [`Ir`]. [`fuse`]
 //! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
 //! separate typed expression DAG with region uses and dependency facts.
-//! [`optimize_expressions`] uses equality saturation for scalar algebra and
-//! records common-branch and loop-invariant placements, including SOAC captures.
+//! [`simplify`] uses equality saturation for scalar algebra. [`place`] records
+//! common-branch and loop-invariant placements, including SOAC captures.
 //! [`schedule`] derives logical stages, residency, backing, scratch requirements,
 //! and dispatch constraints in egglog before building functions and blocks.
 //! Resources, aliases, capacities, accesses and dispatch order are read from
@@ -18,9 +18,11 @@
 //! uses, dependencies and motion constraints; scheduling retains its planning
 //! facts alongside expressions and emitted block topology.
 //!
-//! The languages are documented in `schema.egg`, `expressions.egg`, and
+//! The languages are documented in `fusion/schema.egg`, `expressions.egg`, and
 //! `blocks.egg`. Identities are local to one conversion; keep each fact program
 //! and its sidecar together.
+use egglog_engine::ast::{Command, Parser};
+use egglog_engine::Error;
 
 mod blocks;
 mod data;
@@ -33,6 +35,8 @@ mod regions;
 mod rewrite;
 mod scalar;
 mod schedule;
+mod stage;
+pub use stage::{Expressions, Fused, Imported, Placed, Program, Scheduled, Simplified};
 mod term;
 mod timing;
 mod to_ssa;
@@ -42,11 +46,18 @@ pub use blocks::{
     BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, GridData,
     Instruction, Storage, Value,
 };
-pub use data::*;
+pub use data::{
+    Array, BlockId, BodyId, BucketShapeData, BucketShapeId, BufferId, BuiltinData, BuiltinId,
+    DefinitionData, DefinitionId, DefinitionKind, DispatchId, EntryData, EntryId, EntryParamData,
+    EntryParamId, ExprData, ExprId, ExprKind, ExternData, ExternId, GridId, InputBoundData, InputBoundId,
+    Ir, LoopKind, OperationData, OperationId, OperationKind, OriginData, OriginId, OutputData, OutputId,
+    ParameterData, ParameterId, Place, PlacementData, PlacementId, PlacementSite, ProgramData, ProgramId,
+    Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId, TypeData, TypeId,
+};
 pub use expressions::insert_expressions;
-pub use from_tlc::{convert_program, ConvertError, Converted};
+pub use from_tlc::{from_tlc, ConvertError};
 pub use fusion::fuse;
-pub use scalar::optimize_expressions;
+pub use scalar::{place, simplify};
 pub use schedule::schedule;
 pub use timing::with_timings;
 pub use to_ssa::to_ssa;
@@ -54,7 +65,7 @@ pub use to_ssa::to_ssa;
 #[derive(Debug, thiserror::Error)]
 pub enum OptimizeError {
     #[error("egglog optimization: {0}")]
-    Engine(#[from] egglog_engine::Error),
+    Engine(#[from] Error),
     #[error("egglog extraction: {0}")]
     Extraction(String),
     #[error("egglog output: {0}")]
@@ -68,3 +79,14 @@ pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("fu
 mod from_tlc_tests;
 #[cfg(test)]
 mod graph_tests;
+
+#[cfg(test)]
+pub(super) fn simplify_and_place(program: Program<Expressions>) -> Result<Program<Placed>, OptimizeError> {
+    place(simplify(program)?)
+}
+
+fn parse_program(filename: &str, source: &str) -> Result<Vec<Command>, OptimizeError> {
+    Parser::default()
+        .get_program_from_string(Some(filename.into()), source)
+        .map_err(|error| OptimizeError::Output(error.to_string()))
+}

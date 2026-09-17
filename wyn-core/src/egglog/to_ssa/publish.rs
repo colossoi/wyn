@@ -1,33 +1,39 @@
 //! Publish the finalized resource/dispatch readout through the shared ABI.
-
-use super::*;
+use super::super::timing::span;
+use super::{error, BindingRef, Compiler, OptimizeError, Storage, StorageRole, Value};
+use crate::egglog::data::{BlockId, BufferId};
 use crate::egglog::{DispatchId, EntryId as SourceEntryId};
+use crate::flow::ExecutionModel;
 use crate::interface::publish::PipelineDescriptorPublish;
-use crate::interface::EntryPublication;
-use crate::interface::{EntryInputKind, StorageAccess};
+use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
 use crate::kernel_graph::{KernelDomain, KernelId, PhysicalKernel, PhysicalKernelGraph};
-use crate::pipeline_descriptor::{self as pd, ComputePipeline, ComputeStage, Pipeline, PipelineDescriptor};
-use crate::{ResourceAccess, ResourceUse};
+use crate::pipeline_descriptor::{
+    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, GraphicsPipeline,
+    GraphicsStage, Pipeline, PipelineDescriptor, ShaderStage, SourceResultBinding,
+};
+use crate::ssa::types::EntryPoint;
+use crate::{EntryId, LookupMap, ResourceAccess, ResourceId, ResourceUse};
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Compiler<'_> {
     pub(super) fn publish(
         &self,
-        entries: &mut [ssa::types::EntryPoint],
+        entries: &mut [EntryPoint],
         roots: &[(BlockId, SourceEntryId, [u32; 3], bool)],
     ) -> Result<(PipelineDescriptor, PhysicalKernelGraph), OptimizeError> {
-        let _timing = super::super::timing::span("publish pipeline ABI");
+        let _timing = span("publish pipeline ABI");
         let mut pipeline = PipelineDescriptor::default();
         let mut associations = vec![];
         let entry_indices: BTreeMap<_, _> = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         let dispatches: BTreeMap<_, _> =
-            self.data.dispatches.iter().map(|(&id, d)| (d.kernel, (id, d))).collect();
-        let order = wyn_graph::topo_sort_by_dependencies(self.data.dispatches.ids(), |id, out| {
-            out.extend(self.data.dispatches[id].dependencies.iter().copied());
+            self.data.state.dispatches.iter().map(|(&id, d)| (d.kernel, (id, d))).collect();
+        let order = wyn_graph::topo_sort_by_dependencies(self.data.state.dispatches.ids(), |id, out| {
+            out.extend(self.data.state.dispatches[id].dependencies.iter().copied());
         })
         .map_err(|e| error(e.to_string()))?;
         let mut by_owner: BTreeMap<SourceEntryId, Vec<BlockId>> = BTreeMap::new();
         for &id in &order {
-            let d = &self.data.dispatches[id];
+            let d = &self.data.state.dispatches[id];
             by_owner.entry(d.owner).or_default().push(d.kernel);
         }
         for &(root, owner, _, finish) in roots {
@@ -38,6 +44,7 @@ impl Compiler<'_> {
         let by_binding: BTreeMap<_, _> = self.bindings.iter().map(|(&id, b)| (b.binding, id)).collect();
         let input_resources: BTreeMap<_, _> = self
             .data
+            .state
             .buffers
             .iter()
             .filter_map(|(&id, b)| {
@@ -47,7 +54,8 @@ impl Compiler<'_> {
                 self.value_binding(&Value::Buffer(id)).map(|(binding, _)| (binding, id))
             })
             .collect();
-        let output_buffers: BTreeSet<_> = self.data.outputs.values().filter_map(|o| o.buffer).collect();
+        let output_buffers: BTreeSet<_> =
+            self.data.state.outputs.values().filter_map(|o| o.buffer).collect();
         let mut physical = vec![];
         let mut kernel_ids = BTreeMap::<DispatchId, KernelId>::new();
         let mut graphics_groups = BTreeMap::new();
@@ -55,15 +63,14 @@ impl Compiler<'_> {
             self.data.symbols.values().map(|s| (s.source.0, &s.name)).collect();
         for (owner, blocks) in by_owner {
             let declaration = &self.data.entries[owner].declaration;
-            if declaration.entry_kind != crate::interface::EntryKind::Compute {
-                let group = declaration
-                    .graphics_group
-                    .as_ref()
-                    .ok_or_else(|| error("graphics entry is missing its operation identity"))?;
+            if declaration.entry_kind != EntryKind::Compute {
+                let Some(group) = declaration.graphics_group.as_ref() else {
+                    return Err(error("graphics entry is missing its operation identity"));
+                };
                 let key = (group.root.0, group.operation);
                 let index = *graphics_groups.entry(key).or_insert_with(|| {
                     let index = pipeline.pipelines.len();
-                    pipeline.pipelines.push(Pipeline::Graphics(pd::GraphicsPipeline {
+                    pipeline.pipelines.push(Pipeline::Graphics(GraphicsPipeline {
                         invocation: group.invocation.clone(),
                         stages: vec![],
                         bindings: vec![],
@@ -74,19 +81,19 @@ impl Compiler<'_> {
                     index
                 });
                 let Pipeline::Graphics(graphics) = &mut pipeline.pipelines[index] else {
-                    unreachable!()
+                    unreachable!("graphics group points to non-graphics pipeline {index}")
                 };
                 for root in blocks {
                     let entry = &entries[entry_indices[&EntryId::from(root.as_u32())]];
-                    graphics.stages.push(pd::GraphicsStage {
+                    let Some(owner) = symbol_names.get(&group.root.0) else {
+                        return Err(error("missing graphics owner"));
+                    };
+                    graphics.stages.push(GraphicsStage {
                         entry_point: entry.name.clone(),
-                        owner: symbol_names
-                            .get(&group.root.0)
-                            .ok_or_else(|| error("missing graphics owner"))?
-                            .to_string(),
+                        owner: owner.to_string(),
                         stage: match entry.execution_model {
-                            crate::flow::ExecutionModel::Vertex => pd::ShaderStage::Vertex,
-                            crate::flow::ExecutionModel::Fragment => pd::ShaderStage::Fragment,
+                            ExecutionModel::Vertex => ShaderStage::Vertex,
+                            ExecutionModel::Fragment => ShaderStage::Fragment,
                             _ => return Err(error("compute dispatch in graphics entry")),
                         },
                         uses: Default::default(),
@@ -103,12 +110,12 @@ impl Compiler<'_> {
             for root in blocks {
                 let entry = &mut entries[entry_indices[&EntryId::from(root.as_u32())]];
                 let size = match entry.execution_model {
-                    crate::flow::ExecutionModel::Compute { local_size } => local_size,
+                    ExecutionModel::Compute { local_size } => local_size,
                     _ => unreachable!(),
                 };
                 let dispatch = dispatches.get(&root).copied();
                 let dispatch_size = dispatch.map_or(
-                    pd::DispatchSize::Fixed {
+                    DispatchSize::Fixed {
                         x: 1,
                         y: 1,
                         z: 1,
@@ -132,10 +139,9 @@ impl Compiler<'_> {
                     }
                 }
                 for declaration in &mut entry.storage_bindings {
-                    let buffer = by_binding
-                        .get(&declaration.binding)
-                        .copied()
-                        .ok_or_else(|| error("unplanned storage binding"))?;
+                    let Some(buffer) = by_binding.get(&declaration.binding).copied() else {
+                        return Err(error("unplanned storage binding"));
+                    };
                     let access = accesses.get(&declaration.binding).copied().unwrap_or_else(|| {
                         if output_buffers.contains(&buffer) && dispatch.is_none() {
                             ResourceAccess::Write
@@ -153,7 +159,7 @@ impl Compiler<'_> {
                 }
                 for input in &mut entry.inputs {
                     if let EntryInputKind::Storage {
-                        exposure: crate::interface::BindingExposure::Host(binding),
+                        exposure: BindingExposure::Host(binding),
                         access,
                         ..
                     } = &mut input.kind
@@ -177,10 +183,10 @@ impl Compiler<'_> {
                         .dependencies
                         .iter()
                         .map(|dep| {
-                            kernel_ids
-                                .get(dep)
-                                .copied()
-                                .ok_or_else(|| error("dispatch dependency crosses entry ownership"))
+                            let Some(&id) = kernel_ids.get(dep) else {
+                                return Err(error("dispatch dependency crosses entry ownership"));
+                            };
+                            Ok(id)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     kernel_ids.insert(did, id);
@@ -189,14 +195,17 @@ impl Compiler<'_> {
                     previous.clone()
                 };
                 let domain = match &dispatch_size {
-                    pd::DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
-                    pd::DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
+                    DispatchSize::Fixed { x, y, z, .. } => KernelDomain::Fixed { x: *x, y: *y, z: *z },
+                    DispatchSize::DerivedFrom { len, .. } => KernelDomain::Elements(len.clone()),
+                };
+                let Some(interface) = &self.data.state.blocks[root].interface else {
+                    return Err(error(format!("scheduled root {root:?} has no interface")));
                 };
                 physical.push(PhysicalKernel {
                     id,
                     entry: entry.id,
                     entry_point: entry.name.clone(),
-                    label: self.data.blocks[root].interface.as_ref().unwrap().name.clone(),
+                    label: interface.name.clone(),
                     source_entry: Some(EntryId::from(owner.as_u32())),
                     output_routes: vec![],
                     workgroup_size: size,
@@ -204,7 +213,7 @@ impl Compiler<'_> {
                     resources: resources
                         .into_iter()
                         .map(|(id, access)| ResourceUse {
-                            resource: crate::ResourceId::from_egglog_buffer(id.as_u32()),
+                            resource: ResourceId::from_egglog_buffer(id.as_u32()),
                             access,
                         })
                         .collect(),
@@ -226,20 +235,20 @@ impl Compiler<'_> {
                 default_total_threads: None,
             }));
             associations.push(ids);
-            for output in self.data.outputs.values().filter(|o| o.entry == owner) {
+            for output in self.data.state.outputs.values().filter(|o| o.entry == owner) {
                 // TODO: extend SourceResultBinding with view offset/live-length
                 // metadata. It currently publishes backing/capacity only; a
                 // compacted result's count remains explicit in the egglog plan.
-                let id = output.buffer.ok_or_else(|| {
-                    error(format!(
+                let Some(id) = output.buffer else {
+                    return Err(error(format!(
                         "output {} of {source_name} has no planned backing",
                         output.index
-                    ))
-                })?;
-                let (binding, _) = self
-                    .value_binding(&Value::Buffer(id))
-                    .ok_or_else(|| error("output has no physical binding"))?;
-                pipeline.source_results.push(pd::SourceResultBinding {
+                    )));
+                };
+                let Some((binding, _)) = self.value_binding(&Value::Buffer(id)) else {
+                    return Err(error("output has no physical binding"));
+                };
+                pipeline.source_results.push(SourceResultBinding {
                     entry: source_name.clone(),
                     result: output.index,
                     pipeline_index,
@@ -272,7 +281,7 @@ impl Compiler<'_> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, b)| match b {
-                    pd::Binding::StorageBuffer { set, binding, .. } => {
+                    Binding::StorageBuffer { set, binding, .. } => {
                         Some((BindingRef::new(*set, *binding), i))
                     }
                     _ => None,
@@ -287,9 +296,9 @@ impl Compiler<'_> {
                         stage.uses.record(
                             slot,
                             match access {
-                                ResourceAccess::Read => pd::Access::ReadOnly,
-                                ResourceAccess::Write => pd::Access::WriteOnly,
-                                ResourceAccess::ReadWrite => pd::Access::ReadWrite,
+                                ResourceAccess::Read => Access::ReadOnly,
+                                ResourceAccess::Write => Access::WriteOnly,
+                                ResourceAccess::ReadWrite => Access::ReadWrite,
                             },
                         );
                     }
@@ -309,9 +318,9 @@ impl Compiler<'_> {
                 .filter(|o| o.pipeline_index == index)
                 .map(|o| (o.set, o.binding))
                 .collect();
-            let mut union = crate::LookupMap::new();
+            let mut union = LookupMap::new();
             for b in bindings {
-                if let pd::Binding::StorageBuffer {
+                if let Binding::StorageBuffer {
                     set,
                     binding,
                     usage,
@@ -319,13 +328,13 @@ impl Compiler<'_> {
                     ..
                 } = b
                 {
-                    if outputs.contains(&(*set, *binding)) && *usage == pd::BufferUsage::Intermediate {
-                        *usage = pd::BufferUsage::Output;
+                    if outputs.contains(&(*set, *binding)) && *usage == BufferUsage::Intermediate {
+                        *usage = BufferUsage::Output;
                     }
                     let a = match access {
-                        pd::Access::ReadOnly => ResourceAccess::Read,
-                        pd::Access::WriteOnly => ResourceAccess::Write,
-                        pd::Access::ReadWrite => ResourceAccess::ReadWrite,
+                        Access::ReadOnly => ResourceAccess::Read,
+                        Access::WriteOnly => ResourceAccess::Write,
+                        Access::ReadWrite => ResourceAccess::ReadWrite,
                     };
                     union.insert(BindingRef::new(*set, *binding), a);
                 }

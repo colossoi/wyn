@@ -1,8 +1,6 @@
 use super::filter::uint;
-use super::{
-    array_value, error, length, singleton, BlockId, BufferId, Instruction, OperationId, OperationKind,
-    OptimizeError, Planner, Storage, Value,
-};
+use super::{array_value, error, length, singleton, Instruction, OptimizeError, Planner, Storage, Value};
+use crate::egglog::data::{BlockId, BufferId, OperationId, OperationKind};
 
 impl Planner<'_> {
     pub(super) fn serial_indexed(
@@ -12,7 +10,7 @@ impl Planner<'_> {
         allocate: BlockId,
         storage: Storage,
     ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
-        let owner = self.data.blocks[entry].function;
+        let owner = self.data.state.blocks[entry].function;
         match self.data.operations[op].kind.clone() {
             OperationKind::Scatter {
                 destination,

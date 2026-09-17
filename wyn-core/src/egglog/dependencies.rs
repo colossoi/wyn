@@ -1,12 +1,13 @@
 //! Execution dependencies, liveness and safety shared by compiler passes.
-use super::data::{
-    value_source, AssociatedData, ExprId, ExprKind, OperationId, OperationKind, RegionId, SoacBody,
-};
 use super::visit::Operand;
 use super::OptimizeError;
-use crate::{types, LookupMap};
+use crate::egglog::data::{
+    value_source, ExprId, ExprKind, Ir, OperationId, OperationKind, RegionId, SoacBody,
+};
+use crate::LookupMap;
 use std::collections::{BTreeMap, BTreeSet};
 use wyn_base::persistent_sets::{Set, Sets, EMPTY};
+
 mod order;
 mod worklists;
 
@@ -40,7 +41,7 @@ pub(super) struct Dependencies {
     pub safe_regions: BTreeSet<RegionId>,
 }
 
-pub(super) fn analyze(data: &AssociatedData) -> Dependencies {
+pub(super) fn analyze(data: &Ir) -> Dependencies {
     Analysis::new(data).dependencies
 }
 
@@ -54,7 +55,7 @@ pub(super) struct Analysis<'a> {
     pub(super) active: BTreeSet<RegionId>,
 }
 impl<'a> Analysis<'a> {
-    pub(super) fn new(data: &'a AssociatedData) -> Self {
+    pub(super) fn new(data: &'a Ir) -> Self {
         let mut visitor = Visitor {
             data,
             expressions: LookupMap::new(),
@@ -100,7 +101,7 @@ impl Dependencies {
 
     pub(super) fn schedules(
         &self,
-        data: &AssociatedData,
+        data: &Ir,
     ) -> Result<BTreeMap<RegionId, Vec<OperationId>>, OptimizeError> {
         order::schedules(self, data)
     }
@@ -110,7 +111,7 @@ impl Dependencies {
     #[cfg(test)]
     pub(super) fn walk_dependencies(
         &self,
-        data: &AssociatedData,
+        data: &Ir,
         root: OperationId,
         mut visit: impl FnMut(OperationId),
     ) {
@@ -138,7 +139,7 @@ pub(super) fn safe_body(body: &SoacBody, regions: &BTreeSet<RegionId>) -> bool {
 }
 
 pub(super) struct Visitor<'a> {
-    data: &'a AssociatedData,
+    data: &'a Ir,
     expressions: LookupMap<ExprId, References>,
     pub(super) sets: Sets,
 }

@@ -1,10 +1,16 @@
 //! Cost-based extraction of typed terms back into the interned sidecar DAG.
-use super::*;
-use egglog_engine::{
-    ast::{Literal, Parser},
-    extract::{CostModel, Extractor, TreeAdditiveCostModel},
-    Enode, Function, Term, TermDag,
-};
+use super::fold::evaluate;
+use super::term::{app, key};
+use super::{error, intern_expr, name, EGraph, OptimizeError};
+use crate::egglog::data::{Array, ExprId, ExprKind, Ir, OperationId};
+use crate::egglog::expressions::emit_additional;
+use crate::egglog::parse_program;
+use crate::egglog::timing::{span, time};
+use egglog_engine::ast::{Literal, Parser};
+use egglog_engine::extract::{CostModel, Extractor, TreeAdditiveCostModel};
+use egglog_engine::sort::S;
+use egglog_engine::{ArcSort, Enode, Function, Term, TermDag, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 struct Cost;
 impl CostModel<u64> for Cost {
@@ -14,14 +20,9 @@ impl CostModel<u64> for Cost {
     fn enode_cost(&self, graph: &EGraph, f: &Function, e: &Enode<'_>) -> u64 {
         TreeAdditiveCostModel::default().enode_cost(graph, f, e)
     }
-    fn base_value_cost(
-        &self,
-        graph: &EGraph,
-        sort: &egglog_engine::ArcSort,
-        value: egglog_engine::Value,
-    ) -> u64 {
+    fn base_value_cost(&self, graph: &EGraph, sort: &ArcSort, value: Value) -> u64 {
         if sort.name() == "String" {
-            let text = graph.value_to_base::<egglog_engine::sort::S>(value);
+            let text = graph.value_to_base::<S>(value);
             if matches!(text.as_str(), "/" | "%" | "//" | "%%" | "**") {
                 return 8;
             }
@@ -32,10 +33,10 @@ impl CostModel<u64> for Cost {
 
 pub(super) fn extract(
     graph: &mut EGraph,
-    data: &mut AssociatedData,
+    data: &mut Ir,
     live: &BTreeSet<ExprId>,
 ) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
-    let _timing = timing::span("extract expressions");
+    let _timing = span("extract expressions");
     let mut roots = vec![];
     for &id in live {
         let ast =
@@ -51,9 +52,9 @@ pub(super) fn extract(
     };
     let mut replacements = BTreeMap::new();
     for (id, sort, value) in roots {
-        let (_, node) = extractor
-            .extract_best_with_sort(graph, &mut dag, value, sort)
-            .ok_or_else(|| error("no finite expression extraction"))?;
+        let Some((_, node)) = extractor.extract_best_with_sort(graph, &mut dag, value, sort) else {
+            return Err(error("no finite expression extraction"));
+        };
         let value = reader.value(&dag, node)?;
         if id != value {
             replacements.insert(id, value);
@@ -66,16 +67,16 @@ pub(super) fn extract(
 /// alternative has not yet become cheaper than the original expression.
 pub(super) fn constants(
     graph: &mut EGraph,
-    data: &mut AssociatedData,
+    data: &mut Ir,
     live_operations: &BTreeSet<OperationId>,
     round: usize,
     seen: &mut BTreeSet<(ExprId, ExprId)>,
 ) -> Result<bool, OptimizeError> {
-    let _timing = timing::span("constant evaluation");
-    let (rows, _, dag) = timing::time("read egraph terms", || {
+    let _timing = span("constant evaluation");
+    let (rows, _, dag) = time("read egraph terms", || {
         graph.function_to_dag("Typed", usize::MAX, false)
     })?;
-    let evaluate = timing::span("evaluate terms");
+    let evaluation = span("evaluate terms");
     let mut reader = Reader {
         data,
         memo: BTreeMap::new(),
@@ -85,7 +86,7 @@ pub(super) fn constants(
     let prefix = format!("$fold{round}");
     for row in rows {
         let id = reader.value(&dag, row)?;
-        if let Some(value) = fold::evaluate(reader.data, id) {
+        if let Some(value) = evaluate(reader.data, id) {
             if id != value && seen.insert((id, value)) {
                 extra.push(value);
                 facts.push_str(&format!(
@@ -96,13 +97,13 @@ pub(super) fn constants(
             }
         }
     }
-    drop(evaluate);
+    drop(evaluation);
     if extra.is_empty() {
         return Ok(false);
     }
-    timing::time("insert evaluated constants", || -> Result<(), OptimizeError> {
-        let source = expressions::emit_additional(reader.data, live_operations, &extra, &prefix)?;
-        graph.run_program(term::parse("wyn-evaluated.egg", &source)?)?;
+    time("insert evaluated constants", || -> Result<(), OptimizeError> {
+        let source = emit_additional(reader.data, live_operations, &extra, &prefix)?;
+        graph.run_program(parse_program("wyn-evaluated.egg", &source)?)?;
         graph.parse_and_run_program(None, &facts)?;
         Ok(())
     })?;
@@ -110,7 +111,7 @@ pub(super) fn constants(
 }
 
 struct Reader<'a> {
-    data: &'a mut AssociatedData,
+    data: &'a mut Ir,
     memo: BTreeMap<usize, ExprId>,
 }
 impl Reader<'_> {
@@ -118,18 +119,18 @@ impl Reader<'_> {
         if let Some(&v) = self.memo.get(&id) {
             return Ok(v);
         }
-        let args = term::app(dag, id, "Typed", 2)?;
-        let ty = term::key(dag, args[0], "TypeId")?;
+        let args = app(dag, id, "Typed", 2)?;
+        let ty = key(dag, args[0], "TypeId")?;
         let Term::App(tag, a) = dag.get(args[1]) else {
             return Err(error("expected expression node"));
         };
         let kind = match (tag.as_str(), a.as_slice()) {
-            ("Global", &[x]) => ExprKind::Global(term::key(dag, x, "SymbolId")?),
-            ("Parameter", &[x]) => ExprKind::Parameter(term::key(dag, x, "ParameterId")?),
-            ("Builtin", &[x]) => ExprKind::Builtin(term::key(dag, x, "BuiltinId")?),
-            ("Extern", &[x]) => ExprKind::Extern(term::key(dag, x, "ExternId")?),
-            ("OperationResult", &[x]) => ExprKind::OperationResult(term::key(dag, x, "OperationId")?),
-            ("Lambda", &[x]) => ExprKind::Lambda(term::key(dag, x, "RegionId")?),
+            ("Global", &[x]) => ExprKind::Global(key(dag, x, "SymbolId")?),
+            ("Parameter", &[x]) => ExprKind::Parameter(key(dag, x, "ParameterId")?),
+            ("Builtin", &[x]) => ExprKind::Builtin(key(dag, x, "BuiltinId")?),
+            ("Extern", &[x]) => ExprKind::Extern(key(dag, x, "ExternId")?),
+            ("OperationResult", &[x]) => ExprKind::OperationResult(key(dag, x, "OperationId")?),
+            ("Lambda", &[x]) => ExprKind::Lambda(key(dag, x, "RegionId")?),
             ("BinOp", &[x]) => ExprKind::BinOp(string(dag, x)?),
             ("UnOp", &[x]) => ExprKind::UnOp(string(dag, x)?),
             ("Int", &[x]) => ExprKind::Int(string(dag, x)?),
@@ -158,14 +159,14 @@ impl Reader<'_> {
                 else_value: self.value(dag, b)?,
             },
             ("Closure", &[code, count, xs]) => ExprKind::Closure {
-                code: term::key(dag, code, "SymbolId")?,
+                code: key(dag, code, "SymbolId")?,
                 param_count: usize::try_from(integer(dag, count)?).map_err(|_| error("closure arity"))?,
                 captures: self.values(dag, xs)?,
             },
             ("ArrayValue", &[x]) => ExprKind::Array(self.array(dag, x)?),
             _ => return Err(error(&format!("unknown extracted node {tag}"))),
         };
-        let value = expr(self.data, ty, kind);
+        let value = intern_expr(self.data, ty, kind);
         self.memo.insert(id, value);
         Ok(value)
     }

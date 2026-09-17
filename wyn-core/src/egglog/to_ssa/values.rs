@@ -1,36 +1,39 @@
+use super::interface::storage_type;
 use super::{
-    builder_error, concrete, error, u32_type, uint, Body, InstKind, OpTag, OptimizeError, PureViewSource,
-    Storage, Type, TypeExt, TypeName, Typed, Value,
+    builder_error, concrete, error, u32_type, uint, Body, InstKind, OpTag, OptimizeError, ParameterId,
+    PureViewSource, Storage, Type, TypeExt, TypeName, Typed, Value,
 };
-use crate::builtins;
-use crate::egglog::{Array, ExprId, ExprKind};
+use crate::builtins::catalog;
+use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
 use crate::flow::ControlHeader;
 use crate::op::{BinaryOperator, UnaryOperator};
-use crate::ssa::types::{ConstantValue, Terminator, ValueRef};
-use crate::types;
+use crate::ssa::types::{ConstantValue, PlaceId, Terminator, ValueRef};
+use crate::types::{
+    bool_type, buffer_tag, i32, is_array_variant_view, is_array_variant_virtual, make_array1, no_buffer,
+    sized_array, view_array_of, view_array_with_size,
+};
+use crate::BindingRef;
 
 impl Body<'_, '_> {
-    pub(super) fn input(&mut self, id: super::ParameterId) -> Result<Typed, OptimizeError> {
+    pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.environment.parameters.get(&id) {
             return Ok(value.clone());
         }
         if self.entry.is_none() {
             return Err(error(format!("unbound helper parameter {id:?}")));
         }
-        let inputs = self
-            .compiler
-            .inputs
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| error(format!("no source ABI for parameter {id:?}")))?;
+        let Some(inputs) = self.compiler.inputs.get(&id).cloned() else {
+            return Err(error(format!("no source ABI for parameter {id:?}")));
+        };
         let mut values = vec![];
         for input in inputs {
             let (ty, binding) = if let Some(binding) = input.storage_binding() {
-                let element = super::interface::storage_type(
-                    input.ty.elem_type().ok_or_else(|| error("storage input element"))?,
-                )?;
+                let Some(element) = input.ty.elem_type() else {
+                    return Err(error("storage input element"));
+                };
+                let element = storage_type(element)?;
                 (
-                    types::view_array_of(&element, types::buffer_tag(binding)),
+                    view_array_of(&element, buffer_tag(binding)),
                     Some((binding, element)),
                 )
             } else {
@@ -43,7 +46,7 @@ impl Body<'_, '_> {
                 } else {
                     self.op(
                         OpTag::Intrinsic {
-                            id: builtins::catalog().known().storage_len,
+                            id: catalog().known().storage_len,
                             overload_idx: 0,
                         },
                         vec![Self::number(binding.set), Self::number(binding.binding)],
@@ -85,19 +88,18 @@ impl Body<'_, '_> {
             }
             ExprKind::Parameter(p) => self.input(*p),
             ExprKind::OperationResult(op) => {
-                let value = self
-                    .compiler
-                    .results
-                    .get(op)
-                    .cloned()
-                    .ok_or_else(|| error(format!("unmaterialized capture {op:?}")))?;
+                let Some(value) = self.compiler.results.get(op).cloned() else {
+                    return Err(error(format!("unmaterialized capture {op:?}")));
+                };
                 let value = self.value(&value)?;
                 self.cast(value, &data.types[data.expressions[id].ty].ty)
             }
             ExprKind::Project { tuple, index } => {
                 if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
                     if let Some(Value::Tuple(fields)) = self.compiler.results.get(&op) {
-                        let value = fields.get(*index).cloned().ok_or_else(|| error("result slot"))?;
+                        let Some(value) = fields.get(*index).cloned() else {
+                            return Err(error("result slot"));
+                        };
                         return self.value(&value);
                     }
                 }
@@ -139,16 +141,11 @@ impl Body<'_, '_> {
             }
         }
     }
-    fn view(
-        &mut self,
-        binding: crate::BindingRef,
-        element: Type,
-        len: Typed,
-    ) -> Result<Typed, OptimizeError> {
-        let ty = types::view_array_with_size(
+    fn view(&mut self, binding: BindingRef, element: Type, len: Typed) -> Result<Typed, OptimizeError> {
+        let ty = view_array_with_size(
             &element,
             Type::Constructed(TypeName::SizePlaceholder, vec![]),
-            types::buffer_tag(binding),
+            buffer_tag(binding),
         );
         self.op(
             OpTag::StorageView(PureViewSource::Storage(binding)),
@@ -165,12 +162,12 @@ impl Body<'_, '_> {
     pub(super) fn value(&mut self, value: &Value) -> Result<Typed, OptimizeError> {
         match value {
             Value::Int(n) => Ok(Self::number(*n)),
-            Value::Local(name) => self
-                .environment
-                .locals
-                .get(name)
-                .cloned()
-                .ok_or_else(|| error(format!("unbound scaffold local {name}"))),
+            Value::Local(name) => {
+                let Some(value) = self.environment.locals.get(name).cloned() else {
+                    return Err(error(format!("unbound scaffold local {name}")));
+                };
+                Ok(value)
+            }
             Value::Source(id) => self.expression(*id),
             Value::Tuple(values) => {
                 let values = self.values(values)?;
@@ -192,19 +189,16 @@ impl Body<'_, '_> {
                         ty,
                     });
                 }
-                let buffer = &self.compiler.data.buffers[*id];
+                let buffer = &self.compiler.data.state.buffers[*id];
                 if let Storage::External(expr) = buffer.storage {
                     return self.expression(expr);
                 }
                 if buffer.storage == Storage::Function {
                     return Err(error("local buffer used before allocation"));
                 }
-                let declaration = self
-                    .compiler
-                    .bindings
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| error(format!("buffer {id:?} has no Allocation fact")))?;
+                let Some(declaration) = self.compiler.bindings.get(id).cloned() else {
+                    return Err(error(format!("buffer {id:?} has no Allocation fact")));
+                };
                 self.compiler.used.insert(*id);
                 let len = self.value(&buffer.length)?;
                 let len = self.cast(len, &u32_type())?;
@@ -290,7 +284,7 @@ impl Body<'_, '_> {
                 for value in self
                     .compiler
                     .placements
-                    .get(&crate::egglog::PlacementSite::Expression(id))
+                    .get(&PlacementSite::Expression(id))
                     .cloned()
                     .unwrap_or_default()
                 {
@@ -298,7 +292,9 @@ impl Body<'_, '_> {
                     self.environment.expressions.insert(value, computed);
                 }
                 let c = self.expression(*condition)?;
-                let start = self.builder.current_block().ok_or_else(|| error("no current block"))?;
+                let Some(start) = self.builder.current_block() else {
+                    return Err(error("no current block"));
+                };
                 let yes = self.builder.create_block();
                 let no = self.builder.create_block();
                 let end = self.builder.create_block();
@@ -385,18 +381,18 @@ impl Body<'_, '_> {
                 let Some(first) = values.first() else {
                     return Err(error("TODO: element type of empty array operand"));
                 };
-                let ty = types::sized_array(values.len(), first.ty.clone());
+                let ty = sized_array(values.len(), first.ty.clone());
                 self.op(OpTag::ArrayLit(values.len()), values, ty)
             }
             Array::Range { start, len, step } => {
                 let a = self.expression(*start)?;
                 let n = self.expression(*len)?;
-                let n = self.cast(n, &types::i32())?;
-                let ty = types::make_array1(
+                let n = self.cast(n, &i32())?;
+                let ty = make_array1(
                     a.ty.clone(),
                     Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
                     Type::Constructed(TypeName::SizePlaceholder, vec![]),
-                    types::no_buffer(),
+                    no_buffer(),
                 );
                 let mut args = vec![a, n];
                 if let Some(step) = step {
@@ -413,25 +409,28 @@ impl Body<'_, '_> {
         }
     }
     pub(super) fn field(&mut self, value: Typed, index: usize) -> Result<Typed, OptimizeError> {
-        let ty = match &value.ty {
+        let Some(ty) = (match &value.ty {
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => {
                 fields.get(index).cloned()
             }
             Type::Constructed(TypeName::Vec, fields) => fields.first().cloned(),
             _ => None,
-        }
-        .ok_or_else(|| error(format!("invalid projection {index} of {:?}", value.ty)))?;
+        }) else {
+            return Err(error(format!("invalid projection {index} of {:?}", value.ty)));
+        };
         self.op(OpTag::Project { index: index as u32 }, vec![value], ty)
     }
     pub(super) fn index_place(
         &mut self,
         array: Typed,
         index: Typed,
-    ) -> Result<(crate::ssa::types::PlaceId, Type), OptimizeError> {
-        if !array.ty.array_variant().is_some_and(types::is_array_variant_view) {
+    ) -> Result<(PlaceId, Type), OptimizeError> {
+        if !array.ty.array_variant().is_some_and(is_array_variant_view) {
             return Err(error("TODO: writable nested/composite array view"));
         }
-        let ty = array.ty.elem_type().cloned().ok_or_else(|| error("indexed value has no element type"))?;
+        let Some(ty) = array.ty.elem_type().cloned() else {
+            return Err(error("indexed value has no element type"));
+        };
         let place = self.builder.new_place(ty.clone());
         self.builder
             .push_void_inst(InstKind::ViewIndex {
@@ -451,7 +450,7 @@ impl Body<'_, '_> {
             }
             return self.tuple(values);
         }
-        if array.ty.array_variant().is_some_and(types::is_array_variant_view) {
+        if array.ty.array_variant().is_some_and(is_array_variant_view) {
             let (place, ty) = self.index_place(array, index)?;
             let value =
                 self.builder.push_inst(InstKind::Load { place }, ty.clone()).map_err(builder_error)?;
@@ -460,8 +459,10 @@ impl Body<'_, '_> {
                 ty,
             });
         }
-        let ty = array.ty.elem_type().cloned().ok_or_else(|| error("index of non-array"))?;
-        let index = if array.ty.array_variant().is_some_and(types::is_array_variant_virtual) {
+        let Some(ty) = array.ty.elem_type().cloned() else {
+            return Err(error("index of non-array"));
+        };
+        let index = if array.ty.array_variant().is_some_and(is_array_variant_virtual) {
             self.cast(index, &ty)?
         } else {
             index
@@ -487,10 +488,10 @@ impl Body<'_, '_> {
                 return self.op(OpTag::Tuple(fields.len()), fields, ty);
             }
         }
-        if *ty == types::bool_type() {
+        if *ty == bool_type() {
             return self.binary(BinaryOperator::NotEqual, value, Self::number(0));
         }
-        if value.ty == types::bool_type() {
+        if value.ty == bool_type() {
             let one = self.cast(Self::number(1), ty)?;
             let zero = self.cast(Self::number(0), ty)?;
             return self.select(value, one, zero);
@@ -498,7 +499,7 @@ impl Body<'_, '_> {
         let (Type::Constructed(target, _), Type::Constructed(source, _)) = (ty, &value.ty) else {
             return Err(error("unsupported conversion"));
         };
-        let Some(id) = builtins::catalog().conversion(target, source) else {
+        let Some(id) = catalog().conversion(target, source) else {
             return Err(error(format!("TODO: convert {:?} to {ty:?}", value.ty)));
         };
         self.op(OpTag::Intrinsic { id, overload_idx: 0 }, vec![value], ty.clone())
@@ -516,14 +517,16 @@ impl Body<'_, '_> {
                 | BinaryOperator::LogicalAnd
                 | BinaryOperator::LogicalOr
         ) {
-            types::bool_type()
+            bool_type()
         } else {
             a.ty.clone()
         };
         self.op(OpTag::BinOp(op), vec![a, b], ty)
     }
     fn select(&mut self, c: Typed, a: Typed, b: Typed) -> Result<Typed, OptimizeError> {
-        let start = self.builder.current_block().ok_or_else(|| error("no selection block"))?;
+        let Some(start) = self.builder.current_block() else {
+            return Err(error("no selection block"));
+        };
         let yes = self.builder.create_block();
         let no = self.builder.create_block();
         let (end, p) = self.builder.create_block_with_params(vec![a.ty.clone()]);
@@ -559,7 +562,7 @@ impl Body<'_, '_> {
         })
     }
     fn primitive(&mut self, name: &str, args: Vec<Typed>) -> Result<Typed, OptimizeError> {
-        let known = builtins::catalog().known();
+        let known = catalog().known();
         match (name, args.as_slice()) {
             ("global_id", [_]) => self.op(
                 OpTag::Intrinsic {
@@ -598,7 +601,7 @@ impl Body<'_, '_> {
             ("index", [a, i]) => self.index(a.clone(), i.clone()),
             ("bool_to_u32", [a]) => self.cast(a.clone(), &u32_type()),
             ("slice", [a, n]) => {
-                if !a.ty.array_variant().is_some_and(types::is_array_variant_view) {
+                if !a.ty.array_variant().is_some_and(is_array_variant_view) {
                     return Err(error("TODO: slice local composite array"));
                 }
                 self.op(

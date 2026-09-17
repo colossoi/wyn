@@ -1,16 +1,18 @@
 //! Decode operation-local properties and edges into a typed sink.
-use super::{counts, indexed_demand, input_slices, inputs, produced_input, references, routes, Role};
-use super::{summary, InputSite, Kind, Operation, Sink};
-use crate::egglog::data::{
-    body_signature, is_slice, length_source, value_source, Array, AssociatedData, ExprKind, OperationId,
-    OperationKind, RegionId, SoacBody,
+use super::{
+    counts, indexed_demand, input_slices, inputs, produced_input, references, routes, summary, InputSite,
+    Kind, Operation, Role, Sink,
 };
-use crate::egglog::dependencies::Dependencies;
-use crate::types::{self, TypeExt};
+use crate::egglog::data::{
+    body_signature, is_slice, length_source, value_source, Array, ExprKind, Ir, OperationId, OperationKind,
+    RegionId, SoacBody,
+};
+use crate::egglog::dependencies::{safe_body, Dependencies};
+use crate::types::{Type, TypeExt, TypeName};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn invoke<S: Sink>(
-    data: &AssociatedData,
+    data: &Ir,
     body: &SoacBody,
     args: Vec<S::Dependency>,
     sink: &mut S,
@@ -23,7 +25,7 @@ fn invoke<S: Sink>(
 }
 
 pub(super) fn operations<S: Sink>(
-    data: &AssociatedData,
+    data: &Ir,
     execution: &Dependencies,
     schedules: &BTreeMap<RegionId, Vec<OperationId>>,
     sink: &mut S,
@@ -71,25 +73,21 @@ pub(super) fn operations<S: Sink>(
                 fact.post_projectable = true;
                 fact.arrays = 1;
                 fact.element_consumer =
-                    crate::egglog::dependencies::safe_body(map, &execution.safe_regions)
-                        && crate::egglog::dependencies::safe_body(body, &execution.safe_regions);
+                    safe_body(map, &execution.safe_regions) && safe_body(body, &execution.safe_regions);
                 values
             }
             OperationKind::ReduceByIndex { map, body, .. } => {
                 fact.kind = Kind::Element;
                 fact.pre_projectable = invoke(data, map, args, sink).0;
                 fact.element_consumer =
-                    crate::egglog::dependencies::safe_body(map, &execution.safe_regions)
-                        && crate::egglog::dependencies::safe_body(body, &execution.safe_regions);
+                    safe_body(map, &execution.safe_regions) && safe_body(body, &execution.safe_regions);
                 vec![]
             }
             OperationKind::Scatter { body, .. } | OperationKind::BucketScatter { body, .. } => {
                 fact.kind = Kind::Element;
                 fact.pre_projectable = invoke(data, body, args, sink).0;
-                fact.element_consumer = crate::egglog::dependencies::safe_body(
-                    body,
-                    &execution.safe_regions,
-                ) && !matches!(&op.kind, OperationKind::BucketScatter { shape, .. } if data.bucket_shapes[*shape].domain_rank != 1);
+                fact.element_consumer = safe_body(body, &execution.safe_regions)
+                    && !matches!(&op.kind, OperationKind::BucketScatter { shape, .. } if data.bucket_shapes[*shape].domain_rank != 1);
                 vec![]
             }
             _ => vec![],
@@ -134,7 +132,7 @@ pub(super) fn operations<S: Sink>(
 }
 
 pub(super) fn usage(
-    data: &AssociatedData,
+    data: &Ir,
     producer: OperationId,
     consumer: OperationId,
     role: Role,
@@ -151,11 +149,11 @@ pub(super) fn usage(
             if slots.is_empty() {
                 sink.blocked_stream(producer, consumer);
             } else {
-                sink.stream(
-                    producer,
-                    consumer,
-                    &input_slices(data, producer, consumer).unwrap(),
-                );
+                let Some(slices) = input_slices(data, producer, consumer) else {
+                    sink.blocked_stream(producer, consumer);
+                    return;
+                };
+                sink.stream(producer, consumer, &slices);
                 if matches!(&data.operations[producer].kind, OperationKind::Screma { form, .. } if slots.iter().any(|i| *i < counts(form).1))
                 {
                     sink.blocked_stream(producer, consumer);
@@ -176,7 +174,7 @@ pub(super) fn usage(
     }
 }
 
-fn read_resources(data: &AssociatedData, a: &Array, op: OperationId, sink: &mut impl Sink) {
+fn read_resources(data: &Ir, a: &Array, op: OperationId, sink: &mut impl Sink) {
     match a {
         Array::Value(v) => {
             sink.read_resource(op, *v);
@@ -194,17 +192,17 @@ fn read_resources(data: &AssociatedData, a: &Array, op: OperationId, sink: &mut 
         _ => {}
     }
 }
-fn fixed(data: &AssociatedData, a: &Array) -> Option<u64> {
+fn fixed(data: &Ir, a: &Array) -> Option<u64> {
     match a {
         Array::Literal(xs) => Some(xs.len() as u64),
         Array::Value(id) => match data.types[data.expressions[*id].ty].ty.array_size() {
-            Some(types::Type::Constructed(types::TypeName::Size(n), _)) => Some(*n as u64),
+            Some(Type::Constructed(TypeName::Size(n), _)) => Some(*n as u64),
             _ => None,
         },
         _ => None,
     }
 }
-fn domain(data: &AssociatedData, a: &Array, operation: OperationId, sink: &mut impl Sink) {
+fn domain(data: &Ir, a: &Array, operation: OperationId, sink: &mut impl Sink) {
     match a {
         Array::Zip(xs) if !xs.is_empty() => domain(data, &xs[0], operation, sink),
         Array::Value(id) => match &data.expressions[*id].kind {
@@ -225,7 +223,7 @@ fn domain(data: &AssociatedData, a: &Array, operation: OperationId, sink: &mut i
         _ => sink.domain(operation, a, fixed(data, a)),
     }
 }
-fn element_value<S: Sink>(data: &AssociatedData, a: &Array, sink: &mut S) -> S::Dependency {
+fn element_value<S: Sink>(data: &Ir, a: &Array, sink: &mut S) -> S::Dependency {
     match a {
         Array::Zip(xs) => {
             let values = xs.iter().map(|a| element_value(data, a, sink)).collect::<Vec<_>>();
@@ -251,13 +249,7 @@ fn element_value<S: Sink>(data: &AssociatedData, a: &Array, sink: &mut S) -> S::
         _ => sink.independent(),
     }
 }
-fn input_facts(
-    data: &AssociatedData,
-    a: &Array,
-    indirect: bool,
-    token: u64,
-    emit: &mut impl FnMut(InputSite),
-) {
+fn input_facts(data: &Ir, a: &Array, indirect: bool, token: u64, emit: &mut impl FnMut(InputSite)) {
     match a {
         Array::Zip(xs) => {
             for x in xs {
@@ -274,7 +266,7 @@ fn input_facts(
                 if matches!(data.expressions[*tuple].kind, ExprKind::OperationResult(_)) =>
             {
                 let ExprKind::OperationResult(op) = data.expressions[*tuple].kind else {
-                    unreachable!()
+                    unreachable!("guarded projection {id:?} has a non-operation source {tuple:?}")
                 };
                 emit(if indirect { InputSite::Indirect(op, token) } else { InputSite::Direct(op) });
             }

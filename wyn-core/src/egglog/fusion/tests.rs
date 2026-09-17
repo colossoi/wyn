@@ -1,18 +1,26 @@
-use super::super::{
-    convert_program, fuse, Array, AssociatedData, Converted, ExprData, ExprKind, ExternData, OperationData,
-    OperationId, OperationKind, RegionId, ScremaForm, SoacBody,
+use super::super::data::body_signature;
+use super::super::dependencies::analyze;
+use super::super::{from_tlc, fuse, Program};
+use super::analysis::{emit, Egglog};
+use crate::ast::TypeName;
+use crate::compile_thru_tlc;
+use crate::egglog::data::{
+    Array, ExprData, ExprKind, ExternData, Ir, OperationData, OperationId, OperationKind, RegionId,
+    ScremaForm, SoacBody,
 };
-use crate::{ast::TypeName, compile_thru_tlc, tlc, types};
+use crate::egglog::{parse_program, Fused, Imported, SCHEMA};
+use crate::tlc::infer_input_slice_bounds;
+use crate::types::{SoacOwnership, Type};
 use egglog_engine::EGraph;
 
-fn imported(source: &str) -> Converted {
-    convert_program(&tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap()
+fn imported(source: &str) -> Program<Imported> {
+    from_tlc(&infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap()
 }
 
 #[test]
 fn selection_uses_the_complete_lexicographic_priority() {
     let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, crate::egglog::SCHEMA).unwrap();
+    graph.parse_and_run_program(None, SCHEMA).unwrap();
     graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
     graph
         .parse_and_run_program(
@@ -51,7 +59,7 @@ fn selection_uses_the_complete_lexicographic_priority() {
 #[test]
 fn empty_planning_schedule_terminates_without_advancing() {
     let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, crate::egglog::SCHEMA).unwrap();
+    graph.parse_and_run_program(None, SCHEMA).unwrap();
     graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
     graph.parse_and_run_program(None, include_str!("schedule.egg")).unwrap();
     graph.parse_and_run_program(None, "(check (PlanningRound 0))").unwrap();
@@ -63,7 +71,7 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
     let commands = |n: usize| {
         // Build the execution graph directly, isolating fact import from TLC's
         // recursive processing of deeply nested source lets.
-        let mut data = imported("entry chain(xs:[4]i32) [4]i32=map(|x:i32|x+1,xs)").data;
+        let mut data = imported("entry chain(xs:[4]i32) [4]i32=map(|x:i32|x+1,xs)").ir;
         let region = entry(&data);
         let template = data.operations[*data.regions[region].members.first().unwrap()].clone();
         let OperationKind::Screma { inputs, .. } = &template.kind else {
@@ -96,9 +104,9 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
             });
         }
         data.regions[region].results = vec![previous];
-        let mut sink = super::analysis::Egglog::new();
-        super::analysis::emit(&data, &mut sink).unwrap();
-        crate::egglog::term::parse("scaling.egg", &sink.text).unwrap().len()
+        let mut sink = Egglog::new();
+        emit(&data, &mut sink).unwrap();
+        parse_program("scaling.egg", &sink.text).unwrap().len()
     };
     let small = commands(32);
     let large = commands(128);
@@ -108,27 +116,24 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
     );
 }
 
-fn optimized(input: Converted) -> Converted {
+fn optimized(mut input: Program<Imported>) -> Program<Fused> {
     // Some tests modify the imported graph to introduce a precise effect/use,
     // just as the corresponding EGIR tests modify its semantic graph.
-    let result = fuse(input).unwrap();
-    EGraph::default().run_program(result.program.clone()).expect("extracted program must execute");
-    result
+    let mut sink = Egglog::new();
+    emit(&input.ir, &mut sink).unwrap();
+    input.state.facts = parse_program("test-fusion.egg", &sink.text).unwrap();
+    fuse(input).unwrap()
 }
 
-fn entry(data: &AssociatedData) -> RegionId {
+fn entry(data: &Ir) -> RegionId {
     data.definitions[data.entries.values().next().unwrap().definition].body
 }
 
-fn entry_ops(data: &AssociatedData) -> Vec<OperationId> {
-    super::super::dependencies::analyze(data)
-        .schedules(data)
-        .unwrap()
-        .remove(&entry(data))
-        .unwrap_or_default()
+fn entry_ops(data: &Ir) -> Vec<OperationId> {
+    analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
 }
 
-fn form(data: &AssociatedData, id: OperationId) -> &ScremaForm {
+fn form(data: &Ir, id: OperationId) -> &ScremaForm {
     let OperationKind::Screma { form, .. } = &data.operations[id].kind else {
         panic!("expected Screma")
     };
@@ -159,17 +164,17 @@ fn vertical_fusion_preserves_body_order_captures_and_consumer_identity() {
         "entry chain(xs: [4]i32, offset: i32, scale: i32) [4]i32 =
         let a = map(|x: i32| x + offset, xs) in map(|x: i32| x * scale, a)",
     );
-    let [producer, consumer] = entry_ops(&input.data)[..] else {
+    let [producer, consumer] = entry_ops(&input.ir)[..] else {
         panic!("two maps")
     };
     let before = [
-        form(&input.data, producer).pre.clone(),
-        form(&input.data, consumer).pre.clone(),
+        form(&input.ir, producer).pre.clone(),
+        form(&input.ir, consumer).pre.clone(),
     ];
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data), &[consumer]);
+    assert_eq!(entry_ops(&result.ir), &[consumer]);
     let mut after = Vec::new();
-    functions(&form(&result.data, consumer).pre, &mut after);
+    functions(&form(&result.ir, consumer).pre, &mut after);
     assert_eq!(format!("{after:?}"), format!("{before:?}"));
     for body in after {
         let SoacBody::Apply { captures, .. } = body else {
@@ -189,26 +194,29 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
         let a = map(|x: i32| x + 1, xs) in
         let b = map(|x: i32| x * 2, a) in map(|x: i32| x - 3, b)",
     );
-    let last = *entry_ops(&input.data).last().unwrap();
+    let last = *entry_ops(&input.ir).last().unwrap();
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data), &[last]);
+    assert_eq!(entry_ops(&result.ir), &[last]);
     let mut bodies = Vec::new();
-    functions(&form(&result.data, last).pre, &mut bodies);
+    functions(&form(&result.ir, last).pre, &mut bodies);
     assert_eq!(bodies.len(), 3);
-    let OperationKind::Screma { inputs, .. } = &result.data.operations[last].kind else {
+    let OperationKind::Screma { inputs, .. } = &result.ir.operations[last].kind else {
         unreachable!()
     };
     let [Array::Value(input)] = inputs.as_slice() else {
         panic!("one original input")
     };
     assert!(matches!(
-        result.data.expressions[*input].kind,
+        result.ir.expressions[*input].kind,
         ExprKind::Parameter(_)
     ));
-    let again = fuse(result.clone()).unwrap();
+    let again = optimized(Program {
+        ir: result.ir.clone(),
+        state: Imported { facts: vec![] },
+    });
     assert_eq!(
-        format!("{:?}", result.data),
-        format!("{:?}", again.data),
+        format!("{:?}", result.ir),
+        format!("{:?}", again.ir),
         "fixed point"
     );
 }
@@ -217,25 +225,25 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
 fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
     // Port of EGIR fusion::mod_tests with its original gather/scan fixture.
     let input = imported(include_str!("../../../../testfiles/gather_scan_chain.wyn"));
-    let original = entry_ops(&input.data).to_vec();
+    let original = entry_ops(&input.ir).to_vec();
     let scan = original.iter().copied().find(|&id| {
-        matches!(&input.data.operations[id].kind, OperationKind::Screma { form, .. } if !form.scans.is_empty())
+        matches!(&input.ir.operations[id].kind, OperationKind::Screma { form, .. } if !form.scans.is_empty())
     }).unwrap();
-    let OperationKind::Screma { ownership, .. } = &input.data.operations[scan].kind else {
+    let OperationKind::Screma { ownership, .. } = &input.ir.operations[scan].kind else {
         unreachable!()
     };
-    assert_eq!(ownership, &[types::SoacOwnership::UniqueInput]);
+    assert_eq!(ownership, &[SoacOwnership::UniqueInput]);
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data).len(), original.len() - 1);
-    let OperationKind::Screma { ownership, form, .. } = &result.data.operations[scan].kind else {
+    assert_eq!(entry_ops(&result.ir).len(), original.len() - 1);
+    let OperationKind::Screma { ownership, form, .. } = &result.ir.operations[scan].kind else {
         unreachable!()
     };
-    assert_eq!(ownership, &[types::SoacOwnership::Fresh]);
+    assert_eq!(ownership, &[SoacOwnership::Fresh]);
     assert_eq!(form.scans.len(), 1);
     assert_eq!(form.scans[0].neutral.len(), 1);
     // The later gather still observes a materialized scan result.
-    assert!(entry_ops(&result.data).contains(&scan));
-    assert_eq!(entry_ops(&result.data).last(), original.last());
+    assert!(entry_ops(&result.ir).contains(&scan));
+    assert_eq!(entry_ops(&result.ir).last(), original.last());
 }
 
 #[test]
@@ -248,13 +256,13 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
         reduce(|(a,b): (i32,i32), (c,d): (i32,i32)| (a+c,b+d), (0,0), pairs)",
     );
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data).len(), 1);
-    let fused = form(&result.data, entry_ops(&result.data)[0]);
-    let results = super::super::data::body_signature(&fused.pre).1;
+    assert_eq!(entry_ops(&result.ir).len(), 1);
+    let fused = form(&result.ir, entry_ops(&result.ir)[0]);
+    let results = body_signature(&fused.pre).1;
     assert_eq!(results.len(), 1);
     assert!(matches!(
-        &result.data.types[results[0]].ty,
-        types::Type::Constructed(TypeName::Tuple(2), _)
+        &result.ir.types[results[0]].ty,
+        Type::Constructed(TypeName::Tuple(2), _)
     ));
     assert_eq!(fused.reductions.len(), 1);
     assert_eq!(fused.reductions[0].neutral.len(), 1);
@@ -273,40 +281,40 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
 fn opaque_barriers_prevent_fusion_without_effect_tokens() {
     // Port of EGIR snapshot_preserves_opaque_barriers_without_effect_tokens.
     let mut input = imported(CHAIN);
-    let region = entry(&input.data);
-    let consumer = entry_ops(&input.data)[1];
-    let definition = &input.data.definitions[input.data.entries.values().next().unwrap().definition];
+    let region = entry(&input.ir);
+    let consumer = entry_ops(&input.ir)[1];
+    let definition = &input.ir.definitions[input.ir.entries.values().next().unwrap().definition];
     let ty = definition.ty;
-    let extern_id = input.data.externs.alloc(ExternData {
+    let extern_id = input.ir.externs.alloc(ExternData {
         linkage_name: "opaque_barrier".into(),
     });
-    let function = input.data.expressions.alloc(ExprData {
+    let function = input.ir.expressions.alloc(ExprData {
         ty,
         kind: ExprKind::Extern(extern_id),
     });
     let parameter = input
-        .data
+        .ir
         .expressions
         .iter()
         .find_map(|(&id, value)| {
-            matches!(value.kind, ExprKind::Parameter(p) if input.data.parameters[p].region == region)
+            matches!(value.kind, ExprKind::Parameter(p) if input.ir.parameters[p].region == region)
                 .then_some(id)
         })
         .unwrap();
-    let template = input.data.operations[entry_ops(&input.data)[0]].clone();
-    let barrier = input.data.operations.alloc(OperationData {
+    let template = input.ir.operations[entry_ops(&input.ir)[0]].clone();
+    let barrier = input.ir.operations.alloc(OperationData {
         kind: OperationKind::Call {
             function,
             args: vec![parameter],
         },
         ..template
     });
-    input.data.regions[region].members.insert(barrier);
-    input.data.operations[consumer].source_position = 2;
-    input.data.operations[barrier].source_position = 1;
-    let before = entry_ops(&input.data).to_vec();
+    input.ir.regions[region].members.insert(barrier);
+    input.ir.operations[consumer].source_position = 2;
+    input.ir.operations[barrier].source_position = 1;
+    let before = entry_ops(&input.ir).to_vec();
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data), before);
+    assert_eq!(entry_ops(&result.ir), before);
 }
 
 #[test]
@@ -317,16 +325,11 @@ fn cross_region_uses_keep_the_producer_materialized() {
         let a = map(|x: i32| x + 1, xs) in
         if flag then map(|x: i32| x * 2, a) else a",
     );
-    let before = entry_ops(&input.data).to_vec();
+    let before = entry_ops(&input.ir).to_vec();
     let result = optimized(input);
-    assert_eq!(entry_ops(&result.data), before);
+    assert_eq!(entry_ops(&result.ir), before);
     assert_eq!(
-        super::super::dependencies::analyze(&result.data)
-            .schedules(&result.data)
-            .unwrap()
-            .values()
-            .map(Vec::len)
-            .sum::<usize>(),
+        analyze(&result.ir).schedules(&result.ir).unwrap().values().map(Vec::len).sum::<usize>(),
         3
     );
 }
@@ -343,20 +346,18 @@ fn separate_bodies_and_loop_parameters_do_not_alias() {
     );
     let result = optimized(input);
     let mut parameters = Vec::new();
-    for (region_id, ops) in
-        super::super::dependencies::analyze(&result.data).schedules(&result.data).unwrap()
-    {
-        let region = &result.data.regions[region_id];
+    for (region_id, ops) in analyze(&result.ir).schedules(&result.ir).unwrap() {
+        let region = &result.ir.regions[region_id];
         for op in ops {
-            if let OperationKind::Screma { inputs, .. } = &result.data.operations[op].kind {
+            if let OperationKind::Screma { inputs, .. } = &result.ir.operations[op].kind {
                 let [Array::Value(value)] = inputs.as_slice() else {
                     panic!("one input")
                 };
-                let ExprKind::Parameter(param) = result.data.expressions[*value].kind else {
+                let ExprKind::Parameter(param) = result.ir.expressions[*value].kind else {
                     panic!("scoped input")
                 };
                 assert_eq!(
-                    result.data.regions[result.data.parameters[param].region].definition,
+                    result.ir.regions[result.ir.parameters[param].region].definition,
                     region.definition
                 );
                 parameters.push(param);
@@ -383,11 +384,11 @@ fn capture_dependencies_prevent_absorption() {
         ),
     ] {
         let input = imported(source);
-        let before = entry_ops(&input.data).to_vec();
+        let before = entry_ops(&input.ir).to_vec();
         let result = optimized(input);
         // A and B may combine while retaining A, but the final consumer must
         // still run separately because its capture needs the completed array.
-        let after = entry_ops(&result.data);
+        let after = entry_ops(&result.ir);
         assert_eq!(after.len(), expected, "{source}");
         assert_eq!(after.last(), before.last(), "{source}");
     }
@@ -397,13 +398,13 @@ fn capture_dependencies_prevent_absorption() {
 fn input_write_hazards_and_unknown_body_calls_prevent_fusion() {
     // The ownership-side equivalent of EGIR's input resource write hazard.
     let mut input = imported(CHAIN);
-    let producer = entry_ops(&input.data)[0];
-    let OperationKind::Screma { ownership, .. } = &mut input.data.operations[producer].kind else {
+    let producer = entry_ops(&input.ir)[0];
+    let OperationKind::Screma { ownership, .. } = &mut input.ir.operations[producer].kind else {
         unreachable!()
     };
-    ownership[0] = types::SoacOwnership::UniqueInput;
-    let before = entry_ops(&input.data).to_vec();
-    assert_eq!(entry_ops(&optimized(input).data), before);
+    ownership[0] = SoacOwnership::UniqueInput;
+    let before = entry_ops(&input.ir).to_vec();
+    assert_eq!(entry_ops(&optimized(input).ir), before);
 
     // A source body with an array read is conservatively kept as a separate
     // operation; scalar expression interning does not prove storage-read safety.
@@ -411,28 +412,28 @@ fn input_write_hazards_and_unknown_body_calls_prevent_fusion() {
         "entry reads(xs: [4]i32, ys: [4]i32) [4]i32 =
         let a = map(|x: i32| ys[x], xs) in map(|x: i32| x + 1, a)",
     );
-    let before = entry_ops(&input.data).to_vec();
-    assert_eq!(entry_ops(&optimized(input).data), before);
+    let before = entry_ops(&input.ir).to_vec();
+    assert_eq!(entry_ops(&optimized(input).ir), before);
 }
 
 #[test]
 fn unreferenced_metadata_and_expressions_do_not_block_fusion() {
     let mut input = imported(CHAIN);
-    let producer = entry_ops(&input.data)[0];
-    let consumer = entry_ops(&input.data)[1];
+    let producer = entry_ops(&input.ir)[0];
+    let consumer = entry_ops(&input.ir)[1];
     let result = input
-        .data
+        .ir
         .expressions
         .iter()
         .find_map(|(&id, expr)| {
             matches!(expr.kind, ExprKind::OperationResult(op) if op == producer).then_some(id)
         })
         .unwrap();
-    input.data.expressions.alloc(ExprData {
-        ty: input.data.expressions[result].ty,
+    input.ir.expressions.alloc(ExprData {
+        ty: input.ir.expressions[result].ty,
         kind: ExprKind::Tuple(vec![result, result]),
     });
-    assert_eq!(entry_ops(&optimized(input).data), &[consumer]);
+    assert_eq!(entry_ops(&optimized(input).ir), &[consumer]);
 }
 
 #[test]
@@ -442,6 +443,6 @@ fn scalar_builtin_values_fuse_but_execution_dependent_builtins_do_not() {
             "open f32\nentry values(xs: [4]f32) [4]f32 =
               let a = map(|x: f32| {builtin}(x), xs) in map(|x: f32| x + 1.0, a)"
         ));
-        assert_eq!(entry_ops(&optimized(input).data).len(), expected, "{builtin}");
+        assert_eq!(entry_ops(&optimized(input).ir).len(), expected, "{builtin}");
     }
 }

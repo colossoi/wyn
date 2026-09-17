@@ -1,13 +1,13 @@
 //! Instantiate the selected GPU recipe with ordinary calls, loads, stores and
 //! control edges. No source SOAC survives as an executable instruction.
-
-use super::super::data::Array;
+use super::super::data::{Array, ExprKind};
+use super::super::visit::Operand;
 use super::{
-    array_value, error, length, BlockId, BufferId, DispatchData, DispatchId, ExprId, FunctionKind,
-    GridData, Instruction, OperationId, OperationKind, OptimizeError, Planner, Recipe, SoacBody, Storage,
-    Value, WIDTH,
+    array_value, error, length, DispatchData, FunctionKind, GridData, Instruction, OptimizeError, Planner,
+    Recipe, Storage, Value, WIDTH,
 };
-use crate::types;
+use crate::egglog::data::{BlockId, BufferId, DispatchId, ExprId, OperationId, OperationKind, SoacBody};
+use crate::types::Type;
 use std::collections::BTreeSet;
 
 mod filter;
@@ -32,10 +32,12 @@ impl Planner<'_> {
         let captures = self.scalar_captures(op);
         let kernel = self.kernel("scalar", &captures, 1);
         let end = self.operation(op, kernel, true)?;
-        let result =
-            *self.operation_values.get(&op).ok_or_else(|| error("missing scalar result expression"))?;
+        let Some(result) = self.operation_values.get(&op) else {
+            return Err(error("missing scalar result expression"));
+        };
+        let result = *result;
         let buffer = self.resources.slots[&(op, "scalar".into(), 0)];
-        if self.data.buffers[buffer].storage != Storage::Discarded {
+        if self.data.state.buffers[buffer].storage != Storage::Discarded {
             self.emit(host, Instruction::Allocate(buffer));
         }
         self.store(end, buffer, Value::Int(0), Value::Source(result));
@@ -140,8 +142,8 @@ impl Planner<'_> {
     }
 
     fn start_loop(&mut self, from: BlockId, start: Value, bound: Value, state: Vec<Value>) -> Loop {
-        let owner = self.data.blocks[from].function;
-        let prefix = format!("loop{}", self.data.blocks.len());
+        let owner = self.data.state.blocks[from].function;
+        let prefix = format!("loop{}", self.data.state.blocks.len());
         let index = Value::Local(format!("{prefix}_i"));
         let mut names = vec![format!("{prefix}_i")];
         names.extend((0..state.len()).map(|i| format!("{prefix}_s{i}")));
@@ -149,7 +151,7 @@ impl Planner<'_> {
         let header = self.block(owner, names);
         let body = self.block(owner, vec![]);
         let done = self.block(owner, vec![]);
-        self.data.blocks[header].loop_exit = Some(done);
+        self.data.state.blocks[header].loop_exit = Some(done);
         self.jump(from, header, std::iter::once(start).chain(state).collect());
         self.branch(header, Value::op("lt", [index.clone(), bound]), body, done);
         Loop {
@@ -172,11 +174,13 @@ impl Planner<'_> {
         host: BlockId,
         name: &str,
         n: Value,
-        element: types::Type,
+        element: Type,
         storage: Storage,
     ) -> BufferId {
         let buffer = if storage == Storage::Device {
-            let op = self.current_operation.expect("device allocation belongs to an operation");
+            let Some(op) = self.current_operation else {
+                unreachable!("device allocation {name} in block {host:?} has no source operation");
+            };
             let index = self.allocation_counts.entry((op, name.into())).or_default();
             let buffer = self.resources.slots[&(op, name.into(), *index)];
             *index += 1;
@@ -184,7 +188,7 @@ impl Planner<'_> {
         } else {
             self.buffer(name, n, element, storage)
         };
-        if self.data.buffers[buffer].storage != Storage::Discarded {
+        if self.data.state.buffers[buffer].storage != Storage::Discarded {
             self.emit(host, Instruction::Allocate(buffer));
         }
         buffer
@@ -194,7 +198,7 @@ impl Planner<'_> {
         let name = format!(
             "{prefix}_{}_{}",
             block.as_u32(),
-            self.data.bodies[self.data.blocks[block].body].instructions.len()
+            self.data.state.bodies[self.data.state.blocks[block].body].instructions.len()
         );
         self.emit(
             block,
@@ -208,7 +212,7 @@ impl Planner<'_> {
     }
 
     fn store(&mut self, block: BlockId, buffer: BufferId, index: Value, value: Value) {
-        if self.data.buffers[buffer].storage == Storage::Discarded {
+        if self.data.state.buffers[buffer].storage == Storage::Discarded {
             return;
         }
         self.emit(
@@ -232,19 +236,23 @@ impl Planner<'_> {
         kernel: BlockId,
         captures: Vec<ExprId>,
     ) -> DispatchId {
-        let name = self.data.blocks[kernel].interface.as_ref().expect("kernel interface").name.clone();
+        let Some(interface) = &self.data.state.blocks[kernel].interface else {
+            unreachable!("dispatch target {kernel:?} has no kernel interface");
+        };
+        let name = interface.name.clone();
         let stage = &self.resources.stages[&(op, name.clone())];
-        let grid = self.data.grids.alloc(GridData {
-            groups: [
-                stage.groups.clone().expect("phase domain"),
-                Value::Int(1),
-                Value::Int(1),
-            ],
+        let Some(groups) = stage.groups.clone() else {
+            unreachable!("planned stage {name} for {op:?} has no dispatch domain");
+        };
+        let Some(owner) = stage.owner else {
+            unreachable!("planned stage {name} for {op:?} has no entry owner");
+        };
+        let grid = self.data.state.grids.alloc(GridData {
+            groups: [groups, Value::Int(1), Value::Int(1)],
         });
-        let owner = stage.owner.expect("phase entry owner");
         let reads = stage.reads.clone();
         let writes = stage.writes.clone();
-        let dispatch = self.data.dispatches.alloc(DispatchData {
+        let dispatch = self.data.state.dispatches.alloc(DispatchData {
             owner,
             kernel,
             grid,
@@ -253,7 +261,6 @@ impl Planner<'_> {
             writes,
             captures,
         });
-        let name = &self.data.blocks[kernel].interface.as_ref().expect("kernel interface").name;
         self.launches.push_str(&format!(
             "(check (Phase (Stage {} \"{name}\") r))\n(Emitted (Stage {} \"{name}\") {})\n",
             op.egglog(),
@@ -330,8 +337,8 @@ impl Planner<'_> {
     // Capture external leaves, not whole expressions: branches and partial
     // expressions must still execute inside the scalar invocation that owns them.
     fn scalar_captures(&self, op: OperationId) -> Vec<ExprId> {
-        use super::super::data::ExprKind;
-        use super::super::visit::Operand;
+        use ExprKind;
+        use Operand;
         let mut operations = vec![op];
         let mut regions = BTreeSet::new();
         let mut pending_regions = self.data.operations[op].kind.structured_regions();

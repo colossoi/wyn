@@ -2,11 +2,16 @@
 use super::analysis::{counts, input_slices, references, routes};
 use super::plan::Step;
 use crate::egglog::data::{
-    body_signature as signature, intern_expr as expr, intern_type as ty, is_slice, value_source, Array,
-    AssociatedData, ExprId, ExprKind, OperationId, OperationKind, RegionId, ScremaForm, SoacBody, TypeId,
+    body_signature, intern_expr, intern_type, is_slice, value_source, Array, ExprId, ExprKind, Ir,
+    OperationId, OperationKind, RegionId, ScremaForm, SoacBody, TypeId,
 };
-use crate::egglog::{rewrite, OptimizeError};
-use crate::types::{self, TypeExt};
+use crate::egglog::rewrite::all;
+use crate::egglog::OptimizeError;
+use crate::types::{canonical_storage_buffer_ty, tuple, SoacOwnership, Type, TypeExt, TypeName};
+use body::{finish, invoke, region};
+use envelope::envelope;
+use filter::masked;
+use indexed::indexed;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod body;
@@ -14,10 +19,6 @@ mod envelope;
 mod filter;
 mod indexed;
 mod slices;
-use body::{finish, invoke, region};
-use envelope::envelope;
-use filter::masked;
-use indexed::indexed;
 
 #[derive(Clone, Debug)]
 enum Input {
@@ -25,7 +26,7 @@ enum Input {
     Produced(usize, Vec<(ExprId, ExprId)>),
     Tuple(Vec<Input>),
 }
-fn input(data: &AssociatedData, array: &Array, producer: Option<OperationId>) -> Input {
+fn input(data: &Ir, array: &Array, producer: Option<OperationId>) -> Input {
     match array {
         Array::Zip(arrays) => Input::Tuple(arrays.iter().map(|a| input(data, a, producer)).collect()),
         Array::Value(id) => match &data.expressions[value_source(data, *id)].kind {
@@ -53,7 +54,7 @@ fn input(data: &AssociatedData, array: &Array, producer: Option<OperationId>) ->
 }
 
 pub(super) fn apply_step(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     Step {
         family,
         region,
@@ -73,15 +74,18 @@ pub(super) fn apply_step(
             "fusion candidate does not belong to the selected graph".into(),
         ));
     }
-    match family {
+    let Some(()) = (match family {
         0 | 1 => scremas(data, producer, consumer, family == 1, retained),
         2 => envelope(data, producer, consumer),
         3 | 5 => masked(data, producer, consumer, &lengths),
         4 => indexed(data, producer, &demands),
         _ => None,
-    }.ok_or_else(|| OptimizeError::Extraction(format!(
+    }) else {
+        return Err(OptimizeError::Extraction(format!(
         "fusion body composition disagrees with its legality facts: family {family}, {producer:?} -> {consumer:?}"
-    )))
+    )));
+    };
+    Ok(())
 }
 
 fn compose(first: SoacBody, then: SoacBody) -> SoacBody {
@@ -121,7 +125,7 @@ impl Wiring {
         }
     }
     fn call(&mut self, body: SoacBody, args: Vec<usize>) -> Vec<usize> {
-        let results = signature(&body).1;
+        let results = body_signature(&body).1;
         let start = self.types.len();
         let call = compose(route(&self.types, args), body);
         self.body = compose(
@@ -154,25 +158,25 @@ fn flatten(tree: &Input, arrays: &mut Vec<Array>) {
         Input::Produced(..) => {}
     }
 }
-fn element(data: &mut AssociatedData, array: &Array) -> Option<TypeId> {
+fn element(data: &mut Ir, array: &Array) -> Option<TypeId> {
     let value = element_type(data, array)?;
-    Some(ty(data, value))
+    Some(intern_type(data, value))
 }
-fn element_type(data: &AssociatedData, array: &Array) -> Option<types::Type> {
+fn element_type(data: &Ir, array: &Array) -> Option<Type> {
     match array {
         Array::Value(id) => {
-            let array_ty = types::canonical_storage_buffer_ty(&data.types[data.expressions[*id].ty].ty);
+            let array_ty = canonical_storage_buffer_ty(&data.types[data.expressions[*id].ty].ty);
             array_ty.elem_type().cloned()
         }
         Array::Literal(xs) => Some(data.types[data.expressions[*xs.first()?].ty].ty.clone()),
         Array::Range { start, .. } => Some(data.types[data.expressions[*start].ty].ty.clone()),
-        Array::Zip(xs) => Some(types::tuple(
+        Array::Zip(xs) => Some(tuple(
             xs.iter().map(|x| element_type(data, x)).collect::<Option<_>>()?,
         )),
     }
 }
 fn wire_input(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     region: RegionId,
     wiring: &mut Wiring,
     tree: &Input,
@@ -182,7 +186,7 @@ fn wire_input(
     wire_input_at(data, region, wiring, tree, arrays, produced, 0)
 }
 fn wire_input_at(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     region: RegionId,
     wiring: &mut Wiring,
     tree: &Input,
@@ -204,19 +208,18 @@ fn wire_input_at(
         }
     }
 }
-fn result_types(data: &mut AssociatedData, op: OperationId) -> Vec<TypeId> {
+fn result_types(data: &mut Ir, op: OperationId) -> Vec<TypeId> {
     // Operation results are always a tuple, even for a single logical result.
-    let types::Type::Constructed(types::TypeName::Tuple(_), fields) =
-        data.types[data.operations[op].ty].ty.clone()
+    let Type::Constructed(TypeName::Tuple(_), fields) = data.types[data.operations[op].ty].ty.clone()
     else {
         return vec![];
     };
-    fields.into_iter().map(|t| ty(data, t)).collect()
+    fields.into_iter().map(|t| intern_type(data, t)).collect()
 }
 /// Construct one combined Screma and the mapping from each old result slot to
 /// its new slot. Producer outputs with observers survive the contraction.
 fn scremas(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     producer: OperationId,
     consumer: OperationId,
     horizontal: bool,
@@ -248,10 +251,10 @@ fn scremas(
             ai = ai.iter().map(|a| slices::apply(data, a, &transforms)).collect::<Option<_>>()?;
         }
     }
-    let at = signature(&a.pre).1;
-    let bt = signature(&b.pre).1;
-    let ap = signature(&a.post).1;
-    let bp = signature(&b.post).1;
+    let at = body_signature(&a.pre).1;
+    let bt = body_signature(&b.pre).1;
+    let ap = body_signature(&a.post).1;
+    let bp = body_signature(&b.post).1;
     let trees_a: Vec<_> = ai.iter().map(|i| input(data, i, None)).collect();
     let trees_b: Vec<_> = bi.iter().map(|i| input(data, i, (!horizontal).then_some(producer))).collect();
     let mut arrays = vec![];
@@ -318,11 +321,11 @@ fn scremas(
             .copied()
             .collect();
         let params =
-            signature(&b.post).0.into_iter().chain(if retain { ap.clone() } else { vec![] }).collect();
+            body_signature(&b.post).0.into_iter().chain(if retain { ap.clone() } else { vec![] }).collect();
         let mut post = Wiring::new(params);
-        let cb = post.call(b.post.clone(), (0..signature(&b.post).0.len()).collect());
-        let keep =
-            (signature(&b.post).0.len()..signature(&b.post).0.len() + kept.len()).collect::<Vec<_>>();
+        let cb = post.call(b.post.clone(), (0..body_signature(&b.post).0.len()).collect());
+        let keep = (body_signature(&b.post).0.len()..body_signature(&b.post).0.len() + kept.len())
+            .collect::<Vec<_>>();
         origins.extend((0..ra).map(|i| (producer, i)));
         origins.extend((0..rb + bp.len()).map(|i| (consumer, i)));
         if retain {
@@ -345,7 +348,7 @@ fn scremas(
 }
 
 fn install(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     producer: OperationId,
     consumer: OperationId,
     form: ScremaForm,
@@ -359,11 +362,11 @@ fn install(
         .iter()
         .map(|&(op, i)| if op == producer { a.get(i).copied() } else { b.get(i).copied() })
         .collect::<Option<Vec<_>>>()?;
-    let result_ty = ty(
+    let result_ty = intern_type(
         data,
-        types::tuple(fields.iter().map(|t| data.types[*t].ty.clone()).collect()),
+        tuple(fields.iter().map(|t| data.types[*t].ty.clone()).collect()),
     );
-    let result = expr(data, result_ty, ExprKind::OperationResult(consumer));
+    let result = intern_expr(data, result_ty, ExprKind::OperationResult(consumer));
     let mut substitutions = BTreeMap::new();
     for (old, ts) in [(producer, a), (consumer, b)] {
         let mut values = vec![];
@@ -371,7 +374,7 @@ fn install(
             let Some(slot) = origins.iter().position(|&x| x == (old, i)) else {
                 continue;
             };
-            values.push(expr(
+            values.push(intern_expr(
                 data,
                 *t,
                 ExprKind::Project {
@@ -384,7 +387,7 @@ fn install(
             continue;
         }
         let old_ty = data.operations[old].ty;
-        let replacement = expr(data, old_ty, ExprKind::Tuple(values));
+        let replacement = intern_expr(data, old_ty, ExprKind::Tuple(values));
         for (id, e) in &old_expressions {
             if e.kind == ExprKind::OperationResult(old) && *id != result {
                 substitutions.insert(*id, replacement);
@@ -398,7 +401,7 @@ fn install(
         if let ExprKind::Project { tuple, index } = e.kind {
             if let ExprKind::OperationResult(op) = data.expressions[tuple].kind {
                 if let Some(slot) = origins.iter().position(|&x| x == (op, index)) {
-                    let replacement = expr(
+                    let replacement = intern_expr(
                         data,
                         e.ty,
                         ExprKind::Project {
@@ -417,14 +420,14 @@ fn install(
     data.operations[consumer].kind = OperationKind::Screma {
         form,
         inputs,
-        ownership: vec![types::SoacOwnership::Fresh; origins.len()],
+        ownership: vec![SoacOwnership::Fresh; origins.len()],
     };
     data.regions[data.operations[producer].region].members.remove(&producer);
-    rewrite::all(data, &substitutions);
+    all(data, &substitutions);
     Some(())
 }
 fn input_value(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     tree: &Input,
     arrays: &[Array],
     external: &[ExprId],
@@ -439,17 +442,12 @@ fn input_value(
                 .map(|x| input_value(data, x, arrays, external, produced))
                 .collect::<Option<Vec<_>>>()?;
             let ts = vs.iter().map(|v| data.types[data.expressions[*v].ty].ty.clone()).collect();
-            let t = ty(data, types::tuple(ts));
-            Some(expr(data, t, ExprKind::Tuple(vs)))
+            let t = intern_type(data, tuple(ts));
+            Some(intern_expr(data, t, ExprKind::Tuple(vs)))
         }
     }
 }
-fn across_barrier(
-    data: &mut AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-    retain: bool,
-) -> Option<()> {
+fn across_barrier(data: &mut Ir, producer: OperationId, consumer: OperationId, retain: bool) -> Option<()> {
     let OperationKind::Screma {
         form: a, inputs: ai, ..
     } = data.operations[producer].kind.clone()
@@ -465,8 +463,8 @@ fn across_barrier(
     let parent = data.operations[consumer].region;
     let (sa, ra) = counts(&a);
     let (sb, rb) = counts(&b);
-    let at = signature(&a.pre).1;
-    let bt = signature(&b.pre).1;
+    let at = body_signature(&a.pre).1;
+    let bt = body_signature(&b.pre).1;
     let trees_a: Vec<_> = ai.iter().map(|i| input(data, i, None)).collect();
     let trees_b: Vec<_> = bi.iter().map(|i| input(data, i, Some(producer))).collect();
     let mut arrays = vec![];
@@ -547,7 +545,7 @@ fn across_barrier(
     );
     let mut origins: Vec<_> = (0..ra)
         .map(|i| (producer, i))
-        .chain((0..rb + signature(&b.post).1.len()).map(|i| (consumer, i)))
+        .chain((0..rb + body_signature(&b.post).1.len()).map(|i| (consumer, i)))
         .collect();
     if retain {
         origins.extend((0..produced.len()).map(|i| (producer, ra + i)));

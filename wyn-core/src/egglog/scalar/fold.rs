@@ -1,15 +1,13 @@
 //! Typed literal evaluation shared with EGIR; algebraic identities live in .egg.
-use super::*;
-use crate::builtins::{
-    self,
-    lowering::{BuiltinLowering, PrimOp},
-    Purity,
-};
+use super::{intern_expr, name};
+use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::builtins::{by_id, Purity};
+use crate::egglog::data::{Array, ExprData, ExprId, ExprKind, Ir, OperationKind, TypeId};
 use crate::op::{BinaryOperator, UnaryOperator};
-use crate::scalar_eval::{self, Scalar};
+use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
 use crate::types::{Type, TypeName};
 
-pub(super) fn facts(data: &AssociatedData, id: ExprId, out: &mut String) {
+pub(super) fn facts(data: &Ir, id: ExprId, out: &mut String) {
     let flag = match literal(data, id) {
         Some(Scalar::Int(0)) => Some("Zero"),
         Some(Scalar::Int(1)) => Some("One"),
@@ -25,17 +23,17 @@ pub(super) fn facts(data: &AssociatedData, id: ExprId, out: &mut String) {
     }
 }
 
-pub(super) fn lowering(data: &AssociatedData, f: ExprId) -> Option<&BuiltinLowering> {
+pub(super) fn lowering(data: &Ir, f: ExprId) -> Option<&BuiltinLowering> {
     let ExprKind::Builtin(b) = data.expressions[f].kind else {
         return None;
     };
     let b = &data.builtins[b];
-    let def = builtins::by_id(b.builtin);
+    let def = by_id(b.builtin);
     (def.raw.purity == Purity::Pure).then_some(())?;
     Some(&def.overloads().get(b.overload_idx)?.lowering)
 }
 
-pub(super) fn literal(data: &AssociatedData, id: ExprId) -> Option<Scalar> {
+pub(super) fn literal(data: &Ir, id: ExprId) -> Option<Scalar> {
     let e = &data.expressions[id];
     match (&data.types[e.ty].ty, &e.kind) {
         (Type::Constructed(TypeName::Int(_), _), ExprKind::Int(s)) => Some(Scalar::Int(s.parse().ok()?)),
@@ -50,13 +48,13 @@ pub(super) fn literal(data: &AssociatedData, id: ExprId) -> Option<Scalar> {
     }
 }
 
-fn constant(data: &mut AssociatedData, ty: TypeId, value: Scalar) -> Option<ExprId> {
+fn constant(data: &mut Ir, ty: TypeId, value: Scalar) -> Option<ExprId> {
     let kind = match (value, &data.types[ty].ty) {
         (Scalar::Int(v), t @ Type::Constructed(TypeName::Int(_), _)) => {
-            ExprKind::Int(scalar_eval::wrap_int(v as i128, t).to_string())
+            ExprKind::Int(wrap_int(v as i128, t).to_string())
         }
         (Scalar::Int(v), t @ Type::Constructed(TypeName::UInt(_), _)) => {
-            ExprKind::Int((scalar_eval::wrap_int(v as i128, t) as u64).to_string())
+            ExprKind::Int((wrap_int(v as i128, t) as u64).to_string())
         }
         (Scalar::Float(v), Type::Constructed(TypeName::Float(32), _)) => {
             ExprKind::FloatBits((v as f32).to_bits())
@@ -64,10 +62,10 @@ fn constant(data: &mut AssociatedData, ty: TypeId, value: Scalar) -> Option<Expr
         (Scalar::Bool(v), Type::Constructed(TypeName::Bool, _)) => ExprKind::Bool(v),
         _ => return None,
     };
-    Some(expr(data, ty, kind))
+    Some(intern_expr(data, ty, kind))
 }
 
-pub(super) fn evaluate(data: &mut AssociatedData, id: ExprId) -> Option<ExprId> {
+pub(super) fn evaluate(data: &mut Ir, id: ExprId) -> Option<ExprId> {
     let ExprData { ty, kind } = data.expressions[id].clone();
     if let ExprKind::OperationResult(op) = kind {
         let OperationKind::Index { array, index } = data.operations[op].kind else {
@@ -90,12 +88,12 @@ pub(super) fn evaluate(data: &mut AssociatedData, id: ExprId) -> Option<ExprId> 
         (ExprKind::BinOp(op), &[a, b]) => {
             let op = BinaryOperator::try_from(op.as_str()).ok()?;
             if let (Some(a_value), Some(b_value)) = (literal(data, a), literal(data, b)) {
-                scalar_eval::binary(op, a_value, b_value, &data.types[data.expressions[a].ty].ty)?
+                binary(op, a_value, b_value, &data.types[data.expressions[a].ty].ty)?
             } else {
                 return None;
             }
         }
-        (ExprKind::UnOp(op), &[a]) => scalar_eval::unary(
+        (ExprKind::UnOp(op), &[a]) => unary(
             UnaryOperator::try_from(op.as_str()).ok()?,
             literal(data, a)?,
             &data.types[data.expressions[a].ty].ty,
@@ -114,7 +112,7 @@ pub(super) fn evaluate(data: &mut AssociatedData, id: ExprId) -> Option<ExprId> 
     constant(data, ty, value)
 }
 
-fn conversion(data: &AssociatedData, prim: &PrimOp, ty: TypeId, a: ExprId) -> Option<Scalar> {
+fn conversion(data: &Ir, prim: &PrimOp, ty: TypeId, a: ExprId) -> Option<Scalar> {
     let value = literal(data, a)?;
     let result = &data.types[ty].ty;
     Some(match (prim, result, value) {
@@ -137,7 +135,7 @@ fn conversion(data: &AssociatedData, prim: &PrimOp, ty: TypeId, a: ExprId) -> Op
             Scalar::Float((v as u64) as f32 as f64)
         }
         (PrimOp::SConvert | PrimOp::UConvert, _, Scalar::Int(v)) => {
-            Scalar::Int(scalar_eval::wrap_int(v as i128, result))
+            Scalar::Int(wrap_int(v as i128, result))
         }
         (PrimOp::FPConvert, Type::Constructed(TypeName::Float(32), _), Scalar::Float(v)) => {
             Scalar::Float(v)
@@ -146,7 +144,7 @@ fn conversion(data: &AssociatedData, prim: &PrimOp, ty: TypeId, a: ExprId) -> Op
     })
 }
 
-fn bitcast(data: &mut AssociatedData, ty: TypeId, a: ExprId) -> Option<ExprId> {
+fn bitcast(data: &mut Ir, ty: TypeId, a: ExprId) -> Option<ExprId> {
     let input = &data.expressions[a];
     let bits = match (&data.types[input.ty].ty, &input.kind) {
         (Type::Constructed(TypeName::Float(32), _), ExprKind::FloatBits(bits)) => *bits,
@@ -160,5 +158,5 @@ fn bitcast(data: &mut AssociatedData, ty: TypeId, a: ExprId) -> Option<ExprId> {
         Type::Constructed(TypeName::UInt(32), _) => ExprKind::Int(bits.to_string()),
         _ => return None,
     };
-    Some(expr(data, ty, value))
+    Some(intern_expr(data, ty, value))
 }

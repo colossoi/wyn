@@ -1,34 +1,35 @@
 use super::insert_expressions;
-use crate::egglog::{convert_program, fuse, Converted, ExprKind, OperationKind};
-use crate::{compile_thru_tlc, tlc};
+use crate::compile_thru_tlc;
+use crate::egglog::dependencies::analyze;
+use crate::egglog::graph_tests::fusion_dependencies;
+use crate::egglog::{from_tlc, fuse, ExprKind, Expressions, OperationKind, Program};
+use crate::tlc::infer_input_slice_bounds;
 use egglog_engine::EGraph;
 
-fn compile(source: &str) -> Converted {
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap()
+fn compile(source: &str) -> Program<Expressions> {
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()
 }
 
-fn graph(result: &Converted) -> EGraph {
+fn graph(result: &Program<Expressions>) -> EGraph {
     let mut graph = EGraph::default();
-    graph.run_program(result.program.clone()).unwrap();
+    graph.parse_and_run_program(None, include_str!("ids.egg")).unwrap();
+    graph.run_program(result.state.facts.clone()).unwrap();
+    graph.parse_and_run_program(None, super::RUN).unwrap();
     graph
 }
 
 #[test]
 fn inserts_scalar_only_entry_and_derives_its_dependencies() {
     let result = compile("entry main(x: i32) i32 = x + 1");
-    let mut graph = EGraph::default();
-    graph.run_program(result.program).unwrap();
+    let mut graph = graph(&result);
     graph
         .parse_and_run_program(
             None,
             "(check (RegionResult r 0 e) (ExprParameter e p) (RegionParameter r 0 p t) (RegionExpr r e))",
         )
         .unwrap();
-    assert_eq!(
-        graph.function_to_dag("Current", usize::MAX, false).unwrap().0.len(),
-        0
-    );
+    assert!(graph.function_to_dag("Current", usize::MAX, false).is_err());
 }
 
 #[test]
@@ -52,26 +53,22 @@ fn shares_syntax_across_uses_without_equating_function_parameters() {
         )
         .unwrap();
     let apps: Vec<_> =
-        result.data.expressions.values().filter(|e| matches!(e.kind, ExprKind::PureApp { .. })).collect();
+        result.ir.expressions.values().filter(|e| matches!(e.kind, ExprKind::PureApp { .. })).collect();
     assert_eq!(apps.len(), 2);
 }
 
 #[test]
 fn inserts_selected_fused_bodies_without_reviving_the_producer() {
-    let tlc = tlc::infer_input_slice_bounds(
+    let tlc = infer_input_slice_bounds(
         compile_thru_tlc(
             "entry main(xs: []i32, bias: i32) []i32 = map(|x: i32| x * 2, map(|x: i32| x + bias, xs))",
         )
         .unwrap(),
     );
-    let selected = fuse(convert_program(&tlc).unwrap()).unwrap();
-    let live = crate::egglog::dependencies::analyze(&selected.data).live;
-    let dead: Vec<_> = selected
-        .data
-        .operations
-        .iter()
-        .filter_map(|(&id, _)| (!live.contains(&id)).then_some(id))
-        .collect();
+    let selected = fuse(from_tlc(&tlc).unwrap()).unwrap();
+    let live = analyze(&selected.ir).live;
+    let dead: Vec<_> =
+        selected.ir.operations.iter().filter_map(|(&id, _)| (!live.contains(&id)).then_some(id)).collect();
     assert_eq!(dead.len(), 1);
     let result = insert_expressions(selected).unwrap();
     let mut graph = graph(&result);
@@ -99,7 +96,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         1
     );
     // Fusion still uses its original summary and has no expression declarations.
-    let fusion = crate::egglog::graph_tests::fusion_dependencies(&result.data);
+    let fusion = fusion_dependencies(&result.ir);
     assert!(fusion.function_to_dag("SourceExpression", 1, false).is_err());
 }
 
@@ -110,7 +107,7 @@ fn loop_carried_parameters_are_dependencies_inside_the_loop_only() {
         loop acc = xs for i < n do map(|x: i32| x + i, acc)",
     );
     let (loop_id, header, body) = result
-        .data
+        .ir
         .operations
         .iter()
         .find_map(|(&id, op)| {
@@ -185,13 +182,6 @@ fn expression_export_starts_at_entries_and_ignores_dead_arena_records() {
     "#,
         )
         .unwrap();
-}
-
-#[test]
-fn later_passes_cannot_leave_stale_expression_facts() {
-    let result = compile("entry main(x: i32) i32 = x + 1");
-    assert!(insert_expressions(result.clone()).is_err());
-    assert!(fuse(result).is_err());
 }
 
 #[test]

@@ -1,9 +1,8 @@
-use super::super::{length, OperationId, OperationKind};
-use super::{
-    chunks, error, singleton, Array, BlockId, BufferId, OptimizeError, Planner, SoacBody, Storage, Value,
-    WIDTH,
-};
-use crate::{ast::TypeName, types};
+use super::super::length;
+use super::{chunks, error, singleton, OptimizeError, Planner, Storage, Value, WIDTH};
+use crate::ast::TypeName;
+use crate::egglog::data::{Array, BlockId, BufferId, OperationId, OperationKind, SoacBody};
+use crate::types::Type;
 
 impl Planner<'_> {
     pub(super) fn parallel_filter(
@@ -132,7 +131,7 @@ impl Planner<'_> {
         let [predicate] = values.as_slice() else {
             return Err(error("filter predicate must return one value"));
         };
-        let owner = self.data.blocks[entry].function;
+        let owner = self.data.state.blocks[entry].function;
         let selected = self.block(owner, vec![]);
         let skipped = self.block(owner, vec![]);
         self.branch(loop_.body, predicate.clone(), selected, skipped);
@@ -151,7 +150,7 @@ impl Planner<'_> {
         ))
     }
 
-    fn filter_element(&self, body: &SoacBody) -> Result<types::Type, OptimizeError> {
+    fn filter_element(&self, body: &SoacBody) -> Result<Type, OptimizeError> {
         let parameters = match body {
             SoacBody::Apply { parameters, .. } | SoacBody::Route { parameters, .. } => parameters,
             SoacBody::Identity(types) => types,
@@ -165,6 +164,6 @@ impl Planner<'_> {
     }
 }
 
-pub(super) fn uint() -> types::Type {
-    types::Type::Constructed(TypeName::UInt(32), vec![])
+pub(super) fn uint() -> Type {
+    Type::Constructed(TypeName::UInt(32), vec![])
 }

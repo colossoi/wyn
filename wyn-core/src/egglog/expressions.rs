@@ -1,12 +1,13 @@
 //! Insert a separate expression DAG after fusion has selected its operations.
 //! Region uses and execution dependencies are relations over that DAG; neither
 //! expression ownership nor evaluation placement is implied by interning.
-
-use super::data::{
-    Array, AssociatedData, ExprId, ExprKind, LoopKind, OperationId, OperationKind, RegionId, SoacBody,
-    SymbolId,
+use super::{Expressions, Fused, OptimizeError, Program};
+use crate::egglog::data::{
+    Array, ExprId, ExprKind, Ir, LoopKind, OperationId, OperationKind, RegionId, SoacBody, SymbolId,
 };
-use super::{dependencies, from_tlc::Converted, term, timing, OptimizeError};
+use crate::egglog::dependencies::{analyze, Dependencies};
+use crate::egglog::parse_program;
+use crate::egglog::timing::{span, time};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
@@ -14,32 +15,32 @@ pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 /// Add typed expressions, region interfaces, structured control, and data-flow
 /// facts to the selected fusion result. Scalar values retain their globally
 /// interned sidecar identities. This pass does not rewrite or place expressions.
-/// Execution is deferred to scalar optimization or replay of the exported program.
-/// Run after `fuse` and before `schedule`; repeated insertion is an error.
-pub fn insert_expressions(mut converted: Converted) -> Result<Converted, OptimizeError> {
-    let _timing = timing::span("insert expressions");
-    if converted.expression_program.is_some() || !converted.data.blocks.is_empty() {
-        return Err(error("expression insertion must run once, before scheduling"));
-    }
-    let dependencies = timing::time("analyze dependencies", || dependencies::analyze(&converted.data));
-    timing::time("validate dependency order", || {
-        dependencies.schedules(&converted.data)
+/// Commands are consumed by scalar optimization.
+/// The input state requires completed fusion; the output enables simplification.
+pub fn insert_expressions(converted: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
+    let _timing = span("insert expressions");
+    let dependencies = time("analyze dependencies", || analyze(&converted.ir));
+    time("validate dependency order", || {
+        dependencies.schedules(&converted.ir)
     })?;
-    let (source, _) = timing::time("emit expression facts", || {
-        emit_facts(&converted.data, &dependencies, &[])
+    let (source, live) = time("emit expression facts", || {
+        emit_facts(&converted.ir, &dependencies, &[])
     })?;
-    let mut commands = timing::time("parse expression facts", || {
-        term::parse("wyn-expressions.egg", &source)
+    let commands = time("parse expression facts", || {
+        parse_program("wyn-expressions.egg", &source)
     })?;
-    commands.extend(term::parse("expressions-run.egg", RUN)?);
-    converted.program.extend(commands.iter().cloned());
-    converted.expression_program = Some(commands);
-    Ok(converted)
+    Ok(Program {
+        ir: converted.ir,
+        state: Expressions {
+            live,
+            facts: commands,
+        },
+    })
 }
 
 pub(super) fn emit_facts(
-    data: &AssociatedData,
-    summary: &dependencies::Dependencies,
+    data: &Ir,
+    summary: &Dependencies,
     extra: &[ExprId],
 ) -> Result<(String, BTreeSet<ExprId>), OptimizeError> {
     let mut emitter = Emitter {
@@ -73,7 +74,7 @@ pub(super) fn emit_facts(
 
 /// Add terms to an existing graph without redeclaring its schema or globals.
 pub(super) fn emit_additional(
-    data: &AssociatedData,
+    data: &Ir,
     live: &BTreeSet<OperationId>,
     extra: &[ExprId],
     prefix: &str,
@@ -104,7 +105,7 @@ fn error(message: &str) -> OptimizeError {
 }
 
 struct Emitter<'a> {
-    data: &'a AssociatedData,
+    data: &'a Ir,
     live: &'a BTreeSet<OperationId>,
     symbols: BTreeMap<SymbolId, RegionId>,
     output: String,

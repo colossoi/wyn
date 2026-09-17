@@ -1,12 +1,13 @@
 //! Small test oracle for the generated CFG and dispatch recipes. Deliberately
 //! independent of the lowering templates; rejects unsupported scalar operations.
-
-use crate::builtins;
+use crate::builtins::by_id;
 use crate::egglog::{
-    Array, AssociatedData, BlockId, BodyId, BufferId, Exit, ExprId, ExprKind, FunctionKind, Instruction,
-    OperationId, OperationKind, ParameterId, Storage, Value as Code,
+    Array, BlockId, BodyId, BufferId, Exit, ExprId, ExprKind, FunctionKind, Instruction, OperationId,
+    OperationKind, ParameterId, Program, Scheduled, Storage, Value as Code,
 };
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Value {
@@ -84,15 +85,16 @@ struct Frame {
 }
 
 struct Machine<'a> {
-    data: &'a AssociatedData,
+    data: &'a Program<Scheduled>,
     buffers: BTreeMap<BufferId, Value>,
     invocation: u32,
     invocations: u32,
     fuel: usize,
 }
 
-pub(super) fn run(data: &AssociatedData, args: Vec<Value>) -> Vec<Value> {
+pub(super) fn run(data: &Program<Scheduled>, args: Vec<Value>) -> Vec<Value> {
     let entry = data
+        .state
         .blocks
         .iter()
         .find_map(|(&id, b)| {
@@ -116,12 +118,12 @@ impl Machine<'_> {
         loop {
             assert!(self.fuel > 0, "CFG did not terminate");
             self.fuel -= 1;
-            let data = self.data.blocks[block].clone();
+            let data = self.data.state.blocks[block].clone();
             assert_eq!(args.len(), data.parameters.len());
             for (name, value) in data.parameters.iter().zip(args) {
                 frame.locals.insert(name.clone(), value);
             }
-            for instruction in self.data.bodies[data.body].instructions.clone() {
+            for instruction in self.data.state.bodies[data.body].instructions.clone() {
                 self.instruction(instruction, &mut frame);
             }
             let edge = match data.exit {
@@ -141,7 +143,7 @@ impl Machine<'_> {
     }
 
     fn tuple(&self, id: BodyId, frame: &Frame) -> Vec<Value> {
-        self.data.bodies[id].results.iter().map(|v| self.value(v, frame)).collect()
+        self.data.state.bodies[id].results.iter().map(|v| self.value(v, frame)).collect()
     }
 
     fn instruction(&mut self, instruction: Instruction, frame: &mut Frame) {
@@ -177,7 +179,7 @@ impl Machine<'_> {
                         let ExprKind::Builtin(id) = self.data.expressions[function].kind else {
                             panic!("unsupported oracle callee");
                         };
-                        let name = builtins::by_id(self.data.builtins[id].builtin).raw.surface_name;
+                        let name = by_id(self.data.builtins[id].builtin).raw.surface_name;
                         primitive(name, args.iter().map(|&id| self.source(id, frame)).collect())
                     }
                     ref other => panic!("unsupported source effect in oracle: {other:?}"),
@@ -186,7 +188,7 @@ impl Machine<'_> {
                 self.invalidate(frame, &ExprKind::OperationResult(op));
             }
             Instruction::Allocate(id) => {
-                let buffer = &self.data.buffers[id];
+                let buffer = &self.data.state.buffers[id];
                 let n = self.value(&buffer.length, frame).int() as usize;
                 let values = Value::values(vec![Value::Uninitialized; n]);
                 if buffer.storage == Storage::Function {
@@ -210,10 +212,10 @@ impl Machine<'_> {
                 );
             }
             Instruction::Dispatch(id) => {
-                let dispatch = &self.data.dispatches[id];
-                let groups = self.value(&self.data.grids[dispatch.grid].groups[0], frame).int();
+                let dispatch = &self.data.state.dispatches[id];
+                let groups = self.value(&self.data.state.grids[dispatch.grid].groups[0], frame).int();
                 let FunctionKind::Kernel([width, 1, 1]) =
-                    self.data.blocks[dispatch.kernel].interface.as_ref().unwrap().kind
+                    self.data.state.blocks[dispatch.kernel].interface.as_ref().unwrap().kind
                 else {
                     panic!("kernel");
                 };
@@ -238,10 +240,10 @@ impl Machine<'_> {
             Code::Source(id) => self.source(*id, frame),
             Code::Array(array) => self.array(array, frame),
             Code::Buffer(id) => {
-                if self.data.buffers[*id].storage == Storage::Discarded {
+                if self.data.state.buffers[*id].storage == Storage::Discarded {
                     return Value::Discarded;
                 }
-                if let Storage::External(expr) = self.data.buffers[*id].storage {
+                if let Storage::External(expr) = self.data.state.buffers[*id].storage {
                     self.source(expr, frame)
                 } else {
                     frame
@@ -287,7 +289,7 @@ impl Machine<'_> {
     // projection used in the body must not leak into the next header evaluation.
     fn invalidate(&self, frame: &mut Frame, binding: &ExprKind) {
         fn depends(
-            data: &AssociatedData,
+            data: &Program<Scheduled>,
             id: ExprId,
             binding: &ExprKind,
             memo: &mut BTreeMap<ExprId, bool>,
@@ -364,9 +366,7 @@ impl Machine<'_> {
                 let values = args.iter().map(|&id| self.source(id, frame)).collect();
                 let name = match &self.data.expressions[*function].kind {
                     ExprKind::BinOp(name) | ExprKind::UnOp(name) => name.as_str(),
-                    ExprKind::Builtin(id) => {
-                        builtins::by_id(self.data.builtins[*id].builtin).raw.surface_name
-                    }
+                    ExprKind::Builtin(id) => by_id(self.data.builtins[*id].builtin).raw.surface_name,
                     other => panic!("unsupported pure function: {other:?}"),
                 };
                 primitive(name, values)

@@ -1,12 +1,21 @@
 //! Specialize callback interfaces without changing other calls to the same body.
-use super::*;
+use super::captures::Context;
+use super::OptimizeError;
+use crate::egglog::data::{
+    ExprId, ExprKind, Ir, OperationId, OperationKind, ParameterData, PlacementSite, RegionData, RegionId,
+    SoacBody,
+};
+use crate::egglog::scalar::error;
+use crate::egglog::timing::{span, time};
+use std::collections::{BTreeMap, BTreeSet};
+use wyn_base::persistent_sets::EMPTY;
 
 pub(super) fn apply(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     op: OperationId,
     region: RegionId,
     values: &[ExprId],
-    context: &mut captures::Context<'_>,
+    context: &mut Context<'_>,
 ) -> Result<(), OptimizeError> {
     // Parameterizing the same computations produces the same callable interface,
     // regardless of each invocation's actual capture values.
@@ -14,12 +23,12 @@ pub(super) fn apply(
     let replacement = match context.specializations.get(&key) {
         Some(&r) => r,
         None => {
-            let r = timing::time("clone body", || clone_region(data, region, values, context));
+            let r = time("clone body", || clone_region(data, region, values, context));
             context.specializations.insert(key, r);
             r
         }
     };
-    let _timing = timing::span("rewrite capture arguments");
+    let _timing = span("rewrite capture arguments");
     let mut kind = data.operations[op].kind.clone();
     let mut changed = false;
     kind.for_each_callback_mut(&mut |body| {
@@ -64,17 +73,12 @@ pub(super) fn apply(
     Ok(())
 }
 
-fn clone_region(
-    data: &mut AssociatedData,
-    root: RegionId,
-    values: &[ExprId],
-    context: &mut captures::Context<'_>,
-) -> RegionId {
+fn clone_region(data: &mut Ir, root: RegionId, values: &[ExprId], context: &mut Context<'_>) -> RegionId {
     // Follow current live references, not historical lexical arena records.
     let mut regions = vec![];
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
-    let mut needed = wyn_base::persistent_sets::EMPTY;
+    let mut needed = EMPTY;
     while let Some(r) = pending.pop() {
         if !seen.insert(r) {
             continue;
@@ -88,7 +92,7 @@ fn clone_region(
             data.operations[op].kind.operands(&mut roots, &mut pending);
         }
         let set = context.uses.dag.include(data, &roots);
-        let mut lambdas = wyn_base::persistent_sets::EMPTY;
+        let mut lambdas = EMPTY;
         for e in roots {
             lambdas = context.uses.dag.sets.union(lambdas, context.uses.dag.lambdas[&e]);
         }

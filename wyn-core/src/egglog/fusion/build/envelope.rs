@@ -1,13 +1,9 @@
 use super::super::analysis::{counts, inputs};
 use super::{element, flatten, input, wire_input, Wiring};
-use crate::egglog::data::{AssociatedData, BucketShapeData, OperationId, OperationKind};
-use crate::types;
+use crate::egglog::data::{BucketShapeData, Ir, OperationId, OperationKind};
+use crate::types::SoacOwnership;
 
-pub(super) fn envelope(
-    data: &mut AssociatedData,
-    producer: OperationId,
-    consumer: OperationId,
-) -> Option<()> {
+pub(super) fn envelope(data: &mut Ir, producer: OperationId, consumer: OperationId) -> Option<()> {
     let OperationKind::Screma {
         form: a, inputs: ai, ..
     } = data.operations[producer].kind.clone()
@@ -58,7 +54,7 @@ pub(super) fn envelope(
         } => {
             *map = body;
             *inputs = arrays;
-            *ownership = types::SoacOwnership::Fresh;
+            *ownership = SoacOwnership::Fresh;
         }
         OperationKind::ReduceByIndex { map, inputs, .. } => {
             *map = body;

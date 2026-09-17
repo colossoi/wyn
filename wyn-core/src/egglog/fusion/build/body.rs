@@ -1,27 +1,25 @@
 //! Construct callback regions and project their pure scalar results.
 use super::super::analysis::references;
+use crate::ast::Span;
 use crate::egglog::data::{
-    intern_expr as expr, intern_type as ty, AssociatedData, ExprData, ExprId, ExprKind, OperationData,
-    OperationKind, ParameterData, RegionData, RegionId, SoacBody, TypeId,
+    intern_expr, intern_type, ExprData, ExprId, ExprKind, Ir, OperationData, OperationKind, ParameterData,
+    RegionData, RegionId, SoacBody, TypeId,
 };
-use crate::egglog::rewrite;
+use crate::egglog::rewrite::Rewriter;
 use crate::types;
+use crate::types::function;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn tuple(data: &mut AssociatedData, parent: RegionId, parameters: Vec<TypeId>) -> SoacBody {
+pub(super) fn tuple(data: &mut Ir, parent: RegionId, parameters: Vec<TypeId>) -> SoacBody {
     let (region, args) = region(data, parent, &parameters);
-    let t = ty(
+    let t = intern_type(
         data,
         types::tuple(parameters.iter().map(|t| data.types[*t].ty.clone()).collect()),
     );
-    let value = expr(data, t, ExprKind::Tuple(args));
+    let value = intern_expr(data, t, ExprKind::Tuple(args));
     finish(data, region, parameters, vec![value])
 }
-pub(super) fn region(
-    data: &mut AssociatedData,
-    parent: RegionId,
-    types: &[TypeId],
-) -> (RegionId, Vec<ExprId>) {
+pub(super) fn region(data: &mut Ir, parent: RegionId, types: &[TypeId]) -> (RegionId, Vec<ExprId>) {
     let id = data.regions.alloc(RegionData {
         definition: data.regions[parent].definition,
         parent: Some(parent),
@@ -39,12 +37,12 @@ pub(super) fn region(
             ty,
         });
         data.regions[id].parameters.push(p);
-        args.push(expr(data, ty, ExprKind::Parameter(p)));
+        args.push(intern_expr(data, ty, ExprKind::Parameter(p)));
     }
     (id, args)
 }
 pub(super) fn finish(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     region: RegionId,
     parameters: Vec<TypeId>,
     values: Vec<ExprId>,
@@ -82,10 +80,10 @@ pub(super) fn finish(
         let ty = data.expressions[v].ty;
         let p = data.parameters.alloc(ParameterData { region, symbol, ty });
         data.regions[region].parameters.push(p);
-        let e = expr(data, ty, ExprKind::Parameter(p));
+        let e = intern_expr(data, ty, ExprKind::Parameter(p));
         replacements.insert(v, e);
     }
-    let mut rewrite = rewrite::Rewriter::new(data);
+    let mut rewrite = Rewriter::new(data);
     for op in data.regions[region].members.clone() {
         let mut kind = data.operations[op].kind.clone();
         rewrite.operation(data, &mut kind, &mut replacements);
@@ -104,7 +102,7 @@ pub(super) fn finish(
 /// Materialize opaque body calls into a new region without inspecting their
 /// scalar implementations. Used when projection is unnecessary.
 pub(super) fn call(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     region: RegionId,
     body: &SoacBody,
     args: Vec<ExprId>,
@@ -130,16 +128,16 @@ pub(super) fn call(
             let args: Vec<_> = args.into_iter().chain(captures.iter().copied()).collect();
             let t = match results.as_slice() {
                 [t] => *t,
-                _ => ty(
+                _ => intern_type(
                     data,
                     types::tuple(results.iter().map(|t| data.types[*t].ty.clone()).collect()),
                 ),
             };
             let fty = args.iter().rev().fold(data.types[t].ty.clone(), |r, a| {
-                types::function(data.types[data.expressions[*a].ty].ty.clone(), r)
+                function(data.types[data.expressions[*a].ty].ty.clone(), r)
             });
-            let fty = ty(data, fty);
-            let f = expr(data, fty, ExprKind::Lambda(*target));
+            let fty = intern_type(data, fty);
+            let f = intern_expr(data, fty, ExprKind::Lambda(*target));
             let v = operation(data, region, t, OperationKind::Call { function: f, args });
             Some(if results.len() == 1 {
                 vec![v]
@@ -147,29 +145,24 @@ pub(super) fn call(
                 results
                     .iter()
                     .enumerate()
-                    .map(|(i, &t)| expr(data, t, ExprKind::Project { tuple: v, index: i }))
+                    .map(|(i, &t)| intern_expr(data, t, ExprKind::Project { tuple: v, index: i }))
                     .collect()
             })
         }
     }
 }
-pub(super) fn operation(
-    data: &mut AssociatedData,
-    region: RegionId,
-    ty: TypeId,
-    kind: OperationKind,
-) -> ExprId {
+pub(super) fn operation(data: &mut Ir, region: RegionId, ty: TypeId, kind: OperationKind) -> ExprId {
     let id = data.operations.alloc(OperationData {
         region,
         ty,
         kind,
         source_position: data.regions[region].members.len(),
-        span: crate::ast::Span::generated(),
+        span: Span::generated(),
     });
     data.regions[region].members.insert(id);
-    expr(data, ty, ExprKind::OperationResult(id))
+    intern_expr(data, ty, ExprKind::OperationResult(id))
 }
-fn field(data: &mut AssociatedData, v: ExprId, i: usize, t: TypeId) -> ExprId {
+fn field(data: &mut Ir, v: ExprId, i: usize, t: TypeId) -> ExprId {
     match data.expressions[v].kind.clone() {
         ExprKind::Tuple(vs) => vs[i],
         ExprKind::If {
@@ -179,7 +172,7 @@ fn field(data: &mut AssociatedData, v: ExprId, i: usize, t: TypeId) -> ExprId {
         } => {
             let a = field(data, then_value, i, t);
             let b = field(data, else_value, i, t);
-            expr(
+            intern_expr(
                 data,
                 t,
                 ExprKind::If {
@@ -189,10 +182,10 @@ fn field(data: &mut AssociatedData, v: ExprId, i: usize, t: TypeId) -> ExprId {
                 },
             )
         }
-        _ => expr(data, t, ExprKind::Project { tuple: v, index: i }),
+        _ => intern_expr(data, t, ExprKind::Project { tuple: v, index: i }),
     }
 }
-fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, ExprId>) -> Option<ExprId> {
+fn scalar(data: &mut Ir, id: ExprId, map: &mut BTreeMap<ExprId, ExprId>) -> Option<ExprId> {
     if let Some(&v) = map.get(&id) {
         return Some(v);
     }
@@ -205,7 +198,7 @@ fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, Expr
         ExprKind::Tuple(vs) | ExprKind::Vector(vs) => {
             let vector = matches!(data.expressions[id].kind, ExprKind::Vector(_));
             let vs = vs.into_iter().map(|v| scalar(data, v, map)).collect::<Option<Vec<_>>>()?;
-            expr(
+            intern_expr(
                 data,
                 t,
                 if vector { ExprKind::Vector(vs) } else { ExprKind::Tuple(vs) },
@@ -213,7 +206,7 @@ fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, Expr
         }
         ExprKind::PureApp { function, args } => {
             let args = args.into_iter().map(|v| scalar(data, v, map)).collect::<Option<Vec<_>>>()?;
-            expr(data, t, ExprKind::PureApp { function, args })
+            intern_expr(data, t, ExprKind::PureApp { function, args })
         }
         ExprKind::If {
             condition,
@@ -223,7 +216,7 @@ fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, Expr
             let c = scalar(data, condition, map)?;
             let a = scalar(data, then_value, map)?;
             let b = scalar(data, else_value, map)?;
-            expr(
+            intern_expr(
                 data,
                 t,
                 ExprKind::If {
@@ -235,7 +228,7 @@ fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, Expr
         }
         ExprKind::Coerce(v) => {
             let v = scalar(data, v, map)?;
-            expr(data, t, ExprKind::Coerce(v))
+            intern_expr(data, t, ExprKind::Coerce(v))
         }
         ExprKind::OperationResult(_)
         | ExprKind::Lambda(_)
@@ -246,7 +239,7 @@ fn scalar(data: &mut AssociatedData, id: ExprId, map: &mut BTreeMap<ExprId, Expr
     map.insert(id, result);
     Some(result)
 }
-pub(super) fn invoke(data: &mut AssociatedData, body: &SoacBody, args: Vec<ExprId>) -> Option<Vec<ExprId>> {
+pub(super) fn invoke(data: &mut Ir, body: &SoacBody, args: Vec<ExprId>) -> Option<Vec<ExprId>> {
     match body {
         SoacBody::Identity(_) => Some(args),
         SoacBody::Route { indices, .. } => indices.iter().map(|&i| args.get(i).copied()).collect(),

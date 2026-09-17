@@ -1,42 +1,64 @@
-use super::*;
-use crate::egglog::{convert_program, fuse, insert_expressions, schedule, to_ssa};
-use crate::{compile_thru_tlc, tlc, types};
+use super::super::data::intern_type;
+use super::fold::evaluate;
+use super::{intern_expr, EGraph, Expressions, Placed, Program};
+use crate::builtins::catalog;
+use crate::egglog::data::{
+    BuiltinData, ExprId, ExprKind, Ir, OperationKind, PlacementSite, RegionId, SoacBody, TypeId,
+};
+use crate::egglog::{
+    from_tlc, fuse, insert_expressions, schedule, to_ssa, Fused, OptimizeError, Scheduled,
+};
+use crate::op::{BinaryOperator, OpTag};
+use crate::ssa::types::InstKind;
+use crate::tlc::infer_input_slice_bounds;
+use crate::types::{function, Type, TypeName};
+use crate::{compile_thru_tlc, lower_ssa_to_wgsl, CodegenTarget};
+use exec::{run, Value};
+use std::collections::BTreeSet;
 
 #[path = "schedule_test_exec.rs"]
 mod exec;
-use exec::{run, Value};
 
-fn input(source: &str) -> Converted {
-    let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-    insert_expressions(fuse(convert_program(&tlc).unwrap()).unwrap()).unwrap()
+fn input(source: &str) -> Program<Expressions> {
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()
 }
-fn compile(source: &str) -> Converted {
-    optimize_expressions(input(source)).unwrap()
+fn simplify_and_place(program: Program<Expressions>) -> Result<Program<Placed>, OptimizeError> {
+    // These tests construct expressions directly after import.
+    let program = insert_expressions(Program {
+        ir: program.ir,
+        state: Fused,
+    })?;
+    super::super::simplify_and_place(program)
 }
-fn root(data: &AssociatedData) -> RegionId {
+
+fn compile(source: &str) -> Program<Placed> {
+    simplify_and_place(input(source)).unwrap()
+}
+fn root(data: &Ir) -> RegionId {
     data.definitions[data.entries.values().next().unwrap().definition].body
 }
-fn parameter(data: &mut AssociatedData, index: usize) -> ExprId {
+fn parameter(data: &mut Ir, index: usize) -> ExprId {
     let p = data.regions[root(data)].parameters[index];
-    expr(data, data.parameters[p].ty, ExprKind::Parameter(p))
+    intern_expr(data, data.parameters[p].ty, ExprKind::Parameter(p))
 }
-fn integer(data: &mut AssociatedData, ty: TypeId, n: i64) -> ExprId {
-    expr(data, ty, ExprKind::Int(n.to_string()))
+fn integer(data: &mut Ir, ty: TypeId, n: i64) -> ExprId {
+    intern_expr(data, ty, ExprKind::Int(n.to_string()))
 }
-fn binary(data: &mut AssociatedData, op: &str, a: ExprId, b: ExprId) -> ExprId {
+fn binary(data: &mut Ir, op: &str, a: ExprId, b: ExprId) -> ExprId {
     let t = data.expressions[a].ty;
-    let fty = super::super::data::intern_type(
+    let fty = intern_type(
         data,
-        types::function(
+        function(
             data.types[t].ty.clone(),
-            types::function(
+            function(
                 data.types[data.expressions[b].ty].ty.clone(),
                 data.types[t].ty.clone(),
             ),
         ),
     );
-    let f = expr(data, fty, ExprKind::BinOp(op.into()));
-    expr(
+    let f = intern_expr(data, fty, ExprKind::BinOp(op.into()));
+    intern_expr(
         data,
         t,
         ExprKind::PureApp {
@@ -45,16 +67,16 @@ fn binary(data: &mut AssociatedData, op: &str, a: ExprId, b: ExprId) -> ExprId {
         },
     )
 }
-fn output(data: &mut AssociatedData, e: ExprId) {
+fn output(data: &mut Ir, e: ExprId) {
     let r = root(data);
     data.regions[r].results = vec![e];
 }
-fn result(data: &AssociatedData) -> ExprId {
+fn result(data: &Ir) -> ExprId {
     data.regions[root(data)].results[0]
 }
-fn wgsl(data: &AssociatedData) {
-    let ssa = to_ssa(data, crate::CodegenTarget::Wgsl).unwrap();
-    let source = crate::lower_ssa_to_wgsl(ssa).unwrap();
+fn wgsl(data: &Program<Scheduled>) {
+    let ssa = to_ssa(data, CodegenTarget::Wgsl).unwrap();
+    let source = lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("{}\n{source}", e.emit_to_string(&source)));
     naga::valid::Validator::new(
@@ -68,7 +90,7 @@ fn wgsl(data: &AssociatedData) {
 #[test]
 fn eqsat_factors_and_folds_constants_inside_a_new_alternative() {
     let mut c = input("entry main(x:i32) i32 = x");
-    let d = &mut c.data;
+    let d = &mut c.ir;
     let x = parameter(d, 0);
     let t = d.expressions[x].ty;
     let two = integer(d, t, 2);
@@ -77,17 +99,17 @@ fn eqsat_factors_and_folds_constants_inside_a_new_alternative() {
     let b = binary(d, "*", three, x);
     let sum = binary(d, "+", a, b);
     output(d, sum);
-    let c = optimize_expressions(c).unwrap();
-    let ExprKind::PureApp { function, args } = &c.data.expressions[result(&c.data)].kind else {
+    let c = simplify_and_place(c).unwrap();
+    let ExprKind::PureApp { function, args } = &c.ir.expressions[result(&c.ir)].kind else {
         panic!("expected product")
     };
-    assert_eq!(c.data.expressions[*function].kind, ExprKind::BinOp("*".into()));
-    assert!(args.iter().any(|&a| c.data.expressions[a].kind == ExprKind::Int("5".into())));
+    assert_eq!(c.ir.expressions[*function].kind, ExprKind::BinOp("*".into()));
+    assert!(args.iter().any(|&a| c.ir.expressions[a].kind == ExprKind::Int("5".into())));
     let c = schedule(c).unwrap();
     for x in [-91, 0, 123] {
-        assert_eq!(run(&c.data, vec![Value::Int(x)]), vec![Value::Int(x * 5)]);
+        assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(x * 5)]);
     }
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
@@ -98,27 +120,27 @@ fn constant_folding_wraps_at_the_declared_width_and_keeps_partial_operations() {
         ("entry main(x:i16) i16=x", i16::MAX as i64, 1, i16::MIN as i64),
     ] {
         let mut c = input(source);
-        let t = c.data.expressions[result(&c.data)].ty;
-        let a = integer(&mut c.data, t, a);
-        let b = integer(&mut c.data, t, b);
-        let e = binary(&mut c.data, "+", a, b);
-        output(&mut c.data, e);
-        let c = optimize_expressions(c).unwrap();
+        let t = c.ir.expressions[result(&c.ir)].ty;
+        let a = integer(&mut c.ir, t, a);
+        let b = integer(&mut c.ir, t, b);
+        let e = binary(&mut c.ir, "+", a, b);
+        output(&mut c.ir, e);
+        let c = simplify_and_place(c).unwrap();
         assert_eq!(
-            c.data.expressions[result(&c.data)].kind,
+            c.ir.expressions[result(&c.ir)].kind,
             ExprKind::Int(expected.to_string())
         );
     }
     for (op, rhs) in [("/", 0), ("%", 0), ("<<", 32)] {
         let mut c = input("entry main(x:i32) i32=x");
-        let t = c.data.expressions[result(&c.data)].ty;
-        let a = integer(&mut c.data, t, 7);
-        let b = integer(&mut c.data, t, rhs);
-        let e = binary(&mut c.data, op, a, b);
-        output(&mut c.data, e);
-        let c = optimize_expressions(c).unwrap();
+        let t = c.ir.expressions[result(&c.ir)].ty;
+        let a = integer(&mut c.ir, t, 7);
+        let b = integer(&mut c.ir, t, rhs);
+        let e = binary(&mut c.ir, op, a, b);
+        output(&mut c.ir, e);
+        let c = simplify_and_place(c).unwrap();
         assert!(matches!(
-            c.data.expressions[result(&c.data)].kind,
+            c.ir.expressions[result(&c.ir)].kind,
             ExprKind::PureApp { .. }
         ));
     }
@@ -127,26 +149,26 @@ fn constant_folding_wraps_at_the_declared_width_and_keeps_partial_operations() {
 #[test]
 fn float_folding_does_not_turn_invalid_ring_laws_into_equalities() {
     let mut c = input("entry main(x:f32) f32=x");
-    let x = parameter(&mut c.data, 0);
-    let t = c.data.expressions[x].ty;
-    let zero = expr(&mut c.data, t, ExprKind::FloatBits(0));
-    let e = binary(&mut c.data, "*", x, zero);
-    output(&mut c.data, e);
-    let c = optimize_expressions(c).unwrap();
+    let x = parameter(&mut c.ir, 0);
+    let t = c.ir.expressions[x].ty;
+    let zero = intern_expr(&mut c.ir, t, ExprKind::FloatBits(0));
+    let e = binary(&mut c.ir, "*", x, zero);
+    output(&mut c.ir, e);
+    let c = simplify_and_place(c).unwrap();
     assert!(matches!(
-        c.data.expressions[result(&c.data)].kind,
+        c.ir.expressions[result(&c.ir)].kind,
         ExprKind::PureApp { .. }
     ));
     for (a, b) in [(f32::INFINITY, 0.0f32), (-0.0, 0.0), (1.0, 3.0)] {
         let mut c = input("entry main(x:f32) f32=x");
-        let t = c.data.expressions[result(&c.data)].ty;
-        let av = expr(&mut c.data, t, ExprKind::FloatBits(a.to_bits()));
-        let bv = expr(&mut c.data, t, ExprKind::FloatBits(b.to_bits()));
-        let e = binary(&mut c.data, "+", av, bv);
-        output(&mut c.data, e);
-        let c = optimize_expressions(c).unwrap();
+        let t = c.ir.expressions[result(&c.ir)].ty;
+        let av = intern_expr(&mut c.ir, t, ExprKind::FloatBits(a.to_bits()));
+        let bv = intern_expr(&mut c.ir, t, ExprKind::FloatBits(b.to_bits()));
+        let e = binary(&mut c.ir, "+", av, bv);
+        output(&mut c.ir, e);
+        let c = simplify_and_place(c).unwrap();
         assert_eq!(
-            c.data.expressions[result(&c.data)].kind,
+            c.ir.expressions[result(&c.ir)].kind,
             ExprKind::FloatBits((a + b).to_bits())
         );
     }
@@ -155,15 +177,15 @@ fn float_folding_does_not_turn_invalid_ring_laws_into_equalities() {
 #[test]
 fn explicit_loop_hoists_invariants_but_keeps_iteration_and_accumulator_dependencies() {
     let c = compile("entry main(n:i32, bias:i32) i32 = loop acc=0 for i<n do acc + (bias * bias) + i");
-    assert!(c.data.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.data.operations[op].kind, OperationKind::Loop { .. }))));
+    assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Loop { .. }))));
     let c = schedule(c).unwrap();
     for n in [0, 1, 7] {
         assert_eq!(
-            run(&c.data, vec![Value::Int(n), Value::Int(3)]),
+            run(&c, vec![Value::Int(n), Value::Int(3)]),
             vec![Value::Int(n * 9 + n * (n - 1) / 2)]
         );
     }
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
@@ -174,27 +196,27 @@ fn nested_loop_invariants_refresh_on_each_outer_iteration() {
     let c = schedule(c).unwrap();
     for n in [0, 1, 5] {
         assert_eq!(
-            run(&c.data, vec![Value::Int(n)]),
+            run(&c, vec![Value::Int(n)]),
             vec![Value::Int((0..n).map(|i| 3 * i * i + 3).sum())]
         );
     }
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn common_if_and_zero_trip_safety() {
     let c = compile("entry main(flag:bool, x:i32) i32 = if flag then x*x+1 else x*x+2");
-    assert!(c.data.placements.values().any(|p| matches!(p.before, PlacementSite::Expression(_))));
+    assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Expression(_))));
     let c = schedule(c).unwrap();
     assert_eq!(
-        run(&c.data, vec![Value::Bool(true), Value::Int(7)]),
+        run(&c, vec![Value::Bool(true), Value::Int(7)]),
         vec![Value::Int(50)]
     );
     assert_eq!(
-        run(&c.data, vec![Value::Bool(false), Value::Int(7)]),
+        run(&c, vec![Value::Bool(false), Value::Int(7)]),
         vec![Value::Int(51)]
     );
-    let ssa = to_ssa(&c.data, crate::CodegenTarget::Wgsl).unwrap();
+    let ssa = to_ssa(&c, CodegenTarget::Wgsl).unwrap();
     assert_eq!(
         ssa.entry_points[0]
             .body
@@ -203,8 +225,8 @@ fn common_if_and_zero_trip_safety() {
             .values()
             .filter(|i| matches!(
                 i.data,
-                crate::ssa::types::InstKind::Op {
-                    tag: crate::op::OpTag::BinOp(crate::op::BinaryOperator::Multiply),
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Multiply),
                     ..
                 }
             ))
@@ -212,43 +234,40 @@ fn common_if_and_zero_trip_safety() {
         1,
         "common work must be emitted once before the selection"
     );
-    wgsl(&c.data);
+    wgsl(&c);
     let c = compile("entry main(n:i32, d:i32) i32 = loop acc=0 for i<n do acc + 12/d");
-    assert!(c.data.placements.is_empty(), "division must not be speculated");
+    assert!(c.state.placements.is_empty(), "division must not be speculated");
     let c = schedule(c).unwrap();
-    assert_eq!(
-        run(&c.data, vec![Value::Int(0), Value::Int(0)]),
-        vec![Value::Int(0)]
-    );
+    assert_eq!(run(&c, vec![Value::Int(0), Value::Int(0)]), vec![Value::Int(0)]);
 }
 
 #[test]
 fn while_header_reuses_syntax_without_reusing_the_previous_iterations_value() {
     let c = compile("entry main(n:i32) i32 = let (_,value)=loop (i,total)=(0,0) while i<n do (i+1,total+(loop v=0 for j<3 do v+i*i+j)) in value");
-    assert!(!c.data.placements.is_empty());
+    assert!(!c.state.placements.is_empty());
     let c = schedule(c).unwrap();
     for n in [0, 1, 3] {
         assert_eq!(
-            run(&c.data, vec![Value::Int(n)]),
+            run(&c, vec![Value::Int(n)]),
             vec![Value::Int((0..n).map(|i| 3 * i * i + 3).sum())]
         );
     }
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn soac_capture_computations_move_out_and_refresh_between_launches() {
     let c = compile("entry main(xs:[4]i32, n:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i,acc)");
-    assert!(c.data.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.data.operations[op].kind, OperationKind::Screma { .. }))));
+    assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Screma { .. }))));
     let c = schedule(c).unwrap();
     for n in [0, 1, 5] {
         let add: i64 = (0..n).map(|i| i * i).sum();
         assert_eq!(
-            run(&c.data, vec![Value::array(1..5), Value::Int(n)])[0].ints(),
+            run(&c, vec![Value::array(1..5), Value::Int(n)])[0].ints(),
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    assert!(to_ssa(&c.data, crate::CodegenTarget::Wgsl)
+    assert!(to_ssa(&c, CodegenTarget::Wgsl)
         .err()
         .unwrap()
         .to_string()
@@ -260,21 +279,21 @@ fn nested_soac_capture_hoisting_preserves_element_dependence() {
     let c = compile("entry main(xs:[]i32, bias:i32) []i32 = map(|x:i32|reduce(|a:i32,b:i32|a+b,0,map(|y:i32|y+x*x+bias*bias,iota(3))),xs)");
     let c = schedule(c).unwrap();
     assert_eq!(
-        run(&c.data, vec![Value::array(0..5), Value::Int(2)])[0].ints(),
+        run(&c, vec![Value::array(0..5), Value::Int(2)])[0].ints(),
         (0..5).map(|x| 3 + 3 * x * x + 12).collect::<Vec<_>>()
     );
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn capture_bounds_stop_at_the_loop_binding_that_varies() {
     let c = compile("entry main(xs:[4]i32, n:i32, bias:i32) [4]i32 = loop acc=xs for i<n do map(|x:i32|x+i*i+bias*bias,acc)");
-    let d = &c.data;
+    let d = &c;
     let bias = d.regions[root(d)].parameters[2];
     let outer =
         d.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Loop { .. })).unwrap().0;
     let outside: Vec<_> =
-        d.placements.values().filter(|p| p.before == PlacementSite::Operation(*outer)).collect();
+        d.state.placements.values().filter(|p| p.before == PlacementSite::Operation(*outer)).collect();
     assert!(
         !outside.is_empty(),
         "capture-only work should leave both the map and loop"
@@ -289,18 +308,18 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
         );
     }
     assert!(
-        d.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op)
+        d.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op)
         if matches!(d.operations[op].kind, OperationKind::Screma { .. })))
     );
     let c = schedule(c).unwrap();
     for n in [0, 1, 5] {
         let add: i64 = (0..n).map(|i| i * i + 9).sum();
         assert_eq!(
-            run(&c.data, vec![Value::array(1..5), Value::Int(n), Value::Int(3)])[0].ints(),
+            run(&c, vec![Value::array(1..5), Value::Int(n), Value::Int(3)])[0].ints(),
             (1..5).map(|x| x + add).collect::<Vec<_>>()
         );
     }
-    assert!(to_ssa(&c.data, crate::CodegenTarget::Wgsl)
+    assert!(to_ssa(&c, CodegenTarget::Wgsl)
         .err()
         .unwrap()
         .to_string()
@@ -314,31 +333,30 @@ fn operation_result_bounds_preserve_order_and_branch_scope() {
         "entry main(xs:[]i32, n:i32) i32 = if n>0 then let v=xs[0] in (loop acc=0 for j<3 do acc+v*v+j) else 0",
     ] {
         let c = compile(source);
-        let read = c.data.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Index { .. })).unwrap().0;
-        assert!(!c.data.placements.is_empty(), "reuse the value after the read, before the inner loop");
-        for p in c.data.placements.values() {
+        let read = c.ir.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Index { .. })).unwrap().0;
+        assert!(!c.state.placements.is_empty(), "reuse the value after the read, before the inner loop");
+        for p in c.state.placements.values() {
             let PlacementSite::Operation(op) = p.before else { panic!("loop placement") };
-            assert_eq!(c.data.operations[op].region, c.data.operations[*read].region,
+            assert_eq!(c.ir.operations[op].region, c.ir.operations[*read].region,
                 "a binding cannot escape its defining loop/branch");
         }
         let c = schedule(c).unwrap();
-        assert_eq!(run(&c.data, vec![Value::array([]), Value::Int(0)]), vec![Value::Int(0)]);
-        assert_eq!(run(&c.data, vec![Value::array([4]), Value::Int(1)]), vec![Value::Int(51)]);
-        wgsl(&c.data);
+        assert_eq!(run(&c, vec![Value::array([]), Value::Int(0)]), vec![Value::Int(0)]);
+        assert_eq!(run(&c, vec![Value::array([4]), Value::Int(1)]), vec![Value::Int(51)]);
+        wgsl(&c);
     }
 }
 
 #[test]
 fn shared_callback_bounds_translate_captures_for_each_invocation() {
     let mut c = input("entry main(xs:[2]i32, ys:[3]i32, a:i32, b:i32) ([2]i32,[3]i32) = (map(|x:i32|x+a*a,xs),map(|x:i32|x+b*b,ys))");
-    let ops: Vec<_> = c
-        .data
-        .operations
-        .iter()
-        .filter_map(|(&id, op)| matches!(op.kind, OperationKind::Screma { .. }).then_some(id))
-        .collect();
+    let ops: Vec<_> =
+        c.ir.operations
+            .iter()
+            .filter_map(|(&id, op)| matches!(op.kind, OperationKind::Screma { .. }).then_some(id))
+            .collect();
     assert_eq!(ops.len(), 2);
-    let OperationKind::Screma { form, .. } = &c.data.operations[ops[0]].kind else {
+    let OperationKind::Screma { form, .. } = &c.ir.operations[ops[0]].kind else {
         panic!("map")
     };
     let SoacBody::Apply { region: shared, .. } = form.pre else {
@@ -346,20 +364,20 @@ fn shared_callback_bounds_translate_captures_for_each_invocation() {
     };
     // Identical code, but separate actual arguments; sharing syntax must not
     // equate the two invocations' capture values.
-    let OperationKind::Screma { form, .. } = &mut c.data.operations[ops[1]].kind else {
+    let OperationKind::Screma { form, .. } = &mut c.ir.operations[ops[1]].kind else {
         panic!("map")
     };
     let SoacBody::Apply { region, .. } = &mut form.pre else {
         panic!("callback")
     };
     *region = shared;
-    let c = optimize_expressions(c).unwrap();
-    assert!(c.data.placements.values().any(|p| p.before == PlacementSite::Operation(ops[0])));
-    assert!(c.data.placements.values().any(|p| p.before == PlacementSite::Operation(ops[1])));
+    let c = simplify_and_place(c).unwrap();
+    assert!(c.state.placements.values().any(|p| p.before == PlacementSite::Operation(ops[0])));
+    assert!(c.state.placements.values().any(|p| p.before == PlacementSite::Operation(ops[1])));
     let regions: BTreeSet<_> = ops
         .iter()
         .map(|&op| {
-            let OperationKind::Screma { form, .. } = &c.data.operations[op].kind else {
+            let OperationKind::Screma { form, .. } = &c.ir.operations[op].kind else {
                 panic!("map")
             };
             let SoacBody::Apply { region, .. } = form.pre else {
@@ -375,7 +393,7 @@ fn shared_callback_bounds_translate_captures_for_each_invocation() {
     );
     let c = schedule(c).unwrap();
     let values = run(
-        &c.data,
+        &c,
         vec![
             Value::array([1, 2]),
             Value::array([3, 4, 5]),
@@ -388,89 +406,86 @@ fn shared_callback_bounds_translate_captures_for_each_invocation() {
     };
     assert_eq!(arrays[0].ints(), vec![5, 6]);
     assert_eq!(arrays[1].ints(), vec![28, 29, 30]);
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn structured_if_hoists_shared_work_out_of_both_loop_bodies() {
     let c = compile("entry main(flag:bool, x:i32) i32 = if flag then (loop a=0 for i<2 do a+x*x) else (loop a=0 for i<3 do a+x*x)");
-    assert!(c.data.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.data.operations[op].kind, OperationKind::If { .. }))));
+    assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::If { .. }))));
     let c = schedule(c).unwrap();
     for flag in [false, true] {
         assert_eq!(
-            run(&c.data, vec![Value::Bool(flag), Value::Int(7)]),
+            run(&c, vec![Value::Bool(flag), Value::Int(7)]),
             vec![Value::Int(if flag { 98 } else { 147 })]
         );
     }
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn read_occurrences_and_partial_branch_expressions_are_not_speculated() {
     let c = compile("entry main(xs:[]i32, n:i32) i32 = loop a=0 for i<n do a+xs[0]*xs[0]");
-    assert!(c.data.placements.is_empty());
+    assert!(c.state.placements.is_empty());
     let c = schedule(c).unwrap();
     assert_eq!(
-        run(&c.data, vec![Value::array([]), Value::Int(0)]),
+        run(&c, vec![Value::array([]), Value::Int(0)]),
         vec![Value::Int(0)]
     );
     assert_eq!(
-        run(&c.data, vec![Value::array([4]), Value::Int(3)]),
+        run(&c, vec![Value::array([4]), Value::Int(3)]),
         vec![Value::Int(48)]
     );
     let c = compile("entry main(flag:bool, d:i32) i32 = if flag then 100/d+1 else 100/d+2");
-    assert!(c.data.placements.is_empty());
+    assert!(c.state.placements.is_empty());
 }
 
 #[test]
 fn tuple_captures_can_be_hoisted_without_flattening_element_arguments() {
     let c = compile("entry main(xs:[]i32, pair:(i32,i32)) []i32 = map(|x:i32|x+pair.0*pair.1,xs)");
-    assert!(!c.data.placements.is_empty());
+    assert!(!c.state.placements.is_empty());
     let c = schedule(c).unwrap();
     let actual = run(
-        &c.data,
+        &c,
         vec![
             Value::arrays(vec![Value::Int(1), Value::Int(2)]),
             Value::Tuple(vec![Value::Int(3), Value::Int(5)]),
         ],
     );
     assert_eq!(actual[0].ints(), vec![16, 17]);
-    wgsl(&c.data);
+    wgsl(&c);
 }
 
 #[test]
 fn cancellation_drops_dependencies_in_the_final_fact_base() {
     let mut c = input("entry main(x:i32) i32=x");
-    let x = parameter(&mut c.data, 0);
-    let e = binary(&mut c.data, "-", x, x);
-    output(&mut c.data, e);
-    let c = optimize_expressions(c).unwrap();
-    assert_eq!(
-        c.data.expressions[result(&c.data)].kind,
-        ExprKind::Int("0".into())
-    );
+    let x = parameter(&mut c.ir, 0);
+    let e = binary(&mut c.ir, "-", x, x);
+    output(&mut c.ir, e);
+    let c = simplify_and_place(c).unwrap();
+    assert_eq!(c.ir.expressions[result(&c.ir)].kind, ExprKind::Int("0".into()));
     let mut graph = EGraph::default();
-    graph.run_program(c.program).unwrap();
+    graph.run_program(c.state.facts).unwrap();
     graph.parse_and_run_program(None, "(check (RegionResult r 0 (Typed t (Int \"0\")))) (fail (check (RegionResult r 0 e) (ExprParameter e p)))").unwrap();
 }
 
 #[test]
 fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
-    fn builtin(data: &mut AssociatedData, name: &str, arg: ExprId, ty: TypeId) -> ExprId {
-        let builtin = crate::builtins::catalog().lookup_by_any_name(name).unwrap();
+    fn builtin(data: &mut Ir, name: &str, arg: ExprId, ty: TypeId) -> ExprId {
+        let builtin = catalog().lookup_by_any_name(name).unwrap();
         let b = data.builtins.alloc(BuiltinData {
             builtin: builtin.id,
             overload_idx: 0,
         });
-        let ft = super::super::data::intern_type(
+        let ft = intern_type(
             data,
-            types::function(
+            function(
                 data.types[data.expressions[arg].ty].ty.clone(),
                 data.types[ty].ty.clone(),
             ),
         );
-        let f = expr(data, ft, ExprKind::Builtin(b));
-        expr(
+        let f = intern_expr(data, ft, ExprKind::Builtin(b));
+        intern_expr(
             data,
             ty,
             ExprKind::PureApp {
@@ -480,30 +495,24 @@ fn inverse_bitcasts_preserve_binding_identity_and_nan_payloads() {
         )
     }
     let mut c = input("entry main(x:u32) u32=x");
-    let x = parameter(&mut c.data, 0);
-    let u = c.data.expressions[x].ty;
-    let i = super::super::data::intern_type(
-        &mut c.data,
-        types::Type::Constructed(types::TypeName::Int(32), vec![]),
-    );
-    let a = builtin(&mut c.data, "i32.u32", x, i);
-    let b = builtin(&mut c.data, "u32.i32", a, u);
-    output(&mut c.data, b);
-    let c = optimize_expressions(c).unwrap();
-    assert_eq!(result(&c.data), x);
+    let x = parameter(&mut c.ir, 0);
+    let u = c.ir.expressions[x].ty;
+    let i = intern_type(&mut c.ir, Type::Constructed(TypeName::Int(32), vec![]));
+    let a = builtin(&mut c.ir, "i32.u32", x, i);
+    let b = builtin(&mut c.ir, "u32.i32", a, u);
+    output(&mut c.ir, b);
+    let c = simplify_and_place(c).unwrap();
+    assert_eq!(result(&c.ir), x);
 
     let mut c = input("entry main(x:f32) f32=x");
-    let f = c.data.expressions[result(&c.data)].ty;
-    let u = super::super::data::intern_type(
-        &mut c.data,
-        types::Type::Constructed(types::TypeName::UInt(32), vec![]),
-    );
-    let value = expr(&mut c.data, f, ExprKind::FloatBits(0x7fc01234));
+    let f = c.ir.expressions[result(&c.ir)].ty;
+    let u = intern_type(&mut c.ir, Type::Constructed(TypeName::UInt(32), vec![]));
+    let value = intern_expr(&mut c.ir, f, ExprKind::FloatBits(0x7fc01234));
     // Exercise the constant evaluator directly: a bitcast must not canonicalize NaNs.
-    let app = builtin(&mut c.data, "f32.to_bits", value, u);
-    let folded = fold::evaluate(&mut c.data, app).unwrap();
+    let app = builtin(&mut c.ir, "f32.to_bits", value, u);
+    let folded = evaluate(&mut c.ir, app).unwrap();
     assert_eq!(
-        c.data.expressions[folded].kind,
+        c.ir.expressions[folded].kind,
         ExprKind::Int(0x7fc01234u32.to_string())
     );
 }

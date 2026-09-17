@@ -1,10 +1,10 @@
 //! Decode local callback dependencies directly into a sink.
 use super::sink::Sink;
-use crate::egglog::data::{AssociatedData, ExprId, ExprKind, ParameterId, SoacBody};
+use crate::egglog::data::{ExprId, ExprKind, Ir, ParameterId, SoacBody};
 use std::collections::BTreeMap;
 
 fn scalar<S: Sink>(
-    data: &AssociatedData,
+    data: &Ir,
     id: ExprId,
     parameters: &BTreeMap<ParameterId, S::Dependency>,
     memo: &mut BTreeMap<ExprId, S::Dependency>,
@@ -53,7 +53,7 @@ fn scalar<S: Sink>(
 }
 
 pub(super) fn invoke<S: Sink>(
-    data: &AssociatedData,
+    data: &Ir,
     body: &SoacBody,
     args: Vec<S::Dependency>,
     sink: &mut S,

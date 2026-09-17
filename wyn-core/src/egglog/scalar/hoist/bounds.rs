@@ -1,12 +1,15 @@
 //! Binding barriers on the structured control tree, before block lowering.
 //! DFS intervals encode dominance, not execution counts or operation-ID order.
-use super::*;
 
-pub(super) use wyn_graph::DfsInterval as Interval;
+use super::OptimizeError;
+use crate::egglog::data::{Ir, OperationId, OperationKind, RegionId};
+use crate::egglog::scalar::error;
+use std::collections::{BTreeMap, BTreeSet};
+use wyn_graph::DfsInterval;
 
 pub(super) struct Bounds {
-    pub regions: BTreeMap<RegionId, Interval>,
-    pub operations: BTreeMap<OperationId, (usize, Interval)>,
+    pub regions: BTreeMap<RegionId, DfsInterval>,
+    pub operations: BTreeMap<OperationId, (usize, DfsInterval)>,
 }
 
 #[derive(Default)]
@@ -26,7 +29,7 @@ impl Points {
 
     fn region(
         &mut self,
-        data: &AssociatedData,
+        data: &Ir,
         id: RegionId,
         parent: usize,
         schedules: &BTreeMap<RegionId, Vec<OperationId>>,
@@ -65,7 +68,7 @@ impl Points {
 }
 
 pub(super) fn analyze(
-    data: &AssociatedData,
+    data: &Ir,
     schedules: &BTreeMap<RegionId, Vec<OperationId>>,
 ) -> Result<Bounds, OptimizeError> {
     let mut children = BTreeSet::new();

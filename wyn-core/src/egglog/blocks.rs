@@ -1,10 +1,9 @@
 //! Control-flow scaffold. Scalar instructions are opaque payloads outside egglog.
-
-use super::data::{
+use crate::egglog::data::{
     Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
     RegionId,
 };
-use crate::types;
+use crate::types::Type;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
@@ -130,7 +129,7 @@ pub struct BufferData {
     pub name: String,
     pub length: Value,
     /// Logical element type; physical packing and binding numbers are deferred.
-    pub element: types::Type,
+    pub element: Type,
     pub storage: Storage,
 }
 

@@ -1,18 +1,22 @@
 //! Synthetic graph shapes isolate placement costs from parsing and EqSat.
-use super::*;
-use crate::egglog::{convert_program, dependencies};
+use super::hoist::run;
+use crate::compile_thru_tlc;
+use crate::egglog::data::{
+    ExprData, ExprKind, ExternData, Ir, OperationData, OperationKind, PlacementSite, RegionData, RegionId,
+};
+use crate::egglog::dependencies::analyze;
+use crate::egglog::from_tlc;
+use crate::egglog::timing::with_timings;
+use crate::tlc::infer_input_slice_bounds;
+use std::collections::BTreeSet;
 
-fn imported(source: &str) -> AssociatedData {
-    convert_program(&crate::tlc::infer_input_slice_bounds(
-        crate::compile_thru_tlc(source).unwrap(),
-    ))
-    .unwrap()
-    .data
+fn imported(source: &str) -> Ir {
+    from_tlc(&infer_input_slice_bounds(compile_thru_tlc(source).unwrap())).unwrap().ir
 }
-fn root(data: &AssociatedData) -> RegionId {
+fn root(data: &Ir) -> RegionId {
     data.definitions[data.entries.values().next().unwrap().definition].body
 }
-fn maps(n: usize) -> AssociatedData {
+fn maps(n: usize) -> Ir {
     let mut data = imported("entry main(xs:[4]i32,bias:i32) [4]i32=map(|x:i32|x+bias*bias,xs)");
     let r = root(&data);
     let op = *data.regions[r].members.first().unwrap();
@@ -33,7 +37,7 @@ fn maps(n: usize) -> AssociatedData {
     }
     data
 }
-fn conditionals(n: usize) -> AssociatedData {
+fn conditionals(n: usize) -> Ir {
     let mut data = imported("entry main(flag:bool,x:i32) i32=if flag then x*x+1 else x*x+2");
     let r = root(&data);
     let mut e = data.regions[r].results[0];
@@ -54,7 +58,7 @@ fn conditionals(n: usize) -> AssociatedData {
     data.regions[r].results = vec![e];
     data
 }
-fn effects(n: usize, many_regions: bool) -> AssociatedData {
+fn effects(n: usize, many_regions: bool) -> Ir {
     let mut data = maps(1);
     let r = root(&data);
     let definition = data.regions[r].definition;
@@ -102,18 +106,18 @@ fn effects(n: usize, many_regions: bool) -> AssociatedData {
 fn nested_common_if_work_is_placed_once_above_the_chain() {
     let mut data = conditionals(256);
     let outer = data.regions[root(&data)].results[0];
-    hoist::run(&mut data).unwrap();
-    assert!(!data.placements.is_empty());
-    assert!(data.placements.values().all(|p| p.before == PlacementSite::Expression(outer)));
+    let placements = run(&mut data).unwrap();
+    assert!(!placements.is_empty());
+    assert!(placements.values().all(|p| p.before == PlacementSite::Expression(outer)));
 }
 
 #[test]
 fn shared_callbacks_reuse_one_specialized_body() {
     let mut data = maps(64);
     let before = data.regions.len();
-    hoist::run(&mut data).unwrap();
+    let placements = run(&mut data).unwrap();
     assert_eq!(data.regions.len() - before, 1);
-    let sites: BTreeSet<_> = data.placements.values().map(|p| p.before).collect();
+    let sites: BTreeSet<_> = placements.values().map(|p| p.before).collect();
     assert_eq!(sites.len(), 64);
 }
 
@@ -133,10 +137,10 @@ fn placement_scaling() {
                 let mut candidate = data.clone();
                 let start = std::time::Instant::now();
                 if shape == "effects" || shape == "regions" {
-                    let s = dependencies::analyze(&candidate);
+                    let s = analyze(&candidate);
                     s.schedules(&candidate).unwrap();
                 } else {
-                    hoist::run(&mut candidate).unwrap();
+                    run(&mut candidate).unwrap();
                 }
                 times.push(start.elapsed());
             }
@@ -151,13 +155,13 @@ fn placement_scaling() {
 fn placement_profile() {
     let mut data = maps(2048);
     let before = (data.regions.len(), data.expressions.len());
-    timing::with_timings(true, || hoist::run(&mut data).unwrap());
+    let placements = with_timings(true, || run(&mut data).unwrap());
     eprintln!(
         "regions {} -> {}; expressions {} -> {}; placements {}",
         before.0,
         data.regions.len(),
         before.1,
         data.expressions.len(),
-        data.placements.len()
+        placements.len()
     );
 }

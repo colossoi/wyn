@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 use thiserror::Error;
 use wyn_core::egglog::{
-    convert_program, fuse, insert_expressions, optimize_expressions, schedule, to_ssa, with_timings,
+    from_tlc, fuse, insert_expressions, place, schedule, simplify, to_ssa, with_timings,
 };
 #[cfg(feature = "egir")]
 use wyn_core::egir::{apply_pipeline_topology_policy, optimize_semantic_operations, plan, reify_soacs};
@@ -746,25 +746,26 @@ fn compile_egglog(
     verbose: bool,
     auxiliary: &mut Vec<TextArtifact>,
 ) -> Result<Elaborated, DriverError> {
-    let (converted, ssa) = with_timings(verbose, || -> Result<_, DriverError> {
-        let converted = convert_program(program)?;
-        let converted = fuse(converted)?;
-        let converted = insert_expressions(converted)?;
-        let converted = optimize_expressions(converted)?;
-        let converted = schedule(converted)?;
+    let (program, ssa) = with_timings(verbose, || -> Result<_, DriverError> {
+        let program = from_tlc(program)?;
+        let program = fuse(program)?;
+        let program = insert_expressions(program)?;
+        let program = simplify(program)?;
+        let program = place(program)?;
+        let program = schedule(program)?;
         let ssa = to_ssa(
-            &converted.data,
+            &program,
             match target {
                 Target::Spirv => CodegenTarget::Spirv,
                 Target::Wgsl => CodegenTarget::Wgsl,
             },
         )?;
-        Ok((converted, ssa))
+        Ok((program, ssa))
     })?;
     if let Some(path) = egg_out {
         auxiliary.push(TextArtifact {
             path,
-            contents: converted.program.iter().map(|command| format!("{command}\n")).collect(),
+            contents: program.facts().map(|command| format!("{command}\n")).collect(),
         });
     }
     Ok(ssa)

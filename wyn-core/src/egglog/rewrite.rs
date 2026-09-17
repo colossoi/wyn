@@ -1,9 +1,9 @@
 //! Rebuild interned expressions when changing their operands or bindings.
-use super::data::*;
+use crate::egglog::data::{ExprData, ExprId, ExprKind, Ir, OperationKind, TypeId};
 use std::collections::BTreeMap;
 use wyn_base::InternIndex;
 
-pub(super) fn all(data: &mut AssociatedData, replacements: &BTreeMap<ExprId, ExprId>) {
+pub(super) fn all(data: &mut Ir, replacements: &BTreeMap<ExprId, ExprId>) {
     let mut memo = replacements.clone();
     let mut rewrite = Rewriter::new(data);
     let operations: Vec<_> = data.operations.iter().map(|(&id, o)| (id, o.kind.clone())).collect();
@@ -22,17 +22,17 @@ pub(super) struct Rewriter {
     expressions: InternIndex<ExprId, ExprData>,
 }
 impl Rewriter {
-    pub fn new(data: &AssociatedData) -> Self {
+    pub fn new(data: &Ir) -> Self {
         Self {
             expressions: InternIndex::from_arena(&data.expressions),
         }
     }
-    pub fn intern(&mut self, data: &mut AssociatedData, ty: TypeId, kind: ExprKind) -> ExprId {
+    pub fn intern(&mut self, data: &mut Ir, ty: TypeId, kind: ExprKind) -> ExprId {
         self.expressions.intern(&mut data.expressions, &ExprData { ty, kind })
     }
     pub(super) fn value(
         &mut self,
-        data: &mut AssociatedData,
+        data: &mut Ir,
         id: ExprId,
         memo: &mut BTreeMap<ExprId, ExprId>,
     ) -> ExprId {
@@ -55,7 +55,7 @@ impl Rewriter {
     }
     pub(super) fn operation(
         &mut self,
-        data: &mut AssociatedData,
+        data: &mut Ir,
         kind: &mut OperationKind,
         memo: &mut BTreeMap<ExprId, ExprId>,
     ) {

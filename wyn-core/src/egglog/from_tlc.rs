@@ -1,39 +1,32 @@
 //! Retain backend-ready TLC structure in arenas and emit its fusion summary.
-
-use super::data::{
-    Array, AssociatedData, BucketShapeData, BuiltinData, BuiltinId, DefinitionData, DefinitionId,
-    DefinitionKind, EntryData, EntryParamData, ExprData, ExprId, ExprKind, ExternData, ExternId,
-    InputBoundData, LoopKind, OperationData, OperationKind, OriginData, OriginId, ParameterData, Place,
-    ProgramData, Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId,
-    TypeData, TypeId,
-};
-use super::{fusion, timing};
+use super::data::body_signature;
+use super::fusion::analysis::{emit, Egglog};
+use super::timing::span;
+use super::{Imported, Program};
 use crate::ast::Span;
 use crate::builtins::lowering::PrimOp;
-use crate::builtins::BuiltinLowering;
-use crate::tlc::{self, data, VarRef};
-use crate::{builtins, types, LookupMap};
+use crate::builtins::{by_id, catalog, BuiltinLowering, Purity};
+use crate::egglog::data::{
+    Array, BucketShapeData, BuiltinData, BuiltinId, DefinitionData, DefinitionId, DefinitionKind,
+    EntryData, EntryParamData, ExprData, ExprId, ExprKind, ExternData, ExternId, InputBoundData, Ir,
+    LoopKind, OperationData, OperationKind, OriginData, OriginId, ParameterData, Place, ProgramData,
+    Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId, TypeData, TypeId,
+};
+use crate::egglog::timing::time;
+use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
+use crate::tlc::stage::InputSliceBoundsInferred;
+use crate::tlc::{DefMeta, Lambda, VarRef};
+use crate::types::{array_elem, canonical_storage_buffer_ty, is_copy, tuple, SoacOwnership, Type};
+use crate::{builtins, tlc, LookupMap};
+use egglog_engine::ast::Parser;
 use wyn_base::Interner;
 
-type Term = tlc::Term<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type TermKind = tlc::TermKind<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type ArrayExpr = tlc::ArrayExpr<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type TlcLambda = tlc::Lambda<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type TlcSoacBody = tlc::SoacBody<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-
-#[derive(Clone, Debug)]
-pub struct Converted {
-    /// Facts from the last completed pass: a fusion summary after import or
-    /// optimization, augmented with expressions after insertion; scheduling
-    /// replaces the fusion summary with planning and block/dispatch facts.
-    pub program: Vec<egglog_engine::ast::Command>,
-    /// Full bodies, expressions, arguments, types, and diagnostic metadata.
-    pub data: AssociatedData,
-    /// Independent post-fusion layer. Scheduling retains these commands when
-    /// replacing the fusion summary with block topology.
-    pub(super) expression_program: Option<Vec<egglog_engine::ast::Command>>,
-}
+type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type TermKind = tlc::TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type ArrayExpr = tlc::ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type TlcLambda = Lambda<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type TlcSoacBody = tlc::SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type SoacOp = tlc::SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConvertError {
@@ -51,9 +44,9 @@ pub enum ConvertError {
 /// Map/reduce/scan construct Scremas directly.
 /// Egglog receives only the fusion summary. This conversion neither mutates TLC
 /// nor runs optimization or extraction.
-pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result<Converted, ConvertError> {
-    let _timing = super::timing::span("from TLC");
-    let import = super::timing::span("import sidecar");
+pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>, ConvertError> {
+    let _timing = span("from TLC");
+    let import = span("import sidecar");
     let mut converter = Converter::default();
     converter.data.programs.alloc(ProgramData {
         next_auto_storage_binding: program.global_context.auto_storage_binding_ids.peek_id(),
@@ -77,9 +70,9 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
         let symbol = converter.symbol(def.name)?;
         let ty = converter.ty(&def.ty);
         let kind = match &def.meta {
-            tlc::DefMeta::Function => DefinitionKind::Function,
-            tlc::DefMeta::LiftedLambda => DefinitionKind::LiftedLambda,
-            tlc::DefMeta::EntryPoint(entry) => {
+            DefMeta::Function => DefinitionKind::Function,
+            DefMeta::LiftedLambda => DefinitionKind::LiftedLambda,
+            DefMeta::EntryPoint(entry) => {
                 let entry_id = converter.data.entries.alloc(EntryData {
                     definition: id,
                     declaration: (*entry.declaration).clone(),
@@ -135,27 +128,24 @@ pub fn convert_program(program: &tlc::stage::InputSliceBoundsInferred) -> Result
     converter.data.origins = converter.origins.into_arena();
     drop(import);
 
-    let mut sink = fusion::analysis::Egglog::new();
-    timing::time("derive fusion facts", || {
-        fusion::analysis::emit(&converter.data, &mut sink)
-    })
-    .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
-    let _parse = super::timing::span("parse fusion facts");
-    let program = egglog_engine::ast::Parser::default()
+    let mut sink = Egglog::new();
+    time("derive fusion facts", || emit(&converter.data, &mut sink))
+        .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
+    let _parse = span("parse fusion facts");
+    let program = Parser::default()
         .get_program_from_string(Some("wyn-from-tlc.egg".into()), &sink.text)
         .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
-    Ok(Converted {
-        program,
-        data: converter.data,
-        expression_program: None,
+    Ok(Program {
+        ir: converter.data,
+        state: Imported { facts: program },
     })
 }
 
 #[derive(Default)]
 struct Converter {
-    data: AssociatedData,
+    data: Ir,
     symbols: LookupMap<crate::SymbolId, SymbolId>,
-    globals: LookupMap<crate::SymbolId, (usize, types::Type, RegionId)>,
+    globals: LookupMap<crate::SymbolId, (usize, Type, RegionId)>,
     types: Interner<TypeId, TypeData>,
     expressions: Interner<ExprId, ExprData>,
     origins: Interner<OriginId, OriginData>,
@@ -176,7 +166,7 @@ impl Converter {
         };
         Ok(*id)
     }
-    fn ty(&mut self, ty: &types::Type) -> TypeId {
+    fn ty(&mut self, ty: &Type) -> TypeId {
         self.types.intern(&TypeData { ty: ty.clone() })
     }
     fn expr(&mut self, ty: TypeId, kind: ExprKind) -> ExprId {
@@ -220,7 +210,7 @@ impl Converter {
     }
     fn parameters(
         &mut self,
-        parameters: &[(crate::SymbolId, types::Type)],
+        parameters: &[(crate::SymbolId, Type)],
         scope: &mut Scope,
     ) -> Result<(), ConvertError> {
         for (source, ty) in parameters {
@@ -395,7 +385,7 @@ impl Converter {
                 OperationKind::Screma {
                     form,
                     inputs: vec![input],
-                    ownership: vec![types::SoacOwnership::Fresh],
+                    ownership: vec![SoacOwnership::Fresh],
                 }
             }
             SoacOp::Scan {
@@ -427,7 +417,7 @@ impl Converter {
             } => {
                 let body = self.soac_body(pred, scope)?;
                 OperationKind::Filter {
-                    map: SoacBody::Identity(super::data::body_signature(&body).0),
+                    map: SoacBody::Identity(body_signature(&body).0),
                     body,
                     inputs: vec![self.array(input, scope)?],
                     ownership: *destination,
@@ -465,10 +455,12 @@ impl Converter {
             } => {
                 let mut parameters = Vec::new();
                 for input in [indices, values] {
-                    let array_ty = types::canonical_storage_buffer_ty(&input.array_type());
-                    let element = types::array_elem(&array_ty).ok_or_else(|| {
-                        ConvertError::InvalidProgram("reduce-by-index input must be an array".into())
-                    })?;
+                    let array_ty = canonical_storage_buffer_ty(&input.array_type());
+                    let Some(element) = array_elem(&array_ty) else {
+                        return Err(ConvertError::InvalidProgram(
+                            "reduce-by-index input must be an array".into(),
+                        ));
+                    };
                     parameters.push(self.ty(element));
                 }
                 OperationKind::ReduceByIndex {
@@ -482,7 +474,7 @@ impl Converter {
         };
         let ty = self.ty(&term.ty);
         if matches!(&kind, OperationKind::Screma { .. }) {
-            let tuple_ty = self.ty(&types::tuple(vec![term.ty.clone()]));
+            let tuple_ty = self.ty(&tuple(vec![term.ty.clone()]));
             let tuple = self.operation(kind, tuple_ty, term.span, scope);
             Ok(self.expr(ty, ExprKind::Project { tuple, index: 0 }))
         } else {
@@ -554,10 +546,10 @@ impl Converter {
                 let record = &self.data.builtins[*id];
                 let builtin = record.builtin;
                 // Slicing constructs a view; it does not read or write elements.
-                if builtin == builtins::catalog().known().slice {
+                if builtin == catalog().known().slice {
                     return true;
                 }
-                let definition = builtins::by_id(builtin);
+                let definition = by_id(builtin);
                 let Some(overload) = definition.overloads().get(record.overload_idx) else {
                     return false;
                 };
@@ -569,13 +561,13 @@ impl Converter {
                     BuiltinLowering::PrimOp(_) | BuiltinLowering::ExtInstSplat { .. } => !args.is_empty(),
                     _ => false,
                 };
-                builtin != builtins::catalog().known().storage_index
+                builtin != catalog().known().storage_index
                     && movable
-                    && definition.raw.purity == builtins::Purity::Pure
-                    && types::is_copy(&self.types.resolve(result).ty)
+                    && definition.raw.purity == Purity::Pure
+                    && is_copy(&self.types.resolve(result).ty)
                     && args
                         .iter()
-                        .all(|id| types::is_copy(&self.types.resolve(self.expressions.resolve(*id).ty).ty))
+                        .all(|id| is_copy(&self.types.resolve(self.expressions.resolve(*id).ty).ty))
             }
             _ => false,
         }

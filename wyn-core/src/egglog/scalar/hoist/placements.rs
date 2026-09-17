@@ -1,5 +1,9 @@
 //! Placement lookup and dominance pruning, indexed by site and expression.
-use super::*;
+use super::bounds::Bounds;
+use super::uses::Uses;
+use crate::egglog::data::{ExprId, Ir, OperationId, PlacementData, PlacementId, PlacementSite};
+use std::collections::{BTreeMap, BTreeSet};
+use wyn_base::IdArena;
 
 #[derive(Default)]
 pub(super) struct Placements {
@@ -10,7 +14,7 @@ impl Placements {
         self.sites.entry(site).or_default().insert(expression);
     }
 
-    pub fn finish(self, data: &mut AssociatedData, uses: &uses::Uses, control: &bounds::Bounds) {
+    pub fn finish(self, data: &Ir, uses: &Uses, control: &Bounds) -> IdArena<PlacementId, PlacementData> {
         let mut expressions: BTreeMap<ExprId, Vec<(usize, OperationId)>> = BTreeMap::new();
         let mut kept = Self::default();
         for (site, values) in self.sites {
@@ -51,11 +55,12 @@ impl Placements {
                 }
             }
         }
-        data.placements = Default::default();
+        let mut result = IdArena::default();
         for (before, values) in kept.sites {
             for expression in values {
-                data.placements.alloc(PlacementData { before, expression });
+                result.alloc(PlacementData { before, expression });
             }
         }
+        result
     }
 }

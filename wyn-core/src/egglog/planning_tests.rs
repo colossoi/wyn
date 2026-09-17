@@ -1,5 +1,12 @@
-use super::*;
-use crate::{compile_thru_tlc, tlc};
+use super::super::data::intern_type;
+use super::super::{from_tlc, Storage};
+use super::{facts, outputs, read, EGraph, KEYS, RULES, RUN};
+use crate::compile_thru_tlc;
+use crate::egglog::dependencies::analyze;
+use crate::egglog::{Program, Scheduled};
+use crate::tlc::infer_input_slice_bounds;
+use crate::types::{Type, TypeName};
+use std::fmt::Write;
 
 fn graph(facts: &str) -> EGraph {
     let mut graph = EGraph::default();
@@ -211,23 +218,24 @@ fn imported_source_plans_before_block_generation() {
         "entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x > 0, xs)",
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)",
     ] {
-        let tlc = tlc::infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
-        let mut converted = super::super::convert_program(&tlc).unwrap();
-        let summary = dependencies::analyze(&converted.data);
-        let input_fields = outputs(&mut converted.data);
-        let count_type = super::super::data::intern_type(
-            &mut converted.data,
-            crate::types::Type::Constructed(crate::types::TypeName::UInt(32), vec![]),
-        );
-        let source = facts(&converted.data, &summary, count_type, &input_fields);
+        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let converted = from_tlc(&tlc).unwrap();
+        let mut converted = Program {
+            ir: converted.ir,
+            state: Scheduled::default(),
+        };
+        let summary = analyze(&converted.ir);
+        let input_fields = outputs(&mut converted);
+        let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
+        let source = facts(&converted, &summary, count_type, &input_fields);
         let g = graph(&source);
         assert!(count(&g, "Phase") > 0);
         assert!(count(&g, "Allocation") > 0);
-        assert!(converted.data.blocks.is_empty());
-        assert!(converted.data.buffers.is_empty());
-        read(&g, &mut converted.data).unwrap();
+        assert!(converted.state.blocks.is_empty());
+        assert!(converted.state.buffers.is_empty());
+        read(&g, &mut converted).unwrap();
         assert_eq!(
-            converted.data.buffers.values().filter(|b| b.storage == super::super::Storage::Device).count(),
+            converted.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
             count(&g, "Allocation"),
             "every physical allocation must have exactly one logical allocation fact"
         );

@@ -1,5 +1,5 @@
 //! Structural traversal of the sidecar IR. Passes decide what each use means.
-use super::data::*;
+use crate::egglog::data::{Array, ExprId, ExprKind, LoopKind, OperationKind, RegionId, SoacBody};
 
 #[derive(Clone, Copy)]
 pub(super) enum OperandRole {
@@ -217,11 +217,10 @@ impl OperationKind {
     }
 
     pub(super) fn for_each_operand(&self, f: &mut impl FnMut(Operand)) {
-        use OperandRole::*;
         for body in self.callbacks() {
             if let SoacBody::Apply { region, captures, .. } = body {
                 f(Operand::Region(*region));
-                captures.iter().for_each(|&e| f(Operand::Value(Capture, e)));
+                captures.iter().for_each(|&e| f(Operand::Value(OperandRole::Capture, e)));
             }
         }
         for r in self.structured_regions() {
@@ -230,35 +229,35 @@ impl OperationKind {
         let mut value = |role, e| f(Operand::Value(role, e));
         match self {
             Self::Call { function, args } => {
-                value(Argument, *function);
-                args.iter().for_each(|&e| value(Argument, e));
+                value(OperandRole::Argument, *function);
+                args.iter().for_each(|&e| value(OperandRole::Argument, e));
             }
             Self::EvalGlobal(_) => {}
-            Self::If { condition, .. } => value(Argument, *condition),
+            Self::If { condition, .. } => value(OperandRole::Argument, *condition),
             Self::Loop { init, kind, .. } => {
-                value(Argument, *init);
+                value(OperandRole::Argument, *init);
                 if let LoopKind::For(e) | LoopKind::ForRange(e) = kind {
-                    value(Argument, *e);
+                    value(OperandRole::Argument, *e);
                 }
             }
             Self::Index { array, index } => {
-                value(Argument, *array);
-                value(Argument, *index);
+                value(OperandRole::Argument, *array);
+                value(OperandRole::Argument, *index);
             }
             Self::Screma { form, inputs, .. } => {
                 for a in inputs {
-                    a.for_each_value(&mut |e| value(Input, e));
+                    a.for_each_value(&mut |e| value(OperandRole::Input, e));
                 }
                 for s in &form.scans {
-                    s.neutral.iter().for_each(|&e| value(Neutral, e));
+                    s.neutral.iter().for_each(|&e| value(OperandRole::Neutral, e));
                 }
                 for r in &form.reductions {
-                    r.neutral.iter().for_each(|&e| value(Neutral, e));
+                    r.neutral.iter().for_each(|&e| value(OperandRole::Neutral, e));
                 }
             }
             Self::Filter { inputs, .. } => {
                 for a in inputs {
-                    a.for_each_value(&mut |e| value(Input, e));
+                    a.for_each_value(&mut |e| value(OperandRole::Input, e));
                 }
             }
             Self::Scatter {
@@ -267,9 +266,9 @@ impl OperationKind {
             | Self::BucketScatter {
                 destination, inputs, ..
             } => {
-                value(Argument, destination.value);
+                value(OperandRole::Argument, destination.value);
                 for a in inputs {
-                    a.for_each_value(&mut |e| value(Input, e));
+                    a.for_each_value(&mut |e| value(OperandRole::Input, e));
                 }
             }
             Self::ReduceByIndex {
@@ -278,10 +277,10 @@ impl OperationKind {
                 inputs,
                 ..
             } => {
-                value(Argument, destination.value);
-                value(Neutral, *neutral);
+                value(OperandRole::Argument, destination.value);
+                value(OperandRole::Neutral, *neutral);
                 for a in inputs {
-                    a.for_each_value(&mut |e| value(Input, e));
+                    a.for_each_value(&mut |e| value(OperandRole::Input, e));
                 }
             }
         }
@@ -362,103 +361,5 @@ impl OperationKind {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn screma_traversal_covers_composed_captures_collectives_and_array_descriptors() {
-        let apply = |id| SoacBody::Apply {
-            region: RegionId::from(id),
-            parameters: vec![],
-            results: vec![],
-            captures: vec![ExprId::from(id)],
-        };
-        let mut operation = OperationKind::Screma {
-            form: ScremaForm {
-                pre: SoacBody::Compose {
-                    first: Box::new(apply(1)),
-                    then: Box::new(SoacBody::Parallel {
-                        left: Box::new(apply(2)),
-                        right: Box::new(apply(3)),
-                    }),
-                },
-                post: apply(4),
-                scans: vec![Scan {
-                    operator: apply(5),
-                    neutral: vec![ExprId::from(6)],
-                }],
-                reductions: vec![Reduction {
-                    operator: apply(7),
-                    neutral: vec![ExprId::from(8)],
-                    commutative: true,
-                }],
-            },
-            inputs: vec![Array::Zip(vec![
-                Array::Value(ExprId::from(9)),
-                Array::Literal(vec![ExprId::from(10)]),
-                Array::Range {
-                    start: ExprId::from(11),
-                    len: ExprId::from(12),
-                    step: Some(ExprId::from(13)),
-                },
-            ])],
-            ownership: vec![],
-        };
-        let (mut values, mut regions) = (Vec::new(), Vec::new());
-        operation.operands(&mut values, &mut regions);
-        assert_eq!(
-            values.iter().map(|e| e.as_u32()).collect::<BTreeSet<_>>(),
-            (1..=13).collect()
-        );
-        assert_eq!(
-            regions.iter().map(|r| r.as_u32()).collect::<Vec<_>>(),
-            [1, 2, 3, 4, 5, 7]
-        );
-        assert!(operation.structured_regions().is_empty());
-
-        operation.for_each_operand_mut(&mut |e| *e = ExprId::from(e.as_u32() + 100));
-        let (mut rewritten, mut same_regions) = (Vec::new(), Vec::new());
-        operation.operands(&mut rewritten, &mut same_regions);
-        assert_eq!(
-            rewritten.iter().map(|e| e.as_u32()).collect::<Vec<_>>(),
-            values.iter().map(|e| e.as_u32() + 100).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            same_regions, regions,
-            "rewriting values cannot change invocation identity"
-        );
-        let mut neutrals = Vec::new();
-        operation.for_each_operand(&mut |op| {
-            if let Operand::Value(OperandRole::Neutral, e) = op {
-                neutrals.push(e.as_u32());
-            }
-        });
-        assert_eq!(neutrals, [106, 108]);
-    }
-
-    #[test]
-    fn structured_regions_and_expression_children_do_not_cross_invocations() {
-        let mut operation = OperationKind::Loop {
-            init: ExprId::from(1),
-            header: RegionId::from(2),
-            body: RegionId::from(3),
-            kind: LoopKind::ForRange(ExprId::from(4)),
-        };
-        operation.for_each_operand_mut(&mut |e| *e = ExprId::from(e.as_u32() + 10));
-        let (mut values, mut regions) = (Vec::new(), Vec::new());
-        operation.operands(&mut values, &mut regions);
-        assert_eq!(values, [ExprId::from(11), ExprId::from(14)]);
-        assert_eq!(regions, operation.structured_regions());
-        assert!(operation.callbacks().is_empty());
-        assert!(ExprKind::Lambda(RegionId::from(2)).children().is_empty());
-        assert!(ExprKind::OperationResult(OperationId::from(0)).children().is_empty());
-        let mut expr = ExprKind::Closure {
-            code: SymbolId::from(0),
-            param_count: 1,
-            captures: values,
-        };
-        expr.for_each_child_mut(&mut |e| *e = ExprId::from(e.as_u32() + 10));
-        assert_eq!(expr.children(), [ExprId::from(21), ExprId::from(24)]);
-    }
-}
+#[path = "visit_tests.rs"]
+mod tests;

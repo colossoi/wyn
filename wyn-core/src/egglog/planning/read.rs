@@ -1,10 +1,13 @@
 //! Mechanical readout: allocate arena identities for derived resources and
 //! index recipe slots. All residency, aliasing and ordering choices are facts.
-
-use super::*;
+use super::super::term::{app, key};
+use super::{EGraph, Literal, OptimizeError, Program, Scheduled, Term};
 use crate::egglog::blocks::{BufferData, Storage, Value};
+use crate::egglog::data::{BufferId, EntryId, ExprId, OperationId, OutputId, TypeId};
+use crate::egglog::timing::span;
 use crate::types::TypeExt;
 use egglog_engine::TermDag;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Resource {
@@ -29,8 +32,11 @@ pub(crate) struct Readout {
     pub stages: BTreeMap<(OperationId, String), Stage>,
 }
 
-pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Result<Readout, OptimizeError> {
-    let _timing = timing::span("read resources and domains");
+pub(in crate::egglog) fn read(
+    graph: &EGraph,
+    data: &mut Program<Scheduled>,
+) -> Result<Readout, OptimizeError> {
+    let _timing = span("read resources and domains");
     let mut result = Readout::default();
     let mut produced = BTreeSet::new();
     rows(graph, "Produces", 2, |dag, a| {
@@ -43,7 +49,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         if matches!(value, Resource::Output(_)) {
             produced.insert(value.clone());
         }
-        types.insert(value, super::super::term::key::<TypeId>(dag, a[1], "TypeId")?);
+        types.insert(value, key::<TypeId>(dag, a[1], "TypeId")?);
         Ok(())
     })?;
     let mut allocations = BTreeSet::new();
@@ -54,7 +60,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
     let mut buffers = BTreeMap::new();
     for value in &produced {
         if types.contains_key(value) {
-            buffers.insert(value.clone(), data.buffers.alloc_id());
+            buffers.insert(value.clone(), data.state.buffers.alloc_id());
         }
     }
     rows(graph, "Backing", 2, |dag, a| {
@@ -62,10 +68,14 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         if let Resource::Source(e) = value {
             let ty = &data.types[data.expressions[e].ty].ty;
             if ty.is_array() && !buffers.contains_key(&value) {
-                let id = data.buffers.alloc(BufferData {
+                let Some(element) = ty.elem_type() else {
+                    return Err(invalid("array resource has no element type"));
+                };
+                let element = element.clone();
+                let id = data.state.buffers.alloc(BufferData {
                     name: format!("input{}", e.as_u32()),
                     length: Value::op("length", [Value::Source(e)]),
-                    element: ty.elem_type().unwrap().clone(),
+                    element,
                     storage: Storage::External(e),
                 });
                 buffers.insert(value, id);
@@ -77,7 +87,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         let value = resource(dag, a[0])?;
         if let Some(&id) = buffers.get(&value) {
             if let Some(&ty) = types.get(&value) {
-                data.buffers.insert(
+                data.state.buffers.insert(
                     id,
                     BufferData {
                         name: format!("resource{}", id.as_u32()),
@@ -104,7 +114,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         Ok(())
     })?;
     rows(graph, "OutputBacking", 2, |dag, a| {
-        data.outputs[OutputId::from(number(dag, a[0])?)].buffer =
+        data.state.outputs[OutputId::from(number(dag, a[0])?)].buffer =
             buffers.get(&resource(dag, a[1])?).copied();
         Ok(())
     })?;
@@ -145,7 +155,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
         Ok(())
     })?;
     for (value, id) in buffers {
-        if data.buffers[id].storage == Storage::Discarded {
+        if data.state.buffers[id].storage == Storage::Discarded {
             continue;
         }
         let value = match value {
@@ -154,7 +164,7 @@ pub(in crate::egglog) fn read(graph: &EGraph, data: &mut AssociatedData) -> Resu
             Resource::Result(op, slot) => format!("(Result {} {slot})", op.egglog()),
             Resource::Temporary(op, name, slot) => format!("(Temporary {} {name:?} {slot})", op.egglog()),
         };
-        writeln!(result.identities, "(EmittedResource {value} {})", id.as_u32()).unwrap();
+        result.identities.push_str(&format!("(EmittedResource {value} {})\n", id.as_u32()));
     }
     Ok(result)
 }
@@ -165,11 +175,8 @@ fn extent(d: &TermDag, id: usize, buffers: &BTreeMap<Resource, BufferId>) -> Res
     };
     Ok(match (name.as_str(), a.as_slice()) {
         ("Fixed", [n]) => Value::Int(number(d, *n)?),
-        ("Length", [e]) => Value::op(
-            "length",
-            [Value::Source(super::super::term::key(d, *e, "ExprId")?)],
-        ),
-        ("Scalar", [e]) => Value::Source(super::super::term::key(d, *e, "ExprId")?),
+        ("Length", [e]) => Value::op("length", [Value::Source(key(d, *e, "ExprId")?)]),
+        ("Scalar", [e]) => Value::Source(key(d, *e, "ExprId")?),
         ("ChunkCount", [n, width]) => Value::op(
             "max",
             [
@@ -180,13 +187,12 @@ fn extent(d: &TermDag, id: usize, buffers: &BTreeMap<Resource, BufferId>) -> Res
                 ),
             ],
         ),
-        ("Stored", [v]) => Value::op(
-            "index",
-            [
-                Value::Buffer(*buffers.get(&resource(d, *v)?).ok_or_else(|| invalid("stored length"))?),
-                Value::Int(0),
-            ],
-        ),
+        ("Stored", [v]) => {
+            let Some(&buffer) = buffers.get(&resource(d, *v)?) else {
+                return Err(invalid("stored length"));
+            };
+            Value::op("index", [Value::Buffer(buffer), Value::Int(0)])
+        }
         _ => return Err(invalid("extent")),
     })
 }
@@ -197,7 +203,7 @@ fn resource(d: &TermDag, id: usize) -> Result<Resource, OptimizeError> {
     };
     Ok(match (name.as_str(), a.as_slice()) {
         ("Output", [id]) => Resource::Output(OutputId::from(number(d, *id)?)),
-        ("Source", [e]) => Resource::Source(super::super::term::key(d, *e, "ExprId")?),
+        ("Source", [e]) => Resource::Source(key(d, *e, "ExprId")?),
         ("Result", [o, i]) => Resource::Result(operation(d, *o)?, number(d, *i)?),
         ("Temporary", [o, name, i]) => {
             Resource::Temporary(operation(d, *o)?, string(d, *name)?, number(d, *i)?)
@@ -206,11 +212,11 @@ fn resource(d: &TermDag, id: usize) -> Result<Resource, OptimizeError> {
     })
 }
 fn stage(d: &TermDag, id: usize) -> Result<(OperationId, String), OptimizeError> {
-    let a = super::super::term::app(d, id, "Stage", 2)?;
+    let a = app(d, id, "Stage", 2)?;
     Ok((operation(d, a[0])?, string(d, a[1])?))
 }
 fn operation(d: &TermDag, id: usize) -> Result<OperationId, OptimizeError> {
-    super::super::term::key(d, id, "OperationId")
+    key(d, id, "OperationId")
 }
 fn number(d: &TermDag, id: usize) -> Result<u32, OptimizeError> {
     let Term::Lit(Literal::Int(n)) = d.get(id) else {
@@ -232,7 +238,7 @@ fn rows(
 ) -> Result<(), OptimizeError> {
     let (rows, _, dag) = graph.function_to_dag(name, usize::MAX, false)?;
     for row in rows {
-        f(&dag, super::super::term::app(&dag, row, name, arity)?)?;
+        f(&dag, app(&dag, row, name, arity)?)?;
     }
     Ok(())
 }

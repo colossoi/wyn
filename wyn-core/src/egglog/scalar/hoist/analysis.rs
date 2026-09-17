@@ -1,23 +1,28 @@
 //! Topological binding propagation and placement with shared scope sets.
-use super::super::super::dependencies;
-use super::*;
-use bounds::{Bounds, Interval};
+use super::uses::Uses;
+use super::{bounds, total_node, uses, OptimizeError, Placements};
+use crate::egglog::data::{ExprId, ExprKind, Ir, OperationKind, PlacementSite};
+use crate::egglog::dependencies::analyze;
+use crate::egglog::timing::{span, time};
+use bounds::Bounds;
+use std::collections::BTreeMap;
 use wyn_base::persistent_sets::{Set, EMPTY};
+use wyn_graph::DfsInterval;
 
 pub(super) struct Analysis {
-    pub uses: uses::Uses,
+    pub uses: Uses,
     pub control: Bounds,
-    lexical: BTreeMap<ExprId, Option<Interval>>,
+    lexical: BTreeMap<ExprId, Option<DfsInterval>>,
 }
 impl Analysis {
-    pub(super) fn new(data: &AssociatedData) -> Result<Self, OptimizeError> {
-        let _timing = timing::span("analyze placements");
-        let summary = timing::time("analyze dependencies", || dependencies::analyze(data));
-        let schedules = timing::time("validate dependency order", || summary.schedules(data))?;
-        let control = timing::time("derive binding bounds", || bounds::analyze(data, &schedules))?;
-        let uses = timing::time("collect expression uses", || uses::analyze(data, &summary.live));
-        let lexical = timing::time("propagate binding bounds", || {
-            let mut values: BTreeMap<ExprId, Option<Interval>> = BTreeMap::new();
+    pub(super) fn new(data: &Ir) -> Result<Self, OptimizeError> {
+        let _timing = span("analyze placements");
+        let summary = time("analyze dependencies", || analyze(data));
+        let schedules = time("validate dependency order", || summary.schedules(data))?;
+        let control = time("derive binding bounds", || bounds::analyze(data, &schedules))?;
+        let uses = time("collect expression uses", || uses::analyze(data, &summary.live));
+        let lexical = time("propagate binding bounds", || {
+            let mut values: BTreeMap<ExprId, Option<DfsInterval>> = BTreeMap::new();
             for &e in &uses.dag.order {
                 let bound = match data.expressions[e].kind {
                     ExprKind::Parameter(p) => control.regions.get(&data.parameters[p].region).copied(),
@@ -26,7 +31,7 @@ impl Analysis {
                         .kind
                         .children()
                         .into_iter()
-                        .try_fold(Interval::ANY, |a, x| values[&x].and_then(|b| a.intersect(b))),
+                        .try_fold(DfsInterval::ANY, |a, x| values[&x].and_then(|b| a.intersect(b))),
                     _ => None,
                 };
                 values.insert(e, bound);
@@ -40,7 +45,7 @@ impl Analysis {
         })
     }
 
-    pub(super) fn place(&mut self, data: &AssociatedData, placements: &mut Placements) {
+    pub(super) fn place(&mut self, data: &Ir, placements: &mut Placements) {
         let dag = &mut self.uses.dag;
         let mut available_events: BTreeMap<usize, Vec<(ExprId, bool)>> = BTreeMap::new();
         let mut safe = EMPTY;
@@ -146,7 +151,7 @@ impl Analysis {
     }
 }
 
-pub(super) fn computation(data: &AssociatedData, e: ExprId) -> bool {
+pub(super) fn computation(data: &Ir, e: ExprId) -> bool {
     matches!(
         data.expressions[e].kind,
         ExprKind::PureApp { .. } | ExprKind::Coerce(_) | ExprKind::Project { .. } | ExprKind::Vector(_)

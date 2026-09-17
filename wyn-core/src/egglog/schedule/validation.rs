@@ -1,21 +1,21 @@
-use super::{
-    error, AssociatedData, BlockId, BodyId, Edge, Exit, FunctionKind, Instruction, OperationKind,
-    OptimizeError, Storage, Value,
-};
+use super::{error, Edge, Exit, FunctionKind, Instruction, OptimizeError, Storage, Value};
+use crate::egglog::data::{BlockId, BodyId, OperationKind};
+use crate::egglog::{Program, Scheduled};
+use crate::interface::EntryKind;
 use std::collections::BTreeSet;
 
-pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
+pub(super) fn validate(data: &Program<Scheduled>) -> Result<(), OptimizeError> {
     let mut launches = BTreeSet::new();
-    for (&id, block) in &data.blocks {
+    for (&id, block) in &data.state.blocks {
         if block.source_regions.iter().any(|r| data.regions.get(*r).is_none()) {
             return Err(error("block refers to a missing source region"));
         }
         if let Some(exit) = block.loop_exit {
-            if !data.blocks.get(exit).is_some_and(|b| b.function == block.function) {
+            if !data.state.blocks.get(exit).is_some_and(|b| b.function == block.function) {
                 return Err(error("loop exit is outside its function"));
             }
         }
-        let Some(owner) = data.blocks.get(block.function) else {
+        let Some(owner) = data.state.blocks.get(block.function) else {
             return Err(error("block has a missing owner"));
         };
         let Some(function) = &owner.interface else {
@@ -26,12 +26,10 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
         }
         let device = match function.kind {
             FunctionKind::Device | FunctionKind::Kernel(_) => true,
-            FunctionKind::Entry(entry) => {
-                data.entries[entry].declaration.entry_kind != crate::interface::EntryKind::Compute
-            }
+            FunctionKind::Entry(entry) => data.entries[entry].declaration.entry_kind != EntryKind::Compute,
             FunctionKind::Host => false,
         };
-        let Some(body) = data.bodies.get(block.body) else {
+        let Some(body) = data.state.bodies.get(block.body) else {
             return Err(error("missing block body"));
         };
         if !body.results.is_empty() {
@@ -57,7 +55,7 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
                     arguments,
                     results,
                 } => {
-                    let Some(target) = data.blocks.get(*target) else {
+                    let Some(target) = data.state.blocks.get(*target) else {
                         return Err(error("missing call target"));
                     };
                     let Some(interface) = &target.interface else {
@@ -78,12 +76,12 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
                     if device {
                         return Err(error("device function contains a nested dispatch"));
                     }
-                    if data.dispatches.get(*id).is_none() || !launches.insert(*id) {
+                    if data.state.dispatches.get(*id).is_none() || !launches.insert(*id) {
                         return Err(error("missing or duplicated dispatch site"));
                     }
                 }
                 Instruction::Allocate(id) => {
-                    let Some(buffer) = data.buffers.get(*id) else {
+                    let Some(buffer) = data.state.buffers.get(*id) else {
                         return Err(error("missing allocation"));
                     };
                     if matches!(buffer.storage, Storage::External(_))
@@ -116,11 +114,11 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
             }
         }
     }
-    if launches.len() != data.dispatches.len() {
+    if launches.len() != data.state.dispatches.len() {
         return Err(error("orphaned dispatch"));
     }
-    for dispatch in data.dispatches.values() {
-        let Some(kernel) = data.blocks.get(dispatch.kernel) else {
+    for dispatch in data.state.dispatches.values() {
+        let Some(kernel) = data.state.blocks.get(dispatch.kernel) else {
             return Err(error("missing dispatched kernel"));
         };
         let Some(interface) = &kernel.interface else {
@@ -133,14 +131,14 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
         {
             return Err(error("invalid kernel interface"));
         }
-        let Some(grid) = data.grids.get(dispatch.grid) else {
+        let Some(grid) = data.state.grids.get(dispatch.grid) else {
             return Err(error("missing dispatch grid"));
         };
         for value in &grid.groups {
             check_value(data, value)?;
         }
         for &id in dispatch.reads.iter().chain(&dispatch.writes) {
-            let Some(buffer) = data.buffers.get(id) else {
+            let Some(buffer) = data.state.buffers.get(id) else {
                 return Err(error("unknown dispatch buffer"));
             };
             if matches!(buffer.storage, Storage::Function) {
@@ -156,7 +154,7 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
     let mut ordered = BTreeSet::new();
     loop {
         let before = ordered.len();
-        for (&id, dispatch) in &data.dispatches {
+        for (&id, dispatch) in &data.state.dispatches {
             if dispatch.dependencies.is_subset(&ordered) {
                 ordered.insert(id);
             }
@@ -171,8 +169,8 @@ pub(super) fn validate(data: &AssociatedData) -> Result<(), OptimizeError> {
     Ok(())
 }
 
-fn check_tuple(data: &AssociatedData, id: BodyId, arity: usize) -> Result<(), OptimizeError> {
-    let Some(body) = data.bodies.get(id) else {
+fn check_tuple(data: &Program<Scheduled>, id: BodyId, arity: usize) -> Result<(), OptimizeError> {
+    let Some(body) = data.state.bodies.get(id) else {
         return Err(error("missing argument/result body"));
     };
     if !body.instructions.is_empty() || body.results.len() != arity {
@@ -184,8 +182,8 @@ fn check_tuple(data: &AssociatedData, id: BodyId, arity: usize) -> Result<(), Op
     Ok(())
 }
 
-fn check_edge(data: &AssociatedData, owner: BlockId, edge: &Edge) -> Result<(), OptimizeError> {
-    let Some(target) = data.blocks.get(edge.target) else {
+fn check_edge(data: &Program<Scheduled>, owner: BlockId, edge: &Edge) -> Result<(), OptimizeError> {
+    let Some(target) = data.state.blocks.get(edge.target) else {
         return Err(error("missing control-flow target"));
     };
     if target.function != owner {
@@ -194,12 +192,12 @@ fn check_edge(data: &AssociatedData, owner: BlockId, edge: &Edge) -> Result<(), 
     check_tuple(data, edge.arguments, target.parameters.len())
 }
 
-fn check_value(data: &AssociatedData, value: &Value) -> Result<(), OptimizeError> {
+fn check_value(data: &Program<Scheduled>, value: &Value) -> Result<(), OptimizeError> {
     match value {
         Value::Source(id) if data.expressions.get(*id).is_none() => {
             return Err(error("unknown opaque source expression"))
         }
-        Value::Buffer(id) if data.buffers.get(*id).is_none() => return Err(error("unknown buffer")),
+        Value::Buffer(id) if data.state.buffers.get(*id).is_none() => return Err(error("unknown buffer")),
         Value::Field(value, _) => check_value(data, value)?,
         Value::Tuple(values) | Value::Primitive(_, values) => {
             for value in values {

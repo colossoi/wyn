@@ -1,16 +1,17 @@
+use super::body::{finish, invoke};
 use super::{body, result_types};
 use crate::egglog::data::{
-    body_signature as signature, intern_expr as expr, intern_type as ty, AssociatedData, ExprKind,
-    OperationId, OperationKind, Reduction, ScremaForm, SoacBody,
+    body_signature, intern_expr, intern_type, ExprKind, Ir, OperationId, OperationKind, Reduction,
+    ScremaForm, SoacBody,
 };
-use crate::egglog::rewrite;
-use crate::types;
+use crate::egglog::rewrite::all;
+use crate::types::{function, tuple, SoacOwnership};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Mask reduction inputs and, when needed, append a shared count reduction.
 /// Passing the filter as both IDs requests the length-only transformation.
 pub(super) fn masked(
-    data: &mut AssociatedData,
+    data: &mut Ir,
     producer: OperationId,
     consumer: OperationId,
     lengths: &BTreeSet<OperationId>,
@@ -39,18 +40,17 @@ pub(super) fn masked(
         };
         (form, inputs.len())
     };
-    let parameters = signature(&map).0;
+    let parameters = body_signature(&map).0;
     let (region, args) = body::region(data, parent, &parameters);
-    let mapped = body::invoke(data, &map, args)?;
-    let predicate = body::invoke(data, &body, mapped.clone())?;
+    let mapped = invoke(data, &map, args)?;
+    let predicate = invoke(data, &body, mapped.clone())?;
     let [condition] = predicate.as_slice() else {
         return None;
     };
     let [mapped] = mapped.as_slice() else {
         return None;
     };
-    let values =
-        if only_count { vec![] } else { body::invoke(data, &form.pre, vec![*mapped; consumer_inputs])? };
+    let values = if only_count { vec![] } else { invoke(data, &form.pre, vec![*mapped; consumer_inputs])? };
     let neutrals: Vec<_> = form.reductions.iter().flat_map(|r| &r.neutral).copied().collect();
     if values.len() != neutrals.len() {
         return None;
@@ -59,7 +59,7 @@ pub(super) fn masked(
         .into_iter()
         .zip(neutrals)
         .map(|(v, n)| {
-            expr(
+            intern_expr(
                 data,
                 data.expressions[v].ty,
                 ExprKind::If {
@@ -74,9 +74,9 @@ pub(super) fn masked(
     let count_slot = fields.len();
     if let Some(&length) = lengths.first() {
         let count_ty = data.operations[length].ty;
-        let zero = expr(data, count_ty, ExprKind::Int("0".into()));
-        let one = expr(data, count_ty, ExprKind::Int("1".into()));
-        values.push(expr(
+        let zero = intern_expr(data, count_ty, ExprKind::Int("0".into()));
+        let one = intern_expr(data, count_ty, ExprKind::Int("1".into()));
+        values.push(intern_expr(
             data,
             count_ty,
             ExprKind::If {
@@ -87,10 +87,10 @@ pub(super) fn masked(
         ));
         let (combine, args) = body::region(data, parent, &[count_ty, count_ty]);
         let t = data.types[count_ty].ty.clone();
-        let function_ty = ty(data, types::function(t.clone(), types::function(t.clone(), t)));
-        let function = expr(data, function_ty, ExprKind::BinOp("+".into()));
-        let sum = expr(data, count_ty, ExprKind::PureApp { function, args });
-        let operator = body::finish(data, combine, vec![count_ty, count_ty], vec![sum]);
+        let function_ty = intern_type(data, function(t.clone(), function(t.clone(), t)));
+        let function = intern_expr(data, function_ty, ExprKind::BinOp("+".into()));
+        let sum = intern_expr(data, count_ty, ExprKind::PureApp { function, args });
+        let operator = finish(data, combine, vec![count_ty, count_ty], vec![sum]);
         form.reductions.push(Reduction {
             operator,
             neutral: vec![zero],
@@ -98,22 +98,22 @@ pub(super) fn masked(
         });
         fields.push(count_ty);
     }
-    form.pre = body::finish(data, region, parameters, values);
+    form.pre = finish(data, region, parameters, values);
 
     let old_ty = data.operations[consumer].ty;
-    let result_ty = ty(
+    let result_ty = intern_type(
         data,
-        types::tuple(fields.iter().map(|t| data.types[*t].ty.clone()).collect()),
+        tuple(fields.iter().map(|t| data.types[*t].ty.clone()).collect()),
     );
     let old_values: Vec<_> = data.expressions.iter().map(|(&id, e)| (id, e.kind.clone())).collect();
-    let result = expr(data, result_ty, ExprKind::OperationResult(consumer));
+    let result = intern_expr(data, result_ty, ExprKind::OperationResult(consumer));
     let outputs: Vec<_> = fields
         .iter()
         .enumerate()
-        .map(|(index, &t)| expr(data, t, ExprKind::Project { tuple: result, index }))
+        .map(|(index, &t)| intern_expr(data, t, ExprKind::Project { tuple: result, index }))
         .collect();
     let previous =
-        (!only_count).then(|| expr(data, old_ty, ExprKind::Tuple(outputs[..count_slot].to_vec())));
+        (!only_count).then(|| intern_expr(data, old_ty, ExprKind::Tuple(outputs[..count_slot].to_vec())));
     let mut substitutions = BTreeMap::new();
     for (id, kind) in old_values {
         if id == result {
@@ -133,7 +133,7 @@ pub(super) fn masked(
     data.operations[consumer].kind = OperationKind::Screma {
         form,
         inputs,
-        ownership: vec![types::SoacOwnership::Fresh; fields.len()],
+        ownership: vec![SoacOwnership::Fresh; fields.len()],
     };
     if !only_count {
         data.regions[parent].members.remove(&producer);
@@ -141,6 +141,6 @@ pub(super) fn masked(
     for id in lengths {
         data.regions[parent].members.remove(id);
     }
-    rewrite::all(data, &substitutions);
+    all(data, &substitutions);
     Some(())
 }

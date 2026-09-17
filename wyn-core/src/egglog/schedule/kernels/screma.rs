@@ -1,7 +1,7 @@
-use super::super::super::data::body_signature;
-use super::super::super::data::ExprId;
-use super::super::{error, length, OperationId, OperationKind, ScremaForm};
-use super::{chunks, singleton, Array, BlockId, BufferId, OptimizeError, Planner, Storage, Value, WIDTH};
+use super::super::super::data::{body_signature, ExprId};
+use super::super::{error, length};
+use super::{chunks, singleton, OptimizeError, Planner, Storage, Value, WIDTH};
+use crate::egglog::data::{Array, BlockId, BufferId, OperationId, OperationKind, ScremaForm};
 
 impl Planner<'_> {
     pub(super) fn parallel_screma(

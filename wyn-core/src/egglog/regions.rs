@@ -1,5 +1,5 @@
 //! Lexical containment indexed once, without storing every ancestor pair.
-use super::data::{AssociatedData, RegionId};
+use crate::egglog::data::{Ir, RegionId};
 use crate::LookupMap;
 use std::collections::BTreeMap;
 use wyn_graph::{forest_intervals, DfsInterval};
@@ -10,7 +10,7 @@ pub(super) struct Regions {
 }
 
 impl Regions {
-    pub fn new(data: &AssociatedData) -> Self {
+    pub fn new(data: &Ir) -> Self {
         let mut children: BTreeMap<_, Vec<_>> = BTreeMap::new();
         let mut roots = vec![];
         for (&id, r) in &data.regions {

@@ -1,25 +1,38 @@
-use super::*;
+use super::dependencies::analyze;
+use super::graph_tests::fusion_dependencies;
+use super::{from_tlc, Program};
 use crate::ast::{Span, TypeName};
-use crate::tlc::{self, data, VarRef};
-use crate::{test_pipeline, types, SymbolTable};
+use crate::egglog::data::{ExprKind, OperationKind};
+use crate::egglog::{ConvertError, Imported};
+use crate::test_pipeline::compile_to_reachable;
+use crate::tlc::context::BackendGlobal;
+use crate::tlc::data::{
+    ExplicitCaptures, ExplicitCapturesPayload, ExplicitClosure, ExplicitClosurePayload,
+};
+use crate::tlc::stage::InputSliceBoundsInferred;
+use crate::tlc::{
+    infer_input_slice_bounds, Def, DefMeta, LoopKind, Place, ProgramParts, TermIdSource, VarRef,
+};
+use crate::types::{sized_array, Diet, SoacOwnership, Type};
+use crate::{tlc, LookupSet, SymbolId, SymbolTable};
 use egglog_engine::EGraph;
 use wyn_base::IdSource;
 
-type Term = tlc::Term<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type TermKind = tlc::TermKind<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type ArrayExpr = tlc::ArrayExpr<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type SoacOp = tlc::SoacOp<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type SoacBody = tlc::SoacBody<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
-type Lambda = tlc::Lambda<data::ExplicitClosurePayload, data::ExplicitCapturesPayload>;
+type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type TermKind = tlc::TermKind<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type ArrayExpr = tlc::ArrayExpr<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type SoacOp = tlc::SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type SoacBody = tlc::SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
+type Lambda = tlc::Lambda<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
-fn text(converted: &Converted) -> String {
-    converted.program.iter().map(|command| format!("{command}\n")).collect()
+fn text(converted: &Program<Imported>) -> String {
+    converted.state.facts.iter().map(|command| format!("{command}\n")).collect()
 }
 
-fn run(converted: &Converted) -> EGraph {
+fn run(converted: &Program<Imported>) -> EGraph {
     let mut graph = EGraph::default();
     graph
-        .run_program(converted.program.clone())
+        .run_program(converted.state.facts.clone())
         .expect("egglog must typecheck and execute the imported AST");
     // Exercise the displayed form too: downstream callers can persist the AST
     // with egglog's Display implementation without a Wyn-specific serializer.
@@ -29,46 +42,46 @@ fn run(converted: &Converted) -> EGraph {
     graph
 }
 
-fn source(source: &str) -> tlc::stage::InputSliceBoundsInferred {
-    tlc::infer_input_slice_bounds(test_pipeline::compile_to_reachable(source))
+fn source(source: &str) -> InputSliceBoundsInferred {
+    infer_input_slice_bounds(compile_to_reachable(source))
 }
 
-fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Converted) {
+fn verify_sources(program: &InputSliceBoundsInferred, converted: &Program<Imported>) {
     run(converted);
     // Every imported shape must also support dependency/effect analysis and a
     // valid scoped schedule, including nested loops and all SOAC constructors.
-    super::graph_tests::fusion_dependencies(&converted.data);
-    super::dependencies::analyze(&converted.data).schedules(&converted.data).unwrap();
-    assert_eq!(program.defs.len(), converted.data.definitions.len());
-    assert_eq!(program.symbols.len(), converted.data.symbols.len());
-    let mut expressions = crate::LookupSet::new();
-    for expression in converted.data.expressions.values() {
+    fusion_dependencies(&converted.ir);
+    analyze(&converted.ir).schedules(&converted.ir).unwrap();
+    assert_eq!(program.defs.len(), converted.ir.definitions.len());
+    assert_eq!(program.symbols.len(), converted.ir.symbols.len());
+    let mut expressions = LookupSet::new();
+    for expression in converted.ir.expressions.values() {
         assert!(expressions.insert(expression.clone()), "pure values are interned");
-        assert!(converted.data.types.get(expression.ty).is_some());
+        assert!(converted.ir.types.get(expression.ty).is_some());
     }
-    let mut types = crate::LookupSet::new();
-    for ty in converted.data.types.values() {
+    let mut types = LookupSet::new();
+    for ty in converted.ir.types.values() {
         assert!(types.insert(ty.clone()), "types are interned");
     }
-    for origin in converted.data.origins.values() {
-        assert!(converted.data.expressions.get(origin.expression).is_some());
-        assert!(converted.data.definitions.get(origin.definition).is_some());
+    for origin in converted.ir.origins.values() {
+        assert!(converted.ir.expressions.get(origin.expression).is_some());
+        assert!(converted.ir.definitions.get(origin.definition).is_some());
     }
-    let mut operations = crate::LookupSet::new();
-    for (id, region) in &converted.data.regions {
-        assert!(converted.data.definitions.get(region.definition).is_some());
+    let mut operations = LookupSet::new();
+    for (id, region) in &converted.ir.regions {
+        assert!(converted.ir.definitions.get(region.definition).is_some());
         for operation in &region.members {
             assert!(
                 operations.insert(*operation),
                 "an execution has exactly one region"
             );
-            assert_eq!(converted.data.operations[*operation].region, *id);
+            assert_eq!(converted.ir.operations[*operation].region, *id);
         }
         for param in &region.parameters {
-            assert_eq!(converted.data.parameters[*param].region, *id);
+            assert_eq!(converted.ir.parameters[*param].region, *id);
         }
     }
-    assert_eq!(operations.len(), converted.data.operations.len());
+    assert_eq!(operations.len(), converted.ir.operations.len());
     let emitted = text(converted);
     for removed in [
         "TermId",
@@ -89,9 +102,9 @@ fn verify_sources(program: &tlc::stage::InputSliceBoundsInferred, converted: &Co
     ] {
         assert!(!emitted.contains(removed), "unexpected {removed}");
     }
-    for (def, source) in converted.data.definitions.values().zip(&program.defs) {
-        assert_eq!(converted.data.symbols[def.symbol].source, source.name);
-        assert_eq!(converted.data.types[def.ty].ty, source.ty);
+    for (def, source) in converted.ir.definitions.values().zip(&program.defs) {
+        assert_eq!(converted.ir.symbols[def.symbol].source, source.name);
+        assert_eq!(converted.ir.types[def.ty].ty, source.ty);
         assert_eq!(def.arity, source.arity);
         assert_eq!(def.package, source.package);
         assert_eq!(def.param_diets, source.param_diets);
@@ -110,30 +123,29 @@ fn imports_real_tlc_and_preserves_roots_and_metadata() {
     ] {
         let program = source(source_text);
         let before = format!("{program:?}");
-        let converted = convert_program(&program).expect("import TLC");
+        let converted = from_tlc(&program).expect("import TLC");
         verify_sources(&program, &converted);
         assert_eq!(before, format!("{program:?}"), "conversion must not mutate TLC");
-        assert_eq!(text(&converted), text(&convert_program(&program).unwrap()));
+        assert_eq!(text(&converted), text(&from_tlc(&program).unwrap()));
         assert_eq!(
-            format!("{:?}", converted.data),
-            format!("{:?}", convert_program(&program).unwrap().data)
+            format!("{:?}", converted.ir),
+            format!("{:?}", from_tlc(&program).unwrap().ir)
         );
-        for (entry_id, entry) in &converted.data.entries {
+        for (entry_id, entry) in &converted.ir.entries {
             let source = program
                 .defs
                 .iter()
                 .find(|def| {
                     def.name
-                        == converted.data.symbols[converted.data.definitions[entry.definition].symbol]
-                            .source
+                        == converted.ir.symbols[converted.ir.definitions[entry.definition].symbol].source
                 })
                 .unwrap();
-            let tlc::DefMeta::EntryPoint(source_entry) = &source.meta else {
+            let DefMeta::EntryPoint(source_entry) = &source.meta else {
                 panic!("entry source")
             };
             assert_eq!(entry.declaration, *source_entry.declaration);
             let params: Vec<_> =
-                converted.data.entry_params.values().filter(|param| param.entry == *entry_id).collect();
+                converted.ir.entry_params.values().filter(|param| param.entry == *entry_id).collect();
             assert_eq!(params.len(), source_entry.data.param_bindings.len());
             for (position, param) in params.iter().enumerate() {
                 assert_eq!(param.position, position);
@@ -146,17 +158,17 @@ fn imports_real_tlc_and_preserves_roots_and_metadata() {
 #[test]
 fn empty_program_is_executable() {
     let program = Fixture::new().program(Vec::new());
-    let converted = convert_program(&program).unwrap();
-    assert!(converted.data.definitions.is_empty());
-    assert!(converted.data.expressions.is_empty());
-    assert_eq!(converted.data.programs.len(), 1);
+    let converted = from_tlc(&program).unwrap();
+    assert!(converted.ir.definitions.is_empty());
+    assert!(converted.ir.expressions.is_empty());
+    assert_eq!(converted.ir.programs.len(), 1);
     run(&converted);
-    assert_eq!(text(&converted), text(&convert_program(&program).unwrap()));
+    assert_eq!(text(&converted), text(&from_tlc(&program).unwrap()));
 }
 
 #[test]
 fn fusion_graph_does_not_grow_with_scalar_body_structure() {
-    let small = convert_program(&source(
+    let small = from_tlc(&source(
         "entry mapped(xs: [4]i32) [4]i32 = map(|x: i32| x + 1, xs)",
     ))
     .unwrap();
@@ -164,11 +176,11 @@ fn fusion_graph_does_not_grow_with_scalar_body_structure() {
     for n in 1..5 {
         expression = format!("({expression} * x + {n})");
     }
-    let large = convert_program(&source(&format!(
+    let large = from_tlc(&source(&format!(
         "entry mapped(xs: [4]i32) [4]i32 = map(|x: i32| {expression}, xs)"
     )))
     .unwrap();
-    assert!(large.data.expressions.len() > small.data.expressions.len());
+    assert!(large.ir.expressions.len() > small.ir.expressions.len());
     let small_graph = run(&small);
     let large_graph = run(&large);
     for relation in [
@@ -186,8 +198,8 @@ fn fusion_graph_does_not_grow_with_scalar_body_structure() {
         assert_eq!(small_rows.len(), large_rows.len(), "{relation}");
     }
     assert_eq!(
-        small.program.len(),
-        large.program.len(),
+        small.state.facts.len(),
+        large.state.facts.len(),
         "no scalar facts are emitted"
     );
 }
@@ -201,13 +213,13 @@ fn scalar_only_effects_stay_in_the_sidecar_without_fusion_facts() {
         args: vec![],
     });
     let program = f.program(vec![call]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
     let graph = run(&converted);
     let (rows, _, _) = graph.function_to_dag("Current", usize::MAX, false).unwrap();
     assert!(rows.is_empty(), "no SOACs to fuse");
-    assert_eq!(converted.data.operations.len(), 1);
-    let schedules = super::dependencies::analyze(&converted.data).schedules(&converted.data).unwrap();
+    assert_eq!(converted.ir.operations.len(), 1);
+    let schedules = analyze(&converted.ir).schedules(&converted.ir).unwrap();
     assert_eq!(
         schedules.values().map(Vec::len).sum::<usize>(),
         1,
@@ -224,44 +236,44 @@ fn input_bounds_are_arena_records_with_deterministic_ids() {
           reduce(|x: i32, y: i32| x + y, 0, a) +
           reduce(|x: i32, y: i32| x + y, 0, b)",
     );
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    assert_eq!(converted.data.input_bounds.len(), 2);
+    assert_eq!(converted.ir.input_bounds.len(), 2);
     assert_eq!(
-        converted.data.programs.values().next().unwrap().next_auto_storage_binding,
+        converted.ir.programs.values().next().unwrap().next_auto_storage_binding,
         program.global_context.auto_storage_binding_ids.peek_id(),
     );
-    for bound in converted.data.input_bounds.values() {
-        let entry = &converted.data.entries[bound.entry];
-        let definition = &converted.data.definitions[entry.definition];
-        let source_symbol = converted.data.symbols[definition.symbol].source;
+    for bound in converted.ir.input_bounds.values() {
+        let entry = &converted.ir.entries[bound.entry];
+        let definition = &converted.ir.definitions[entry.definition];
+        let source_symbol = converted.ir.symbols[definition.symbol].source;
         let def = program.defs.iter().find(|def| def.name == source_symbol).unwrap();
-        let tlc::DefMeta::EntryPoint(source_entry) = &def.meta else {
+        let DefMeta::EntryPoint(source_entry) = &def.meta else {
             panic!("entry source")
         };
         assert_eq!(
-            source_entry.data.by_symbol[&converted.data.symbols[bound.symbol].source],
+            source_entry.data.by_symbol[&converted.ir.symbols[bound.symbol].source],
             bound.length
         );
     }
     for def in &mut program.defs {
-        if let tlc::DefMeta::EntryPoint(entry) = &mut def.meta {
+        if let DefMeta::EntryPoint(entry) = &mut def.meta {
             let mut bounds: Vec<_> = entry.data.by_symbol.drain().collect();
             bounds.sort_by_key(|(symbol, _)| std::cmp::Reverse(symbol.0));
             entry.data.by_symbol.extend(bounds);
         }
     }
-    let reordered = convert_program(&program).unwrap();
+    let reordered = from_tlc(&program).unwrap();
     assert_eq!(text(&converted), text(&reordered));
-    assert_eq!(format!("{:?}", converted.data), format!("{:?}", reordered.data));
+    assert_eq!(format!("{:?}", converted.ir), format!("{:?}", reordered.ir));
 }
 
 struct Fixture {
     symbols: SymbolTable,
-    ids: tlc::TermIdSource,
-    def: crate::SymbolId,
-    x: crate::SymbolId,
-    y: crate::SymbolId,
+    ids: TermIdSource,
+    def: SymbolId,
+    x: SymbolId,
+    y: SymbolId,
 }
 
 impl Fixture {
@@ -272,7 +284,7 @@ impl Fixture {
         let y = symbols.alloc("shadowed".into());
         Self {
             symbols,
-            ids: tlc::TermIdSource::new(),
+            ids: TermIdSource::new(),
             def,
             x,
             y,
@@ -287,25 +299,25 @@ impl Fixture {
         self.term(TermKind::IntLit(n.into()))
     }
 
-    fn program(self, bodies: Vec<Term>) -> tlc::stage::InputSliceBoundsInferred {
+    fn program(self, bodies: Vec<Term>) -> InputSliceBoundsInferred {
         let defs = bodies
             .into_iter()
-            .map(|body| tlc::Def {
+            .map(|body| Def {
                 data: (),
                 name: self.def,
                 package: None,
                 ty: body.ty.clone(),
                 body,
-                meta: tlc::DefMeta::Function,
+                meta: DefMeta::Function,
                 arity: 0,
                 param_diets: vec![],
-                return_diet: types::Diet::default(),
+                return_diet: Diet::default(),
             })
             .collect();
-        tlc::ProgramParts { defs }.with_symbols(
+        ProgramParts { defs }.with_symbols(
             self.symbols,
             self.ids,
-            tlc::context::BackendGlobal {
+            BackendGlobal {
                 auto_storage_binding_ids: IdSource::new(),
             },
         )
@@ -325,19 +337,19 @@ impl Fixture {
         let capture = self.int("37");
         SoacBody {
             lam,
-            data: data::ExplicitCaptures {
+            data: ExplicitCaptures {
                 captures: vec![(self.y, i32_ty(), capture)],
             },
         }
     }
 
     fn array(&self) -> ArrayExpr {
-        ArrayExpr::Var(VarRef::Symbol(self.x), types::sized_array(4, i32_ty()))
+        ArrayExpr::Var(VarRef::Symbol(self.x), sized_array(4, i32_ty()))
     }
 }
 
-fn i32_ty() -> types::Type {
-    types::Type::Constructed(TypeName::Int(32), vec![])
+fn i32_ty() -> Type {
+    Type::Constructed(TypeName::Int(32), vec![])
 }
 
 #[test]
@@ -355,7 +367,7 @@ fn literals_and_names_stay_in_the_sidecar() {
     ];
     let tuple = f.term(TermKind::Tuple(values));
     let program = f.program(vec![tuple]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
     let emitted = text(&converted);
     assert!(!emitted.contains("18446744073709551615"));
@@ -364,17 +376,17 @@ fn literals_and_names_stay_in_the_sidecar() {
         ExprKind::FloatBits(2147483648),
         ExprKind::FloatBits(2143289410),
     ] {
-        assert!(converted.data.expressions.values().any(|expr| expr.kind == literal));
+        assert!(converted.ir.expressions.values().any(|expr| expr.kind == literal));
     }
     assert!(!emitted.contains("shadowed"));
     assert!(!emitted.contains("external"));
     assert!(!emitted.contains("Wyn"));
     assert_eq!(
-        converted.data.externs.values().next().unwrap().linkage_name,
+        converted.ir.externs.values().next().unwrap().linkage_name,
         "external\"name\n(with syntax)"
     );
     let shadowed: Vec<_> =
-        converted.data.symbols.iter().filter(|(_, symbol)| symbol.name == "shadowed").collect();
+        converted.ir.symbols.iter().filter(|(_, symbol)| symbol.name == "shadowed").collect();
     assert_ne!(shadowed[0].0, shadowed[1].0);
 }
 
@@ -388,20 +400,20 @@ fn repeated_effectful_calls_keep_distinct_occurrences() {
     });
     let tuple = f.term(TermKind::Tuple(vec![call.clone(), call]));
     let program = f.program(vec![tuple]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let root = converted.data.definitions.values().next().unwrap().body;
-    let region = &converted.data.regions[root];
+    let root = converted.ir.definitions.values().next().unwrap().body;
+    let region = &converted.ir.regions[root];
     assert_eq!(region.members.len(), 2);
     assert_ne!(*region.members.first().unwrap(), *region.members.last().unwrap());
-    let ExprKind::Tuple(ids) = &converted.data.expressions[region.results[0]].kind else {
+    let ExprKind::Tuple(ids) = &converted.ir.expressions[region.results[0]].kind else {
         panic!("tuple");
     };
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
     for (value, operation) in ids.iter().zip(&region.members) {
         assert_eq!(
-            converted.data.expressions[*value].kind,
+            converted.ir.expressions[*value].kind,
             ExprKind::OperationResult(*operation)
         );
     }
@@ -412,21 +424,21 @@ fn equal_constants_share_a_sidecar_record_without_losing_provenance() {
     let left = f.int("42");
     let right = f.int("42");
     let tuple = f.term(TermKind::Tuple(vec![left, right]));
-    let converted = convert_program(&f.program(vec![tuple])).unwrap();
+    let converted = from_tlc(&f.program(vec![tuple])).unwrap();
     let constants: Vec<_> = converted
-        .data
+        .ir
         .expressions
         .iter()
         .filter(|(_, expr)| expr.kind == ExprKind::Int("42".into()))
         .collect();
     assert_eq!(constants.len(), 1);
     let (id, _) = constants[0];
-    let root = converted.data.regions.values().next().unwrap().results[0];
+    let root = converted.ir.regions.values().next().unwrap().results[0];
     assert_eq!(
-        converted.data.expressions[root].kind,
+        converted.ir.expressions[root].kind,
         ExprKind::Tuple(vec![*id, *id])
     );
-    assert!(converted.data.origins.values().any(|origin| origin.expression == *id));
+    assert!(converted.ir.origins.values().any(|origin| origin.expression == *id));
     run(&converted);
 }
 #[test]
@@ -443,17 +455,17 @@ fn imports_all_loop_array_and_closure_shapes() {
         terms.push(f.term(TermKind::ArrayExpr(ArrayExpr::Range { start, len, step })));
     }
     let kinds = [
-        tlc::LoopKind::For {
+        LoopKind::For {
             var: f.x,
             var_ty: i32_ty(),
             iter: Box::new(f.int("3")),
         },
-        tlc::LoopKind::ForRange {
+        LoopKind::ForRange {
             var: f.x,
             var_ty: i32_ty(),
             bound: Box::new(f.int("4")),
         },
-        tlc::LoopKind::While {
+        LoopKind::While {
             cond: Box::new(f.term(TermKind::BoolLit(false))),
         },
     ];
@@ -471,7 +483,7 @@ fn imports_all_loop_array_and_closure_shapes() {
         }));
     }
     let capture = f.int("6");
-    terms.push(f.term(TermKind::Closure(data::ExplicitClosure {
+    terms.push(f.term(TermKind::Closure(ExplicitClosure {
         code: f.def,
         captures: vec![capture],
         param_count: 1,
@@ -486,7 +498,7 @@ fn imports_all_loop_array_and_closure_shapes() {
     let inner = f.int("7");
     terms.push(f.term(TermKind::Coerce {
         inner: Box::new(inner),
-        target_ty: types::Type::Constructed(TypeName::Float(32), vec![]),
+        target_ty: Type::Constructed(TypeName::Float(32), vec![]),
     }));
     let array = f.term(TermKind::ArrayExpr(f.array()));
     let index = f.int("0");
@@ -496,13 +508,13 @@ fn imports_all_loop_array_and_closure_shapes() {
     }));
     let tuple = f.term(TermKind::Tuple(terms));
     let program = f.program(vec![tuple]);
-    verify_sources(&program, &convert_program(&program).unwrap());
+    verify_sources(&program, &from_tlc(&program).unwrap());
 }
 
 #[test]
 fn imports_every_soac_and_its_capture_and_destination_data() {
     let mut f = Fixture::new();
-    let dest = tlc::Place {
+    let dest = Place {
         id: f.y,
         elem_ty: i32_ty(),
     };
@@ -510,7 +522,7 @@ fn imports_every_soac_and_its_capture_and_destination_data() {
         SoacOp::Map {
             lam: f.soac_body(),
             inputs: vec![f.array()],
-            destination: types::SoacOwnership::Fresh,
+            destination: SoacOwnership::Fresh,
         },
         SoacOp::Reduce {
             op: f.soac_body(),
@@ -521,12 +533,12 @@ fn imports_every_soac_and_its_capture_and_destination_data() {
             op: f.soac_body(),
             ne: Box::new(f.int("0")),
             input: f.array(),
-            destination: types::SoacOwnership::UniqueInput,
+            destination: SoacOwnership::UniqueInput,
         },
         SoacOp::Filter {
             pred: f.soac_body(),
             input: f.array(),
-            destination: types::SoacOwnership::Fresh,
+            destination: SoacOwnership::Fresh,
         },
         SoacOp::Scatter {
             dest: dest.clone(),
@@ -551,15 +563,15 @@ fn imports_every_soac_and_its_capture_and_destination_data() {
     let terms: Vec<_> = ops.into_iter().map(|op| f.term(TermKind::Soac(op))).collect();
     let tuple = f.term(TermKind::Tuple(terms));
     let program = f.program(vec![tuple]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    assert_eq!(converted.data.bucket_shapes.len(), 1);
-    let shape = converted.data.bucket_shapes.values().next().unwrap();
+    assert_eq!(converted.ir.bucket_shapes.len(), 1);
+    let shape = converted.ir.bucket_shapes.values().next().unwrap();
     assert_eq!(shape.input_dimensions, vec![vec![0], vec![1, 0]]);
     assert_eq!(shape.domain_rank, 2);
     assert_eq!(
         converted
-            .data
+            .ir
             .operations
             .values()
             .filter(|op| matches!(op.kind, OperationKind::Screma { .. }))
@@ -567,7 +579,7 @@ fn imports_every_soac_and_its_capture_and_destination_data() {
         3
     );
     let mut kinds = [false; 4];
-    for op in converted.data.operations.values() {
+    for op in converted.ir.operations.values() {
         match op.kind {
             OperationKind::Filter { .. } => kinds[0] = true,
             OperationKind::Scatter { .. } => kinds[1] = true,
@@ -581,15 +593,15 @@ fn imports_every_soac_and_its_capture_and_destination_data() {
 #[test]
 fn missing_symbols_and_duplicate_definitions_return_errors() {
     let mut f = Fixture::new();
-    let missing = crate::SymbolId(u32::MAX);
+    let missing = SymbolId(u32::MAX);
     let term = f.term(TermKind::Var(VarRef::Symbol(missing)));
     assert!(
-        matches!(convert_program(&f.program(vec![term])), Err(ConvertError::MissingSymbol(id)) if id == missing)
+        matches!(from_tlc(&f.program(vec![term])), Err(ConvertError::MissingSymbol(id)) if id == missing)
     );
     let mut f = Fixture::new();
     let term = f.int("0");
     assert!(matches!(
-        convert_program(&f.program(vec![term.clone(), term])),
+        from_tlc(&f.program(vec![term.clone(), term])),
         Err(ConvertError::DuplicateDefinition(_))
     ));
 }
@@ -600,22 +612,22 @@ fn lets_and_repeated_arithmetic_resolve_to_shared_values() {
         "entry shared(x: i32) (i32, i32, i32) =
       let a = x + 17 in let b = x + 17 in (a, b, x + 17)",
     );
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let entry = converted.data.entries.values().next().unwrap();
-    let region = &converted.data.regions[converted.data.definitions[entry.definition].body];
+    let entry = converted.ir.entries.values().next().unwrap();
+    let region = &converted.ir.regions[converted.ir.definitions[entry.definition].body];
     assert!(region.members.is_empty());
-    let ExprKind::Tuple(values) = &converted.data.expressions[region.results[0]].kind else {
+    let ExprKind::Tuple(values) = &converted.ir.expressions[region.results[0]].kind else {
         panic!("tuple");
     };
     assert_eq!(values.len(), 3);
     assert!(values.iter().all(|id| *id == values[0]));
     assert!(matches!(
-        converted.data.expressions[values[0]].kind,
+        converted.ir.expressions[values[0]].kind,
         ExprKind::PureApp { .. }
     ));
     let origins: Vec<_> =
-        converted.data.origins.values().filter(|origin| origin.expression == values[0]).collect();
+        converted.ir.origins.values().filter(|origin| origin.expression == values[0]).collect();
     assert!(
         origins.len() > 1,
         "distinct source spans remain associated with one expression"
@@ -627,7 +639,7 @@ fn type_and_exact_float_bits_participate_in_interning() {
     let mut f = Fixture::new();
     let signed = f.int("42");
     let mut unsigned = f.int("42");
-    unsigned.ty = types::Type::Constructed(TypeName::UInt(32), vec![]);
+    unsigned.ty = Type::Constructed(TypeName::UInt(32), vec![]);
     let plus = f.term(TermKind::FloatLit(0.0));
     let minus = f.term(TermKind::FloatLit(-0.0));
     let nan = f.term(TermKind::FloatLit(f32::from_bits(0x7fc00042)));
@@ -640,9 +652,9 @@ fn type_and_exact_float_bits_participate_in_interning() {
         nan.clone(),
         nan,
     ]));
-    let converted = convert_program(&f.program(vec![tuple])).unwrap();
-    let root = converted.data.regions.values().next().unwrap().results[0];
-    let ExprKind::Tuple(values) = &converted.data.expressions[root].kind else {
+    let converted = from_tlc(&f.program(vec![tuple])).unwrap();
+    let root = converted.ir.regions.values().next().unwrap().results[0];
+    let ExprKind::Tuple(values) = &converted.ir.expressions[root].kind else {
         panic!("tuple");
     };
     assert_eq!(values[0], values[1]);
@@ -660,17 +672,13 @@ fn parameters_are_distinct_across_regions_even_with_the_same_source_symbol() {
     let body = f.term(TermKind::Lambda(lambda));
     let mut program = f.program(vec![body.clone(), body]);
     program.defs[1].name = other_name;
-    let converted = convert_program(&program).unwrap();
-    let params: Vec<_> = converted.data.parameters.iter().collect();
+    let converted = from_tlc(&program).unwrap();
+    let params: Vec<_> = converted.ir.parameters.iter().collect();
     assert_eq!(params.len(), 2);
     assert_eq!(params[0].1.symbol, params[1].1.symbol);
     assert_ne!(params[0].0, params[1].0);
-    let results: Vec<_> = converted
-        .data
-        .definitions
-        .values()
-        .map(|def| converted.data.regions[def.body].results[0])
-        .collect();
+    let results: Vec<_> =
+        converted.ir.definitions.values().map(|def| converted.ir.regions[def.body].results[0]).collect();
     assert_ne!(results[0], results[1]);
     run(&converted);
 }
@@ -703,33 +711,33 @@ fn unused_call_results_remain_ordered_and_branches_keep_their_own_effects() {
         body: Box::new(tail),
     });
     let program = f.program(vec![body]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let root = converted.data.definitions.values().next().unwrap().body;
-    let region = &converted.data.regions[root];
+    let root = converted.ir.definitions.values().next().unwrap().body;
+    let region = &converted.ir.regions[root];
     assert_eq!(region.members.len(), 2);
     let OperationKind::If {
         then_region,
         else_region,
         ..
-    } = converted.data.operations[*region.members.first().unwrap()].kind
+    } = converted.ir.operations[*region.members.first().unwrap()].kind
     else {
         panic!("branch");
     };
     for child in [then_region, else_region] {
-        let ops = &converted.data.regions[child].members;
+        let ops = &converted.ir.regions[child].members;
         assert_eq!(ops.len(), 1);
         assert!(matches!(
-            converted.data.operations[*ops.first().unwrap()].kind,
+            converted.ir.operations[*ops.first().unwrap()].kind,
             OperationKind::Call { .. }
         ));
     }
     assert!(matches!(
-        converted.data.operations[*region.members.last().unwrap()].kind,
+        converted.ir.operations[*region.members.last().unwrap()].kind,
         OperationKind::Call { .. }
     ));
     assert_eq!(
-        converted.data.expressions[region.results[0]].kind,
+        converted.ir.expressions[region.results[0]].kind,
         ExprKind::Int("0".into())
     );
 }
@@ -746,12 +754,12 @@ fn canonical_scremas_preserve_tuple_components_callable_captures_and_ownership()
         "entry summed(xs: []i32) (i32, i32) = reduce(|a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1), (0, 0), map(|x: i32| (x, x + 1), xs))",
     ] {
         let program = source(input);
-        let converted = convert_program(&program).unwrap();
+        let converted = from_tlc(&program).unwrap();
         verify_sources(&program, &converted);
-        for op in converted.data.operations.values() {
+        for op in converted.ir.operations.values() {
             let OperationKind::Screma { form, ownership, .. } = &op.kind else { continue; };
             assert_eq!(ownership.len(), 1);
-            saw_unique |= ownership[0] == types::SoacOwnership::UniqueInput;
+            saw_unique |= ownership[0] == SoacOwnership::UniqueInput;
             let bodies = std::iter::once(&form.pre).chain(std::iter::once(&form.post))
                 .chain(form.scans.iter().map(|scan| &scan.operator))
                 .chain(form.reductions.iter().map(|reduction| &reduction.operator));
@@ -759,8 +767,8 @@ fn canonical_scremas_preserve_tuple_components_callable_captures_and_ownership()
                 if let super::SoacBody::Apply { region, parameters, results, captures } = body {
                     saw_capture |= !captures.is_empty();
                     assert_eq!(results.len(), 1);
-                    saw_tuple |= matches!(converted.data.types[results[0]].ty, types::Type::Constructed(TypeName::Tuple(_), _));
-                    assert_eq!(converted.data.regions[*region].parameters.len(), parameters.len() + captures.len());
+                    saw_tuple |= matches!(converted.ir.types[results[0]].ty, Type::Constructed(TypeName::Tuple(_), _));
+                    assert_eq!(converted.ir.regions[*region].parameters.len(), parameters.len() + captures.len());
                 }
             }
             for scan in &form.scans { assert_eq!(scan.neutral.len(), 1); }
@@ -783,12 +791,12 @@ fn anonymous_body_captures_are_trailing_region_parameters() {
     let map = f.term(TermKind::Soac(SoacOp::Map {
         lam: body,
         inputs: vec![input],
-        destination: types::SoacOwnership::Fresh,
+        destination: SoacOwnership::Fresh,
     }));
     let program = f.program(vec![map]);
-    let converted = convert_program(&program).unwrap();
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let operation = converted.data.operations.values().next().unwrap();
+    let operation = converted.ir.operations.values().next().unwrap();
     let OperationKind::Screma { form, .. } = &operation.kind else {
         panic!("map")
     };
@@ -801,33 +809,33 @@ fn anonymous_body_captures_are_trailing_region_parameters() {
     else {
         panic!("body application")
     };
-    let body = &converted.data.regions[*region];
+    let body = &converted.ir.regions[*region];
     assert_eq!(parameters.len(), 1);
     assert_eq!(captures.len(), 1);
     assert_eq!(body.parameters.len(), 2);
     assert_eq!(
-        converted.data.expressions[body.results[0]].kind,
+        converted.ir.expressions[body.results[0]].kind,
         ExprKind::Parameter(body.parameters[1])
     );
     assert_eq!(
-        converted.data.expressions[captures[0]].kind,
+        converted.ir.expressions[captures[0]].kind,
         ExprKind::Int("37".into())
     );
-    assert!(converted.data.definitions.values().all(|def| def.body != *region));
+    assert!(converted.ir.definitions.values().all(|def| def.body != *region));
 }
 
 #[test]
 fn named_body_regions_resolve_forward_references() {
     let mut program = source("entry mapped(xs: [4]i32, offset: i32) [4]i32 = map(|x: i32| x + offset, xs)");
     // Import the caller before its lifted body, regardless of pipeline ordering.
-    program.defs.sort_by_key(|def| !matches!(def.meta, tlc::DefMeta::EntryPoint(_)));
-    assert!(matches!(program.defs[0].meta, tlc::DefMeta::EntryPoint(_)));
-    let converted = convert_program(&program).unwrap();
+    program.defs.sort_by_key(|def| !matches!(def.meta, DefMeta::EntryPoint(_)));
+    assert!(matches!(program.defs[0].meta, DefMeta::EntryPoint(_)));
+    let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let entry = converted.data.entries.values().next().unwrap();
-    let caller = converted.data.definitions[entry.definition].body;
-    let op = *converted.data.regions[caller].members.first().unwrap();
-    let OperationKind::Screma { form, .. } = &converted.data.operations[op].kind else {
+    let entry = converted.ir.entries.values().next().unwrap();
+    let caller = converted.ir.definitions[entry.definition].body;
+    let op = *converted.ir.regions[caller].members.first().unwrap();
+    let OperationKind::Screma { form, .. } = &converted.ir.operations[op].kind else {
         panic!("map")
     };
     let super::SoacBody::Apply {
@@ -842,8 +850,8 @@ fn named_body_regions_resolve_forward_references() {
     assert_ne!(*region, caller);
     assert_eq!(captures.len(), 1);
     assert_eq!(
-        converted.data.regions[*region].parameters.len(),
+        converted.ir.regions[*region].parameters.len(),
         parameters.len() + captures.len()
     );
-    assert!(converted.data.definitions.values().any(|def| def.body == *region));
+    assert!(converted.ir.definitions.values().any(|def| def.body == *region));
 }

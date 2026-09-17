@@ -1,15 +1,10 @@
 use super::element;
-use crate::egglog::data::{
-    intern_expr as expr, intern_type as ty, Array, AssociatedData, ExprId, ExprKind,
-};
-use crate::types;
+use crate::builtins::catalog;
+use crate::egglog::data::{intern_expr, intern_type, Array, ExprId, ExprKind, Ir};
+use crate::types::{canonical_storage_buffer_ty, function, make_array1, no_buffer, Type, TypeName};
 
 /// Push a common slice chain onto every original input of a pure map.
-pub(super) fn apply(
-    data: &mut AssociatedData,
-    array: &Array,
-    transforms: &[(ExprId, ExprId)],
-) -> Option<Array> {
+pub(super) fn apply(data: &mut Ir, array: &Array, transforms: &[(ExprId, ExprId)]) -> Option<Array> {
     if let Array::Zip(xs) = array {
         return Some(Array::Zip(
             xs.iter().map(|a| apply(data, a, transforms)).collect::<Option<_>>()?,
@@ -20,28 +15,26 @@ pub(super) fn apply(
         _ => {
             let element = element(data, array)?;
             let size = match array {
-                Array::Literal(xs) => types::Type::Constructed(types::TypeName::Size(xs.len()), vec![]),
-                _ => types::Type::Constructed(types::TypeName::SizePlaceholder, vec![]),
+                Array::Literal(xs) => Type::Constructed(TypeName::Size(xs.len()), vec![]),
+                _ => Type::Constructed(TypeName::SizePlaceholder, vec![]),
             };
-            let t = ty(
+            let t = intern_type(
                 data,
-                types::make_array1(
+                make_array1(
                     data.types[element].ty.clone(),
-                    types::Type::Constructed(types::TypeName::ArrayVariantVirtual, vec![]),
+                    Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
                     size,
-                    types::no_buffer(),
+                    no_buffer(),
                 ),
             );
-            expr(data, t, ExprKind::Array(array.clone()))
+            intern_expr(data, t, ExprKind::Array(array.clone()))
         }
     };
-    let builtin = data
-        .builtins
-        .iter()
-        .find_map(|(&id, b)| (b.builtin == crate::builtins::catalog().known().slice).then_some(id))?;
+    let builtin =
+        data.builtins.iter().find_map(|(&id, b)| (b.builtin == catalog().known().slice).then_some(id))?;
     for &(start, end) in transforms {
-        let mut t = types::canonical_storage_buffer_ty(&data.types[data.expressions[value].ty].ty);
-        let types::Type::Constructed(types::TypeName::Array, fields) = &mut t else {
+        let mut t = canonical_storage_buffer_ty(&data.types[data.expressions[value].ty].ty);
+        let Type::Constructed(TypeName::Array, fields) = &mut t else {
             return None;
         };
         let size = match (&data.expressions[start].kind, &data.expressions[end].kind) {
@@ -50,18 +43,18 @@ pub(super) fn apply(
             }
             _ => None,
         };
-        *fields.get_mut(2)? = types::Type::Constructed(
-            size.map(types::TypeName::Size).unwrap_or(types::TypeName::SizePlaceholder),
+        *fields.get_mut(2)? = Type::Constructed(
+            size.map(TypeName::Size).unwrap_or(TypeName::SizePlaceholder),
             vec![],
         );
-        let result_ty = ty(data, t.clone());
+        let result_ty = intern_type(data, t.clone());
         let args = vec![value, start, end];
         let function_ty = args.iter().rev().fold(t, |ret, arg| {
-            types::function(data.types[data.expressions[*arg].ty].ty.clone(), ret)
+            function(data.types[data.expressions[*arg].ty].ty.clone(), ret)
         });
-        let function_ty = ty(data, function_ty);
-        let function = expr(data, function_ty, ExprKind::Builtin(builtin));
-        value = expr(data, result_ty, ExprKind::PureApp { function, args });
+        let function_ty = intern_type(data, function_ty);
+        let function = intern_expr(data, function_ty, ExprKind::Builtin(builtin));
+        value = intern_expr(data, result_ty, ExprKind::PureApp { function, args });
     }
     Some(Array::Value(value))
 }

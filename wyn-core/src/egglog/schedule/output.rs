@@ -1,9 +1,12 @@
 use super::super::blocks::Exit;
-use super::{AssociatedData, BlockId, FunctionKind, Instruction, Storage};
+use super::{FunctionKind, Instruction, Storage};
+use crate::egglog::data::BlockId;
+use crate::egglog::{Program, Scheduled};
 use std::collections::BTreeSet;
 
-pub(super) fn reachable(data: &AssociatedData) -> BTreeSet<BlockId> {
+pub(super) fn reachable(data: &Program<Scheduled>) -> BTreeSet<BlockId> {
     let mut pending: Vec<_> = data
+        .state
         .blocks
         .iter()
         .filter_map(|(&id, block)| {
@@ -15,16 +18,16 @@ pub(super) fn reachable(data: &AssociatedData) -> BTreeSet<BlockId> {
         if !live.insert(id) {
             continue;
         }
-        let block = &data.blocks[id];
+        let block = &data.state.blocks[id];
         match &block.exit {
             Exit::Return(_) => {}
             Exit::Jump(edge) => pending.push(edge.target),
             Exit::Branch { yes, no, .. } => pending.extend([yes.target, no.target]),
         }
-        for instruction in &data.bodies[block.body].instructions {
+        for instruction in &data.state.bodies[block.body].instructions {
             match instruction {
                 Instruction::Call { function, .. } => pending.push(*function),
-                Instruction::Dispatch(id) => pending.push(data.dispatches[*id].kernel),
+                Instruction::Dispatch(id) => pending.push(data.state.dispatches[*id].kernel),
                 _ => {}
             }
         }
@@ -32,12 +35,12 @@ pub(super) fn reachable(data: &AssociatedData) -> BTreeSet<BlockId> {
     live
 }
 
-pub(super) fn program(data: &AssociatedData) -> String {
+pub(super) fn program(data: &Program<Scheduled>) -> String {
     let mut text = include_str!("../blocks.egg").to_owned();
     let mut dispatches = BTreeSet::new();
     let mut buffers = BTreeSet::new();
     for id in reachable(data) {
-        let block = &data.blocks[id];
+        let block = &data.state.blocks[id];
         let b = id.as_u32();
         if let Some(exit) = block.loop_exit {
             text.push_str(&format!("(LoopExit (BlockId {b}) (BlockId {}))\n", exit.as_u32()));
@@ -90,7 +93,7 @@ pub(super) fn program(data: &AssociatedData) -> String {
                 no.arguments.as_u32()
             )),
         }
-        for (i, instruction) in data.bodies[block.body].instructions.iter().enumerate() {
+        for (i, instruction) in data.state.bodies[block.body].instructions.iter().enumerate() {
             match instruction {
                 Instruction::Call { function, .. } => text.push_str(&format!(
                     "(Call (BlockId {b}) {i} (BlockId {}))\n",
@@ -116,7 +119,7 @@ pub(super) fn program(data: &AssociatedData) -> String {
     }
     for id in dispatches {
         let d = id.as_u32();
-        let dispatch = &data.dispatches[id];
+        let dispatch = &data.state.dispatches[id];
         text.push_str(&format!(
             "(Dispatch (DispatchId {d}) (BlockId {}) (GridId {}))\n",
             dispatch.kernel.as_u32(),
@@ -136,7 +139,7 @@ pub(super) fn program(data: &AssociatedData) -> String {
         }
     }
     for id in buffers {
-        let relation = match data.buffers[id].storage {
+        let relation = match data.state.buffers[id].storage {
             Storage::Device => "DeviceBuffer",
             Storage::Function => "LocalBuffer",
             Storage::External(_) => "InputBuffer",

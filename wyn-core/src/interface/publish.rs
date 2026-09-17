@@ -615,8 +615,12 @@ fn append_vertex_inputs(vertex_inputs: &mut Vec<VertexAttribute>, entry: &EntryP
         let Some(IoDecoration::Location(slot)) = input.decoration() else {
             continue;
         };
-        let format =
-            vertex_format(&input.ty).expect("vertex #[vertex_slot] param must have a valid vertex format");
+        let Some(format) = vertex_format(&input.ty) else {
+            unreachable!(
+                "type-checked vertex input {} has no vertex format: {:?}",
+                input.name, input.ty
+            );
+        };
         vertex_inputs.push(VertexAttribute {
             slot,
             name: input.name.clone(),

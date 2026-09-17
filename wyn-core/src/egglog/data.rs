@@ -1,7 +1,9 @@
 //! Complete program structure retained outside the egglog fusion graph.
-
-use super::blocks::{BlockData, BodyData, BufferData, DispatchData, GridData};
-use crate::{ast, builtins, interface, pipeline_descriptor, types};
+use crate::ast::Span;
+use crate::builtins::catalog;
+use crate::interface::{EntryDecl, EntryParamBinding};
+use crate::pipeline_descriptor::BufferLen;
+use crate::types::{Diet, SoacOwnership, Type};
 use std::collections::BTreeSet;
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
@@ -42,17 +44,10 @@ impl OperationId {
     }
 }
 
-/// Every collection of associated data is an arena of structs. Lookup maps
-/// used during conversion are temporary and do not escape into this sidecar.
+/// Shared source structure, interned expressions, types, and metadata.
+/// Pass states retain these arenas through scheduling and SSA lowering.
 #[derive(Clone, Debug, Default)]
-pub struct AssociatedData {
-    pub placements: IdArena<PlacementId, PlacementData>,
-    pub outputs: IdArena<OutputId, OutputData>,
-    pub blocks: IdArena<BlockId, BlockData>,
-    pub bodies: IdArena<BodyId, BodyData>,
-    pub buffers: IdArena<BufferId, BufferData>,
-    pub dispatches: IdArena<DispatchId, DispatchData>,
-    pub grids: IdArena<GridId, GridData>,
+pub struct Ir {
     pub programs: IdArena<ProgramId, ProgramData>,
     pub symbols: IdArena<SymbolId, SymbolData>,
     pub types: IdArena<TypeId, TypeData>,
@@ -98,7 +93,7 @@ pub struct SymbolData {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TypeData {
-    pub ty: types::Type,
+    pub ty: Type,
 }
 
 /// Sidecar values are interned by content, independently of diagnostic metadata.
@@ -165,7 +160,7 @@ pub enum Array {
 /// Diagnostic provenance attaches to values, without tracking TLC node IDs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OriginData {
-    pub span: ast::Span,
+    pub span: Span,
     pub expression: ExprId,
     pub definition: DefinitionId,
 }
@@ -196,7 +191,7 @@ pub struct OperationData {
     /// Independent, movable operations need not execute in this order.
     pub source_position: usize,
     pub ty: TypeId,
-    pub span: ast::Span,
+    pub span: Span,
     pub kind: OperationKind,
 }
 
@@ -229,14 +224,14 @@ pub enum OperationKind {
     Screma {
         form: ScremaForm,
         inputs: Vec<Array>,
-        ownership: Vec<types::SoacOwnership>,
+        ownership: Vec<SoacOwnership>,
     },
     Filter {
         /// Element transformation before predicate evaluation and compaction.
         map: SoacBody,
         body: SoacBody,
         inputs: Vec<Array>,
-        ownership: types::SoacOwnership,
+        ownership: SoacOwnership,
     },
     Scatter {
         destination: Place,
@@ -339,14 +334,14 @@ pub struct DefinitionData {
     pub body: RegionId,
     pub kind: DefinitionKind,
     pub arity: usize,
-    pub param_diets: Vec<types::Diet>,
-    pub return_diet: types::Diet,
+    pub param_diets: Vec<Diet>,
+    pub return_diet: Diet,
 }
 
 #[derive(Clone, Debug)]
 pub struct EntryData {
     pub definition: DefinitionId,
-    pub declaration: interface::EntryDecl,
+    pub declaration: EntryDecl,
 }
 
 #[derive(Clone, Debug)]
@@ -365,19 +360,19 @@ pub struct OutputData {
 pub struct EntryParamData {
     pub entry: EntryId,
     pub position: usize,
-    pub binding: Option<interface::EntryParamBinding>,
+    pub binding: Option<EntryParamBinding>,
 }
 
 #[derive(Clone, Debug)]
 pub struct InputBoundData {
     pub entry: EntryId,
     pub symbol: SymbolId,
-    pub length: pipeline_descriptor::BufferLen,
+    pub length: BufferLen,
 }
 
 #[derive(Clone, Debug)]
 pub struct BuiltinData {
-    pub builtin: builtins::BuiltinId,
+    pub builtin: crate::builtins::BuiltinId,
     pub overload_idx: usize,
 }
 
@@ -392,13 +387,13 @@ pub struct BucketShapeData {
     pub domain_rank: u8,
 }
 
-pub(super) fn intern_type(data: &mut AssociatedData, value: types::Type) -> TypeId {
+pub(super) fn intern_type(data: &mut Ir, value: Type) -> TypeId {
     if let Some((&id, _)) = data.types.iter().find(|(_, t)| t.ty == value) {
         return id;
     }
     data.types.alloc(TypeData { ty: value })
 }
-pub(super) fn intern_expr(data: &mut AssociatedData, ty: TypeId, kind: ExprKind) -> ExprId {
+pub(super) fn intern_expr(data: &mut Ir, ty: TypeId, kind: ExprKind) -> ExprId {
     let value = ExprData { ty, kind };
     if let Some((&id, _)) = data.expressions.iter().find(|(_, e)| **e == value) {
         return id;
@@ -423,7 +418,7 @@ pub(super) fn body_signature(body: &SoacBody) -> (Vec<TypeId>, Vec<TypeId>) {
         }
     }
 }
-pub(in crate::egglog) fn length_source(data: &AssociatedData, kind: &OperationKind) -> Option<ExprId> {
+pub(in crate::egglog) fn length_source(data: &Ir, kind: &OperationKind) -> Option<ExprId> {
     let OperationKind::Call { function, args } = kind else {
         return None;
     };
@@ -437,11 +432,11 @@ pub(in crate::egglog) fn length_source(data: &AssociatedData, kind: &OperationKi
     let ExprKind::Builtin(id) = data.expressions[function].kind else {
         return None;
     };
-    (data.builtins[id].builtin == crate::builtins::catalog().known().length).then_some(*array)
+    (data.builtins[id].builtin == catalog().known().length).then_some(*array)
 }
 
 /// Resolve structural aliases without rewriting the sidecar.
-pub(super) fn value_source(data: &AssociatedData, mut value: ExprId) -> ExprId {
+pub(super) fn value_source(data: &Ir, mut value: ExprId) -> ExprId {
     loop {
         match data.expressions[value].kind {
             ExprKind::Coerce(inner) => value = inner,
@@ -458,10 +453,10 @@ pub(super) fn value_source(data: &AssociatedData, mut value: ExprId) -> ExprId {
 }
 
 /// Recognize the shared slice builtin through type coercions.
-pub(super) fn is_slice(data: &AssociatedData, mut function: ExprId) -> bool {
+pub(super) fn is_slice(data: &Ir, mut function: ExprId) -> bool {
     while let ExprKind::Coerce(inner) = data.expressions[function].kind {
         function = inner;
     }
     matches!(data.expressions[function].kind, ExprKind::Builtin(id)
-        if data.builtins[id].builtin == crate::builtins::catalog().known().slice)
+        if data.builtins[id].builtin == catalog().known().slice)
 }

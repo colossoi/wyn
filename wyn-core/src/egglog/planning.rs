@@ -1,15 +1,21 @@
 //! Import structural facts for relational scheduling. This adapter never decides
 //! which values to materialize, which resources to allocate, or which phase writes
 //! an output. Those decisions belong to the .egg rules.
-
-use super::data::body_signature as signature;
-use super::data::*;
-
+use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
-use super::{dependencies, timing, OptimizeError};
-use egglog_engine::{ast::Literal, EGraph, Term};
+use super::OptimizeError;
+use crate::egglog::data::{
+    is_slice, Array, DispatchId, ExprData, ExprId, ExprKind, OperationKind, OutputData, TypeData, TypeId,
+};
+use crate::egglog::dependencies::{safe_body, Dependencies};
+use crate::egglog::{Program, Scheduled};
+use crate::interface::EntryKind;
+use crate::ssa::layout::type_byte_size;
+use crate::types;
+use crate::types::{bool_type, canonical_storage_buffer_ty};
+use egglog_engine::ast::Literal;
+use egglog_engine::{EGraph, Term};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write;
 
 mod read;
 pub(super) use read::{read, Readout};
@@ -32,7 +38,10 @@ pub(super) const RUN: &str =
 
 /// Assign the derived order to emitted launch IDs. Kernel emission contributes
 /// identities only; it cannot add its own dependency decisions.
-pub(super) fn read_dispatch_order(graph: &EGraph, data: &mut AssociatedData) -> Result<(), OptimizeError> {
+pub(super) fn read_dispatch_order(
+    graph: &EGraph,
+    data: &mut Program<Scheduled>,
+) -> Result<(), OptimizeError> {
     let (rows, _, dag) = graph.function_to_dag("DispatchDependency", usize::MAX, false)?;
     for row in rows {
         let Term::App(_, args) = dag.get(row) else {
@@ -48,10 +57,10 @@ pub(super) fn read_dispatch_order(graph: &EGraph, data: &mut AssociatedData) -> 
         };
         let before = DispatchId::from(u32::try_from(*before).map_err(|_| invalid_order())?);
         let after = DispatchId::from(u32::try_from(*after).map_err(|_| invalid_order())?);
-        if data.dispatches.get(before).is_none() {
+        if data.state.dispatches.get(before).is_none() {
             return Err(invalid_order());
         }
-        let Some(dispatch) = data.dispatches.get_mut(after) else {
+        let Some(dispatch) = data.state.dispatches.get_mut(after) else {
             return Err(invalid_order());
         };
         dispatch.dependencies.insert(before);
@@ -71,62 +80,63 @@ fn ty(t: TypeId) -> String {
 }
 
 pub(super) fn facts(
-    data: &AssociatedData,
-    summary: &dependencies::Dependencies,
+    data: &Program<Scheduled>,
+    summary: &Dependencies,
     count_type: TypeId,
     input_fields: &BTreeMap<ExprId, Vec<ExprId>>,
 ) -> String {
     let mut out = String::new();
-    writeln!(out, "(CounterType {})", ty(count_type)).unwrap();
+    out.push_str(&format!("(CounterType {})\n", ty(count_type)));
     let mut values = BTreeSet::new();
     for (&parent, fields) in input_fields {
         let ExprKind::Parameter(p) = data.expressions[parent].kind else {
-            unreachable!()
+            unreachable!(
+                "input field source {parent:?} is not a parameter: {:?}",
+                data.expressions[parent].kind
+            )
         };
         for (i, &field) in fields.iter().enumerate() {
             values.insert(field);
-            writeln!(
-                out,
-                "(FieldValue {} {i} {})\n(ChildValue {} {})\n(ParameterValue {} {})",
+            out.push_str(&format!(
+                "(FieldValue {} {i} {})\n(ChildValue {} {})\n(ParameterValue {} {})\n",
                 expr(parent),
                 expr(field),
                 expr(parent),
                 expr(field),
                 expr(field),
                 data.parameters[p].region.egglog()
-            )
-            .unwrap();
+            ));
         }
     }
-    for (&id, output) in &data.outputs {
+    for (&id, output) in &data.state.outputs {
         values.insert(output.expression);
         if output.scalar {
-            writeln!(
-                out,
-                "(ReturnScalar {} {} {})",
+            out.push_str(&format!(
+                "(ReturnScalar {} {} {})\n",
                 id.as_u32(),
                 expr(output.expression),
                 ty(data.expressions[output.expression].ty)
-            )
-            .unwrap();
+            ));
         } else {
-            writeln!(out, "(ReturnArray {} {})", id.as_u32(), expr(output.expression)).unwrap();
+            out.push_str(&format!(
+                "(ReturnArray {} {})\n",
+                id.as_u32(),
+                expr(output.expression)
+            ));
         }
     }
     let mut regions = BTreeSet::new();
     let symbols: BTreeMap<_, _> = data.definitions.values().map(|d| (d.symbol, d.body)).collect();
     for (&id, entry) in &data.entries {
         regions.insert(data.definitions[entry.definition].body);
-        if entry.declaration.entry_kind != crate::interface::EntryKind::Compute {
+        if entry.declaration.entry_kind != EntryKind::Compute {
             continue;
         }
-        writeln!(
-            out,
-            "(HostRoot {} {})",
+        out.push_str(&format!(
+            "(HostRoot {} {})\n",
             id.as_u32(),
             data.definitions[entry.definition].body.egglog()
-        )
-        .unwrap();
+        ));
     }
     for &id in &summary.live {
         let op = &data.operations[id];
@@ -140,18 +150,20 @@ pub(super) fn facts(
                 | OperationKind::BucketScatter { .. }
                 | OperationKind::ReduceByIndex { .. }
         );
-        writeln!(
-            out,
-            "(set (ContainsCollective {key}) {collective})\n(set (ScalarBoundary {key}) false)"
-        )
-        .unwrap();
-        writeln!(out, "(Site {key} {})", op.region.egglog()).unwrap();
+        out.push_str(&format!(
+            "(set (ContainsCollective {key}) {collective})\n(set (ScalarBoundary {key}) false)\n"
+        ));
+        out.push_str(&format!("(Site {key} {})\n", op.region.egglog()));
         for r in op.kind.structured_regions() {
             regions.insert(r);
-            writeln!(out, "(Enters {key} {})", r.egglog()).unwrap();
+            out.push_str(&format!("(Enters {key} {})\n", r.egglog()));
         }
         if let OperationKind::Loop { header, body, .. } = &op.kind {
-            writeln!(out, "(Repeated {key} {} {})", header.egglog(), body.egglog()).unwrap();
+            out.push_str(&format!(
+                "(Repeated {key} {} {})\n",
+                header.egglog(),
+                body.egglog()
+            ));
         }
         let called = match &op.kind {
             OperationKind::Call { function, .. } => match &data.expressions[*function].kind {
@@ -164,56 +176,62 @@ pub(super) fn facts(
         };
         if let Some(r) = called {
             regions.insert(r);
-            writeln!(out, "(Enters {key} {})", r.egglog()).unwrap();
+            out.push_str(&format!("(Enters {key} {})\n", r.egglog()));
         }
         op.kind.for_each_operand(&mut |operand| {
             if let Operand::Value(role, e) = operand {
                 let role = if matches!(role, OperandRole::Input) { "input" } else { "environment" };
                 values.insert(e);
-                writeln!(out, "(Operand {key} \"{role}\" {})", expr(e)).unwrap();
+                out.push_str(&format!("(Operand {key} \"{role}\" {})\n", expr(e)));
             }
         });
         let inputs = match &op.kind {
             OperationKind::Screma { form, inputs, .. } => {
-                writeln!(
-                    out,
-                    "(CollectiveShape {key} {} {} {})",
+                out.push_str(&format!(
+                    "(CollectiveShape {key} {} {} {})\n",
                     form.scans.len(),
                     form.reductions.len(),
                     summary.discardable.contains(&id)
-                )
-                .unwrap();
+                ));
                 let scans: Vec<_> = form.scans.iter().flat_map(|s| s.neutral.iter()).copied().collect();
                 let totals: Vec<_> =
                     form.reductions.iter().flat_map(|r| r.neutral.iter()).copied().collect();
-                writeln!(out, "(TotalCount {key} {})", totals.len()).unwrap();
+                out.push_str(&format!("(TotalCount {key} {})\n", totals.len()));
                 for (i, e) in scans.iter().chain(&totals).enumerate() {
-                    writeln!(out, "(Accumulator {key} {i} {})", ty(data.expressions[*e].ty)).unwrap();
+                    out.push_str(&format!(
+                        "(Accumulator {key} {i} {})\n",
+                        ty(data.expressions[*e].ty)
+                    ));
                 }
                 for (i, e) in scans.iter().enumerate() {
-                    writeln!(out, "(ScanComponent {key} {i} {})", ty(data.expressions[*e].ty)).unwrap();
+                    out.push_str(&format!(
+                        "(ScanComponent {key} {i} {})\n",
+                        ty(data.expressions[*e].ty)
+                    ));
                 }
                 for (i, e) in totals.iter().enumerate() {
-                    writeln!(out, "(TotalResult {key} {i} {})", ty(data.expressions[*e].ty)).unwrap();
+                    out.push_str(&format!(
+                        "(TotalResult {key} {i} {})\n",
+                        ty(data.expressions[*e].ty)
+                    ));
                 }
-                for (i, t) in signature(&form.post).1.into_iter().enumerate() {
-                    writeln!(out, "(ArrayResult {key} {} {})", totals.len() + i, ty(t)).unwrap();
+                for (i, t) in body_signature(&form.post).1.into_iter().enumerate() {
+                    out.push_str(&format!("(ArrayResult {key} {} {})\n", totals.len() + i, ty(t)));
                 }
                 for (i, t) in
-                    signature(&form.pre).1.into_iter().skip(scans.len() + totals.len()).enumerate()
+                    body_signature(&form.pre).1.into_iter().skip(scans.len() + totals.len()).enumerate()
                 {
-                    writeln!(out, "(MappedComponent {key} {i} {})", ty(t)).unwrap();
+                    out.push_str(&format!("(MappedComponent {key} {i} {})\n", ty(t)));
                 }
                 Some(inputs)
             }
             OperationKind::Filter {
                 map, body, inputs, ..
             } => {
-                let safe = dependencies::safe_body(map, &summary.safe_regions)
-                    && dependencies::safe_body(body, &summary.safe_regions);
-                writeln!(out, "(FilterShape {key} {safe})").unwrap();
-                if let Some(t) = signature(map).1.first() {
-                    writeln!(out, "(FilterResult {key} {})", ty(*t)).unwrap();
+                let safe = safe_body(map, &summary.safe_regions) && safe_body(body, &summary.safe_regions);
+                out.push_str(&format!("(FilterShape {key} {safe})\n"));
+                if let Some(t) = body_signature(map).1.first() {
+                    out.push_str(&format!("(FilterResult {key} {})\n", ty(*t)));
                 }
                 Some(inputs)
             }
@@ -226,10 +244,10 @@ pub(super) fn facts(
             | OperationKind::BucketScatter {
                 destination, inputs, ..
             } => {
-                writeln!(out, "(IndexedWrite {key})").unwrap();
-                writeln!(out, "(UpdatedResult {key} 0 {})", expr(destination.value)).unwrap();
+                out.push_str(&format!("(IndexedWrite {key})\n"));
+                out.push_str(&format!("(UpdatedResult {key} 0 {})\n", expr(destination.value)));
                 if matches!(op.kind, OperationKind::BucketScatter { .. }) {
-                    writeln!(out, "(BucketResult {key} {})", expr(destination.value)).unwrap();
+                    out.push_str(&format!("(BucketResult {key} {})\n", expr(destination.value)));
                     // Its ranked iteration space is still a source payload. The
                     // selected serial phase has one invocation regardless of rank.
                     None
@@ -238,40 +256,42 @@ pub(super) fn facts(
                 }
             }
             _ => {
-                writeln!(out, "(ScalarSite {key})").unwrap();
-                if data.types[op.ty].ty == crate::types::bool_type()
-                    || crate::ssa::layout::type_byte_size(&data.types[op.ty].ty).is_some_and(|n| n > 0)
+                out.push_str(&format!("(ScalarSite {key})\n"));
+                if data.types[op.ty].ty == bool_type()
+                    || type_byte_size(&data.types[op.ty].ty).is_some_and(|n| n > 0)
                 {
-                    writeln!(out, "(ScalarCandidate {key} {})", ty(op.ty)).unwrap();
+                    out.push_str(&format!("(ScalarCandidate {key} {})\n", ty(op.ty)));
                 }
                 None
             }
         };
         if let Some(inputs) = inputs {
-            writeln!(
-                out,
-                "(InputDomain {key} {})",
+            out.push_str(&format!(
+                "(InputDomain {key} {})\n",
                 inputs.first().map(|a| extent(a)).unwrap_or("(Fixed 0)".into())
-            )
-            .unwrap();
+            ));
         }
     }
     for r in regions {
         for (i, &e) in data.regions[r].results.iter().enumerate() {
             values.insert(e);
-            writeln!(out, "(ExitValue {} {i} {})", r.egglog(), expr(e)).unwrap();
+            out.push_str(&format!("(ExitValue {} {i} {})\n", r.egglog(), expr(e)));
         }
     }
     for (after, before) in summary.dependencies() {
-        writeln!(out, "(SourceDependency {} {})", after.egglog(), before.egglog()).unwrap();
+        out.push_str(&format!(
+            "(SourceDependency {} {})\n",
+            after.egglog(),
+            before.egglog()
+        ));
     }
     for (gate, inputs) in summary.effects.gates() {
         for op in inputs {
-            writeln!(out, "(EffectInput {gate} {})", op.egglog()).unwrap();
+            out.push_str(&format!("(EffectInput {gate} {})\n", op.egglog()));
         }
     }
     for (op, gate) in summary.effects.waits() {
-        writeln!(out, "(EffectWait {} {gate})", op.egglog()).unwrap();
+        out.push_str(&format!("(EffectWait {} {gate})\n", op.egglog()));
     }
 
     // Each expression is visited once. Only structural edges and view metadata
@@ -280,60 +300,56 @@ pub(super) fn facts(
     while let Some(e) = pending.pop() {
         let value = &data.expressions[e];
         let key = expr(e);
-        writeln!(out, "(SourceType {key} {})", ty(value.ty)).unwrap();
+        out.push_str(&format!("(SourceType {key} {})\n", ty(value.ty)));
         let mut generic_children = false;
         match &value.kind {
             ExprKind::Parameter(p) => {
                 if input_fields.contains_key(&e) {
                     continue;
                 }
-                writeln!(
-                    out,
-                    "(ParameterValue {key} {})",
+                out.push_str(&format!(
+                    "(ParameterValue {key} {})\n",
                     data.parameters[*p].region.egglog()
-                )
-                .unwrap();
+                ));
             }
             ExprKind::OperationResult(op) => {
                 if matches!(
                     data.operations[*op].kind,
                     OperationKind::Screma { .. } | OperationKind::BucketScatter { .. }
                 ) {
-                    writeln!(out, "(ResultTuple {key} {})", op.egglog()).unwrap();
+                    out.push_str(&format!("(ResultTuple {key} {})\n", op.egglog()));
                 } else {
-                    writeln!(out, "(DirectResult {key} {} 0)", op.egglog()).unwrap();
+                    out.push_str(&format!("(DirectResult {key} {} 0)\n", op.egglog()));
                 }
             }
             ExprKind::Project { tuple, index } => {
-                writeln!(out, "(Projection {key} {} {index})", expr(*tuple)).unwrap();
+                out.push_str(&format!("(Projection {key} {} {index})\n", expr(*tuple)));
             }
             ExprKind::Tuple(fields) | ExprKind::Vector(fields) => {
                 for (i, &field) in fields.iter().enumerate() {
-                    writeln!(out, "(FieldValue {key} {i} {})", expr(field)).unwrap();
+                    out.push_str(&format!("(FieldValue {key} {i} {})\n", expr(field)));
                 }
                 generic_children = true;
             }
             ExprKind::Coerce(inner) | ExprKind::Array(Array::Value(inner)) => {
-                writeln!(out, "(ForwardValue {key} {})", expr(*inner)).unwrap();
+                out.push_str(&format!("(ForwardValue {key} {})\n", expr(*inner)));
             }
             ExprKind::PureApp { function, args } if is_slice(data, *function) && args.len() == 3 => {
-                writeln!(
-                    out,
-                    "(SliceView {key} {} {} {})",
+                out.push_str(&format!(
+                    "(SliceView {key} {} {} {})\n",
                     expr(args[0]),
                     expr(args[1]),
                     expr(args[2])
-                )
-                .unwrap();
+                ));
             }
             _ => generic_children = true,
         }
         if generic_children && !matches!(value.kind, ExprKind::Tuple(_) | ExprKind::Vector(_)) {
-            writeln!(out, "(ComputedValue {key})").unwrap();
+            out.push_str(&format!("(ComputedValue {key})\n"));
         }
         for child in value.kind.children() {
             if generic_children {
-                writeln!(out, "(ChildValue {key} {})", expr(child)).unwrap();
+                out.push_str(&format!("(ChildValue {key} {})\n", expr(child)));
             }
             if values.insert(child) {
                 pending.push(child);
@@ -354,8 +370,8 @@ fn extent(array: &Array) -> String {
 
 /// Expose source result slots once; tuple projection is structural import, not
 /// an allocation decision. Use the same global identities for existing values.
-pub(super) fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>> {
-    use crate::types::{Type, TypeExt, TypeName};
+pub(super) fn outputs(data: &mut Program<Scheduled>) -> BTreeMap<ExprId, Vec<ExprId>> {
+    use types::{Type, TypeExt, TypeName};
     let mut types: std::collections::HashMap<_, _> =
         data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();
     let mut expressions: std::collections::HashMap<_, _> =
@@ -363,7 +379,7 @@ pub(super) fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>
     let entries: Vec<_> =
         data.entries.iter().map(|(&id, e)| (id, data.definitions[e.definition].body)).collect();
     for (entry, region) in entries {
-        if data.entries[entry].declaration.entry_kind != crate::interface::EntryKind::Compute {
+        if data.entries[entry].declaration.entry_kind != EntryKind::Compute {
             continue;
         }
         for e in data.regions[region].results.clone() {
@@ -386,24 +402,25 @@ pub(super) fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>
                         if let ExprKind::Tuple(values) = &data.expressions[e].kind {
                             return values[index];
                         }
-                        let ty =
-                            *types.entry(ty.clone()).or_insert_with(|| data.types.alloc(TypeData { ty }));
+                        let ty = *types
+                            .entry(ty.clone())
+                            .or_insert_with(|| data.ir.types.alloc(TypeData { ty }));
                         let value = ExprData {
                             ty,
                             kind: ExprKind::Project { tuple: e, index },
                         };
-                        *expressions.entry(value.clone()).or_insert_with(|| data.expressions.alloc(value))
+                        *expressions
+                            .entry(value.clone())
+                            .or_insert_with(|| data.ir.expressions.alloc(value))
                     })
                     .collect::<Vec<_>>()
             } else {
                 vec![e]
             };
             for (index, expression) in values.into_iter().enumerate() {
-                let scalar = !crate::types::canonical_storage_buffer_ty(
-                    &data.types[data.expressions[expression].ty].ty,
-                )
-                .is_array();
-                data.outputs.alloc(OutputData {
+                let scalar = !canonical_storage_buffer_ty(&data.types[data.expressions[expression].ty].ty)
+                    .is_array();
+                data.state.outputs.alloc(OutputData {
                     entry,
                     index,
                     expression,
@@ -435,12 +452,12 @@ pub(super) fn outputs(data: &mut AssociatedData) -> BTreeMap<ExprId, Vec<ExprId>
             .into_iter()
             .enumerate()
             .map(|(index, ty)| {
-                let ty = *types.entry(ty.clone()).or_insert_with(|| data.types.alloc(TypeData { ty }));
+                let ty = *types.entry(ty.clone()).or_insert_with(|| data.ir.types.alloc(TypeData { ty }));
                 let value = ExprData {
                     ty,
                     kind: ExprKind::Project { tuple, index },
                 };
-                *expressions.entry(value.clone()).or_insert_with(|| data.expressions.alloc(value))
+                *expressions.entry(value.clone()).or_insert_with(|| data.ir.expressions.alloc(value))
             })
             .collect();
         fields.insert(tuple, values);

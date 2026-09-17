@@ -1,11 +1,20 @@
 //! Specialize callees before callers, so new captures flow outward in one visit.
-use super::super::super::{dependencies, regions::Regions};
-use super::*;
+use super::super::super::regions::Regions;
+use super::analysis::computation;
+use super::specialize::apply;
+use super::uses::Uses;
+use super::{ordered, total_node, uses, OptimizeError, Placements};
+use crate::egglog::data::{ExprId, ExprKind, Ir, OperationId, ParameterId, RegionId, SoacBody};
+use crate::egglog::dependencies::analyze;
+use crate::egglog::rewrite::Rewriter;
+use crate::egglog::scalar::error;
+use crate::egglog::timing::{span, time};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Context<'a> {
     pub placements: &'a mut Placements,
-    pub rewrite: rewrite::Rewriter,
-    pub uses: uses::Uses,
+    pub rewrite: Rewriter,
+    pub uses: Uses,
     pub live: BTreeSet<OperationId>,
     pub lexical: Regions,
     pub originals: BTreeMap<RegionId, RegionId>,
@@ -16,14 +25,14 @@ pub(super) struct Context<'a> {
     choices: BTreeMap<(RegionId, Vec<ParameterId>), Vec<ExprId>>,
 }
 
-pub(super) fn run(data: &mut AssociatedData, placements: &mut Placements) -> Result<(), OptimizeError> {
-    let summary = timing::time("analyze dependencies", || dependencies::analyze(data));
-    timing::time("validate dependency order", || summary.schedules(data))?;
-    let uses = timing::time("collect expression uses", || uses::analyze(data, &summary.live));
+pub(super) fn run(data: &mut Ir, placements: &mut Placements) -> Result<(), OptimizeError> {
+    let summary = time("analyze dependencies", || analyze(data));
+    time("validate dependency order", || summary.schedules(data))?;
+    let uses = time("collect expression uses", || uses::analyze(data, &summary.live));
     let regions: Vec<_> = uses.scopes.keys().copied().collect();
     let mut context = Context {
         placements,
-        rewrite: timing::time("index expressions", || rewrite::Rewriter::new(data)),
+        rewrite: time("index expressions", || Rewriter::new(data)),
         uses,
         live: summary.live,
         lexical: Regions::new(data),
@@ -34,7 +43,7 @@ pub(super) fn run(data: &mut AssociatedData, placements: &mut Placements) -> Res
         total: BTreeMap::new(),
         choices: BTreeMap::new(),
     };
-    let _timing = timing::span("specialize bodies");
+    let _timing = span("specialize bodies");
     for r in regions {
         context.region(data, r)?;
     }
@@ -46,7 +55,7 @@ impl Context<'_> {
         self.originals.get(&r).copied().unwrap_or(r)
     }
 
-    fn region(&mut self, data: &mut AssociatedData, r: RegionId) -> Result<(), OptimizeError> {
+    fn region(&mut self, data: &mut Ir, r: RegionId) -> Result<(), OptimizeError> {
         if self.done.contains(&r) {
             return Ok(());
         }
@@ -74,7 +83,7 @@ impl Context<'_> {
         Ok(())
     }
 
-    fn totals(&mut self, data: &AssociatedData, roots: &[ExprId]) {
+    fn totals(&mut self, data: &Ir, roots: &[ExprId]) {
         self.uses.dag.include(data, roots);
         // Immutable expression IDs make these proofs reusable across invocations.
         for &e in &self.uses.dag.order[self.total.len()..] {
@@ -84,7 +93,7 @@ impl Context<'_> {
         }
     }
 
-    fn operation(&mut self, data: &mut AssociatedData, op: OperationId) -> Result<(), OptimizeError> {
+    fn operation(&mut self, data: &mut Ir, op: OperationId) -> Result<(), OptimizeError> {
         let bodies = data.operations[op].kind.callbacks();
         let mut bindings: BTreeMap<RegionId, BTreeSet<ParameterId>> = BTreeMap::new();
         for body in bodies {
@@ -126,7 +135,7 @@ impl Context<'_> {
                         }
                     };
                     invariant.insert(e, safe);
-                    if safe && analysis::computation(data, e) {
+                    if safe && computation(data, e) {
                         selected.push(e);
                     }
                 }
@@ -134,7 +143,7 @@ impl Context<'_> {
             }
             let values = self.choices[&key].clone();
             if !values.is_empty() {
-                specialize::apply(data, op, region, &values, self)?;
+                apply(data, op, region, &values, self)?;
             }
         }
         Ok(())

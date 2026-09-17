@@ -1,9 +1,7 @@
 //! Scoped wall-clock timings, aggregated by pass and nested activity.
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 thread_local! {
     static CURRENT: RefCell<Option<Rc<RefCell<Profile>>>> = const { RefCell::new(None) };

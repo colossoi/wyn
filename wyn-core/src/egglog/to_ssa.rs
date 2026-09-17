@@ -1,21 +1,25 @@
 //! SSA handoff from scheduled blocks and the derived resource plan.
-
 use super::blocks::{Exit, FunctionKind, Instruction, Storage, Value};
-use super::data::{AssociatedData, BlockId, BufferId, ExprId, OperationId, OperationKind, ParameterId};
-use super::OptimizeError;
+use super::scalar::placement_index;
+use super::timing::{span, time};
+use super::{OptimizeError, PlacementSite};
 use crate::ast::Span;
-use crate::flow::ControlHeader;
+use crate::egglog::data::{BlockId, BufferId, ExprId, OperationId, OperationKind, ParameterId};
+use crate::egglog::{Program, Scheduled};
+use crate::flow::{ControlHeader, ExecutionModel};
 use crate::interface::lowering::build_entry_outputs;
-use crate::interface::{StorageBindingDecl, StorageRole};
+use crate::interface::{EntryInput, EntryKind, StorageBindingDecl, StorageRole};
 use crate::op::{OpTag, PureViewSource};
-use crate::ssa::{
-    self,
-    builder::FuncBuilder,
-    types::{FuncBody, InstKind, PlaceId, Terminator, ValueRef},
+use crate::ssa::builder::{BuilderError, FuncBuilder};
+use crate::ssa::context::BackendGlobal;
+use crate::ssa::stage::{Elaborated, ElaboratedTag};
+use crate::ssa::types::{
+    ConstantValue, EntryPoint, FuncBody, Function, InstKind, PlaceId, Terminator, ValueRef,
 };
-use crate::types::{self, Type, TypeExt, TypeName};
-use crate::{BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, SchedulePolicy};
+use crate::types::{sized_array, unit, Type, TypeExt, TypeName};
+use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, SchedulePolicy};
 use std::collections::{BTreeMap, BTreeSet};
+use wyn_base::IdSource;
 
 mod control;
 mod interface;
@@ -25,24 +29,19 @@ mod values;
 /// Lower scheduled kernels with their authored inputs and planned storage.
 /// Static compute pipelines publish the same resources and dispatch order.
 /// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
-pub fn to_ssa(
-    data: &AssociatedData,
-    target: CodegenTarget,
-) -> Result<ssa::stage::Elaborated, OptimizeError> {
-    let _timing = super::timing::span("to SSA");
-    if data.blocks.is_empty() && !data.entries.is_empty() {
-        return Err(error("schedule the program before lowering to SSA"));
-    }
+pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
+    let _timing = span("to SSA");
     let results = data
+        .state
         .blocks
         .values()
         .filter(|b| {
             matches!(
-                data.blocks[b.function].interface.as_ref().map(|f| &f.kind),
+                data.state.blocks[b.function].interface.as_ref().map(|f| &f.kind),
                 Some(FunctionKind::Host | FunctionKind::Entry(_))
             )
         })
-        .flat_map(|b| &data.bodies[b.body].instructions)
+        .flat_map(|b| &data.state.bodies[b.body].instructions)
         .filter_map(|i| match i {
             Instruction::BindResult(op, value) if materialized(value) => Some((*op, value.clone())),
             _ => None,
@@ -54,7 +53,7 @@ pub fn to_ssa(
     }
     let mut compiler = Compiler {
         origins,
-        placements: super::scalar::placement_index(data),
+        placements: placement_index(&data.ir, &data.state.placements),
         data,
         functions: vec![],
         specializations: vec![],
@@ -63,10 +62,10 @@ pub fn to_ssa(
         results,
         used: BTreeSet::new(),
     };
-    super::timing::time("assign physical bindings", || compiler.allocate_bindings())?;
-    let owners: BTreeMap<_, _> = data.dispatches.values().map(|d| (d.kernel, d.owner)).collect();
+    time("assign physical bindings", || compiler.allocate_bindings())?;
+    let owners: BTreeMap<_, _> = data.state.dispatches.values().map(|d| (d.kernel, d.owner)).collect();
     let mut roots = vec![];
-    for (&id, block) in &data.blocks {
+    for (&id, block) in &data.state.blocks {
         let Some(f) = &block.interface else {
             continue;
         };
@@ -79,7 +78,7 @@ pub fn to_ssa(
                         data.entries[entry].declaration.name
                     )));
                 }
-                if data.outputs.values().any(|o| o.entry == entry && o.scalar)
+                if data.state.outputs.values().any(|o| o.entry == entry && o.scalar)
                     || !contains_dispatch(data, id)
                 {
                     roots.push((id, entry, [1, 1, 1], true));
@@ -91,18 +90,18 @@ pub fn to_ssa(
     roots.sort_by_key(|r| r.0);
     let mut entries = vec![];
     for &(root, owner, size, finish) in &roots {
-        let _entry = super::timing::span("lower entry or kernel");
+        let _entry = span("lower entry or kernel");
         compiler.used.clear();
         let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
         lower.entry = Some(owner);
         let declaration = &data.entries[owner].declaration;
-        let compute = !finish || declaration.entry_kind == crate::interface::EntryKind::Compute;
+        let compute = !finish || declaration.entry_kind == EntryKind::Compute;
         lower.finish_outputs = finish && compute;
         lower.graphics_outputs = !compute;
         // Root parameters are source ABI values. Kernel captures are resolved
         // lazily, so a combine phase does not declare unused input arrays.
         if finish {
-            for instruction in &data.bodies[data.blocks[root].body].instructions {
+            for instruction in &data.state.bodies[data.state.blocks[root].body].instructions {
                 if let Instruction::BindParameter(p, Value::Local(name)) = instruction {
                     let value = lower.input(*p)?;
                     lower.environment.locals.insert(name.clone(), value);
@@ -121,24 +120,24 @@ pub fn to_ssa(
                 &[],
                 &inputs,
                 false,
-                &mut wyn_base::IdSource::new(),
+                &mut IdSource::new(),
             )
             .map_err(|e| error(e.to_string()))?
         };
         let storage_bindings =
             compiler.used.iter().filter_map(|id| compiler.bindings.get(id).cloned()).collect();
-        entries.push(ssa::types::EntryPoint {
+        entries.push(EntryPoint {
             id: EntryId::from(root.as_u32()),
             name: entry_name(root),
             body,
             execution_model: if compute {
-                crate::flow::ExecutionModel::Compute {
+                ExecutionModel::Compute {
                     local_size: (size[0], size[1], size[2]),
                 }
             } else {
                 match declaration.entry_kind {
-                    crate::interface::EntryKind::Vertex => crate::flow::ExecutionModel::Vertex,
-                    crate::interface::EntryKind::Fragment => crate::flow::ExecutionModel::Fragment,
+                    EntryKind::Vertex => ExecutionModel::Vertex,
+                    EntryKind::Fragment => ExecutionModel::Fragment,
                     _ => return Err(error("unextracted graphics root")),
                 }
             },
@@ -152,12 +151,15 @@ pub fn to_ssa(
         });
     }
     let (pipeline, physical_kernels) = compiler.publish(&mut entries, &roots)?;
-    Ok(ssa::Program::bare(compiler.functions, entries, vec![])
-        .with_context::<ssa::stage::ElaboratedTag, _>(ssa::context::BackendGlobal {
-            pipeline,
-            physical_kernels,
-            profile: LoweringProfile::new(target, SchedulePolicy::Parallel),
-        }))
+    Ok(
+        ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
+            BackendGlobal {
+                pipeline,
+                physical_kernels,
+                profile: LoweringProfile::new(target, SchedulePolicy::Parallel),
+            },
+        ),
+    )
 }
 
 fn entry_name(root: BlockId) -> String {
@@ -175,15 +177,15 @@ fn materialized(value: &Value) -> bool {
 
 /// The existing runtime executes a static sequence. Do not advertise a
 /// conditional or repeated launch as an unconditional executable pipeline.
-fn static_host(data: &AssociatedData, root: BlockId) -> bool {
+fn static_host(data: &Program<Scheduled>, root: BlockId) -> bool {
     // Scalar memory reads need their own stage if a later launch can overwrite
     // their inputs. Until those stages exist, moving the read to the final
     // publication kernel would change the observed value.
     let mut pending = vec![root];
     let mut read = false;
     while let Some(id) = pending.pop() {
-        let block = &data.blocks[id];
-        for instruction in &data.bodies[block.body].instructions {
+        let block = &data.state.blocks[id];
+        for instruction in &data.state.bodies[block.body].instructions {
             match instruction {
                 Instruction::Evaluate(_) | Instruction::Call { .. } => read = true,
                 Instruction::Dispatch(_) if read => return false,
@@ -197,28 +199,28 @@ fn static_host(data: &AssociatedData, root: BlockId) -> bool {
             return false;
         }
     }
-    data.blocks.iter().filter(|(_, b)| b.function == root).all(|(_, b)| {
+    data.state.blocks.iter().filter(|(_, b)| b.function == root).all(|(_, b)| {
         !matches!(b.exit, Exit::Branch { .. })
-            && !data.bodies[b.body].instructions.iter().any(|i| matches!(i, Instruction::Call { .. }))
+            && !data.state.bodies[b.body].instructions.iter().any(|i| matches!(i, Instruction::Call { .. }))
     })
 }
 
 fn error(message: impl Into<String>) -> OptimizeError {
     OptimizeError::Output(format!("egglog to SSA: {}", message.into()))
 }
-fn builder_error(e: ssa::builder::BuilderError) -> OptimizeError {
+fn builder_error(e: BuilderError) -> OptimizeError {
     error(e.to_string())
 }
 
-fn contains_dispatch(data: &AssociatedData, root: BlockId) -> bool {
+fn contains_dispatch(data: &Program<Scheduled>, root: BlockId) -> bool {
     let mut pending = vec![root];
     let mut seen = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if !seen.insert(id) {
             continue;
         }
-        let b = &data.blocks[id];
-        for i in &data.bodies[b.body].instructions {
+        let b = &data.state.blocks[id];
+        for i in &data.state.bodies[b.body].instructions {
             match i {
                 Instruction::Dispatch(_) => return true,
                 Instruction::Call { function, .. } => pending.push(*function),
@@ -242,11 +244,11 @@ struct Specialization {
 }
 struct Compiler<'a> {
     origins: BTreeMap<ExprId, Span>,
-    placements: BTreeMap<super::PlacementSite, Vec<ExprId>>,
-    data: &'a AssociatedData,
-    functions: Vec<ssa::types::Function>,
+    placements: BTreeMap<PlacementSite, Vec<ExprId>>,
+    data: &'a Program<Scheduled>,
+    functions: Vec<Function>,
     specializations: Vec<Specialization>,
-    inputs: BTreeMap<ParameterId, Vec<crate::interface::EntryInput>>,
+    inputs: BTreeMap<ParameterId, Vec<EntryInput>>,
     bindings: BTreeMap<BufferId, StorageBindingDecl>,
     results: BTreeMap<OperationId, Value>,
     used: BTreeSet<BufferId>,
@@ -277,7 +279,7 @@ impl Compiler<'_> {
         lower.visit(source)?;
         let (body, result) = lower.finish()?;
         self.specializations[index].result = Some(result.clone());
-        self.functions.push(ssa::types::Function {
+        self.functions.push(Function {
             id,
             name: format!("egg_helper_{}_{index}", source.as_u32()),
             body,
@@ -315,7 +317,7 @@ struct Body<'a, 'b> {
     entry: Option<super::EntryId>,
     finish_outputs: bool,
     graphics_outputs: bool,
-    inputs: Vec<crate::interface::EntryInput>,
+    inputs: Vec<EntryInput>,
 }
 impl<'a, 'b> Body<'a, 'b> {
     fn new(
@@ -324,14 +326,12 @@ impl<'a, 'b> Body<'a, 'b> {
         types: &[Type],
         width: u32,
     ) -> Result<Self, OptimizeError> {
-        let names = &compiler.data.blocks[entry].parameters;
+        let names = &compiler.data.state.blocks[entry].parameters;
         if !types.is_empty() && names.len() != types.len() {
             return Err(error("function parameter arity"));
         }
-        let mut builder = FuncBuilder::new(
-            types.iter().cloned().zip(names.iter().cloned()).collect(),
-            types::unit(),
-        );
+        let mut builder =
+            FuncBuilder::new(types.iter().cloned().zip(names.iter().cloned()).collect(), unit());
         let mut environment = Environment::default();
         for (i, (name, ty)) in names.iter().zip(types).enumerate() {
             environment.locals.insert(
@@ -343,7 +343,7 @@ impl<'a, 'b> Body<'a, 'b> {
             );
         }
         let mut blocks = BTreeMap::from([(entry, builder.entry())]);
-        for (&id, b) in &compiler.data.blocks {
+        for (&id, b) in &compiler.data.state.blocks {
             if b.function == entry && id != entry {
                 blocks.insert(id, builder.create_block());
             }
@@ -376,7 +376,7 @@ impl<'a, 'b> Body<'a, 'b> {
                     args,
                 })
                 .map_err(builder_error)?;
-            let Some(exit) = self.compiler.data.blocks[source].loop_exit else {
+            let Some(exit) = self.compiler.data.state.blocks[source].loop_exit else {
                 return Err(error("loop exit missing"));
             };
             self.builder.set_control_header(
@@ -389,7 +389,7 @@ impl<'a, 'b> Body<'a, 'b> {
         }
         let types = self.return_types.unwrap_or_default();
         let mut body = self.builder.finish().map_err(builder_error)?;
-        body.return_ty = if self.graphics_outputs { types::unit() } else { result_type(&types) };
+        body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
         control::annotate_selections(&mut body)?;
         Ok((body, types))
     }
@@ -400,8 +400,10 @@ impl<'a, 'b> Body<'a, 'b> {
         self.active.insert(id);
         self.builder.switch_to_block_unchecked(self.blocks[&id]);
         let data = self.compiler.data;
-        for (name, &value) in
-            data.blocks[id].parameters.iter().zip(&self.builder.func().blocks[self.blocks[&id]].params)
+        for (name, &value) in data.state.blocks[id]
+            .parameters
+            .iter()
+            .zip(&self.builder.func().blocks[self.blocks[&id]].params)
         {
             self.environment.locals.insert(
                 name.clone(),
@@ -411,15 +413,19 @@ impl<'a, 'b> Body<'a, 'b> {
                 },
             );
         }
-        for instruction in &data.bodies[data.blocks[id].body].instructions {
+        for instruction in &data.state.bodies[data.state.blocks[id].body].instructions {
             self.instruction(instruction)?;
         }
-        match &data.blocks[id].exit {
+        match &data.state.blocks[id].exit {
             Exit::Return(body) => {
                 let values = if self.finish_outputs {
-                    let owner = self.entry.unwrap();
-                    for output in data.outputs.values().filter(|o| o.entry == owner && o.scalar) {
-                        let buffer = output.buffer.ok_or_else(|| error("missing planned output buffer"))?;
+                    let Some(owner) = self.entry else {
+                        return Err(error("output publication requires an entry owner"));
+                    };
+                    for output in data.state.outputs.values().filter(|o| o.entry == owner && o.scalar) {
+                        let Some(buffer) = output.buffer else {
+                            return Err(error("missing planned output buffer"));
+                        };
                         self.instruction(&Instruction::Store {
                             buffer: Value::Buffer(buffer),
                             index: Value::Int(0),
@@ -428,7 +434,7 @@ impl<'a, 'b> Body<'a, 'b> {
                     }
                     vec![]
                 } else {
-                    self.values(&data.bodies[*body].results)?
+                    self.values(&data.state.bodies[*body].results)?
                 };
                 let types: Vec<_> = values.iter().map(|v| v.ty.clone()).collect();
                 if self.return_types.as_ref().is_some_and(|known| *known != types) {
@@ -465,21 +471,21 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.builder.terminate(Terminator::Return(value)).map_err(builder_error)?;
             }
             Exit::Jump(edge) => {
-                let values = self.values(&data.bodies[edge.arguments].results)?;
+                let values = self.values(&data.state.bodies[edge.arguments].results)?;
                 let (target, args) = self.edge(edge.target, values)?;
                 self.builder.terminate(Terminator::Branch { target, args }).map_err(builder_error)?;
                 self.visit(edge.target)?;
             }
             Exit::Branch { condition, yes, no } => {
-                let values = self.values(&data.bodies[*condition].results)?;
+                let values = self.values(&data.state.bodies[*condition].results)?;
                 let [condition] = values.as_slice() else {
                     return Err(error("branch condition arity"));
                 };
-                let y = self.values(&data.bodies[yes.arguments].results)?;
-                let n = self.values(&data.bodies[no.arguments].results)?;
+                let y = self.values(&data.state.bodies[yes.arguments].results)?;
+                let n = self.values(&data.state.bodies[no.arguments].results)?;
                 // The current backend requires a single conditional header.
                 // TODO(egglog-control): outline branching loop tests into helpers.
-                if data.blocks[id].loop_exit.is_some()
+                if data.state.blocks[id].loop_exit.is_some()
                     && self.builder.current_block() != Some(self.blocks[&id])
                 {
                     return Err(error("TODO: branching expression in loop header"));
@@ -509,7 +515,7 @@ impl<'a, 'b> Body<'a, 'b> {
         target: BlockId,
         values: Vec<Typed>,
     ) -> Result<(crate::flow::BlockId, Vec<ValueRef>), OptimizeError> {
-        if self.compiler.data.blocks[target].parameters.len() != values.len() {
+        if self.compiler.data.state.blocks[target].parameters.len() != values.len() {
             return Err(error("block argument arity"));
         }
         let types: Vec<_> = values.iter().map(|v| v.ty.clone()).collect();
@@ -526,7 +532,7 @@ impl<'a, 'b> Body<'a, 'b> {
             self.parameter_types.insert(target, types.clone());
         }
         let block = if self.active.contains(&target) {
-            if self.compiler.data.blocks[target].loop_exit.is_none() {
+            if self.compiler.data.state.blocks[target].loop_exit.is_none() {
                 return Err(error("cycle without loop metadata"));
             }
             if let Some(&b) = self.continuing.get(&target) {
@@ -649,14 +655,13 @@ impl<'a, 'b> Body<'a, 'b> {
                     .map_err(builder_error)?;
             }
             Instruction::Allocate(id) => {
-                let buffer = &self.compiler.data.buffers[*id];
+                let buffer = &self.compiler.data.state.buffers[*id];
                 if buffer.storage == Storage::Function {
-                    let count = self
-                        .compiler
-                        .constant(&buffer.length)
-                        .ok_or_else(|| error("TODO: dynamic invocation-local allocation"))?
-                        .max(1) as usize;
-                    let ty = types::sized_array(count, concrete(&buffer.element)?);
+                    let Some(count) = self.compiler.constant(&buffer.length) else {
+                        return Err(error("TODO: dynamic invocation-local allocation"));
+                    };
+                    let count = count.max(1) as usize;
+                    let ty = sized_array(count, concrete(&buffer.element)?);
                     let place = self.builder.new_place(ty.clone());
                     self.builder
                         .push_void_inst(InstKind::Alloca {
@@ -709,13 +714,13 @@ impl<'a, 'b> Body<'a, 'b> {
 }
 fn result_type(types: &[Type]) -> Type {
     match types {
-        [] => types::unit(),
+        [] => unit(),
         [ty] => ty.clone(),
         _ => types::tuple(types.to_vec()),
     }
 }
 fn uint(n: u32) -> ValueRef {
-    ValueRef::Const(ssa::types::ConstantValue::U32(n))
+    ValueRef::Const(ConstantValue::U32(n))
 }
 fn u32_type() -> Type {
     Type::Constructed(TypeName::UInt(32), vec![])
@@ -726,7 +731,7 @@ fn concrete(ty: &Type) -> Result<Type, OptimizeError> {
             Some(Type::Constructed(TypeName::Size(n), _)) => *n as usize,
             _ => return Err(error("runtime-sized array requires a storage view")),
         };
-        return Ok(types::sized_array(count.max(1), concrete(element)?));
+        return Ok(sized_array(count.max(1), concrete(element)?));
     }
     match ty {
         Type::Constructed(name, args) => Ok(Type::Constructed(
