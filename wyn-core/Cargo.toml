@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-egir = ["dep:wyn-fusion", "dep:wyn-staged-ir"]
+egir = ["dep:wyn-fusion", "dep:wyn-slice", "dep:wyn-staged-ir"]
 
 [dependencies]
 egglog-engine = { package = "egglog", version = "3.0.0", default-features = false }
@@ -19,15 +19,14 @@ log.workspace = true
 slotmap = "1.0"
 smallvec = "1.13"
 itertools = "0.14.0"
-indexmap = "2.7"
 half = "2.7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 wyn-base = { path = "../wyn-base" }
 wyn-pipeline-descriptor = { path = "../wyn-pipeline-descriptor" }
 wyn-graph = { path = "../wyn-graph" }
-wyn-slice = { path = "../wyn-slice" }
+wyn-slice = { path = "../wyn-slice", optional = true }
 wyn-fusion = { path = "../wyn-fusion", optional = true }
+# TODO: Move KernelId to a shared crate so wyn-kernel-graph can be removed from
+# the unconditional dependencies; all its other uses are behind egir.
 wyn-kernel-graph = { path = "../wyn-kernel-graph" }
 wyn-module-graph = { path = "../wyn-module-graph" }
 wyn-staged-ir = { path = "../wyn-staged-ir", optional = true }
@@ -35,6 +34,7 @@ wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }
 
 [dev-dependencies]
 env_logger.workspace = true
+serde_json = "1.0"
 stacker = "0.1.25"
 # Used for in-process WGSL and SPIR-V validation in backend tests.
 naga = { version = "26.0", features = ["wgsl-in", "spv-in"] }
