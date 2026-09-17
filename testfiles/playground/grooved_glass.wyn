@@ -1,0 +1,457 @@
+-- Grooved glass: Wyn port of the supplied GLSL shader by @0nicron.
+-- SPDX-License-Identifier: MIT
+-- Copyright (c) 2026 @0nicron
+-- License: https://opensource.org/licenses/MIT
+--
+-- Animated, smoothly joined tori and spheres with grooved normals,
+-- chromatic refraction, internal reflections, and studio lighting.
+-- Move the mouse to orbit; before mouse input the camera drifts with time.
+-- The original GLSL is preserved below.
+
+open f32
+
+------------------------------------------------------------
+-- Constants and colour helpers
+------------------------------------------------------------
+
+def PI: f32 = 3.14159265359
+def BUMP: f32 = 0.08
+def IOR: f32 = 1.46
+
+def LKEY: vec3f32 = normalize(@[-0.45, 0.62, 0.55])
+def LRIM: vec3f32 = normalize(@[0.65, -0.10, -0.55])
+def LACC: vec3f32 = normalize(@[0.30, -0.45, -0.35])
+
+def h21(p0: vec2f32) f32 =
+  let p1 = vec.fract(p0 * @[123.34, 345.45]) in
+  let p = p1 + dot(p1, p1 + 34.345) in
+  fract(p.x * p.y)
+
+-- Matches GLSL's row-vector p * mat2(c, -s, s, c).
+def rotate(p: vec2f32, angle: f32) vec2f32 =
+  let s = sin(angle) in
+  let c = cos(angle) in
+  @[p.x * c - p.y * s, p.x * s + p.y * c]
+
+def aces(x: vec3f32) vec3f32 =
+  let mapped = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14) in
+  vec.clamp(mapped, @[0.0, 0.0, 0.0], @[1.0, 1.0, 1.0])
+
+def spectral(w0: f32) vec3f32 =
+  let w = clamp(w0, 0.0, 1.0) in
+  let r0 = (w - 0.02) / 0.26 in
+  let r1 = (w - 0.94) / 0.14 in
+  let g0 = (w - 0.40) / 0.26 in
+  let b0 = (w - 0.78) / 0.30 in
+  let r = exp(-r0 * r0) + 0.22 * exp(-r1 * r1) in
+  let g = exp(-g0 * g0) in
+  let b = exp(-b0 * b0) in
+  @[r, g, b] / max(max(r, max(g, b)), 0.001)
+
+def environment(rd: vec3f32) vec3f32 =
+  let dk = max(dot(rd, LKEY), 0.0) in
+  let dr = max(dot(rd, LRIM), 0.0) in
+  let da = max(dot(rd, LACC), 0.0) in
+  @[0.015, 0.018, 0.030]
+    + @[1.00, 0.95, 0.86] * pow(dk, 3.0) * 0.95
+    + @[1.00, 0.97, 0.92] * pow(dk, 700.0) * 9.0
+    + @[0.28, 0.60, 0.96] * pow(dr, 3.0) * 0.85
+    + @[0.46, 0.66, 1.00] * pow(dr, 520.0) * 7.0
+    + @[0.85, 0.25, 0.85] * pow(da, 3.0) * 0.55
+    + @[1.00, 0.42, 0.20] * pow(da, 300.0) * 3.0
+
+------------------------------------------------------------
+-- Animated scene SDF; time replaces the mutable GLSL global T
+------------------------------------------------------------
+
+def sd_torus(p: vec3f32, radii: vec2f32) f32 =
+  magnitude(@[magnitude(p.xz) - radii.x, p.y]) - radii.y
+
+def smin(a: f32, b: f32, k: f32) f32 =
+  let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0) in
+  mix(b, a, h) - k * h * (1.0 - h)
+
+def scene_map(p0: vec3f32, time: f32) f32 =
+  let p1 = p0 with .xz = rotate(p0.xz, time * 0.23) in
+  let p2 = p1 with .xy = rotate(p1.xy, time * 0.16) in
+  let twist = 0.55 * sin(time * 0.31) in
+  let p = p2 with .xz = rotate(p2.xz, p2.y * twist) in
+  let a = sd_torus(p, @[1.02, 0.34 + 0.12 * sin(time * 0.5)]) in
+  let b = sd_torus(p.yzx, @[0.88, 0.28 + 0.10 * sin(time * 0.6 + 1.3)]) in
+  let spheres = loop d = 1.0e9 for i < 3 do
+    let angle = time * 0.55 + f32.i32(i) * 2.0944 in
+    let centre = @[cos(angle) * 1.12, sin(angle * 1.3) * 0.62, sin(angle) * 1.12] in
+    min(d, magnitude(p - centre) - 0.42)
+  in
+  let d0 = smin(a, b, 0.55) in
+  let d1 = smin(d0, spheres, 0.60) in
+  smin(d1, magnitude(p) - (0.55 + 0.08 * sin(time * 0.7)), 0.55)
+
+def calc_normal(p: vec3f32, time: f32) vec3f32 =
+  let e = @[1.0, -1.0] * 0.0009 in
+  normalize(e.xyy * scene_map(p + e.xyy, time)
+          + e.yyx * scene_map(p + e.yyx, time)
+          + e.yxy * scene_map(p + e.yxy, time)
+          + e.xxx * scene_map(p + e.xxx, time))
+
+------------------------------------------------------------
+-- Fine directional and radial grooves, projected onto the surface
+------------------------------------------------------------
+
+def groove(x: f32) f32 =
+  tanh(2.0 * sin(6.2831853 * x))
+
+def bump_grad(p0: vec3f32) vec3f32 =
+  let p1 = p0 with .xy = rotate(p0.xy, 0.6) in
+  let p = p1 with .yz = rotate(p1.yz, 0.4) in
+  let a1 = normalize(@[1.0, 0.5, 0.2]) in
+  let a2 = normalize(@[-0.3, 1.0, 0.4]) in
+  let a3 = normalize(@[0.2, -0.4, 1.0]) in
+  let g0 = a1 * groove(dot(p, a1) * 9.0)
+         + a2 * groove(dot(p, a2) * 9.0)
+         + a3 * groove(dot(p, a3) * 9.0) in
+  let b1 = normalize(@[1.0, -0.7, -0.3]) in
+  let b2 = normalize(@[-0.6, -0.3, 1.0]) in
+  let b3 = normalize(@[0.4, 1.0, -0.5]) in
+  let g1 = g0 + 0.55 * (b1 * groove(dot(p, b1) * 20.0)
+                     + b2 * groove(dot(p, b2) * 20.0)
+                     + b3 * groove(dot(p, b3) * 20.0)) in
+  let q = p.xy in
+  let r2 = max(dot(q, q), 0.18) in
+  let sc = 22.0 / (2.0 * PI) in
+  let g2 = g1 with .xy += 0.18 * sc * groove(atan2(q.y, q.x) * sc) * @[-q.y, q.x] / r2 in
+  let q2 = p.yz in
+  let r2b = max(dot(q2, q2), 0.18) in
+  let sc2 = 16.0 / (2.0 * PI) in
+  g2 with .yz += 0.16 * sc2 * groove(atan2(q2.y, q2.x) * sc2) * @[-q2.y, q2.x] / r2b
+
+def apply_bump(p: vec3f32, n: vec3f32) vec3f32 =
+  let g0 = bump_grad(p) in
+  let g = g0 - n * dot(g0, n) in
+  normalize(n - BUMP * g)
+
+------------------------------------------------------------
+-- Bounded exterior and interior sphere tracing
+------------------------------------------------------------
+
+-- Return the hit flag and both distances instead of GLSL out parameters.
+def bound_hit(ro: vec3f32, rd: vec3f32) (bool, f32, f32) =
+  let b = dot(ro, rd) in
+  let c = dot(ro, ro) - 2.2 * 2.2 in
+  let h = b * b - c in
+  if h < 0.0 then (false, 0.0, 0.0)
+  else
+    let root = sqrt(h) in
+    let t0 = -b - root in
+    let t1 = -b + root in
+    (t1 > 0.0, t0, t1)
+
+def march_out(ro: vec3f32, rd: vec3f32, time: f32) f32 =
+  let (bounded, t0, t1) = bound_hit(ro, rd) in
+  if !bounded then -1.0
+  else
+    let (_, distance, hit) =
+      loop (i, t, hit) = (0, max(t0, 0.0), false)
+      while i < 110 && !hit && t <= t1 do
+        let d = scene_map(ro + rd * t, time) in
+        if d < 0.0006 then (i, t, true)
+        else (i + 1, t + d * 0.85, false)
+    in
+    if hit then distance else -1.0
+
+def march_in(ro: vec3f32, rd: vec3f32, time: f32) f32 =
+  let (_, distance) =
+    loop (i, t) = (0, 0.0) while i < 72 && t <= 8.0 do
+      let d = scene_map(ro + rd * t, time) in
+      if d > 0.0006 then (72, t)
+      else (i + 1, t + max(-d, 0.0006) * 0.9)
+  in distance
+
+------------------------------------------------------------
+-- Dispersion, absorption, and up to four internal reflections
+------------------------------------------------------------
+
+def trace_glass(p: vec3f32, rd: vec3f32, n: vec3f32, ior: f32, time: f32) vec3f32 =
+  let absorb = @[0.16, 0.09, 0.07] in
+  let refracted = refract(rd, n, 1.0 / ior) in
+  let initial_dir = if refracted.x == 0.0 && refracted.y == 0.0 && refracted.z == 0.0
+                    then reflect(rd, n) else refracted in
+  -- A successful exit freezes the state; exhausting four bounces samples
+  -- the environment in the last reflected direction, as in the source.
+  let (_, _, dir, atten, _) =
+    loop (bounce, point, dir, atten, escaped) =
+      (0, p, initial_dir, @[1.0, 1.0, 1.0], false)
+    while bounce < 4 && !escaped do
+      let t = march_in(point + dir * 0.002, dir, time) in
+      let q = point + dir * (t + 0.002) in
+      let atten2 = atten * vec.exp(-absorb * t) in
+      let nn0 = calc_normal(q, time) in
+      let nn = if dot(nn0, dir) < 0.0 then -nn0 else nn0 in
+      let out_dir = refract(dir, -nn, ior) in
+      if out_dir.x == 0.0 && out_dir.y == 0.0 && out_dir.z == 0.0 then
+        (bounce + 1, q, reflect(dir, nn), atten2, false)
+      else
+        (bounce + 1, q, out_dir, atten2, true)
+  in
+  environment(dir) * atten
+
+def shade_glass(ro: vec3f32, rd: vec3f32, time: f32) vec3f32 =
+  let t = march_out(ro, rd, time) in
+  if t < 0.0 then @[0.0, 0.0, 0.0]
+  else
+    let p = ro + rd * t in
+    let ng = calc_normal(p, time) in
+    let nb = apply_bump(p, ng) in
+    let nref = normalize(mix(ng, nb, 0.40)) in
+    let ci = clamp(dot(-rd, ng), 0.0, 1.0) in
+    let fresnel = 0.04 + 0.96 * pow(1.0 - ci, 5.0) in
+    let red = trace_glass(p, rd, nref, IOR - 0.018, time) in
+    let green = trace_glass(p, rd, nref, IOR, time) in
+    let blue = trace_glass(p, rd, nref, IOR + 0.020, time) in
+    let trans = @[red.x, green.y, blue.z] in
+    let rb = reflect(rd, nb) in
+    let col0 = mix(trans, environment(rb), fresnel) in
+    let ek = pow(max(dot(rb, LKEY), 0.0), 120.0) in
+    let er = pow(max(dot(rb, LRIM), 0.0), 120.0) in
+    let ev = pow(max(dot(rb, LACC), 0.0), 120.0) in
+    let col1 = col0 + @[1.00, 0.97, 0.92] * ek * 1.6
+                    + @[0.50, 0.72, 1.00] * er * 1.2
+                    + @[0.92, 0.42, 0.95] * ev * 0.8 in
+    let cib = clamp(dot(-rd, nb), 0.0, 1.0) in
+    col1 + spectral(clamp(cib * 1.05, 0.0, 1.0)) * pow(1.0 - cib, 5.0) * 0.35
+         + @[0.30, 0.45, 0.85] * pow(1.0 - ci, 3.0) * 0.10
+
+------------------------------------------------------------
+-- Playground image shader
+------------------------------------------------------------
+
+def main_image(
+    resolution: vec3f32, time: f32, mouse: vec4f32, frag_coord: vec2f32
+    ) vec4f32 =
+  -- Flip fragment Y for Vulkan / WebGPU, matching the other image ports.
+  let fc = @[frag_coord.x, resolution.y - frag_coord.y] in
+  let uv = (fc - 0.5 * resolution.xy) / resolution.y in
+  let (yaw, pitch) = if mouse.x > 0.5 then
+    ((mouse.x / resolution.x - 0.5) * 6.28,
+     (mouse.y / resolution.y - 0.5) * 2.4)
+  else
+    (0.5 + 0.2 * sin(time * 0.12), 0.12 * sin(time * 0.09))
+  in
+  let ro = @[sin(yaw) * cos(pitch), sin(pitch), cos(yaw) * cos(pitch)] * 5.9 in
+  let forward = normalize(-ro) in
+  let right = normalize(cross(forward, @[0.0, 1.0, 0.0])) in
+  let up = cross(right, forward) in
+  let rd = normalize(uv.x * right + uv.y * up + 1.6 * forward) in
+  let col = aces(shade_glass(ro, rd, time)) in
+  let gamma = vec.pow(vec.max(col, @[0.0, 0.0, 0.0]), @[0.4545, 0.4545, 0.4545]) in
+  let dithered = gamma + (h21(fc + time) - 0.5) * 0.004 in
+  @[dithered..., 1.0]
+
+------------------------------------------------------------
+-- Original GLSL
+------------------------------------------------------------
+
+-- uniform vec2 u_resolution; //Pass resolution in pixels
+--
+-- // SPDX-License-Identifier: MIT
+-- // Copyright (c) 2026 @0nicron
+-- //[LICENSE] https://opensource.org/licenses/MIT
+--
+-- #define PI 3.14159265359
+-- #define BUMP 0.08
+--
+-- float h21(vec2 p){ p=fract(p*vec2(123.34,345.45)); p+=dot(p,p+34.345); return fract(p.x*p.y); }
+-- mat2 rot(float a){ float s=sin(a),c=cos(a); return mat2(c,-s,s,c); }
+-- vec3 aces(vec3 x){ return clamp((x*(2.51*x+.03))/(x*(2.43*x+.59)+.14),0.,1.); }
+--
+-- vec3 spectral(float w){
+--     w=clamp(w,0.,1.);
+--     float r=exp(-pow((w-0.02)/0.26,2.))+0.22*exp(-pow((w-0.94)/0.14,2.));
+--     float g=exp(-pow((w-0.40)/0.26,2.));
+--     float b=exp(-pow((w-0.78)/0.30,2.));
+--     vec3 c=vec3(r,g,b); return c/max(max(c.r,max(c.g,c.b)),1e-3);
+-- }
+--
+-- float T = 0.0;
+-- const float IOR = 1.46;
+--
+-- vec3 LKEY = normalize(vec3(-0.45, 0.62, 0.55));
+-- vec3 LRIM = normalize(vec3( 0.65,-0.10,-0.55));
+--
+-- vec3 env(vec3 rd){
+--     vec3 c=vec3(0.015,0.018,0.030);
+--     float dk=max(dot(rd,LKEY),0.0);
+--     c += vec3(1.00,0.95,0.86)*pow(dk,3.0)*0.95;
+--     c += vec3(1.00,0.97,0.92)*pow(dk,700.0)*9.0;
+--     float dr=max(dot(rd,LRIM),0.0);
+--     c += vec3(0.28,0.60,0.96)*pow(dr,3.0)*0.85;
+--     c += vec3(0.46,0.66,1.00)*pow(dr,520.0)*7.0;
+--     vec3 LACC=normalize(vec3(0.30,-0.45,-0.35));
+--     float da=max(dot(rd,LACC),0.0);
+--     c += vec3(0.85,0.25,0.85)*pow(da,3.0)*0.55;
+--     c += vec3(1.00,0.42,0.20)*pow(da,300.0)*3.0;
+--     return c;
+-- }
+--
+-- float sdTorus(vec3 p, vec2 t){ vec2 q=vec2(length(p.xz)-t.x, p.y); return length(q)-t.y; }
+-- float smin(float a,float b,float k){ float h=clamp(0.5+0.5*(b-a)/k,0.,1.); return mix(b,a,h)-k*h*(1.-h); }
+--
+-- float map(vec3 p){
+--     p.xz*=rot(T*0.23); p.xy*=rot(T*0.16);
+--     float tw=0.55*sin(T*0.31);
+--     p.xz*=rot(p.y*tw);
+--
+--     float a=sdTorus(p, vec2(1.02, 0.34+0.12*sin(T*0.5)));
+--     float b=sdTorus(p.yzx, vec2(0.88, 0.28+0.10*sin(T*0.6+1.3)));
+--
+--     float s=1e9;
+--     for(int i=0;i<3;i++){
+--         float an=T*0.55+float(i)*2.0944;
+--         vec3 c=vec3(cos(an)*1.12, sin(an*1.3)*0.62, sin(an)*1.12);
+--         s=min(s, length(p-c)-0.42);
+--     }
+--
+--     float d=smin(a,b,0.55);
+--     d=smin(d,s,0.60);
+--     d=smin(d, length(p)-(0.55+0.08*sin(T*0.7)), 0.55);
+--     return d;
+-- }
+--
+-- vec3 calcNormal(vec3 p){
+--     vec2 e=vec2(1.0,-1.0)*0.0009;
+--     return normalize(e.xyy*map(p+e.xyy)+e.yyx*map(p+e.yyx)+e.yxy*map(p+e.yxy)+e.xxx*map(p+e.xxx));
+-- }
+--
+-- float groove(float x){ return tanh(2.0*sin(6.2831853*x)); }
+--
+-- vec3 bumpGrad(vec3 p){
+--     p.xy*=rot(0.6); p.yz*=rot(0.4);
+--     vec3 g=vec3(0.0);
+--
+--     float f1=9.0;
+--     vec3 a1=normalize(vec3( 1.0, 0.5, 0.2));
+--     vec3 a2=normalize(vec3(-0.3, 1.0, 0.4));
+--     vec3 a3=normalize(vec3( 0.2,-0.4, 1.0));
+--     g += a1*groove(dot(p,a1)*f1) + a2*groove(dot(p,a2)*f1) + a3*groove(dot(p,a3)*f1);
+--
+--     float f2=20.0;
+--     vec3 b1=normalize(vec3( 1.0,-0.7,-0.3));
+--     vec3 b2=normalize(vec3(-0.6,-0.3, 1.0));
+--     vec3 b3=normalize(vec3( 0.4, 1.0,-0.5));
+--     g += 0.55*(b1*groove(dot(p,b1)*f2)+b2*groove(dot(p,b2)*f2)+b3*groove(dot(p,b3)*f2));
+--     vec2 q=p.xy; float r2=max(dot(q,q),0.18);
+--
+--     float N=22.0, sc=N/(2.0*PI);
+--     g.xy += 0.18*sc*groove(atan(q.y,q.x)*sc)*vec2(-q.y,q.x)/r2;
+--     vec2 q2=p.yz; float r2b=max(dot(q2,q2),0.18);
+--
+--     float N2=16.0, sc2=N2/(2.0*PI);
+--     g.yz += 0.16*sc2*groove(atan(q2.y,q2.x)*sc2)*vec2(-q2.y,q2.x)/r2b;
+--     return g;
+-- }
+-- vec3 applyBump(vec3 p, vec3 n){
+--     vec3 g=bumpGrad(p);
+--     g -= n*dot(g,n);
+--     return normalize(n - BUMP*g);
+-- }
+--
+-- bool boundHit(vec3 ro, vec3 rd, out float t0, out float t1){
+--     float b=dot(ro,rd), c=dot(ro,ro)-2.2*2.2;
+--     float h=b*b-c; if(h<0.0) return false; h=sqrt(h);
+--     t0=-b-h; t1=-b+h; return t1>0.0;
+-- }
+--
+-- float marchOut(vec3 ro, vec3 rd){
+--     float tb0,tb1; if(!boundHit(ro,rd,tb0,tb1)) return -1.0;
+--     float t=max(tb0,0.0);
+--     for(int i=0;i<110;i++){
+--         vec3 p=ro+rd*t; float d=map(p);
+--         if(d<0.0006) return t;
+--         t+=d*0.85;
+--         if(t>tb1) return -1.0;
+--     }
+--     return -1.0;
+-- }
+-- float marchIn(vec3 ro, vec3 rd){
+--     float t=0.0;
+--     for(int i=0;i<72;i++){
+--         vec3 p=ro+rd*t; float d=map(p);
+--         if(d>0.0006) return t;
+--         t+=max(-d,0.0006)*0.9;
+--         if(t>8.0) return t;
+--     }
+--     return t;
+-- }
+--
+-- vec3 traceGlass(vec3 p, vec3 rd, vec3 n, float ior){
+--     vec3 absorb=vec3(0.16,0.09,0.07);
+--     vec3 dir=refract(rd,n,1.0/ior);
+--     if(dir==vec3(0.0)) dir=reflect(rd,n);
+--     vec3 atten=vec3(1.0);
+--     for(int b=0;b<4;b++){
+--         float t=marchIn(p+dir*0.002, dir);
+--         vec3 q=p+dir*(t+0.002);
+--         atten*=exp(-absorb*t);
+--         vec3 nn=calcNormal(q); if(dot(nn,dir)<0.0) nn=-nn;
+--         vec3 outd=refract(dir,-nn,ior);
+--         if(outd==vec3(0.0)){ dir=reflect(dir,nn); p=q; continue; }
+--         return env(outd)*atten;
+--     }
+--     return env(dir)*atten;
+-- }
+--
+-- vec3 shade(vec3 ro, vec3 rd){
+--     float t=marchOut(ro,rd);
+--     if(t<0.0) return vec3(0.0);
+--     vec3 p=ro+rd*t;
+--     vec3 ng=calcNormal(p);
+--     vec3 nb=applyBump(p,ng);
+--     vec3 nref=normalize(mix(ng,nb,0.40));
+--     float ci=clamp(dot(-rd,ng),0.0,1.0);
+--     float fres=0.04+0.96*pow(1.0-ci,5.0);
+--
+--     vec3 trans=vec3(
+--         traceGlass(p,rd,nref,IOR-0.018).r,
+--         traceGlass(p,rd,nref,IOR       ).g,
+--         traceGlass(p,rd,nref,IOR+0.020).b);
+--
+--     vec3 refl=env(reflect(rd,nb));
+--     vec3 col=mix(trans,refl,fres);
+--
+--     vec3 rb=reflect(rd,nb);
+--     float ek=pow(max(dot(rb,LKEY),0.0),120.0);
+--     float er=pow(max(dot(rb,LRIM),0.0),120.0);
+--     vec3 LACC=normalize(vec3(0.30,-0.45,-0.35));
+--     float ev=pow(max(dot(rb,LACC),0.0),120.0);
+--     col += vec3(1.00,0.97,0.92)*ek*1.6 + vec3(0.50,0.72,1.00)*er*1.2 + vec3(0.92,0.42,0.95)*ev*0.8;
+--
+--     float cib=clamp(dot(-rd,nb),0.0,1.0);
+--     col+=spectral(clamp(cib*1.05,0.,1.))*pow(1.0-cib,5.0)*0.35;
+--     col+=vec3(0.30,0.45,0.85)*pow(1.0-ci,3.0)*0.10;
+--     return col;
+-- }
+--
+-- void main() {
+--   vec2 fragCoord = gl_FragCoord.xy;
+--
+--     vec2 uv=(fragCoord-0.5*u_resolution.xy)/u_resolution.y;
+--     T=u_time;
+--
+--     float yaw, pit;
+--     if(u_mouse.x>0.5){ yaw=(u_mouse.x/u_resolution.x-0.5)*6.28; pit=(u_mouse.y/u_resolution.y-0.5)*2.4; }
+--     else { yaw=0.5+0.2*sin(u_time*0.12); pit=0.12*sin(u_time*0.09); }
+--     float r=5.9;
+--     vec3 ro=vec3(sin(yaw)*cos(pit), sin(pit), cos(yaw)*cos(pit))*r;
+--     vec3 ta=vec3(0.0);
+--     vec3 ww=normalize(ta-ro);
+--     vec3 uu=normalize(cross(ww,vec3(0,1,0)));
+--     vec3 vv=cross(uu,ww);
+--     vec3 rd=normalize(uv.x*uu+uv.y*vv+1.6*ww);
+--
+--     vec3 col=shade(ro,rd);
+--
+--     col=aces(col*1.0);
+--     col=pow(max(col,0.),vec3(0.4545));
+--     col+=(h21(fragCoord+u_time)-0.5)*0.004;
+--     fragColor=vec4(col,1.0);
+-- }
