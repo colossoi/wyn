@@ -4,18 +4,19 @@
 use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
 use crate::egglog::data::{
-    is_slice, Array, ExprData, ExprKind, OperationKind, OutputData, TypeData, TypeId,
+    is_slice, Array, ExprData, ExprKind, OperationKind, OutputData, SoacBody, TypeData, TypeId,
 };
 use crate::egglog::dependencies::{safe_body, Dependencies};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use crate::ssa::layout::type_byte_size;
-use crate::types::{bool_type, canonical_storage_buffer_ty, Type, TypeExt, TypeName};
+use crate::types::{bool_type, canonical_storage_buffer_ty, strip_existentials, Type, TypeExt, TypeName};
 use egglog_engine::{Error, FullState, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+pub(super) mod abi;
 mod read;
-pub(super) use read::{read, Readout, Recipe};
+pub(super) use read::{number, read, rows, Readout, Recipe};
 
 pub(super) const RULES: &str = concat!(
     include_str!("planning.egg"),
@@ -31,7 +32,7 @@ pub(super) const RULES: &str = concat!(
 );
 pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
 pub(super) const RUN: &str =
-    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch))) (run readout)))";
+    "(run-schedule (seq (saturate (run structure)) (saturate (run classify)) (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch))) (run materialize-outputs) (saturate (run allocation)) (saturate (run abi)) (saturate (run abi-final)) (run readout)))";
 
 pub(super) fn facts(
     data: &Program<Scheduled>,
@@ -45,7 +46,7 @@ pub(super) fn facts(
     for (&id, output) in &data.state.outputs {
         values.insert(output.expression);
         let e = sink.add("ExprId", i64::from(output.expression.as_u32()))?;
-        if output.scalar {
+        if !canonical_storage_buffer_ty(&data.types[data.expressions[output.expression].ty].ty).is_array() {
             let ty = sink.add(
                 "TypeId",
                 i64::from(data.expressions[output.expression].ty.as_u32()),
@@ -60,7 +61,19 @@ pub(super) fn facts(
     for (&id, entry) in &data.entries {
         let region = data.definitions[entry.definition].body;
         regions.insert(region);
-        if entry.declaration.entry_kind == EntryKind::Compute {
+        let r = sink.add("RegionId", i64::from(region.as_u32()))?;
+        let compute = entry.declaration.entry_kind == EntryKind::Compute;
+        sink.add("SourceEntry", (i64::from(id.as_u32()), r, compute))?;
+        let root = sink.add("EntryRoot", i64::from(id.as_u32()))?;
+        for &e in &data.regions[region].results {
+            values.insert(e);
+            let e = sink.add("AbiExpr", i64::from(e.as_u32()))?;
+            sink.add("AbiRootNeed", (root, e))?;
+        }
+        if !compute {
+            sink.add("DeviceRegion", r)?;
+        }
+        if compute {
             let region = sink.add("RegionId", i64::from(region.as_u32()))?;
             sink.add("HostRoot", (i64::from(id.as_u32()), region))?;
         }
@@ -90,6 +103,27 @@ pub(super) fn facts(
             let header = sink.add("RegionId", i64::from(header.as_u32()))?;
             let body = sink.add("RegionId", i64::from(body.as_u32()))?;
             sink.add("Repeated", (key, header, body))?;
+        }
+        match &op.kind {
+            OperationKind::If { .. } | OperationKind::Loop { .. } => {
+                sink.add("SourceControl", key)?;
+            }
+            OperationKind::Call { .. } | OperationKind::EvalGlobal(_) => {
+                sink.add("SourceCall", key)?;
+                sink.add("HostEvaluation", key)?;
+            }
+            OperationKind::Index { .. } => {
+                sink.add("HostEvaluation", key)?;
+            }
+            _ => {}
+        }
+        for body in op.kind.callbacks() {
+            if let SoacBody::Apply { region, .. } = body {
+                regions.insert(*region);
+                let region = sink.add("RegionId", i64::from(region.as_u32()))?;
+                sink.add("Callback", (key, region))?;
+                sink.add("DeviceRegion", region)?;
+            }
         }
         let called = match &op.kind {
             OperationKind::Call { function, .. } => match &data.expressions[*function].kind {
@@ -238,6 +272,32 @@ pub(super) fn facts(
         let key = sink.add("ExprId", i64::from(e.as_u32()))?;
         let ty = sink.add("TypeId", i64::from(value.ty.as_u32()))?;
         sink.add("SourceType", (key, ty))?;
+        // Source size and interface leaves supplement the structural facts.
+        let abi_value = sink.add("AbiExpr", i64::from(e.as_u32()))?;
+        if let Some(Type::Constructed(TypeName::Size(n), _)) =
+            strip_existentials(&data.types[value.ty].ty).array_size()
+        {
+            let n = sink.add("AbiNumber", *n as i64)?;
+            sink.add("AbiArrayLength", (abi_value, n))?;
+        }
+        match &value.kind {
+            ExprKind::Parameter(p) => {
+                let p = sink.add("AbiParameter", i64::from(p.as_u32()))?;
+                sink.add("AbiAlias", (abi_value, p))?;
+            }
+            ExprKind::Int(n) => {
+                if let Some(n) = n.parse::<i64>().ok().filter(|&n| n >= 0) {
+                    let n = sink.add("AbiNumber", n)?;
+                    sink.add("AbiAlias", (abi_value, n))?;
+                }
+            }
+            ExprKind::Array(array) => {
+                let n = extent(Some(array), sink)?;
+                let n = sink.add("AbiExtent", n)?;
+                sink.add("AbiArrayLength", (abi_value, n))?;
+            }
+            _ => {}
+        }
         let mut generic_children = false;
         match &value.kind {
             ExprKind::Parameter(p) => {
@@ -295,7 +355,7 @@ pub(super) fn facts(
     Ok(())
 }
 
-fn extent(array: Option<&Array>, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
+pub(super) fn extent(array: Option<&Array>, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
     match array {
         Some(Array::Value(e)) => {
             let e = sink.add("ExprId", i64::from(e.as_u32()))?;
@@ -358,15 +418,32 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
                 vec![e]
             };
             for (index, expression) in values.into_iter().enumerate() {
-                let scalar = !canonical_storage_buffer_ty(&data.types[data.expressions[expression].ty].ty)
-                    .is_array();
-                data.state.outputs.alloc(OutputData {
+                let ty = canonical_storage_buffer_ty(&data.types[data.expressions[expression].ty].ty);
+                let output = data.state.outputs.alloc(OutputData {
                     entry,
                     index,
                     expression,
                     buffer: None,
-                    scalar,
+                    copy: false,
                 });
+                sink.add(
+                    "OutputOwner",
+                    (i64::from(output.as_u32()), i64::from(entry.as_u32())),
+                )?;
+                if ty.is_array() {
+                    if let Some(element) = ty.elem_type() {
+                        let element = *types
+                            .entry(element.clone())
+                            .or_insert_with(|| data.ir.types.alloc(TypeData { ty: element.clone() }));
+                        let element = sink.add("TypeId", i64::from(element.as_u32()))?;
+                        let expression = sink.add("ExprId", i64::from(expression.as_u32()))?;
+                        let length = sink.add("Length", expression)?;
+                        sink.add(
+                            "ReturnedArrayLayout",
+                            (i64::from(output.as_u32()), element, length),
+                        )?;
+                    }
+                }
             }
         }
     }

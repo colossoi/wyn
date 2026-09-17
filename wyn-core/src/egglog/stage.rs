@@ -3,6 +3,7 @@ use super::blocks::{BlockData, BodyData, BufferData, DispatchData, GridData};
 use crate::egglog::data::{
     BlockId, BodyId, BufferId, DispatchId, GridId, Ir, OutputData, OutputId, PlacementData, PlacementId,
 };
+use crate::kernel_graph::PhysicalKernelGraph;
 use egglog_engine::ast::Command;
 use egglog_engine::EGraph;
 use wyn_base::IdArena;
@@ -61,6 +62,10 @@ pub struct Placed {
 /// Final functions, blocks, resource allocations, and dispatches for SSA lowering.
 #[derive(Clone, Debug, Default)]
 pub struct Scheduled {
+    pub(super) abi: super::abi::Abi,
+    pub(super) physical_kernels: PhysicalKernelGraph,
+    pub(super) unsupported_host: Option<BlockId>,
+    pub(super) materialized: std::collections::BTreeMap<super::OperationId, super::Value>,
     pub(super) placements: IdArena<PlacementId, PlacementData>,
     pub(super) outputs: IdArena<OutputId, OutputData>,
     pub(super) blocks: IdArena<BlockId, BlockData>,

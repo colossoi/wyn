@@ -351,8 +351,8 @@ pub struct OutputData {
     pub expression: ExprId,
     /// Filled by the plan's OutputBacking relation.
     pub buffer: Option<BufferId>,
-    /// Scalar results are published by the entry's final scalar kernel.
-    pub scalar: bool,
+    /// Copy this expression into its backing in the entry's final kernel.
+    pub copy: bool,
 }
 
 /// Includes unbound parameters, preserving the original parameter positions.

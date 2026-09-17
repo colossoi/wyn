@@ -1,7 +1,8 @@
 use super::super::data::intern_type;
 use super::super::{from_tlc, Storage};
-use super::{facts, outputs, read, KEYS, RULES, RUN};
+use super::{abi, facts, outputs, read, KEYS, RULES, RUN};
 use crate::compile_thru_tlc;
+use crate::egglog::abi::inputs;
 use crate::egglog::dependencies::analyze;
 use crate::egglog::{Program, Scheduled};
 use crate::tlc::infer_input_slice_bounds;
@@ -126,6 +127,24 @@ fn compacted_capacity_and_live_count_are_distinct() {
     );
     assert_eq!(count(&g, "Phase"), 4);
     assert_eq!(count(&g, "Allocation"), 6);
+    g.parse_and_run_program(
+        None,
+        r#"
+        (TypeStride (TypeId 0) 4)
+        (AbiArrayLength (AbiExpr 0) (AbiNumber 64))
+        (AbiExtent (Length (ExprId 1)))
+        (run-schedule (seq (saturate (run abi)) (run abi-final)))
+    "#,
+    )
+    .unwrap();
+    check(
+        &mut g,
+        r#"
+        (AbiFixedCapacity (Result (OperationId 0) 0) 256)
+        (AbiArrayLength (AbiExpr 1) (AbiExtent (Stored (Result (OperationId 0) 1))))
+        (= (AbiKnown (AbiExtent (Length (ExprId 1)))) false)
+    "#,
+    );
 }
 
 #[test]
@@ -229,39 +248,107 @@ fn imported_source_plans_before_block_generation() {
         };
         let summary = analyze(&converted.ir);
         let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
+        converted.state.abi.inputs = inputs(
+            &converted.entries,
+            &converted.entry_params,
+            &converted.input_bounds,
+            &converted.symbols,
+            &converted.regions,
+            &converted.definitions,
+            &converted.types,
+            &converted.parameters,
+        )
+        .unwrap();
+        let mut uniforms = vec![];
         let mut g = EGraph::default();
         g.parse_and_run_program(None, include_str!("ids.egg")).unwrap();
         g.parse_and_run_program(None, KEYS).unwrap();
         g.parse_and_run_program(None, RULES).unwrap();
         g.update(|mut sink| {
             outputs(&mut converted, &mut sink)?;
-            facts(&converted, &summary, count_type, &mut sink)
+            facts(&converted, &summary, count_type, &mut sink)?;
+            abi::facts(
+                &converted.state.abi.inputs,
+                &converted.state.outputs,
+                &converted.entries,
+                &converted.types,
+                &mut sink,
+                &mut uniforms,
+            )
         })
         .unwrap();
         g.parse_and_run_program(None, RUN).unwrap();
         assert!(count(&g, "Phase") > 0);
         assert!(count(&g, "Allocation") > 0);
+        assert!(count(&g, "AbiRoot") > 0);
+        assert!(count(&g, "AbiBufferBinding") > 0);
+        assert!(count(&g, "AbiFixedCapacity") > 0);
+        assert_eq!(
+            count(&g, "AbiInvalidHost"),
+            usize::from(source.contains("loop acc"))
+        );
         assert!(converted.state.blocks.is_empty());
         assert!(converted.state.buffers.is_empty());
         let plan = read(&g, &mut converted).unwrap();
         assert_eq!(plan.stages.len(), count(&g, "Phase"));
         assert_eq!(
-            plan.stages.values().map(|s| s.dependencies.len()).sum::<usize>(),
+            converted.state.dispatches.values().map(|s| s.dependencies.len()).sum::<usize>(),
             count(&g, "DispatchDependency")
         );
-        let ids: std::collections::BTreeSet<_> = plan.stages.values().map(|s| s.id).collect();
-        assert!(plan.stages.values().all(|s| s.dependencies.iter().all(|id| ids.contains(id))));
-        assert!(converted.state.blocks.is_empty());
-        assert!(
-            converted.state.dispatches.is_empty(),
-            "IDs are reserved before bodies exist"
-        );
+        let ids: std::collections::BTreeSet<_> = plan.stages.values().copied().collect();
+        assert!(converted
+            .state
+            .dispatches
+            .values()
+            .all(|s| s.dependencies.iter().all(|id| ids.contains(id))));
+        assert_eq!(converted.state.dispatches.len(), plan.stages.len());
+        assert!(converted
+            .state
+            .dispatches
+            .values()
+            .all(|s| converted.state.blocks[s.kernel].interface.is_some()));
+        assert_eq!(plan.buffers.len(), converted.state.buffers.len());
+        assert_eq!(plan.launches.len(), converted.state.dispatches.len());
         assert_eq!(
             converted.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
             count(&g, "Allocation"),
             "every physical allocation must have exactly one logical allocation fact"
         );
     }
+}
+
+#[test]
+fn local_allocations_and_binding_aliases_are_resolved_without_backend_ids() {
+    let mut g = graph(&format!(
+        r#"{MAP}
+        (SourceEntry 0 (RegionId 0) true)
+        (ExitValue (RegionId 0) 0 (ExprId 2))
+        (TypeStride (TypeId 0) 4)
+        (AbiArrayLength (AbiExpr 0) (AbiNumber 128))
+        (OutputBacking 0 (Result (OperationId 0) 0))
+        (AbiOutputBinding 0 0 5 "result")
+        (AbiRootNeed (KernelRoot (Stage (OperationId 0) "elements")) (AbiExpr 10))
+        (AbiStorage (AbiExpr 10) (InputBinding 0 5) 4)
+        (DeviceRegion (RegionId 1))
+        (Site (OperationId 1) (RegionId 1))
+        (CollectiveShape (OperationId 1) 0 0 true)
+        (ArrayResult (OperationId 1) 0 (TypeId 0)) (TotalCount (OperationId 1) 0)
+        (InputDomain (OperationId 1) (Fixed 0))
+    "#
+    ));
+    check(
+        &mut g,
+        r#"
+        (AbiRoot (KernelRoot (Stage (OperationId 0) "elements")) 0 64 1 1 false)
+        (AbiFixedGrid (Stage (OperationId 0) "elements") 2 1 1)
+        (AbiFixedCapacity (Result (OperationId 0) 0) 512)
+        (= (AbiAccess (KernelRoot (Stage (OperationId 0) "elements")) (InputBinding 0 5)) 3)
+        (LocalBuffer (OperationId 1) "output" 0 (TypeId 0) (Fixed 0))
+        (AbiLocalLength (OperationId 1) "output" 0 1)
+    "#,
+    );
+    assert_eq!(count(&g, "Phase"), 1);
+    assert_eq!(count(&g, "Allocation"), 1);
 }
 
 #[test]
@@ -506,4 +593,26 @@ fn tuple_input_fields_replace_the_parent_buffer_independent_of_fact_order() {
         );
         g.parse_and_run_program(None, "(fail (check (ParameterValue (ExprId 0) r)))").unwrap();
     }
+}
+
+#[test]
+fn whole_tuple_captures_publish_all_materialized_fields() {
+    let mut g = graph(
+        r#"
+        (ResultTuple (ExprId 0) (OperationId 0))
+        (ResultSlot (OperationId 0) 0) (ResultSlot (OperationId 0) 1)
+        (Projection (ExprId 1) (ExprId 0) 0)
+        (AbiStorage (AbiResource (Result (OperationId 0) 0)) (InputBinding 0 5) 4)
+        (AbiStorage (AbiResource (Result (OperationId 0) 1)) (InputBinding 0 6) 4)
+        (AbiRootNeed (EntryRoot 100) (AbiExpr 0)) (AbiRootNeed (EntryRoot 101) (AbiExpr 1))
+    "#,
+    );
+    g.parse_and_run_program(None, "(run-schedule (seq (saturate (run abi)) (run abi-final)))").unwrap();
+    check(
+        &mut g,
+        r#"
+        (AbiRootStorage (EntryRoot 100) (InputBinding 0 5)) (AbiRootStorage (EntryRoot 100) (InputBinding 0 6))
+        (AbiRootStorage (EntryRoot 101) (InputBinding 0 5)) (AbiRootStorage (EntryRoot 101) (InputBinding 0 6))
+    "#,
+    );
 }

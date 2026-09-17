@@ -1,4 +1,3 @@
-use super::filter::uint;
 use super::{array_value, error, length, singleton, Instruction, OptimizeError, Planner, Storage, Value};
 use crate::egglog::data::{BlockId, BufferId, OperationId, OperationKind};
 
@@ -32,6 +31,7 @@ impl Planner<'_> {
                     in_bounds(key.clone(), Value::op("length", [dest.clone()])),
                     write,
                     next,
+                    Some(next),
                 );
                 self.emit(
                     write,
@@ -69,6 +69,7 @@ impl Planner<'_> {
                     in_bounds(key.clone(), Value::op("length", [dest.clone()])),
                     update,
                     next,
+                    Some(next),
                 );
                 let old = self.load(update, dest.clone(), key.clone(), "old");
                 let result = self.invoke_body(update, &body, vec![old, value.clone()], "updated")?;
@@ -122,8 +123,8 @@ impl Planner<'_> {
                 let dest = Value::Source(destination.value);
                 let buckets = Value::op("length", [dest.clone()]);
                 let capacity = Value::op("dimension", [dest.clone(), Value::Int(1)]);
-                let counts = self.allocate(allocate, "counts", buckets.clone(), uint(), storage);
-                let overflow = self.allocate(allocate, "overflow", Value::Int(1), uint(), storage);
+                let counts = self.allocate(allocate, "counts", storage);
+                let overflow = self.allocate(allocate, "overflow", storage);
                 self.store(entry, overflow, Value::Int(0), Value::Int(0));
                 let clear = self.start_loop(entry, Value::Int(0), buckets.clone(), vec![]);
                 self.store(clear.body, counts, clear.index.clone(), Value::Int(0));
@@ -156,8 +157,17 @@ impl Planner<'_> {
                 let full = self.block(owner, vec![]);
                 let write = self.block(owner, vec![]);
                 let next = self.block(owner, vec![]);
-                self.branch(loop_.body, active, check, next);
-                self.branch(check, in_bounds(key.clone(), buckets), reserve, full);
+                let invalid = self.block(owner, vec![]);
+                let reserved = self.block(owner, vec![]);
+                let checked = self.block(owner, vec![]);
+                self.branch(loop_.body, active, check, next, Some(next));
+                self.branch(
+                    check,
+                    in_bounds(key.clone(), buckets),
+                    reserve,
+                    invalid,
+                    Some(checked),
+                );
                 let slot = self.load(reserve, Value::Buffer(counts), key.clone(), "slot");
                 self.store(
                     reserve,
@@ -165,7 +175,13 @@ impl Planner<'_> {
                     key.clone(),
                     Value::op("add", [slot.clone(), Value::Int(1)]),
                 );
-                self.branch(reserve, Value::op("lt", [slot.clone(), capacity]), write, full);
+                self.branch(
+                    reserve,
+                    Value::op("lt", [slot.clone(), capacity]),
+                    write,
+                    full,
+                    Some(reserved),
+                );
                 let row = self.load(write, dest.clone(), key, "row");
                 self.emit(
                     write,
@@ -175,9 +191,13 @@ impl Planner<'_> {
                         value: emission.clone().field(2),
                     },
                 );
-                self.jump(write, next, vec![]);
+                self.jump(write, reserved, vec![]);
                 self.store(full, overflow, Value::Int(0), Value::Int(1));
-                self.jump(full, next, vec![]);
+                self.jump(full, reserved, vec![]);
+                self.jump(reserved, checked, vec![]);
+                self.store(invalid, overflow, Value::Int(0), Value::Int(1));
+                self.jump(invalid, checked, vec![]);
+                self.jump(checked, next, vec![]);
                 self.finish_loop(&loop_, next, vec![]);
                 Ok((
                     loop_.done,

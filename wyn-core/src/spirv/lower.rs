@@ -885,6 +885,33 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         Ok(())
     }
 
+    fn lower_control_header(&mut self, block_id: BlockId) -> Result<()> {
+        // Emit structured control flow merge instructions if this is a header block
+        if let Some(control) = &self.body.inner.blocks[block_id].control_header {
+            match control {
+                ControlHeader::Loop {
+                    merge,
+                    continue_block,
+                } => {
+                    let merge_label = self.block_map[merge];
+                    let continue_label = self.block_map[continue_block];
+                    self.constructor.builder.loop_merge(
+                        merge_label,
+                        continue_label,
+                        spirv::LoopControl::NONE,
+                        [],
+                    )?;
+                }
+                ControlHeader::Selection { merge } => {
+                    let merge_label = self.block_map[merge];
+                    self.constructor.builder.selection_merge(merge_label, spirv::SelectionControl::NONE)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn lower_terminator(
         &mut self,
         _block_id: BlockId,
@@ -901,6 +928,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 }
 
                 let target_label = self.block_map[target];
+                self.lower_control_header(_block_id)?;
                 self.constructor.builder.branch(target_label)?;
             }
 
@@ -924,30 +952,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     self.phi_inputs.push((*else_target, param_idx, arg_id, current_block));
                 }
 
-                // Emit structured control flow merge instructions if this is a header block
-                if let Some(control) = &self.body.inner.blocks[_block_id].control_header {
-                    match control {
-                        ControlHeader::Loop {
-                            merge,
-                            continue_block,
-                        } => {
-                            let merge_label = self.block_map[merge];
-                            let continue_label = self.block_map[continue_block];
-                            self.constructor.builder.loop_merge(
-                                merge_label,
-                                continue_label,
-                                spirv::LoopControl::NONE,
-                                [],
-                            )?;
-                        }
-                        ControlHeader::Selection { merge } => {
-                            let merge_label = self.block_map[merge];
-                            self.constructor
-                                .builder
-                                .selection_merge(merge_label, spirv::SelectionControl::NONE)?;
-                        }
-                    }
-                }
+                self.lower_control_header(_block_id)?;
 
                 self.constructor.builder.branch_conditional(cond_id, then_label, else_label, [])?;
             }

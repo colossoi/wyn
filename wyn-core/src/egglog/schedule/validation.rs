@@ -1,15 +1,21 @@
-use super::{error, Edge, Exit, FunctionKind, Instruction, OptimizeError, Storage, Value};
-use crate::egglog::data::{BlockId, BodyId, OperationKind};
+use super::{error, Control, Edge, Exit, FunctionKind, Instruction, OptimizeError, Storage, Value};
+use crate::egglog::data::{BlockId, BodyId, DispatchId, OperationKind};
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use std::collections::BTreeSet;
 
-pub(super) fn validate(data: &Program<Scheduled>) -> Result<(), OptimizeError> {
+pub(super) fn validate(data: &Program<Scheduled>) -> Result<Vec<DispatchId>, OptimizeError> {
     let mut launches = BTreeSet::new();
     for (&id, block) in &data.state.blocks {
-        if let Some(exit) = block.loop_exit {
-            if !data.state.blocks.get(exit).is_some_and(|b| b.function == block.function) {
-                return Err(error("loop exit is outside its function"));
+        if let Some(control) = block.control {
+            let targets = match control {
+                Control::Selection { merge } => vec![merge],
+                Control::Loop { merge, continuing } => vec![merge, continuing],
+            };
+            for target in targets {
+                if !data.state.blocks.get(target).is_some_and(|b| b.function == block.function) {
+                    return Err(error("control boundary is outside its function"));
+                }
             }
         }
         let Some(owner) = data.state.blocks.get(block.function) else {
@@ -151,8 +157,7 @@ pub(super) fn validate(data: &Program<Scheduled>) -> Result<(), OptimizeError> {
     wyn_graph::topo_sort_by_dependencies(data.state.dispatches.ids(), |id, out| {
         out.extend(data.state.dispatches[id].dependencies.iter().copied());
     })
-    .map_err(|_| error("cyclic dispatch dependencies"))?;
-    Ok(())
+    .map_err(|_| error("cyclic dispatch dependencies"))
 }
 
 fn check_tuple(data: &Program<Scheduled>, id: BodyId, arity: usize) -> Result<(), OptimizeError> {

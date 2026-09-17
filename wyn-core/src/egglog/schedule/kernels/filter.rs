@@ -1,8 +1,6 @@
 use super::super::length;
 use super::{chunks, error, singleton, OptimizeError, Planner, Storage, Value, WIDTH};
-use crate::ast::TypeName;
 use crate::egglog::data::{Array, BlockId, BufferId, OperationId, OperationKind, SoacBody};
-use crate::types::Type;
 
 impl Planner<'_> {
     pub(super) fn parallel_filter(
@@ -16,18 +14,16 @@ impl Planner<'_> {
         else {
             return Err(error("invalid compaction recipe"));
         };
-        let captures = self.captures(op);
         let n = length(&inputs);
         let chunks = chunks(n.clone());
-        let element = self.filter_element(&body)?;
-        let output = self.allocate(host, "output", n.clone(), element, Storage::Device);
-        let count = self.allocate(host, "length", Value::Int(1), uint(), Storage::Device);
-        let flags = self.allocate(host, "flags", n.clone(), uint(), Storage::Device);
-        let local_offsets = self.allocate(host, "local_offsets", n.clone(), uint(), Storage::Device);
-        let totals = self.allocate(host, "totals", chunks.clone(), uint(), Storage::Device);
-        let offsets = self.allocate(host, "offsets", chunks.clone(), uint(), Storage::Device);
+        let output = self.allocate(host, "output", Storage::Device);
+        let count = self.allocate(host, "length", Storage::Device);
+        let flags = self.allocate(host, "flags", Storage::Device);
+        let local_offsets = self.allocate(host, "local_offsets", Storage::Device);
+        let totals = self.allocate(host, "totals", Storage::Device);
+        let offsets = self.allocate(host, "offsets", Storage::Device);
 
-        let flags_kernel = self.kernel("flags", &captures, WIDTH);
+        let flags_kernel = self.kernel(op, "flags");
         let invocation = self.invocations(flags_kernel, n.clone());
         let (active, i) = (invocation.body, invocation.index.clone());
         let elements = self.read_inputs(active, &inputs, i.clone());
@@ -38,9 +34,9 @@ impl Planner<'_> {
         };
         self.store(active, flags, i, Value::op("bool_to_u32", [predicate.clone()]));
         self.finish_loop(&invocation, active, vec![]);
-        self.dispatch(op, host, flags_kernel, captures.clone());
+        self.dispatch(op, host, flags_kernel);
 
-        let prefix_kernel = self.kernel("local_offsets", &captures, WIDTH);
+        let prefix_kernel = self.kernel(op, "local_offsets");
         let invocation = self.invocations(prefix_kernel, chunks.clone());
         let (active, chunk) = (invocation.body, invocation.index.clone());
         let start = Value::op("mul", [chunk.clone(), Value::Int(WIDTH)]);
@@ -63,9 +59,9 @@ impl Planner<'_> {
         );
         self.store(loop_.done, totals, chunk, loop_.state[0].clone());
         self.finish_loop(&invocation, loop_.done, vec![]);
-        self.dispatch(op, host, prefix_kernel, captures.clone());
+        self.dispatch(op, host, prefix_kernel);
 
-        let combine = self.kernel("offsets", &captures, 1);
+        let combine = self.kernel(op, "offsets");
         let loop_ = self.start_loop(combine, Value::Int(0), chunks, vec![Value::Int(0)]);
         self.store(loop_.body, offsets, loop_.index.clone(), loop_.state[0].clone());
         let total = self.load(loop_.body, Value::Buffer(totals), loop_.index.clone(), "total");
@@ -76,15 +72,21 @@ impl Planner<'_> {
         );
         self.store(loop_.done, count, Value::Int(0), loop_.state[0].clone());
         self.returns(loop_.done, vec![]);
-        self.dispatch(op, host, combine, captures.clone());
+        self.dispatch(op, host, combine);
 
-        let write = self.kernel("compact", &captures, WIDTH);
+        let write = self.kernel(op, "compact");
         let invocation = self.invocations(write, n.clone());
         let (active, i) = (invocation.body, invocation.index.clone());
         let selected = self.block(write, vec![]);
         let done = self.block(write, vec![]);
         let flag = self.load(active, Value::Buffer(flags), i.clone(), "flag");
-        self.branch(active, Value::op("ne", [flag, Value::Int(0)]), selected, done);
+        self.branch(
+            active,
+            Value::op("ne", [flag, Value::Int(0)]),
+            selected,
+            done,
+            Some(done),
+        );
         let local = self.load(selected, Value::Buffer(local_offsets), i.clone(), "local");
         let offset = self.load(
             selected,
@@ -100,7 +102,7 @@ impl Planner<'_> {
         self.store(selected, output, Value::op("add", [offset, local]), value.clone());
         self.jump(selected, done, vec![]);
         self.finish_loop(&invocation, done, vec![]);
-        self.dispatch(op, host, write, captures);
+        self.dispatch(op, host, write);
         Ok((
             Value::op("slice", [Value::Buffer(output), singleton(count)]),
             vec![output, count],
@@ -117,9 +119,8 @@ impl Planner<'_> {
         inputs: &[Array],
     ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
         let n = length(inputs);
-        let element = self.filter_element(body)?;
-        let output = self.allocate(allocate, "output", n.clone(), element, storage);
-        let count = self.allocate(allocate, "length", Value::Int(1), uint(), storage);
+        let output = self.allocate(allocate, "output", storage);
+        let count = self.allocate(allocate, "length", storage);
         let loop_ = self.start_loop(entry, Value::Int(0), n, vec![Value::Int(0)]);
         let elements = self.read_inputs(loop_.body, inputs, loop_.index.clone());
         let mapped = self.invoke_body(loop_.body, map, elements, "map")?;
@@ -134,14 +135,17 @@ impl Planner<'_> {
         let owner = self.data.state.blocks[entry].function;
         let selected = self.block(owner, vec![]);
         let skipped = self.block(owner, vec![]);
-        self.branch(loop_.body, predicate.clone(), selected, skipped);
+        let count_name = format!("filter_count{}", loop_.body.as_u32());
+        let merge = self.block(owner, vec![count_name.clone()]);
+        self.branch(loop_.body, predicate.clone(), selected, skipped, Some(merge));
         self.store(selected, output, loop_.state[0].clone(), value);
-        self.finish_loop(
-            &loop_,
+        self.jump(
             selected,
+            merge,
             vec![Value::op("add", [loop_.state[0].clone(), Value::Int(1)])],
         );
-        self.finish_loop(&loop_, skipped, loop_.state.clone());
+        self.jump(skipped, merge, loop_.state.clone());
+        self.finish_loop(&loop_, merge, vec![Value::Local(count_name)]);
         self.store(loop_.done, count, Value::Int(0), loop_.state[0].clone());
         Ok((
             loop_.done,
@@ -149,21 +153,4 @@ impl Planner<'_> {
             vec![output, count],
         ))
     }
-
-    fn filter_element(&self, body: &SoacBody) -> Result<Type, OptimizeError> {
-        let parameters = match body {
-            SoacBody::Apply { parameters, .. } | SoacBody::Route { parameters, .. } => parameters,
-            SoacBody::Identity(types) => types,
-            SoacBody::Compose { first, .. } => return self.filter_element(first),
-            SoacBody::Parallel { left, .. } => return self.filter_element(left),
-        };
-        let [element] = parameters.as_slice() else {
-            return Err(error("filter body must take one logical element"));
-        };
-        Ok(self.data.types[*element].ty.clone())
-    }
-}
-
-pub(super) fn uint() -> Type {
-    Type::Constructed(TypeName::UInt(32), vec![])
 }

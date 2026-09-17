@@ -326,3 +326,24 @@ fn producer_buffers_are_shared_by_identity_with_consumer_dispatches() {
     let output = run(&result, vec![Value::array(0..65)]);
     assert_eq!(output, [Value::Int(64 * 65 * 66 / 6)]);
 }
+
+#[test]
+fn result_copy_waits_for_its_entry_launches_and_publishes_storage() {
+    let result = compile("entry first(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs) entry second(xs:[5]i32) i32 = reduce(|a:i32,b:i32|a*b,1,xs)");
+    let kernels: Vec<_> = result.state.physical_kernels.kernels().collect();
+    for output in result.state.outputs.values() {
+        assert!(output.copy);
+        let owner = crate::EntryId::from(output.entry.as_u32());
+        let mut owned =
+            kernels.iter().filter(|k| k.source_entry == Some(owner)).copied().collect::<Vec<_>>();
+        let copy = owned.pop().unwrap();
+        assert_eq!(copy.dependencies, owned.iter().map(|k| k.id).collect::<Vec<_>>());
+        let resource = crate::ResourceId::from_egglog_buffer(output.buffer.unwrap().as_u32());
+        assert!(copy.resources.iter().any(|r| r.resource == resource
+            && matches!(
+                r.access,
+                crate::ResourceAccess::Write | crate::ResourceAccess::ReadWrite
+            )));
+        assert!(owned.iter().all(|k| k.resources.iter().all(|r| r.resource != resource)));
+    }
+}

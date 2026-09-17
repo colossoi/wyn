@@ -34,8 +34,8 @@ pub enum Node {
         state_vars: Vec<ValueId>,
         /// Initial values for state vars (from the branch into the loop).
         init_args: Vec<ValueRef>,
-        /// Instructions in the header that compute the condition.
-        header_insts: Vec<InstId>,
+        /// Code evaluated on every test, including conditional expressions.
+        header: Vec<Node>,
         /// The condition value.
         cond: ValueRef,
         /// Whether the condition is "continue when true" (false = invert).
@@ -110,14 +110,12 @@ impl<'a> StructCtx<'a> {
                 }
 
                 Terminator::Branch { target, args } => {
-                    if let Some(ControlHeader::Loop {
-                        merge,
-                        continue_block,
-                    }) = self.body.inner.blocks[*target].control_header.as_ref()
+                    if let Some(ControlHeader::Loop { merge, .. }) =
+                        self.body.inner.blocks[*target].control_header.as_ref()
                     {
                         let merge = *merge;
-                        let continue_block = *continue_block;
-                        self.emit_loop(*target, args, merge, continue_block, &mut nodes);
+
+                        self.emit_loop(*target, args, merge, &mut nodes);
                         // Continue from the merge block
                         current = merge;
                         // Merge block params are set by the loop exit
@@ -206,10 +204,9 @@ impl<'a> StructCtx<'a> {
             );
         }
 
-        loop {
+        let result = loop {
             if current == stop_at {
-                self.depth.set(d);
-                return (nodes, current_args);
+                break (nodes, current_args);
             }
             if !visited.insert(current) {
                 panic!("lower_arm: cycle at {:?}, stop_at={:?}", current, stop_at);
@@ -235,18 +232,16 @@ impl<'a> StructCtx<'a> {
             match &block.term {
                 Terminator::Branch { target, args } => {
                     if *target == stop_at {
-                        return (nodes, args.clone());
+                        break (nodes, args.clone());
                     }
 
                     // Check for loop
-                    if let Some(ControlHeader::Loop {
-                        merge,
-                        continue_block,
-                    }) = self.body.inner.blocks[*target].control_header.as_ref()
+                    if let Some(ControlHeader::Loop { merge, .. }) =
+                        self.body.inner.blocks[*target].control_header.as_ref()
                     {
                         let merge = *merge;
-                        let continue_block = *continue_block;
-                        self.emit_loop(*target, args, merge, continue_block, &mut nodes);
+
+                        self.emit_loop(*target, args, merge, &mut nodes);
                         current = merge;
                         current_args = Vec::new();
                         continue;
@@ -278,17 +273,19 @@ impl<'a> StructCtx<'a> {
                         current_args = Vec::new();
                         continue;
                     }
-                    return (nodes, vec![]);
+                    break (nodes, vec![]);
                 }
 
                 Terminator::Return(val) => {
                     nodes.push(Node::Return(*val));
-                    return (nodes, vec![]);
+                    break (nodes, vec![]);
                 }
 
-                Terminator::Unreachable => return (nodes, vec![]),
+                Terminator::Unreachable => break (nodes, vec![]),
             }
-        }
+        };
+        self.depth.set(d);
+        result
     }
 
     fn emit_loop(
@@ -296,34 +293,54 @@ impl<'a> StructCtx<'a> {
         header_id: BlockId,
         init_args: &[ValueRef],
         merge_id: BlockId,
-        continue_id: BlockId,
         nodes: &mut Vec<Node>,
     ) {
         let header = &self.body.inner.blocks[header_id];
         let state_vars: Vec<ValueId> = header.params.clone();
-        let header_insts: Vec<InstId> = header.insts.clone();
-
-        // Determine condition and body target from header's CondBranch
-        let (cond, cond_is_continue, body_target) = match &header.term {
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                else_target,
-                ..
-            } => {
-                if *then_target == continue_id
-                    || self.reaches_without_header(*then_target, continue_id, header_id)
-                {
-                    (*cond, true, *then_target)
-                } else {
-                    (*cond, false, *else_target)
-                }
+        // A loop test can contain selections or nested loops before reaching
+        // the conditional exit. Follow their merges to find that exit block.
+        let mut test = header_id;
+        let mut visited = LookupSet::new();
+        loop {
+            assert!(visited.insert(test), "cyclic loop test at {test:?}");
+            let block = &self.body.inner.blocks[test];
+            if matches!(block.term, Terminator::CondBranch { then_target, else_target, .. }
+                if then_target == merge_id || else_target == merge_id)
+            {
+                break;
             }
-            _ => panic!("Loop header must end with CondBranch"),
+            test = match block.control_header {
+                Some(ControlHeader::Selection { merge }) => merge,
+                Some(ControlHeader::Loop { merge, .. }) if test != header_id => merge,
+                _ => match block.term {
+                    Terminator::Branch { target, .. } => target,
+                    _ => panic!("loop test has no conditional exit at {test:?}"),
+                },
+            };
+        }
+        let (mut header_nodes, test_args) = self.lower_arm(header_id, &[], test);
+        let condition = &self.body.inner.blocks[test];
+        for (&target, &value) in condition.params.iter().zip(&test_args) {
+            header_nodes.push(Node::Assign { target, value });
+        }
+        header_nodes.extend(condition.insts.iter().copied().map(Node::Inst));
+        let Terminator::CondBranch {
+            cond,
+            then_target,
+            then_args,
+            else_target,
+            else_args,
+        } = &condition.term
+        else {
+            unreachable!("loop test {test:?} must be conditional");
         };
-
-        // Lower loop body — stops when it branches back to the header
-        let (mut body, continue_args) = self.lower_arm(body_target, &[], header_id);
+        let cond_is_continue = *else_target == merge_id;
+        let (body_target, body_args, exit_args) = if cond_is_continue {
+            (*then_target, then_args, else_args)
+        } else {
+            (*else_target, else_args, then_args)
+        };
+        let (mut body, continue_args) = self.lower_arm(body_target, body_args, header_id);
 
         // Add state variable updates from the back-edge args
         for (state_var, arg) in state_vars.iter().zip(continue_args.iter()) {
@@ -334,60 +351,22 @@ impl<'a> StructCtx<'a> {
         }
 
         nodes.push(Node::Loop {
-            state_vars: state_vars.clone(),
+            state_vars,
             init_args: init_args.to_vec(),
-            header_insts,
-            cond,
+            header: header_nodes,
+            cond: *cond,
             cond_is_continue,
             body,
         });
 
-        // Set merge block params from loop exit args (after the loop)
-        if let Terminator::CondBranch {
-            then_target,
-            then_args,
-            else_args,
-            ..
-        } = &header.term
-        {
-            let exit_args = if *then_target == body_target { else_args } else { then_args };
-            let merge_block = &self.body.inner.blocks[merge_id];
-            for (param, arg) in merge_block.params.iter().zip(exit_args.iter()) {
-                nodes.push(Node::Assign {
-                    target: *param,
-                    value: *arg,
-                });
-            }
+        // Set merge block params from loop exit args (after the loop).
+        let merge_block = &self.body.inner.blocks[merge_id];
+        for (param, arg) in merge_block.params.iter().zip(exit_args.iter()) {
+            nodes.push(Node::Assign {
+                target: *param,
+                value: *arg,
+            });
         }
-    }
-
-    /// Check if `from` reaches `target` without going through `avoid`.
-    fn reaches_without_header(&self, from: BlockId, target: BlockId, avoid: BlockId) -> bool {
-        let mut visited = LookupSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(from);
-        while let Some(b) = queue.pop_front() {
-            if b == target {
-                return true;
-            }
-            if b == avoid || !visited.insert(b) {
-                continue;
-            }
-            let blk = &self.body.inner.blocks[b];
-            match &blk.term {
-                Terminator::Branch { target, .. } => queue.push_back(*target),
-                Terminator::CondBranch {
-                    then_target,
-                    else_target,
-                    ..
-                } => {
-                    queue.push_back(*then_target);
-                    queue.push_back(*else_target);
-                }
-                _ => {}
-            }
-        }
-        false
     }
 
     /// Find the merge block for an if-else.
@@ -437,3 +416,7 @@ impl<'a> StructCtx<'a> {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "structured_tests.rs"]
+mod tests;

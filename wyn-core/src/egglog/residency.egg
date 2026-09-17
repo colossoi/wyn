@@ -33,7 +33,7 @@
       ((ValueRef e value)) :ruleset residency)
 (rule ((ForwardValue e source) (ValueRef source value))
       ((ValueRef e value)) :ruleset residency)
-(rule ((SliceView e source start end)) ((ForwardValue e source)) :ruleset residency)
+(rule ((SliceView e source start end) (ValueRef source value)) ((ValueRef e value)) :ruleset residency)
 
 ; Summarize the shared expression DAG once, stopping at execution results. A
 ; shared scalar chain must not be traversed again for every consuming stage.
@@ -43,6 +43,7 @@
 (rule ((Projection e tuple i) (ComputedValue tuple) (References tuple value))
       ((References e value)) :ruleset residency)
 (rule ((ResultTuple e op) (ResultSlot op i)) ((References e (Result op i))) :ruleset residency)
+(rule ((SliceView e source start end) (References source value)) ((References e value)) :ruleset residency)
 (rule ((SliceView e source start end) (References start value)) ((References e value)) :ruleset residency)
 (rule ((SliceView e source start end) (References end value)) ((References e value)) :ruleset residency)
 

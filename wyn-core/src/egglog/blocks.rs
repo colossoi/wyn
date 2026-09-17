@@ -2,19 +2,32 @@
 use crate::egglog::data::{
     Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
 };
+use crate::pipeline_descriptor::DispatchSize;
 use crate::types::Type;
 use std::collections::BTreeSet;
+use wyn_base::IdArena;
 
 #[derive(Clone, Debug)]
 pub struct BlockData {
     /// The entry block owning this block. Functions are adornments of entries.
     pub function: BlockId,
-    /// Structured loop exit, retained for SSA/WGSL reconstruction.
-    pub loop_exit: Option<BlockId>,
+    /// Structured control boundaries supplied by block construction.
+    pub control: Option<Control>,
     pub interface: Option<Function>,
     pub parameters: Vec<String>,
     pub body: BodyId,
     pub exit: Exit,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Control {
+    Selection {
+        merge: BlockId,
+    },
+    Loop {
+        merge: BlockId,
+        continuing: BlockId,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +35,7 @@ pub struct Function {
     pub name: String,
     pub kind: FunctionKind,
     pub results: usize,
+    pub blocks: Vec<BlockId>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +126,7 @@ pub struct DispatchData {
     pub owner: EntryId,
     pub kernel: BlockId,
     pub grid: GridId,
+    pub size: DispatchSize,
     pub dependencies: BTreeSet<DispatchId>,
     /// Physical readout of the plan's Access facts.
     pub reads: BTreeSet<BufferId>,
@@ -150,5 +165,31 @@ impl Value {
     }
     pub(super) fn op(name: &'static str, args: impl IntoIterator<Item = Self>) -> Self {
         Self::Primitive(name, args.into_iter().collect())
+    }
+}
+
+impl Function {
+    pub(super) fn insert(
+        mut self,
+        parameters: Vec<String>,
+        blocks: &mut IdArena<BlockId, BlockData>,
+        bodies: &mut IdArena<BodyId, BodyData>,
+    ) -> BlockId {
+        let id = blocks.alloc_id();
+        self.blocks.push(id);
+        let body = bodies.alloc(BodyData::default());
+        let returns = bodies.alloc(BodyData::default());
+        blocks.insert(
+            id,
+            BlockData {
+                function: id,
+                control: None,
+                interface: Some(self),
+                parameters,
+                body,
+                exit: Exit::Return(returns),
+            },
+        );
+        id
     }
 }

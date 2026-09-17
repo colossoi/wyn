@@ -103,3 +103,10 @@
        (Needs (Stage op "compact") (Temporary op "offsets" 0))) :ruleset schedule)
 (rule ((Scratch op name i n))
       ((FreshValue (Temporary op name i)) (Capacity (Temporary op name i) n)) :ruleset schedule)
+
+; Invocation-local allocations are recipe outputs, without dispatches or shared storage.
+(rule ((Site op r) (DeviceRegion r)) ((DeviceOperation op)) :ruleset schedule)
+(rule ((DeviceOperation op) (Enters op r)) ((DeviceRegion r)) :ruleset schedule)
+(rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
+(rule ((DeviceOperation op) (Plan op recipe) (BufferSlot op name i value) (ElementType value t) (Capacity value n))
+      ((LocalBuffer op name i t n)) :ruleset schedule)

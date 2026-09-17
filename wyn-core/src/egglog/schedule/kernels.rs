@@ -1,13 +1,12 @@
 //! Instantiate the selected GPU recipe with ordinary calls, loads, stores and
 //! control edges. No source SOAC survives as an executable instruction.
-use super::super::data::{Array, ExprKind};
+use super::super::data::Array;
 use super::super::visit::Operand;
 use super::{
-    array_value, error, length, DispatchData, FunctionKind, Instruction, OptimizeError, Planner, Recipe,
+    array_value, error, length, Control, FunctionKind, Instruction, OptimizeError, Planner, Recipe,
     Storage, Value, WIDTH,
 };
-use crate::egglog::data::{BlockId, BufferId, DispatchId, ExprId, OperationId, OperationKind, SoacBody};
-use crate::types::Type;
+use crate::egglog::data::{BlockId, BufferId, DispatchId, ExprId, OperationId, OperationKind};
 use std::collections::BTreeSet;
 
 mod filter;
@@ -15,7 +14,7 @@ mod indexed;
 mod screma;
 
 struct Loop {
-    header: BlockId,
+    continuing: BlockId,
     body: BlockId,
     done: BlockId,
     index: Value,
@@ -24,13 +23,73 @@ struct Loop {
 }
 
 impl Planner<'_> {
+    pub(super) fn output_copies(&mut self) -> Result<(), OptimizeError> {
+        let outputs: Vec<_> = self.data.state.outputs.values().filter(|o| o.copy).cloned().collect();
+        let roots: Vec<_> = self
+            .data
+            .state
+            .blocks
+            .iter()
+            .filter_map(|(&id, b)| match b.interface.as_ref().map(|f| &f.kind) {
+                Some(FunctionKind::Entry(entry))
+                    if self.data.entries[*entry].declaration.entry_kind
+                        == crate::interface::EntryKind::Compute =>
+                {
+                    Some((id, *entry))
+                }
+                _ => None,
+            })
+            .collect();
+        for (root, entry) in roots {
+            let returns: Vec<_> = self
+                .data
+                .state
+                .blocks
+                .iter()
+                .filter_map(|(&id, b)| {
+                    (b.function == root && matches!(b.exit, super::Exit::Return(_))).then_some(id)
+                })
+                .collect();
+            for mut end in returns {
+                let super::Exit::Return(original) = self.data.state.blocks[end].exit else {
+                    unreachable!()
+                };
+                let values = self.data.state.bodies[original].results.clone();
+                for output in outputs.iter().filter(|o| o.entry == entry) {
+                    let Some(buffer) = output.buffer else {
+                        return Err(error("copy output has no backing"));
+                    };
+                    self.emit(end, Instruction::Allocate(buffer));
+                    let source = Value::Source(output.expression);
+                    if crate::types::TypeExt::is_array(crate::types::strip_existentials(
+                        &self.data.types[self.data.expressions[output.expression].ty].ty,
+                    )) {
+                        let loop_ = self.start_loop(
+                            end,
+                            Value::Int(0),
+                            Value::op("length", [source.clone()]),
+                            vec![],
+                        );
+                        let value = self.load(loop_.body, source, loop_.index.clone(), "output");
+                        self.store(loop_.body, buffer, loop_.index.clone(), value);
+                        self.finish_loop(&loop_, loop_.body, vec![]);
+                        end = loop_.done;
+                    } else {
+                        self.store(end, buffer, Value::Int(0), source);
+                    }
+                }
+                self.returns(end, values);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn scalar_dispatch(
         &mut self,
         op: OperationId,
         host: BlockId,
     ) -> Result<BlockId, OptimizeError> {
-        let captures = self.scalar_captures(op);
-        let kernel = self.kernel("scalar", &captures, 1);
+        let kernel = self.kernel(op, "scalar");
         let end = self.operation(op, kernel, true)?;
         let Some(result) = self.operation_values.get(&op) else {
             return Err(error("missing scalar result expression"));
@@ -42,7 +101,7 @@ impl Planner<'_> {
         }
         self.store(end, buffer, Value::Int(0), Value::Source(result));
         self.returns(end, vec![]);
-        self.dispatch(op, host, kernel, captures);
+        self.dispatch(op, host, kernel);
         self.emit(
             host,
             Instruction::BindResult(op, Value::op("index", [Value::Buffer(buffer), Value::Int(0)])),
@@ -52,6 +111,7 @@ impl Planner<'_> {
 
     pub(super) fn parallel(&mut self, op: OperationId, host: BlockId) -> Result<BlockId, OptimizeError> {
         let previous = self.current_operation.replace(op);
+        let counts = std::mem::take(&mut self.allocation_counts);
         let Some(recipe) = self.resources.recipes.get(&op).copied() else {
             return Err(error("missing execution recipe"));
         };
@@ -59,15 +119,15 @@ impl Planner<'_> {
             Recipe::Elements | Recipe::Totals | Recipe::Prefixes => self.parallel_screma(op, host)?,
             Recipe::Compact => self.parallel_filter(op, host)?,
             Recipe::Serial => {
-                let captures = self.captures(op);
-                let kernel = self.kernel("ordered", &captures, 1);
+                let kernel = self.kernel(op, "ordered");
                 let (end, value, outputs) = self.serial_body(op, kernel, host, Storage::Device)?;
                 self.returns(end, vec![]);
-                self.dispatch(op, host, kernel, captures);
+                self.dispatch(op, host, kernel);
                 (value, outputs)
             }
         };
         self.current_operation = previous;
+        self.allocation_counts = counts;
         self.emit(host, Instruction::BindResult(op, value));
         Ok(host)
     }
@@ -79,7 +139,11 @@ impl Planner<'_> {
         let names = (0..captures.len()).map(|i| format!("c{i}")).collect();
         let function = self.function("local".into(), FunctionKind::Device, names, 1);
         self.bind_captures(function, &captures);
+        let previous = self.current_operation.replace(op);
+        let counts = std::mem::take(&mut self.allocation_counts);
         let (end, value, _) = self.serial_body(op, function, function, Storage::Function)?;
+        self.current_operation = previous;
+        self.allocation_counts = counts;
         self.returns(end, vec![value]);
         let name = format!("local{}", op.as_u32());
         self.emit(
@@ -115,11 +179,9 @@ impl Planner<'_> {
         }
     }
 
-    fn kernel(&mut self, name: &str, captures: &[ExprId], width: u32) -> BlockId {
-        let names = (0..captures.len()).map(|i| format!("c{i}")).collect();
-        let entry = self.function(name.into(), FunctionKind::Kernel([width, 1, 1]), names, 0);
-        self.bind_captures(entry, captures);
-        entry
+    fn kernel(&self, op: OperationId, name: &str) -> BlockId {
+        let dispatch = self.resources.stages[&(op, name.into())];
+        self.data.state.dispatches[dispatch].kernel
     }
 
     fn bind_captures(&mut self, entry: BlockId, captures: &[ExprId]) {
@@ -148,14 +210,26 @@ impl Planner<'_> {
         let mut names = vec![format!("{prefix}_i")];
         names.extend((0..state.len()).map(|i| format!("{prefix}_s{i}")));
         let values: Vec<_> = names.iter().skip(1).cloned().map(Value::Local).collect();
+        let next_names: Vec<_> = names.iter().map(|n| format!("{n}_next")).collect();
         let header = self.block(owner, names);
+        let test = self.block(owner, vec![]);
+        let continuing = self.block(owner, next_names.clone());
+        self.jump(
+            continuing,
+            header,
+            next_names.into_iter().map(Value::Local).collect(),
+        );
+        self.jump(header, test, vec![]);
         let body = self.block(owner, vec![]);
         let done = self.block(owner, vec![]);
-        self.data.state.blocks[header].loop_exit = Some(done);
+        self.data.state.blocks[header].control = Some(Control::Loop {
+            merge: done,
+            continuing,
+        });
         self.jump(from, header, std::iter::once(start).chain(state).collect());
-        self.branch(header, Value::op("lt", [index.clone(), bound]), body, done);
+        self.branch(test, Value::op("lt", [index.clone(), bound]), body, done, None);
         Loop {
-            header,
+            continuing,
             body,
             done,
             index,
@@ -166,28 +240,22 @@ impl Planner<'_> {
 
     fn finish_loop(&mut self, loop_: &Loop, end: BlockId, state: Vec<Value>) {
         let next = Value::op("add", [loop_.index.clone(), loop_.step.clone()]);
-        self.jump(end, loop_.header, std::iter::once(next).chain(state).collect());
+        self.jump(
+            end,
+            loop_.continuing,
+            std::iter::once(next).chain(state).collect(),
+        );
     }
 
-    fn allocate(
-        &mut self,
-        host: BlockId,
-        name: &str,
-        n: Value,
-        element: Type,
-        storage: Storage,
-    ) -> BufferId {
-        let buffer = if storage == Storage::Device {
-            let Some(op) = self.current_operation else {
-                unreachable!("device allocation {name} in block {host:?} has no source operation");
-            };
-            let index = self.allocation_counts.entry((op, name.into())).or_default();
-            let buffer = self.resources.slots[&(op, name.into(), *index)];
-            *index += 1;
-            buffer
-        } else {
-            self.buffer(name, n, element, storage)
+    fn allocate(&mut self, host: BlockId, name: &str, storage: Storage) -> BufferId {
+        let Some(op) = self.current_operation else {
+            unreachable!("allocation {name} in {host:?} has no source operation");
         };
+        let index = self.allocation_counts.entry(name.into()).or_default();
+        let slots =
+            if storage == Storage::Function { &self.resources.local_slots } else { &self.resources.slots };
+        let buffer = slots[&(op, name.into(), *index)];
+        *index += 1;
         if self.data.state.buffers[buffer].storage != Storage::Discarded {
             self.emit(host, Instruction::Allocate(buffer));
         }
@@ -229,177 +297,26 @@ impl Planner<'_> {
         inputs.iter().map(|array| self.load(block, array_value(array), index.clone(), "element")).collect()
     }
 
-    fn dispatch(
-        &mut self,
-        op: OperationId,
-        host: BlockId,
-        kernel: BlockId,
-        captures: Vec<ExprId>,
-    ) -> DispatchId {
+    fn dispatch(&mut self, op: OperationId, host: BlockId, kernel: BlockId) -> DispatchId {
         let Some(interface) = &self.data.state.blocks[kernel].interface else {
             unreachable!("dispatch target {kernel:?} has no kernel interface");
         };
         let name = &interface.name;
-        let Some(stage) = self.resources.stages.remove(&(op, name.clone())) else {
+        let Some(dispatch) = self.resources.stages.remove(&(op, name.clone())) else {
             unreachable!("kernel {name} for {op:?} has no planned dispatch");
         };
-        let dispatch = stage.id;
-        self.data.state.dispatches.insert(
-            dispatch,
-            DispatchData {
-                owner: stage.owner,
-                kernel,
-                grid: stage.grid,
-                dependencies: stage.dependencies,
-                reads: stage.reads,
-                writes: stage.writes,
-                captures,
-            },
-        );
         self.emit(host, Instruction::Dispatch(dispatch));
         dispatch
     }
 
     fn captures(&self, op: OperationId) -> Vec<ExprId> {
-        let mut result = BTreeSet::new();
-        match &self.data.operations[op].kind {
-            OperationKind::Screma { form, inputs, .. } => {
-                for array in inputs {
-                    array_captures(array, &mut result);
-                }
-                body_captures(&form.pre, &mut result);
-                body_captures(&form.post, &mut result);
-                for scan in &form.scans {
-                    result.extend(&scan.neutral);
-                    body_captures(&scan.operator, &mut result);
-                }
-                for reduction in &form.reductions {
-                    result.extend(&reduction.neutral);
-                    body_captures(&reduction.operator, &mut result);
-                }
-            }
-            OperationKind::Filter {
-                inputs, map, body, ..
-            } => {
-                for input in inputs {
-                    array_captures(input, &mut result);
-                }
-                body_captures(map, &mut result);
-                body_captures(body, &mut result);
-            }
-            OperationKind::Scatter {
-                destination,
-                body,
-                inputs,
-            }
-            | OperationKind::BucketScatter {
-                destination,
-                body,
-                inputs,
-                ..
-            } => {
-                result.insert(destination.value);
-                body_captures(body, &mut result);
-                for array in inputs {
-                    array_captures(array, &mut result);
-                }
-            }
-            OperationKind::ReduceByIndex {
-                destination,
-                map,
-                body,
-                neutral,
-                inputs,
-            } => {
-                result.extend([destination.value, *neutral]);
-                body_captures(map, &mut result);
-                body_captures(body, &mut result);
-                for array in inputs {
-                    array_captures(array, &mut result);
-                }
-            }
-            _ => {}
-        }
-        result.into_iter().collect()
-    }
-
-    // Capture external leaves, not whole expressions: branches and partial
-    // expressions must still execute inside the scalar invocation that owns them.
-    fn scalar_captures(&self, op: OperationId) -> Vec<ExprId> {
-        use ExprKind;
-        use Operand;
-        let mut operations = vec![op];
-        let mut regions = BTreeSet::new();
-        let mut pending_regions = self.data.operations[op].kind.structured_regions();
-        let mut pending = vec![];
-        while let Some(r) = pending_regions.pop() {
-            if !regions.insert(r) {
-                continue;
-            }
-            let region = &self.data.regions[r];
-            pending.extend(&region.results);
-            for &child in &region.members {
-                operations.push(child);
-                pending_regions.extend(self.data.operations[child].kind.structured_regions());
-            }
-        }
-        for op in operations {
-            self.data.operations[op].kind.for_each_operand(&mut |operand| {
-                if let Operand::Value(_, e) = operand {
-                    pending.push(e);
-                }
-            });
-        }
-        let mut seen = BTreeSet::new();
         let mut captures = BTreeSet::new();
-        while let Some(e) = pending.pop() {
-            if !seen.insert(e) {
-                continue;
+        self.data.operations[op].kind.for_each_operand(&mut |operand| {
+            if let Operand::Value(_, e) = operand {
+                captures.insert(e);
             }
-            match &self.data.expressions[e].kind {
-                ExprKind::Parameter(p) if !regions.contains(&self.data.parameters[*p].region) => {
-                    captures.insert(e);
-                }
-                ExprKind::OperationResult(op) if !regions.contains(&self.data.operations[*op].region) => {
-                    captures.insert(e);
-                }
-                kind => pending.extend(kind.children()),
-            }
-        }
+        });
         captures.into_iter().collect()
-    }
-}
-
-fn array_captures(array: &Array, result: &mut BTreeSet<ExprId>) {
-    match array {
-        Array::Value(expr) => {
-            result.insert(*expr);
-        }
-        Array::Zip(arrays) => {
-            for array in arrays {
-                array_captures(array, result);
-            }
-        }
-        Array::Literal(values) => result.extend(values),
-        Array::Range { start, len, step } => {
-            result.extend([*start, *len]);
-            result.extend(step);
-        }
-    }
-}
-
-fn body_captures(body: &SoacBody, result: &mut BTreeSet<ExprId>) {
-    match body {
-        SoacBody::Apply { captures, .. } => result.extend(captures),
-        SoacBody::Compose { first, then } => {
-            body_captures(first, result);
-            body_captures(then, result);
-        }
-        SoacBody::Parallel { left, right } => {
-            body_captures(left, result);
-            body_captures(right, result);
-        }
-        SoacBody::Identity(_) | SoacBody::Route { .. } => {}
     }
 }
 

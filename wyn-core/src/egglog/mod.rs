@@ -23,6 +23,7 @@
 use egglog_engine::ast::{Command, Parser};
 use egglog_engine::Error;
 
+mod abi;
 mod blocks;
 mod data;
 mod dependencies;
@@ -30,6 +31,7 @@ mod expressions;
 pub mod from_tlc;
 mod fusion;
 mod planning;
+mod publish;
 mod regions;
 mod rewrite;
 mod scalar;

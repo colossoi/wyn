@@ -1,9 +1,15 @@
 //! Read a completed relational plan directly into compiler arenas.
 //! Native egglog values identify resources until their arena IDs are assigned.
-use crate::egglog::blocks::{BufferData, GridData, Storage, Value};
-use crate::egglog::data::{BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, OutputId, TypeId};
+use crate::egglog::blocks::{
+    BufferData, DispatchData, Function, FunctionKind, GridData, Instruction, Storage, Value,
+};
+use crate::egglog::data::{
+    BufferId, DispatchId, EntryId, ExprId, ExprKind, Ir, OperationId, OutputId, TypeId,
+};
 use crate::egglog::timing::span;
+use crate::egglog::visit::Operand;
 use crate::egglog::{OptimizeError, Program, Scheduled};
+use crate::pipeline_descriptor::DispatchSize;
 use crate::types::TypeExt;
 use egglog_engine::sort::S;
 use egglog_engine::{EGraph, Value as EggValue};
@@ -18,20 +24,14 @@ pub(in crate::egglog) enum Recipe {
     Serial,
 }
 
-pub(in crate::egglog) struct Stage {
-    pub id: DispatchId,
-    pub owner: EntryId,
-    pub grid: GridId,
-    pub reads: BTreeSet<BufferId>,
-    pub writes: BTreeSet<BufferId>,
-    pub dependencies: BTreeSet<DispatchId>,
-}
-
 #[derive(Default)]
 pub(in crate::egglog) struct Readout {
+    pub buffers: HashMap<EggValue, BufferId>,
+    pub launches: HashMap<EggValue, DispatchId>,
+    pub local_slots: BTreeMap<(OperationId, String, u32), BufferId>,
     pub recipes: BTreeMap<OperationId, Recipe>,
     pub slots: BTreeMap<(OperationId, String, u32), BufferId>,
-    pub stages: BTreeMap<(OperationId, String), Stage>,
+    pub stages: BTreeMap<(OperationId, String), DispatchId>,
 }
 
 pub(in crate::egglog) fn read(
@@ -153,6 +153,10 @@ pub(in crate::egglog) fn read(
         data.state.outputs[OutputId::from(number(graph, a[0])?)].buffer = buffers.get(&a[1]).copied();
         Ok(())
     })?;
+    rows(graph, "CopyOutput", |a| {
+        data.state.outputs[OutputId::from(number(graph, a[0])?)].copy = true;
+        Ok(())
+    })?;
 
     let mut stages = HashMap::new();
     rows(graph, "PlannedStage", |a| {
@@ -176,31 +180,68 @@ pub(in crate::egglog) fn read(
         let grid = data.state.grids.alloc(GridData {
             groups: [groups, Value::Int(1), Value::Int(1)],
         });
-        stages.insert(a[0], key.clone());
-        result.stages.insert(
-            key,
-            Stage {
-                id: data.state.dispatches.alloc_id(),
-                owner,
-                grid,
-                reads: BTreeSet::new(),
-                writes: BTreeSet::new(),
-                dependencies: BTreeSet::new(),
-            },
+        let captures = if key.1 == "scalar" {
+            scalar_captures(&data.ir, key.0)
+        } else {
+            let mut captures = BTreeSet::new();
+            data.operations[key.0].kind.for_each_operand(&mut |operand| {
+                if let Operand::Value(_, e) = operand {
+                    captures.insert(e);
+                }
+            });
+            captures.into_iter().collect()
+        };
+        // The root and its interface are complete before recipe bodies are built.
+        let kernel = Function {
+            name: key.1.clone(),
+            kind: FunctionKind::Kernel([number(graph, a[5])?, 1, 1]),
+            results: 0,
+            blocks: vec![],
+        }
+        .insert(
+            (0..captures.len()).map(|i| format!("c{i}")).collect(),
+            &mut data.state.blocks,
+            &mut data.state.bodies,
         );
+        let body = data.state.blocks[kernel].body;
+        data.state.bodies[body].instructions.extend(
+            captures
+                .iter()
+                .enumerate()
+                .map(|(i, &e)| Instruction::BindExpression(e, Value::Local(format!("c{i}")))),
+        );
+        let dispatch = data.state.dispatches.alloc(DispatchData {
+            owner,
+            kernel,
+            grid,
+            // Runtime domains use the kernel's grid-stride loop until the ABI
+            // can express their formulas; fixed grids are filled by ABI readout.
+            size: DispatchSize::Fixed {
+                x: 1,
+                y: 1,
+                z: 1,
+                explicit: true,
+            },
+            captures,
+            reads: BTreeSet::new(),
+            writes: BTreeSet::new(),
+            dependencies: BTreeSet::new(),
+        });
+        stages.insert(a[0], dispatch);
+        result.stages.insert(key, dispatch);
         Ok(())
     })?;
     rows(graph, "Access", |a| {
         if let Some(&id) = buffers.get(&a[1]) {
-            let Some(stage) = stages.get(&a[0]).and_then(|key| result.stages.get_mut(key)) else {
+            let Some(&dispatch) = stages.get(&a[0]) else {
                 return Err(invalid("access without a planned stage"));
             };
             match graph.value_to_base::<S>(a[2]).as_str() {
                 "read" => {
-                    stage.reads.insert(id);
+                    data.state.dispatches[dispatch].reads.insert(id);
                 }
                 "write" => {
-                    stage.writes.insert(id);
+                    data.state.dispatches[dispatch].writes.insert(id);
                 }
                 _ => return Err(invalid("unknown access")),
             }
@@ -208,16 +249,94 @@ pub(in crate::egglog) fn read(
         Ok(())
     })?;
     rows(graph, "DispatchDependency", |a| {
-        let Some(before) = stages.get(&a[0]).and_then(|key| result.stages.get(key)).map(|s| s.id) else {
+        let Some(&before) = stages.get(&a[0]) else {
             return Err(invalid("dependency without a planned predecessor"));
         };
-        let Some(after) = stages.get(&a[1]).and_then(|key| result.stages.get_mut(key)) else {
+        let Some(&after) = stages.get(&a[1]) else {
             return Err(invalid("dependency without a planned successor"));
         };
-        after.dependencies.insert(before);
+        data.state.dispatches[after].dependencies.insert(before);
         Ok(())
     })?;
+    let mut lengths = BTreeMap::new();
+    rows(graph, "AbiLocalLength", |a| {
+        lengths.insert(
+            (
+                OperationId::from(operations[&a[0]]),
+                graph.value_to_base::<S>(a[1]).to_string(),
+                number(graph, a[2])?,
+            ),
+            graph.value_to_base::<i64>(a[3]) as u64,
+        );
+        Ok(())
+    })?;
+    let types = keys(graph, "TypeId")?;
+    rows(graph, "LocalBuffer", |a| {
+        let key = (
+            OperationId::from(operations[&a[0]]),
+            graph.value_to_base::<S>(a[1]).to_string(),
+            number(graph, a[2])?,
+        );
+        let Some(&capacity) = lengths.get(&key) else {
+            return Err(invalid("TODO: dynamic invocation-local allocation"));
+        };
+        let id = data.state.buffers.alloc(BufferData {
+            name: key.1.clone(),
+            length: extent(graph, a[4], &mut extents, &chunks)?,
+            element: data.types[TypeId::from(types[&a[3]])].ty.clone(),
+            storage: Storage::Function,
+        });
+        data.state.abi.local_lengths.insert(id, capacity);
+        result.local_slots.insert(key, id);
+        Ok(())
+    })?;
+    result.buffers = buffers;
+    result.launches = stages;
     Ok(result)
+}
+
+// Capture external leaves, not whole expressions: branches and partial
+// expressions must still execute inside the scalar invocation that owns them.
+fn scalar_captures(data: &Ir, op: OperationId) -> Vec<ExprId> {
+    let mut operations = vec![op];
+    let mut regions = BTreeSet::new();
+    let mut pending_regions = data.operations[op].kind.structured_regions();
+    let mut pending = vec![];
+    while let Some(r) = pending_regions.pop() {
+        if !regions.insert(r) {
+            continue;
+        }
+        let region = &data.regions[r];
+        pending.extend(&region.results);
+        for &child in &region.members {
+            operations.push(child);
+            pending_regions.extend(data.operations[child].kind.structured_regions());
+        }
+    }
+    for op in operations {
+        data.operations[op].kind.for_each_operand(&mut |operand| {
+            if let Operand::Value(_, e) = operand {
+                pending.push(e);
+            }
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut captures = BTreeSet::new();
+    while let Some(e) = pending.pop() {
+        if !seen.insert(e) {
+            continue;
+        }
+        match &data.expressions[e].kind {
+            ExprKind::Parameter(p) if !regions.contains(&data.parameters[*p].region) => {
+                captures.insert(e);
+            }
+            ExprKind::OperationResult(op) if !regions.contains(&data.operations[*op].region) => {
+                captures.insert(e);
+            }
+            kind => pending.extend(kind.children()),
+        }
+    }
+    captures.into_iter().collect()
 }
 
 fn extent(
@@ -257,11 +376,11 @@ fn keys(graph: &EGraph, name: &str) -> Result<HashMap<EggValue, u32>, OptimizeEr
     Ok(keys)
 }
 
-fn number(graph: &EGraph, value: EggValue) -> Result<u32, OptimizeError> {
+pub(in crate::egglog) fn number(graph: &EGraph, value: EggValue) -> Result<u32, OptimizeError> {
     u32::try_from(graph.value_to_base::<i64>(value)).map_err(|_| invalid("integer range"))
 }
 
-fn rows(
+pub(in crate::egglog) fn rows(
     graph: &EGraph,
     name: &str,
     mut f: impl FnMut(&[EggValue]) -> Result<(), OptimizeError>,

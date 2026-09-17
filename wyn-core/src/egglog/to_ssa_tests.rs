@@ -50,6 +50,42 @@ fn filtered_reduction_and_shared_count_reach_wgsl() {
 }
 
 #[test]
+fn mapped_filter_result_keeps_its_runtime_sized_view() {
+    compile(include_str!("../../../testfiles/filter_then_map.wyn"));
+}
+
+#[test]
+fn signed_and_unsigned_integer_power_reach_wgsl() {
+    compile(include_str!("../../../testfiles/int_pow.wyn"));
+}
+
+#[test]
+fn invocation_local_filter_keeps_a_bounded_array_length() {
+    compile(include_str!("../../../testfiles/filter_demo.wyn"));
+}
+
+#[test]
+fn computed_array_outputs_have_storage_and_a_writer() {
+    use pipeline_descriptor::{Binding, BufferLen};
+    for source in [
+        include_str!("../../../testfiles/array_param_view_multi.wyn"),
+        include_str!("../../../testfiles/array_param_view_slice.wyn"),
+    ] {
+        compile(source);
+        let output = pipeline(source);
+        let [result] = output.pipeline.source_results.as_slice() else {
+            panic!("one array result");
+        };
+        let Pipeline::Compute(p) = &output.pipeline.pipelines[result.pipeline_index] else {
+            panic!("compute result");
+        };
+        assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
+            set, binding, length: Some(BufferLen::Fixed { bytes: 4 }), ..
+        } if (*set, *binding) == (result.set, result.binding))));
+    }
+}
+
+#[test]
 fn sliced_fused_map_reaches_wgsl() {
     compile(
         "entry main(xs: []i32) [4]i32 =
@@ -111,6 +147,12 @@ fn conditional_expressions_inside_device_loops_reach_wgsl() {
 }
 
 #[test]
+fn branching_loop_tests_and_header_array_reads_reach_wgsl() {
+    compile("entry main(xs: [4]i32, limit: i32) i32 = loop acc = 0 while (if acc < limit then xs[acc % 4] > 0 else false) do acc + 1");
+    compile("entry main(xs: [4]i32) i32 = loop acc = 0 for i < xs[0] do acc + i");
+}
+
+#[test]
 fn host_control_requires_a_runtime_cfg_instead_of_a_false_static_descriptor() {
     let source =
         "entry main(xs: [4]i32, n: i32) [4]i32 = loop acc = xs for k < n do map(|x: i32| x + k, acc)";
@@ -125,17 +167,28 @@ fn host_control_requires_a_runtime_cfg_instead_of_a_false_static_descriptor() {
 
 #[test]
 fn existing_spirv_backend_also_accepts_the_handoff() {
-    let tlc = infer_input_slice_bounds(
-        compile_thru_tlc("entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)").unwrap(),
-    );
-    let program = schedule(
-        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
-    )
-    .unwrap();
-    let ssa = to_ssa(&program, CodegenTarget::Spirv).unwrap();
-    let output = lower_ssa_to_spirv(ssa).unwrap();
-    let module = wspirv::dr::load_words(output.spirv).unwrap();
-    assert_eq!(module.entry_points.len(), 1);
+    for source in [
+        "entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)",
+        "entry main(xs: []i32) [2]i32 = [xs[0], xs[1]]",
+        include_str!("../../../testfiles/filter_captures_runtime_array.wyn"),
+    ] {
+        let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+        let program = schedule(
+            simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let ssa = to_ssa(&program, CodegenTarget::Spirv).unwrap();
+        let output = lower_ssa_to_spirv(ssa).unwrap();
+        let bytes: Vec<_> = output.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
 }
 
 #[test]
@@ -309,4 +362,118 @@ fn tuple_of_views_uses_the_tlc_component_bindings() {
     )
     .validate(&module)
     .unwrap();
+}
+
+#[test]
+fn computed_graphics_captures_share_the_producer_binding() {
+    use pipeline_descriptor::Binding;
+    let output = pipeline(include_str!("../../../testfiles/playground/conway.wyn"));
+    let [result] = output.pipeline.source_results.as_slice() else {
+        panic!("one computed board");
+    };
+    assert!(output.pipeline.pipelines.iter().any(|p| {
+        let Pipeline::Graphics(p) = p else { return false };
+        p.bindings.iter().any(|b| {
+            matches!(b, Binding::StorageBuffer { set, binding, .. }
+            if (*set, *binding) == (result.set, result.binding))
+        })
+    }));
+}
+
+#[test]
+fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
+    use pipeline_descriptor::{Binding, BufferLen, HostSizeScalar};
+    let source = include_str!("../../../testfiles/regressions/uniform_output_size.wyn")
+        .replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }")
+        .replace("([]f32,", "([]vec3f32,")
+        .replace(
+            "target_load(rendered, @[i % width, i / width], 0u32)",
+            "@[f32(i), 0.0, 0.0]",
+        );
+    let output = pipeline(&source);
+    let lengths: Vec<_> = output
+        .pipeline
+        .pipelines
+        .iter()
+        .filter_map(|p| {
+            let Pipeline::Compute(p) = p else { return None };
+            p.bindings.iter().find_map(|b| match b {
+                Binding::StorageBuffer {
+                    length: Some(BufferLen::HostProvided { inputs, elem_bytes }),
+                    ..
+                } => Some((inputs, *elem_bytes)),
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(lengths.len(), 1);
+    let (inputs, stride) = lengths[0];
+    assert_eq!(stride, 16);
+    assert_eq!(
+        inputs.iter().map(|i| (i.name.as_str(), i.offset, i.scalar)).collect::<Vec<_>>(),
+        [
+            ("frame_resolution_x", 16, HostSizeScalar::F32),
+            ("frame_resolution_y", 20, HostSizeScalar::F32)
+        ]
+    );
+}
+
+#[test]
+fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
+    use crate::egglog::blocks::{BufferData, Function, FunctionKind, Storage, Value};
+    use crate::egglog::{Program, Scheduled};
+    use crate::interface::{StorageBindingDecl, StorageRole};
+    let mut data = Program {
+        ir: Default::default(),
+        state: Scheduled::default(),
+    };
+    let buffer = data.state.buffers.alloc(BufferData {
+        name: "shared".into(),
+        length: Value::Int(1),
+        element: crate::types::i32(),
+        storage: Storage::Device,
+    });
+    data.state.abi.bindings.insert(
+        buffer,
+        StorageBindingDecl {
+            binding: crate::BindingRef::new(0, 0),
+            elem_ty: crate::types::i32(),
+            role: StorageRole::Input,
+            logical_resource: None,
+            length: None,
+        },
+    );
+    let root = Function {
+        name: "load".into(),
+        kind: FunctionKind::Device,
+        results: 1,
+        blocks: vec![],
+    }
+    .insert(vec![], &mut data.state.blocks, &mut data.state.bodies);
+    let crate::egglog::Exit::Return(returns) = data.state.blocks[root].exit else {
+        panic!("return")
+    };
+    data.state.bodies[returns].results.push(Value::op("index", [Value::Buffer(buffer), Value::Int(0)]));
+    let mut compiler = super::Compiler {
+        origins: Default::default(),
+        placements: Default::default(),
+        data: &data,
+        functions: vec![],
+        specializations: Default::default(),
+        active: Default::default(),
+        used: Default::default(),
+    };
+    let first = compiler.function(root, vec![]).unwrap();
+    assert_eq!(
+        compiler.functions[first.0 as usize].body.return_ty,
+        crate::types::i32()
+    );
+    assert!(compiler.used.contains(&buffer));
+    compiler.used.clear();
+    assert_eq!(compiler.function(root, vec![]).unwrap(), first);
+    assert_eq!(compiler.functions.len(), 1);
+    assert!(
+        compiler.used.contains(&buffer),
+        "cached helper still needs its storage in each shader"
+    );
 }

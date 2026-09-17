@@ -1,15 +1,14 @@
 //! Parallel dispatch planning and lowering to blocks with opaque scalar bodies.
 use super::blocks::{
-    BlockData, BodyData, BufferData, DispatchData, Edge, Exit, Function, FunctionKind, Instruction,
-    Storage, Value,
+    BlockData, BodyData, Control, Edge, Exit, Function, FunctionKind, Instruction, Storage, Value,
 };
 use super::data::intern_type;
-use super::planning::{facts, outputs, read, Readout, Recipe, KEYS, RULES, RUN};
+use super::planning::{abi, facts, outputs, read, Readout, Recipe, KEYS, RULES, RUN};
 use super::scalar::placement_index;
 use super::{OptimizeError, Placed, PlacementSite, Program, Scheduled};
 use crate::egglog::data::{
-    Array, BlockId, BodyId, BufferId, DefinitionId, ExprId, ExprKind, LoopKind, OperationId, OperationKind,
-    RegionId, SoacBody,
+    Array, BlockId, BodyId, DefinitionId, ExprId, ExprKind, LoopKind, OperationId, OperationKind, RegionId,
+    SoacBody,
 };
 use crate::egglog::dependencies::analyze;
 use crate::egglog::timing::{span, time};
@@ -19,6 +18,7 @@ use egglog_engine::EGraph;
 use std::collections::BTreeMap;
 
 mod kernels;
+mod publication;
 mod validation;
 
 const WIDTH: u32 = 64;
@@ -40,6 +40,17 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     let schedules = time("validate dependency order", || summary.schedules(&converted))?;
     let entries: Vec<_> = converted.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
     let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
+    converted.state.abi.inputs = super::abi::inputs(
+        &converted.entries,
+        &converted.entry_params,
+        &converted.input_bounds,
+        &converted.symbols,
+        &converted.regions,
+        &converted.definitions,
+        &converted.types,
+        &converted.parameters,
+    )?;
+    let mut uniforms = vec![];
     let mut graph = EGraph::default();
     time("load planning schema", || {
         graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
@@ -49,14 +60,21 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     time("read planning facts", || {
         graph.update(|mut sink| {
             outputs(&mut converted, &mut sink)?;
-            facts(&converted, &summary, count_type, &mut sink)
+            facts(&converted, &summary, count_type, &mut sink)?;
+            abi::facts(
+                &converted.state.abi.inputs,
+                &converted.state.outputs,
+                &converted.entries,
+                &converted.types,
+                &mut sink,
+                &mut uniforms,
+            )
         })
     })?;
     time("derive stages, storage and dispatch order", || {
         graph.parse_and_run_program(None, RUN)
     })?;
     let resources = read(&graph, &mut converted)?;
-    drop(graph);
     let plan = span("build blocks and dispatches");
     let operation_values = converted
         .ir
@@ -82,9 +100,11 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
         current_operation: None,
         operation_values,
     };
+    let mut entry_roots = BTreeMap::new();
     for (entry, definition) in entries {
         let device = planner.data.entries[entry].declaration.entry_kind != EntryKind::Compute;
         let root = planner.definition(definition, device)?;
+        entry_roots.insert(entry, root);
         if let Some(interface) = &mut planner.data.state.blocks[root].interface {
             interface.kind = FunctionKind::Entry(entry);
         }
@@ -93,7 +113,29 @@ pub fn schedule(program: Program<Placed>) -> Result<Program<Scheduled>, Optimize
     if !planner.resources.stages.is_empty() {
         return Err(error("planned dispatches were not lowered"));
     }
-    time("validate blocks", || validation::validate(planner.data))?;
+    let dispatch_order = time("validate blocks", || validation::validate(planner.data))?;
+    let roots = time("read shader interfaces", || {
+        abi::read(
+            &graph,
+            planner.data,
+            &planner.resources.buffers,
+            &planner.resources.launches,
+            &entry_roots,
+            &uniforms,
+        )
+    })?;
+    planner.output_copies()?;
+    planner.data.state.physical_kernels = time("finalize physical kernel graph", || {
+        publication::build_physical_kernel_graph(
+            &graph,
+            &roots,
+            &dispatch_order,
+            &mut planner.data.state.abi,
+            &planner.data.state.dispatches,
+            &planner.data.ir.entries,
+            &planner.data.state.blocks,
+        )
+    })?;
     Ok(converted)
 }
 
@@ -107,7 +149,7 @@ struct Planner<'a> {
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
     functions: BTreeMap<(RegionId, bool), BlockId>,
     resources: Readout,
-    allocation_counts: BTreeMap<(OperationId, String), u32>,
+    allocation_counts: BTreeMap<String, u32>,
     current_operation: Option<OperationId>,
     operation_values: BTreeMap<OperationId, ExprId>,
 }
@@ -125,14 +167,18 @@ impl Planner<'_> {
     fn block(&mut self, function: BlockId, parameters: Vec<String>) -> BlockId {
         let body = self.body(vec![], vec![]);
         let returns = self.values(vec![]);
-        self.data.state.blocks.alloc(BlockData {
+        let id = self.data.state.blocks.alloc(BlockData {
             function,
-            loop_exit: None,
+            control: None,
             interface: None,
             parameters,
             body,
             exit: Exit::Return(returns),
-        })
+        });
+        if let Some(interface) = &mut self.data.state.blocks[function].interface {
+            interface.blocks.push(id);
+        }
+        id
     }
     fn function(
         &mut self,
@@ -141,23 +187,32 @@ impl Planner<'_> {
         parameters: Vec<String>,
         results: usize,
     ) -> BlockId {
-        let id = self.data.state.blocks.alloc_id();
-        let body = self.body(vec![], vec![]);
-        let returns = self.values(vec![]);
-        self.data.state.blocks.insert(
-            id,
-            BlockData {
-                function: id,
-                loop_exit: None,
-                interface: Some(Function { name, kind, results }),
-                parameters,
-                body,
-                exit: Exit::Return(returns),
-            },
-        );
-        id
+        Function {
+            name,
+            kind,
+            results,
+            blocks: vec![],
+        }
+        .insert(
+            parameters,
+            &mut self.data.state.blocks,
+            &mut self.data.state.bodies,
+        )
     }
     fn emit(&mut self, block: BlockId, instruction: Instruction) {
+        if matches!(
+            self.data.state.blocks[self.data.state.blocks[block].function]
+                .interface
+                .as_ref()
+                .map(|f| &f.kind),
+            Some(FunctionKind::Host | FunctionKind::Entry(_))
+        ) {
+            if let Instruction::BindResult(op, value) = &instruction {
+                if materialized(value) {
+                    self.data.state.materialized.insert(*op, value.clone());
+                }
+            }
+        }
         let body = self.data.state.blocks[block].body;
         self.data.state.bodies[body].instructions.push(instruction);
     }
@@ -171,7 +226,15 @@ impl Planner<'_> {
         let edge = self.edge(target, arguments);
         self.data.state.blocks[from].exit = Exit::Jump(edge);
     }
-    fn branch(&mut self, from: BlockId, condition: Value, yes: BlockId, no: BlockId) {
+    fn branch(
+        &mut self,
+        from: BlockId,
+        condition: Value,
+        yes: BlockId,
+        no: BlockId,
+        merge: Option<BlockId>,
+    ) {
+        self.data.state.blocks[from].control = merge.map(|merge| Control::Selection { merge });
         let condition = self.values(vec![condition]);
         let yes = self.edge(yes, vec![]);
         let no = self.edge(no, vec![]);
@@ -256,7 +319,7 @@ impl Planner<'_> {
                 let no = self.block(owner, vec![]);
                 let selected = format!("selected{}", op.as_u32());
                 let merge = self.block(owner, vec![selected.clone()]);
-                self.branch(block, Value::Source(condition), yes, no);
+                self.branch(block, Value::Source(condition), yes, no, Some(merge));
                 let yes_end = self.region_into(then_region, yes, device)?;
                 let no_end = self.region_into(else_region, no, device)?;
                 self.jump(yes_end, merge, vec![self.result(then_region)]);
@@ -370,11 +433,31 @@ impl Planner<'_> {
         let index_name = format!("index{}", op.as_u32());
         let acc = Value::Local(acc_name.clone());
         let index = Value::Local(index_name.clone());
-        let test = self.block(owner, vec![acc_name, index_name]);
+        let loop_header = self.block(owner, vec![acc_name, index_name]);
+        let test = self.block(owner, vec![]);
+        let continuing = self.block(
+            owner,
+            vec![
+                format!("next_acc{}", op.as_u32()),
+                format!("next_index{}", op.as_u32()),
+            ],
+        );
+        self.jump(
+            continuing,
+            loop_header,
+            vec![
+                Value::local(&format!("next_acc{}", op.as_u32())),
+                Value::local(&format!("next_index{}", op.as_u32())),
+            ],
+        );
+        self.jump(loop_header, test, vec![]);
         let iterate = self.block(owner, vec![]);
         let after = self.block(owner, vec![]);
-        self.data.state.blocks[test].loop_exit = Some(after);
-        self.jump(from, test, vec![Value::Source(init), Value::Int(0)]);
+        self.data.state.blocks[loop_header].control = Some(Control::Loop {
+            merge: after,
+            continuing,
+        });
+        self.jump(from, loop_header, vec![Value::Source(init), Value::Int(0)]);
         let parameters = self.data.regions[header].parameters.clone();
         if let Some(&parameter) = parameters.first() {
             self.emit(test, Instruction::BindParameter(parameter, acc.clone()));
@@ -393,7 +476,7 @@ impl Planner<'_> {
             ),
             LoopKind::ForRange(bound) => (test, Value::op("lt", [index.clone(), Value::Source(*bound)])),
         };
-        self.branch(test_end, condition, iterate, after);
+        self.branch(test_end, condition, iterate, after, None);
         if let Some(&parameter) = parameters.get(1) {
             let value = match kind {
                 LoopKind::For(array) => Value::op("index", [Value::Source(*array), index.clone()]),
@@ -409,7 +492,7 @@ impl Planner<'_> {
         let end = self.region_into(body, iterate, device)?;
         self.jump(
             end,
-            test,
+            continuing,
             vec![self.result(body), Value::op("add", [index, Value::Int(1)])],
         );
         self.emit(after, Instruction::BindResult(op, acc));
@@ -468,14 +551,6 @@ impl Planner<'_> {
             }
         }
     }
-    fn buffer(&mut self, name: &str, length: Value, element: Type, storage: Storage) -> BufferId {
-        self.data.state.buffers.alloc(BufferData {
-            name: name.into(),
-            length,
-            element,
-            storage,
-        })
-    }
 }
 
 fn signature(body: &SoacBody) -> (usize, usize) {
@@ -500,3 +575,12 @@ fn length(inputs: &[Array]) -> Value {
 #[cfg(test)]
 #[path = "schedule_tests.rs"]
 mod schedule_tests;
+
+fn materialized(value: &Value) -> bool {
+    match value {
+        Value::Buffer(_) => true,
+        Value::Field(value, _) => materialized(value),
+        Value::Tuple(values) | Value::Primitive(_, values) => values.iter().any(materialized),
+        _ => false,
+    }
+}

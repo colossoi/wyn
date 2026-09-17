@@ -1,14 +1,15 @@
 //! SSA handoff from scheduled blocks and the derived resource plan.
-use super::blocks::{Exit, FunctionKind, Instruction, Storage, Value};
+use super::abi::{concrete, u32_type};
+use super::blocks::{Control, Exit, Instruction, Storage, Value};
 use super::scalar::placement_index;
-use super::timing::{span, time};
+use super::timing::span;
 use super::{OptimizeError, PlacementSite};
 use crate::ast::Span;
 use crate::egglog::data::{BlockId, BufferId, ExprId, OperationId, OperationKind, ParameterId};
 use crate::egglog::{Program, Scheduled};
 use crate::flow::{ControlHeader, ExecutionModel};
 use crate::interface::lowering::build_entry_outputs;
-use crate::interface::{EntryInput, EntryKind, StorageBindingDecl, StorageRole};
+use crate::interface::{EntryInput, EntryKind};
 use crate::op::{OpTag, PureViewSource};
 use crate::ssa::builder::{BuilderError, FuncBuilder};
 use crate::ssa::context::BackendGlobal;
@@ -18,12 +19,9 @@ use crate::ssa::types::{
 };
 use crate::types::{sized_array, unit, Type, TypeExt, TypeName};
 use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, SchedulePolicy};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wyn_base::IdSource;
 
-mod control;
-mod interface;
-mod publish;
 mod values;
 
 /// Lower scheduled kernels with their authored inputs and planned storage.
@@ -31,22 +29,11 @@ mod values;
 /// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
 pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
     let _timing = span("to SSA");
-    let results = data
-        .state
-        .blocks
-        .values()
-        .filter(|b| {
-            matches!(
-                data.state.blocks[b.function].interface.as_ref().map(|f| &f.kind),
-                Some(FunctionKind::Host | FunctionKind::Entry(_))
-            )
-        })
-        .flat_map(|b| &data.state.bodies[b.body].instructions)
-        .filter_map(|i| match i {
-            Instruction::BindResult(op, value) if materialized(value) => Some((*op, value.clone())),
-            _ => None,
-        })
-        .collect();
+    if let Some(root) = data.state.unsupported_host {
+        return Err(error(format!(
+            "TODO: runtime publication of conditional or repeated host dispatches ({root:?})"
+        )));
+    }
     let mut origins = BTreeMap::new();
     for origin in data.origins.values().filter(|origin| origin.span.module().is_some()) {
         origins.entry(origin.expression).or_insert(origin.span);
@@ -56,40 +43,13 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         placements: placement_index(&data.ir, &data.state.placements),
         data,
         functions: vec![],
-        specializations: vec![],
-        inputs: interface::inputs(data)?,
-        bindings: BTreeMap::new(),
-        results,
+        specializations: HashMap::new(),
+        active: HashSet::new(),
         used: BTreeSet::new(),
     };
-    time("assign physical bindings", || compiler.allocate_bindings())?;
-    let owners: BTreeMap<_, _> = data.state.dispatches.values().map(|d| (d.kernel, d.owner)).collect();
-    let mut roots = vec![];
-    for (&id, block) in &data.state.blocks {
-        let Some(f) = &block.interface else {
-            continue;
-        };
-        match f.kind {
-            FunctionKind::Kernel(size) => roots.push((id, owners[&id], size, false)),
-            FunctionKind::Entry(entry) => {
-                if contains_dispatch(data, id) && !static_host(data, id) {
-                    return Err(error(format!(
-                        "TODO: runtime publication of conditional or repeated host dispatches in {} ({id:?})",
-                        data.entries[entry].declaration.name
-                    )));
-                }
-                if data.state.outputs.values().any(|o| o.entry == entry && o.scalar)
-                    || !contains_dispatch(data, id)
-                {
-                    roots.push((id, entry, [1, 1, 1], true));
-                }
-            }
-            _ => {}
-        }
-    }
-    roots.sort_by_key(|r| r.0);
+    let roots = &data.state.abi.roots;
     let mut entries = vec![];
-    for &(root, owner, size, finish) in &roots {
+    for &(root, owner, size, finish) in roots {
         let _entry = span("lower entry or kernel");
         compiler.used.clear();
         let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
@@ -124,8 +84,11 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             )
             .map_err(|e| error(e.to_string()))?
         };
-        let storage_bindings =
-            compiler.used.iter().filter_map(|id| compiler.bindings.get(id).cloned()).collect();
+        let storage_bindings = compiler
+            .used
+            .iter()
+            .filter_map(|id| compiler.data.state.abi.bindings.get(id).cloned())
+            .collect();
         entries.push(EntryPoint {
             id: EntryId::from(root.as_u32()),
             name: entry_name(root),
@@ -150,12 +113,19 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             span: Span::generated(),
         });
     }
-    let (pipeline, physical_kernels) = compiler.publish(&mut entries, &roots)?;
+    let pipeline = super::publish::publish(
+        &data.state.abi,
+        &data.entries,
+        &data.symbols,
+        &data.state.outputs,
+        &data.state.dispatches,
+        &mut entries,
+    )?;
     Ok(
         ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
             BackendGlobal {
                 pipeline,
-                physical_kernels,
+                physical_kernels: data.state.physical_kernels.clone(),
                 profile: LoweringProfile::new(target, SchedulePolicy::Parallel),
             },
         ),
@@ -166,45 +136,6 @@ fn entry_name(root: BlockId) -> String {
     format!("egg_kernel_{}", root.as_u32())
 }
 
-fn materialized(value: &Value) -> bool {
-    match value {
-        Value::Buffer(_) => true,
-        Value::Field(value, _) => materialized(value),
-        Value::Tuple(values) | Value::Primitive(_, values) => values.iter().any(materialized),
-        _ => false,
-    }
-}
-
-/// The existing runtime executes a static sequence. Do not advertise a
-/// conditional or repeated launch as an unconditional executable pipeline.
-fn static_host(data: &Program<Scheduled>, root: BlockId) -> bool {
-    // Scalar memory reads need their own stage if a later launch can overwrite
-    // their inputs. Until those stages exist, moving the read to the final
-    // publication kernel would change the observed value.
-    let mut pending = vec![root];
-    let mut read = false;
-    while let Some(id) = pending.pop() {
-        let block = &data.state.blocks[id];
-        for instruction in &data.state.bodies[block.body].instructions {
-            match instruction {
-                Instruction::Evaluate(_) | Instruction::Call { .. } => read = true,
-                Instruction::Dispatch(_) if read => return false,
-                _ => {}
-            }
-        }
-        if let Exit::Jump(edge) = &block.exit {
-            pending.push(edge.target);
-        }
-        if matches!(block.exit, Exit::Branch { .. }) {
-            return false;
-        }
-    }
-    data.state.blocks.iter().filter(|(_, b)| b.function == root).all(|(_, b)| {
-        !matches!(b.exit, Exit::Branch { .. })
-            && !data.state.bodies[b.body].instructions.iter().any(|i| matches!(i, Instruction::Call { .. }))
-    })
-}
-
 fn error(message: impl Into<String>) -> OptimizeError {
     OptimizeError::Output(format!("egglog to SSA: {}", message.into()))
 }
@@ -212,81 +143,48 @@ fn builder_error(e: BuilderError) -> OptimizeError {
     error(e.to_string())
 }
 
-fn contains_dispatch(data: &Program<Scheduled>, root: BlockId) -> bool {
-    let mut pending = vec![root];
-    let mut seen = BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let b = &data.state.blocks[id];
-        for i in &data.state.bodies[b.body].instructions {
-            match i {
-                Instruction::Dispatch(_) => return true,
-                Instruction::Call { function, .. } => pending.push(*function),
-                _ => {}
-            }
-        }
-        match &b.exit {
-            Exit::Jump(e) => pending.push(e.target),
-            Exit::Branch { yes, no, .. } => pending.extend([yes.target, no.target]),
-            Exit::Return(_) => {}
-        }
-    }
-    false
-}
-
-struct Specialization {
-    source: BlockId,
-    parameters: Vec<Type>,
-    id: FunctionId,
-    result: Option<Vec<Type>>,
-}
 struct Compiler<'a> {
     origins: BTreeMap<ExprId, Span>,
     placements: BTreeMap<PlacementSite, Vec<ExprId>>,
     data: &'a Program<Scheduled>,
     functions: Vec<Function>,
-    specializations: Vec<Specialization>,
-    inputs: BTreeMap<ParameterId, Vec<EntryInput>>,
-    bindings: BTreeMap<BufferId, StorageBindingDecl>,
-    results: BTreeMap<OperationId, Value>,
+    specializations: HashMap<(BlockId, Vec<Type>), (FunctionId, BTreeSet<BufferId>)>,
+    active: HashSet<BlockId>,
     used: BTreeSet<BufferId>,
 }
 impl Compiler<'_> {
-    fn function(
-        &mut self,
-        source: BlockId,
-        parameters: Vec<Type>,
-    ) -> Result<(FunctionId, Vec<Type>), OptimizeError> {
-        if let Some(s) =
-            self.specializations.iter().find(|s| s.source == source && s.parameters == parameters)
-        {
-            let Some(result) = &s.result else {
-                return Err(error("TODO: recursive helper signatures"));
-            };
-            return Ok((s.id, result.clone()));
+    // Emit each specialization once. Its signature comes from the actual SSA
+    // body, and cached resource uses belong to every shader that calls it.
+    fn function(&mut self, source: BlockId, parameters: Vec<Type>) -> Result<FunctionId, OptimizeError> {
+        let key = (source, parameters);
+        if let Some((id, buffers)) = self.specializations.get(&key) {
+            self.used.extend(buffers);
+            return Ok(*id);
         }
-        let index = self.specializations.len();
-        let id = FunctionId::from(u32::try_from(index).map_err(|_| error("too many helper functions"))?);
-        self.specializations.push(Specialization {
-            source,
-            parameters: parameters.clone(),
-            id,
-            result: None,
-        });
-        let mut lower = Body::new(self, source, &parameters, 1)?;
+        if !self.active.insert(source) {
+            return Err(error("recursive device helper"));
+        }
+        let caller_buffers = std::mem::take(&mut self.used);
+        let mut lower = Body::new(self, source, &key.1, 1)?;
         lower.visit(source)?;
-        let (body, result) = lower.finish()?;
-        self.specializations[index].result = Some(result.clone());
+        let (body, results) = lower.finish()?;
+        if self.data.state.blocks[source].interface.as_ref().is_none_or(|f| f.results != results.len()) {
+            return Err(error("helper result arity"));
+        }
+        let index = u32::try_from(self.functions.len()).map_err(|_| error("too many helpers"))?;
+        let id = FunctionId::from(index);
         self.functions.push(Function {
             id,
-            name: format!("egg_helper_{}_{index}", source.as_u32()),
+            name: format!("egg_helper_{}_{}", source.as_u32(), index),
             body,
             span: Span::generated(),
             linkage_name: None,
         });
-        Ok((id, result))
+        let buffers = std::mem::replace(&mut self.used, caller_buffers);
+        self.used.extend(&buffers);
+        self.specializations.insert(key, (id, buffers));
+        self.active.remove(&source);
+        Ok(id)
     }
 }
 
@@ -309,8 +207,6 @@ struct Body<'a, 'b> {
     environment: Environment,
     blocks: BTreeMap<BlockId, crate::flow::BlockId>,
     entered: BTreeSet<BlockId>,
-    active: BTreeSet<BlockId>,
-    continuing: BTreeMap<BlockId, crate::flow::BlockId>,
     parameter_types: BTreeMap<BlockId, Vec<Type>>,
     return_types: Option<Vec<Type>>,
     width: u32,
@@ -343,8 +239,11 @@ impl<'a, 'b> Body<'a, 'b> {
             );
         }
         let mut blocks = BTreeMap::from([(entry, builder.entry())]);
-        for (&id, b) in &compiler.data.state.blocks {
-            if b.function == entry && id != entry {
+        let Some(function) = &compiler.data.state.blocks[entry].interface else {
+            return Err(error("helper has no function interface"));
+        };
+        for &id in &function.blocks {
+            if id != entry {
                 blocks.insert(id, builder.create_block());
             }
         }
@@ -354,8 +253,6 @@ impl<'a, 'b> Body<'a, 'b> {
             environment,
             blocks,
             entered: BTreeSet::new(),
-            active: BTreeSet::new(),
-            continuing: BTreeMap::new(),
             parameter_types: BTreeMap::new(),
             return_types: None,
             width,
@@ -365,39 +262,16 @@ impl<'a, 'b> Body<'a, 'b> {
             inputs: vec![],
         })
     }
-    fn finish(mut self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
-        for (&source, &cont) in &self.continuing {
-            self.builder.switch_to_block_unchecked(cont);
-            let args =
-                self.builder.func().blocks[cont].params.iter().copied().map(ValueRef::from).collect();
-            self.builder
-                .terminate(Terminator::Branch {
-                    target: self.blocks[&source],
-                    args,
-                })
-                .map_err(builder_error)?;
-            let Some(exit) = self.compiler.data.state.blocks[source].loop_exit else {
-                return Err(error("loop exit missing"));
-            };
-            self.builder.set_control_header(
-                self.blocks[&source],
-                ControlHeader::Loop {
-                    merge: self.blocks[&exit],
-                    continue_block: cont,
-                },
-            );
-        }
+    fn finish(self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
         let types = self.return_types.unwrap_or_default();
         let mut body = self.builder.finish().map_err(builder_error)?;
         body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
-        control::annotate_selections(&mut body)?;
         Ok((body, types))
     }
     fn visit(&mut self, id: BlockId) -> Result<(), OptimizeError> {
         if !self.entered.insert(id) {
             return Ok(());
         }
-        self.active.insert(id);
         self.builder.switch_to_block_unchecked(self.blocks[&id]);
         let data = self.compiler.data;
         for (name, &value) in data.state.blocks[id]
@@ -413,25 +287,22 @@ impl<'a, 'b> Body<'a, 'b> {
                 },
             );
         }
+        if let Some(control @ Control::Loop { .. }) = data.state.blocks[id].control {
+            let control = match control {
+                Control::Selection { .. } => unreachable!(),
+                Control::Loop { merge, continuing } => ControlHeader::Loop {
+                    merge: self.blocks[&merge],
+                    continue_block: self.blocks[&continuing],
+                },
+            };
+            self.builder.set_control_header(self.blocks[&id], control);
+        }
         for instruction in &data.state.bodies[data.state.blocks[id].body].instructions {
             self.instruction(instruction)?;
         }
         match &data.state.blocks[id].exit {
             Exit::Return(body) => {
                 let values = if self.finish_outputs {
-                    let Some(owner) = self.entry else {
-                        return Err(error("output publication requires an entry owner"));
-                    };
-                    for output in data.state.outputs.values().filter(|o| o.entry == owner && o.scalar) {
-                        let Some(buffer) = output.buffer else {
-                            return Err(error("missing planned output buffer"));
-                        };
-                        self.instruction(&Instruction::Store {
-                            buffer: Value::Buffer(buffer),
-                            index: Value::Int(0),
-                            value: Value::Source(output.expression),
-                        })?;
-                    }
                     vec![]
                 } else {
                     self.values(&data.state.bodies[*body].results)?
@@ -483,15 +354,19 @@ impl<'a, 'b> Body<'a, 'b> {
                 };
                 let y = self.values(&data.state.bodies[yes.arguments].results)?;
                 let n = self.values(&data.state.bodies[no.arguments].results)?;
-                // The current backend requires a single conditional header.
-                // TODO(egglog-control): outline branching loop tests into helpers.
-                if data.state.blocks[id].loop_exit.is_some()
-                    && self.builder.current_block() != Some(self.blocks[&id])
-                {
-                    return Err(error("TODO: branching expression in loop header"));
-                }
                 let (then_target, then_args) = self.edge(yes.target, y)?;
                 let (else_target, else_args) = self.edge(no.target, n)?;
+                if let Some(Control::Selection { merge }) = data.state.blocks[id].control {
+                    let Some(header) = self.builder.current_block() else {
+                        return Err(error("missing selection header"));
+                    };
+                    self.builder.set_control_header(
+                        header,
+                        ControlHeader::Selection {
+                            merge: self.blocks[&merge],
+                        },
+                    );
+                }
                 self.builder
                     .terminate(Terminator::CondBranch {
                         cond: condition.value,
@@ -507,7 +382,6 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.visit(no.target)?;
             }
         }
-        self.active.remove(&id);
         Ok(())
     }
     fn edge(
@@ -531,21 +405,10 @@ impl<'a, 'b> Body<'a, 'b> {
             }
             self.parameter_types.insert(target, types.clone());
         }
-        let block = if self.active.contains(&target) {
-            if self.compiler.data.state.blocks[target].loop_exit.is_none() {
-                return Err(error("cycle without loop metadata"));
-            }
-            if let Some(&b) = self.continuing.get(&target) {
-                b
-            } else {
-                let (b, _) = self.builder.create_block_with_params(types);
-                self.continuing.insert(target, b);
-                b
-            }
-        } else {
-            self.blocks[&target]
-        };
-        Ok((block, values.into_iter().map(|v| v.value).collect()))
+        Ok((
+            self.blocks[&target],
+            values.into_iter().map(|v| v.value).collect(),
+        ))
     }
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), OptimizeError> {
         match instruction {
@@ -566,7 +429,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 self.environment.expressions.insert(*id, v);
             }
             Instruction::BindResult(id, value) => {
-                if self.finish_outputs && self.compiler.results.contains_key(id) {
+                if self.finish_outputs && self.compiler.data.state.materialized.contains_key(id) {
                     return Ok(());
                 }
                 let v = self.value(value)?;
@@ -578,12 +441,16 @@ impl<'a, 'b> Body<'a, 'b> {
                 results,
             } => {
                 let args = self.values(arguments)?;
-                let (id, types) =
-                    self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
-                if results.len() != types.len() {
+                let id = self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
+                let ty = self.compiler.functions[id.0 as usize].body.return_ty.clone();
+                if self.compiler.data.state.blocks[*function]
+                    .interface
+                    .as_ref()
+                    .is_none_or(|f| f.results != results.len())
+                {
                     return Err(error("call result arity"));
                 }
-                let value = self.op(OpTag::Call(id), args, result_type(&types))?;
+                let value = self.op(OpTag::Call(id), args, ty)?;
                 if results.len() == 1 {
                     self.environment.locals.insert(results[0].clone(), value);
                 } else {
@@ -657,7 +524,7 @@ impl<'a, 'b> Body<'a, 'b> {
             Instruction::Allocate(id) => {
                 let buffer = &self.compiler.data.state.buffers[*id];
                 if buffer.storage == Storage::Function {
-                    let Some(count) = self.compiler.constant(&buffer.length) else {
+                    let Some(&count) = self.compiler.data.state.abi.local_lengths.get(id) else {
                         return Err(error("TODO: dynamic invocation-local allocation"));
                     };
                     let count = count.max(1) as usize;
@@ -721,25 +588,6 @@ fn result_type(types: &[Type]) -> Type {
 }
 fn uint(n: u32) -> ValueRef {
     ValueRef::Const(ConstantValue::U32(n))
-}
-fn u32_type() -> Type {
-    Type::Constructed(TypeName::UInt(32), vec![])
-}
-fn concrete(ty: &Type) -> Result<Type, OptimizeError> {
-    if let Some(element) = ty.elem_type().filter(|_| ty.is_array()) {
-        let count = match ty.array_size() {
-            Some(Type::Constructed(TypeName::Size(n), _)) => *n as usize,
-            _ => return Err(error("runtime-sized array requires a storage view")),
-        };
-        return Ok(sized_array(count.max(1), concrete(element)?));
-    }
-    match ty {
-        Type::Constructed(name, args) => Ok(Type::Constructed(
-            name.clone(),
-            args.iter().map(concrete).collect::<Result<_, _>>()?,
-        )),
-        Type::Variable(_) => Err(error("unresolved scalar type")),
-    }
 }
 
 #[cfg(test)]

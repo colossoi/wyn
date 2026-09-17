@@ -723,6 +723,7 @@ struct LowerCtx<'a> {
     wgsl_gid_alias: Option<String>,
     int64_mode: WgslInt64Mode,
     u64_emulation: U64Emulation,
+    int_pow: [bool; 2],
 }
 
 /// Read-only storage-block stand-in for a compute entry's push-constant inputs.
@@ -786,6 +787,7 @@ impl<'a> LowerCtx<'a> {
             wgsl_gid_alias: None,
             int64_mode: options.int64_mode,
             u64_emulation: U64Emulation::default(),
+            int_pow: [false; 2],
         }
     }
 
@@ -1000,6 +1002,22 @@ impl<'a> LowerCtx<'a> {
         // emulation support is emitted for ordinary WGSL modules or for u64
         // programs rejected under the default backend policy.
         self.u64_emulation.emit_helpers(&mut output);
+        for (used, ty) in self.int_pow.into_iter().zip(["i32", "u32"]) {
+            if used {
+                // Match SPIR-V's modular integer power, including returning
+                // one for negative signed exponents.
+                writeln!(output, "fn _wyn_pow_{ty}(base: {ty}, exponent: {ty}) -> {ty} {{")?;
+                writeln!(
+                    output,
+                    "    var b = base; var e = exponent; var result = {ty}(1);"
+                )?;
+                writeln!(output, "    while e > {ty}(0) {{")?;
+                writeln!(output, "        if (e & {ty}(1)) != {ty}(0) {{ result *= b; }}")?;
+                writeln!(output, "        b *= b; e >>= 1u;")?;
+                writeln!(output, "    }}")?;
+                writeln!(output, "    return result;\n}}\n")?;
+            }
+        }
 
         // Entry-point output struct declarations — each field carries
         // its `@builtin(...)` or `@location(N)` attribute inline,
@@ -2705,7 +2723,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                 Node::Loop {
                     state_vars,
                     init_args,
-                    header_insts,
+                    header,
                     cond,
                     cond_is_continue,
                     body,
@@ -2730,30 +2748,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     }
                     writeln!(output, "{}loop {{", self.ctx.indent_str())?;
                     self.ctx.indent += 1;
-                    for inst_id in header_insts {
-                        let inst = self.body.get_inst(*inst_id);
-                        self.current_span = inst.span;
-                        let expr = self.lower_inst(inst)?;
-                        if let Some(result) = inst.result {
-                            if matches!(
-                                inst.data,
-                                InstKind::Op {
-                                    tag: op::OpTag::StorageView(_),
-                                    ..
-                                }
-                            ) {
-                                self.value_map.insert(result, ValueBinding::Alias(expr));
-                                continue;
-                            }
-                            if is_scalar_literal(inst) {
-                                self.value_map.insert(result, ValueBinding::Alias(expr));
-                                continue;
-                            }
-                            let ty =
-                                self.ctx.type_emitter.type_to_wgsl(self.body.get_value_type(result))?;
-                            self.emit_ssa_binding(output, result, &ty, &expr)?;
-                        }
-                    }
+                    self.emit_nodes(header, output)?;
                     let cond_val = self.get_value(*cond)?;
                     if *cond_is_continue {
                         // cond is "continue condition"; break when it's false.
@@ -2862,7 +2857,17 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
                     let l = self.coerce_operand_to_result_ty(lhs, result_ty.as_ref())?;
                     let r = self.coerce_operand_to_result_ty(rhs, result_ty.as_ref())?;
                     match op {
-                        op::BinaryOperator::Power => Ok(format!("pow({}, {})", l, r)),
+                        op::BinaryOperator::Power => match lhs_ty {
+                            PolyType::Constructed(TypeName::Int(32), _) => {
+                                self.ctx.int_pow[0] = true;
+                                Ok(format!("_wyn_pow_i32({l}, {r})"))
+                            }
+                            PolyType::Constructed(TypeName::UInt(32), _) => {
+                                self.ctx.int_pow[1] = true;
+                                Ok(format!("_wyn_pow_u32({l}, {r})"))
+                            }
+                            _ => Ok(format!("pow({l}, {r})")),
+                        },
                         op::BinaryOperator::FloorDivide
                         | op::BinaryOperator::FloorRemainder
                         | op::BinaryOperator::ShiftRightLogical => Err(err_wgsl_at!(

@@ -12,14 +12,13 @@ impl Planner<'_> {
         let OperationKind::Screma { form, inputs, .. } = self.data.operations[op].kind.clone() else {
             return Err(error("invalid collective recipe"));
         };
-        let captures = self.captures(op);
         let n = length(&inputs);
-        let (reductions, arrays) = self.screma_outputs(host, &form, n.clone(), Storage::Device);
+        let (reductions, arrays) = self.screma_outputs(host, &form, Storage::Device);
         let outputs: Vec<_> = reductions.iter().chain(&arrays).copied().collect();
         let ns: usize = form.scans.iter().map(|s| s.neutral.len()).sum();
         let nr: usize = form.reductions.iter().map(|r| r.neutral.len()).sum();
         if ns + nr == 0 {
-            let kernel = self.kernel("elements", &captures, WIDTH);
+            let kernel = self.kernel(op, "elements");
             let invocation = self.invocations(kernel, n.clone());
             let (active, i) = (invocation.body, invocation.index.clone());
             let args = self.read_inputs(active, &inputs, i.clone());
@@ -27,7 +26,7 @@ impl Planner<'_> {
             let values = self.invoke_body(active, &form.post, pre, "post")?;
             self.write_values(active, &arrays, i, values)?;
             self.finish_loop(&invocation, active, vec![]);
-            self.dispatch(op, host, kernel, captures);
+            self.dispatch(op, host, kernel);
             return Ok((result(&reductions, &arrays), outputs));
         }
 
@@ -36,29 +35,12 @@ impl Planner<'_> {
         // the operator's identity, including for the single empty chunk.
         let chunks = chunks(n.clone());
         let neutral = neutrals(&form);
-        let partials: Vec<_> = neutral
-            .iter()
-            .map(|&e| {
-                let ty = self.data.types[self.data.expressions[e].ty].ty.clone();
-                self.allocate(host, "partial", chunks.clone(), ty, Storage::Device)
-            })
-            .collect();
-        let prefixes: Vec<_> = neutral
-            .iter()
-            .take(ns)
-            .map(|&e| {
-                let ty = self.data.types[self.data.expressions[e].ty].ty.clone();
-                self.allocate(host, "prefix", n.clone(), ty, Storage::Device)
-            })
-            .collect();
-        let offsets: Vec<_> = neutral
-            .iter()
-            .take(ns)
-            .map(|&e| {
-                let ty = self.data.types[self.data.expressions[e].ty].ty.clone();
-                self.allocate(host, "offset", chunks.clone(), ty, Storage::Device)
-            })
-            .collect();
+        let partials: Vec<_> =
+            neutral.iter().map(|_| self.allocate(host, "partial", Storage::Device)).collect();
+        let prefixes: Vec<_> =
+            neutral.iter().take(ns).map(|_| self.allocate(host, "prefix", Storage::Device)).collect();
+        let offsets: Vec<_> =
+            neutral.iter().take(ns).map(|_| self.allocate(host, "offset", Storage::Device)).collect();
         let mapped: Vec<_> = if ns == 0 {
             vec![]
         } else {
@@ -66,18 +48,10 @@ impl Planner<'_> {
                 .1
                 .into_iter()
                 .skip(ns + nr)
-                .map(|ty| {
-                    self.allocate(
-                        host,
-                        "mapped",
-                        n.clone(),
-                        self.data.types[ty].ty.clone(),
-                        Storage::Device,
-                    )
-                })
+                .map(|_| self.allocate(host, "mapped", Storage::Device))
                 .collect()
         };
-        let kernel = self.kernel("chunks", &captures, WIDTH);
+        let kernel = self.kernel(op, "chunks");
         let invocation = self.invocations(kernel, chunks.clone());
         let (active, chunk) = (invocation.body, invocation.index.clone());
         let start = Value::op("mul", [chunk.clone(), Value::Int(WIDTH)]);
@@ -113,11 +87,11 @@ impl Planner<'_> {
         self.finish_loop(&loop_, loop_.body, next);
         self.write_values(loop_.done, &partials, chunk, loop_.state.clone())?;
         self.finish_loop(&invocation, loop_.done, vec![]);
-        self.dispatch(op, host, kernel, captures.clone());
+        self.dispatch(op, host, kernel);
 
         // Dispatch boundaries supply device-wide visibility. No workgroup
         // barrier is used as a substitute for global synchronization.
-        let combine = self.kernel("combine", &captures, 1);
+        let combine = self.kernel(op, "combine");
         let loop_ = self.start_loop(
             combine,
             Value::Int(0),
@@ -135,10 +109,10 @@ impl Planner<'_> {
         self.finish_loop(&loop_, loop_.body, next);
         self.write_values(loop_.done, &reductions, Value::Int(0), loop_.state[ns..].to_vec())?;
         self.returns(loop_.done, vec![]);
-        self.dispatch(op, host, combine, captures.clone());
+        self.dispatch(op, host, combine);
 
         if ns > 0 {
-            let finish = self.kernel("offsets", &captures, WIDTH);
+            let finish = self.kernel(op, "offsets");
             let invocation = self.invocations(finish, n.clone());
             let (active, i) = (invocation.body, invocation.index.clone());
             let chunk = Value::op("div", [i.clone(), Value::Int(WIDTH)]);
@@ -162,7 +136,7 @@ impl Planner<'_> {
             let post = self.invoke_body(active, &form.post, scan_values, "post")?;
             self.write_values(active, &arrays, i, post)?;
             self.finish_loop(&invocation, active, vec![]);
-            self.dispatch(op, host, finish, captures);
+            self.dispatch(op, host, finish);
         }
         Ok((result(&reductions, &arrays), outputs))
     }
@@ -176,7 +150,7 @@ impl Planner<'_> {
         inputs: &[Array],
     ) -> Result<(BlockId, Value, Vec<BufferId>), OptimizeError> {
         let n = length(inputs);
-        let (reductions, arrays) = self.screma_outputs(allocate, form, n.clone(), storage);
+        let (reductions, arrays) = self.screma_outputs(allocate, form, storage);
         let neutral = neutrals(form);
         let ns: usize = form.scans.iter().map(|s| s.neutral.len()).sum();
         let count = neutral.len();
@@ -211,30 +185,18 @@ impl Planner<'_> {
         &mut self,
         allocate: BlockId,
         form: &ScremaForm,
-        n: Value,
         storage: Storage,
     ) -> (Vec<BufferId>, Vec<BufferId>) {
         let reductions = form
             .reductions
             .iter()
             .flat_map(|r| r.neutral.iter())
-            .map(|&e| {
-                let ty = self.data.types[self.data.expressions[e].ty].ty.clone();
-                self.allocate(allocate, "total", Value::Int(1), ty, storage)
-            })
+            .map(|_| self.allocate(allocate, "total", storage))
             .collect();
         let arrays = body_signature(&form.post)
             .1
             .into_iter()
-            .map(|ty| {
-                self.allocate(
-                    allocate,
-                    "output",
-                    n.clone(),
-                    self.data.types[ty].ty.clone(),
-                    storage,
-                )
-            })
+            .map(|_| self.allocate(allocate, "output", storage))
             .collect();
         (reductions, arrays)
     }

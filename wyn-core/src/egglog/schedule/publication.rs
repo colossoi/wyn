@@ -1,0 +1,93 @@
+//! Assign backend identities to the completed stage and resource plan.
+use super::{error, FunctionKind, OptimizeError};
+use crate::egglog::abi::Abi;
+use crate::egglog::blocks::{BlockData, DispatchData};
+use crate::egglog::data::{BlockId, DispatchId, EntryData, EntryId as SourceEntryId};
+use crate::egglog::planning::rows;
+use crate::interface::EntryKind;
+use crate::kernel_graph::{KernelDomain, KernelId, PhysicalKernel, PhysicalKernelGraph};
+use crate::pipeline_descriptor::DispatchSize;
+use crate::{EntryId, ResourceId, ResourceUse};
+use egglog_engine::{EGraph, Value as EggValue};
+use std::collections::{BTreeMap, HashMap};
+use wyn_base::IdArena;
+
+pub(super) fn build_physical_kernel_graph(
+    graph: &EGraph,
+    roots: &HashMap<EggValue, BlockId>,
+    order: &[DispatchId],
+    abi: &mut Abi,
+    dispatches: &IdArena<DispatchId, DispatchData>,
+    entries: &IdArena<SourceEntryId, EntryData>,
+    blocks: &IdArena<BlockId, BlockData>,
+) -> Result<PhysicalKernelGraph, OptimizeError> {
+    for &id in order {
+        let d = &dispatches[id];
+        abi.entry_roots.entry(d.owner).or_default().push(d.kernel);
+    }
+    for &(root, owner, _, finish) in &abi.roots {
+        if finish {
+            abi.entry_roots.entry(owner).or_default().push(root);
+        }
+    }
+    let dispatches: BTreeMap<_, _> = dispatches.values().map(|d| (d.kernel, d)).collect();
+    let by_binding: BTreeMap<_, _> =
+        abi.buffer_bindings.iter().map(|(&id, &binding)| (binding, id)).collect();
+    let mut kernels = vec![];
+    let mut identities = BTreeMap::new();
+    for (&owner, roots) in &abi.entry_roots {
+        if entries[owner].declaration.entry_kind != EntryKind::Compute {
+            continue;
+        }
+        for &root in roots {
+            let id = KernelId::from(kernels.len() as u32);
+            identities.insert(root, id);
+            let domain = match dispatches.get(&root).map(|d| &d.size) {
+                Some(DispatchSize::Fixed { x, y, z, .. }) => KernelDomain::Fixed { x: *x, y: *y, z: *z },
+                Some(DispatchSize::DerivedFrom { len, .. }) => KernelDomain::Elements(len.clone()),
+                None => KernelDomain::Fixed { x: 1, y: 1, z: 1 },
+            };
+            let Some(function) = &blocks[root].interface else {
+                return Err(error("shader root has no interface"));
+            };
+            let size = match function.kind {
+                FunctionKind::Kernel([x, y, z]) => (x, y, z),
+                _ => (1, 1, 1),
+            };
+            kernels.push(PhysicalKernel {
+                id,
+                entry: EntryId::from(root.as_u32()),
+                entry_point: format!("egg_kernel_{}", root.as_u32()),
+                label: function.name.clone(),
+                source_entry: Some(EntryId::from(owner.as_u32())),
+                output_routes: vec![],
+                workgroup_size: size,
+                domain,
+                resources: abi.root_accesses[&root]
+                    .iter()
+                    .filter_map(|(binding, &access)| {
+                        by_binding.get(binding).map(|buffer| ResourceUse {
+                            resource: ResourceId::from_egglog_buffer(buffer.as_u32()),
+                            access,
+                        })
+                    })
+                    .collect(),
+                dependencies: vec![],
+            });
+        }
+    }
+    rows(graph, "AbiRootDependency", |a| {
+        let before = roots[&a[0]];
+        let after = roots[&a[1]];
+        let (Some(&before), Some(&after)) = (identities.get(&before), identities.get(&after)) else {
+            return Err(error("dependency without a compute root"));
+        };
+        kernels[after.index()].dependencies.push(before);
+        Ok(())
+    })?;
+    for kernel in &mut kernels {
+        kernel.dependencies.sort_unstable();
+        kernel.resources.sort_by_key(|r| r.resource);
+    }
+    PhysicalKernelGraph::from_ordered(kernels).map_err(|e| error(&e))
+}
