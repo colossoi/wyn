@@ -97,6 +97,27 @@ fn retained_fused_outputs_have_distinct_storage() {
 }
 
 #[test]
+fn map_reuses_a_compiler_owned_array_after_its_reduction_finishes() {
+    let result = compile("entry main(xs: []i32) []i32 = let a=map(|x:i32|x*2,xs) in let s=reduce(|x:i32,y:i32|x+y,0,a) in map(|x:i32|x+s,a)");
+    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(
+        result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
+        3
+    );
+    for n in [0, 1, 63, 64, 65, 137] {
+        let input = Value::array(0..n);
+        let output = run(&result, vec![input.clone()]);
+        let sum = n * (n - 1);
+        assert_eq!(output[0].ints(), (0..n).map(|x| x * 2 + sum).collect::<Vec<_>>());
+        assert_eq!(
+            input.ints(),
+            (0..n).collect::<Vec<_>>(),
+            "borrowed input must survive"
+        );
+    }
+}
+
+#[test]
 fn fused_map_chain_becomes_one_guarded_kernel_with_explicit_captures() {
     let result = compile("entry main(xs: []i32, bias: i32) []i32 = let a = map(|x: i32| x + bias, xs) in map(|x: i32| x * 2, a)");
     assert_eq!(kernel_count(&result), 1);

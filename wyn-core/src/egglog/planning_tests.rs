@@ -64,17 +64,149 @@ fn map_reuse_is_selected_only_after_all_old_value_uses_are_known() {
 }
 
 #[test]
-fn fused_outputs_cannot_both_claim_the_same_input() {
-    let mut g = graph(&format!(
-        r#"{MAP}
+fn fused_outputs_choose_one_eligible_owner_of_the_input() {
+    for (extra, first, second) in [
+        ("", "(Reuse (ExprId 0))", "(Allocate)"),
+        (
+            "(AbiOutputBinding 0 0 7 \"out\") (ReturnArray 0 (ExprId 2))",
+            "(Allocate)",
+            "(Reuse (ExprId 0))",
+        ),
+    ] {
+        let mut g = graph(&format!(
+            r#"{MAP} {extra}
         (ArrayResult (OperationId 0) 1 (TypeId 0))
-        (ReusePermission (OperationId 0) 0 (ExprId 0))
         (ReusePermission (OperationId 0) 1 (ExprId 0))
+        (ReusePermission (OperationId 0) 0 (ExprId 0))
         (Materialize (Result (OperationId 0) 0))
         (Materialize (Result (OperationId 0) 1))"#
-    ));
-    check(&mut g, "(= (StorageFor (Result (OperationId 0) 0)) (Allocate)) (= (StorageFor (Result (OperationId 0) 1)) (Allocate))");
-    assert_eq!(count(&g, "Allocation"), 2);
+        ));
+        check(&mut g, &format!("(= (StorageFor (Result (OperationId 0) 0)) {first}) (= (StorageFor (Result (OperationId 0) 1)) {second})"));
+        assert_eq!(count(&g, "Allocation"), 1);
+    }
+}
+
+#[test]
+fn reuse_accepts_only_existing_proofs_that_other_readers_have_finished() {
+    let reader = r#"
+        (Site (OperationId 1) (RegionId 0))
+        (CollectiveShape (OperationId 1) 0 0 true)
+        (InputDomain (OperationId 1) (Length (ExprId 0)))
+        (Operand (OperationId 1) "input" (ExprId 0))"#;
+    let collective = r#"
+        (Site (OperationId 1) (RegionId 0))
+        (CollectiveShape (OperationId 1) 1 0 true)
+        (InputDomain (OperationId 1) (Length (ExprId 0)))
+        (Operand (OperationId 1) "input" (ExprId 0))"#;
+    let scalar = r#"
+        (Site (OperationId 1) (RegionId 0)) (ScalarSite (OperationId 1))
+        (Operand (OperationId 1) "environment" (ExprId 0))"#;
+    for (reads, order, allowed) in [
+        (reader, "", false),
+        (
+            reader,
+            "(Before (Stage (OperationId 0) \"elements\") (Stage (OperationId 1) \"elements\"))",
+            false,
+        ),
+        (
+            reader,
+            "(Before (Stage (OperationId 1) \"elements\") (Stage (OperationId 0) \"elements\"))",
+            true,
+        ),
+        (
+            reader,
+            "(EffectInput 1 (OperationId 1)) (EffectWait (OperationId 0) 1)",
+            true,
+        ),
+        (
+            collective,
+            "(Before (Stage (OperationId 1) \"offsets\") (Stage (OperationId 0) \"elements\"))",
+            true,
+        ),
+        (scalar, "", false),
+        (
+            scalar,
+            "(EffectInput 1 (OperationId 1)) (EffectWait (OperationId 0) 1)",
+            true,
+        ),
+    ] {
+        let facts = format!("{MAP} {reads} {order} (ExitValue (RegionId 0) 0 (ExprId 2))");
+        let baseline = graph(&facts);
+        let mut g = graph(&format!("{facts} (ReusePermission (OperationId 0) 0 (ExprId 0))"));
+        let expected = if allowed { "(Reuse (ExprId 0))" } else { "(Allocate)" };
+        check(
+            &mut g,
+            &format!("(= (StorageFor (Result (OperationId 0) 0)) {expected})"),
+        );
+        assert_eq!(count(&g, "Before"), count(&baseline, "Before"));
+        assert_eq!(
+            count(&g, "DispatchDependency"),
+            count(&baseline, "DispatchDependency")
+        );
+    }
+}
+
+#[test]
+fn owned_intermediate_reuse_preserves_live_values_layout_and_invocation_scope() {
+    for (extra, ty, region, allowed) in [
+        ("", 0, 0, true),
+        ("(ExitValue (RegionId 0) 1 (ExprId 2))", 0, 0, false),
+        (
+            "(Operand (OperationId 1) \"environment\" (ExprId 2))",
+            0,
+            0,
+            false,
+        ),
+        ("", 1, 0, false),
+        ("(HostRoot 1 (RegionId 1))", 0, 1, false),
+    ] {
+        let mut g = graph(&format!(
+            r#"{MAP} {extra}
+            (Site (OperationId 1) (RegionId {region}))
+            (CollectiveShape (OperationId 1) 0 0 true)
+            (InputDomain (OperationId 1) (Length (ExprId 2)))
+            (Operand (OperationId 1) "input" (ExprId 2))
+            (ArrayResult (OperationId 1) 0 (TypeId {ty}))
+            (DirectResult (ExprId 3) (OperationId 1) 0)
+            (ExitValue (RegionId {region}) 0 (ExprId 3))"#
+        ));
+        let expected = if allowed { "(Reuse (ExprId 2))" } else { "(Allocate)" };
+        check(
+            &mut g,
+            &format!("(= (StorageFor (Result (OperationId 1) 0)) {expected})"),
+        );
+        assert_eq!(count(&g, "Allocation"), if allowed { 1 } else { 2 });
+    }
+}
+
+#[test]
+fn owned_reuse_selects_an_eligible_input_after_checking_each_candidate() {
+    for (extra, chosen) in [("", 2), ("(ExitValue (RegionId 0) 1 (ExprId 2))", 3)] {
+        let mut g = graph(&format!(
+            r#"{MAP} {extra}
+            (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true)
+            (InputDomain (OperationId 1) (Length (ExprId 0)))
+            (Operand (OperationId 1) "input" (ExprId 0))
+            (ArrayResult (OperationId 1) 0 (TypeId 0)) (DirectResult (ExprId 3) (OperationId 1) 0)
+            (Site (OperationId 2) (RegionId 0)) (CollectiveShape (OperationId 2) 0 0 true)
+            (InputDomain (OperationId 2) (Length (ExprId 2)))
+            (Operand (OperationId 2) "input" (ExprId 2)) (Operand (OperationId 2) "input" (ExprId 3))
+            (ArrayResult (OperationId 2) 0 (TypeId 0)) (DirectResult (ExprId 4) (OperationId 2) 0)
+            (ArrayResult (OperationId 2) 1 (TypeId 0)) (Materialize (Result (OperationId 2) 1))
+            (ExitValue (RegionId 0) 0 (ExprId 4))"#
+        ));
+        check(
+            &mut g,
+            &format!("(= (StorageFor (Result (OperationId 2) 0)) (Reuse (ExprId {chosen})))"),
+        );
+        assert_eq!(count(&g, "Allocation"), 3);
+        assert_eq!(
+            count(&g, "ReuseCandidate"),
+            2,
+            "inspect inputs once across output slots"
+        );
+        assert_eq!(count(&g, "DispatchDependency"), 2);
+    }
 }
 
 #[test]
@@ -136,6 +268,26 @@ fn shared_producer_has_one_backing_and_independent_consumers() {
         "unused consumer results require no storage"
     );
     assert_eq!(count(&g, "Before"), 2);
+    // Live sibling results must stay independent; neither reader may clobber
+    // the shared producer while the other dispatch is still running.
+    for op in [1, 2] {
+        writeln!(
+            facts,
+            "(DirectResult (ExprId {}) (OperationId {op}) 0) (ExitValue (RegionId 0) {op} (ExprId {}))",
+            op + 2,
+            op + 2
+        )
+        .unwrap();
+    }
+    let mut g = graph(&facts);
+    for op in [1, 2] {
+        check(
+            &mut g,
+            &format!("(= (StorageFor (Result (OperationId {op}) 0)) (Allocate))"),
+        );
+    }
+    assert_eq!(count(&g, "Allocation"), 3);
+    assert_eq!(count(&g, "DispatchDependency"), 2);
 }
 
 #[test]
@@ -464,10 +616,19 @@ fn chain_planning_keeps_linear_fact_counts() {
                 writeln!(facts, "(Operand (OperationId {i}) \"input\" (ExprId {}))", i - 1).unwrap();
             }
         }
-        let g = graph(&facts);
+        let mut g = graph(&facts);
         assert_eq!(count(&g, "Before"), n - 1);
         assert_eq!(count(&g, "DispatchDependency"), n - 1);
-        assert_eq!(count(&g, "Allocation"), n - 1);
+        assert_eq!(count(&g, "Allocation"), 1);
+        assert!(count(&g, "ReuseCandidate") < n);
+        assert!(count(&g, "ReuseAlias") < n);
+        check(
+            &mut g,
+            &format!(
+                "(= (Backing (Result (OperationId {}) 0)) (Result (OperationId 0) 0))",
+                n - 2
+            ),
+        );
         assert!(count(&g, "OrderEdge") < 4 * n);
     }
 }
