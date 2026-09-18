@@ -22,6 +22,119 @@ fn test_simple_function() {
     assert!(!spirv.is_empty());
     assert_eq!(spirv[0], 0x07230203);
 }
+
+#[test]
+fn fragment_helper_result_is_evaluated_once_for_multiple_projections() {
+    use wspirv::spirv::Op;
+
+    let module = wspirv::dr::load_words(
+        compile_to_spirv(
+            r#"
+def color(x: f32) vec2f32 =
+  if x < 10.0 then @[1.0, 2.0] else @[3.0, 4.0]
+type output = { color: vec2f32, depth: f32 }
+def fragment(_v: (), p: vec4f32, _f: bool, _i: u32, _s: u32) output =
+  let c = color(p.x) in { color = @[c.x, c.y], depth = p.z }
+entry repro(surface: render_target<output>) render_target<output> =
+  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+    |v, _, _| vertex_output(
+      @[if v == 1u32 then 3.0 else -1.0,
+        if v == 2u32 then 3.0 else -1.0, 0.0, 1.0], ())) in
+  shade(surface, triangle, fragment)
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let calls = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| inst.class.opcode == Op::FunctionCall)
+        .count();
+    assert_eq!(calls, 1, "the fragment must evaluate its helper only once");
+}
+
+#[test]
+fn vertex_conditional_is_evaluated_once_for_nested_varyings() {
+    use wspirv::dr::Operand;
+    use wspirv::spirv::{ExecutionModel, Op};
+
+    let module = wspirv::dr::load_words(
+        compile_to_spirv(
+            r#"
+def color(x: f32) vec2f32 =
+  if x < 10.0 then @[1.0, 2.0] else @[3.0, 4.0]
+def payload(v: u32) (f32, (f32, f32)) =
+  let c = color(f32(v)) in (c.x, (c.y, f32(v)))
+entry repro(surface: render_target<f32>) render_target<f32> =
+  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+    |v, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], payload(v))) in
+  shade(surface, triangle, |p, _, _, _, _|
+    let (x, (y, z)) = p in x + y + z)
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|inst| inst.operands.first() == Some(&Operand::ExecutionModel(ExecutionModel::Vertex)))
+        .unwrap();
+    let Operand::IdRef(vertex_id) = entry.operands[1] else {
+        panic!("vertex function")
+    };
+    let vertex = module
+        .functions
+        .iter()
+        .find(|function| function.def.as_ref().unwrap().result_id == Some(vertex_id))
+        .unwrap();
+    let selections = vertex
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| inst.class.opcode == Op::SelectionMerge)
+        .count();
+    assert_eq!(
+        selections, 1,
+        "varying projections must share the conditional result"
+    );
+}
+
+#[test]
+fn fixed_array_output_constructs_only_the_indexed_value() {
+    use std::collections::HashSet;
+    use wspirv::spirv::Op;
+
+    let module = wspirv::dr::load_words(
+        compile_to_spirv(
+            "entry repro(xs: []i32) ([]i32, [1]i32) =
+              let n = xs[0] in (map(|x| x + n, xs), [n])",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let arrays: HashSet<_> = module
+        .types_global_values
+        .iter()
+        .filter(|inst| inst.class.opcode == Op::TypeArray)
+        .filter_map(|inst| inst.result_id)
+        .collect();
+    let constructors = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .filter(|inst| {
+            inst.class.opcode == Op::CompositeConstruct
+                && inst.result_type.is_some_and(|ty| arrays.contains(&ty))
+        })
+        .count();
+    assert_eq!(constructors, 1, "static length queries must not construct arrays");
+}
+
 #[test]
 fn test_linked_extern_call_uses_structural_function_identity() {
     let spirv = compile_to_spirv(

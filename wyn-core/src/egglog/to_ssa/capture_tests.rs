@@ -111,6 +111,172 @@ fn capture_reads_are_shared_through_array_and_argument_emission() {
 }
 
 #[test]
+fn literal_and_zipped_lengths_do_not_read_captured_elements() {
+    use crate::ssa::types::{ConstantValue, ValueRef};
+
+    let mut capture = Capture::new();
+    let literal = Array::Literal(capture.fields.to_vec());
+    let ty = capture.data.ir.types.alloc(TypeData {
+        ty: crate::types::sized_array(2, crate::types::i32()),
+    });
+    let source = capture.data.ir.expressions.alloc(ExprData {
+        ty,
+        kind: ExprKind::Array(literal.clone()),
+    });
+    let mut compiler = capture.compiler();
+    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+    for (array, expected) in [
+        (Value::Array(literal.clone()), 2),
+        (Value::Source(source), 2),
+        (Value::Array(Array::Zip(vec![literal.clone(), literal])), 2),
+        (Value::Tuple(vec![Value::Source(source), Value::Discarded]), 2),
+        (Value::Array(Array::Literal(vec![])), 0),
+    ] {
+        let length = body.value(&Value::op("length", [array])).unwrap();
+        assert_eq!(length.value, ValueRef::Const(ConstantValue::U32(expected)));
+        assert!(body.builder.func().insts.is_empty());
+    }
+}
+
+#[test]
+fn range_length_reads_only_its_runtime_count() {
+    use crate::op::OpTag;
+
+    let capture = Capture::new();
+    let mut compiler = capture.compiler();
+    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+    body.value(&Value::op(
+        "length",
+        [Value::Array(Array::Range {
+            start: capture.fields[1],
+            len: capture.fields[0],
+            step: Some(capture.fields[1]),
+        })],
+    ))
+    .unwrap();
+    let instructions = &body.builder.func().insts;
+    assert_eq!(
+        instructions.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
+        1
+    );
+    let projections: Vec<_> = instructions
+        .values()
+        .filter_map(|node| match node.data {
+            InstKind::Op {
+                tag: OpTag::Project { index },
+                ..
+            } => Some(index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        projections,
+        [0],
+        "the range start and step are not length dependencies"
+    );
+    assert!(!instructions.values().any(|node| matches!(
+        node.data,
+        InstKind::Op {
+            tag: OpTag::ArrayRange { .. },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn fixed_array_types_supply_lengths_without_reading_captured_values() {
+    use crate::ssa::types::{ConstantValue, ValueRef};
+    use crate::types::{i32, make_array1, no_buffer};
+
+    for variant in [
+        TypeName::ArrayVariantComposite,
+        TypeName::ArrayVariantView,
+        TypeName::ArrayVariantVirtual,
+    ] {
+        let mut capture = Capture::new();
+        let ty = make_array1(
+            i32(),
+            Type::Constructed(variant, vec![]),
+            Type::Constructed(TypeName::Size(3), vec![]),
+            no_buffer(),
+        );
+        let ty_id = capture.data.ir.types.alloc(TypeData { ty: ty.clone() });
+        capture.data.ir.expressions[capture.result].ty = ty_id;
+        capture.data.state.buffers[capture.buffer].element = ty.clone();
+        capture.data.state.abi.bindings.get_mut(&capture.buffer).unwrap().elem_ty = ty;
+        let mut compiler = capture.compiler();
+        let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+        let length = body.value(&Value::op("length", [Value::Source(capture.result)])).unwrap();
+        assert_eq!(length.value, ValueRef::Const(ConstantValue::U32(3)));
+        assert!(
+            body.builder.func().insts.is_empty(),
+            "the type supplies the length without a capture load"
+        );
+    }
+}
+
+#[test]
+fn bounded_capture_types_do_not_turn_capacity_into_length() {
+    use crate::builtins::catalog;
+    use crate::op::OpTag;
+    use crate::types::{array_variant_bounded, i32, make_array1, no_buffer};
+
+    let mut capture = Capture::new();
+    let ty = make_array1(
+        i32(),
+        array_variant_bounded(),
+        Type::Constructed(TypeName::Size(3), vec![]),
+        no_buffer(),
+    );
+    let ty_id = capture.data.ir.types.alloc(TypeData { ty: ty.clone() });
+    capture.data.ir.expressions[capture.result].ty = ty_id;
+    capture.data.state.buffers[capture.buffer].element = ty.clone();
+    capture.data.state.abi.bindings.get_mut(&capture.buffer).unwrap().elem_ty = ty;
+    let mut compiler = capture.compiler();
+    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+    body.value(&Value::op("length", [Value::Source(capture.result)])).unwrap();
+    assert!(
+        body.builder.func().insts.values().any(|node| matches!(
+            node.data,
+            InstKind::Op { tag: OpTag::Intrinsic { id, .. }, .. } if id == catalog().known().length
+        )),
+        "the capture's live length must be read at runtime"
+    );
+}
+
+#[test]
+fn generated_length_uses_a_rebound_array_instead_of_its_literal_shape() {
+    use crate::builtins::catalog;
+    use crate::op::OpTag;
+
+    let mut capture = Capture::new();
+    let ty = capture.data.ir.types.alloc(TypeData {
+        ty: crate::types::sized_array(2, crate::types::i32()),
+    });
+    let source = capture.data.ir.expressions.alloc(ExprData {
+        ty,
+        kind: ExprKind::Array(Array::Literal(capture.fields.to_vec())),
+    });
+    let mut compiler = capture.compiler();
+    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+    body.instruction(&Instruction::BindExpression(
+        source,
+        Value::op("slice", [Value::Source(source), Value::Int(1)]),
+    ))
+    .unwrap();
+    let bound = body.environment.expressions[&source].value;
+    body.value(&Value::op("length", [Value::Source(source)])).unwrap();
+    assert!(
+        body.builder.func().insts.values().any(|node| matches!(
+            &node.data,
+            InstKind::Op { tag: OpTag::Intrinsic { id, .. }, operands }
+                if *id == catalog().known().length && operands == &[bound]
+        )),
+        "the bounded array's live length must not become its literal capacity"
+    );
+}
+
+#[test]
 fn capture_reads_do_not_cross_writes_or_result_rebindings() {
     let capture = Capture::new();
     let mut compiler = capture.compiler();

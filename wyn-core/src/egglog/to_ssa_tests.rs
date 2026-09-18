@@ -68,6 +68,59 @@ fn literal_and_runtime_nested_array_indices_reach_wgsl() {
 }
 
 #[test]
+fn fixed_output_lengths_do_not_emit_element_reads_or_array_constructions() {
+    use crate::op::OpTag;
+    use crate::ssa::types::InstKind;
+
+    for (array, expected) in [("[n]", 1), ("if flag then [n] else [n + 1]", 2)] {
+        let program = crate::compile_thru_ssa(&format!(
+            "entry repro(xs: []i32, flag: bool) ([]i32, [1]i32) =
+              let n = xs[0] in (map(|x| x + n, xs), {array})",
+        ))
+        .unwrap();
+        // Inspect the emitted SSA before optimization, placement, or dead-code
+        // elimination can conceal unnecessary work in the output copy kernel.
+        let output = program
+            .entry_points
+            .iter()
+            .find(|entry| {
+                entry.body.inner.insts.values().any(|node| {
+                    matches!(
+                        node.data,
+                        InstKind::Op {
+                            tag: OpTag::ArrayLit(_),
+                            ..
+                        }
+                    )
+                })
+            })
+            .unwrap();
+        let instructions = &output.body.inner.insts;
+        assert_eq!(
+            instructions
+                .values()
+                .filter(|node| {
+                    matches!(
+                        node.data,
+                        InstKind::Op {
+                            tag: OpTag::ArrayLit(_),
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            expected,
+            "only the indexed output value needs array constructions: {array}"
+        );
+        assert_eq!(
+            instructions.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
+            expected,
+            "length queries must not reload the captured element: {array}"
+        );
+    }
+}
+
+#[test]
 fn nested_mountain_shader_preserves_ssa_dominance() {
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)

@@ -23,6 +23,25 @@ use std::collections::HashMap;
 // The cache is dropped before subsequent bindings or memory effects.
 type ExpressionCache = HashMap<(Option<BlockId>, ExprId), Typed>;
 
+fn static_array_length(ty: &Type) -> Option<usize> {
+    let ty = strip_existentials(ty);
+    if let Type::Constructed(TypeName::Tuple(_), fields) = ty {
+        return static_array_length(fields.first()?);
+    }
+    // Bounded arrays encode capacity here. An abstract representation may
+    // specialize to bounded, so neither variant proves an exact live length.
+    if !matches!(
+        ty.array_variant(),
+        Some(Type::Constructed(
+            TypeName::ArrayVariantComposite | TypeName::ArrayVariantView | TypeName::ArrayVariantVirtual,
+            _
+        ))
+    ) {
+        return None;
+    }
+    ty.as_tensor()?.concrete_dim(0)
+}
+
 impl Body<'_, '_> {
     pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.environment.parameters.get(&id) {
@@ -166,11 +185,108 @@ impl Body<'_, '_> {
                 self.view(declaration.binding, declaration.elem_ty, len)
             }
             Value::Primitive(name, args) => {
+                if let ("length", [array]) = (*name, args.as_slice()) {
+                    return self.length_cached(array, cache);
+                }
                 let values = self.values_cached(args, cache)?;
                 self.primitive(name, values)
             }
         }
     }
+
+    // Generated shape queries need only the array's extent. Source operations
+    // still execute in their scheduled instructions; reading an extent must not
+    // reload their captured results just to assemble the array's elements.
+    fn length_cached(
+        &mut self,
+        array: &Value,
+        cache: &mut ExpressionCache,
+    ) -> Result<Typed, OptimizeError> {
+        if let Some(length) = self.length_type(array, cache).and_then(static_array_length) {
+            return Ok(Self::number(
+                u32::try_from(length).map_err(|_| error("array size exceeds u32"))?,
+            ));
+        }
+        match array {
+            Value::Array(array) => return self.array_length_cached(array, cache),
+            Value::Tuple(fields) => {
+                let Some(first) = fields.first() else {
+                    return Err(error("empty logical array"));
+                };
+                return self.length_cached(first, cache);
+            }
+            Value::Source(id)
+                if !self.environment.expressions.contains_key(id)
+                    && !cache.contains_key(&(self.builder.current_block(), *id)) =>
+            {
+                match &self.compiler.data.expressions[*id].kind {
+                    ExprKind::Array(array) => return self.array_length_cached(array, cache),
+                    ExprKind::Coerce(inner) => return self.length_cached(&Value::Source(*inner), cache),
+                    ExprKind::Tuple(fields) => {
+                        let Some(first) = fields.first() else {
+                            return Err(error("empty logical array"));
+                        };
+                        return self.length_cached(&Value::Source(*first), cache);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        let array = self.value_cached(array, cache)?;
+        self.primitive("length", vec![array])
+    }
+
+    // Consult the current binding before source metadata: a scheduled value can
+    // have a different array representation (and length semantics) after rebinding.
+    fn length_type<'c>(&'c self, array: &Value, cache: &'c ExpressionCache) -> Option<&'c Type> {
+        match array {
+            Value::Source(id) => {
+                let expression = &self.compiler.data.expressions[*id];
+                let bound = self
+                    .environment
+                    .expressions
+                    .get(id)
+                    .or_else(|| cache.get(&(self.builder.current_block(), *id)))
+                    .or_else(|| match expression.kind {
+                        ExprKind::Parameter(id) => self.environment.parameters.get(&id),
+                        ExprKind::OperationResult(id) => self.environment.operations.get(&id),
+                        _ => None,
+                    });
+                Some(bound.map_or(&self.compiler.data.types[expression.ty].ty, |value| &value.ty))
+            }
+            Value::Local(name) => self.environment.locals.get(name).map(|value| &value.ty),
+            Value::Field(value, index) => match strip_existentials(self.length_type(value, cache)?) {
+                Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), fields) => fields.get(*index),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn array_length_cached(
+        &mut self,
+        array: &Array,
+        cache: &mut ExpressionCache,
+    ) -> Result<Typed, OptimizeError> {
+        match array {
+            Array::Value(id) => self.length_cached(&Value::Source(*id), cache),
+            Array::Zip(arrays) => {
+                let Some(first) = arrays.first() else {
+                    return Err(error("empty logical array"));
+                };
+                self.array_length_cached(first, cache)
+            }
+            Array::Literal(items) => Ok(Self::number(
+                u32::try_from(items.len()).map_err(|_| error("array size exceeds u32"))?,
+            )),
+            Array::Range { len, .. } => {
+                let length = self.expression_cached(*len, cache)?;
+                self.cast(length, &u32_type())
+            }
+        }
+    }
+
     pub(super) fn expression(&mut self, id: ExprId) -> Result<Typed, OptimizeError> {
         self.expression_cached(id, &mut ExpressionCache::new())
     }

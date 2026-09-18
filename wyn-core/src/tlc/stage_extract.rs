@@ -2453,7 +2453,40 @@ fn rebuild_varying_value(
     Some(Term::fresh(term_ids, ty.clone(), span, kind))
 }
 
-fn flatten_varying_term(term: Term, term_ids: &mut TermIdSource, leaves: &mut Vec<Term>) {
+/// Evaluate the stage result once before projecting its interface leaves.
+fn flatten_varying_term(term: Term, symbols: &mut SymbolTable, term_ids: &mut TermIdSource) -> Term {
+    let name = symbols.alloc("_w_stage_output_value".to_string());
+    let value = Term::fresh(
+        term_ids,
+        term.ty.clone(),
+        term.span,
+        TermKind::Var(VarRef::Symbol(name)),
+    );
+    let mut leaves = Vec::new();
+    collect_varying_leaves(value, term_ids, &mut leaves);
+    let body = if leaves.len() == 1 {
+        leaves.remove(0)
+    } else {
+        let ty = Type::Constructed(
+            TypeName::Tuple(leaves.len()),
+            leaves.iter().map(|leaf| leaf.ty.clone()).collect(),
+        );
+        Term::fresh(term_ids, ty, term.span, TermKind::Tuple(leaves))
+    };
+    Term::fresh(
+        term_ids,
+        body.ty.clone(),
+        term.span,
+        TermKind::Let {
+            name,
+            name_ty: term.ty.clone(),
+            rhs: Box::new(term),
+            body: Box::new(body),
+        },
+    )
+}
+
+fn collect_varying_leaves(term: Term, term_ids: &mut TermIdSource, leaves: &mut Vec<Term>) {
     let components = match &term.ty {
         Type::Constructed(TypeName::Unit, _) => return,
         Type::Constructed(TypeName::Record(_), components)
@@ -2465,27 +2498,18 @@ fn flatten_varying_term(term: Term, term_ids: &mut TermIdSource, leaves: &mut Ve
         return;
     };
 
-    match term.kind {
-        TermKind::Tuple(values) if values.len() == components.len() => {
-            for value in values {
-                flatten_varying_term(value, term_ids, leaves);
-            }
-        }
-        _ => {
-            for (index, component) in components.into_iter().enumerate() {
-                let tuple = clone_term_with_fresh_ids(&term, term_ids);
-                let projection = Term::fresh(
-                    term_ids,
-                    component,
-                    term.span,
-                    TermKind::TupleProj {
-                        tuple: Box::new(tuple),
-                        idx: index,
-                    },
-                );
-                flatten_varying_term(projection, term_ids, leaves);
-            }
-        }
+    for (index, component) in components.into_iter().enumerate() {
+        let tuple = clone_term_with_fresh_ids(&term, term_ids);
+        let projection = Term::fresh(
+            term_ids,
+            component,
+            term.span,
+            TermKind::TupleProj {
+                tuple: Box::new(tuple),
+                idx: index,
+            },
+        );
+        collect_varying_leaves(projection, term_ids, leaves);
     }
 }
 
@@ -2556,6 +2580,7 @@ fn build_vertex_stage(
     let mut rewriter = VertexBodyRewriter {
         vertex_result_ty: result_ty.clone(),
         term_ids,
+        symbols,
         vertex_output: builtins.vertex_output,
     };
     body = rewriter.rewrite_owned(body);
@@ -2720,18 +2745,16 @@ fn lower_fragment_output(
         term_ids,
     );
 
-    let mut values = Vec::new();
-    flatten_varying_term(color, term_ids, &mut values);
-    values.push(depth);
-    values.push(sample_mask);
+    let values = vec![color, depth, sample_mask];
     let value_ty = Type::Constructed(
         TypeName::Tuple(values.len()),
         values.iter().map(|value| value.ty.clone()).collect(),
     );
-    let value = Term::fresh(term_ids, value_ty.clone(), span, TermKind::Tuple(values));
+    let value = Term::fresh(term_ids, value_ty, span, TermKind::Tuple(values));
+    let value = flatten_varying_term(value, symbols, term_ids);
     Some(Term::fresh(
         term_ids,
-        value_ty,
+        value.ty.clone(),
         span,
         TermKind::Let {
             name: result_symbol,
@@ -2869,24 +2892,7 @@ fn build_fragment_stage(
         (body.ty.clone(), body)
     };
     let attachments = attachment_specs(&target_name, &color_ty);
-    let body_span = body.span;
-    let body = if has_fragment_output {
-        body
-    } else {
-        let mut color_values = Vec::new();
-        flatten_varying_term(body, term_ids, &mut color_values);
-        if color_values.len() == 1 {
-            color_values.pop()?
-        } else {
-            let component_types = attachments.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
-            Term::fresh(
-                term_ids,
-                Type::Constructed(TypeName::Tuple(component_types.len()), component_types),
-                body_span,
-                TermKind::Tuple(color_values),
-            )
-        }
-    };
+    let body = if has_fragment_output { body } else { flatten_varying_term(body, symbols, term_ids) };
 
     let mut params = invocation_params;
     params.extend(external_params);
@@ -3005,6 +3011,7 @@ fn interface_param(
 
 struct VertexBodyRewriter<'a> {
     term_ids: &'a mut TermIdSource,
+    symbols: &'a mut SymbolTable,
     vertex_result_ty: Type,
     vertex_output: builtins::BuiltinId,
 }
@@ -3019,14 +3026,12 @@ impl TermRewriter<data::Empty, data::Empty> for VertexBodyRewriter<'_> {
             if matches!(func.kind, TermKind::Var(VarRef::Builtin { id, .. }) if id == self.vertex_output)
                 && args.len() == 2
             {
-                let mut values = vec![args[0].clone()];
-                flatten_varying_term(args[1].clone(), self.term_ids, &mut values);
-                term.ty = self.vertex_result_ty.clone();
-                term.kind = if values.len() == 1 {
-                    values.pop().expect("position output").kind
-                } else {
-                    TermKind::Tuple(values)
-                };
+                term.ty = Type::Constructed(
+                    TypeName::Tuple(2),
+                    args.iter().map(|arg| arg.ty.clone()).collect(),
+                );
+                term.kind = TermKind::Tuple(args.clone());
+                term = flatten_varying_term(term, self.symbols, self.term_ids);
                 return (term, RewriteDecision::Changed);
             }
         }
