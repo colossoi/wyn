@@ -17,7 +17,7 @@ use crate::types::{
     TypeName,
 };
 use crate::PipelineTopologyPolicy;
-use egglog_engine::{Error, FullState, Value, Write};
+use egglog_engine::{Error, FullState, RawValues, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub(super) mod abi;
@@ -70,7 +70,7 @@ pub(super) fn facts(
                 "TypeId",
                 i64::from(data.expressions[output.expression].ty.as_u32()),
             )?;
-            sink.add("ReturnScalar", (i64::from(id.as_u32()), e, ty))?;
+            sink.add("ReturnScalar", (i64::from(id.as_u32()), ty))?;
         } else {
             sink.add("ReturnArray", (i64::from(id.as_u32()), e))?;
         }
@@ -227,7 +227,7 @@ pub(super) fn facts(
             } => {
                 sink.add(
                     "CollectiveShape",
-                    (key, form.scans.len() as i64, form.reductions.len() as i64),
+                    (key, !form.scans.is_empty(), !form.reductions.is_empty()),
                 )?;
                 let scans = form.scans.iter().flat_map(|s| &s.neutral);
                 let totals = form.reductions.iter().flat_map(|r| &r.neutral);
@@ -287,7 +287,8 @@ pub(super) fn facts(
                         data.types[destination.elem_ty].ty,
                         Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
                     );
-                    sink.add("IndexedReducer", (key, safe, reducer_operator(data, body)))?;
+                    let update = sink.add(reducer_operator(data, body), RawValues(vec![]))?;
+                    sink.add("IndexedReducer", (key, safe, update))?;
                 } else if let OperationKind::BucketScatter { shape, .. } = &op.kind {
                     let shape = &data.bucket_shapes[*shape];
                     let mut axes = vec![None; usize::from(shape.domain_rank)];
@@ -341,10 +342,10 @@ pub(super) fn facts(
     }
     for r in regions {
         let region = sink.add("RegionId", i64::from(r.as_u32()))?;
-        for (i, &e) in data.regions[r].results.iter().enumerate() {
+        for &e in &data.regions[r].results {
             values.insert(e);
             let e = sink.add("ExprId", i64::from(e.as_u32()))?;
-            sink.add("ExitValue", (region, i as i64, e))?;
+            sink.add("ExitValue", (region, e))?;
         }
     }
     for (after, before) in summary.dependencies() {
@@ -412,9 +413,8 @@ pub(super) fn facts(
         }
         let mut generic_children = false;
         match &value.kind {
-            ExprKind::Parameter(p) => {
-                let region = sink.add("RegionId", i64::from(data.parameters[*p].region.as_u32()))?;
-                sink.add("SourceParameter", (key, region))?;
+            ExprKind::Parameter(_) => {
+                sink.add("SourceParameter", key)?;
                 sink.set("HasInputFields", key, false)?;
             }
             ExprKind::OperationResult(op) => {
@@ -469,22 +469,22 @@ pub(super) fn facts(
 
 fn reducer_operator(data: &Program<Scheduled>, body: &SoacBody) -> &'static str {
     let SoacBody::Apply { region, captures, .. } = body else {
-        return "general";
+        return "AtomicCas";
     };
     let region = &data.regions[*region];
     let [result] = region.results.as_slice() else {
-        return "general";
+        return "AtomicCas";
     };
     let ExprKind::PureApp { function, args } = &data.expressions[*result].kind else {
-        return "general";
+        return "AtomicCas";
     };
     let [left, right] = args.as_slice() else {
-        return "general";
+        return "AtomicCas";
     };
     let (ExprKind::Parameter(a), ExprKind::Parameter(b)) =
         (&data.expressions[*left].kind, &data.expressions[*right].kind)
     else {
-        return "general";
+        return "AtomicCas";
     };
     if !captures.is_empty()
         || region.parameters.len() != 2
@@ -492,14 +492,14 @@ fn reducer_operator(data: &Program<Scheduled>, body: &SoacBody) -> &'static str 
         || !region.parameters.contains(a)
         || !region.parameters.contains(b)
     {
-        return "general";
+        return "AtomicCas";
     }
     match &data.expressions[*function].kind {
-        ExprKind::BinOp(op) if op == "+" => "add",
-        ExprKind::BinOp(op) if op == "&" => "and",
-        ExprKind::BinOp(op) if op == "|" => "or",
-        ExprKind::BinOp(op) if op == "^" => "xor",
-        _ => "general",
+        ExprKind::BinOp(op) if op == "+" => "AtomicAdd",
+        ExprKind::BinOp(op) if op == "&" => "AtomicAnd",
+        ExprKind::BinOp(op) if op == "|" => "AtomicOr",
+        ExprKind::BinOp(op) if op == "^" => "AtomicXor",
+        _ => "AtomicCas",
     }
 }
 
@@ -639,13 +639,8 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
         })
         .collect();
     for (tuple, ts) in parameters {
-        let ExprKind::Parameter(parameter) = data.expressions[tuple].kind else {
-            unreachable!("input tuple {tuple:?} is not a parameter");
-        };
-        let region = data.parameters[parameter].region;
         let tuple_key = sink.add("ExprId", i64::from(tuple.as_u32()))?;
         sink.set("HasInputFields", tuple_key, true)?;
-        let region = sink.add("RegionId", i64::from(region.as_u32()))?;
         for (index, field_type) in ts.into_iter().enumerate() {
             let field_ty = *types
                 .entry(field_type.clone())
@@ -659,7 +654,7 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
             let field = sink.add("ExprId", i64::from(field.as_u32()))?;
             sink.add("FieldValue", (tuple_key, index as i64, field))?;
             sink.add("ChildValue", (tuple_key, field))?;
-            sink.add("ParameterValue", (field, region))?;
+            sink.add("ParameterValue", field)?;
             sink.add("Projection", (field, tuple_key, index as i64))?;
         }
     }

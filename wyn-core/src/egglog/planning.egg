@@ -18,7 +18,7 @@
 (relation Site (OperationKey RegionKey))
 (relation HostRoot (i64 RegionKey))
 (relation Enters (OperationKey RegionKey))
-(relation ExitValue (RegionKey i64 ExprKey))
+(relation ExitValue (RegionKey ExprKey))
 (relation Operand (OperationKey String ExprKey))
 (relation EffectInput (i64 OperationKey))
 (relation EffectWait (OperationKey i64))
@@ -41,8 +41,8 @@
 (relation FilterResult (OperationKey TypeKey))
 (relation BucketResult (OperationKey ExprKey))
 (relation CounterType (TypeKey))
-(relation ParameterValue (ExprKey RegionKey))
-(relation SourceParameter (ExprKey RegionKey))
+(relation ParameterValue (ExprKey))
+(relation SourceParameter (ExprKey))
 (function HasInputFields (ExprKey) bool :merge (or old new))
 (relation ResultTuple (ExprKey OperationKey))
 (relation DirectResult (ExprKey OperationKey i64))
@@ -88,7 +88,7 @@
 (relation BufferSlot (OperationKey String i64 ValueKey))
 (relation OwnedRegion (i64 RegionKey))
 (relation PhaseOwner (StageKey i64))
-(relation ReturnScalar (i64 ExprKey TypeKey))
+(relation ReturnScalar (i64 TypeKey))
 (relation ReturnArray (i64 ExprKey))
 (relation ReturnedArrayLayout (i64 TypeKey Extent))
 (function OutputHasBacking (i64) bool :merge (or old new))
@@ -145,8 +145,8 @@
 (ruleset dispatch)
 
 ; Exposed tuple fields own input buffers; their parent tuple is only a container.
-(rule ((SourceParameter e r) (= (HasInputFields e) false))
-      ((ParameterValue e r)) :ruleset structure)
+(rule ((SourceParameter e) (= (HasInputFields e) false))
+      ((ParameterValue e)) :ruleset structure)
 ; ABI leaves accompany source import. Values describe sizes and aliases;
 ; physical identities are assigned only when reading the completed plan.
 (datatype AbiValue

@@ -138,7 +138,7 @@
       ((AbiInvokes (KernelRoot stage) child)) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Operand op role (ExprId e)))
       ((AbiRootNeed root (AbiExpr e))) :ruleset abi)
-(rule ((AbiInvokes root r) (ExitValue r i (ExprId e)))
+(rule ((AbiInvokes root r) (ExitValue r (ExprId e)))
       ((AbiRootNeed root (AbiExpr e))) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Enters op child)) ((AbiInvokes root child)) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Callback op child)) ((AbiInvokes root child)) :ruleset abi)

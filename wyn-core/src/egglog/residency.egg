@@ -25,7 +25,7 @@
 (rule ((UpdatedResult op i e)) ((ResultSlot op i)) :ruleset residency)
 (rule ((FilterResult op t)) ((ResultSlot op 0) (ResultSlot op 1)) :ruleset residency)
 (rule ((BucketResult op destination)) ((ResultSlot op 1) (ResultSlot op 2)) :ruleset residency)
-(rule ((ParameterValue e r)) ((ValueRef e (Source e))) :ruleset residency)
+(rule ((ParameterValue e)) ((ValueRef e (Source e))) :ruleset residency)
 (rule ((DirectResult e op i)) ((ValueRef e (Result op i))) :ruleset residency)
 (rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
       ((ValueRef e (Result op i))) :ruleset residency)
@@ -72,7 +72,7 @@
       ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
 (rule ((HostRegion r) (Site op r) (ScalarSite op) (Operand op role e))
       ((Demand (InOperation op) e)) :ruleset residency)
-(rule ((HostRegion r) (ExitValue r i e)) ((Demand (AtExit r) e)) :ruleset residency)
+(rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit r) e)) :ruleset residency)
 (rule ((Demand site e) (References e value)) ((Requires site value)) :ruleset residency)
 (rule ((Requires (InStage stage) value)) ((Needs stage value)) :ruleset residency)
 

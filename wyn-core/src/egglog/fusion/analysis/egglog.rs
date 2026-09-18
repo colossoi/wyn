@@ -88,15 +88,11 @@ impl Sink for Egglog {
                 self.emit(format_args!("({name} {p})"));
             }
         }
-        for (name, n) in [
-            ("Scans", fact.scans),
-            ("Reductions", fact.reductions),
-            ("ArrayOutputs", fact.arrays),
-            ("DemandLimit", fact.demand_limit),
-        ] {
-            self.emit(format_args!("(set ({name} {p}) {n})"));
-        }
+        self.emit(format_args!("(set (DemandLimit {p}) {})", fact.demand_limit));
         for (name, yes) in [
+            ("HasScans", fact.scans > 0),
+            ("HasReductions", fact.reductions > 0),
+            ("HasArrayOutputs", fact.arrays > 0),
             ("PrePure", fact.pre_projectable),
             ("PostPure", fact.post_projectable),
             ("PredicatePure", fact.predicate_projectable),
@@ -189,7 +185,7 @@ impl Sink for Egglog {
     }
     fn blocked_stream(&mut self, producer: OperationId, consumer: OperationId) {
         self.emit(format_args!(
-            "(set (StreamProblems {} {}) 1)",
+            "(set (StreamBlocked {} {}) true)",
             group(producer),
             group(consumer)
         ));

@@ -116,7 +116,13 @@ fn fused_indexed_updates_reach_wgsl() {
 
 #[test]
 fn integer_indexed_reductions_select_atomic_and_compare_exchange_kernels() {
-    for (operator, primitive) in [("a+b", "atomicAdd"), ("max(a,b)", "atomicCompareExchangeWeak")] {
+    for (operator, primitive) in [
+        ("a+b", "atomicAdd"),
+        ("a&b", "atomicAnd"),
+        ("a|b", "atomicOr"),
+        ("a^b", "atomicXor"),
+        ("max(a,b)", "atomicCompareExchangeWeak"),
+    ] {
         let source = format!(
             "entry main(dest:*[3]i32, xs:[137]i32) [3]i32 =
             reduce_by_index(dest, |a:i32,b:i32| {operator}, 0, map(|x:i32|x%3,xs), xs)"

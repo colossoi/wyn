@@ -272,9 +272,9 @@ impl Reader<'_, '_, '_> {
         })
     }
     fn inputs(&mut self, op: Value, inputs: &[Array]) -> Result<(), OptimizeError> {
-        for (i, input) in inputs.iter().enumerate() {
+        for input in inputs {
             let input = self.array(input)?;
-            self.sink.add("OperationInput", (op, self.sink.base_to_value(i as i64), input))?;
+            self.sink.add("OperationInput", (op, input))?;
         }
         Ok(())
     }

@@ -51,6 +51,21 @@ fn check(source: &str, operations: usize) {
 fn horizontal_maps_reductions_and_scans_preserve_all_outputs() {
     check("entry main(xs: []i32) ([]i32,i32,[]i32) = (map(|x:i32|x+1,xs),reduce(|a:i32,b:i32|a+b,0,xs),scan(|a:i32,b:i32|a+b,0,xs))",1);
 }
+
+#[test]
+fn repeated_collectives_preserve_all_result_slots() {
+    check(
+        "entry main(xs: []i32) ([]i32,[]i32,i32,i32,[]i32) =
+        let sums=scan(|a:i32,b:i32|a+b,0,xs) in
+        let maxima=scan(|a:i32,b:i32|if a>b then a else b,-2147483648,xs) in
+        (map(|x:i32|x*2,sums),maxima,
+         reduce(|a:i32,b:i32|a+b,0,xs),
+         reduce(|a:i32,b:i32|if a>b then a else b,-2147483648,xs),
+         map(|x:i32|x-1,xs))",
+        1,
+    );
+}
+
 #[test]
 fn shared_producer_outputs_and_multiple_consumers_survive() {
     check("entry main(xs: []i32) ([]i32,[]i32,[]i32) = let a=map(|x:i32|x+1,xs) in (a,map(|x:i32|x*2,a),map(|x:i32|x-3,a))",1);

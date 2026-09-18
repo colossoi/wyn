@@ -281,43 +281,48 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
 }
 
 #[test]
-fn opaque_barriers_prevent_fusion_without_effect_tokens() {
+fn opaque_barriers_prevent_stream_and_indexed_fusion_without_effect_tokens() {
     // Opaque barriers must survive without explicit effect tokens.
-    let mut input = imported(CHAIN);
-    let region = entry(&input.ir);
-    let consumer = entry_ops(&input.ir)[1];
-    let definition = &input.ir.definitions[input.ir.entries.values().next().unwrap().definition];
-    let ty = definition.ty;
-    let extern_id = input.ir.externs.alloc(ExternData {
-        linkage_name: "opaque_barrier".into(),
-    });
-    let function = input.ir.expressions.alloc(ExprData {
-        ty,
-        kind: ExprKind::Extern(extern_id),
-    });
-    let parameter = input
-        .ir
-        .expressions
-        .iter()
-        .find_map(|(&id, value)| {
-            matches!(value.kind, ExprKind::Parameter(p) if input.ir.parameters[p].region == region)
-                .then_some(id)
-        })
-        .unwrap();
-    let template = input.ir.operations[entry_ops(&input.ir)[0]].clone();
-    let barrier = input.ir.operations.alloc(OperationData {
-        kind: OperationKind::Call {
-            function,
-            args: vec![parameter],
-        },
-        ..template
-    });
-    input.ir.regions[region].members.insert(barrier);
-    input.ir.operations[consumer].source_position = 2;
-    input.ir.operations[barrier].source_position = 1;
-    let before = entry_ops(&input.ir).to_vec();
-    let result = optimized(input);
-    assert_eq!(entry_ops(&result.ir), before);
+    for source in [
+        CHAIN,
+        "entry indexed(xs: [4]i32, i: i32) i32 = let a=map(|x:i32|x+1,xs) in a[i]",
+    ] {
+        let mut input = imported(source);
+        let region = entry(&input.ir);
+        let consumer = entry_ops(&input.ir)[1];
+        let definition = &input.ir.definitions[input.ir.entries.values().next().unwrap().definition];
+        let ty = definition.ty;
+        let extern_id = input.ir.externs.alloc(ExternData {
+            linkage_name: "opaque_barrier".into(),
+        });
+        let function = input.ir.expressions.alloc(ExprData {
+            ty,
+            kind: ExprKind::Extern(extern_id),
+        });
+        let parameter = input
+            .ir
+            .expressions
+            .iter()
+            .find_map(|(&id, value)| {
+                matches!(value.kind, ExprKind::Parameter(p) if input.ir.parameters[p].region == region)
+                    .then_some(id)
+            })
+            .unwrap();
+        let template = input.ir.operations[entry_ops(&input.ir)[0]].clone();
+        let barrier = input.ir.operations.alloc(OperationData {
+            kind: OperationKind::Call {
+                function,
+                args: vec![parameter],
+            },
+            ..template
+        });
+        input.ir.regions[region].members.insert(barrier);
+        input.ir.operations[consumer].source_position = 2;
+        input.ir.operations[barrier].source_position = 1;
+        let before = entry_ops(&input.ir).to_vec();
+        let result = optimized(input);
+        assert_eq!(entry_ops(&result.ir), before);
+    }
 }
 
 #[test]

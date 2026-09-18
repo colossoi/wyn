@@ -62,7 +62,7 @@
       ((Access stage storage "write")) :ruleset allocation)
 
 ; Kernel emission looks up these slots; only Allocation facts create storage.
-(rule ((ReturnScalar output e t))
+(rule ((ReturnScalar output t))
       ((ElementType (Output output) t) (CapacityExtent (Output output) (Fixed 1))
        (FreshValue (Output output)) (Materialize (Output output))
        (OutputBacking output (Output output)) (CopyOutput output)) :ruleset allocation)

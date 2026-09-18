@@ -58,7 +58,7 @@
 ; iteration parameter. While uses header result 0 as its condition. These are
 ; static bindings whose runtime values vary by iteration, not global constants.
 (relation LoopRegions (OperationKey RegionKey RegionKey))
-(relation OperationInput (OperationKey i64 Array))
+(relation OperationInput (OperationKey Array))
 ; Order constraints are retained independently of value dependencies.
 (relation ExecutionOrder (OperationKey OperationKey))
 
@@ -123,7 +123,7 @@
 (rule ((IndexOperands op a i)) ((OperationExpr op a) (OperationExpr op i)) :ruleset expressions)
 (rule ((Conditional op c yes no)) ((OperationExpr op c) (Invokes op yes) (Invokes op no)) :ruleset expressions)
 (rule ((LoopRegions op header body)) ((Invokes op header) (Invokes op body)) :ruleset expressions)
-(rule ((OperationInput op i a) (ArrayExpr a e)) ((OperationExpr op e)) :ruleset expressions)
+(rule ((OperationInput op a) (ArrayExpr a e)) ((OperationExpr op e)) :ruleset expressions)
 
 (relation RegionExpr (RegionKey Expr))
 (rule ((RegionResult r i e)) ((RegionExpr r e)) :ruleset expressions)

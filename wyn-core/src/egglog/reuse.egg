@@ -26,7 +26,7 @@
 (function ReuseLost (ValueKey) bool :merge (or old new))
 
 ; Slices retain offsets that the published result ABI cannot yet describe.
-(rule ((ParameterValue e r)) ((WholeValue e (Source e))) :ruleset reuse)
+(rule ((ParameterValue e)) ((WholeValue e (Source e))) :ruleset reuse)
 (rule ((DirectResult e op i)) ((WholeValue e (Result op i))) :ruleset reuse)
 (rule ((Projection e tuple i) (ResultTuple tuple op) (ResultSlot op i))
       ((WholeValue e (Result op i))) :ruleset reuse)
@@ -68,6 +68,7 @@
       ((ReuseBoundary (Stage op writer) (Stage op before))) :ruleset reuse)
 
 ; Follow authored aliases in both directions, scoped to actual candidates.
+; Every alias and read inherits candidacy, so consumers need no candidate join.
 (rule ((ReuseAlias writer e old) (SameBacking alias source) (ValueRef source old))
       ((ReuseAlias writer e alias)) :ruleset reuse)
 (rule ((ReuseAlias writer e alias) (SameBacking alias source) (ValueRef source old))
@@ -75,34 +76,34 @@
 
 ; Length-only demands do not observe contents. Scalar-stage needs include
 ; reads hidden in nested source regions and therefore count as content reads.
-(rule ((ReuseCandidate writer e old) (ReuseAlias writer e alias)
+(rule ((ReuseAlias writer e alias)
        (Requires (InStage reader) alias) (!= reader writer))
       ((ReuseRead writer e (InStage reader))) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseAlias writer e alias)
+(rule ((ReuseAlias writer e alias)
        (Needs (Stage op "scalar") alias) (!= (Stage op "scalar") writer))
       ((ReuseRead writer e (InStage (Stage op "scalar")))) :ruleset reuse)
 (rule ((ReuseAlias writer e alias) (Requires (InOperation op) alias))
       ((ReuseRead writer e (InOperation op))) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e site))
+(rule ((ReuseRead writer e site))
       ((set (ReadFinished writer site) false)) :ruleset reuse)
 ; Input-reading phases of this recipe finish before its final writer.
 (rule ((ReuseRead writer e (InStage reader)) (ReuseBoundary writer reader) (!= reader writer))
       ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
 ; Existing immediate dependencies and complete recipes certify finished reads.
 ; Do not build a transitive closure over the dispatch graph.
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage reader))
+(rule ((ReuseRead writer e (InStage reader))
        (ReuseBoundary writer boundary) (DispatchDependency reader boundary))
       ((set (ReadFinished writer (InStage reader)) true)) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage (Stage op name)))
+(rule ((ReuseRead writer e (InStage (Stage op name)))
        (LastPhase op last) (ReuseBoundary writer boundary) (DispatchDependency last boundary))
       ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e (InStage (Stage op name)))
+(rule ((ReuseRead writer e (InStage (Stage op name)))
        (ReuseBoundary writer boundary) (Waits boundary (End op)))
       ((set (ReadFinished writer (InStage (Stage op name))) true)) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e (InOperation op))
+(rule ((ReuseRead writer e (InOperation op))
        (ReuseBoundary writer boundary) (Waits boundary (End op)))
       ((set (ReadFinished writer (InOperation op)) true)) :ruleset reuse)
-(rule ((ReuseCandidate writer e old) (ReuseRead writer e site)
+(rule ((ReuseRead writer e site)
        (= (ReadFinished writer site) false))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse-blockers)
 
@@ -112,10 +113,10 @@
 (rule ((ReuseAlias writer e alias) (SameBacking alias source) (SliceView source base start end))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
-(rule ((ReuseCandidate (Stage op name) e old) (ReuseAlias (Stage op name) e alias)
+(rule ((ReuseAlias (Stage op name) e alias)
        (Operand op "environment" capture) (References capture alias))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
-(rule ((ReuseCandidate (Stage op name) e old) (ReuseAlias (Stage op name) e alias)
+(rule ((ReuseAlias (Stage op name) e alias)
        (Operand op "input" other) (!= other e) (References other alias))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 ; Explicit output bindings require a separate destination. Preserve authored
