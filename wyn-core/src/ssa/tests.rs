@@ -97,6 +97,145 @@ fn dead_pure_elimination_removes_an_entire_unused_expression_tree() {
     assert_eq!(ValueUses::analyze(&body.inner).count(x), 1);
 }
 
+#[test]
+fn dead_pure_elimination_removes_unused_intrinsic_chains() {
+    use crate::types::{f32, i32};
+
+    let mut builder = FuncBuilder::new(vec![(f32(), "x".into())], f32());
+    let x = builder.get_param(0);
+    let mut operand = x;
+    // Neither sqrt nor float-to-int conversion is safe to speculate, but an
+    // unused chain of these computations can be discarded.
+    for (name, ty) in [("f32.sqrt", f32()), ("i32.f32", i32())] {
+        operand = builder
+            .push_inst(
+                InstKind::Op {
+                    tag: op::OpTag::Intrinsic {
+                        id: crate::builtins::catalog().lookup_by_any_name(name).unwrap().id,
+                        overload_idx: 0,
+                    },
+                    operands: vec![operand.into()],
+                },
+                ty,
+            )
+            .unwrap();
+    }
+    builder.terminate(Terminator::Return(Some(x.into()))).unwrap();
+    let mut body = builder.finish().unwrap();
+    eliminate_dead_pure_instructions(&mut body);
+    assert_eq!(body.num_insts(), 0);
+}
+
+#[test]
+fn dead_pure_elimination_removes_unused_texture_samples() {
+    use crate::ssa::types::ConstantValue;
+    use crate::types::{f32, vec};
+
+    let mut builder = FuncBuilder::new(
+        vec![
+            (Type::Constructed(TypeName::Texture2D, vec![]), "texture".into()),
+            (Type::Constructed(TypeName::Sampler, vec![]), "sampler".into()),
+            (vec(2, f32()), "uv".into()),
+        ],
+        f32(),
+    );
+    let sample = builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::Intrinsic {
+                    id: crate::builtins::catalog().known().texture_sample,
+                    overload_idx: 0,
+                },
+                operands: vec![
+                    builder.get_param(0).into(),
+                    builder.get_param(1).into(),
+                    builder.get_param(2).into(),
+                    ValueRef::Const(ConstantValue::from_f32(0.0)),
+                ],
+            },
+            vec(4, f32()),
+        )
+        .unwrap();
+    builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::Project { index: 0 },
+                operands: vec![sample.into()],
+            },
+            f32(),
+        )
+        .unwrap();
+    builder
+        .terminate(Terminator::Return(Some(ValueRef::Const(
+            ConstantValue::from_f32(1.0),
+        ))))
+        .unwrap();
+    let mut body = builder.finish().unwrap();
+    eliminate_dead_pure_instructions(&mut body);
+    assert_eq!(body.num_insts(), 0);
+}
+
+#[test]
+fn dead_pure_elimination_preserves_storage_updates_and_opaque_calls() {
+    use crate::ssa::types::ConstantValue;
+    use crate::types::{buffer_tag, i32, view_array_with_size};
+    use crate::{BindingRef, FunctionId};
+
+    let view_ty = view_array_with_size(
+        &i32(),
+        Type::Constructed(TypeName::Size(4), vec![]),
+        buffer_tag(BindingRef::new(0, 0)),
+    );
+    let mut builder = FuncBuilder::new(vec![(view_ty.clone(), "dest".into()), (i32(), "x".into())], i32());
+    let dest = builder.get_param(0);
+    let x = builder.get_param(1);
+    let value = builder
+        .push_inst(
+            InstKind::Op {
+                tag: op::OpTag::BinOp(op::BinaryOperator::Add),
+                operands: vec![x.into(), ValueRef::Const(ConstantValue::I32(1))],
+            },
+            i32(),
+        )
+        .unwrap();
+    let known = crate::builtins::catalog().known();
+    let mut results = Vec::new();
+    // array_with is catalogued Pure, yet its view representation writes to
+    // storage. Its result being unused must not discard the write or operands.
+    for tag in [
+        op::OpTag::Intrinsic {
+            id: known.array_with,
+            overload_idx: 0,
+        },
+        op::OpTag::Intrinsic {
+            id: known.array_with_in_place,
+            overload_idx: 0,
+        },
+        op::OpTag::Call(FunctionId::from(99)),
+    ] {
+        results.push(
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag,
+                        operands: vec![dest.into(), ValueRef::Const(ConstantValue::I32(0)), value.into()],
+                    },
+                    view_ty.clone(),
+                )
+                .unwrap(),
+        );
+    }
+    builder.terminate(Terminator::Return(Some(x.into()))).unwrap();
+    let mut body = builder.finish().unwrap();
+    eliminate_dead_pure_instructions(&mut body);
+    assert_eq!(body.num_insts(), 4);
+    let uses = ValueUses::analyze(&body.inner);
+    assert!(results
+        .iter()
+        .all(|&result| uses.count(result) == 0 && body.inner.inst_of_value(result).is_some()));
+    assert_eq!(uses.count(value), 3);
+}
+
 /// `InstKind::remap` rewrites `ValueId` operands but must leave `PlaceId`s
 /// (the identity of `ViewIndex` / `OutputSlot` / `Alloca` results and the
 /// operand slot of `Load` / `Store`) untouched. Place identity lives directly

@@ -69,6 +69,145 @@ fn distinct_entry_push_constant_layouts_have_distinct_variables() {
 }
 
 #[test]
+fn render_target_load_fetches_only_fields_used_by_the_fragment_output() {
+    use crate::pipeline_descriptor::{Binding, Pipeline};
+    use std::collections::{HashMap, HashSet};
+    use wspirv::dr::Operand;
+    use wspirv::spirv::{Decoration, ExecutionModel, Op};
+
+    for (scene_ty, result, expected_names) in [
+        ("pair", "p.depth", vec!["scene_depth"]),
+        ("pair", "p.unused", vec!["scene_unused"]),
+        ("pair", "p.unused + p.depth", vec!["scene_unused", "scene_depth"]),
+        ("f32", "p", vec!["scene"]),
+    ] {
+        let source = format!(
+            r#"
+type pair = {{ unused: f32, depth: f32 }}
+entry repro(scene: render_target<{scene_ty}>, surface: render_target<f32>)
+    render_target<f32> =
+  let triangle = rasterize_triangles(direct_draw(3u32, 1u32),
+    |v, _, _| vertex_output(
+      @[if v == 1u32 then 3.0 else -1.0,
+        if v == 2u32 then 3.0 else -1.0, 0.0, 1.0], ())) in
+  shade(surface, triangle, |_, position, _, _, _|
+    let p = target_load(scene, @[i32(position.x), i32(position.y)], 0u32) in {result})
+"#
+        );
+        let lowered = compile_thru_spirv(&source).unwrap();
+        let bytes: Vec<_> = lowered.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let validated = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&validated)
+        .unwrap();
+
+        let module = wspirv::dr::load_words(&lowered.spirv).unwrap();
+        let entry = module
+            .entry_points
+            .iter()
+            .find(|inst| inst.operands.first() == Some(&Operand::ExecutionModel(ExecutionModel::Fragment)))
+            .unwrap();
+        let Operand::IdRef(fragment_id) = entry.operands[1] else {
+            panic!("fragment function")
+        };
+        let fragment = module
+            .functions
+            .iter()
+            .find(|f| f.def.as_ref().unwrap().result_id == Some(fragment_id))
+            .unwrap();
+        let instructions: Vec<_> = fragment.blocks.iter().flat_map(|block| &block.instructions).collect();
+        let definitions: HashMap<_, _> =
+            instructions.iter().filter_map(|inst| inst.result_id.map(|id| (id, *inst))).collect();
+        let fetches: Vec<_> =
+            instructions.iter().filter(|inst| inst.class.opcode == Op::ImageFetch).collect();
+        assert_eq!(fetches.len(), expected_names.len(), "{scene_ty}: {result}");
+
+        // Trace each fetch through its image load and decorations to the named
+        // attachment in the descriptor; neither result IDs nor binding slots
+        // are fixed by the test.
+        let decoration = |id, kind| {
+            module
+                .annotations
+                .iter()
+                .find_map(|inst| match inst.operands.as_slice() {
+                    [Operand::IdRef(target), Operand::Decoration(actual), Operand::LiteralBit32(value)]
+                        if inst.class.opcode == Op::Decorate && *target == id && *actual == kind =>
+                    {
+                        Some(*value)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let mut fetched_names = Vec::new();
+        for fetch in &fetches {
+            let fetch_id = fetch.result_id.unwrap();
+            assert!(
+                instructions.iter().any(|inst| inst.operands.contains(&Operand::IdRef(fetch_id))),
+                "unused fetch %{fetch_id}"
+            );
+            let Operand::IdRef(image) = fetch.operands[0] else {
+                panic!("fetch image")
+            };
+            let load = definitions[&image];
+            assert_eq!(load.class.opcode, Op::Load);
+            let Operand::IdRef(variable) = load.operands[0] else {
+                panic!("image variable")
+            };
+            let set = decoration(variable, Decoration::DescriptorSet);
+            let binding = decoration(variable, Decoration::Binding);
+            let name = lowered
+                .pipeline
+                .pipelines
+                .iter()
+                .filter_map(|p| match p {
+                    Pipeline::Graphics(p) => Some(&p.bindings),
+                    _ => None,
+                })
+                .flatten()
+                .find_map(|b| match b {
+                    Binding::Texture {
+                        set: s,
+                        binding: b,
+                        name,
+                        ..
+                    } if *s == set && *b == binding => Some(name.as_str()),
+                    _ => None,
+                })
+                .unwrap();
+            fetched_names.push(name);
+        }
+        fetched_names.sort_unstable();
+        let mut expected_names = expected_names;
+        expected_names.sort_unstable();
+        assert_eq!(fetched_names, expected_names, "{scene_ty}: {result}");
+
+        // Every retained fetch must contribute to the fragment's output store.
+        let stores: Vec<_> = instructions.iter().filter(|inst| inst.class.opcode == Op::Store).collect();
+        assert_eq!(stores.len(), 1);
+        let Operand::IdRef(output) = stores[0].operands[1] else {
+            panic!("output value")
+        };
+        let mut pending = vec![output];
+        let mut live = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if live.insert(id) {
+                if let Some(inst) = definitions.get(&id) {
+                    pending.extend(inst.operands.iter().filter_map(|operand| match operand {
+                        Operand::IdRef(id) => Some(*id),
+                        _ => None,
+                    }));
+                }
+            }
+        }
+        assert!(fetches.iter().all(|inst| live.contains(&inst.result_id.unwrap())));
+    }
+}
+
+#[test]
 fn test_let_binding() {
     let spirv = compile_to_spirv("def f = let x = 1 in x + 2").unwrap();
     assert!(!spirv.is_empty());
