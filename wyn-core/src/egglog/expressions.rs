@@ -271,45 +271,6 @@ impl Reader<'_, '_, '_> {
             }
         })
     }
-    fn body(&mut self, body: &SoacBody) -> Result<Value, OptimizeError> {
-        Ok(match body {
-            SoacBody::Apply { region, captures, .. } => {
-                self.queue(*region);
-                let region = self.key("RegionId", region.as_u32())?;
-                let captures = self.values(captures)?;
-                self.sink.add("ApplyRegion", (region, captures))?
-            }
-            SoacBody::Identity(types) => {
-                let types =
-                    types.iter().map(|t| self.key("TypeId", t.as_u32())).collect::<Result<_, _>>()?;
-                let types = self.vector(types, true);
-                self.sink.add("Identity", (types,))?
-            }
-            SoacBody::Route { parameters, indices } => {
-                let types =
-                    parameters.iter().map(|t| self.key("TypeId", t.as_u32())).collect::<Result<_, _>>()?;
-                let types = self.vector(types, true);
-                let indices = indices.iter().map(|&i| self.sink.base_to_value(i as i64)).collect();
-                let indices = self.vector(indices, false);
-                self.sink.add("Route", (types, indices))?
-            }
-            SoacBody::Compose { first, then } => {
-                let first = self.body(first)?;
-                let then = self.body(then)?;
-                self.sink.add("Compose", (first, then))?
-            }
-            SoacBody::Parallel { left, right } => {
-                let left = self.body(left)?;
-                let right = self.body(right)?;
-                self.sink.add("Parallel", (left, right))?
-            }
-        })
-    }
-    fn operation_body(&mut self, op: Value, role: Value, body: &SoacBody) -> Result<(), OptimizeError> {
-        let body = self.body(body)?;
-        self.sink.add("OperationBody", (op, role, body))?;
-        Ok(())
-    }
     fn inputs(&mut self, op: Value, inputs: &[Array]) -> Result<(), OptimizeError> {
         for (i, input) in inputs.iter().enumerate() {
             let input = self.array(input)?;
@@ -322,13 +283,9 @@ impl Reader<'_, '_, '_> {
         self.sink.add(relation, (op, value))?;
         Ok(())
     }
-    fn neutrals(&mut self, op: Value, role: Value, values: &[ExprId]) -> Result<(), OptimizeError> {
-        for (i, &value) in values.iter().enumerate() {
-            let value = self.expression(value)?;
-            self.sink.add(
-                "OperationNeutral",
-                (op, role, self.sink.base_to_value(i as i64), value),
-            )?;
+    fn operands(&mut self, op: Value, values: &[ExprId]) -> Result<(), OptimizeError> {
+        for &value in values {
+            self.operand("OperationExpr", op, value)?;
         }
         Ok(())
     }
@@ -347,6 +304,14 @@ impl Reader<'_, '_, '_> {
         let region = self.key("RegionId", source.region.as_u32())?;
         let ty = self.key("TypeId", source.ty.as_u32())?;
         self.sink.add("Execution", (region, op, ty))?;
+        for body in source.kind.callbacks() {
+            if let SoacBody::Apply { region, captures, .. } = body {
+                self.queue(*region);
+                let region = self.key("RegionId", region.as_u32())?;
+                self.sink.add("Invokes", (op, region))?;
+                self.operands(op, captures)?;
+            }
+        }
         match &source.kind {
             OperationKind::Call { function, args } => {
                 self.operand("Callee", op, *function)?;
@@ -381,13 +346,12 @@ impl Reader<'_, '_, '_> {
                 let header = self.key("RegionId", header.as_u32())?;
                 let body = self.key("RegionId", body.as_u32())?;
                 self.sink.add("LoopRegions", (op, header, body))?;
-                self.operand("LoopInitial", op, *init)?;
+                self.operand("OperationExpr", op, *init)?;
                 match kind {
-                    LoopKind::For(array) => self.operand("LoopArray", op, *array)?,
-                    LoopKind::ForRange(bound) => self.operand("LoopBound", op, *bound)?,
-                    LoopKind::While => {
-                        self.sink.add("WhileLoop", (op,))?;
+                    LoopKind::For(value) | LoopKind::ForRange(value) => {
+                        self.operand("OperationExpr", op, *value)?;
                     }
+                    LoopKind::While => {}
                 }
             }
             OperationKind::Index { array, index } => {
@@ -397,60 +361,34 @@ impl Reader<'_, '_, '_> {
             }
             OperationKind::Screma { form, inputs, .. } => {
                 self.inputs(op, inputs)?;
-                let pre = self.sink.add("Pre", RawValues(vec![]))?;
-                let post = self.sink.add("Post", RawValues(vec![]))?;
-                self.operation_body(op, pre, &form.pre)?;
-                self.operation_body(op, post, &form.post)?;
-                for (i, scan) in form.scans.iter().enumerate() {
-                    let role = self.sink.add("ScanOp", (self.sink.base_to_value(i as i64),))?;
-                    self.operation_body(op, role, &scan.operator)?;
-                    self.neutrals(op, role, &scan.neutral)?;
+                for scan in &form.scans {
+                    self.operands(op, &scan.neutral)?;
                 }
-                for (i, reduction) in form.reductions.iter().enumerate() {
-                    let role = self.sink.add("ReduceOp", (self.sink.base_to_value(i as i64),))?;
-                    self.operation_body(op, role, &reduction.operator)?;
-                    self.neutrals(op, role, &reduction.neutral)?;
+                for reduction in &form.reductions {
+                    self.operands(op, &reduction.neutral)?;
                 }
             }
-            OperationKind::Filter {
-                map, body, inputs, ..
-            } => {
+            OperationKind::Filter { inputs, .. } => {
                 self.inputs(op, inputs)?;
-                let pre = self.sink.add("Pre", RawValues(vec![]))?;
-                let callback = self.sink.add("Callback", RawValues(vec![]))?;
-                self.operation_body(op, pre, map)?;
-                self.operation_body(op, callback, body)?;
             }
             OperationKind::Scatter {
-                destination,
-                body,
-                inputs,
+                destination, inputs, ..
             }
             | OperationKind::BucketScatter {
-                destination,
-                body,
-                inputs,
-                ..
+                destination, inputs, ..
             } => {
-                self.operand("Destination", op, destination.value)?;
+                self.operand("OperationExpr", op, destination.value)?;
                 self.inputs(op, inputs)?;
-                let callback = self.sink.add("Callback", RawValues(vec![]))?;
-                self.operation_body(op, callback, body)?;
             }
             OperationKind::ReduceByIndex {
                 destination,
-                map,
-                body,
                 neutral,
                 inputs,
+                ..
             } => {
-                self.operand("Destination", op, destination.value)?;
+                self.operand("OperationExpr", op, destination.value)?;
                 self.inputs(op, inputs)?;
-                let pre = self.sink.add("Pre", RawValues(vec![]))?;
-                let callback = self.sink.add("Callback", RawValues(vec![]))?;
-                self.operation_body(op, pre, map)?;
-                self.operation_body(op, callback, body)?;
-                self.neutrals(op, callback, &[*neutral])?;
+                self.operand("OperationExpr", op, *neutral)?;
             }
         }
         Ok(())

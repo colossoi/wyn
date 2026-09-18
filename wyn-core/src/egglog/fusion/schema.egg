@@ -3,7 +3,9 @@
 (datatype FusionGroup (Group OperationKey))
 (datatype FusionPlan (Source OperationKey) (Joined i64 FusionPlan FusionPlan bool))
 (sort OperationSet (Set OperationKey))
-(datatype OperandRole (Input) (Capture) (Neutral) (Argument) (Length))
+; Captures and neutrals are ordinary uses; indexed arguments and lengths carry
+; additional proofs that fusion must distinguish from input streams.
+(datatype OperandRole (Input) (Other) (Argument) (Length))
 (datatype GroupUse (To FusionGroup OperandRole) (Outside OperationKey OperandRole) (Returned))
 (datatype OriginalUse (At OperationKey OperandRole) (Observed))
 (sort GroupUses (Set OriginalUse))

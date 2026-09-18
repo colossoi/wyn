@@ -74,14 +74,15 @@
       ((AbiLaunchDomain stage n width)) :ruleset abi-final)
 ; ceil(ceil(n / chunk) / width) = ceil(n / (chunk * width)). Keep
 ; this division in the launch policy, independently of scratch capacity.
+; Classify extents in abi before abi-final tests the completed predicate.
+(function ChunkedExtent (Extent) bool :merge (or old new))
+(rule ((= v (AbiExtent n))) ((set (ChunkedExtent n) false)) :ruleset abi)
+(rule ((= n (ChunkCount domain chunk))) ((set (ChunkedExtent n) true)) :ruleset abi)
 (rule ((AbiLaunchDomain stage (ChunkCount n chunk) width) (> chunk 0)
        (<= width (/ 4294967295 chunk)))
       ((AbiLaunchDomain stage n (* width chunk))) :ruleset abi-final)
-(rule ((AbiLaunchDomain stage (Fixed n) width)) ((AbiGridDomain stage (AbiExtent (Fixed n)) width)) :ruleset abi-final)
-(rule ((AbiLaunchDomain stage (Length e) width)) ((AbiGridDomain stage (AbiExtent (Length e)) width)) :ruleset abi-final)
-(rule ((AbiLaunchDomain stage (Scalar e) width)) ((AbiGridDomain stage (AbiExtent (Scalar e)) width)) :ruleset abi-final)
-(rule ((AbiLaunchDomain stage (Stored value) width)) ((AbiGridDomain stage (AbiExtent (Stored value)) width)) :ruleset abi-final)
-(rule ((AbiLaunchDomain stage (Product a b) width)) ((AbiGridDomain stage (AbiExtent (Product a b)) width)) :ruleset abi-final)
+(rule ((AbiLaunchDomain stage n width) (= (ChunkedExtent n) false))
+      ((AbiGridDomain stage (AbiExtent n) width)) :ruleset abi-final)
 (rule ((PhaseOwner stage entry) (SourceGrid entry x y z) (PhaseDomain stage n width) (= (FixedPhaseGrid stage) false))
       ((set (RootLaunch (KernelRoot stage)) (FixedLaunch x y z))) :ruleset abi-final)
 (rule ((AbiGridDomain stage n width) (> width 0) (= count (AbiBoundConstant n)))

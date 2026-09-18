@@ -45,7 +45,7 @@
       ((set (Members g) (set-of op))
        (set (InputUses g) (set-of (At op (Input))))
        (set (DirectInputs g) (set-of (Direct op)))
-       (set (SelfUses g) (set-of (At op (Input)) (At op (Capture)) (At op (Neutral)) (At op (Argument)) (At op (Length))))) :ruleset fusion-dependencies)
+       (set (SelfUses g) (set-of (At op (Input)) (At op (Other)) (At op (Argument)) (At op (Length))))) :ruleset fusion-dependencies)
 (rule ((OriginalUseFact g op role))
       ((set (GroupUsesOf g) (set-of (At op role)))) :ruleset fusion-dependencies)
 (rule ((GroupUseFact g (Returned)))

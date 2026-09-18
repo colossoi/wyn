@@ -55,7 +55,7 @@ pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
             "Length" => {
                 step.lengths.insert(consumer);
             }
-            "Input" | "Capture" | "Neutral" | "Argument" => {}
+            "Input" | "Other" | "Argument" => {}
             _ => return Err(OptimizeError::Extraction("invalid operand role".into())),
         }
         step.retained |= consumer != step.consumer;

@@ -18,8 +18,7 @@ pub(in crate::egglog) use egglog::Egglog;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::egglog) enum Role {
     Input,
-    Capture,
-    Neutral,
+    Other,
     Argument,
     Length,
 }
@@ -27,8 +26,7 @@ impl From<OperandRole> for Role {
     fn from(role: OperandRole) -> Self {
         match role {
             OperandRole::Input => Self::Input,
-            OperandRole::Capture => Self::Capture,
-            OperandRole::Neutral => Self::Neutral,
+            OperandRole::Capture | OperandRole::Neutral => Self::Other,
             OperandRole::Argument => Self::Argument,
         }
     }
@@ -100,7 +98,7 @@ pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), Opt
             for p in visitor.sets.iter(analysis.external[&region]) {
                 let producer = OperationId::from(p);
                 if included(producer) {
-                    facts::usage(data, producer, consumer, Role::Capture, included(consumer), sink);
+                    facts::usage(data, producer, consumer, Role::Other, included(consumer), sink);
                 }
             }
         }

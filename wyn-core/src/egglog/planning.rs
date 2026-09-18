@@ -154,11 +154,6 @@ pub(super) fn facts(
             let r = sink.add("RegionId", i64::from(r.as_u32()))?;
             sink.add("Enters", (key, r))?;
         }
-        if let OperationKind::Loop { header, body, .. } = &op.kind {
-            let header = sink.add("RegionId", i64::from(header.as_u32()))?;
-            let body = sink.add("RegionId", i64::from(body.as_u32()))?;
-            sink.add("Repeated", (key, header, body))?;
-        }
         match &op.kind {
             OperationKind::If { .. } | OperationKind::Loop { .. } => {
                 sink.add("SourceControl", key)?;
@@ -373,8 +368,6 @@ pub(super) fn facts(
     while let Some(e) = pending.pop() {
         let value = &data.expressions[e];
         let key = sink.add("ExprId", i64::from(e.as_u32()))?;
-        let ty = sink.add("TypeId", i64::from(value.ty.as_u32()))?;
-        sink.add("SourceType", (key, ty))?;
         // Source size and interface leaves supplement the structural facts.
         let abi_value = sink.add("AbiExpr", i64::from(e.as_u32()))?;
         if crate::types::as_soa_tuple(strip_existentials(&data.types[value.ty].ty)).is_some() {
@@ -651,9 +644,7 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
         };
         let region = data.parameters[parameter].region;
         let tuple_key = sink.add("ExprId", i64::from(tuple.as_u32()))?;
-        let tuple_type = sink.add("TypeId", i64::from(data.expressions[tuple].ty.as_u32()))?;
         sink.set("HasInputFields", tuple_key, true)?;
-        sink.add("SourceType", (tuple_key, tuple_type))?;
         let region = sink.add("RegionId", i64::from(region.as_u32()))?;
         for (index, field_type) in ts.into_iter().enumerate() {
             let field_ty = *types
@@ -666,11 +657,9 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
             let field =
                 *expressions.entry(value.clone()).or_insert_with(|| data.ir.expressions.alloc(value));
             let field = sink.add("ExprId", i64::from(field.as_u32()))?;
-            let field_ty = sink.add("TypeId", i64::from(field_ty.as_u32()))?;
             sink.add("FieldValue", (tuple_key, index as i64, field))?;
             sink.add("ChildValue", (tuple_key, field))?;
             sink.add("ParameterValue", (field, region))?;
-            sink.add("SourceType", (field, field_ty))?;
             sink.add("Projection", (field, tuple_key, index as i64))?;
         }
     }

@@ -1,5 +1,5 @@
 ; Scheduling inputs describe source structure, not allocation decisions.
-; Stage identities name static launch sites. Site/Enters/Repeated retain the
+; Stage identities name static launch sites. Site/Enters retain the
 ; invocation boundaries; a repeated launch is not a cycle in the dispatch DAG.
 (datatype StageKey (Stage OperationKey String))
 (datatype ValueKey
@@ -18,7 +18,6 @@
 (relation Site (OperationKey RegionKey))
 (relation HostRoot (i64 RegionKey))
 (relation Enters (OperationKey RegionKey))
-(relation Repeated (OperationKey RegionKey RegionKey))
 (relation ExitValue (RegionKey i64 ExprKey))
 (relation Operand (OperationKey String ExprKey))
 (relation EffectInput (i64 OperationKey))
@@ -42,7 +41,6 @@
 (relation FilterResult (OperationKey TypeKey))
 (relation BucketResult (OperationKey ExprKey))
 (relation CounterType (TypeKey))
-(relation SourceType (ExprKey TypeKey))
 (relation ParameterValue (ExprKey RegionKey))
 (relation SourceParameter (ExprKey RegionKey))
 (function HasInputFields (ExprKey) bool :merge (or old new))
@@ -82,7 +80,6 @@
 (relation Demand (UseKey ExprKey))
 (relation Requires (UseKey ValueKey))
 (relation Escapes (RegionKey ValueKey))
-(relation OutputValue (i64 i64 ExprKey))
 (relation Materialize (ValueKey))
 (function IsMaterialized (ValueKey) bool :merge (or old new))
 (function Backing (ValueKey) ValueKey :no-merge)

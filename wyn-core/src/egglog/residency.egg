@@ -77,7 +77,6 @@
 (rule ((Requires (InStage stage) value)) ((Needs stage value)) :ruleset residency)
 
 ; Region exits preserve loop/branch boundaries. They are not global returns.
-(rule ((HostRoot entry r) (ExitValue r i e)) ((OutputValue entry i e)) :ruleset residency)
 (rule ((Requires (AtExit r) value)) ((Escapes r value)) :ruleset residency)
 (rule ((Produces producer value) (Needs consumer value) (!= producer consumer))
       ((Crossing producer consumer value) (Materialize value)) :ruleset residency)

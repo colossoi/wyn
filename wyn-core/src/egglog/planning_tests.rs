@@ -490,7 +490,6 @@ fn repeated_launch_sites_retain_scope_and_cross_region_handoffs() {
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0)) (ScalarSite (OperationId 1))
         (Enters (OperationId 1) (RegionId 1)) (Enters (OperationId 1) (RegionId 2))
-        (Repeated (OperationId 1) (RegionId 1) (RegionId 2))
         (Site (OperationId 2) (RegionId 2))
         (CollectiveShape (OperationId 2) 0 0)
         (InputDomain (OperationId 2) (Length (ExprId 2)))
@@ -639,6 +638,65 @@ fn local_allocations_and_binding_aliases_are_resolved_without_backend_ids() {
     );
     assert_eq!(count(&g, "Phase"), 1);
     assert_eq!(count(&g, "Allocation"), 1);
+}
+
+#[test]
+fn launch_domains_share_extent_handling_after_chunk_normalization() {
+    for (domain, normalized, width, groups) in [
+        ("(Fixed 129)", "(Fixed 129)", 64, 3),
+        ("(Length (ExprId 0))", "(Length (ExprId 0))", 64, 3),
+        ("(Scalar (ExprId 1))", "(Scalar (ExprId 1))", 64, 3),
+        (
+            "(Stored (Source (ExprId 2)))",
+            "(Stored (Source (ExprId 2)))",
+            64,
+            3,
+        ),
+        (
+            "(Product (Fixed 3) (Fixed 43))",
+            "(Product (Fixed 3) (Fixed 43))",
+            64,
+            3,
+        ),
+        (
+            "(ChunkCount (ChunkCount (Fixed 8193) 4) 8)",
+            "(Fixed 8193)",
+            2048,
+            5,
+        ),
+    ] {
+        let mut g = graph(&format!(
+            r#"
+            (SourceEntry 0 (RegionId 0) true) (HostRoot 0 (RegionId 0))
+            (Site (OperationId 0) (RegionId 0)) (CollectiveShape (OperationId 0) 0 0)
+            (InputDomain (OperationId 0) {domain})
+            (AbiArrayLength (AbiExpr 0) (AbiNumber 129))
+            (AbiAlias (AbiExpr 1) (AbiNumber 129))
+            (AbiBound (AbiExtent (Stored (Source (ExprId 2)))) (AbiNumber 129))
+        "#
+        ));
+        check(
+            &mut g,
+            &format!(
+                r#"
+                (AbiGridDomain (Stage (OperationId 0) "elements") (AbiExtent {normalized}) {width})
+                (= (RootLaunch (KernelRoot (Stage (OperationId 0) "elements"))) (FixedLaunch {groups} 1 1))
+            "#
+            ),
+        );
+        assert_eq!(count(&g, "AbiGridDomain"), 1, "{domain}");
+    }
+
+    // A chunk factor that cannot be folded into the launch width must not fall
+    // through to the generic extent rule with an unnormalized domain.
+    let g = graph(
+        r#"
+        (SourceEntry 0 (RegionId 0) true) (HostRoot 0 (RegionId 0))
+        (Site (OperationId 0) (RegionId 0)) (CollectiveShape (OperationId 0) 0 0)
+        (InputDomain (OperationId 0) (ChunkCount (Fixed 1) 4294967296))
+    "#,
+    );
+    assert_eq!(count(&g, "AbiGridDomain"), 0);
 }
 
 #[test]

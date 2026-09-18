@@ -107,8 +107,7 @@ impl Sink for Egglog {
     fn usage(&mut self, producer: OperationId, consumer: OperationId, role: Role, internal: bool) {
         let role = match role {
             Role::Input => "Input",
-            Role::Capture => "Capture",
-            Role::Neutral => "Neutral",
+            Role::Other => "Other",
             Role::Argument => "Argument",
             Role::Length => "Length",
         };

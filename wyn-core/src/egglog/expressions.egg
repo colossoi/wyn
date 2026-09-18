@@ -10,8 +10,6 @@
 (sort Array)
 (sort Exprs (Vec Expr))
 (sort Arrays (Vec Array))
-(sort Types (Vec TypeKey))
-(sort Indices (Vec i64))
 (constructor Typed (TypeKey Node) Expr)
 ; Stable roots follow e-class unions until scalar extraction.
 (function SourceExpression (i64) Expr :no-merge)
@@ -41,17 +39,6 @@
 (constructor Range (Expr Expr) Array)
 (constructor StridedRange (Expr Expr Expr) Array)
 
-; Bodies describe argument routing after fusion. ApplyRegion passes logical
-; arguments first, then captures; tuple-valued arguments stay whole. Compose
-; connects the first body's results to the second body's arguments. None of
-; these relations identify a formal parameter with a particular call argument.
-(datatype Body
-  (ApplyRegion RegionKey Exprs)
-  (Identity Types)
-  (Route Types Indices)
-  (Compose Body Body)
-  (Parallel Body Body))
-(datatype BodyRole (Pre) (Post) (ScanOp i64) (ReduceOp i64) (Callback))
 (relation Region (RegionKey))
 (relation RegionParent (RegionKey RegionKey))
 (relation NamedRegion (SymbolKey RegionKey))
@@ -67,18 +54,11 @@
 (relation IndexOperands (OperationKey Expr Expr))
 (relation Conditional (OperationKey Expr RegionKey RegionKey))
 ; Header parameter 0 is the current accumulator. The body's result 0 supplies
-; its next value; LoopInitial supplies its first value. For/ForRange add an
+; its next value; the initial value is an OperationExpr. For/ForRange add an
 ; iteration parameter. While uses header result 0 as its condition. These are
 ; static bindings whose runtime values vary by iteration, not global constants.
 (relation LoopRegions (OperationKey RegionKey RegionKey))
-(relation LoopInitial (OperationKey Expr))
-(relation LoopArray (OperationKey Expr))
-(relation LoopBound (OperationKey Expr))
-(relation WhileLoop (OperationKey))
 (relation OperationInput (OperationKey i64 Array))
-(relation OperationBody (OperationKey BodyRole Body))
-(relation OperationNeutral (OperationKey BodyRole i64 Expr))
-(relation Destination (OperationKey Expr))
 ; Order constraints are retained independently of value dependencies.
 (relation ExecutionOrder (OperationKey OperationKey))
 
@@ -126,21 +106,14 @@
 (rule ((ExprChild e x) (ExprParameter x p)) ((ExprParameter e p)) :ruleset expressions)
 (rule ((ExprChild e x) (ExprOperation x op)) ((ExprOperation e op)) :ruleset expressions)
 
-(relation BodyRegion (Body RegionKey))
-(relation BodyExpr (Body Expr))
-(rule ((= b (ApplyRegion r xs))) ((BodyRegion b r) (ValueVector xs)) :ruleset expressions)
-(rule ((= b (ApplyRegion r xs)) (ValueAt xs i x)) ((BodyExpr b x)) :ruleset expressions)
-(relation BodyChild (Body Body))
-(rule ((= b (Compose a c))) ((BodyChild b a) (BodyChild b c)) :ruleset expressions)
-(rule ((= b (Parallel a c))) ((BodyChild b a) (BodyChild b c)) :ruleset expressions)
-(rule ((BodyChild b c) (BodyRegion c r)) ((BodyRegion b r)) :ruleset expressions)
-(rule ((BodyChild b c) (BodyExpr c e)) ((BodyExpr b e)) :ruleset expressions)
 (relation Callable (Expr RegionKey))
 (rule ((= e (Typed t (Lambda r)))) ((Callable e r)) :ruleset expressions)
 (rule ((= e (Typed t (Global s))) (NamedRegion s r)) ((Callable e r)) :ruleset expressions)
 (rule ((= e (Typed t (Closure s arity xs))) (NamedRegion s r)) ((Callable e r)) :ruleset expressions)
 (rule ((= e (Typed t (Coerce x))) (Callable x r)) ((Callable e r)) :ruleset expressions)
 (relation Invokes (OperationKey RegionKey))
+; Import callback regions and value operands directly. Body routing and operand
+; roles remain in the sidecar; dependency analysis only needs these edges.
 (relation OperationExpr (OperationKey Expr))
 (rule ((Callee op e)) ((OperationExpr op e)) :ruleset expressions)
 (rule ((Callee op e) (Callable e r)) ((Invokes op r)) :ruleset expressions)
@@ -150,14 +123,7 @@
 (rule ((IndexOperands op a i)) ((OperationExpr op a) (OperationExpr op i)) :ruleset expressions)
 (rule ((Conditional op c yes no)) ((OperationExpr op c) (Invokes op yes) (Invokes op no)) :ruleset expressions)
 (rule ((LoopRegions op header body)) ((Invokes op header) (Invokes op body)) :ruleset expressions)
-(rule ((LoopInitial op e)) ((OperationExpr op e)) :ruleset expressions)
-(rule ((LoopArray op e)) ((OperationExpr op e)) :ruleset expressions)
-(rule ((LoopBound op e)) ((OperationExpr op e)) :ruleset expressions)
 (rule ((OperationInput op i a) (ArrayExpr a e)) ((OperationExpr op e)) :ruleset expressions)
-(rule ((OperationBody op role b) (BodyRegion b r)) ((Invokes op r)) :ruleset expressions)
-(rule ((OperationBody op role b) (BodyExpr b e)) ((OperationExpr op e)) :ruleset expressions)
-(rule ((OperationNeutral op role i e)) ((OperationExpr op e)) :ruleset expressions)
-(rule ((Destination op e)) ((OperationExpr op e)) :ruleset expressions)
 
 (relation RegionExpr (RegionKey Expr))
 (rule ((RegionResult r i e)) ((RegionExpr r e)) :ruleset expressions)

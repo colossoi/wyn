@@ -84,7 +84,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         .parse_and_run_program(
             None,
             "
-        (check (OperationBody op (Pre) body) (BodyRegion body ra) (BodyRegion body rb) (!= ra rb))
+        (check (Invokes op ra) (Invokes op rb) (!= ra rb))
         (check (EntryRegion id r) (RegionParameter r 1 bias t) (OperationParameter op bias))
     ",
         )
@@ -96,6 +96,33 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
     // Fusion still uses its original summary and has no expression declarations.
     let fusion = fusion_dependencies(&result.ir);
     assert!(fusion.function_to_dag("Typed", 1, false).is_err());
+}
+
+#[test]
+fn parallel_fused_callbacks_keep_captures_and_neutral_dependencies() {
+    let result = compile(
+        "entry main(xs: []i32, bias: i32, neutral: i32) ([]i32, i32, []i32) =
+        (map(|x: i32| x + bias, xs),
+         reduce(|a: i32, b: i32| a + b, neutral, xs),
+         scan(|a: i32, b: i32| a + b, neutral, xs))",
+    );
+    let mut graph = graph(&result);
+    graph
+        .parse_and_run_program(
+            None,
+            "
+        (check (EntryRegion entry r) (Execution r op t)
+               (RegionParameter r 0 xs xt) (OperationParameter op xs)
+               (RegionParameter r 1 bias bt) (OperationParameter op bias)
+               (RegionParameter r 2 neutral nt) (OperationParameter op neutral))
+        (fail (check (Invokes op r) (RegionParameter r i p t) (OperationParameter op p)))
+    ",
+        )
+        .unwrap();
+    assert_eq!(
+        graph.function_to_dag("Execution", usize::MAX, false).unwrap().0.len(),
+        1
+    );
 }
 
 #[test]
