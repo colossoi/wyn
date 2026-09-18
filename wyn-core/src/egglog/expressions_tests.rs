@@ -24,7 +24,7 @@ fn inserts_scalar_only_entry_and_derives_its_dependencies() {
     graph
         .parse_and_run_program(
             None,
-            "(check (RegionResult r 0 e) (ExprParameter e p) (RegionParameter r 0 p t) (RegionExpr r e))",
+            "(check (RegionResult r 0 e) (ExprParameter e p) (RegionParameter r 0 p) (RegionExpr r e))",
         )
         .unwrap();
     assert!(graph.function_to_dag("Current", usize::MAX, false).is_err());
@@ -42,11 +42,11 @@ fn shares_syntax_across_uses_without_equating_function_parameters() {
             None,
             r#"
         (check (EntryRegion a ra) (RegionResult ra 0 (Typed t (Tuple (vec-of e e))))
-               (ExprParameter e p) (RegionParameter ra 0 p pt))
+               (ExprParameter e p) (RegionParameter ra 0 p))
         (check (EntryRegion a ra) (EntryRegion b rb) (!= ra rb)
                (RegionExpr ra (Typed t (Int "1"))) (RegionExpr rb (Typed t (Int "1"))))
         (fail (check (EntryRegion a ra) (EntryRegion b rb) (!= ra rb)
-                     (RegionParameter ra 0 p ta) (RegionParameter rb 0 p tb)))
+                     (RegionParameter ra 0 p) (RegionParameter rb 0 p)))
     "#,
         )
         .unwrap();
@@ -74,7 +74,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
         .parse_and_run_program(
             None,
             &format!(
-                "(fail (check (Execution r {} t))) (fail (check (ExprOperation e {})))",
+                "(fail (check (Execution r {}))) (fail (check (ExprOperation e {})))",
                 dead[0].egglog(),
                 dead[0].egglog()
             ),
@@ -85,7 +85,7 @@ fn inserts_selected_fused_bodies_without_reviving_the_producer() {
             None,
             "
         (check (Invokes op ra) (Invokes op rb) (!= ra rb))
-        (check (EntryRegion id r) (RegionParameter r 1 bias t) (OperationParameter op bias))
+        (check (EntryRegion id r) (RegionParameter r 1 bias) (OperationParameter op bias))
     ",
         )
         .unwrap();
@@ -111,11 +111,11 @@ fn parallel_fused_callbacks_keep_captures_and_neutral_dependencies() {
         .parse_and_run_program(
             None,
             "
-        (check (EntryRegion entry r) (Execution r op t)
-               (RegionParameter r 0 xs xt) (OperationParameter op xs)
-               (RegionParameter r 1 bias bt) (OperationParameter op bias)
-               (RegionParameter r 2 neutral nt) (OperationParameter op neutral))
-        (fail (check (Invokes op r) (RegionParameter r i p t) (OperationParameter op p)))
+        (check (EntryRegion entry r) (Execution r op)
+               (RegionParameter r 0 xs) (OperationParameter op xs)
+               (RegionParameter r 1 bias) (OperationParameter op bias)
+               (RegionParameter r 2 neutral) (OperationParameter op neutral))
+        (fail (check (Invokes op r) (RegionParameter r i p) (OperationParameter op p)))
     ",
         )
         .unwrap();
@@ -149,14 +149,15 @@ fn loop_carried_parameters_are_dependencies_inside_the_loop_only() {
             None,
             &format!(
                 "
-        (check (LoopRegions {} {} {})
-               (RegionParameter {} 0 acc t) (Execution {} child ct) (OperationParameter child acc))
-        (fail (check (RegionParameter {} i p t) (OperationParameter {} p)))
-        (fail (check (Execution {} child t) (OperationDependency {} child)))
-        (check (EntryRegion id outer) (RegionParameter outer 1 n t) (OperationParameter {} n))
+        (check (Invokes {} {}) (Invokes {} {})
+               (RegionParameter {} 0 acc) (Execution {} child) (OperationParameter child acc))
+        (fail (check (RegionParameter {} i p) (OperationParameter {} p)))
+        (fail (check (Execution {} child) (OperationDependency {} child)))
+        (check (EntryRegion id outer) (RegionParameter outer 1 n) (OperationParameter {} n))
         ",
                 loop_id.egglog(),
                 header.egglog(),
+                loop_id.egglog(),
                 body.egglog(),
                 header.egglog(),
                 body.egglog(),
@@ -165,6 +166,44 @@ fn loop_carried_parameters_are_dependencies_inside_the_loop_only() {
                 body.egglog(),
                 loop_id.egglog(),
                 loop_id.egglog()
+            ),
+        )
+        .unwrap();
+}
+
+#[test]
+fn conditional_dependencies_include_call_arguments_from_both_arms() {
+    let result = compile(
+        "entry main(flag: bool, xs: []i32, ys: []i32) i32 =
+        if flag then length(xs) else length(ys)",
+    );
+    let (id, yes, no) = result
+        .ir
+        .operations
+        .iter()
+        .find_map(|(&id, op)| match op.kind {
+            OperationKind::If {
+                then_region,
+                else_region,
+                ..
+            } => Some((id, then_region, else_region)),
+            _ => None,
+        })
+        .unwrap();
+    let mut graph = graph(&result);
+    graph
+        .parse_and_run_program(
+            None,
+            &format!(
+                "(check (Execution r {op}) (Invokes {op} {yes}) (Invokes {op} {no})
+                    (RegionParameter r 0 flag) (OperationParameter {op} flag)
+                    (RegionParameter r 1 xs) (OperationParameter {op} xs)
+                    (RegionParameter r 2 ys) (OperationParameter {op} ys))
+                 (fail (check (Execution {yes} child) (OperationDependency {op} child)))
+                 (fail (check (Execution {no} child) (OperationDependency {op} child)))",
+                op = id.egglog(),
+                yes = yes.egglog(),
+                no = no.egglog(),
             ),
         )
         .unwrap();
@@ -203,7 +242,7 @@ fn expression_export_starts_at_entries_and_ignores_dead_arena_records() {
         (check (EntryRegion id r) (RegionResult r 0 (Typed t (Int "7"))))
         (fail (check (= e (Typed t (Int "909")))))
         (fail (check (= e (Typed t (Int "808")))))
-        (fail (check (Execution r op t)))
+        (fail (check (Execution r op)))
     "#,
         )
         .unwrap();
@@ -222,10 +261,10 @@ fn lambda_values_depend_on_captures_without_invoking_their_bodies() {
             "
         (Region (RegionId 0)) (Region (RegionId 1))
         (RegionParent (RegionId 1) (RegionId 0))
-        (RegionParameter (RegionId 0) 0 (ParameterId 0) (TypeId 0))
-        (RegionParameter (RegionId 1) 0 (ParameterId 1) (TypeId 0))
-        (Execution (RegionId 0) (OperationId 0) (TypeId 0))
-        (Execution (RegionId 1) (OperationId 1) (TypeId 0))
+        (RegionParameter (RegionId 0) 0 (ParameterId 0))
+        (RegionParameter (RegionId 1) 0 (ParameterId 1))
+        (Execution (RegionId 0) (OperationId 0))
+        (Execution (RegionId 1) (OperationId 1))
         (let outer (Typed (TypeId 0) (Parameter (ParameterId 0))))
         (let inner (Typed (TypeId 0) (Parameter (ParameterId 1))))
         (RegionResult (RegionId 1) 0 (Typed (TypeId 1) (Tuple (vec-of outer inner

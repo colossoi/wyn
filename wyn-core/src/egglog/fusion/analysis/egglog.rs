@@ -176,9 +176,7 @@ impl Sink for Egglog {
             format!("(InputSlice {} {} {tail})", a.as_u32(), b.as_u32())
         });
         self.emit(format_args!(
-            "(GroupStream {} {}) (set (StreamSlices {} {}) (set-of {chain}))",
-            group(producer),
-            group(consumer),
+            "(set (StreamSlices {} {}) (set-of {chain}))",
             group(producer),
             group(consumer)
         ));

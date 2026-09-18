@@ -7,7 +7,7 @@
 (rule ((= (StorageFor value) (Reuse e))) ((SameBacking value e)) :ruleset allocation)
 (rule ((Needs stage (Source e))) ((set (Backing (Source e)) (Source e))) :ruleset allocation)
 (rule ((Requires (InOperation op) (Source e))) ((set (Backing (Source e)) (Source e))) :ruleset allocation)
-(rule ((Escapes r (Source e))) ((set (Backing (Source e)) (Source e))) :ruleset allocation)
+(rule ((Escapes (Source e))) ((set (Backing (Source e)) (Source e))) :ruleset allocation)
 (rule ((SameBacking value e) (ValueRef e source) (= storage (Backing source)))
       ((set (Backing value) storage)) :ruleset allocation)
 (rule ((SameBacking value e) (ValueRef e source) (Materialize value))
@@ -40,7 +40,7 @@
 ; Bucket updates retain the destination; counts and overflow are fresh outputs.
 (rule ((= (Plan op) (Buckets)) (Phase (Stage op "clear") r)
        (= counts (Backing (Result op 1))) (= overflow (Backing (Result op 2))))
-      ((Access (Stage op "clear") counts "write") (Access (Stage op "clear") overflow "write")) :ruleset allocation)
+      ((set (Access (Stage op "clear") counts) 2) (set (Access (Stage op "clear") overflow) 2)) :ruleset allocation)
 (rule ((BucketResult op destination) (CounterType count))
       ((ElementType (Result op 1) count) (ElementType (Result op 2) count)
        (CapacityExtent (Result op 1) (Length destination)) (LiveLength (Result op 1) (Length destination))
@@ -57,9 +57,9 @@
 (rule ((Needs stage value) (LiveLength value (Stored count)))
       ((Needs stage count)) :ruleset allocation)
 (rule ((Needs stage value) (= storage (Backing value)))
-      ((Access stage storage "read")) :ruleset allocation)
+      ((set (Access stage storage) 1)) :ruleset allocation)
 (rule ((Produces stage value) (= storage (Backing value)))
-      ((Access stage storage "write")) :ruleset allocation)
+      ((set (Access stage storage) 2)) :ruleset allocation)
 
 ; Kernel emission looks up these slots; only Allocation facts create storage.
 (rule ((ReturnScalar output t))
@@ -130,7 +130,6 @@
 
 ; Alias and size information is shared by every capacity using that value.
 (rule ((= v (AbiNumber n))) ((set (AbiConstant v) n)) :ruleset abi)
-(rule ((= n (AbiConstant v))) ((set (AbiBoundKnown v) true)) :ruleset abi)
 (rule ((AbiAlias a b) (= n (AbiConstant b))) ((set (AbiConstant a) n)) :ruleset abi)
 (rule ((AbiAlias a b) (AbiStorage b binding stride))
       ((AbiStorage a binding stride)) :ruleset abi)
@@ -161,7 +160,6 @@
       ((AbiBoundInput v binding stride)) :ruleset abi)
 (rule ((AbiChoice v a b) (AbiParameterCount a offset) (AbiParameterCount b offset))
       ((AbiParameterCount v offset)) :ruleset abi)
-(rule ((AbiAlias a b)) ((AbiChild a b)) :ruleset abi)
 (rule ((= v (AbiLength a))) ((AbiChild v a)) :ruleset abi)
 (rule ((= v (AbiBinary op a b))) ((AbiChild v a) (AbiChild v b)) :ruleset abi)
 ; Sizes use nonnegative, checked arithmetic, independently of scalar wraparound.

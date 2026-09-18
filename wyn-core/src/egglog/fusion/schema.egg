@@ -1,7 +1,8 @@
 ; Mutable fusion groups are distinct from immutable operation and plan IDs.
 ; Union redirects graph edges, use sets, and dependency closure together.
 (datatype FusionGroup (Group OperationKey))
-(datatype FusionPlan (Source OperationKey) (Joined i64 FusionPlan FusionPlan bool))
+; Each planning round selects one contraction, giving its immutable plan an ID.
+(datatype FusionPlan (Source OperationKey) (Joined i64))
 (sort OperationSet (Set OperationKey))
 ; Captures and neutrals are ordinary uses; indexed arguments and lengths carry
 ; additional proofs that fusion must distinguish from input streams.
@@ -49,11 +50,10 @@
 (function GroupInputs (FusionGroup) InputSites :merge (set-union old new))
 (function InternalInputs (FusionGroup) InputSites :merge (set-union old new))
 (relation InputFact (FusionGroup InputSite))
-(relation GroupStream (FusionGroup FusionGroup))
 (function StreamBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (function StreamSlices (FusionGroup FusionGroup) SliceChains :merge (set-union old new))
-(function MemoryProblems (FusionGroup FusionGroup) i64 :merge (max old new))
-(function BarrierProblems (FusionGroup FusionGroup) i64 :merge (max old new))
+(function MemoryBlocked (FusionGroup FusionGroup) bool :merge (or old new))
+(function BarrierBlocked (FusionGroup FusionGroup) bool :merge (or old new))
 (relation ScanFeeds (OperationKey OperationKey))
 (function HasGroupPath (FusionGroup FusionGroup) bool :merge (or old new))
 (function GroupBetween (FusionGroup FusionGroup) OperationSet :merge (set-union old new))

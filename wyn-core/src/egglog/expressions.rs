@@ -112,10 +112,9 @@ impl Reader<'_, '_, '_> {
         }
         for (i, &p) in data.parameters.iter().enumerate() {
             let parameter = self.key("ParameterId", p.as_u32())?;
-            let ty = self.key("TypeId", self.data.parameters[p].ty.as_u32())?;
             self.sink.add(
                 "RegionParameter",
-                (r, self.sink.base_to_value(i as i64), parameter, ty),
+                (r, self.sink.base_to_value(i as i64), parameter),
             )?;
         }
         for (&symbol, &body) in &self.symbols {
@@ -302,8 +301,7 @@ impl Reader<'_, '_, '_> {
         self.scope(source.region)?;
         let op = self.key("OperationId", id.as_u32())?;
         let region = self.key("RegionId", source.region.as_u32())?;
-        let ty = self.key("TypeId", source.ty.as_u32())?;
-        self.sink.add("Execution", (region, op, ty))?;
+        self.sink.add("Execution", (region, op))?;
         for body in source.kind.callbacks() {
             if let SoacBody::Apply { region, captures, .. } = body {
                 self.queue(*region);
@@ -315,8 +313,7 @@ impl Reader<'_, '_, '_> {
         match &source.kind {
             OperationKind::Call { function, args } => {
                 self.operand("Callee", op, *function)?;
-                let args = self.values(args)?;
-                self.sink.add("Arguments", (op, args))?;
+                self.operands(op, args)?;
             }
             OperationKind::EvalGlobal(symbol) => {
                 self.named(*symbol);
@@ -328,12 +325,13 @@ impl Reader<'_, '_, '_> {
                 then_region,
                 else_region,
             } => {
-                let condition = self.expression(*condition)?;
+                self.operand("OperationExpr", op, *condition)?;
                 self.queue(*then_region);
                 self.queue(*else_region);
                 let then_region = self.key("RegionId", then_region.as_u32())?;
                 let else_region = self.key("RegionId", else_region.as_u32())?;
-                self.sink.add("Conditional", (op, condition, then_region, else_region))?;
+                self.sink.add("Invokes", (op, then_region))?;
+                self.sink.add("Invokes", (op, else_region))?;
             }
             OperationKind::Loop {
                 init,
@@ -345,7 +343,8 @@ impl Reader<'_, '_, '_> {
                 self.queue(*body);
                 let header = self.key("RegionId", header.as_u32())?;
                 let body = self.key("RegionId", body.as_u32())?;
-                self.sink.add("LoopRegions", (op, header, body))?;
+                self.sink.add("Invokes", (op, header))?;
+                self.sink.add("Invokes", (op, body))?;
                 self.operand("OperationExpr", op, *init)?;
                 match kind {
                     LoopKind::For(value) | LoopKind::ForRange(value) => {

@@ -122,10 +122,8 @@
       ((AbiRootDependency (KernelRoot before) (KernelRoot after))) :ruleset abi-final)
 ; Merge accesses before assigning physical bindings.
 (rule ((AbiRootStorage root binding)) ((set (AbiAccess root binding) 1)) :ruleset abi-final)
-(rule ((Access stage value "read") (AbiBufferBinding value binding))
-      ((set (AbiAccess (KernelRoot stage) binding) 1)) :ruleset abi-final)
-(rule ((Access stage value "write") (AbiBufferBinding value binding))
-      ((set (AbiAccess (KernelRoot stage) binding) 2)) :ruleset abi-final)
+(rule ((= flags (Access stage value)) (AbiBufferBinding value binding))
+      ((set (AbiAccess (KernelRoot stage) binding) flags)) :ruleset abi-final)
 (rule ((OutputOwner output entry) (CopyOutput output) (OutputBacking output value) (AbiBufferBinding value binding))
       ((set (AbiAccess (EntryRoot entry) binding) 2)) :ruleset abi-final)
 ; Root environments use source values already present in the planning graph.

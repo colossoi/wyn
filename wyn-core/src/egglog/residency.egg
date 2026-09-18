@@ -72,15 +72,15 @@
       ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
 (rule ((HostRegion r) (Site op r) (ScalarSite op) (Operand op role e))
       ((Demand (InOperation op) e)) :ruleset residency)
-(rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit r) e)) :ruleset residency)
+(rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit) e)) :ruleset residency)
 (rule ((Demand site e) (References e value)) ((Requires site value)) :ruleset residency)
 (rule ((Requires (InStage stage) value)) ((Needs stage value)) :ruleset residency)
 
-; Region exits preserve loop/branch boundaries. They are not global returns.
-(rule ((Requires (AtExit r) value)) ((Escapes r value)) :ruleset residency)
+; Any host-region exit requires its values to survive the invocation.
+(rule ((Requires (AtExit) value)) ((Escapes value)) :ruleset residency)
 (rule ((Produces producer value) (Needs consumer value) (!= producer consumer))
       ((Crossing producer consumer value) (Materialize value)) :ruleset residency)
-(rule ((Escapes r value) (Produces producer value)) ((Materialize value)) :ruleset residency)
+(rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)
 

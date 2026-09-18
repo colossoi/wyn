@@ -292,8 +292,8 @@ fn scan_can_reuse_an_owned_intermediate_without_a_permission_hint() {
         r#"
         (= (StorageFor (Result (OperationId 1) 0)) (Reuse (ExprId 2)))
         (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
-        (Access (Stage (OperationId 1) "chunks") (Result (OperationId 0) 0) "read")
-        (Access (Stage (OperationId 1) "offsets") (Result (OperationId 0) 0) "write")"#,
+        (= (& (Access (Stage (OperationId 1) "chunks") (Result (OperationId 0) 0)) 1) 1)
+        (= (& (Access (Stage (OperationId 1) "offsets") (Result (OperationId 0) 0)) 2) 2)"#,
     );
     assert_eq!(count(&g, "Allocation"), 4);
     // The prefix scratch also connects chunks directly to offsets.
@@ -349,8 +349,8 @@ fn shared_producer_has_one_backing_and_independent_consumers() {
         &mut g,
         r#"
         (= (Backing (Result (OperationId 0) 0)) (Result (OperationId 0) 0))
-        (Access (Stage (OperationId 1) "elements") (Result (OperationId 0) 0) "read")
-        (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0) "read")
+        (= (& (Access (Stage (OperationId 1) "elements") (Result (OperationId 0) 0)) 1) 1)
+        (= (& (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0)) 1) 1)
     "#,
     );
     assert_eq!(
@@ -450,8 +450,8 @@ fn sliced_in_place_update_keeps_value_versions_and_shared_backing() {
         &mut g,
         r#"
         (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
-        (Access (Stage (OperationId 1) "ordered") (Result (OperationId 0) 0) "write")
-        (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0) "read")
+        (= (Access (Stage (OperationId 1) "ordered") (Result (OperationId 0) 0)) 3)
+        (= (& (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0)) 1) 1)
         (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "ordered"))
         (OrderEdge (End (OperationId 2)) (Gate 0))
         (OrderEdge (Gate 0) (Start (OperationId 1)))

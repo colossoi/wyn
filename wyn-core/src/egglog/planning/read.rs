@@ -264,23 +264,29 @@ pub(in crate::egglog) fn read(
         result.stages.insert(key, dispatch);
         Ok(())
     })?;
-    rows(graph, "Access", |a| {
-        if let Some(&id) = buffers.get(&a[1]) {
-            let Some(&dispatch) = stages.get(&a[0]) else {
-                return Err(invalid("access without a planned stage"));
-            };
-            match graph.value_to_base::<S>(a[2]).as_str() {
-                "read" => {
+    let mut status = Ok(());
+    graph.function_entries_while("Access", |entry| {
+        status = (|| {
+            let flags = graph.value_to_base::<i64>(entry.output);
+            if !(1..=3).contains(&flags) {
+                return Err(invalid("invalid access flags"));
+            }
+            if let Some(&id) = buffers.get(&entry.inputs[1]) {
+                let Some(&dispatch) = stages.get(&entry.inputs[0]) else {
+                    return Err(invalid("access without a planned stage"));
+                };
+                if flags & 1 != 0 {
                     data.state.dispatches[dispatch].reads.insert(id);
                 }
-                "write" => {
+                if flags & 2 != 0 {
                     data.state.dispatches[dispatch].writes.insert(id);
                 }
-                _ => return Err(invalid("unknown access")),
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        status.is_ok()
     })?;
+    status?;
     rows(graph, "DispatchDependency", |a| {
         let Some(&before) = stages.get(&a[0]) else {
             return Err(invalid("dependency without a planned predecessor"));

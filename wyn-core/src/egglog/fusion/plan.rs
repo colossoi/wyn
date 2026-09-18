@@ -45,18 +45,14 @@ pub(super) fn read(graph: &EGraph) -> Result<Vec<Step>, OptimizeError> {
         let args = app(&dag, row, "StepUse", 3)?;
         let n = integer(&dag, args[0])?;
         let consumer = key(&dag, args[1], "OperationId")?;
-        let Term::App(name, _) = dag.get(args[2]) else {
-            return Err(OptimizeError::Extraction("expected operand role".into()));
+        let Term::Lit(Literal::Bool(length)) = dag.get(args[2]) else {
+            return Err(OptimizeError::Extraction("expected length-use flag".into()));
         };
         let Some(step) = steps.get_mut(&n) else {
             return Err(OptimizeError::Extraction("use without fusion step".into()));
         };
-        match name.as_str() {
-            "Length" => {
-                step.lengths.insert(consumer);
-            }
-            "Input" | "Other" | "Argument" => {}
-            _ => return Err(OptimizeError::Extraction("invalid operand role".into())),
+        if *length {
+            step.lengths.insert(consumer);
         }
         step.retained |= consumer != step.consumer;
         step.demands.insert(consumer);

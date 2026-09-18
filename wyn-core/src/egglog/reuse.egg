@@ -107,7 +107,7 @@
        (= (ReadFinished writer site) false))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse-blockers)
 
-(rule ((ReuseAlias writer e alias) (Escapes region alias))
+(rule ((ReuseAlias writer e alias) (Escapes alias))
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Authored updates may return slices even when the result is a whole value.
 (rule ((ReuseAlias writer e alias) (SameBacking alias source) (SliceView source base start end))

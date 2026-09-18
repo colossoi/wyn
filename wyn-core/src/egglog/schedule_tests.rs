@@ -82,6 +82,12 @@ fn consuming_fused_maps_reuse_the_input_without_allocating() {
         1,
         "only the input resource needs a buffer record"
     );
+    let dispatch = result.state.dispatches.values().next().unwrap();
+    assert_eq!(dispatch.reads.len(), 1);
+    assert_eq!(
+        dispatch.reads, dispatch.writes,
+        "reuse must preserve both access flags"
+    );
     for n in [0, 1, 63, 64, 65, 137] {
         let input = Value::array(0..n);
         let output = run(&result, vec![input.clone()]);
