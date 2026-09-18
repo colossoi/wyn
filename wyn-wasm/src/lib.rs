@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 use wyn_core::error::CompilerError;
 use wyn_core::{
     initialize_frontend, CodegenTarget, CompilationFailure, CompilerOptions, LoadModulesError,
-    LoweringProfile, ParsedModules, PipelineTopologyPolicy, SchedulePolicy,
+    ParsedModules, PipelineTopologyPolicy,
 };
 use wyn_module_graph::{BuildError, ModulePath, PackageIdentity, PackagePlan};
 
@@ -628,7 +628,7 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
         Err(error) => return CompileResultWgsl::source_modules_err(source, error),
     };
 
-    // Frontend → TLC → semantic EGIR → target-aware SSA lowering → WGSL.
+    // Frontend → TLC → egglog → target-aware SSA lowering → WGSL.
     let program = match modules.type_check() {
         Ok(p) => p,
         Err(failure) => return CompileResultWgsl::frontend_err(source, failure),
@@ -674,26 +674,17 @@ fn compile_to_wgsl_impl(source: &str, graphics: bool, direct: bool) -> CompileRe
     let program = wyn_core::tlc::apply_ownership(program);
     let program = wyn_core::tlc::filter_reachable(program);
     let program = wyn_core::tlc::infer_input_slice_bounds(program);
-    let program = match wyn_core::to_egraph(program) {
-        Ok(s) => s,
-        Err(e) => return CompileResultWgsl::err_msg(format!("SSA conversion error: {:?}", e)),
-    };
-    let profile = if direct {
-        LoweringProfile::with_topology(
-            CodegenTarget::Wgsl,
-            SchedulePolicy::Serial,
-            PipelineTopologyPolicy::AuthoredOnly,
-        )
-    } else {
-        LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel)
-    };
-    let lower = || -> Result<_, wyn_core::egir::from_tlc::ConvertError> {
-        let program = wyn_core::egir::reify_soacs(program);
-        let program = wyn_core::egir::optimize_semantic_operations(program)
-            .map_err(|error| wyn_core::egir::from_tlc::ConvertError::Internal(error.to_string()))?;
-        let program = wyn_core::egir::apply_pipeline_topology_policy(program, profile.topology);
-        let program = wyn_core::egir::plan(program, profile)?;
-        wyn_core::lower_egir_to_ssa(program)
+    let topology =
+        if direct { PipelineTopologyPolicy::AuthoredOnly } else { PipelineTopologyPolicy::AllowGenerated };
+    let lower = || -> Result<_, Box<dyn std::error::Error>> {
+        use wyn_core::egglog;
+        let program = egglog::from_tlc(&program)?;
+        let program = egglog::fuse(program)?;
+        let program = egglog::insert_expressions(program)?;
+        let program = egglog::simplify(program, false)?;
+        let program = egglog::place(program)?;
+        let program = egglog::schedule(program, topology)?;
+        Ok(egglog::to_ssa(&program, CodegenTarget::Wgsl)?)
     };
     let ssa = match lower() {
         Ok(s) => s,

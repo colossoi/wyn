@@ -76,7 +76,7 @@ fn dependent_scan_then_reduction_keeps_two_operations() {
 }
 #[test]
 fn conditional_projection_crosses_only_the_independent_scan_barrier() {
-    // EGIR's cross_barrier_projection_handles_conditional_lambda_results.
+    // Conditional lambda results may be projected across independent barriers.
     check(
         "entry main(xs: []i32) ([]i32,i32) =
         let prefixes=scan(|a:i32,b:i32|a+b,0,xs) in

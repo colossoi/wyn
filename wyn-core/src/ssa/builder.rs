@@ -1,7 +1,7 @@
 //! SSA function builder.
 //!
 //! Thin wrapper around the generic SSA builder that adds Wyn return-type and
-//! place metadata and exposes exactly the surface the EGIR elaborator needs.
+//! place metadata and exposes exactly the surface the egglog elaborator needs.
 
 use crate::ast::{Span, TypeName};
 use crate::ssa;

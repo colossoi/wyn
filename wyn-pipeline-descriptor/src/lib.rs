@@ -1130,7 +1130,7 @@ impl FrameGraphBuilder {
             // Other binding kinds (textures, uniforms, samplers) are never in
             // the lists and always auto-derive from their declared access. If a
             // stage ever needs explicit read/write control over a non-buffer
-            // binding, the lists (populated upstream in EGIR) must be extended
+            // binding, the lists (populated upstream in egglog) must be extended
             // to name it and this carve-out generalized to "skip if listed".
             if explicit && matches!(binding, Binding::StorageBuffer { .. }) {
                 continue;

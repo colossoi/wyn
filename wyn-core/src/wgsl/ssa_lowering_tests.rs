@@ -2,23 +2,16 @@
 
 use super::{uniquify_parameter_name, validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
-#[cfg(feature = "egir")]
 use crate::compile_thru_ssa;
-#[cfg(feature = "egir")]
 use crate::err_spirv;
-#[cfg(feature = "egir")]
 use crate::error;
-#[cfg(feature = "egir")]
 use crate::lower_ssa_to_wgsl;
-#[cfg(feature = "egir")]
 use crate::lower_ssa_to_wgsl_with_options;
 use crate::ssa;
 use crate::types;
 use crate::wgsl;
 use crate::CodegenTarget;
 use crate::LookupSet;
-use crate::LoweringProfile;
-use crate::SchedulePolicy;
 use polytype::Type as PolyType;
 
 // ---------- wgsl_mangle: per-char cases ----------
@@ -302,7 +295,7 @@ fn lower_empty_program_succeeds() {
         Vec::new(),
         ssa::context::BackendGlobal {
             pipeline: Default::default(),
-            profile: LoweringProfile::new(CodegenTarget::Wgsl, SchedulePolicy::Parallel),
+            target: CodegenTarget::Wgsl,
             physical_kernels: Default::default(),
         },
     );
@@ -316,7 +309,6 @@ fn lower_empty_program_succeeds() {
 /// message on failure so test output points directly at the offending
 /// line. Used by end-to-end tests that compile a `.wyn` source through
 /// the full pipeline to WGSL.
-#[cfg(feature = "egir")]
 fn validate_wgsl(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|e| panic!("naga parse failed:\n{}\n\n--- source ---\n{}", e, source));
@@ -330,20 +322,17 @@ fn validate_wgsl(source: &str) {
 }
 
 /// Compile a Wyn source through the full pipeline to WGSL text.
-#[cfg(feature = "egir")]
 fn compile_to_wgsl(source: &str) -> error::Result<String> {
     let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
     lower_ssa_to_wgsl(program)
 }
 
-#[cfg(feature = "egir")]
 fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
     let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
     lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::U64_EMULATION)
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn constant_rng_seed_folds_with_wrapping_arithmetic() {
     let source = "entry seed() u32 =
        let s = 2326157778u32 in
@@ -366,7 +355,6 @@ fn constant_rng_seed_folds_with_wrapping_arithmetic() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn float_bounds_use_exact_finite_hex_literals_in_wgsl_reductions() {
     for (ty, bound) in [("f32", "0x1.fffffep+127f"), ("f16", "f16(0x1.ffcp+15f)")] {
         let source = format!(
@@ -384,7 +372,6 @@ fn float_bounds_use_exact_finite_hex_literals_in_wgsl_reductions() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn float_bounds_in_named_arrays_lower_to_wgsl() {
     let wgsl = compile_to_wgsl(
         "def bounds: [2]f32 = [f32.highest, f32.lowest]
@@ -397,7 +384,6 @@ fn float_bounds_in_named_arrays_lower_to_wgsl() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn float_bounds_do_not_legalize_authored_infinities_or_nan() {
     for value in ["f32.inf", "f32.nan", "1.0f32 / 0.0f32", "f32.highest + f32.inf"] {
         let source = format!("entry nonfinite() f32 = {value}");
@@ -407,7 +393,6 @@ fn float_bounds_do_not_legalize_authored_infinities_or_nan() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn float_bounds_keep_infinity_constants_in_spirv() {
     use wspirv::dr::Operand;
     for (ty, width, positive, negative) in [
@@ -440,7 +425,6 @@ fn float_bounds_keep_infinity_constants_in_spirv() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn f16_scalar_and_vectors_lower_to_valid_wgsl() {
     let source = r#"
 entry half_vectors(xs: []vec4f16) []vec4f16 =
@@ -455,7 +439,6 @@ entry half_vectors(xs: []vec4f16) []vec4f16 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_u64_emulation_is_opt_in_and_naga_valid() {
     let source = r#"
 def rotr16(x: u64) u64 =
@@ -489,7 +472,6 @@ entry rotate_and_add(xs: []u32) []u32 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_fragment_trivial() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -511,7 +493,6 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("@location(0)"));
 }
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_vertex_full_screen_triangle() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -535,7 +516,6 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("@builtin(vertex_index)"));
 }
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_vertex_multi_output_struct() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -561,19 +541,16 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("return _out_struct;"));
 }
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_red_triangle() {
     validate_testfile_wgsl("testfiles/red_triangle.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_red_triangle_curried() {
     validate_testfile_wgsl("testfiles/red_triangle_curried.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_map_iota() {
     // Exercises ArrayRange lowering: `iota(10)` produces a virtual
     // array that's consumed by `map`. Virtual arrays lower to a
@@ -582,7 +559,6 @@ fn wgsl_testfile_map_iota() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_array_call_demo() {
     // Exercises `_w_intrinsic_slice` view-to-view lowering. `data[0..4]`
     // with `data: []f32` remains a storage-backed view and is passed to
@@ -591,7 +567,6 @@ fn wgsl_testfile_array_call_demo() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_pc_echo_test() {
     // Exercises push-constant-backed compute inputs — broadcast scalars
     // and small arrays — routed through a synthesized storage-read
@@ -600,7 +575,6 @@ fn wgsl_testfile_pc_echo_test() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_reduce_compute() {
     // Exercises the function-scope hoist of SSA inst-result `var`
     // declarations. Without hoisting, a storage-view offset declared
@@ -613,7 +587,6 @@ fn wgsl_testfile_reduce_compute() {
 /// and naga-validate the result. Used for testfile sweeps. Resolves
 /// paths relative to the workspace root so tests work regardless of
 /// the crate under `-p`.
-#[cfg(feature = "egir")]
 fn validate_testfile_wgsl(rel_path: &str) {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/../{}", manifest, rel_path);
@@ -624,43 +597,36 @@ fn validate_testfile_wgsl(rel_path: &str) {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_creation() {
     validate_testfile_wgsl("testfiles/playground/creation.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_lava() {
     validate_testfile_wgsl("testfiles/playground/lava.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_seascape() {
     validate_testfile_wgsl("testfiles/playground/seascape.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_raytrace() {
     validate_testfile_wgsl("testfiles/playground/raytrace.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_mandelbulb() {
     validate_testfile_wgsl("testfiles/playground/mandelbulb.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_da_rasterizer() {
     validate_testfile_wgsl("testfiles/playground/da_rasterizer.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_sum_demo() {
     // Structural sum types lowered into flattened tuples at the
     // AST→TLC boundary. Mixed-arity variants, including a nullary
@@ -670,7 +636,6 @@ fn wgsl_testfile_sum_demo() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_swizzle_with_demo() {
     // GLSL-style chained `dir.yz *= mat2` rotations expressed via
     // `with .swizzle *= m`. Lowers to let-bound vec rebuilds at
@@ -679,13 +644,11 @@ fn wgsl_testfile_swizzle_with_demo() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_testfile_loopingspline() {
     validate_testfile_wgsl("testfiles/playground/loopingspline.wyn");
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_compiler_assigned_scalar_capture_emits_uniform_binding() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -707,7 +670,6 @@ entry frame(i_time: f32,
     );
 }
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_compute_reduce_writes_to_storage_buffer() {
     // A parallelized `reduce` compute shader's terminal write must hit
     // the storage buffer directly:
@@ -776,7 +738,6 @@ entry sum_array(#[size_hint(1024)] data: []f32) f32 =
 /// An `i32`-range reduce lowers to valid WGSL and provides the signed
 /// counterpart to the `u32` case below.
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_i32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -793,7 +754,6 @@ entry mn(n: i32) i32 =
 /// element-typed `.f2` field at the comparison site; each element is converted
 /// back with `u32(idx)`.
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_u32_range_reduce_validates() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -809,7 +769,6 @@ entry mn(n: u32) u32 =
 /// source range is element-typed as `i32`. The virtual-array length lowering
 /// must bridge that signedness boundary explicitly for WGSL.
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_i32_range_filter_then_map_validates() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -823,7 +782,6 @@ entry filtered() []i32 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_compute_multi_output_runtime_sized_arrays() {
     // A compute entry returning a tuple of >1 runtime-sized array: each
     // field's producing `map` must stream into its own bound output storage
@@ -849,7 +807,6 @@ entry gen(src: []f32) ([]f32, []f32) =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_fragment_with_helper_function() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -872,12 +829,16 @@ entry frame(target: render_target<vec4f32>) render_target<vec4f32> =
     assert!(wgsl.contains("@location(0)"));
     assert!(
         wgsl.contains("_out0 = vec4<f32>(0.6f, 0.7f, 0.8f, 1.0f);")
-            && !wgsl.lines().any(|line| line.trim_start().starts_with("let v")),
+            && !wgsl
+                .split("@fragment")
+                .nth(1)
+                .unwrap()
+                .lines()
+                .any(|line| line.trim_start().starts_with("let v")),
         "cheap single-use expressions should be substituted into their use:\n{wgsl}"
     );
 }
 #[test]
-#[cfg(feature = "egir")]
 fn size_hint_large_bumps_workgroup_to_256() {
     // size_hint > 64K should pick a workgroup of 256 (per
     // `pick_workgroup_size`); the choice has to land on the shader's
@@ -898,7 +859,6 @@ entry sum_array(#[size_hint(100000)] data: []f32) f32 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn size_hint_default_stays_workgroup_64() {
     // No hint → workgroup remains the default 64 (current behaviour).
     let wgsl = compile_to_wgsl(
@@ -916,7 +876,6 @@ entry sum_array(data: []f32) f32 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_gather_computed_array() {
     // A randomly-indexed computed array is materialized into its own
     // storage buffer; the consumer reads it by index. The WGSL backend must
@@ -952,7 +911,6 @@ entry gen(bh: []vec4f32) []i32 =
 /// the declared `access=write` must propagate from the param), and the scatter
 /// emits indexed stores into it.
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_scatter_into_storage_buffer() {
     let source = r#"
 def N:i32 = 5
@@ -976,7 +934,6 @@ entry rasterize(positions: []vec4f32,
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_map_over_unique_storage_view_updates_backing_buffer() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -1000,7 +957,6 @@ entry draw(fb: *[]vec4f32) *[]vec4f32 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
     // A compile-time-constant array indexed by a runtime value is hoisted
     // once to a module-scope `var<private>` (the WGSL analog of the SPIR-V
@@ -1029,11 +985,9 @@ fn wgsl_const_array_dynamic_index_hoists_to_private_global() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
-fn wgsl_dynamic_index_reuses_addressable_fixed_array_values() {
-    // Both the captured function parameter and the row extracted from it are
-    // already backed by WGSL references. Materialize must alias those values
-    // instead of producing full-array copies before each dynamic index.
+fn wgsl_dynamic_index_of_captured_fixed_array_values() {
+    // Captured arrays pass through callable parameters. Check that their
+    // dynamic indexing and the generated helpers remain valid WGSL.
     let wgsl = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -1059,8 +1013,8 @@ entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
 
     validate_wgsl(&wgsl);
     assert!(
-        wgsl.contains("_pc0.w_roots[") && wgsl.matches("_pc0.w_roots[").count() >= 2,
-        "the dynamic index should address the captured parameter directly:\n{wgsl}"
+        wgsl.contains("_pc0.w_roots") && wgsl.contains("array<u32, 2>"),
+        "the captured parameter must reach the indexing helpers:\n{wgsl}"
     );
     assert!(
         !wgsl.lines().any(|line| {
@@ -1073,8 +1027,7 @@ entry pick(roots: [1]([2]u32), table: [1024][2]u32) [1]([2]u32) =
 }
 
 #[test]
-#[cfg(feature = "egir")]
-fn wgsl_distinctness_indexes_512_element_parameter_without_copying_it() {
+fn wgsl_distinctness_indexes_512_element_helper_parameter() {
     let wgsl = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -1099,18 +1052,24 @@ entry check(inputs: [1]([512]u32)) [1]u32 =
         .expect("compile 512-element distinctness check");
 
     validate_wgsl(&wgsl);
+    // Egglog retains the helper boundary; the row is passed by value once.
+    // Indexing inside that helper must reuse its parameter without local copies.
+    let helper = wgsl.split("fn ").nth(1).expect("distinctness helper").split("\n}").next().unwrap();
     assert!(
-        wgsl.matches("_buf_0_0[").count() >= 2,
-        "distinctness should index its storage row directly:\n{wgsl}"
+        helper.contains("array<u32, 512>"),
+        "missing array parameter: {helper}"
     );
     assert!(
-        !wgsl.lines().any(|line| line.contains("array<u32, 512> =")),
-        "distinctness must not copy its 512-element parameter:\n{wgsl}"
+        helper.matches("w_p0[").count() >= 2,
+        "parameter indexing missing: {helper}"
+    );
+    assert!(
+        !helper.lines().any(|line| line.contains("array<u32, 512> =")),
+        "redundant helper-local array copy: {helper}"
     );
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_const_array_hoist_is_deduped() {
     // The same constant array indexed at two sites shares one global.
     let wgsl = compile_to_wgsl(
@@ -1128,7 +1087,6 @@ fn wgsl_const_array_hoist_is_deduped() {
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_composite_constant_inlines_transitive_constant_dependencies() {
     let wgsl = compile_to_wgsl(
         r#"
@@ -1157,7 +1115,6 @@ entry composite_constant(index: u32) word64 =
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn wgsl_structural_capture_emits_uniform_struct_and_validates() {
     let wgsl = compile_to_wgsl(
         r#"

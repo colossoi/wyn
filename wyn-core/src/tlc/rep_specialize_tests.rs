@@ -2,7 +2,7 @@
 //!
 //! These programs carry `filter(...)` results through user helpers and assert
 //! that representation specialization eliminates every abstract array before
-//! the EGIR backend boundary.
+//! the egglog backend boundary.
 
 use crate::compile_thru_spirv;
 

@@ -5,7 +5,6 @@
 use crate::ast::TypeName;
 use crate::builtins;
 use crate::flow::ExecutionModel;
-use crate::op;
 use crate::ssa;
 use crate::ssa::types::Program;
 use polytype::Type;
@@ -202,9 +201,6 @@ fn format_inst_kind(out: &mut fmt::Formatter<'_>, kind: &InstKind) -> fmt::Resul
     use crate::op::{OpTag, PureViewSource};
     match kind {
         InstKind::Op { tag, operands } => match tag {
-            op::OpTag::ResourceLen(resource) => {
-                write!(out, "resource_len({},{})", resource.set, resource.binding)?;
-            }
             OpTag::Int(s) => {
                 write!(out, "int {s}")?;
             }

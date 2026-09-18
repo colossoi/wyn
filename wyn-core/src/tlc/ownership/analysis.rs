@@ -18,7 +18,7 @@
 //!      promote to `_w_intrinsic_array_with_inplace` when the source's
 //!      owner is mutable and absent from `live_out`.
 //!    - SOAC uniqueness annotation: mark pointwise-safe SOAC inputs whose
-//!      owners are unique. EGIR separately decides physical reuse from the
+//!      owners are unique. egglog separately decides physical reuse from the
 //!      post-fusion semantic graph and its liveness.
 
 use crate::builtins;

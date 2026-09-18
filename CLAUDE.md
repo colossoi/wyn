@@ -70,7 +70,7 @@ cargo run --bin wyn -- check test.wyn
   free — no `pub(super)` / `pub(crate)` plumbing. This keeps source files
   focused on implementation and keeps test churn out of source diffs.
 - Existing examples: `tlc/defunctionalize.rs`, `tlc/fusion.rs`,
-  `egir/from_tlc.rs`, `ssa/builder.rs`.
+  `egglog/from_tlc.rs`, `ssa/builder.rs`.
 
 ### Visualizing SPIR-V Output
 The viz runner lives in `extra/viz` and is driven by the pipeline descriptor
@@ -216,7 +216,7 @@ smallest program that still reproduces the bug. Source:
                Output typed lambda calculus representation
 
            --output-mir <FILE>
-               Output MIR (SSA post-EGIR, pre-backend-lowering)
+               Output MIR (SSA post-egglog, pre-backend-lowering)
 
        -v, --verbose
                Print verbose output

@@ -473,7 +473,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 } else if id == known.storage_index || id == known.storage_store {
                     bail_spirv!(
                         "{} reached backend dispatch — should be lowered to \
-                         an InstKind::Load/Store side effect during EGIR conversion",
+                         an InstKind::Load/Store side effect during egglog conversion",
                         dispatch_name
                     )
                 } else {

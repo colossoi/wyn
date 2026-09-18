@@ -1,9 +1,9 @@
 //! Push array-valued conditionals into pointwise producers.
 //!
-//! Compute entries need a top-level producer shape for EGIR-side
+//! Compute entries need a top-level producer shape for egglog-side
 //! pointwise parallelization. An expression like
 //! `if c then map(f, xs) else map(g, xs)` is still pointwise, but if it
-//! reaches EGIR in that shape, output routing sees a branch that produces an
+//! reaches egglog in that shape, output routing sees a branch that produces an
 //! array instead of a producer. This pass rewrites
 //! the conservative cases to one `Map` whose lambda contains the branch.
 
@@ -187,7 +187,7 @@ fn try_compose_prefix_map(
 /// Branch canonicalization sometimes exposes a pointwise prefix immediately
 /// before the branch's final map. Compose that prefix locally so the enclosing
 /// array-valued `if` can still become one map. General producer/consumer fusion
-/// is deliberately EGIR-owned; this helper exists only inside that control-flow
+/// is deliberately egglog-owned; this helper exists only inside that control-flow
 /// normalization.
 fn compose_map_into_branch(
     producer: Lambda<Empty, Empty>,

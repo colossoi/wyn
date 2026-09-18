@@ -29,7 +29,7 @@
 //! an input symbol.
 //!
 //! Analysis is read-only. The phase transition then attaches each result
-//! directly to its owning entry node; EGIR consumes that in-tree data when
+//! directly to its owning entry node; egglog consumes that in-tree data when
 //! it builds the descriptor entry for each input binding.
 
 use crate::ssa;

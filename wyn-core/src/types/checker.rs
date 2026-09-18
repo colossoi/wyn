@@ -1618,7 +1618,7 @@ impl<'a> TypeChecker<'a> {
 
         // map: ∀a b n s. (a -> b) -> Array[a, s, n] -> Array[b, n, Composite]
         //
-        // The output variant is pinned to Composite because `egir::soac_lowering`
+        // The output variant is pinned to Composite because SOAC lowering
         // always materializes the map result via `_w_intrinsic_uninit` +
         // `_w_intrinsic_array_with_inplace`. Preserving the input variant `s`
         // in the output type would be a lie: post-expand the representation
@@ -1706,7 +1706,7 @@ impl<'a> TypeChecker<'a> {
         // Output variant is `Abstract` — representation-polymorphic at the
         // TLC level. The concrete runtime variant (Bounded for static-
         // capacity inputs, View for runtime-sized) is chosen by the
-        // producer's EGIR lowering in `egir/from_tlc.rs`. Pinning
+        // producer's concrete lowering. Pinning
         // Composite here would freeze the consumer's signature before
         // the producer's representation exists — see
         // `ssa::backend_validation` for the backend-boundary invariant.

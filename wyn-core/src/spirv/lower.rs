@@ -258,9 +258,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
         let spirv_result = match &inst.data {
             InstKind::Op { tag, operands } => match tag {
-                op::OpTag::ResourceLen(_) => {
-                    panic!("logical resource length reached SPIR-V lowering")
-                }
                 op::OpTag::Int(s) | op::OpTag::Uint(s) => match ssa_result_ty.as_ref() {
                     Some(PolyType::Constructed(TypeName::UInt(32), _)) => {
                         let val: u32 = s
@@ -467,7 +464,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         bail_spirv!(
                             "OpTag::Intrinsic with no SPIR-V backend dispatch: '{}' \
                              (id={:?}, lowering={:?}). HOF / SOAC intrinsics should be \
-                             lowered at EGIR; everything else needs an arm in \
+                             lowered at egglog; everything else needs an arm in \
                              lower_builtin_call and an entry in the typed_dispatch list.",
                             def.dispatch_name(),
                             id,

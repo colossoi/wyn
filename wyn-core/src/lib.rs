@@ -34,8 +34,6 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egglog;
-#[cfg(feature = "egir")]
-pub mod egir;
 /// Re-export of the pipeline descriptor format. Lives in its own
 /// crate so host runtimes (e.g. `extra/viz`) can deserialize the
 /// JSON without pulling in the whole compiler.
@@ -44,20 +42,13 @@ pub mod spirv;
 pub mod structured;
 pub mod wgsl;
 
-#[cfg(all(test, feature = "egir"))]
-mod integration_tests;
-
 #[cfg(test)]
 mod test_pipeline;
 
-#[cfg(all(test, feature = "egir"))]
+#[cfg(test)]
 mod slice_range_tests;
 
-#[cfg(feature = "egir")]
-use egir::from_tlc::ConvertError;
 use wyn_base::IdArena;
-#[cfg(feature = "egir")]
-use wyn_base::IdSource;
 
 use ast::NodeCounter;
 use std::collections::BTreeMap;
@@ -69,9 +60,9 @@ pub use wyn_base::{LookupMap, LookupSet, SortedSet, StableMap};
 
 /// Stable compiler-internal identity of a callable body.
 ///
-/// Allocated once while TLC is converted to EGIR and carried unchanged through
-/// EGIR, SSA, and backend lowering. Source-level callables use `SymbolId`
-/// through TLC; the conversion between the two realms is structural. Human-readable
+/// Allocated at SSA construction and carried unchanged through backend lowering.
+/// Source-level callables use `SymbolId` through TLC; the conversion between the
+/// two realms is structural. Human-readable
 /// function names and extern linkage symbols are metadata only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FunctionId(u32);
@@ -134,11 +125,6 @@ impl EntryId {
     pub(crate) const fn from_index(index: usize) -> Self {
         Self(index as u32)
     }
-
-    #[cfg(feature = "egir")]
-    pub(crate) const fn index(self) -> usize {
-        self.0 as usize
-    }
 }
 
 impl std::fmt::Display for EntryId {
@@ -179,9 +165,9 @@ pub type SymbolTable = IdArena<SymbolId, String>;
 // =============================================================================
 
 /// A `(descriptor set, binding)` pair naming a host-runtime storage /
-/// uniform / texture / sampler resource. Pre-allocation semantic EGIR keeps
-/// this interface identity directly; logical-resource allocation replaces it
-/// with `ResourceId`. Deliberately no
+/// uniform / texture / sampler resource. Source interfaces keep
+/// this binding identity; scheduled resources also carry `ResourceId` values.
+/// Deliberately no
 /// `Default` impl —
 /// `BindingRef { set: 0, binding: 0 }` is a meaningful binding, and a
 /// default value would silently mask construction bugs.
@@ -210,11 +196,6 @@ impl std::fmt::Display for BindingRef {
 pub struct ResourceId(u32);
 
 impl ResourceId {
-    #[cfg(feature = "egir")]
-    pub(crate) const fn from_index(index: u32) -> Self {
-        Self(index)
-    }
-
     /// A finalized egglog resource uses its sidecar buffer arena identity.
     pub(crate) const fn from_egglog_buffer(index: u32) -> Self {
         Self(index)
@@ -222,11 +203,6 @@ impl ResourceId {
 
     pub const fn index(self) -> usize {
         self.0 as usize
-    }
-
-    #[cfg(all(test, feature = "egir"))]
-    pub(crate) const fn for_test(index: u32) -> Self {
-        Self(index)
     }
 }
 
@@ -281,9 +257,8 @@ impl ResourceAccess {
 /// "internal compiler bug" message. Use this when downstream code
 /// structurally requires that every `SymbolId` it sees was registered
 /// by an earlier pass — the panic is the structural assertion, not a
-/// placeholder. Call sites in `Result`-returning paths should prefer
-/// `egir::from_tlc::symbol_name` (which propagates the same condition
-/// as `ConvertError::Internal`).
+/// placeholder. Fallible passes can instead report a missing symbol as a
+/// structured compiler error.
 pub fn symbol_name_or_bug(symbols: &SymbolTable, sym: SymbolId) -> &str {
     symbols.get(sym).map(String::as_str).unwrap_or_else(|| {
         panic!("BUG: symbol {sym:?} not in symbol table — registration invariant violated")
@@ -344,16 +319,14 @@ pub use polytype::Context as PolytypeContext;
 //       tlc::filter_reachable(...)       -> tlc::stage::Reachable
 //       tlc::infer_input_slice_bounds(...)
 //                                      -> tlc::stage::InputSliceBoundsInferred
-//       to_egraph(...)                  -> egir::from_tlc::Converted
-//
-// EGIR stages:
-//       egir::reify_soacs(...)           -> Segmented
-//       egir::optimize_semantic_operations(...)
-//                                      -> SemanticOperationsOptimized
-//       egir::lift_stage_uniform_values(...)
-//                                      -> Optimized
-//       egir::plan(..., profile)          -> Planned
-//       lower_egir_to_ssa(...)            -> ssa::stage::Elaborated
+// Egglog stages:
+//       egglog::from_tlc(&program)       -> Imported
+//       egglog::fuse(...)                -> Fused
+//       egglog::insert_expressions(...)  -> Expressions
+//       egglog::simplify(..., algebra)   -> Simplified
+//       egglog::place(...)               -> Placed
+//       egglog::schedule(..., topology)  -> Scheduled
+//       egglog::to_ssa(&program, target) -> ssa::stage::Elaborated
 //
 // Backend:
 //       ssa::filter_reachable(...)         -> ssa::stage::Reachable
@@ -405,26 +378,7 @@ pub(crate) fn optimize_tlc_for_test_thru_soac_normalization(
     Ok(tlc::normalize_soacs_to_anf(program))
 }
 
-/// Convert fully analyzed TLC into raw semantic EGIR.
-#[cfg(feature = "egir")]
-pub fn to_egraph(
-    program: tlc::stage::InputSliceBoundsInferred,
-) -> std::result::Result<egir::from_tlc::Converted, ConvertError> {
-    let binding_ids = program.global_context.auto_storage_binding_ids.clone();
-    egir::from_tlc::convert_program(&program, binding_ids, IdSource::new())
-}
-
-// =============================================================================
-// EGIR typestate chain
-//
-// Six newtypes over the semantic and physical programs defined in
-// `egir::program`. Transitions consume `self` and re-wrap the inner into the
-// next newtype.
-// Pass modules in `egir::*` are called per-body from inside the transitions
-// and are unaware of the newtype wrapping.
-// =============================================================================
-
-/// Target capability profile selected before semantic EGIR is lowered to SSA.
+/// Target capabilities selected before scheduled blocks are lowered to SSA.
 /// `Portable` deliberately uses the common SPIR-V/WGSL capability subset and
 /// is retained for tools and tests that want to inspect one shared SSA module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -434,72 +388,12 @@ pub enum CodegenTarget {
     Wgsl,
 }
 
-/// Whether semantic segmented operations may expand into multiple host
-/// dispatches. Serial scheduling still constructs semantic SegOps; only the
-/// terminal scheduling decision changes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SchedulePolicy {
-    Serial,
-    Parallel,
-}
-
 /// Whether lowering may introduce pipeline structure beyond the stages and
 /// resources authored by the source program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PipelineTopologyPolicy {
     AllowGenerated,
     AuthoredOnly,
-}
-
-/// Target and scheduling policy for the semantic-EGIR-to-SSA boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LoweringProfile {
-    pub target: CodegenTarget,
-    pub schedule: SchedulePolicy,
-    pub topology: PipelineTopologyPolicy,
-}
-
-impl LoweringProfile {
-    pub const PORTABLE: Self = Self {
-        target: CodegenTarget::Portable,
-        schedule: SchedulePolicy::Parallel,
-        topology: PipelineTopologyPolicy::AllowGenerated,
-    };
-
-    pub const fn new(target: CodegenTarget, schedule: SchedulePolicy) -> Self {
-        Self {
-            target,
-            schedule,
-            topology: PipelineTopologyPolicy::AllowGenerated,
-        }
-    }
-
-    pub const fn with_topology(
-        target: CodegenTarget,
-        schedule: SchedulePolicy,
-        topology: PipelineTopologyPolicy,
-    ) -> Self {
-        Self {
-            target,
-            schedule,
-            topology,
-        }
-    }
-}
-
-/// Run the physical EGIR passes and construct backend-bound SSA.
-#[cfg(feature = "egir")]
-pub fn lower_egir_to_ssa(
-    program: egir::parallelize::Planned,
-) -> std::result::Result<ssa::stage::Elaborated, ConvertError> {
-    let program = egir::lower_soacs(program)?;
-    let program = egir::eliminate_internal_place_calls(program)?;
-    let program = egir::partially_inline_calls(program)?;
-    let program = egir::materialize_dynamic_extracts(program);
-    let program = egir::rewrite(program);
-    let program = egir::optimize_skeleton(program);
-    let program = egir::erase_resources(program)?;
-    Ok(egir::elaborate(program))
 }
 
 /// Validate and lower elaborated SSA to SPIR-V.
@@ -801,55 +695,37 @@ pub fn compile_thru_tlc(source: &str) -> error::Result<tlc::stage::Reachable> {
     optimize_tlc_for_test(program)
 }
 
-/// Internal: run all the way through EGIR + elaborate to SSA from a
-/// pre-built `tlc::stage::Reachable`. Both `compile_thru_ssa` and
-/// `compile_thru_spirv_serial` build the SSA the same way; only
-/// the downstream scheduling profile differs.
-#[cfg(all(test, feature = "egir"))]
-fn ssa_from_reachable(
-    program: tlc::stage::Reachable,
-    profile: LoweringProfile,
-) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
-    let program = tlc::infer_input_slice_bounds(program);
-    let program = to_egraph(program)?;
-    let program = egir::reify_soacs(program);
-    let program = egir::optimize_semantic_operations(program)?;
-    let program = egir::lift_stage_uniform_values(program);
-    let program = egir::plan(program, profile)?;
-    Ok(lower_egir_to_ssa(program)?)
-}
-
-/// Run all the way through EGIR + elaborate to SSA. Materialize is enabled
-/// (matches the SPIR-V backend's requirements). Returns the boxed
-/// `Result<_, dyn Error>` so callers see both compiler errors and EGIR
-/// conversion errors uniformly.
-#[cfg(all(test, feature = "egir"))]
+/// Run the egglog pipeline to backend-bound SSA.
+#[cfg(test)]
 pub fn compile_thru_ssa(
     source: &str,
 ) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
-    ssa_from_reachable(compile_thru_tlc(source)?, LoweringProfile::PORTABLE)
+    compile_thru_ssa_for_target(source, CodegenTarget::Portable)
+}
+
+#[cfg(test)]
+fn compile_thru_ssa_for_target(
+    source: &str,
+    target: CodegenTarget,
+) -> std::result::Result<ssa::stage::Elaborated, Box<dyn std::error::Error>> {
+    let program = tlc::infer_input_slice_bounds(compile_thru_tlc(source)?);
+    let program = egglog::from_tlc(&program)?;
+    let program = egglog::fuse(program)?;
+    let program = egglog::insert_expressions(program)?;
+    let program = egglog::simplify(program, false)?;
+    let program = egglog::place(program)?;
+    let program = egglog::schedule(program, PipelineTopologyPolicy::AllowGenerated)?;
+    Ok(egglog::to_ssa(&program, target)?)
 }
 
 /// Run the full pipeline to a final SPIR-V binary.
-#[cfg(all(test, feature = "egir"))]
+#[cfg(test)]
 pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(lower_ssa_to_spirv(ssa_from_reachable(
-        compile_thru_tlc(source)?,
-        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Parallel),
+    Ok(lower_ssa_to_spirv(compile_thru_ssa_for_target(
+        source,
+        CodegenTarget::Spirv,
     )?)?)
 }
-
-/// Serial-scheduling equivalent of `compile_thru_spirv` for scheduler tests.
-#[cfg(all(test, feature = "egir"))]
-pub fn compile_thru_spirv_serial(source: &str) -> std::result::Result<Lowered, Box<dyn std::error::Error>> {
-    Ok(lower_ssa_to_spirv(ssa_from_reachable(
-        compile_thru_tlc(source)?,
-        LoweringProfile::new(CodegenTarget::Spirv, SchedulePolicy::Serial),
-    )?)?)
-}
-
-#[cfg(all(test, feature = "egir"))]
-mod host_length_tests;
 
 #[cfg(test)]
 mod literal_expansion_tests;

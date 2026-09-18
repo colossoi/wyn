@@ -1,9 +1,9 @@
 //! Normalize nested SOAC expressions into flat let chains.
 //!
-//! This is a source-shape pass, not a fusion pass: EGIR still makes every
-//! producer/consumer decision. The flat form ensures TLC-to-EGIR conversion
+//! This is a source-shape pass, not a fusion pass: egglog still makes every
+//! producer/consumer decision. The flat form ensures TLC-to-egglog conversion
 //! emits each SOAC as an explicit side effect and preserves the semantic value
-//! edges that EGIR needs.
+//! edges that egglog needs.
 
 use super::data::Empty;
 use super::{

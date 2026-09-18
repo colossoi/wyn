@@ -77,7 +77,7 @@ fn default_route_compiles_spirv_and_wgsl() {
     for target in ["spirv", "wgsl"] {
         let case = Case::new();
         let result = case.compile(target, &[]);
-        case.assert_compiled(target, &result, !cfg!(feature = "egir"));
+        case.assert_compiled(target, &result, true);
     }
 }
 
@@ -89,8 +89,7 @@ fn explicit_egglog_route_emits_shader() {
 }
 
 #[test]
-#[cfg(not(feature = "egir"))]
-fn direct_works_without_the_egir_feature() {
+fn direct_compiles_authored_compute() {
     let case = Case::new();
     fs::write(
         case.directory.join("input.wyn"),

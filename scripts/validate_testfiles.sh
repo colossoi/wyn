@@ -8,7 +8,6 @@ KEEP=false
 OUT_DIR="/tmp"
 MODE="spirv"
 PROFILE="debug"
-EGIR=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -29,18 +28,13 @@ while [[ $# -gt 0 ]]; do
             PROFILE="release"
             shift
             ;;
-        --egir)
-            EGIR=true
-            shift
-            ;;
         *)
-            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--wgsl] [--egir] [--release]"
+            echo "Usage: $0 [--keep|-k] [--out-dir|-o DIR] [--wgsl] [--release]"
             echo "  --keep, -k       Keep generated files (in /tmp by default)"
             echo "  --out-dir, -o    Output directory (implies --keep)"
             echo "  --wgsl           Compile to WGSL and validate with 'viz validate'"
             echo "  --release        Build wyn (and viz, for --wgsl) with --release"
             echo "                   (default: debug — builds faster, runs slower)"
-            echo "  --egir           Build and validate the optional EGIR compiler route"
             exit 1
             ;;
     esac
@@ -57,11 +51,7 @@ else
 fi
 
 echo "Building wyn ($PROFILE)..."
-FEATURE_FLAGS=()
-if $EGIR; then
-    FEATURE_FLAGS=(--features egir)
-fi
-cargo build $CARGO_FLAG -p wyn "${FEATURE_FLAGS[@]}"
+cargo build $CARGO_FLAG -p wyn
 
 if [ "$MODE" = "wgsl" ]; then
     echo "Building viz ($PROFILE) for WGSL validation..."

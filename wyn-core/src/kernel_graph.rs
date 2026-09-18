@@ -4,7 +4,22 @@ use crate::interface::OutputSlotId;
 use crate::pipeline_descriptor::DispatchLen;
 use crate::{EntryId, ResourceId, ResourceUse};
 use std::collections::HashSet;
-pub use wyn_kernel_graph::KernelId;
+
+/// Stable identity of a scheduled physical kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KernelId(u32);
+
+impl From<u32> for KernelId {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl KernelId {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutputRouteProjection {
@@ -77,29 +92,6 @@ impl PhysicalKernelGraph {
                     kernel.entry
                 ));
             }
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "egir")]
-    pub(crate) fn validate_entry_ids(
-        &self,
-        entry_ids: impl IntoIterator<Item = EntryId>,
-    ) -> Result<(), String> {
-        let expected = self.kernels.iter().map(|kernel| kernel.entry).collect::<HashSet<_>>();
-        let actual_ids = entry_ids.into_iter().collect::<Vec<_>>();
-        let actual = actual_ids.iter().copied().collect::<HashSet<_>>();
-        if actual.len() != actual_ids.len() {
-            return Err("physical body arena repeats an entry identity".into());
-        }
-        if expected != actual {
-            let mut missing = expected.difference(&actual).copied().collect::<Vec<_>>();
-            let mut unowned = actual.difference(&expected).copied().collect::<Vec<_>>();
-            missing.sort_unstable();
-            unowned.sort_unstable();
-            return Err(format!(
-                "physical kernel/body ownership mismatch; missing bodies: {missing:?}; unowned bodies: {unowned:?}"
-            ));
         }
         Ok(())
     }

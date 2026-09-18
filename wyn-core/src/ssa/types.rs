@@ -435,13 +435,13 @@ impl FuncBody {
 pub mod context {
     use crate::kernel_graph::PhysicalKernelGraph;
     use crate::pipeline_descriptor::PipelineDescriptor;
-    use crate::LoweringProfile;
+    use crate::CodegenTarget;
 
     /// Pipeline and planning data carried alongside a backend-bound SSA tree.
     #[derive(Clone, Debug)]
     pub struct BackendGlobal {
         pub pipeline: PipelineDescriptor,
-        pub profile: LoweringProfile,
+        pub target: CodegenTarget,
         pub physical_kernels: PhysicalKernelGraph,
     }
 }
@@ -454,7 +454,7 @@ pub mod stage {
     pub enum BareTag {}
     pub type Bare = Program<BareTag, ()>;
 
-    /// SSA freshly elaborated from the final physical EGIR program.
+    /// SSA emitted from scheduled egglog blocks.
     #[derive(Clone, Copy, Debug)]
     pub enum ElaboratedTag {}
     pub type Elaborated = Program<ElaboratedTag, BackendGlobal>;

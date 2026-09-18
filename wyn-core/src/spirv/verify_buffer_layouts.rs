@@ -6,11 +6,8 @@
 //! `type_byte_size(elem).expect("…")` call that crashes the compiler
 //! whenever upstream hands it a non-concrete element shape (view
 //! wrappers, abstract array variants, composites with a runtime size
-//! at the leaf). Construction sites that produce these typed fields
-//! — there are roughly eight, scattered across the EGIR `from_tlc`,
-//! `parallelize`, and `soac_lowering` passes — each
-//! does its own ad-hoc normalization. This pass is the single
-//! chokepoint they must implicitly satisfy: it walks every
+//! at the leaf). This pass checks the final interface produced by
+//! scheduling and SSA emission: it walks every
 //! `EntryInput.ty` / `EntryOutput.ty` / `StorageBindingDecl.elem_ty`
 //! that carries a `storage_binding`, derives the element type the
 //! backend will see, and rejects anything `type_byte_size` can't
@@ -73,7 +70,7 @@ fn check_storage_binding_decl(entry_name: &str, sb: &StorageBindingDecl) -> Resu
         format!(
             "internal: entry `{}` storage binding (set={}, binding={}) elem type {:?} \
              has no static size; SPIR-V's `create_storage_buffer` cannot lay it out. \
-             The construction site (likely a EGIR pass producing this `StorageBindingDecl`) \
+             The construction site (producing this `StorageBindingDecl`) \
              needs to reduce the element shape to a concrete fixed-size type before the \
              SSA boundary. See `spirv/verify_buffer_layouts.rs` for context.",
             entry_name, sb.binding.set, sb.binding.binding, sb.elem_ty
@@ -100,8 +97,7 @@ fn check_buffer_elem(
             "internal: entry `{}` {} (set={}, binding={}) lowered to a storage buffer whose \
              element type {:?} has no static size — derived from declared field type {:?}. \
              SPIR-V's `create_storage_buffer` requires a fixed-size element layout. \
-             A construction site upstream (likely in `egir::from_tlc`, \
-             `egir::parallelize`, or `egir::soac_lowering`) is \
+             An upstream interface construction site is \
              handing through a view-wrapped or composite-element type that didn't get \
              reduced to its concrete leaf. See `spirv/verify_buffer_layouts.rs` for \
              context.",

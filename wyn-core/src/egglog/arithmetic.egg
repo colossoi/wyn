@@ -90,7 +90,7 @@
 
 ; Small scalar powers use fewer multiplies than general power. Each fact carries
 ; the original expression, result/function types, base, remaining factors, and
-; accumulated product. Left-to-right multiplication matches EGIR's float policy.
+; accumulated product. Preserve left-to-right floating-point multiplication order.
 (relation PowerChain (Expr TypeKey TypeKey Expr i64 Expr))
 (relation MultiplicationType (TypeKey TypeKey))
 (rule ((Binary e t (Typed ft (BinOp "**")) x exponent)

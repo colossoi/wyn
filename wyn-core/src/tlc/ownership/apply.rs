@@ -259,7 +259,7 @@ fn unique_input_var<C: Payload, S: Payload>(
     let owner = model.owner_of(input_sym)?;
     let origin = model.origin(owner)?;
     // Only an externally-backed unique array has a stable ownership identity
-    // at this source boundary. EGIR may fuse or materialize the SOAC later, so
+    // at this source boundary. egglog may fuse or materialize the SOAC later, so
     // TLC records only `UniqueInput` and does not commit to `InputBuffer`.
     if !matches!(origin, Origin::Fresh | Origin::UniqueParam | Origin::Entry) {
         return None;

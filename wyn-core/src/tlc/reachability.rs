@@ -12,7 +12,7 @@ use super::ownership::OwnershipApplied;
 pub enum ReachableTag {}
 pub type Reachable = super::Program<ReachableTag, super::defunctionalize::ClosureConverted, BackendGlobal>;
 
-/// Eliminate unreachable definitions before semantic EGIR conversion.
+/// Eliminate unreachable definitions before egglog conversion.
 ///
 /// Definition bodies are not rewritten: live definitions and their term IDs
 /// move intact into the resulting program.

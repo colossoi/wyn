@@ -1,6 +1,6 @@
-//! Experimental TLC import into [egglog](https://github.com/egraphs-good/egglog).
+//! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
 //!
-//! [`from_tlc()`] accepts the same TLC checkpoint as EGIR and
+//! [`from_tlc()`] accepts normalized TLC with inferred input bounds and
 //! returns an egglog fusion graph together with [`Ir`]. [`fuse`]
 //! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
 //! separate typed expression DAG with region uses and dependency facts.

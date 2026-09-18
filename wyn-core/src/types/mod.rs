@@ -17,7 +17,6 @@ use crate::ast::Span;
 use crate::BindingRef;
 use crate::FunctionId;
 use crate::LookupMap;
-use crate::ResourceId;
 use std::hash::{Hash, Hasher};
 
 /// Map a swizzle letter to its component index. Supports both the
@@ -308,14 +307,11 @@ pub enum TypeName {
     /// Entry point params are constrained to Storage, others remain polymorphic.
     AddressPlaceholder,
     /// Buffer region `(set, binding)` carried inside a `View` variant at the
-    /// EGIR/SSA level: `Array[elem, ArrayVariantView[Region(set,binding)], dim]`.
-    /// Introduced at EGIR lowering (where the binding is known), so the backend
+    /// egglog/SSA level: `Array[elem, ArrayVariantView[Region(set,binding)], dim]`.
+    /// Introduced at egglog lowering (where the binding is known), so the backend
     /// reads a view's descriptor off its type instead of a per-value side-map.
     /// Never appears in source/TLC types — views are nullary (`View[]`) there.
     Buffer(BindingRef),
-    /// Target-independent storage identity used by allocated semantic EGIR.
-    /// Physicalization rewrites this to `Buffer` before SSA elaboration.
-    Resource(ResourceId),
     /// The buffer slot's value for a non-view array (composite/virtual/bounded):
     /// "this array is not buffer-backed, so it has no descriptor binding." A
     /// concrete tag (not a variable) so non-view arrays carry no free type var.
@@ -425,7 +421,6 @@ impl std::fmt::Display for TypeName {
             TypeName::ArrayVariantAbstract => write!(f, "abstract"),
             TypeName::AddressPlaceholder => write!(f, "?addrspace"),
             TypeName::Buffer(b) => write!(f, "buffer(set={}, binding={})", b.set, b.binding),
-            TypeName::Resource(resource) => write!(f, "resource({})", resource.index()),
             TypeName::NoBuffer => write!(f, "no_buffer"),
             TypeName::Texture2D => write!(f, "texture2d"),
             TypeName::Sampler => write!(f, "sampler"),
@@ -497,7 +492,6 @@ impl polytype::Name for TypeName {
             TypeName::ArrayVariantAbstract => "abstract".to_string(),
             TypeName::AddressPlaceholder => "?variant".to_string(),
             TypeName::Buffer(b) => format!("buffer_s{}_b{}", b.set, b.binding),
-            TypeName::Resource(resource) => format!("resource_{}", resource.index()),
             TypeName::NoBuffer => "no_buffer".to_string(),
             TypeName::Texture2D => "texture2d".to_string(),
             TypeName::Sampler => "sampler".to_string(),
@@ -1047,7 +1041,7 @@ pub fn array_view_buffer(ty: &Type) -> Option<BindingRef> {
 
 /// Concrete descriptor carried by a monomorphized storage-image type.
 /// Storage images have no runtime payload; this region is their complete
-/// identity during EGIR and backend lowering.
+/// identity during egglog and backend lowering.
 pub fn storage_image_buffer(ty: &Type) -> Option<BindingRef> {
     match ty {
         Type::Constructed(TypeName::StorageTexture, args) => match args.first() {
@@ -1491,7 +1485,7 @@ pub fn is_array_variant_bounded(ty: &Type) -> bool {
 
 /// Create the Abstract array variant marker — representation-polymorphic
 /// at the TLC level, resolved to a concrete variant by the producer's
-/// EGIR lowering. See `TypeName::ArrayVariantAbstract` for the full
+/// egglog lowering. See `TypeName::ArrayVariantAbstract` for the full
 /// semantics + invariant.
 pub fn array_variant_abstract() -> Type {
     Type::Constructed(TypeName::ArrayVariantAbstract, vec![])
@@ -1554,7 +1548,6 @@ pub fn debug_assert_top_level_type(ty: &Type, context: &str) {
             TypeName::ArrayVariantView
             | TypeName::ArrayVariantComposite
             | TypeName::Buffer(_)
-            | TypeName::Resource(_)
             | TypeName::NoBuffer
             | TypeName::AddressPlaceholder => {
                 panic!(
@@ -1645,7 +1638,7 @@ pub fn array_size(ty: &Type) -> Option<&Type> {
 /// `(vec![P1, P2, ..., Pn], R)`. For a non-arrow `ty`, returns
 /// `(vec![], ty.clone())`. This is the single canonical helper for
 /// peeling an entry def's signature into params plus its declared return,
-/// including when EGIR wires entry parameters and output routes.
+/// including when egglog wires entry parameters and output routes.
 pub fn extract_function_signature(ty: &Type) -> (Vec<Type>, Type) {
     let mut params = Vec::new();
     let mut current = ty.clone();

@@ -8,18 +8,13 @@ members = [
     "wyn-pipeline-descriptor",
     "wyn-spirv",
     "wyn-graph",
-    "wyn-slice",
-    "wyn-fusion",
-    "wyn-kernel-graph",
     "wyn-module-graph",
     "wyn-package-manager",
-    "wyn-staged-ir",
 ]
 resolver = "2"
-# wyn-wasm is built only for wasm32 via `wasm-pack`, never the host target the
-# rest of the workspace compiles for, and it carries its own size-tuned
-# release profile — so it stays out of the workspace with its own lockfile.
-exclude = ["extra", "wyn-wasm", "wyn-egir-viz-wasm"]
+# wyn-wasm is shipped via wasm-pack and has its own size-tuned release profile
+# and lockfile. Run its native tests separately with --manifest-path.
+exclude = ["extra", "wyn-wasm"]
 
 [workspace.package]
 version = "0.1.0"

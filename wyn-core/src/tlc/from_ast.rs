@@ -1245,7 +1245,7 @@ impl<'a> Transformer<'a> {
     /// `values[i]` into `dest[indices[i]]` for each `i`; out-of-bounds indices
     /// are ignored (Futhark semantics). The `dest` must be a Var (a `#[storage]`
     /// buffer param in the rasterizer use case) — its `Place`
-    /// carries the symbol the EGIR conversion resolves to the dest's view.
+    /// carries the symbol the egglog conversion resolves to the dest's view.
     fn transform_soac_scatter(
         &mut self,
         args: &[ast::Expression<ast::HolesResolvedTree>],

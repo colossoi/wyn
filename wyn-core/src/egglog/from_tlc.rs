@@ -37,7 +37,7 @@ pub enum ConvertError {
     InvalidProgram(String),
 }
 
-/// Import the same TLC checkpoint accepted by `egir::from_tlc`. Types and pure
+/// Import normalized TLC after input slice bounds inference. Types and pure
 /// values are structurally interned in the sidecar; local lets become references.
 /// Operations have their own identities and remain in their execution regions.
 /// Map/reduce/scan construct Scremas directly.

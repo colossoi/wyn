@@ -19,7 +19,7 @@ use crate::ssa::types::{
     AtomicOp, ConstantValue, EntryPoint, FuncBody, Function, InstKind, PlaceId, Terminator, ValueRef,
 };
 use crate::types::{bool_type, sized_array, unit, Type, TypeExt, TypeName};
-use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, SchedulePolicy};
+use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wyn_base::IdSource;
 
@@ -126,7 +126,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             BackendGlobal {
                 pipeline,
                 physical_kernels: data.state.physical_kernels.clone(),
-                profile: LoweringProfile::new(target, SchedulePolicy::Parallel),
+                target,
             },
         ),
     )

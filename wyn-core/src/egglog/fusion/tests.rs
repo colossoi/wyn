@@ -118,7 +118,7 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
 
 fn optimized(mut input: Program<Imported>) -> Program<Fused> {
     // Some tests modify the imported graph to introduce a precise effect/use,
-    // just as the corresponding EGIR tests modify its semantic graph.
+    // before importing the modified dependency graph.
     let mut sink = Egglog::new();
     emit(&input.ir, &mut sink).unwrap();
     input.state.facts = parse_program("test-fusion.egg", &sink.text).unwrap();
@@ -186,7 +186,7 @@ fn vertical_fusion_preserves_body_order_captures_and_consumer_identity() {
 
 #[test]
 fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
-    // EGIR planner_tests::cycle_candidates_are_skipped_without_changing_the_graph.
+    // Cyclic candidates must be skipped without changing the graph.
     // Adjacent contractions can consume this chain; merging first and last alone
     // would create a cycle through the middle operation.
     let input = imported(
@@ -223,7 +223,7 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
 
 #[test]
 fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
-    // Port of EGIR fusion::mod_tests with its original gather/scan fixture.
+    // Gather/scan regression fixture.
     let input = imported(include_str!("../../../../testfiles/gather_scan_chain.wyn"));
     let original = entry_ops(&input.ir).to_vec();
     let scan = original.iter().copied().find(|&id| {
@@ -251,7 +251,7 @@ fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
 
 #[test]
 fn conditional_tuple_elements_keep_their_logical_boundaries() {
-    // Conditional result handling from EGIR fusion::projection_tests, combined
+    // Conditional result handling combined
     // with tuple-sensitive routing: the pair is one element, never two arrays.
     let input = imported(
         "entry pair_sum(xs: [4]i32) (i32, i32) =
@@ -282,7 +282,7 @@ fn conditional_tuple_elements_keep_their_logical_boundaries() {
 
 #[test]
 fn opaque_barriers_prevent_fusion_without_effect_tokens() {
-    // Port of EGIR snapshot_preserves_opaque_barriers_without_effect_tokens.
+    // Opaque barriers must survive without explicit effect tokens.
     let mut input = imported(CHAIN);
     let region = entry(&input.ir);
     let consumer = entry_ops(&input.ir)[1];
@@ -322,7 +322,7 @@ fn opaque_barriers_prevent_fusion_without_effect_tokens() {
 
 #[test]
 fn cross_region_uses_keep_the_producer_materialized() {
-    // Region equivalent of EGIR snapshot_keeps_cross_block_uses_as_external_observers.
+    // Cross-region uses remain external observers.
     let input = imported(
         "entry branch(xs: [4]i32, flag: bool) [4]i32 =
         let a = map(|x: i32| x + 1, xs) in
@@ -339,7 +339,7 @@ fn cross_region_uses_keep_the_producer_materialized() {
 
 #[test]
 fn separate_bodies_and_loop_parameters_do_not_alias() {
-    // EGIR snapshot_qualifies_values_by_body_and_accepts_loop_parameters,
+    // Values must be qualified by body, including loop parameters,
     // with a fusible pair in each scope to exercise the rewrite as well.
     let input = imported(
         "entry first(xs: [4]i32) [4]i32 =

@@ -7,7 +7,7 @@
 //!
 //! **Representation variants.** Type substitution replaces type variables but
 //! deliberately preserves `ArrayVariantAbstract`. It is a first-class
-//! representation-polymorphic variant, not a placeholder. EGIR lowering
+//! representation-polymorphic variant, not a placeholder. egglog lowering
 //! chooses the concrete representation, and `ssa::backend_validation` guards
 //! the backend boundary.
 

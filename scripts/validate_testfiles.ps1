@@ -26,8 +26,6 @@ Build and run release binaries instead of debug binaries.
 Validate only testfiles tracked by Git. Useful when a working tree contains
 local experiments that should not participate in a repository gate.
 
-.PARAMETER Egir
-Build and validate the optional EGIR compiler route instead of egglog.
 #>
 [CmdletBinding()]
 param(
@@ -35,8 +33,7 @@ param(
     [string]$OutDir,
     [switch]$Wgsl,
     [switch]$Release,
-    [switch]$TrackedOnly,
-    [switch]$Egir
+    [switch]$TrackedOnly
 )
 
 Set-StrictMode -Version Latest
@@ -110,9 +107,6 @@ try {
     $cargoArguments = @('build', '-p', 'wyn')
     if ($Release) {
         $cargoArguments = @('build', '--release', '-p', 'wyn')
-    }
-    if ($Egir) {
-        $cargoArguments += @('--features', 'egir')
     }
     Invoke-NativeChecked cargo $cargoArguments 'Wyn build'
 

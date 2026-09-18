@@ -1,9 +1,7 @@
-//! Operator tags shared between EGIR's pure node identity (`PureOp`) and
-//! SSA's `InstKind::Op` form.
+//! Operator tags used by scalar evaluation and SSA instructions.
 //!
 //! Each variant identifies a kind of operation; operands are carried
 //! separately:
-//! - In EGIR: as `SmallVec<[ValueId; 4]>` inside `ValueKind::Pure`.
 //! - In SSA:  as `Vec<ValueRef>` inside `InstKind::Op { tag, operands }`.
 //!
 //! ## Operand layout per tag
@@ -164,9 +162,7 @@ impl std::fmt::Display for UnaryOperator {
     }
 }
 
-/// The operator identity shared by EGIR's pure nodes and SSA's `InstKind::Op`.
-/// The call-target type is selected by the owning IR; EGIR uses an
-/// uninhabited target so calls can only be represented by its call-site arena.
+/// Operator identity with resource and call-target types selected by the IR.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OpTag<R, C> {
     /// Signed integer literal (i8, i16, i32, i64).
@@ -212,10 +208,6 @@ pub enum OpTag<R, C> {
     /// carried in the operands tail, not in this tag, so equivalent views
     /// with the same backing source hash-cons together.
     StorageView(PureViewSource<R>),
-    /// EGIR-only logical storage length. Physicalization resolves the
-    /// `ResourceId` to a descriptor binding and rewrites this to the ordinary
-    /// storage-length intrinsic before SSA elaboration.
-    ResourceLen(R),
     StorageViewLen,
 }
 
@@ -257,7 +249,6 @@ impl<R, C> OpTag<R, C> {
         match self {
             OpTag::StorageImageLoad(resource)
             | OpTag::StorageImageStore(resource)
-            | OpTag::ResourceLen(resource)
             | OpTag::StorageView(PureViewSource::Storage(resource)) => Some(resource),
             _ => None,
         }
@@ -288,7 +279,6 @@ impl<R, C> OpTag<R, C> {
             OpTag::StorageImageLoad(resource) => OpTag::StorageImageLoad(map(resource)?),
             OpTag::StorageImageStore(resource) => OpTag::StorageImageStore(map(resource)?),
             OpTag::StorageView(source) => OpTag::StorageView(source.try_map_resource(map)?),
-            OpTag::ResourceLen(resource) => OpTag::ResourceLen(map(resource)?),
             OpTag::StorageViewLen => OpTag::StorageViewLen,
         })
     }
@@ -318,7 +308,6 @@ impl<R, C> OpTag<R, C> {
             OpTag::StorageImageLoad(resource) => OpTag::StorageImageLoad(resource),
             OpTag::StorageImageStore(resource) => OpTag::StorageImageStore(resource),
             OpTag::StorageView(source) => OpTag::StorageView(source),
-            OpTag::ResourceLen(resource) => OpTag::ResourceLen(resource),
             OpTag::StorageViewLen => OpTag::StorageViewLen,
         })
     }

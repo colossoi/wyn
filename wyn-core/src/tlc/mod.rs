@@ -18,7 +18,7 @@ pub mod patterns;
 pub mod pin_entry_buffers;
 pub mod reachability;
 pub mod rep_specialize;
-#[cfg(all(test, feature = "egir"))]
+#[cfg(test)]
 #[path = "rep_specialize_tests.rs"]
 mod rep_specialize_tests;
 pub mod run;
@@ -299,7 +299,7 @@ pub mod context {
         pub auto_storage_binding_ids: IdSource<u32>,
     }
 
-    /// Global state retained at the TLC-to-EGIR boundary.
+    /// Global state retained at the TLC-to-egglog boundary.
     #[derive(Debug, Clone)]
     pub struct BackendGlobal {
         pub auto_storage_binding_ids: IdSource<u32>,
@@ -674,7 +674,7 @@ impl<C: Payload, S: Payload> Term<C, S> {
 /// Catalog builtins are identified by `BuiltinId` from type-check
 /// onward; everything else (locals, user-defined functions, prelude
 /// functions, top-level constants) is a `Symbol(SymbolId)`. The
-/// distinction lets TLC → EGIR dispatch structurally without
+/// distinction lets TLC → egglog dispatch structurally without
 /// re-deriving builtin identity by string-matching `_w_intrinsic_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VarRef {
@@ -904,7 +904,7 @@ pub enum ArrayExpr<C: Payload = data::Empty, S: Payload = data::Empty> {
 
 impl<C: Payload, S: Payload> ArrayExpr<C, S> {
     /// `Var(Symbol(sym), _)` → `Some(sym)`. The canonical "named SOAC input"
-    /// shape used by ownership and TLC→EGIR conversion to recognize an entry
+    /// shape used by ownership and TLC→egglog conversion to recognize an entry
     /// parameter, intermediate, or let-bound result of a prior SOAC.
     pub fn as_named_ref(&self) -> Option<SymbolId> {
         if let ArrayExpr::Var(VarRef::Symbol(sym), _) = self {
@@ -918,7 +918,7 @@ impl<C: Payload, S: Payload> ArrayExpr<C, S> {
     /// `Literal` is a composite array sized to its element count; `Range` a
     /// virtual array; `Zip` a virtual array of the tuple of its children's element
     /// types. This is the canonical array-type calculation shared by TLC
-    /// representation passes and EGIR lowering.
+    /// representation passes and egglog lowering.
     pub fn array_type(&self) -> Type<TypeName> {
         use crate::types::{make_array1, no_buffer};
         let virtual_array = |elem: Type<TypeName>| {
@@ -969,7 +969,7 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         lam: SoacBody<C, S>,
         /// Parallel inputs. `inputs.len() == lam.lam.params.len()`.
         inputs: Vec<ArrayExpr<C, S>>,
-        /// Logical uniqueness fact from TLC ownership; EGIR decides whether
+        /// Logical uniqueness fact from TLC ownership; egglog decides whether
         /// the candidate becomes an in-place write.
         destination: SoacOwnership,
     },
@@ -984,7 +984,7 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         ne: Box<Term<C, S>>,
         input: ArrayExpr<C, S>,
         /// TLC may mark a pointwise-safe uniquely owned input as
-        /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
+        /// `UniqueInput`; egglog resolves post-fusion liveness and routing into
         /// the physical destination.
         destination: SoacOwnership,
     },
@@ -992,14 +992,14 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         pred: SoacBody<C, S>,
         input: ArrayExpr<C, S>,
         /// TLC may mark a pointwise-safe uniquely owned input as
-        /// `UniqueInput`; EGIR resolves post-fusion liveness and routing into
+        /// `UniqueInput`; egglog resolves post-fusion liveness and routing into
         /// the physical destination.
         destination: SoacOwnership,
     },
     /// Indexed writes into `dest`: over the parallel `inputs`, `lam` yields an
     /// `(index, value)` pair per element, written as `dest[index] = value`.
     /// Plain `scatter(dest, is, vs)` carries the identity envelope
-    /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`. EGIR receives that
+    /// `lam = λ(i, v) → (i, v)` with `inputs = [is, vs]`. egglog receives that
     /// callable ABI and owns any later producer composition.
     Scatter {
         dest: Place,
@@ -1019,7 +1019,7 @@ pub enum SoacOp<C: Payload = data::Empty, S: Payload = data::Empty> {
         input_dimensions: Vec<Vec<u8>>,
         domain_rank: u8,
     },
-    /// General histogram update. EGIR retains the reducer and neutral value;
+    /// General histogram update. egglog retains the reducer and neutral value;
     /// physical expansion currently emits a serial read-combine-write loop.
     ReduceByIndex {
         dest: Place,
@@ -1240,7 +1240,7 @@ impl<Tag, F: Family, GlobalContext> Program<Tag, F, GlobalContext> {
 
 /// Build a var-reference `Term` for a SOAC-input atom (`Var(vr, ty)`), for
 /// passes that walk a SOAC input as a `Term` (ownership analysis, substitution,
-/// EGIR conversion). A SOAC-input atom has no span of its own, but it still
+/// egglog conversion). A SOAC-input atom has no span of its own, but it still
 /// gets a real pass-local `TermId` so synthetic terms never alias on a sentinel
 /// placeholder.
 pub fn atom_var_term<C: Payload, S: Payload>(

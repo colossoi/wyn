@@ -43,7 +43,7 @@ const INLINE_SIZE_THRESHOLD: usize = 30;
 /// Force-inline every helper whose body contains a SOAC or an explicit array
 /// producer anywhere in its term tree. This mirrors Futhark's "inline
 /// array/parallel callees" rule: a helper that performs SOAC work or constructs
-/// a range/literal behind a call boundary blocks EGIR from seeing the complete
+/// a range/literal behind a call boundary blocks egglog from seeing the complete
 /// producer/consumer relationship and dispatch extent, so we expose it by
 /// inlining. Size threshold is ignored — such a helper is by definition
 /// critical to fusion and scheduling, regardless of source LOC.
@@ -57,7 +57,7 @@ pub fn force_inline_soac_helpers(mut program: SmallInlined) -> SoacHelpersInline
     debug_assert!(
         verify_array_work_helpers_inlined(&program).is_ok(),
         "force-inline left an array-work helper behind a call boundary; \
-         semantic EGIR would need an interprocedural path: {:?}",
+         egglog would need an interprocedural path: {:?}",
         verify_array_work_helpers_inlined(&program).err(),
     );
     program.retag()
@@ -69,9 +69,9 @@ struct CalledArrayWorkHelper {
     callee: SymbolId,
 }
 
-/// EGIR fusion and dispatch inference are deliberately intraprocedural. Keep
+/// egglog fusion and dispatch inference are deliberately intraprocedural. Keep
 /// source-level inlining as the one boundary operation that exposes every
-/// array-work helper before conversion, then let EGIR own all
+/// array-work helper before conversion, then let egglog own all
 /// producer/consumer and scheduling decisions.
 fn verify_array_work_helpers_inlined(program: &SmallInlined) -> Result<(), Vec<CalledArrayWorkHelper>> {
     let array_work_bearing: LookupSet<SymbolId> =
@@ -203,7 +203,7 @@ fn term_contains_free_type_variable<C: Payload, S: Payload>(term: &Term<C, S>) -
 }
 
 /// True if `term` contains a SOAC, an explicit array producer, or a `length`
-/// call. All must be visible in the caller so EGIR can build complete
+/// call. All must be visible in the caller so egglog can build complete
 /// producer/use edges and derive dispatch extents without interprocedural
 /// summaries.
 pub(super) fn contains_array_work<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
@@ -531,11 +531,8 @@ impl<C: Payload, S: Payload> TermRewriter<C, S> for FunctionInliner<'_, '_, C, S
 /// caller is passing an in-scope binding straight through), we substitute
 /// `param_sym → arg_sym` into the body instead of emitting a redundant
 /// `let param_sym = arg_var in body`. The alias-let is correct in
-/// principle but downstream passes — `egir::from_tlc::convert_soac_filter`
-/// in particular — read attributes (storage region, ownership) directly
-/// off the original symbol and don't follow let-bound aliases, so a
-/// post-inline `let arr = xs in filter(p, arr)` loses the entry-param's
-/// region info. This is *not* general beta-reduction — only the trivial
+/// principle, but substituting the original symbol directly keeps its
+/// storage-region and ownership metadata attached to downstream uses. This is *not* general beta-reduction — only the trivial
 /// `let x = y in body` case where `y` is a `Var`. Non-Var args still
 /// get the `let` wrap so we don't duplicate side-effecting computation
 /// under multi-use params.

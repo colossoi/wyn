@@ -1,7 +1,7 @@
 //! Whole-module reachability for SSA definitions.
 //!
 //! Per-body elaboration is demand-driven, so it already omits unused
-//! instructions. Late EGIR inlining can nevertheless leave complete function
+//! instructions. Late egglog inlining can nevertheless leave complete function
 //! or constant definitions with no path from an entry point. This phase walks
 //! the final SSA call/global graph and removes those orphan definitions before
 //! backend validation and emission.

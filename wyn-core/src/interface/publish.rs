@@ -214,7 +214,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
         let mut layout = DescriptorLayout::from_pipeline(self)?;
 
         for entry in entries {
-            // The descriptor keeps emitted names only. EGIR's companion map
+            // The descriptor keeps emitted names only. egglog's companion map
             // supplies the structural stage-to-entry association.
             let Some((pipeline_index, _)) =
                 associations.iter().enumerate().find(|(_, stages)| stages.contains(&entry.id))
@@ -355,7 +355,7 @@ impl PipelineDescriptorPublish for PipelineDescriptor {
             }
 
             // Compiler-managed storage declarations, including gather buffers,
-            // scalar-prepass links, and EGIR-scheduled phase scratch. Emit these
+            // scalar-prepass links, and egglog-scheduled phase scratch. Emit these
             // *before* outputs so
             // the producer's matching `EntryOutput` (same set/binding) doesn't
             // also claim it as a host-read `Output`. The producer declares it

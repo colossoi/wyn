@@ -565,7 +565,7 @@ entry reproduce(values: []f32, surface: render_target<vec4f32>)
 }
 
 /// `scatter` into a `#[storage]` framebuffer lowers end-to-end: the full
-/// `SoacKind::Scatter` → `SoacOp::Scatter` → `EgirSoac::Hist` →
+/// `SoacKind::Scatter` → `SoacOp::Scatter` → `egglog::OperationKind::Scatter` →
 /// `build_scatter_loop` path emits indexed `OpStore`s into the destination
 /// view (one per scattered element; N=5 here, unrolled).
 #[test]

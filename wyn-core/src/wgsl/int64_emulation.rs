@@ -127,7 +127,7 @@ pub(crate) fn is_u64(ty: &Type<TypeName>) -> bool {
     matches!(ty, Type::Constructed(TypeName::UInt(64), _))
 }
 
-/// Split the decimal spelling carried by TLC/EGIR into little-endian lanes.
+/// Split the decimal spelling carried by TLC/egglog into little-endian lanes.
 ///
 /// Constant folding stores integer bit patterns in an `i64`, so high-bit u64
 /// values can arrive either as their positive source spelling or as a negative

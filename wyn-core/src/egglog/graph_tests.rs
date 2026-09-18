@@ -43,7 +43,7 @@ fn parameter(data: &Ir) -> ExprId {
 
 #[test]
 fn fusion_follows_dependencies_across_an_independent_reduction() {
-    // The opening of EGIR's reduction-bearing-producer case: the independent
+    // Reduction-bearing producer: the independent
     // reduction used to break adjacency between the two maps.
     let input = imported(
         "entry redomap_then_map(xs: [4]i32) (i32, [4]i32) =

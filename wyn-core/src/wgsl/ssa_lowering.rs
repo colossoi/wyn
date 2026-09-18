@@ -516,7 +516,7 @@ impl TypeEmitter {
                      eliminated before backend lowering"
                 )),
                 TypeName::StorageTexture => Err(err_wgsl!(
-                    "StorageTexture reached runtime WGSL type lowering; terminal EGIR resource \
+                    "StorageTexture reached runtime WGSL type lowering; terminal compiler resource \
                      erasure must remove image handles from SSA"
                 )),
                 TypeName::Float(bits) | TypeName::Int(bits) | TypeName::UInt(bits) if *bits != 32 => Err(
@@ -2780,9 +2780,6 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
         match &inst.data {
             InstKind::Op { tag, operands } => match tag {
-                op::OpTag::ResourceLen(_) => {
-                    panic!("logical resource length reached WGSL lowering")
-                }
                 // Integer literals carry their type in the suffix:
                 //   `Nu` for `u32`, `Ni` for `i32`. WGSL has no implicit
                 //   int conversion, so respecting the SSA value's type is

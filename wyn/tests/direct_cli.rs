@@ -47,7 +47,6 @@ fn compile(source: &PathBuf, output: &PathBuf, target: &str, direct_flag: &str) 
 }
 
 #[test]
-#[cfg(feature = "egir")]
 fn direct_compiles_authored_graphics_for_both_backends() {
     for (target, extension) in [("spirv", "spv"), ("wgsl", "wgsl")] {
         let (directory, source, output) = temp_case(extension);

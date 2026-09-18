@@ -2537,7 +2537,6 @@ dependencies = [
 name = "wyn-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "egglog",
  "env_logger",
  "half",
@@ -2546,21 +2545,16 @@ dependencies = [
  "naga",
  "nom",
  "polytype",
- "serde_json",
  "slotmap",
  "smallvec",
  "spirv",
  "stacker",
  "thiserror 1.0.69",
  "wyn-base",
- "wyn-fusion",
  "wyn-graph",
- "wyn-kernel-graph",
  "wyn-module-graph",
  "wyn-pipeline-descriptor",
- "wyn-slice",
  "wyn-spirv",
- "wyn-staged-ir",
 ]
 
 [[package]]
@@ -2571,28 +2565,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "wyn-fusion"
-version = "0.1.0"
-dependencies = [
- "thiserror 1.0.69",
- "wyn-base",
- "wyn-graph",
-]
-
-[[package]]
 name = "wyn-graph"
 version = "0.1.0"
 dependencies = [
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "wyn-kernel-graph"
-version = "0.1.0"
-dependencies = [
- "thiserror 1.0.69",
- "wyn-base",
- "wyn-graph",
 ]
 
 [[package]]
@@ -2626,27 +2602,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "wyn-slice"
-version = "0.1.0"
-dependencies = [
- "wyn-graph",
-]
-
-[[package]]
 name = "wyn-spirv"
 version = "0.1.0"
 dependencies = [
  "rspirv",
  "spirv",
-]
-
-[[package]]
-name = "wyn-staged-ir"
-version = "0.1.0"
-dependencies = [
- "thiserror 1.0.69",
- "wyn-base",
- "wyn-graph",
 ]
 
 [[package]]

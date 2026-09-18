@@ -1,7 +1,7 @@
 ; Greedy fusion planning on a persistent quotient graph. Scalar bodies remain
 ; in the immutable sidecar until every contraction has been selected.
 ;
-; Differences from EGIR: bucket scatter is rank 1 only; equal fixed extents
+; Current constraints: bucket scatter is rank 1 only; equal fixed extents
 ; permit horizontal fusion of distinct inputs; memory checks remain conservative;
 ; scan projection requires pure callbacks; indexed demands stay in one region.
 ; Indexed expansion follows all contractions, then Rust constructs the bodies.

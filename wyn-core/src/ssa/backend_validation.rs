@@ -4,7 +4,7 @@
 //! `ArrayVariantAbstract` is a TLC-level representation-polymorphic
 //! variant — see `types::TypeName::ArrayVariantAbstract`. Producers
 //! (e.g. `filter`) leave their result as Abstract in the TLC type and
-//! the EGIR producer lowering picks a concrete variant (Bounded for
+//! the egglog producer lowering picks a concrete variant (Bounded for
 //! static-capacity inputs, View for runtime-sized). By the time we
 //! reach SSA, every value must carry a concrete representation the
 //! backend can lower.

@@ -1,16 +1,15 @@
 //! SSA-based intermediate representation for the Wyn compiler.
 //!
-//! With EGIR as the mid-end, this layer is strictly "the IR the codegens
-//! consume". The builder emits it from EGIR's `elaborate`; SSA then prunes
-//! unreachable module definitions and records target validation before the
-//! SPIR-V / WGSL backends read it.
+//! Egglog emits scheduled blocks into SSA. This layer optimizes and places
+//! pure instructions, prunes unreachable definitions, and validates the
+//! program for the SPIR-V and WGSL backends.
 //!
 //! ## Submodules
 //!
 //! - `ir`: Generic SSA representation and structural transformations.
 //! - `types`: Wyn-specific `InstKind`, `Program`, and the
 //!   concrete `FuncBody = Function<InstKind, Type>` instantiation.
-//! - `builder`: `FuncBuilder` that EGIR's `elaborate` uses to materialize SSA.
+//! - `builder`: `FuncBuilder` used by `egglog::to_ssa`.
 //! - `reachability`: whole-module function and constant definition pruning.
 //! - `backend_validation`: Concrete type representation checks for backend emission.
 //! - `layout`: Type byte-size helpers for SPIR-V memory operations.
@@ -68,7 +67,7 @@ fn eliminate_dead_values(program: &mut stage::Reachable) {
 /// Validate reachable SSA for SPIR-V and record that proof in its
 /// top-level type.
 pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::SpirvReady> {
-    if program.global_context.profile.target == CodegenTarget::Wgsl {
+    if program.global_context.target == CodegenTarget::Wgsl {
         return Err(err_spirv!(
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
@@ -82,7 +81,7 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
 /// Validate reachable SSA for WGSL and record that proof in its
 /// top-level type.
 pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslReady> {
-    if program.global_context.profile.target == CodegenTarget::Spirv {
+    if program.global_context.target == CodegenTarget::Spirv {
         return Err(err_spirv!(
             "SSA was scheduled for SPIR-V and cannot be lowered as WGSL"
         ));

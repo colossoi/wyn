@@ -3,7 +3,7 @@
 //! These types describe *what a compiled shader exposes to the host* —
 //! entry points, their inputs/outputs, and the storage/uniform buffers
 //! they bind. They're created during parsing but flow through every
-//! downstream pass (TLC → EGIR → SSA → SPIR-V) as metadata, so they
+//! downstream pass (TLC → egglog → SSA → SPIR-V) as metadata, so they
 //! don't belong in `ast` (which is meant for the syntactic AST proper).
 //!
 //! Later compiler passes (notably `parallelize`) may *add* to this

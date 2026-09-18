@@ -82,13 +82,6 @@ pub(crate) fn compile_to_reachable(src: &str) -> tlc::stage::Reachable {
 // that pass itself and observe its effect (rather than re-running the whole
 // pipeline, which already ran the pass — and everything after it).
 
-/// Through source-level SOAC ANF normalization, immediately before nested
-/// runtime-index producers are floated.
-#[cfg(feature = "egir")]
-pub(crate) fn compile_thru_expose_producers(src: &str) -> tlc::stage::SoacsAnfNormalized {
-    optimize_tlc_for_test_thru_soac_normalization(front_end(src)).expect("TLC optimization")
-}
-
 /// Compatibility name for tests whose subject starts at the same SOAC ANF
 /// boundary and then runs runtime-index producer exposure directly.
 pub(crate) fn compile_thru_static_index(src: &str) -> tlc::stage::SoacsAnfNormalized {
