@@ -13,6 +13,7 @@ mod tests;
 /// Lexical loop containing each reachable control-flow block.
 pub(crate) struct LoopScopes {
     scopes: LookupMap<BlockId, Option<BlockId>>,
+    parents: LookupMap<BlockId, Option<BlockId>>,
 }
 
 impl LoopScopes {
@@ -21,6 +22,7 @@ impl LoopScopes {
             successors.extend(function.blocks[block].term.successors())
         });
         let mut scopes = LookupMap::new();
+        let mut parents = LookupMap::new();
         for &block in dominators.preorder() {
             let mut scope = dominators.idom(block).and_then(|parent| scopes[&parent]);
             while let Some(header) = scope {
@@ -30,22 +32,30 @@ impl LoopScopes {
                 if merge != block {
                     break;
                 }
-                scope = dominators.idom(header).and_then(|parent| scopes[&parent]);
+                scope = parents[&header];
             }
             if matches!(
                 function.blocks[block].control_header,
                 Some(ControlHeader::Loop { .. })
             ) {
+                parents.insert(block, scope);
                 scope = Some(block);
             }
             scopes.insert(block, scope);
         }
-        Self { scopes }
+        Self { scopes, parents }
     }
 
     /// Innermost lexical loop containing a reachable block.
     pub fn scope(&self, block: BlockId) -> Option<BlockId> {
         self.scopes.get(&block).copied().flatten()
+    }
+
+    /// Current and enclosing loop scopes, ending with function scope (`None`).
+    pub fn enclosing_scopes(&self, block: BlockId) -> impl Iterator<Item = Option<BlockId>> + '_ {
+        std::iter::successors(Some(self.scope(block)), |scope| {
+            scope.map(|header| self.parents[&header])
+        })
     }
 
     /// Whether a value is defined within a lexical loop scope.

@@ -184,25 +184,29 @@ fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
             let node = &function.insts[instruction];
             if let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) {
                 if reusable(&node.data) {
-                    // WGSL declares loop-local instruction results inside the
-                    // loop. Preserve that lifetime until the backend supports
-                    // exporting those results to enclosing lexical scopes.
-                    let key = (
+                    // Enclosing values are visible inside a loop. WGSL keeps
+                    // loop-local results inside it, so never search child or
+                    // sibling scopes, even if their blocks dominate this use.
+                    let mut key = (
                         loop_scopes.scope(block),
                         function.values[result].ty.clone(),
                         tag.clone(),
                         operands.clone(),
                     );
-                    if let Some(&(producer, previous)) = expressions.get(&key) {
-                        if dominators.dominates(producer, block) {
-                            replacements.insert(result, previous.into());
-                            function.insts.remove(instruction);
-                            continue;
-                        }
+                    let previous = loop_scopes.enclosing_scopes(block).find_map(|scope| {
+                        key.0 = scope;
+                        let &(producer, previous) = expressions.get(&key)?;
+                        dominators.dominates(producer, block).then_some(previous)
+                    });
+                    if let Some(previous) = previous {
+                        replacements.insert(result, previous.into());
+                        function.insts.remove(instruction);
+                        continue;
                     }
                     // In dominator preorder a candidate outside the current
                     // subtree is no longer needed. Never move the retained
                     // instruction, including when it is guarded or in a loop.
+                    key.0 = loop_scopes.scope(block);
                     expressions.insert(key, (block, result));
                 }
             }

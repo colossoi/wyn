@@ -68,11 +68,76 @@ fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
           total + (if q < r then q - r else q + r),
         indices)"#,
     ] {
-        assert_branch_division_reuse(source);
+        assert_division_sites(source, 1);
     }
 }
 
-fn assert_branch_division_reuse(source: &str) {
+#[test]
+fn division_and_remainder_are_reused_from_enclosing_loop_scopes() {
+    for source in [
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    let pixel = @[i % width, i / width] in
+    loop total = pixel.x + pixel.y for k < 2 do total + pixel.x + pixel.y,
+    indices)"#,
+        // The producer is two lexical loop scopes outside the repeated use.
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    let pixel = @[i % width, i / width] in
+    loop total = pixel.x + pixel.y for j < 2 do
+      loop inner = total for k < 2 do inner + pixel.x + pixel.y,
+    indices)"#,
+        // An outer iteration's result is available throughout its inner loop.
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    loop total = 0 for j < 2 do
+      let pixel = @[(i + j) % width, (i + j) / width] in
+      loop inner = total + pixel.x + pixel.y for k < 2 do
+        inner + pixel.x + pixel.y,
+    indices)"#,
+    ] {
+        assert_division_sites(source, 1);
+    }
+}
+
+#[test]
+fn loop_header_division_and_remainder_do_not_escape_to_the_merge() {
+    // The header dominates the merge, but WGSL declares its results inside
+    // the loop. The post-loop computations must keep their own definitions.
+    assert_division_sites(
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+  map(|i|
+    let total = loop total = 0 while total < i / width + i % width do total + 1 in
+    total + i / width + i % width,
+    indices)"#,
+        2,
+    );
+}
+
+#[test]
+fn division_and_remainder_in_a_possibly_empty_loop_stay_inside_it() {
+    let placed = assert_division_sites(
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+  map(|i| loop total = 0 for k < i do total + i / width + i % width, indices)"#,
+        1,
+    );
+    for function in &placed.functions {
+        let scopes = LoopScopes::analyze(&function.body.inner);
+        for node in function.body.inner.insts.values() {
+            if matches!(
+                node.data,
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Divide | BinaryOperator::Remainder),
+                    ..
+                }
+            ) {
+                assert!(scopes.scope(node.placement.block().unwrap()).is_some());
+            }
+        }
+    }
+}
+
+fn assert_division_sites(source: &str, expected: usize) -> crate::ssa::stage::Placed {
     let ssa = crate::compile_thru_ssa(source).unwrap();
     let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
     for operator in [BinaryOperator::Divide, BinaryOperator::Remainder] {
@@ -84,7 +149,10 @@ fn assert_branch_division_reuse(source: &str) {
                 |node| matches!(node.data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator),
             )
             .count();
-        assert_eq!(sites, 1, "{operator:?} must be shared before backend lowering");
+        assert_eq!(
+            sites, expected,
+            "unexpected {operator:?} count before backend lowering"
+        );
     }
     let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
     let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
@@ -99,8 +167,8 @@ fn assert_branch_division_reuse(source: &str) {
     for opcode in [wspirv::spirv::Op::SDiv, wspirv::spirv::Op::SRem] {
         assert_eq!(
             module.all_inst_iter().filter(|inst| inst.class.opcode == opcode).count(),
-            1,
-            "{opcode:?} must be emitted once"
+            expected,
+            "unexpected {opcode:?} count"
         );
     }
     let bytes = spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
@@ -111,6 +179,7 @@ fn assert_branch_division_reuse(source: &str) {
     )
     .validate(&module)
     .unwrap();
+    placed
 }
 
 #[test]
