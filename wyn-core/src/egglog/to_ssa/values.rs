@@ -18,6 +18,11 @@ use crate::types::{
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
 
+// One evaluation of an expression or argument list. Block keys prevent a value
+// emitted in one conditional arm from escaping into its sibling or the join.
+// The cache is dropped before subsequent bindings or memory effects.
+type ExpressionCache = HashMap<(Option<BlockId>, ExprId), Typed>;
+
 impl Body<'_, '_> {
     pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.environment.parameters.get(&id) {
@@ -72,79 +77,6 @@ impl Body<'_, '_> {
         self.environment.parameters.insert(id, value.clone());
         Ok(value)
     }
-    pub(super) fn seed(&mut self, id: ExprId) -> Result<Typed, OptimizeError> {
-        let data = self.compiler.data;
-        match &data.expressions[id].kind {
-            ExprKind::Tuple(items) => {
-                let values = items.iter().map(|&id| self.seed(id)).collect::<Result<Vec<_>, _>>()?;
-                self.tuple(values)
-            }
-            ExprKind::Vector(items) => {
-                let values = items.iter().map(|&id| self.seed(id)).collect::<Result<Vec<_>, _>>()?;
-                self.op(
-                    OpTag::Vector(items.len()),
-                    values,
-                    data.types[data.expressions[id].ty].ty.clone(),
-                )
-            }
-            ExprKind::Int(_) | ExprKind::FloatBits(_) | ExprKind::Bool(_) | ExprKind::Unit => {
-                self.expression(id)
-            }
-            ExprKind::Parameter(p) => self.input(*p),
-            ExprKind::OperationResult(op) => {
-                let Some(value) = self.compiler.data.state.materialized.get(op).cloned() else {
-                    return Err(error(format!("unmaterialized capture {op:?}")));
-                };
-                let value = self.value(&value)?;
-                self.cast(value, &data.types[data.expressions[id].ty].ty)
-            }
-            ExprKind::Project { tuple, index } => {
-                if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
-                    if let Some(Value::Tuple(fields)) = self.compiler.data.state.materialized.get(&op) {
-                        let Some(value) = fields.get(*index).cloned() else {
-                            return Err(error("result slot"));
-                        };
-                        return self.value(&value);
-                    }
-                }
-                let value = self.seed(*tuple)?;
-                self.field(value, *index)
-            }
-            ExprKind::Coerce(value) => {
-                let value = self.seed(*value)?;
-                self.cast(value, &data.types[data.expressions[id].ty].ty)
-            }
-            ExprKind::PureApp { function, args } => {
-                let args = args.iter().map(|&id| self.seed(id)).collect::<Result<Vec<_>, _>>()?;
-                self.apply(*function, args, data.types[data.expressions[id].ty].ty.clone())
-            }
-            ExprKind::Array(array) => self.seed_array(array),
-            _ => Err(error(format!("no physical source for capture {id:?}"))),
-        }
-    }
-    fn seed_array(&mut self, array: &Array) -> Result<Typed, OptimizeError> {
-        match array {
-            Array::Value(id) => self.seed(*id),
-            Array::Zip(arrays) => {
-                let values = arrays.iter().map(|a| self.seed_array(a)).collect::<Result<Vec<_>, _>>()?;
-                self.tuple(values)
-            }
-            Array::Literal(items) => {
-                for &id in items {
-                    let v = self.seed(id)?;
-                    self.environment.expressions.insert(id, v);
-                }
-                self.array(array)
-            }
-            Array::Range { start, len, step } => {
-                for id in [Some(*start), Some(*len), *step].into_iter().flatten() {
-                    let value = self.seed(id)?;
-                    self.environment.expressions.insert(id, value);
-                }
-                self.array(array)
-            }
-        }
-    }
     fn view(&mut self, binding: BindingRef, element: Type, len: Typed) -> Result<Typed, OptimizeError> {
         let ty = view_array_with_size(
             &element,
@@ -164,6 +96,19 @@ impl Body<'_, '_> {
         }
     }
     pub(super) fn value(&mut self, value: &Value) -> Result<Typed, OptimizeError> {
+        self.value_cached(value, &mut ExpressionCache::new())
+    }
+    pub(super) fn values(&mut self, values: &[Value]) -> Result<Vec<Typed>, OptimizeError> {
+        self.values_cached(values, &mut ExpressionCache::new())
+    }
+    fn values_cached(
+        &mut self,
+        values: &[Value],
+        cache: &mut ExpressionCache,
+    ) -> Result<Vec<Typed>, OptimizeError> {
+        values.iter().map(|v| self.value_cached(v, cache)).collect()
+    }
+    fn value_cached(&mut self, value: &Value, cache: &mut ExpressionCache) -> Result<Typed, OptimizeError> {
         match value {
             Value::Discarded => Err(error("unused result has no value")),
             Value::Int(n) => Ok(Self::number(*n)),
@@ -173,16 +118,16 @@ impl Body<'_, '_> {
                 };
                 Ok(value)
             }
-            Value::Source(id) => self.expression(*id),
+            Value::Source(id) => self.expression_cached(*id, cache),
             Value::Tuple(values) => {
-                let values = self.values(values)?;
+                let values = self.values_cached(values, cache)?;
                 self.tuple(values)
             }
             Value::Field(value, index) => {
-                let value = self.value(value)?;
+                let value = self.value_cached(value, cache)?;
                 self.field(value, *index)
             }
-            Value::Array(array) => self.array(array),
+            Value::Array(array) => self.array_cached(array, cache),
             Value::Workgroup { id, count, element } => {
                 let ty = view_array_of(&concrete(&self.compiler.data.types[*element].ty)?, no_buffer());
                 self.op(
@@ -207,7 +152,7 @@ impl Body<'_, '_> {
                 }
                 let buffer = &self.compiler.data.state.buffers[*id];
                 if let Storage::View(expr) = buffer.storage {
-                    return self.expression(expr);
+                    return self.expression_cached(expr, cache);
                 }
                 if buffer.storage == Storage::Function {
                     return Err(error("local buffer used before allocation"));
@@ -216,25 +161,27 @@ impl Body<'_, '_> {
                     return Err(error(format!("buffer {id:?} has no Allocation fact")));
                 };
                 self.compiler.used.insert(*id);
-                let len = self.value(&buffer.length)?;
+                let len = self.value_cached(&buffer.length, cache)?;
                 let len = self.cast(len, &u32_type())?;
                 self.view(declaration.binding, declaration.elem_ty, len)
             }
             Value::Primitive(name, args) => {
-                let values = self.values(args)?;
+                let values = self.values_cached(args, cache)?;
                 self.primitive(name, values)
             }
         }
     }
     pub(super) fn expression(&mut self, id: ExprId) -> Result<Typed, OptimizeError> {
-        self.expression_cached(id, &mut HashMap::new())
+        self.expression_cached(id, &mut ExpressionCache::new())
     }
-    // Share DAG nodes within one expression emission and one SSA block.
-    // The cache ends before later parameter bindings or memory effects.
+    pub(super) fn expressions(&mut self, ids: &[ExprId]) -> Result<Vec<Typed>, OptimizeError> {
+        let mut cache = ExpressionCache::new();
+        ids.iter().map(|&id| self.expression_cached(id, &mut cache)).collect()
+    }
     fn expression_cached(
         &mut self,
         id: ExprId,
-        cache: &mut HashMap<(Option<BlockId>, ExprId), Typed>,
+        cache: &mut ExpressionCache,
     ) -> Result<Typed, OptimizeError> {
         if let Some(value) = self.environment.expressions.get(&id) {
             return Ok(value.clone());
@@ -251,7 +198,11 @@ impl Body<'_, '_> {
                 if let Some(v) = self.environment.operations.get(op) {
                     Ok(v.clone())
                 } else {
-                    self.seed(id)
+                    let Some(value) = data.state.materialized.get(op) else {
+                        return Err(error(format!("unmaterialized capture {op:?}")));
+                    };
+                    let value = self.value_cached(value, cache)?;
+                    self.cast(value, &ty)
                 }
             }
             ExprKind::Int(s) => self.op(
@@ -291,20 +242,12 @@ impl Body<'_, '_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.op(OpTag::Vector(items.len()), values, ty)
             }
-            ExprKind::Project { tuple, index } => {
-                if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
-                    if !self.environment.operations.contains_key(&op) {
-                        return self.seed(id);
-                    }
-                }
-                let value = self.expression_cached(*tuple, cache)?;
-                self.field(value, *index)
-            }
+            ExprKind::Project { tuple, index } => self.projection(*tuple, *index, cache),
             ExprKind::Coerce(inner) => {
                 let value = self.expression_cached(*inner, cache)?;
                 self.cast(value, &ty)
             }
-            ExprKind::Array(array) => self.array(array),
+            ExprKind::Array(array) => self.array_cached(array, cache),
             ExprKind::PureApp { function, args } => {
                 let args = args
                     .iter()
@@ -384,6 +327,34 @@ impl Body<'_, '_> {
         cache.insert((self.builder.current_block(), id), result.clone());
         Ok(result)
     }
+    fn projection(
+        &mut self,
+        tuple: ExprId,
+        index: usize,
+        cache: &mut ExpressionCache,
+    ) -> Result<Typed, OptimizeError> {
+        let data = self.compiler.data;
+        if !self.environment.expressions.contains_key(&tuple)
+            && !cache.contains_key(&(self.builder.current_block(), tuple))
+        {
+            if let ExprKind::OperationResult(op) = data.expressions[tuple].kind {
+                if !self.environment.operations.contains_key(&op) {
+                    // Split results may contain discarded slots. Resolve only
+                    // the requested slot instead of loading the whole tuple.
+                    if let Some(Value::Tuple(fields)) = data.state.materialized.get(&op) {
+                        let Some(value) = fields.get(index) else {
+                            return Err(error("result slot"));
+                        };
+                        return self.value_cached(value, cache);
+                    }
+                }
+            }
+        }
+        // An aggregate stored in one buffer has one SSA identity. All of its
+        // projections use the same cached OperationResult within this emission.
+        let value = self.expression_cached(tuple, cache)?;
+        self.field(value, index)
+    }
     pub(super) fn apply(
         &mut self,
         function: ExprId,
@@ -435,15 +406,19 @@ impl Body<'_, '_> {
         };
         self.op(tag, args, ty)
     }
-    fn array(&mut self, array: &Array) -> Result<Typed, OptimizeError> {
+    fn array_cached(&mut self, array: &Array, cache: &mut ExpressionCache) -> Result<Typed, OptimizeError> {
         match array {
-            Array::Value(id) => self.expression(*id),
+            Array::Value(id) => self.expression_cached(*id, cache),
             Array::Zip(arrays) => {
-                let values = arrays.iter().map(|a| self.array(a)).collect::<Result<Vec<_>, _>>()?;
+                let values =
+                    arrays.iter().map(|a| self.array_cached(a, cache)).collect::<Result<Vec<_>, _>>()?;
                 self.tuple(values)
             }
             Array::Literal(items) => {
-                let values = items.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
+                let values = items
+                    .iter()
+                    .map(|&id| self.expression_cached(id, cache))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let Some(first) = values.first() else {
                     return Err(error("TODO: element type of empty array operand"));
                 };
@@ -451,8 +426,8 @@ impl Body<'_, '_> {
                 self.op(OpTag::ArrayLit(values.len()), values, ty)
             }
             Array::Range { start, len, step } => {
-                let a = self.expression(*start)?;
-                let n = self.expression(*len)?;
+                let a = self.expression_cached(*start, cache)?;
+                let n = self.expression_cached(*len, cache)?;
                 let n = self.cast(n, &a.ty)?;
                 let ty = make_array1(
                     a.ty.clone(),
@@ -462,7 +437,7 @@ impl Body<'_, '_> {
                 );
                 let mut args = vec![a, n];
                 if let Some(step) = step {
-                    args.push(self.expression(*step)?);
+                    args.push(self.expression_cached(*step, cache)?);
                 }
                 self.op(
                     OpTag::ArrayRange {

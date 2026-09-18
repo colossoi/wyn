@@ -28,7 +28,7 @@ fn compile(source: &str) -> naga::Module {
     module
 }
 
-fn assert_ssa_dominance<Tag>(
+pub(super) fn assert_ssa_dominance<Tag>(
     phase: &str,
     program: &crate::ssa::Program<Tag, crate::ssa::context::BackendGlobal>,
 ) {

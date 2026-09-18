@@ -25,6 +25,9 @@ use wyn_base::IdSource;
 
 mod values;
 
+#[cfg(test)]
+mod capture_tests;
+
 /// Lower scheduled kernels with their authored inputs and planned storage.
 /// Static compute pipelines publish the same resources and dispatch order.
 /// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
@@ -486,8 +489,7 @@ impl<'a, 'b> Body<'a, 'b> {
                         self.index(a, i)?
                     }
                     OperationKind::Call { function, args } => {
-                        let args =
-                            args.iter().map(|&id| self.expression(id)).collect::<Result<Vec<_>, _>>()?;
+                        let args = self.expressions(args)?;
                         self.apply(*function, args, data.types[data.operations[*op].ty].ty.clone())?
                     }
                     other => return Err(error(format!("TODO: lower source execution {other:?}"))),
@@ -610,9 +612,6 @@ impl<'a, 'b> Body<'a, 'b> {
     fn tuple(&mut self, values: Vec<Typed>) -> Result<Typed, OptimizeError> {
         let ty = types::tuple(values.iter().map(|v| v.ty.clone()).collect());
         self.op(OpTag::Tuple(values.len()), values, ty)
-    }
-    fn values(&mut self, values: &[Value]) -> Result<Vec<Typed>, OptimizeError> {
-        values.iter().map(|v| self.value(v)).collect()
     }
 }
 fn result_type(types: &[Type]) -> Type {
