@@ -1,82 +1,9 @@
-//! Derived SSA value-use information.
-//!
-//! This is intentionally an analysis rather than mutable state on `FuncBody`:
-//! rewrites cannot leave cached use counts stale, and consumers pay only one
-//! linear walk when they need the information.
+//! Wyn-specific cleanup driven by generic SSA use information.
 
 use crate::op::OpTag;
-use crate::ssa::framework::InstId;
-use crate::ssa::types::{FuncBody, InstKind, Terminator, ValueId, ValueRef};
+pub use crate::ssa::ir::{UseSite, ValueUses};
+use crate::ssa::types::{FuncBody, InstKind};
 use crate::LookupMap;
-
-/// The location of one SSA value operand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UseSite {
-    Instruction {
-        instruction: InstId,
-        operand: usize,
-    },
-    Terminator,
-}
-
-/// Immutable use counts and use sites for the values in one SSA body.
-#[derive(Clone, Debug, Default)]
-pub struct ValueUses {
-    users: LookupMap<ValueId, Vec<UseSite>>,
-}
-
-impl ValueUses {
-    /// Analyze every instruction and CFG terminator operand in `body`.
-    pub fn analyze(body: &FuncBody) -> Self {
-        let mut result = Self::default();
-        for (instruction, node) in &body.inner.insts {
-            for (operand, value) in node.data.value_uses().into_iter().enumerate() {
-                result.record(value, UseSite::Instruction { instruction, operand });
-            }
-        }
-        for block in body.inner.blocks.values() {
-            match &block.term {
-                Terminator::Branch { args, .. } => {
-                    for value in args {
-                        result.record(*value, UseSite::Terminator);
-                    }
-                }
-                Terminator::CondBranch {
-                    cond,
-                    then_args,
-                    else_args,
-                    ..
-                } => {
-                    result.record(*cond, UseSite::Terminator);
-                    for value in then_args.iter().chain(else_args) {
-                        result.record(*value, UseSite::Terminator);
-                    }
-                }
-                Terminator::Return(Some(value)) => result.record(*value, UseSite::Terminator),
-                Terminator::Return(None) | Terminator::Unreachable => {}
-            }
-        }
-        result
-    }
-
-    fn record(&mut self, value: ValueRef, site: UseSite) {
-        if let ValueRef::Ssa(value) = value {
-            self.users.entry(value).or_default().push(site);
-        }
-    }
-
-    pub fn count(&self, value: ValueId) -> usize {
-        self.users.get(&value).map_or(0, Vec::len)
-    }
-
-    pub fn users(&self, value: ValueId) -> &[UseSite] {
-        self.users.get(&value).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn is_used_once(&self, value: ValueId) -> bool {
-        self.count(value) == 1
-    }
-}
 
 /// Remove recursively dead, side-effect-free SSA instructions.
 ///
@@ -84,28 +11,38 @@ impl ValueUses {
 /// Calls, intrinsics, storage operations, and place operations are retained;
 /// broadening that set belongs with an explicit effect classification.
 pub fn eliminate_dead_pure_instructions(body: &mut FuncBody) {
-    loop {
-        let uses = ValueUses::analyze(body);
-        let dead = body
-            .inner
-            .insts
-            .iter()
-            .filter_map(|(instruction, node)| {
-                let result = node.result?;
-                (uses.count(result) == 0 && is_structurally_pure(&node.data))
-                    .then_some((instruction, result))
-            })
-            .collect::<Vec<_>>();
-        if dead.is_empty() {
-            return;
+    let uses = ValueUses::analyze(&body.inner);
+    let mut counts: LookupMap<_, _> = uses.counts().collect();
+    let mut pending: Vec<_> = body
+        .inner
+        .insts
+        .iter()
+        .filter_map(|(id, node)| {
+            (counts.get(&node.result?).copied().unwrap_or(0) == 0 && is_structurally_pure(&node.data))
+                .then_some(id)
+        })
+        .collect();
+    while let Some(id) = pending.pop() {
+        let Some(node) = body.inner.insts.remove(id) else {
+            continue;
+        };
+        for operand in node.data.ssa_uses() {
+            let count = counts.entry(operand).or_default();
+            *count -= 1;
+            if *count == 0 {
+                if let Some(id) = body.inner.inst_of_value(operand) {
+                    if is_structurally_pure(&body.inner.insts[id].data) {
+                        pending.push(id);
+                    }
+                }
+            }
         }
-        for block in body.inner.blocks.values_mut() {
-            block.insts.retain(|instruction| !dead.iter().any(|(dead, _)| dead == instruction));
-        }
-        for (instruction, result) in dead {
-            body.inner.insts.remove(instruction);
+        if let Some(result) = node.result {
             body.inner.values.remove(result);
         }
+    }
+    for block in body.inner.blocks.values_mut() {
+        block.insts.retain(|id| body.inner.insts.contains_key(*id));
     }
 }
 

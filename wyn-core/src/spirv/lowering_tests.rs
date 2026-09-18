@@ -37,6 +37,38 @@ entry main(x: i32) i32 = external_increment(x)
 }
 
 #[test]
+fn distinct_entry_push_constant_layouts_have_distinct_variables() {
+    use std::collections::HashSet;
+    use wspirv::dr::Operand;
+    use wspirv::spirv::{Op, StorageClass};
+    let module = wspirv::dr::load_words(
+        compile_to_spirv("entry one(x:i32) i32 = x + 1\nentry two(xs:[2]i32,i:i32) i32 = xs[i]").unwrap(),
+    )
+    .unwrap();
+    let variables: HashSet<_> = module
+        .types_global_values
+        .iter()
+        .filter_map(|i| {
+            (i.class.opcode == Op::Variable
+                && i.operands.first() == Some(&Operand::StorageClass(StorageClass::PushConstant)))
+            .then_some(i.result_id)
+            .flatten()
+        })
+        .collect();
+    assert!(variables.len() >= 2);
+    for entry in &module.entry_points {
+        assert_eq!(
+            entry
+                .operands
+                .iter()
+                .filter(|operand| matches!(operand, Operand::IdRef(id) if variables.contains(id)))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn test_let_binding() {
     let spirv = compile_to_spirv("def f = let x = 1 in x + 2").unwrap();
     assert!(!spirv.is_empty());

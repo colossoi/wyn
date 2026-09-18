@@ -5,6 +5,7 @@ use crate::egglog::{
     Array, BlockId, BodyId, BufferId, Exit, ExprId, ExprKind, FunctionKind, Instruction, OperationId,
     OperationKind, ParameterId, Program, Scheduled, Storage, Value as Code,
 };
+use crate::ssa::types::AtomicOp;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -54,7 +55,7 @@ impl Value {
     pub(super) fn ints(&self) -> Vec<i64> {
         self.elements().iter().map(Self::int).collect()
     }
-    fn at(&self, i: usize) -> Self {
+    pub(super) fn at(&self, i: usize) -> Self {
         if matches!(self, Self::Discarded) {
             return Self::Discarded;
         }
@@ -89,6 +90,9 @@ struct Machine<'a> {
     buffers: BTreeMap<BufferId, Value>,
     invocation: u32,
     invocations: u32,
+    width: u32,
+    shared: RefCell<BTreeMap<u32, Value>>,
+    spurious_cas_failure: bool,
     fuel: usize,
 }
 
@@ -106,28 +110,43 @@ pub(super) fn run(data: &Program<Scheduled>, args: Vec<Value>) -> Vec<Value> {
         buffers: BTreeMap::new(),
         invocation: 0,
         invocations: 1,
+        width: 1,
+        shared: RefCell::default(),
+        spurious_cas_failure: true,
         fuel: 5_000_000,
     }
     .call(entry, args)
 }
 
 impl Machine<'_> {
-    fn call(&mut self, entry: BlockId, mut args: Vec<Value>) -> Vec<Value> {
+    fn call(&mut self, entry: BlockId, args: Vec<Value>) -> Vec<Value> {
         let mut frame = Frame::default();
+        frame.locals.extend(self.data.state.blocks[entry].parameters.iter().cloned().zip(args));
         let mut block = entry;
+        self.resume(&mut frame, &mut block, &mut 0).expect("barrier outside a workgroup dispatch")
+    }
+
+    fn resume(
+        &mut self,
+        frame: &mut Frame,
+        block: &mut BlockId,
+        position: &mut usize,
+    ) -> Option<Vec<Value>> {
         loop {
             assert!(self.fuel > 0, "CFG did not terminate");
             self.fuel -= 1;
-            let data = self.data.state.blocks[block].clone();
-            assert_eq!(args.len(), data.parameters.len());
-            for (name, value) in data.parameters.iter().zip(args) {
-                frame.locals.insert(name.clone(), value);
-            }
-            for instruction in self.data.state.bodies[data.body].instructions.clone() {
-                self.instruction(instruction, &mut frame);
+            let data = self.data.state.blocks[*block].clone();
+            for instruction in
+                self.data.state.bodies[data.body].instructions.clone().into_iter().skip(*position)
+            {
+                *position += 1;
+                if matches!(instruction, Instruction::Barrier) {
+                    return None;
+                }
+                self.instruction(instruction, frame);
             }
             let edge = match data.exit {
-                Exit::Return(body) => return self.tuple(body, &frame),
+                Exit::Return(body) => return Some(self.tuple(body, frame)),
                 Exit::Jump(edge) => edge,
                 Exit::Branch { condition, yes, no } => {
                     if self.tuple(condition, &frame)[0].boolean() {
@@ -137,8 +156,12 @@ impl Machine<'_> {
                     }
                 }
             };
-            args = self.tuple(edge.arguments, &frame);
-            block = edge.target;
+            let args = self.tuple(edge.arguments, frame);
+            let names = &self.data.state.blocks[edge.target].parameters;
+            assert_eq!(args.len(), names.len());
+            frame.locals.extend(names.iter().cloned().zip(args));
+            *block = edge.target;
+            *position = 0;
         }
     }
 
@@ -148,6 +171,47 @@ impl Machine<'_> {
 
     fn instruction(&mut self, instruction: Instruction, frame: &mut Frame) {
         match instruction {
+            Instruction::Barrier => unreachable!("barriers suspend the invocation"),
+            Instruction::Atomic {
+                result,
+                buffer,
+                index,
+                op,
+                values,
+            } => {
+                let buffer = self.value(&buffer, frame);
+                let index = self.value(&index, frame).int() as usize;
+                let old = buffer.at(index);
+                let values: Vec<_> = values.iter().map(|v| self.value(v, frame)).collect();
+                let (next, result_value) = match op {
+                    AtomicOp::Load => (old.clone(), old.clone()),
+                    AtomicOp::CompareExchange => {
+                        let equal = old == values[0] && !self.spurious_cas_failure;
+                        self.spurious_cas_failure = !self.spurious_cas_failure;
+                        (
+                            if equal { values[1].clone() } else { old.clone() },
+                            Value::Tuple(vec![old.clone(), Value::Bool(equal)]),
+                        )
+                    }
+                    _ => {
+                        let a = old.int();
+                        let b = values[0].int();
+                        let value = match op {
+                            AtomicOp::Add => a.wrapping_add(b),
+                            AtomicOp::And => a & b,
+                            AtomicOp::Or => a | b,
+                            AtomicOp::Xor => a ^ b,
+                            AtomicOp::SignedMin | AtomicOp::UnsignedMin => a.min(b),
+                            AtomicOp::SignedMax | AtomicOp::UnsignedMax => a.max(b),
+                            AtomicOp::Exchange => b,
+                            _ => unreachable!(),
+                        };
+                        (Value::Int(value), old)
+                    }
+                };
+                buffer.store(index, next);
+                frame.locals.insert(result, result_value);
+            }
             Instruction::BindParameter(id, value) => {
                 frame.parameters.insert(id, self.value(&value, frame));
                 self.invalidate(frame, &ExprKind::Parameter(id));
@@ -221,11 +285,37 @@ impl Machine<'_> {
                 };
                 let args: Vec<_> = dispatch.captures.iter().map(|&id| self.source(id, frame)).collect();
                 self.invocations = groups as u32 * width;
-                // Reverse invocation order catches accidental inter-invocation
-                // dependence within a dispatch. Only dispatch boundaries sync.
-                for i in (0..groups as u32 * width).rev() {
-                    self.invocation = i;
-                    assert!(self.call(dispatch.kernel, args.clone()).is_empty());
+                self.width = width;
+                // Reverse lanes/groups expose dependencies without a barrier.
+                for group in (0..groups as u32).rev() {
+                    self.shared.borrow_mut().clear();
+                    let mut lanes: Vec<_> = (0..width)
+                        .map(|_| {
+                            let mut frame = Frame::default();
+                            frame.locals.extend(
+                                self.data.state.blocks[dispatch.kernel]
+                                    .parameters
+                                    .iter()
+                                    .cloned()
+                                    .zip(args.clone()),
+                            );
+                            (frame, dispatch.kernel, 0)
+                        })
+                        .collect();
+                    loop {
+                        let mut finished = 0;
+                        for (lane, (frame, block, position)) in lanes.iter_mut().enumerate().rev() {
+                            self.invocation = group * width + lane as u32;
+                            if let Some(results) = self.resume(frame, block, position) {
+                                assert!(results.is_empty());
+                                finished += 1;
+                            }
+                        }
+                        assert!(finished == 0 || finished == width, "divergent barrier");
+                        if finished == width {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -240,6 +330,12 @@ impl Machine<'_> {
             }
             Code::Source(id) => self.source(*id, frame),
             Code::Array(array) => self.array(array, frame),
+            Code::Workgroup { id, count, .. } => self
+                .shared
+                .borrow_mut()
+                .entry(*id)
+                .or_insert_with(|| Value::values(vec![Value::Uninitialized; *count as usize]))
+                .clone(),
             Code::Buffer(id) => {
                 if let Storage::View(expr) = self.data.state.buffers[*id].storage {
                     self.source(expr, frame)
@@ -256,6 +352,7 @@ impl Machine<'_> {
             Code::Field(tuple, index) => field(self.value(tuple, frame), *index),
             Code::Primitive("global_id", _) => Value::Int(i64::from(self.invocation)),
             Code::Primitive("global_size", _) => Value::Int(i64::from(self.invocations)),
+            Code::Primitive("local_id", _) => Value::Int(i64::from(self.invocation % self.width)),
             Code::Primitive(name, args) => {
                 primitive(name, args.iter().map(|v| self.value(v, frame)).collect())
             }
@@ -409,18 +506,18 @@ fn primitive(name: &str, args: Vec<Value>) -> Value {
         "or" | "||" => Value::Bool(args[0].boolean() || args[1].boolean()),
         "+" | "add" => Value::Int(args[0].int() + args[1].int()),
         "-" if args.len() == 1 => Value::Int(-args[0].int()),
-        "-" => Value::Int(args[0].int() - args[1].int()),
+        "-" | "sub" => Value::Int(args[0].int() - args[1].int()),
         "*" | "mul" => Value::Int(args[0].int() * args[1].int()),
         "/" | "div" => Value::Int(args[0].int() / args[1].int()),
         "%" | "rem" => Value::Int(args[0].int() % args[1].int()),
         "ceil_div" => Value::Int((args[0].int() + args[1].int() - 1) / args[1].int()),
-        "max" => Value::Int(args[0].int().max(args[1].int())),
+        "max" | "i32.max" => Value::Int(args[0].int().max(args[1].int())),
         "min" => Value::Int(args[0].int().min(args[1].int())),
         "lt" | "<" => Value::Bool(args[0].int() < args[1].int()),
         "<=" => Value::Bool(args[0].int() <= args[1].int()),
         "ge" | ">=" => Value::Bool(args[0].int() >= args[1].int()),
         ">" => Value::Bool(args[0].int() > args[1].int()),
-        "==" => Value::Bool(args[0] == args[1]),
+        "==" | "eq" => Value::Bool(args[0] == args[1]),
         "ne" | "!=" => Value::Bool(args[0] != args[1]),
         "u32" | "i32" => args[0].clone(),
         other => panic!("unsupported primitive in oracle: {other}"),

@@ -2,17 +2,20 @@ use super::{
     builder_error, concrete, error, u32_type, uint, Body, InstKind, OpTag, OptimizeError, ParameterId,
     PureViewSource, Storage, Type, TypeExt, TypeName, Typed, Value,
 };
+use crate::ast::Span;
 use crate::builtins::catalog;
 use crate::egglog::abi::storage_type;
 use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
 use crate::flow::{BlockId, ControlHeader};
 use crate::op::{BinaryOperator, UnaryOperator};
-use crate::ssa::types::{ConstantValue, PlaceId, Terminator, ValueRef};
+use crate::ssa::builder::FuncBuilder;
+use crate::ssa::types::{ConstantValue, Function, PlaceId, Terminator, ValueRef};
 use crate::types::{
-    array_variant_bounded, bool_type, buffer_tag, i32, is_array_variant_view, is_array_variant_virtual,
-    make_array1, no_buffer, sized_array, strip_existentials, view_array_of, view_array_with_size,
+    array_variant_bounded, bool_type, buffer_tag, extract_function_signature, i32, is_array_variant_view,
+    is_array_variant_virtual, make_array1, no_buffer, sized_array, strip_existentials, view_array_of,
+    view_array_with_size,
 };
-use crate::BindingRef;
+use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
 
 impl Body<'_, '_> {
@@ -180,6 +183,17 @@ impl Body<'_, '_> {
                 self.field(value, *index)
             }
             Value::Array(array) => self.array(array),
+            Value::Workgroup { id, count, element } => {
+                let ty = view_array_of(&concrete(&self.compiler.data.types[*element].ty)?, no_buffer());
+                self.op(
+                    OpTag::StorageView(PureViewSource::Workgroup {
+                        id: *id,
+                        count: *count,
+                    }),
+                    vec![Self::number(0), Self::number(*count)],
+                    ty,
+                )
+            }
             Value::Buffer(id) => {
                 if let Some((place, ty)) = self.environment.buffers.get(id).cloned() {
                     let value = self
@@ -390,6 +404,33 @@ impl Body<'_, '_> {
                     overload_idx: b.overload_idx,
                 }
             }
+            ExprKind::Extern(external) => {
+                let id = if let Some(&id) = self.compiler.externs.get(external) {
+                    id
+                } else {
+                    let index = u32::try_from(self.compiler.functions.len())
+                        .map_err(|_| error("too many helpers"))?;
+                    let id = FunctionId::from(index);
+                    let name = &self.compiler.data.externs[*external].linkage_name;
+                    let signature =
+                        &self.compiler.data.types[self.compiler.data.expressions[function].ty].ty;
+                    let (params, result) = extract_function_signature(signature);
+                    self.compiler.functions.push(Function {
+                        id,
+                        name: name.clone(),
+                        body: FuncBuilder::new(
+                            params.into_iter().enumerate().map(|(i, t)| (t, format!("arg{i}"))).collect(),
+                            result,
+                        )
+                        .finish_unchecked(),
+                        span: Span::generated(),
+                        linkage_name: Some(name.clone()),
+                    });
+                    self.compiler.externs.insert(*external, id);
+                    id
+                };
+                OpTag::Call(id)
+            }
             other => return Err(error(format!("TODO: unresolved call target {other:?}"))),
         };
         self.op(tag, args, ty)
@@ -412,7 +453,7 @@ impl Body<'_, '_> {
             Array::Range { start, len, step } => {
                 let a = self.expression(*start)?;
                 let n = self.expression(*len)?;
-                let n = self.cast(n, &i32())?;
+                let n = self.cast(n, &a.ty)?;
                 let ty = make_array1(
                     a.ty.clone(),
                     Type::Constructed(TypeName::ArrayVariantVirtual, vec![]),
@@ -445,13 +486,42 @@ impl Body<'_, '_> {
         };
         self.op(OpTag::Project { index: index as u32 }, vec![value], ty)
     }
-    pub(super) fn index_place(
+    pub(super) fn indexed_destination(
         &mut self,
-        array: Typed,
+        buffer: &Value,
         index: Typed,
     ) -> Result<(PlaceId, Type), OptimizeError> {
+        let base = match buffer {
+            Value::Primitive("index", args) => {
+                let [base, outer] = args.as_slice() else {
+                    return Err(error("destination index requires an array and index"));
+                };
+                let outer = self.value(outer)?;
+                Some(self.indexed_destination(base, outer)?)
+            }
+            Value::Buffer(id) => self.environment.buffers.get(id).cloned(),
+            _ => None,
+        };
+        let Some((place, ty)) = base else {
+            let array = self.value(buffer)?;
+            return self.index_place(array, index);
+        };
+        let Some(ty) = ty.elem_type().cloned() else {
+            return Err(error("indexed destination has no element type"));
+        };
+        let result = self.builder.new_place(ty.clone());
+        self.builder
+            .push_void_inst(InstKind::PlaceIndex {
+                place,
+                index: index.value,
+                result,
+            })
+            .map_err(builder_error)?;
+        Ok((result, ty))
+    }
+    fn index_place(&mut self, array: Typed, index: Typed) -> Result<(PlaceId, Type), OptimizeError> {
         if !array.ty.array_variant().is_some_and(is_array_variant_view) {
-            return Err(error("TODO: writable nested/composite array view"));
+            return Err(error("writable array requires a storage view or local place"));
         }
         let Some(ty) = array.ty.elem_type().cloned() else {
             return Err(error("indexed value has no element type"));
@@ -590,6 +660,14 @@ impl Body<'_, '_> {
     fn primitive(&mut self, name: &str, args: Vec<Typed>) -> Result<Typed, OptimizeError> {
         let known = catalog().known();
         match (name, args.as_slice()) {
+            ("local_id", []) => self.op(
+                OpTag::Intrinsic {
+                    id: known.local_id,
+                    overload_idx: 0,
+                },
+                vec![],
+                u32_type(),
+            ),
             ("global_id", [_]) => {
                 let mut index = self.op(
                     OpTag::Intrinsic {
@@ -663,6 +741,41 @@ impl Body<'_, '_> {
                 )?;
                 self.cast(length, &u32_type())
             }
+            ("dimension", [a, axis]) => {
+                let ValueRef::Const(ConstantValue::U32(axis)) = axis.value else {
+                    return Err(error("generated dimension requires a constant axis"));
+                };
+                if axis == 0 {
+                    return self.primitive("length", vec![a.clone()]);
+                }
+                let mut ty = &a.ty;
+                let mut axis = axis as usize;
+                loop {
+                    if let Type::Constructed(TypeName::Tuple(_), fields) = ty {
+                        let Some(first) = fields.first() else {
+                            return Err(error("empty ranked input"));
+                        };
+                        ty = first;
+                        continue;
+                    }
+                    let Some(dims) = ty.array_dims() else {
+                        return Err(error("array dimension out of rank"));
+                    };
+                    if let Some(Type::Constructed(TypeName::Size(n), _)) = dims.get(axis) {
+                        return Ok(Self::number(
+                            u32::try_from(*n).map_err(|_| error("array dimension exceeds u32"))?,
+                        ));
+                    }
+                    if axis < dims.len() {
+                        return Err(error("inner array dimension must be statically sized"));
+                    }
+                    axis -= dims.len();
+                    let Some(element) = ty.elem_type() else {
+                        return Err(error("array dimension out of rank"));
+                    };
+                    ty = element;
+                }
+            }
             ("index", [a, i]) => self.index(a.clone(), i.clone()),
             ("bool_to_u32", [a]) => self.cast(a.clone(), &u32_type()),
             ("slice", [a, n]) => {
@@ -708,12 +821,14 @@ impl Body<'_, '_> {
             (_, [a, b]) => {
                 let op = match name {
                     "add" => BinaryOperator::Add,
+                    "sub" => BinaryOperator::Subtract,
                     "mul" => BinaryOperator::Multiply,
                     "div" => BinaryOperator::Divide,
                     "rem" => BinaryOperator::Remainder,
                     "lt" => BinaryOperator::Less,
                     "ge" => BinaryOperator::GreaterEqual,
                     "ne" => BinaryOperator::NotEqual,
+                    "eq" => BinaryOperator::Equal,
                     "and" => BinaryOperator::LogicalAnd,
                     _ => return Err(error(format!("TODO: generated primitive {name}"))),
                 };

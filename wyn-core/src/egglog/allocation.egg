@@ -38,6 +38,9 @@
 (rule ((= (Plan op) (Compact)) (Scratch op name i n) (CounterType count))
       ((ElementType (Temporary op name i) count)) :ruleset allocation)
 ; Bucket updates retain the destination; counts and overflow are fresh outputs.
+(rule ((= (Plan op) (Buckets)) (Phase (Stage op "clear") r)
+       (= counts (Backing (Result op 1))) (= overflow (Backing (Result op 2))))
+      ((Access (Stage op "clear") counts "write") (Access (Stage op "clear") overflow "write")) :ruleset allocation)
 (rule ((BucketResult op destination) (CounterType count))
       ((ElementType (Result op 1) count) (ElementType (Result op 2) count)
        (CapacityExtent (Result op 1) (Length destination)) (LiveLength (Result op 1) (Length destination))
@@ -122,6 +125,8 @@
 (rule ((= v (AbiExtent (ChunkCount n width))))
       ((AbiAlias v (AbiBinary "ceil_div" (AbiExtent n) (AbiNumber width)))
        (AbiBound v (AbiExtent n))) :ruleset abi)
+(rule ((= v (AbiExtent (Product a b))))
+      ((AbiAlias v (AbiBinary "mul" (AbiExtent a) (AbiExtent b)))) :ruleset abi)
 
 ; Alias and size information is shared by every capacity using that value.
 (rule ((= v (AbiNumber n))) ((set (AbiConstant v) n)) :ruleset abi)
@@ -160,6 +165,15 @@
 (rule ((= v (AbiLength a))) ((AbiChild v a)) :ruleset abi)
 (rule ((= v (AbiBinary op a b))) ((AbiChild v a) (AbiChild v b)) :ruleset abi)
 ; Sizes use nonnegative, checked arithmetic, independently of scalar wraparound.
+(rule ((= v (AbiBinary "mul" a b)) (= x (AbiConstant a)) (= y (AbiConstant b))
+       (>= x 0) (> y 0) (<= x (/ 4294967295 y)))
+      ((set (AbiConstant v) (* x y))) :ruleset abi)
+(rule ((= v (AbiBinary "mul" a b)) (= 0 (AbiConstant b))) ((set (AbiConstant v) 0)) :ruleset abi)
+(rule ((= v (AbiBinary "mul" a b)) (= 1 (AbiConstant a))) ((AbiAlias v b)) :ruleset abi)
+(rule ((= v (AbiBinary "mul" a b)) (= 1 (AbiConstant b))) ((AbiAlias v a)) :ruleset abi)
+(rule ((= v (AbiBinary "mul" a b)) (AbiBoundInput a binding stride)
+       (= factor (AbiConstant b)) (> factor 0) (= 0 (% stride factor)))
+      ((AbiBoundInput v binding (/ stride factor))) :ruleset abi)
 (rule ((= v (AbiBinary "sub" a b)) (= x (AbiConstant a)) (= y (AbiConstant b)) (>= x y))
       ((set (AbiConstant v) (- x y))) :ruleset abi)
 (rule ((= v (AbiBinary "ceil_div" a b)) (= x (AbiConstant a)) (= y (AbiConstant b)) (> y 0))
@@ -169,7 +183,7 @@
 ; Traverse only capacity dependencies, not the expression-by-buffer product.
 (rule ((AbiCapacity buffer n stride)) ((AbiCapacityNeed buffer n)) :ruleset abi)
 (rule ((AbiCapacityNeed buffer v) (AbiChild v child)) ((AbiCapacityNeed buffer child)) :ruleset abi)
-(rule ((AbiCapacityNeed buffer v) (AbiUniform v input)) ((AbiCapacityInput buffer input)) :ruleset abi)
+(rule ((AbiCapacityNeed buffer v) (AbiHostInput v input)) ((AbiCapacityInput buffer input)) :ruleset abi)
 (rule ((AbiStorage (AbiResource buffer) binding stride)) ((AbiBufferBinding buffer binding)) :ruleset abi)
 (rule ((LocalBuffer op name i t n)) ((AbiLocalCapacity op name i (AbiExtent n))) :ruleset abi)
 (rule ((AbiLocalCapacity op name i n) (= size (AbiBoundConstant n)))
@@ -187,7 +201,7 @@
 ; SameAsDispatch is valid only when each launched invocation owns at most one
 ; output element. Explicit grids and chunked writers cannot size larger outputs.
 (rule ((AbiCapacity buffer (AbiExtent domain) stride) (Produces stage buffer)
-       (PhaseDomain stage domain width) (AbiGridDomain stage n width)
+       (PhaseDomain stage domain width) (AbiGridDomain stage n launch-width)
        (= (AbiBoundKnown (AbiExtent domain)) false) (AbiParameterCount n offset))
       ((set (BufferCapacity buffer) (DispatchCapacity stride))) :ruleset abi-final)
 (rule ((AbiCapacity buffer n stride)) ((set (AbiCapacityResolved buffer) false)) :ruleset abi-final)

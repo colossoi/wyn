@@ -47,6 +47,22 @@ pub(super) fn validate(
         }
         for instruction in &body.instructions {
             match instruction {
+                Instruction::Barrier if !matches!(function.kind, FunctionKind::Kernel(_)) => {
+                    return Err(error("workgroup barrier outside a kernel"));
+                }
+                Instruction::Barrier => {}
+                Instruction::Atomic {
+                    buffer,
+                    index,
+                    values,
+                    ..
+                } => {
+                    check_value(data, buffer)?;
+                    check_value(data, index)?;
+                    for value in values {
+                        check_value(data, value)?;
+                    }
+                }
                 Instruction::Evaluate(op) => {
                     let Some(op) = data.operations.get(*op) else {
                         return Err(error("unknown source operation"));
@@ -72,7 +88,7 @@ pub(super) fn validate(
                         return Err(error("call target is not a function"));
                     };
                     if arguments.len() != target.parameters.len() || results.len() != interface.results {
-                        return Err(error("call signature mismatch"));
+                        return Err(error(&format!("call to {} has {} arguments and {} results; expected {} arguments and {} results", interface.name, arguments.len(), results.len(), target.parameters.len(), interface.results)));
                     }
                     let target_device = matches!(interface.kind, FunctionKind::Device);
                     if device != target_device || matches!(interface.kind, FunctionKind::Kernel(_)) {

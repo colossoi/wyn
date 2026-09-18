@@ -7,7 +7,7 @@
 //! structured source rather than a basic-block graph.
 
 use crate::flow::{BlockId, ControlHeader};
-use crate::ssa::framework::InstId;
+use crate::ssa::ir::InstId;
 use crate::ssa::types::{FuncBody, Terminator, ValueId, ValueRef};
 use crate::LookupSet;
 

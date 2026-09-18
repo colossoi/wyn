@@ -27,6 +27,29 @@ pub type LookupMap<K, V> = std::collections::HashMap<K, V>;
 /// Set companion to [`LookupMap`].
 pub type LookupSet<T> = std::collections::HashSet<T>;
 
+/// Borrow one element mutably and look up the others by their original indices.
+/// The lookup returns `None` for the selected element or an out-of-bounds index.
+///
+/// # Panics
+/// Panics if `index` is out of bounds.
+pub fn split_one_mut<'a, T>(
+    slice: &'a mut [T],
+    index: usize,
+) -> (&'a mut T, impl Fn(usize) -> Option<&'a T>) {
+    let (before, rest) = slice.split_at_mut(index);
+    let (current, after) = rest.split_at_mut(1);
+    let before = &*before;
+    let after = &*after;
+    let other = move |i: usize| {
+        if i < index {
+            before.get(i)
+        } else {
+            after.get(i.checked_sub(index + 1)?)
+        }
+    };
+    (&mut current[0], other)
+}
+
 /// Generic counter for generating unique IDs.
 ///
 /// The ID type must implement `From<u32>` to convert the raw counter value.

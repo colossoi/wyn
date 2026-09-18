@@ -147,7 +147,7 @@ fn host_dependencies(
             let dependency = graph.canonical_value(dependency);
             let scalar = scalar(graph.nodes[dependency].ty())?;
             let (binding, offset, name) = uniform_location(graph, entry, dependency, 0)?;
-            Some(HostSizeInput {
+            Some(HostSizeInput::Uniform {
                 name,
                 set: binding.set,
                 binding: binding.binding,

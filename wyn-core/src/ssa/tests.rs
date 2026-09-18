@@ -55,7 +55,7 @@ fn value_uses_counts_instruction_and_terminator_operands() {
     builder.terminate(Terminator::Return(Some(sum.into()))).unwrap();
     let body = builder.finish().unwrap();
 
-    let uses = ValueUses::analyze(&body);
+    let uses = ValueUses::analyze(&body.inner);
     assert_eq!(uses.count(x), 2);
     assert_eq!(uses.count(sum), 1);
     assert!(matches!(uses.users(sum), [UseSite::Terminator]));
@@ -95,7 +95,7 @@ fn dead_pure_elimination_removes_an_entire_unused_expression_tree() {
 
     eliminate_dead_pure_instructions(&mut body);
     assert_eq!(body.num_insts(), 0);
-    assert_eq!(ValueUses::analyze(&body).count(x), 1);
+    assert_eq!(ValueUses::analyze(&body.inner).count(x), 1);
 }
 
 /// `InstKind::remap` rewrites `ValueId` operands but must leave `PlaceId`s

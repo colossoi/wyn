@@ -119,7 +119,7 @@ fn test_int_literal_roundtrip() {
     );
     assert!(matches!(
         entry.term,
-        ssa::framework::Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(42))))
+        ssa::ir::Terminator::Return(Some(ValueRef::Const(ConstantValue::I32(42))))
     ));
 }
 
@@ -361,7 +361,7 @@ fn test_if_else_roundtrip() {
     // Entry should end with CondBranch
     let entry = func.get_block(func.entry_block());
     assert!(
-        matches!(&entry.term, ssa::framework::Terminator::CondBranch { .. }),
+        matches!(&entry.term, ssa::ir::Terminator::CondBranch { .. }),
         "Entry should end with CondBranch, got {:?}",
         entry.term
     );

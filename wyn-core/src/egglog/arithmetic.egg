@@ -136,13 +136,14 @@
       ((union e (Typed t (Bool false)))) :ruleset arithmetic)
 
 ; Literal indexing is safe only in bounds and when element/result types agree.
+; Exclude the eliminated execution from extraction of its earlier input element.
 (rule ((IndexOperands op (Typed at (Vector xs)) index)
        (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
        (= value (vec-get xs n)) (= value (Typed t node))
        (= e (Typed t (OperationResult op))))
-      ((union e value)) :ruleset arithmetic)
+      ((union e value) (subsume (Typed t (OperationResult op)))) :ruleset arithmetic)
 (rule ((IndexOperands op (Typed at (ArrayValue (ArrayLiteral xs))) index)
        (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
        (= value (vec-get xs n)) (= value (Typed t node))
        (= e (Typed t (OperationResult op))))
-      ((union e value)) :ruleset arithmetic)
+      ((union e value) (subsume (Typed t (OperationResult op)))) :ruleset arithmetic)

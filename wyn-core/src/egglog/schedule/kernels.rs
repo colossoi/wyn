@@ -7,6 +7,7 @@ use super::{
     WIDTH,
 };
 use crate::egglog::data::{BlockId, DispatchId, ExprId, OperationId, OperationKind};
+use crate::ssa::types::AtomicOp;
 use std::collections::BTreeSet;
 
 mod filter;
@@ -112,6 +113,36 @@ impl Planner<'_> {
         let value = match recipe {
             Recipe::Elements | Recipe::Totals | Recipe::Prefixes => self.parallel_screma(op, host)?,
             Recipe::Compact => self.parallel_filter(op, host)?,
+            Recipe::Buckets => {
+                let clear = self.kernel(op, "clear");
+                let OperationKind::BucketScatter { ref destination, .. } = self.data.operations[op].kind
+                else {
+                    return Err(error("bucket recipe requires a bucket operation"));
+                };
+                let n = Value::op("length", [Value::Source(destination.value)]);
+                let counts = self.slot(op, "counts", 0, false);
+                let overflow = self.slot(op, "overflow", 0, false);
+                let zero = self.invocations(clear, Value::Int(1));
+                self.store(zero.body, &overflow, Value::Int(0), Value::Int(0));
+                self.finish_loop(&zero, zero.body, vec![]);
+                let bins = self.invocations(zero.done, n);
+                self.store(bins.body, &counts, bins.index.clone(), Value::Int(0));
+                self.finish_loop(&bins, bins.body, vec![]);
+                self.returns(bins.done, vec![]);
+                self.dispatch(op, host, clear);
+                let kernel = self.kernel(op, "buckets");
+                let (end, value) = self.indexed(op, kernel, false, Some(AtomicOp::Add))?;
+                self.returns(end, vec![]);
+                self.dispatch(op, host, kernel);
+                value
+            }
+            Recipe::Atomic(update) => {
+                let kernel = self.kernel(op, "atomic");
+                let (end, value) = self.indexed(op, kernel, false, Some(update))?;
+                self.returns(end, vec![]);
+                self.dispatch(op, host, kernel);
+                value
+            }
             Recipe::Serial => {
                 let kernel = self.kernel(op, "ordered");
                 let (end, value) = self.serial_body(op, kernel, false)?;
@@ -162,7 +193,7 @@ impl Planner<'_> {
             } => self.serial_filter(op, block, local, &map, &body, &inputs),
             OperationKind::Scatter { .. }
             | OperationKind::BucketScatter { .. }
-            | OperationKind::ReduceByIndex { .. } => self.serial_indexed(op, block, local),
+            | OperationKind::ReduceByIndex { .. } => self.indexed(op, block, local, None),
             _ => Err(error("expected an array operation")),
         }
     }

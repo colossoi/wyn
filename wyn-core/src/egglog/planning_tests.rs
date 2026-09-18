@@ -34,7 +34,7 @@ fn count(graph: &EGraph, relation: &str) -> usize {
 const MAP: &str = r#"
     (HostRoot 0 (RegionId 0))
     (Site (OperationId 0) (RegionId 0))
-    (CollectiveShape (OperationId 0) 0 0 true)
+    (CollectiveShape (OperationId 0) 0 0)
     (InputDomain (OperationId 0) (Length (ExprId 0)))
     (ArrayResult (OperationId 0) 0 (TypeId 0))
     (ParameterValue (ExprId 0) (RegionId 0))
@@ -47,14 +47,14 @@ const MAP: &str = r#"
 fn map_reuse_is_selected_only_after_all_old_value_uses_are_known() {
     for (extra, expected) in [
         ("", "(Reuse (ExprId 0))"),
-        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true) (InputDomain (OperationId 1) (Length (ExprId 0)))", "(Reuse (ExprId 0))"),
+        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0) (InputDomain (OperationId 1) (Length (ExprId 0)))", "(Reuse (ExprId 0))"),
         ("(Operand (OperationId 0) \"environment\" (ExprId 0))", "(Allocate)"),
         ("(Operand (OperationId 0) \"input\" (ExprId 3)) (ParameterValue (ExprId 3) (RegionId 0))", "(Reuse (ExprId 0))"),
         ("(Operand (OperationId 0) \"input\" (ExprId 3)) (SliceView (ExprId 3) (ExprId 0) (ExprId 4) (ExprId 5))", "(Allocate)"),
         ("(Operand (OperationId 0) \"input\" (ExprId 3)) (DirectResult (ExprId 3) (OperationId 1) 0) (UpdatedResult (OperationId 1) 0 (ExprId 0))", "(Allocate)"),
         ("(ExitValue (RegionId 0) 1 (ExprId 0))", "(Allocate)"),
         ("(AbiOutputBinding 0 0 7 \"out\") (ReturnArray 0 (ExprId 2))", "(Allocate)"),
-        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true) (InputDomain (OperationId 1) (Fixed 4)) (Operand (OperationId 1) \"input\" (ExprId 0))", "(Allocate)"),
+        ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0) (InputDomain (OperationId 1) (Fixed 4)) (Operand (OperationId 1) \"input\" (ExprId 0))", "(Allocate)"),
     ] {
         let mut g = graph(&format!("{MAP} {extra} (ReusePermission (OperationId 0) 0 (ExprId 0)) (ExitValue (RegionId 0) 0 (ExprId 2))"));
         check(&mut g, &format!("(= (StorageFor (Result (OperationId 0) 0)) {expected})"));
@@ -90,12 +90,12 @@ fn fused_outputs_choose_one_eligible_owner_of_the_input() {
 fn reuse_accepts_only_existing_proofs_that_other_readers_have_finished() {
     let reader = r#"
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 0 0 true)
+        (CollectiveShape (OperationId 1) 0 0)
         (InputDomain (OperationId 1) (Length (ExprId 0)))
         (Operand (OperationId 1) "input" (ExprId 0))"#;
     let collective = r#"
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 1 0 true)
+        (CollectiveShape (OperationId 1) 1 0)
         (InputDomain (OperationId 1) (Length (ExprId 0)))
         (Operand (OperationId 1) "input" (ExprId 0))"#;
     let scalar = r#"
@@ -163,7 +163,7 @@ fn owned_intermediate_reuse_preserves_live_values_layout_and_invocation_scope() 
         let mut g = graph(&format!(
             r#"{MAP} {extra}
             (Site (OperationId 1) (RegionId {region}))
-            (CollectiveShape (OperationId 1) 0 0 true)
+            (CollectiveShape (OperationId 1) 0 0)
             (InputDomain (OperationId 1) (Length (ExprId 2)))
             (Operand (OperationId 1) "input" (ExprId 2))
             (ArrayResult (OperationId 1) 0 (TypeId {ty}))
@@ -184,11 +184,11 @@ fn owned_reuse_selects_an_eligible_input_after_checking_each_candidate() {
     for (extra, chosen) in [("", 2), ("(ExitValue (RegionId 0) 1 (ExprId 2))", 3)] {
         let mut g = graph(&format!(
             r#"{MAP} {extra}
-            (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true)
+            (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0)
             (InputDomain (OperationId 1) (Length (ExprId 0)))
             (Operand (OperationId 1) "input" (ExprId 0))
             (ArrayResult (OperationId 1) 0 (TypeId 0)) (DirectResult (ExprId 3) (OperationId 1) 0)
-            (Site (OperationId 2) (RegionId 0)) (CollectiveShape (OperationId 2) 0 0 true)
+            (Site (OperationId 2) (RegionId 0)) (CollectiveShape (OperationId 2) 0 0)
             (InputDomain (OperationId 2) (Length (ExprId 2)))
             (Operand (OperationId 2) "input" (ExprId 2)) (Operand (OperationId 2) "input" (ExprId 3))
             (ArrayResult (OperationId 2) 0 (TypeId 0)) (DirectResult (ExprId 4) (OperationId 2) 0)
@@ -212,11 +212,11 @@ fn owned_reuse_selects_an_eligible_input_after_checking_each_candidate() {
 #[test]
 fn scan_reuse_uses_recipe_boundaries_without_ordering_independent_readers() {
     let scan = MAP.replace(
-        "(CollectiveShape (OperationId 0) 0 0 true)",
-        "(CollectiveShape (OperationId 0) 1 0 true)",
+        "(CollectiveShape (OperationId 0) 0 0)",
+        "(CollectiveShape (OperationId 0) 1 0)",
     );
     let reader = r#"
-        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0 true)
+        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 0 0)
         (InputDomain (OperationId 1) (Length (ExprId 0)))
         (Operand (OperationId 1) "input" (ExprId 0))"#;
     for (reads, order, allowed) in [
@@ -280,7 +280,7 @@ fn scan_reuse_uses_recipe_boundaries_without_ordering_independent_readers() {
 fn scan_can_reuse_an_owned_intermediate_without_a_permission_hint() {
     let mut g = graph(&format!(
         r#"{MAP}
-        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 1 0 true)
+        (Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) 1 0)
         (InputDomain (OperationId 1) (Length (ExprId 2)))
         (Operand (OperationId 1) "input" (ExprId 2))
         (Accumulator (OperationId 1) 0 (TypeId 0)) (ScanComponent (OperationId 1) 0 (TypeId 0))
@@ -305,7 +305,7 @@ fn map_to_reduce_derives_materialization_scratch_and_order() {
     let mut g = graph(&format!(
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 0 1 true)
+        (CollectiveShape (OperationId 1) 0 1)
         (TotalResult (OperationId 1) 0 (TypeId 0))
         (Accumulator (OperationId 1) 0 (TypeId 0))
         (InputDomain (OperationId 1) (Length (ExprId 2)))
@@ -336,7 +336,7 @@ fn shared_producer_has_one_backing_and_independent_consumers() {
             facts,
             r#"
             (Site (OperationId {op}) (RegionId 0))
-            (CollectiveShape (OperationId {op}) 0 0 true)
+            (CollectiveShape (OperationId {op}) 0 0)
             (InputDomain (OperationId {op}) (Length (ExprId 2)))
             (ArrayResult (OperationId {op}) 0 (TypeId 0))
             (Operand (OperationId {op}) "input" (ExprId 2))
@@ -386,7 +386,7 @@ fn compacted_capacity_and_live_count_are_distinct() {
     let mut g = graph(
         r#"
         (HostRoot 0 (RegionId 0)) (Site (OperationId 0) (RegionId 0))
-        (FilterShape (OperationId 0) true) (FilterResult (OperationId 0) (TypeId 0))
+        (FilterShape (OperationId 0)) (FilterResult (OperationId 0) (TypeId 0))
         (InputDomain (OperationId 0) (Length (ExprId 0)))
         (DirectResult (ExprId 1) (OperationId 0) 0)
         (ExitValue (RegionId 0) 0 (ExprId 1))
@@ -440,7 +440,7 @@ fn sliced_in_place_update_keeps_value_versions_and_shared_backing() {
         (DirectResult (ExprId 4) (OperationId 1) 0)
         (ExitValue (RegionId 0) 0 (ExprId 4))
         (Site (OperationId 2) (RegionId 0))
-        (CollectiveShape (OperationId 2) 0 0 true)
+        (CollectiveShape (OperationId 2) 0 0)
         (InputDomain (OperationId 2) (Length (ExprId 3)))
         (Operand (OperationId 2) "input" (ExprId 3))
         (EffectInput 0 (OperationId 2)) (EffectWait (OperationId 1) 0)
@@ -466,7 +466,7 @@ fn independent_output_domains_stay_independent() {
         r#"{MAP}
         (ExitValue (RegionId 0) 0 (ExprId 2))
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 0 0 true)
+        (CollectiveShape (OperationId 1) 0 0)
         (InputDomain (OperationId 1) (Fixed 137))
         (ArrayResult (OperationId 1) 0 (TypeId 0))
         (DirectResult (ExprId 3) (OperationId 1) 0)
@@ -492,11 +492,11 @@ fn repeated_launch_sites_retain_scope_and_cross_region_handoffs() {
         (Enters (OperationId 1) (RegionId 1)) (Enters (OperationId 1) (RegionId 2))
         (Repeated (OperationId 1) (RegionId 1) (RegionId 2))
         (Site (OperationId 2) (RegionId 2))
-        (CollectiveShape (OperationId 2) 0 0 true)
+        (CollectiveShape (OperationId 2) 0 0)
         (InputDomain (OperationId 2) (Length (ExprId 2)))
         (Operand (OperationId 2) "input" (ExprId 2))
         (Site (OperationId 3) (RegionId 3))
-        (CollectiveShape (OperationId 3) 0 0 true)
+        (CollectiveShape (OperationId 3) 0 0)
         (InputDomain (OperationId 3) (Fixed 4))
     "#
     ));
@@ -621,7 +621,7 @@ fn local_allocations_and_binding_aliases_are_resolved_without_backend_ids() {
         (AbiStorage (AbiExpr 10) (InputBinding 0 5) 4)
         (DeviceRegion (RegionId 1))
         (Site (OperationId 1) (RegionId 1))
-        (CollectiveShape (OperationId 1) 0 0 true)
+        (CollectiveShape (OperationId 1) 0 0)
         (ArrayResult (OperationId 1) 0 (TypeId 0)) (TotalCount (OperationId 1) 0)
         (InputDomain (OperationId 1) (Fixed 0))
     "#
@@ -646,7 +646,7 @@ fn consumers_wait_for_their_component_writer_not_the_last_recipe_phase() {
     let mut g = graph(
         r#"
         (HostRoot 0 (RegionId 0)) (Site (OperationId 0) (RegionId 0))
-        (CollectiveShape (OperationId 0) 0 1 true)
+        (CollectiveShape (OperationId 0) 0 1)
         (InputDomain (OperationId 0) (Fixed 256))
         (TotalResult (OperationId 0) 0 (TypeId 0))
         (Accumulator (OperationId 0) 0 (TypeId 0))
@@ -654,7 +654,7 @@ fn consumers_wait_for_their_component_writer_not_the_last_recipe_phase() {
         (ResultTuple (ExprId 0) (OperationId 0))
         (Projection (ExprId 1) (ExprId 0) 1)
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 0 0 true)
+        (CollectiveShape (OperationId 1) 0 0)
         (InputDomain (OperationId 1) (Fixed 256))
         (Operand (OperationId 1) "input" (ExprId 1))
         (SourceDependency (OperationId 1) (OperationId 0))
@@ -674,7 +674,7 @@ fn effects_cross_scalar_sites_and_stop_at_the_next_launch() {
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0)) (ScalarSite (OperationId 1))
         (Site (OperationId 2) (RegionId 0))
-        (CollectiveShape (OperationId 2) 0 0 true)
+        (CollectiveShape (OperationId 2) 0 0)
         (InputDomain (OperationId 2) (Fixed 4))
         (EffectInput 0 (OperationId 0)) (EffectWait (OperationId 1) 0)
         (EffectInput 1 (OperationId 1)) (EffectWait (OperationId 2) 1)
@@ -696,7 +696,7 @@ fn chain_planning_keeps_linear_fact_counts() {
                 facts,
                 r#"
                 (Site (OperationId {i}) (RegionId 0))
-                (CollectiveShape (OperationId {i}) 0 0 true)
+                (CollectiveShape (OperationId {i}) 0 0)
                 (InputDomain (OperationId {i}) (Fixed 64))
                 (ArrayResult (OperationId {i}) 0 (TypeId 0))
                 (DirectResult (ExprId {i}) (OperationId {i}) 0)
@@ -753,12 +753,12 @@ fn old_value_readers_precede_updates_without_a_precomputed_effect_edge() {
         (UpdatedResult (OperationId 1) 0 (ExprId 2))
         (Operand (OperationId 1) "environment" (ExprId 2))
         (Site (OperationId 2) (RegionId 0))
-        (CollectiveShape (OperationId 2) 0 0 true)
+        (CollectiveShape (OperationId 2) 0 0)
         (InputDomain (OperationId 2) (Fixed 4))
         (Operand (OperationId 2) "input" (ExprId 2))
         (DirectResult (ExprId 4) (OperationId 1) 0)
         (Site (OperationId 3) (RegionId 0))
-        (CollectiveShape (OperationId 3) 0 0 true)
+        (CollectiveShape (OperationId 3) 0 0)
         (InputDomain (OperationId 3) (Fixed 4))
         (Operand (OperationId 3) "input" (ExprId 4))
     "#
@@ -810,7 +810,7 @@ fn effect_gates_do_not_expand_to_all_operation_pairs_during_planning() {
             facts,
             r#"
             (Site (OperationId {i}) (RegionId 0))
-            (CollectiveShape (OperationId {i}) 0 0 true)
+            (CollectiveShape (OperationId {i}) 0 0)
             (InputDomain (OperationId {i}) (Fixed 64))
         "#
         )
@@ -836,7 +836,7 @@ fn shared_scalar_dag_is_summarized_once_across_many_stages() {
             facts,
             r#"
             (Site (OperationId {i}) (RegionId 0))
-            (CollectiveShape (OperationId {i}) 0 0 true)
+            (CollectiveShape (OperationId {i}) 0 0)
             (InputDomain (OperationId {i}) (Fixed 64))
             (Operand (OperationId {i}) "environment" (ExprId {n}))
         "#
@@ -854,7 +854,7 @@ fn selecting_a_tuple_field_does_not_materialize_its_siblings() {
     let mut g = graph(&format!(
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0))
-        (CollectiveShape (OperationId 1) 0 0 true)
+        (CollectiveShape (OperationId 1) 0 0)
         (InputDomain (OperationId 1) (Fixed 8))
         (ArrayResult (OperationId 1) 0 (TypeId 0))
         (DirectResult (ExprId 3) (OperationId 1) 0)
@@ -944,14 +944,28 @@ fn conflicting_launch_policies_fail_inside_egglog() {
 
 #[test]
 fn conflicting_scheduling_recipes_fail_inside_egglog() {
-    let mut g = graph("");
+    let mut g = graph("(Site (OperationId 0) (RegionId 0))");
     let result = g.parse_and_run_program(
         None,
         r#"
-        (CollectiveShape (OperationId 0) 0 0 true)
-        (FilterShape (OperationId 0) true)
+        (CollectiveShape (OperationId 0) 0 0)
+        (FilterShape (OperationId 0))
         (run schedule)
     "#,
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn callback_effects_block_parallelism_through_nested_calls() {
+    let mut g = graph(&format!(
+        r#"{MAP}
+        (Callback (OperationId 0) (RegionId 1))
+        (Site (OperationId 1) (RegionId 1))
+        (Enters (OperationId 1) (RegionId 2))
+        (Site (OperationId 2) (RegionId 2))
+        (ParallelEffect (OperationId 2))
+    "#
+    ));
+    check(&mut g, "(= (Plan (OperationId 0)) (Serial))");
 }

@@ -5,7 +5,7 @@ use super::scalar::placement_index;
 use super::timing::span;
 use super::{OptimizeError, PlacementSite};
 use crate::ast::Span;
-use crate::egglog::data::{BlockId, BufferId, ExprId, OperationId, OperationKind, ParameterId};
+use crate::egglog::data::{BlockId, BufferId, ExprId, ExternId, OperationId, OperationKind, ParameterId};
 use crate::egglog::{Program, Scheduled};
 use crate::flow::{ControlHeader, ExecutionModel};
 use crate::interface::lowering::build_entry_outputs;
@@ -16,9 +16,9 @@ use crate::ssa::builder::{BuilderError, FuncBuilder};
 use crate::ssa::context::BackendGlobal;
 use crate::ssa::stage::{Elaborated, ElaboratedTag};
 use crate::ssa::types::{
-    ConstantValue, EntryPoint, FuncBody, Function, InstKind, PlaceId, Terminator, ValueRef,
+    AtomicOp, ConstantValue, EntryPoint, FuncBody, Function, InstKind, PlaceId, Terminator, ValueRef,
 };
-use crate::types::{sized_array, unit, Type, TypeExt, TypeName};
+use crate::types::{bool_type, sized_array, unit, Type, TypeExt, TypeName};
 use crate::{ssa, types, BindingRef, CodegenTarget, EntryId, FunctionId, LoweringProfile, SchedulePolicy};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use wyn_base::IdSource;
@@ -44,6 +44,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         placements: placement_index(&data.ir, &data.state.placements),
         data,
         functions: vec![],
+        externs: BTreeMap::new(),
         specializations: HashMap::new(),
         active: HashSet::new(),
         used: BTreeSet::new(),
@@ -69,7 +70,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
                 }
             }
         }
-        lower.visit(root).map_err(|e| error(format!("{} ({root:?}): {e}", declaration.name)))?;
+        lower.visit(root, None).map_err(|e| error(format!("{} ({root:?}): {e}", declaration.name)))?;
         let inputs = lower.inputs.clone();
         let (body, return_types) = lower.finish()?;
         let outputs = if compute {
@@ -148,6 +149,7 @@ struct Compiler<'a> {
     placements: BTreeMap<PlacementSite, Vec<ExprId>>,
     data: &'a Program<Scheduled>,
     functions: Vec<Function>,
+    externs: BTreeMap<ExternId, FunctionId>,
     specializations: HashMap<(BlockId, Vec<Type>), (FunctionId, BTreeSet<BufferId>)>,
     active: HashSet<BlockId>,
     used: BTreeSet<BufferId>,
@@ -166,7 +168,7 @@ impl Compiler<'_> {
         }
         let caller_buffers = std::mem::take(&mut self.used);
         let mut lower = Body::new(self, source, &key.1, 1)?;
-        lower.visit(source)?;
+        lower.visit(source, None)?;
         let (body, results) = lower.finish()?;
         if self.data.state.blocks[source].interface.as_ref().is_none_or(|f| f.results != results.len()) {
             return Err(error("helper result arity"));
@@ -274,8 +276,8 @@ impl<'a, 'b> Body<'a, 'b> {
         body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
         Ok((body, types))
     }
-    fn visit(&mut self, id: BlockId) -> Result<(), OptimizeError> {
-        if !self.entered.insert(id) {
+    fn visit(&mut self, id: BlockId, stop: Option<BlockId>) -> Result<(), OptimizeError> {
+        if Some(id) == stop || !self.entered.insert(id) {
             return Ok(());
         }
         self.builder.switch_to_block_unchecked(self.blocks[&id]);
@@ -351,7 +353,7 @@ impl<'a, 'b> Body<'a, 'b> {
                 let values = self.values(&data.state.bodies[edge.arguments].results)?;
                 let (target, args) = self.edge(edge.target, values)?;
                 self.builder.terminate(Terminator::Branch { target, args }).map_err(builder_error)?;
-                self.visit(edge.target)?;
+                self.visit(edge.target, stop)?;
             }
             Exit::Branch { condition, yes, no } => {
                 let values = self.values(&data.state.bodies[*condition].results)?;
@@ -383,9 +385,19 @@ impl<'a, 'b> Body<'a, 'b> {
                     })
                     .map_err(builder_error)?;
                 let environment = self.environment.clone();
-                self.visit(yes.target)?;
-                self.environment = environment;
-                self.visit(no.target)?;
+                let merge = match data.state.blocks[id].control {
+                    Some(Control::Selection { merge }) => Some(merge),
+                    _ => None,
+                };
+                self.visit(yes.target, merge.or(stop))?;
+                self.environment = environment.clone();
+                self.visit(no.target, merge.or(stop))?;
+                if let Some(merge) = merge {
+                    // Neither arm's local bindings dominate the join. Only
+                    // its explicit block parameters carry values out of it.
+                    self.environment = environment;
+                    self.visit(merge, stop)?;
+                }
             }
         }
         Ok(())
@@ -496,29 +508,7 @@ impl<'a, 'b> Body<'a, 'b> {
             Instruction::Store { buffer, index, value } => {
                 let i = self.value(index)?;
                 let v = self.value(value)?;
-                let (place, ty) = if let Value::Buffer(id) = buffer {
-                    if let Some((p, ty)) = self.environment.buffers.get(id).cloned() {
-                        let Some(elem) = ty.elem_type() else {
-                            return Err(error("local buffer element type"));
-                        };
-                        let ty = elem.clone();
-                        let result = self.builder.new_place(ty.clone());
-                        self.builder
-                            .push_void_inst(InstKind::PlaceIndex {
-                                place: p,
-                                index: i.value,
-                                result,
-                            })
-                            .map_err(builder_error)?;
-                        (result, ty)
-                    } else {
-                        let a = self.value(buffer)?;
-                        self.index_place(a, i)?
-                    }
-                } else {
-                    let a = self.value(buffer)?;
-                    self.index_place(a, i)?
-                };
+                let (place, ty) = self.indexed_destination(buffer, i)?;
                 let v = self.cast(v, &ty)?;
                 self.builder
                     .push_void_inst(InstKind::Store {
@@ -544,6 +534,47 @@ impl<'a, 'b> Body<'a, 'b> {
                         .map_err(builder_error)?;
                     self.environment.buffers.insert(*id, (place, ty));
                 }
+            }
+            Instruction::Barrier => {
+                self.builder.push_void_inst(InstKind::ControlBarrier).map_err(builder_error)?;
+            }
+            Instruction::Atomic {
+                result,
+                buffer,
+                index,
+                op,
+                values,
+            } => {
+                let index = self.value(index)?;
+                let (place, ty) = self.indexed_destination(buffer, index)?;
+                let values = self
+                    .values(values)?
+                    .into_iter()
+                    .map(|v| self.cast(v, &ty).map(|v| v.value))
+                    .collect::<Result<_, _>>()?;
+                let ty = if *op == AtomicOp::CompareExchange {
+                    Type::Constructed(TypeName::Tuple(2), vec![ty, bool_type()])
+                } else {
+                    ty
+                };
+                let value = self
+                    .builder
+                    .push_inst(
+                        InstKind::Atomic {
+                            place,
+                            op: *op,
+                            values,
+                        },
+                        ty.clone(),
+                    )
+                    .map_err(builder_error)?;
+                self.environment.locals.insert(
+                    result.clone(),
+                    Typed {
+                        value: value.into(),
+                        ty,
+                    },
+                );
             }
             Instruction::Dispatch(_) if self.finish_outputs => {}
             Instruction::Dispatch(_) => return Err(error("host dispatches do not belong in shader SSA")),

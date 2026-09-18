@@ -7,7 +7,7 @@ use crate::ast::{Span, TypeName};
 use crate::ssa;
 use polytype::Type;
 
-pub use super::framework::BuilderError;
+pub use super::ir::BuilderError;
 use super::types::{
     BlockId, ControlHeader, FuncBody, InstId, InstKind, PlaceId, PlaceInfo, PlaceOrigin, Terminator,
     ValueId,
@@ -16,7 +16,7 @@ use slotmap::SlotMap;
 
 /// Builder for constructing SSA functions.
 pub struct FuncBuilder {
-    inner: ssa::framework::FuncBuilder<InstKind, Type<TypeName>>,
+    inner: ssa::ir::FuncBuilder<InstKind, Type<TypeName>>,
     return_ty: Type<TypeName>,
     places: SlotMap<PlaceId, PlaceInfo>,
 }
@@ -24,7 +24,7 @@ pub struct FuncBuilder {
 impl FuncBuilder {
     /// Create a new function builder with the given parameters and return type.
     pub fn new(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Self {
-        let mut inner = ssa::framework::FuncBuilder::new();
+        let mut inner = ssa::ir::FuncBuilder::new();
         let _entry = inner.entry();
 
         for (ty, name) in params {
@@ -160,12 +160,12 @@ impl FuncBuilder {
     }
 
     /// Access the underlying function (read-only).
-    pub fn func(&self) -> &ssa::framework::Function<InstKind, Type<TypeName>> {
+    pub fn func(&self) -> &ssa::ir::Function<InstKind, Type<TypeName>> {
         self.inner.func()
     }
 
     /// Access the underlying function (mutable).
-    pub fn func_mut(&mut self) -> &mut ssa::framework::Function<InstKind, Type<TypeName>> {
+    pub fn func_mut(&mut self) -> &mut ssa::ir::Function<InstKind, Type<TypeName>> {
         self.inner.func_mut()
     }
 

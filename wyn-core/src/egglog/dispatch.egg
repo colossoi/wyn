@@ -54,15 +54,19 @@
       ((AbiRoot (EntryRoot entry) entry 1 1 1 true)) :ruleset abi-final)
 (rule ((PhaseOwner stage entry) (PhaseDomain stage n width))
       ((AbiRoot (KernelRoot stage) entry width 1 1 false)) :ruleset abi-final)
-; Explicit grids apply to parallel phases; singleton combine/serial phases stay
-; singleton. Dynamic grids name their actual ABI source, never a guessed size.
+; Cooperative combines still require exactly one workgroup. Authored grids
+; apply only to phases whose ownership supports multiple independent groups.
+(function FixedPhaseGrid (StageKey) bool :merge (or old new))
+(rule ((Phase stage r)) ((set (FixedPhaseGrid stage) false)) :ruleset abi)
+(rule ((PhaseDomain stage n 1)) ((set (FixedPhaseGrid stage) true)) :ruleset abi)
+(rule ((Phase (Stage op "combine") r)) ((set (FixedPhaseGrid (Stage op "combine")) true)) :ruleset abi)
 (rule ((SourceEntry entry r compute)) ((set (HasSourceGrid entry) false)) :ruleset abi)
 (rule ((SourceGrid entry x y z)) ((set (HasSourceGrid entry) true)) :ruleset abi)
 (rule ((Phase stage r) (PhaseDomain stage n width)) ((AbiExtent n)) :ruleset abi)
 (rule ((PhaseOwner stage entry) (= (HasSourceGrid entry) false) (PhaseDomain stage n width))
       ((AbiLaunchDomain stage n width)) :ruleset abi-final)
-(rule ((PhaseOwner stage entry) (PhaseDomain stage n 1))
-      ((AbiLaunchDomain stage n 1)) :ruleset abi-final)
+(rule ((PhaseOwner stage entry) (PhaseDomain stage n width) (= (FixedPhaseGrid stage) true))
+      ((AbiLaunchDomain stage n width)) :ruleset abi-final)
 ; ceil(ceil(n / chunk) / width) = ceil(n / (chunk * width)). Keep
 ; this division in the launch policy, independently of scratch capacity.
 (rule ((AbiLaunchDomain stage (ChunkCount n chunk) width) (> chunk 0)
@@ -72,7 +76,8 @@
 (rule ((AbiLaunchDomain stage (Length e) width)) ((AbiGridDomain stage (AbiExtent (Length e)) width)) :ruleset abi-final)
 (rule ((AbiLaunchDomain stage (Scalar e) width)) ((AbiGridDomain stage (AbiExtent (Scalar e)) width)) :ruleset abi-final)
 (rule ((AbiLaunchDomain stage (Stored value) width)) ((AbiGridDomain stage (AbiExtent (Stored value)) width)) :ruleset abi-final)
-(rule ((PhaseOwner stage entry) (SourceGrid entry x y z) (PhaseDomain stage n width) (> width 1))
+(rule ((AbiLaunchDomain stage (Product a b) width)) ((AbiGridDomain stage (AbiExtent (Product a b)) width)) :ruleset abi-final)
+(rule ((PhaseOwner stage entry) (SourceGrid entry x y z) (PhaseDomain stage n width) (= (FixedPhaseGrid stage) false))
       ((set (RootLaunch (KernelRoot stage)) (FixedLaunch x y z))) :ruleset abi-final)
 (rule ((AbiGridDomain stage n width) (> width 0) (= count (AbiBoundConstant n)))
       ((set (RootLaunch (KernelRoot stage)) (FixedLaunch (min 65535 (max 1 (+ (/ count width) (min 1 (% count width))))) 1 1))) :ruleset abi-final)
@@ -86,7 +91,7 @@
 (rule ((AbiGridNeed stage n) (AbiChild n child)) ((AbiGridNeed stage child)) :ruleset abi-final)
 (rule ((AbiGridDomain stage n width)) ((set (AbiGridResolved stage) false)) :ruleset abi-final)
 (rule ((= launch (RootLaunch (KernelRoot stage)))) ((set (AbiGridResolved stage) true)) :ruleset abi-final)
-(rule ((AbiGridNeed stage n) (AbiUniform n input) (= (AbiGridResolved stage) false))
+(rule ((AbiGridNeed stage n) (AbiHostInput n input) (= (AbiGridResolved stage) false))
       ((set (RootLaunch (KernelRoot stage)) (HostLaunch))) :ruleset readout)
 (rule ((SourceGrid entry x y z) (SourceEntry entry r true) (= (AbiHasLaunch r) false)
        (AbiRoot (EntryRoot entry) entry wx wy wz finish))

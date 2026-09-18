@@ -133,6 +133,22 @@ fn fused_map_chain_becomes_one_guarded_kernel_with_explicit_captures() {
 }
 
 #[test]
+fn readonly_callback_loops_use_parallel_invocations() {
+    let result = compile(
+        "entry main(xs:[]i32) []i32 =
+        map(|i:i32| loop acc=0 for j<3 do acc+xs[i], iota(length(xs)))",
+    );
+    assert!(result.state.blocks.values().any(|block| block
+        .interface
+        .as_ref()
+        .is_some_and(|f| matches!(f.kind, FunctionKind::Kernel([64, 1, 1])))));
+    assert_eq!(
+        run(&result, vec![Value::array(0..137)])[0].ints(),
+        (0..137).map(|i| i * 3).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn reduction_handles_empty_tail_chunks_and_tuple_accumulators() {
     let result = compile("entry main(xs: []i32) (i32, i32) = reduce(|a: (i32, i32), b: (i32, i32)| (a.0 + b.0, a.1 + b.1), (0, 0), map(|x: i32| (x, 1), xs))");
     assert_eq!(kernel_count(&result), 2);
@@ -307,7 +323,7 @@ fn noncommutative_associative_reduction_preserves_chunk_order() {
 }
 
 #[test]
-fn ordered_writes_and_ranked_bucket_overflow_lower_to_ordinary_memory_ops() {
+fn ordered_scatter_and_parallel_ranked_buckets_preserve_results_and_overflow() {
     let scatter =
         compile("entry main(dest: *[3]i32) [3]i32 = scatter(dest, [0, 0, -1, 3, 2], [1, 2, 9, 9, 7])");
     let output = run(&scatter, vec![Value::array([10, 20, 30])]);
@@ -320,12 +336,35 @@ fn ordered_writes_and_ranked_bucket_overflow_lower_to_ordinary_memory_ops() {
     let Value::Tuple(fields) = &output[0] else {
         panic!("bucket outputs");
     };
-    assert_eq!(
-        fields[0],
-        Value::arrays(vec![Value::array([10, 11]), Value::array([20, 0])])
-    );
+    let first = fields[0].at(0).ints();
+    assert_eq!(first.len(), 2);
+    assert_ne!(first[0], first[1]);
+    assert!(first.iter().all(|x| (10..=12).contains(x)));
+    assert_eq!(fields[0].at(1).ints(), [20, 0]);
+    assert_eq!(buckets.state.dispatches.len(), 2);
     assert_eq!(fields[1].ints(), [3, 1]);
     assert_eq!(fields[2], Value::Int(1));
+}
+
+#[test]
+fn atomic_indexed_reductions_preserve_existing_bins_and_collisions() {
+    for operator in ["a+b", "max(a,b)"] {
+        let program = compile(&format!(
+            "entry main(dest:*[3]i32, xs:[7]i32) [3]i32 =
+            reduce_by_index(dest, |a:i32,b:i32|{operator}, 0, [-1,0,0,1,2,3,0], xs)"
+        ));
+        let output = run(
+            &program,
+            vec![
+                Value::array([10, 20, 30]),
+                Value::array([100, 2, 3, 40, 50, 100, 7]),
+            ],
+        );
+        assert_eq!(
+            output[0].ints(),
+            if operator == "a+b" { vec![22, 60, 80] } else { vec![10, 40, 50] }
+        );
+    }
 }
 
 #[test]

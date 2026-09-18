@@ -1,5 +1,10 @@
+//! Generic SSA storage and structural transformations.
+//!
+//! This module knows about blocks, values, instructions, dominance, cloning,
+//! and substitution. It does not decide which Wyn operations are pure, safe to
+//! move, profitable to inline, foldable, or in need of materialization.
+
 pub use crate::flow::BlockId;
-use crate::LookupMap;
 pub use slotmap::Key;
 use slotmap::{new_key_type, SlotMap};
 use std::fmt::Debug;
@@ -7,12 +12,73 @@ use std::hash::Hash;
 
 use crate::ast::Span;
 use crate::flow::{ControlHeader, Terminator as FlowTerminator};
-use crate::ssa::types::ValueRef;
+
+mod inline;
+mod rewrite;
+mod schedule;
+mod uses;
+pub(crate) use inline::inline_single_block;
+pub(crate) use rewrite::Substitutions;
+pub use rewrite::VisitValues;
+pub(crate) use schedule::{schedule_floating, LoopScopes};
+pub use uses::{UseSite, ValueUses};
 
 new_key_type! {
     pub struct InstId;
     pub struct ValueId;
     pub struct PlaceId;
+}
+
+/// A compile-time scalar carried directly by an SSA operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantValue {
+    I32(i32),
+    U32(u32),
+    /// IEEE-754 bits, preserving equality and hashing for every payload.
+    F32(u32),
+    Bool(bool),
+}
+
+impl ConstantValue {
+    pub fn from_f32(value: f32) -> Self {
+        Self::F32(value.to_bits())
+    }
+}
+
+/// An SSA instruction result or an inline scalar constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ValueRef {
+    Ssa(ValueId),
+    Const(ConstantValue),
+}
+
+impl ValueRef {
+    pub fn as_ssa(self) -> Option<ValueId> {
+        match self {
+            Self::Ssa(id) => Some(id),
+            Self::Const(_) => None,
+        }
+    }
+
+    pub fn as_const(self) -> Option<ConstantValue> {
+        match self {
+            Self::Const(value) => Some(value),
+            Self::Ssa(_) => None,
+        }
+    }
+
+    pub fn map_ssa(self, map: impl Fn(ValueId) -> ValueId) -> Self {
+        match self {
+            Self::Ssa(id) => Self::Ssa(map(id)),
+            Self::Const(value) => Self::Const(value),
+        }
+    }
+}
+
+impl From<ValueId> for ValueRef {
+    fn from(id: ValueId) -> Self {
+        Self::Ssa(id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -38,11 +104,27 @@ pub struct BasicBlock {
 pub struct InstNode<I> {
     pub data: I,
     pub result: Option<ValueId>,
-    pub parent: BlockId,
+    pub placement: InstPlacement,
     /// Source span of the user expression that produced this instruction,
     /// or `None` for synthesized instructions (block-param phis, builder
     /// scratch). Used by backends to blame errors back to source.
     pub span: Option<Span>,
+}
+
+/// Whether an instruction has been assigned to a control-flow block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstPlacement {
+    Floating,
+    Block(BlockId),
+}
+
+impl InstPlacement {
+    pub fn block(self) -> Option<BlockId> {
+        match self {
+            Self::Floating => None,
+            Self::Block(block) => Some(block),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -72,7 +154,7 @@ pub enum ValueDef {
 
 pub type Terminator = FlowTerminator<ValueRef, ValueRef, ValueRef>;
 
-impl<I, T: Clone + Debug> Function<I, T> {
+impl<I, T> Function<I, T> {
     pub fn new() -> Self {
         let mut blocks = SlotMap::with_key();
         let entry = blocks.insert(BasicBlock {
@@ -125,19 +207,15 @@ impl<I, T: Clone + Debug> Function<I, T> {
         value
     }
 
-    pub fn value_def(&self, v: ValueId) -> ValueDef {
-        self.values[v].def
-    }
-
     pub fn value_type(&self, v: ValueId) -> &T {
         &self.values[v].ty
     }
 
-    pub fn block_of_value(&self, v: ValueId) -> BlockId {
+    pub fn block_of_value(&self, v: ValueId) -> Option<BlockId> {
         match self.values[v].def {
-            ValueDef::Param { block, .. } => block,
-            ValueDef::FunctionParam { .. } => self.entry,
-            ValueDef::Inst { inst } => self.insts[inst].parent,
+            ValueDef::Param { block, .. } => Some(block),
+            ValueDef::FunctionParam { .. } => Some(self.entry),
+            ValueDef::Inst { inst } => self.insts[inst].placement.block(),
         }
     }
 
@@ -153,20 +231,54 @@ impl<I, T: Clone + Debug> Function<I, T> {
     }
 
     pub fn append_inst_with_span(&mut self, block: BlockId, data: I, ty: T, span: Option<Span>) -> ValueId {
-        let value = self.values.insert(ValueInfo {
-            def: ValueDef::Param { block, index: 0 },
-            ty,
-            name: None,
-        });
-        let inst = self.insts.insert(InstNode {
-            data,
-            result: Some(value),
-            parent: block,
-            span,
-        });
-        self.values[value].def = ValueDef::Inst { inst };
+        let (inst, value) = self.insert_value_inst(data, ty, InstPlacement::Block(block), span);
         self.blocks[block].insts.push(inst);
         value
+    }
+
+    /// Create a value-producing instruction without assigning it to a block.
+    pub(crate) fn append_floating_inst(&mut self, data: I, ty: T) -> ValueId {
+        let (_, value) = self.insert_value_inst(data, ty, InstPlacement::Floating, None);
+        value
+    }
+
+    fn insert_value_inst(
+        &mut self,
+        data: I,
+        ty: T,
+        placement: InstPlacement,
+        span: Option<Span>,
+    ) -> (InstId, ValueId) {
+        let values = &mut self.values;
+        let inst = self.insts.insert_with_key(|inst| {
+            let value = values.insert(ValueInfo {
+                def: ValueDef::Inst { inst },
+                ty,
+                name: None,
+            });
+            InstNode {
+                data,
+                result: Some(value),
+                placement,
+                span,
+            }
+        });
+        let Some(value) = self.insts[inst].result else {
+            unreachable!("value-producing instruction {inst:?} has no result")
+        };
+        (inst, value)
+    }
+
+    /// Remove a placed instruction from its block and leave its value floating.
+    pub(crate) fn float_inst(&mut self, inst: InstId) {
+        assert!(
+            self.insts[inst].result.is_some(),
+            "cannot float resultless instruction {inst:?}"
+        );
+        if let InstPlacement::Block(block) = self.insts[inst].placement {
+            self.blocks[block].insts.retain(|&candidate| candidate != inst);
+        }
+        self.insts[inst].placement = InstPlacement::Floating;
     }
 
     pub fn append_void_inst(&mut self, block: BlockId, data: I) -> InstId {
@@ -177,75 +289,11 @@ impl<I, T: Clone + Debug> Function<I, T> {
         let inst = self.insts.insert(InstNode {
             data,
             result: None,
-            parent: block,
+            placement: InstPlacement::Block(block),
             span,
         });
         self.blocks[block].insts.push(inst);
         inst
-    }
-
-    pub fn insert_inst_at_index(&mut self, block: BlockId, index: usize, data: I, ty: T) -> ValueId {
-        self.insert_inst_at_index_with_span(block, index, data, ty, None)
-    }
-
-    pub fn insert_inst_at_index_with_span(
-        &mut self,
-        block: BlockId,
-        index: usize,
-        data: I,
-        ty: T,
-        span: Option<Span>,
-    ) -> ValueId {
-        let value = self.values.insert(ValueInfo {
-            def: ValueDef::Param { block, index: 0 },
-            ty,
-            name: None,
-        });
-        let inst = self.insts.insert(InstNode {
-            data,
-            result: Some(value),
-            parent: block,
-            span,
-        });
-        self.values[value].def = ValueDef::Inst { inst };
-        self.blocks[block].insts.insert(index, inst);
-        value
-    }
-
-    pub fn predecessors(&self) -> LookupMap<BlockId, Vec<BlockId>> {
-        let mut preds: LookupMap<BlockId, Vec<BlockId>> =
-            self.blocks.keys().map(|b| (b, Vec::new())).collect();
-
-        for (bid, block) in &self.blocks {
-            for succ in block.term.successors() {
-                preds.entry(succ).or_default().push(bid);
-            }
-        }
-        preds
-    }
-
-    pub fn block_order_index_map(&self) -> LookupMap<InstId, usize> {
-        let mut out = LookupMap::new();
-        for (_bid, block) in &self.blocks {
-            for (idx, &inst) in block.insts.iter().enumerate() {
-                out.insert(inst, idx);
-            }
-        }
-        out
-    }
-
-    pub fn remove_inst(&mut self, inst: InstId) -> bool {
-        let Some(node) = self.insts.remove(inst) else {
-            return false;
-        };
-        let block = node.parent;
-        if let Some(pos) = self.blocks[block].insts.iter().position(|&x| x == inst) {
-            self.blocks[block].insts.remove(pos);
-        }
-        if let Some(result) = node.result {
-            self.values.remove(result);
-        }
-        true
     }
 }
 

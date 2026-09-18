@@ -64,6 +64,14 @@ pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>,
         if converter.globals.insert(def.name, (def.arity, def.ty.clone(), region)).is_some() {
             return Err(ConvertError::DuplicateDefinition(def.name));
         }
+        if let TermKind::Extern(name) = &def.body.kind {
+            let id = *converter.externs.entry(name.clone()).or_insert_with(|| {
+                converter.data.externs.alloc(ExternData {
+                    linkage_name: name.clone(),
+                })
+            });
+            converter.external_symbols.insert(def.name, id);
+        }
     }
     for def in &program.defs {
         let id = converter.data.definitions.alloc_id();
@@ -151,6 +159,7 @@ struct Converter {
     origins: Interner<OriginId, OriginData>,
     builtins: LookupMap<(builtins::BuiltinId, usize), BuiltinId>,
     externs: LookupMap<String, ExternId>,
+    external_symbols: LookupMap<crate::SymbolId, ExternId>,
 }
 
 struct Scope {
@@ -250,6 +259,9 @@ impl Converter {
                 let symbol = self.symbol(source)?;
                 if let Some(&value) = scope.locals.get(&source) {
                     return Ok(self.retype(value, ty));
+                }
+                if let Some(&id) = self.external_symbols.get(&source) {
+                    return Ok(self.expr(ty, ExprKind::Extern(id)));
                 }
                 if self.globals.get(&source).is_some_and(|(arity, _, _)| *arity == 0) {
                     return Ok(self.operation(OperationKind::EvalGlobal(symbol), ty, span, scope));

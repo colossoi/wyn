@@ -92,7 +92,7 @@ fn buffer_len_serde_round_trip() {
             src_elem_bytes: 16,
         },
         BufferLen::HostProvided {
-            inputs: vec![HostSizeInput {
+            inputs: vec![HostSizeInput::Uniform {
                 name: "frame_resolution_x".into(),
                 set: 0,
                 binding: 0,
@@ -110,6 +110,19 @@ fn buffer_len_serde_round_trip() {
         }
         assert_eq!(serde_json::from_str::<BufferLen>(&json).unwrap(), len);
     }
+}
+
+#[test]
+fn push_constant_capacity_dependency_preserves_its_location() {
+    let input = HostSizeInput::PushConstant {
+        name: "count".into(),
+        push_constant_offset: 12,
+        scalar: HostSizeScalar::I32,
+    };
+    let json = serde_json::to_string(&input).unwrap();
+    assert_eq!(serde_json::from_str::<HostSizeInput>(&json).unwrap(), input);
+    assert!(json.contains("\"push_constant_offset\":12"));
+    assert!(!json.contains("\"binding\""));
 }
 
 #[test]

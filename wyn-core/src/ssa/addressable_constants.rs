@@ -2,7 +2,7 @@
 
 use crate::ast::TypeName;
 use crate::op::{AddressableConstantId, OpTag};
-use crate::ssa::framework::ValueDef;
+use crate::ssa::ir::ValueDef;
 use crate::ssa::types::{
     AddressableConstant, AddressableConstantKind, AddressableConstantValue, ConstantValue, FuncBody,
     InstKind, Program, ValueRef,

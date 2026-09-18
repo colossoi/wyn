@@ -45,14 +45,14 @@ fn assert_frame_inputs(inputs: &[HostSizeInput], x_offset: u32, y_offset: u32) {
     assert_eq!(
         inputs,
         [
-            HostSizeInput {
+            HostSizeInput::Uniform {
                 name: "frame_resolution_x".into(),
                 set: 0,
                 binding: 0,
                 offset: x_offset,
                 scalar: HostSizeScalar::F32,
             },
-            HostSizeInput {
+            HostSizeInput::Uniform {
                 name: "frame_resolution_y".into(),
                 set: 0,
                 binding: 0,

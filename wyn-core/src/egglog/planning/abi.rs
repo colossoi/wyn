@@ -24,7 +24,7 @@ pub(in crate::egglog) fn facts(
     entries: &IdArena<EntryId, EntryData>,
     types: &IdArena<TypeId, TypeData>,
     sink: &mut FullState<'_, '_>,
-    uniforms: &mut Vec<HostSizeInput>,
+    host_inputs: &mut Vec<HostSizeInput>,
 ) -> Result<(), Error> {
     for (&parameter, inputs) in inputs {
         let parent = sink.add("AbiParameter", i64::from(parameter.as_u32()))?;
@@ -51,6 +51,20 @@ pub(in crate::egglog) fn facts(
                 ) {
                     sink.add("AbiParameterCount", (value, i64::from(slot.offset)))?;
                 }
+                let scalar = match input.ty {
+                    Type::Constructed(TypeName::Int(32), _) => Some(HostSizeScalar::I32),
+                    Type::Constructed(TypeName::UInt(32), _) => Some(HostSizeScalar::U32),
+                    Type::Constructed(TypeName::Float(32), _) => Some(HostSizeScalar::F32),
+                    _ => None,
+                };
+                if let Some(scalar) = scalar {
+                    sink.add("AbiHostInput", (value, host_inputs.len() as i64))?;
+                    host_inputs.push(HostSizeInput::PushConstant {
+                        name: input.name.clone(),
+                        push_constant_offset: slot.offset,
+                        scalar,
+                    });
+                }
             }
             if let Some((binding, ..)) = input.storage_image_binding() {
                 let binding = sink.add(
@@ -60,7 +74,7 @@ pub(in crate::egglog) fn facts(
                 sink.add("AbiImage", (value, binding))?;
             }
             if let EntryInputKind::Uniform { binding } = input.kind {
-                uniform(sink, value, &input.ty, binding, 0, &input.name, uniforms)?;
+                uniform(sink, value, &input.ty, binding, 0, &input.name, host_inputs)?;
             }
         }
     }
@@ -113,8 +127,8 @@ fn uniform(
         _ => None,
     };
     if let Some(scalar) = scalar {
-        sink.add("AbiUniform", (value, inputs.len() as i64))?;
-        inputs.push(HostSizeInput {
+        sink.add("AbiHostInput", (value, inputs.len() as i64))?;
+        inputs.push(HostSizeInput::Uniform {
             name: name.into(),
             set: binding.set,
             binding: binding.binding,
@@ -170,7 +184,7 @@ pub(in crate::egglog) fn read(
     buffers: &HashMap<EggValue, BufferId>,
     stages: &HashMap<EggValue, DispatchId>,
     entry_roots: &BTreeMap<EntryId, BlockId>,
-    uniforms: &[HostSizeInput],
+    host_inputs: &[HostSizeInput],
 ) -> Result<HashMap<EggValue, BlockId>, OptimizeError> {
     let mut pinned = BTreeMap::new();
     rows(graph, "AbiPinnedBinding", |a| {
@@ -310,7 +324,7 @@ pub(in crate::egglog) fn read(
         let Some(BufferLen::HostProvided { inputs, .. }) = &mut binding.length else {
             return Err(error("host-size input without a host-provided capacity"));
         };
-        inputs.push(uniforms[number(graph, a[1])? as usize].clone());
+        inputs.push(host_inputs[number(graph, a[1])? as usize].clone());
         Ok(())
     })?;
     for (&id, binding) in bindings {

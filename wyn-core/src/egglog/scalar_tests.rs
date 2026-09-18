@@ -453,6 +453,23 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
 }
 
 #[test]
+fn literal_indices_cannot_replace_earlier_values_with_their_execution() {
+    for algebra in [false, true] {
+        for source in [
+            "entry main(x:i32) i32 = let m=[[1,x*x+3],[x*x+3,2]] in m[1][0]+m[0][1]",
+            "entry main(x:i32) i32 = let v=[x*x+3,2] in v[0]+x*x+3",
+        ] {
+            let c = super::simplify(input(source), algebra).unwrap();
+            let c = schedule(super::place(c).unwrap(), PipelineTopologyPolicy::AllowGenerated).unwrap();
+            for x in [-7, 0, 9] {
+                assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(2 * (x * x + 3))]);
+            }
+            wgsl(&c);
+        }
+    }
+}
+
+#[test]
 fn operation_result_bounds_preserve_order_and_branch_scope() {
     for source in [
         "entry main(xs:[]i32, n:i32) i32 = loop total=0 for i<n do let v=xs[i] in total+(loop acc=0 for j<3 do acc+v*v+j)",

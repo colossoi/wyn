@@ -1,6 +1,6 @@
 use super::super::super::data::{body_signature, ExprId};
 use super::super::{error, length};
-use super::{chunks, singleton, OptimizeError, Planner, Value, WIDTH};
+use super::{chunks, singleton, FunctionKind, Instruction, OptimizeError, Planner, Value, WIDTH};
 use crate::egglog::data::{Array, BlockId, OperationId, OperationKind, ScremaForm};
 
 impl Planner<'_> {
@@ -92,6 +92,11 @@ impl Planner<'_> {
         // Dispatch boundaries supply device-wide visibility. No workgroup
         // barrier is used as a substitute for global synchronization.
         let combine = self.kernel(op, "combine");
+        if ns == 0 {
+            self.combine_reduction(combine, &form, chunks.clone(), &partials, &reductions)?;
+            self.dispatch(op, host, combine);
+            return Ok(result(&reductions, &arrays));
+        }
         let loop_ = self.start_loop(
             combine,
             Value::Int(0),
@@ -139,6 +144,88 @@ impl Planner<'_> {
             self.dispatch(op, host, finish);
         }
         Ok(result(&reductions, &arrays))
+    }
+
+    fn combine_reduction(
+        &mut self,
+        kernel: BlockId,
+        form: &ScremaForm,
+        count: Value,
+        partials: &[Value],
+        outputs: &[Value],
+    ) -> Result<(), OptimizeError> {
+        let Some(FunctionKind::Kernel([width, 1, 1])) =
+            self.data.state.blocks[kernel].interface.as_ref().map(|f| &f.kind)
+        else {
+            return Err(error("reduction combine requires a workgroup"));
+        };
+        let width = *width;
+        let neutral = neutrals(form);
+        let shared: Vec<_> = neutral
+            .iter()
+            .enumerate()
+            .map(|(i, &e)| Value::Workgroup {
+                id: i as u32,
+                count: width,
+                element: self.data.expressions[e].ty,
+            })
+            .collect();
+        let lane = Value::op("local_id", []);
+        // Adjacent lanes own consecutive intervals; the tree preserves their
+        // order even for noncommutative associative operators.
+        let per_lane = Value::op("ceil_div", [count.clone(), Value::Int(width)]);
+        let start = Value::op("mul", [lane.clone(), per_lane.clone()]);
+        let end = Value::op("min", [count, Value::op("add", [start.clone(), per_lane])]);
+        let loop_ = self.start_loop(
+            kernel,
+            start,
+            end,
+            neutral.into_iter().map(Value::Source).collect(),
+        );
+        let incoming = self.read_buffers(loop_.body, partials, loop_.index.clone());
+        let next = self.accumulate(loop_.body, form, loop_.state.clone(), incoming, "partial")?;
+        self.finish_loop(&loop_, loop_.body, next);
+        self.write_values(loop_.done, &shared, lane.clone(), loop_.state.clone())?;
+        self.emit(loop_.done, Instruction::Barrier);
+        let mut block = loop_.done;
+        for step in 0..width.trailing_zeros() {
+            let stride = 1 << step;
+            let active = self.block(kernel, vec![]);
+            let merge = self.block(kernel, vec![]);
+            self.branch(
+                block,
+                Value::op("lt", [lane.clone(), Value::Int(width / (2 * stride))]),
+                active,
+                merge,
+                Some(merge),
+            );
+            let first = Value::op("mul", [lane.clone(), Value::Int(2 * stride)]);
+            let left = self.read_buffers(active, &shared, first.clone());
+            let right = self.read_buffers(
+                active,
+                &shared,
+                Value::op("add", [first.clone(), Value::Int(stride)]),
+            );
+            let next = self.accumulate(active, form, left, right, "tree")?;
+            self.write_values(active, &shared, first, next)?;
+            self.jump(active, merge, vec![]);
+            self.emit(merge, Instruction::Barrier);
+            block = merge;
+        }
+        let write = self.block(kernel, vec![]);
+        let done = self.block(kernel, vec![]);
+        self.branch(
+            block,
+            Value::op("eq", [lane, Value::Int(0)]),
+            write,
+            done,
+            Some(done),
+        );
+        let values = self.read_buffers(write, &shared, Value::Int(0));
+        self.write_values(write, outputs, Value::Int(0), values)?;
+        self.jump(write, done, vec![]);
+        self.returns(done, vec![]);
+        Ok(())
     }
 
     pub(super) fn serial_screma(

@@ -1,7 +1,8 @@
 //! Control-flow scaffold. Scalar instructions are opaque payloads outside egglog.
 use crate::egglog::data::{
-    Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId,
+    Array, BlockId, BodyId, BufferId, DispatchId, EntryId, ExprId, GridId, OperationId, ParameterId, TypeId,
 };
+use crate::ssa::types::AtomicOp;
 use crate::types::Type;
 use std::collections::BTreeSet;
 use wyn_base::IdArena;
@@ -82,6 +83,11 @@ pub enum Value {
     Source(ExprId),
     Array(Array),
     Buffer(BufferId),
+    Workgroup {
+        id: u32,
+        count: u32,
+        element: TypeId,
+    },
     Tuple(Vec<Value>),
     Field(Box<Value>, usize),
     Primitive(&'static str, Vec<Value>),
@@ -110,6 +116,14 @@ pub enum Instruction {
         value: Value,
     },
     Allocate(BufferId),
+    Barrier,
+    Atomic {
+        result: String,
+        buffer: Value,
+        index: Value,
+        op: AtomicOp,
+        values: Vec<Value>,
+    },
     /// Execute this dispatch site and make its writes visible before continuing
     /// host control flow. A loop can execute a site more than once.
     Dispatch(DispatchId),

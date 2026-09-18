@@ -54,7 +54,7 @@ pub fn schedule(
         &converted.types,
         &converted.parameters,
     )?;
-    let mut uniforms = vec![];
+    let mut host_inputs = vec![];
     let mut graph = EGraph::default();
     time("load planning schema", || {
         graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
@@ -71,7 +71,7 @@ pub fn schedule(
                 &converted.entries,
                 &converted.types,
                 &mut sink,
-                &mut uniforms,
+                &mut host_inputs,
             )
         })
     })?;
@@ -124,7 +124,7 @@ pub fn schedule(
             &planner.resources.buffers,
             &planner.resources.launches,
             &entry_roots,
-            &uniforms,
+            &host_inputs,
         )
     })?;
     planner.output_copies()?;

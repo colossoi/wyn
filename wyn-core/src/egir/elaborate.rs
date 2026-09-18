@@ -1168,14 +1168,14 @@ impl<'a> Elaborator<'a> {
     /// Elaborate a skeleton terminator.
     fn elaborate_terminator(&mut self, term: &SkeletonTerminator) {
         let t = match term {
-            SkeletonTerminator::Return(None) => ssa::framework::Terminator::Return(None),
+            SkeletonTerminator::Return(None) => ssa::ir::Terminator::Return(None),
             SkeletonTerminator::Return(Some(result)) => {
-                ssa::framework::Terminator::Return(self.demand_result_ref(result))
+                ssa::ir::Terminator::Return(self.demand_result_ref(result))
             }
             SkeletonTerminator::Branch { target, args } => {
                 let out_args: Vec<ValueRef> =
                     args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
-                ssa::framework::Terminator::Branch {
+                ssa::ir::Terminator::Branch {
                     target: self.block_map[target],
                     args: out_args,
                 }
@@ -1190,7 +1190,7 @@ impl<'a> Elaborator<'a> {
                 let cond = self.demand_ref(*cond);
                 let ta: Vec<ValueRef> = then_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
                 let ea: Vec<ValueRef> = else_args.iter().map(|&nid| self.demand_ref(nid.value())).collect();
-                ssa::framework::Terminator::CondBranch {
+                ssa::ir::Terminator::CondBranch {
                     cond,
                     then_target: self.block_map[then_target],
                     then_args: ta,
@@ -1198,7 +1198,7 @@ impl<'a> Elaborator<'a> {
                     else_args: ea,
                 }
             }
-            SkeletonTerminator::Unreachable => ssa::framework::Terminator::Unreachable,
+            SkeletonTerminator::Unreachable => ssa::ir::Terminator::Unreachable,
         };
         let _ = self.builder.terminate(t);
     }

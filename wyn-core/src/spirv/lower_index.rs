@@ -220,7 +220,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
             ValueRef::Const(ConstantValue::I32(i)) => Some(i as u32),
             ValueRef::Ssa(id) => {
                 let inst_id = match self.body.inner.values.get(id)?.def {
-                    ssa::framework::ValueDef::Inst { inst } => inst,
+                    ssa::ir::ValueDef::Inst { inst } => inst,
                     _ => return None,
                 };
                 match &self.body.inner.insts.get(inst_id)?.data {
@@ -308,10 +308,9 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     ) -> Result<spirv::Word> {
         // Virtual array is {start, step, len}
         // Result = start + index * step
-        let i32_type = self.constructor.i32_type;
-        let start = self.constructor.builder.composite_extract(i32_type, None, range_id, [0])?;
-        let step = self.constructor.builder.composite_extract(i32_type, None, range_id, [1])?;
-        let offset = self.constructor.builder.i_mul(i32_type, None, index_id, step)?;
+        let start = self.constructor.builder.composite_extract(result_ty, None, range_id, [0])?;
+        let step = self.constructor.builder.composite_extract(result_ty, None, range_id, [1])?;
+        let offset = self.constructor.builder.i_mul(result_ty, None, index_id, step)?;
         Ok(self.constructor.builder.i_add(result_ty, None, start, offset)?)
     }
 

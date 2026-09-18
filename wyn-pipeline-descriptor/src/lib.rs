@@ -1508,13 +1508,22 @@ pub enum HostSizeScalar {
 /// capacity. This is dependency metadata, not a formula: the host application
 /// remains responsible for choosing the allocation size.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct HostSizeInput {
-    pub name: String,
-    pub set: u32,
-    pub binding: u32,
-    pub offset: u32,
-    #[serde(rename = "type")]
-    pub scalar: HostSizeScalar,
+#[serde(untagged)]
+pub enum HostSizeInput {
+    Uniform {
+        name: String,
+        set: u32,
+        binding: u32,
+        offset: u32,
+        #[serde(rename = "type")]
+        scalar: HostSizeScalar,
+    },
+    PushConstant {
+        name: String,
+        push_constant_offset: u32,
+        #[serde(rename = "type")]
+        scalar: HostSizeScalar,
+    },
 }
 
 /// Allocation policy for a storage buffer. Some policies are resolved from

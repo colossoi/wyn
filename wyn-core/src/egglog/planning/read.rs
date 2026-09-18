@@ -9,6 +9,7 @@ use crate::egglog::data::{
 use crate::egglog::timing::span;
 use crate::egglog::visit::Operand;
 use crate::egglog::{OptimizeError, Program, Scheduled};
+use crate::ssa::types::AtomicOp;
 use crate::types::TypeExt;
 use egglog_engine::sort::S;
 use egglog_engine::{EGraph, Read, Value as EggValue};
@@ -21,6 +22,8 @@ pub(in crate::egglog) enum Recipe {
     Prefixes,
     Compact,
     Serial,
+    Atomic(AtomicOp),
+    Buckets,
 }
 
 #[derive(Default)]
@@ -44,12 +47,34 @@ pub(in crate::egglog) fn read(
     let mut status = Ok(());
     graph.function_entries_while("Plan", |entry| {
         status = graph.read(|state| {
+            let mut atomic = None;
+            state.enodes_for_eclass("Atomic", entry.output, |node| atomic = Some(node.children[0]))?;
+            if let Some(update) = atomic {
+                for (name, op) in [
+                    ("AtomicAdd", AtomicOp::Add),
+                    ("AtomicAnd", AtomicOp::And),
+                    ("AtomicOr", AtomicOp::Or),
+                    ("AtomicXor", AtomicOp::Xor),
+                    ("AtomicCas", AtomicOp::CompareExchange),
+                ] {
+                    let mut selected = false;
+                    state.enodes_for_eclass(name, update, |_| selected = true)?;
+                    if selected {
+                        result.recipes.insert(
+                            OperationId::from(operations[&entry.inputs[0]]),
+                            Recipe::Atomic(op),
+                        );
+                        return Ok(());
+                    }
+                }
+            }
             for (name, recipe) in [
                 ("Elements", Recipe::Elements),
                 ("Totals", Recipe::Totals),
                 ("Prefixes", Recipe::Prefixes),
                 ("Compact", Recipe::Compact),
                 ("Serial", Recipe::Serial),
+                ("Buckets", Recipe::Buckets),
             ] {
                 let mut selected = false;
                 state.enodes_for_eclass(name, entry.output, |_| selected = true)?;
@@ -120,7 +145,10 @@ pub(in crate::egglog) fn read(
     }
     let mut chunks = HashMap::new();
     graph.constructor_enodes("ChunkCount", |e| {
-        chunks.insert(e.eclass, (e.children[0], e.children[1]));
+        chunks.insert(e.eclass, ("ceil_div", e.children[0], e.children[1]));
+    })?;
+    graph.constructor_enodes("Product", |e| {
+        chunks.insert(e.eclass, ("mul", e.children[0], e.children[1]));
     })?;
     rows(graph, "PlannedBuffer", |a| {
         let id = buffers[&a[0]];
@@ -350,16 +378,21 @@ fn extent(
     graph: &EGraph,
     id: EggValue,
     values: &mut HashMap<EggValue, Value>,
-    chunks: &HashMap<EggValue, (EggValue, EggValue)>,
+    chunks: &HashMap<EggValue, (&'static str, EggValue, EggValue)>,
 ) -> Result<Value, OptimizeError> {
     if let Some(value) = values.get(&id) {
         return Ok(value.clone());
     }
-    let Some(&(n, width)) = chunks.get(&id) else {
+    let Some(&(op, n, rhs)) = chunks.get(&id) else {
         return Err(invalid("extent has no value or stored length"));
     };
     let n = extent(graph, n, values, chunks)?;
-    let value = Value::op("ceil_div", [n, Value::Int(number(graph, width)?)]);
+    let rhs = if op == "ceil_div" {
+        Value::Int(number(graph, rhs)?)
+    } else {
+        extent(graph, rhs, values, chunks)?
+    };
+    let value = Value::op(op, [n, rhs]);
     values.insert(id, value.clone());
     Ok(value)
 }

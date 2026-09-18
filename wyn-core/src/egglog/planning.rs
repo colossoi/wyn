@@ -3,11 +3,12 @@
 //! an output. Those decisions belong to the .egg rules.
 use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
+use crate::builtins::{by_id, Purity};
 use crate::egglog::data::{
     is_slice, length_source, Array, ExprData, ExprKind, OperationKind, OutputData, SoacBody, TypeData,
     TypeId,
 };
-use crate::egglog::dependencies::{safe_body, Dependencies};
+use crate::egglog::dependencies::Dependencies;
 use crate::egglog::{Program, Scheduled};
 use crate::interface::EntryKind;
 use crate::ssa::layout::type_byte_size;
@@ -188,6 +189,20 @@ pub(super) fn facts(
             OperationKind::EvalGlobal(s) => symbols.get(s).copied(),
             _ => None,
         };
+        let effectful = match &op.kind {
+            OperationKind::Scatter { .. }
+            | OperationKind::BucketScatter { .. }
+            | OperationKind::ReduceByIndex { .. } => true,
+            OperationKind::Call { function, .. } if called.is_none() => {
+                !matches!(data.expressions[*function].kind, ExprKind::Builtin(id)
+                    if by_id(data.builtins[id].builtin).raw.purity == Purity::Pure)
+            }
+            OperationKind::EvalGlobal(_) => called.is_none(),
+            _ => false,
+        };
+        if effectful {
+            sink.add("ParallelEffect", key)?;
+        }
         if let Some(r) = called {
             regions.insert(r);
             let r = sink.add("RegionId", i64::from(r.as_u32()))?;
@@ -217,12 +232,7 @@ pub(super) fn facts(
             } => {
                 sink.add(
                     "CollectiveShape",
-                    (
-                        key,
-                        form.scans.len() as i64,
-                        form.reductions.len() as i64,
-                        summary.discardable.contains(&id),
-                    ),
+                    (key, form.scans.len() as i64, form.reductions.len() as i64),
                 )?;
                 let scans = form.scans.iter().flat_map(|s| &s.neutral);
                 let totals = form.reductions.iter().flat_map(|r| &r.neutral);
@@ -260,11 +270,8 @@ pub(super) fn facts(
                 }
                 Some(inputs)
             }
-            OperationKind::Filter {
-                map, body, inputs, ..
-            } => {
-                let safe = safe_body(map, &summary.safe_regions) && safe_body(body, &summary.safe_regions);
-                sink.add("FilterShape", (key, safe))?;
+            OperationKind::Filter { map, inputs, .. } => {
+                sink.add("FilterShape", key)?;
                 if let Some(t) = body_signature(map).1.first() {
                     let t = sink.add("TypeId", i64::from(t.as_u32()))?;
                     sink.add("FilterResult", (key, t))?;
@@ -280,13 +287,42 @@ pub(super) fn facts(
             | OperationKind::BucketScatter {
                 destination, inputs, ..
             } => {
-                sink.add("IndexedWrite", key)?;
+                if let OperationKind::ReduceByIndex { body, .. } = &op.kind {
+                    let safe = matches!(
+                        data.types[destination.elem_ty].ty,
+                        Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)
+                    );
+                    sink.add("IndexedReducer", (key, safe, reducer_operator(data, body)))?;
+                } else if let OperationKind::BucketScatter { shape, .. } = &op.kind {
+                    let shape = &data.bucket_shapes[*shape];
+                    let mut axes = vec![None; usize::from(shape.domain_rank)];
+                    for (input, mapping) in inputs.iter().zip(&shape.input_dimensions) {
+                        for (axis, &domain_axis) in mapping.iter().enumerate() {
+                            axes[usize::from(domain_axis)] = if axis == 0 {
+                                Some(extent(Some(input), sink)?)
+                            } else if let Some(n) = inner_dimension(input, axis, data) {
+                                Some(sink.add("Fixed", n as i64)?)
+                            } else {
+                                None
+                            };
+                        }
+                    }
+                    let known = axes.iter().all(Option::is_some);
+                    sink.add("BucketShape", (key, known))?;
+                    if known {
+                        let mut n = sink.add("Fixed", 1i64)?;
+                        for axis in axes.into_iter().flatten() {
+                            n = sink.add("Product", (n, axis))?;
+                        }
+                        sink.add("InputDomain", (key, n))?;
+                    }
+                } else {
+                    sink.add("IndexedWrite", key)?;
+                }
                 let destination = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
                 sink.add("UpdatedResult", (key, 0i64, destination))?;
                 if matches!(op.kind, OperationKind::BucketScatter { .. }) {
                     sink.add("BucketResult", (key, destination))?;
-                    // Ranked iteration is a source payload; the serial phase
-                    // has one invocation regardless of rank.
                     None
                 } else {
                     Some(inputs)
@@ -430,6 +466,42 @@ pub(super) fn facts(
     Ok(())
 }
 
+fn reducer_operator(data: &Program<Scheduled>, body: &SoacBody) -> &'static str {
+    let SoacBody::Apply { region, captures, .. } = body else {
+        return "general";
+    };
+    let region = &data.regions[*region];
+    let [result] = region.results.as_slice() else {
+        return "general";
+    };
+    let ExprKind::PureApp { function, args } = &data.expressions[*result].kind else {
+        return "general";
+    };
+    let [left, right] = args.as_slice() else {
+        return "general";
+    };
+    let (ExprKind::Parameter(a), ExprKind::Parameter(b)) =
+        (&data.expressions[*left].kind, &data.expressions[*right].kind)
+    else {
+        return "general";
+    };
+    if !captures.is_empty()
+        || region.parameters.len() != 2
+        || a == b
+        || !region.parameters.contains(a)
+        || !region.parameters.contains(b)
+    {
+        return "general";
+    }
+    match &data.expressions[*function].kind {
+        ExprKind::BinOp(op) if op == "+" => "add",
+        ExprKind::BinOp(op) if op == "&" => "and",
+        ExprKind::BinOp(op) if op == "|" => "or",
+        ExprKind::BinOp(op) if op == "^" => "xor",
+        _ => "general",
+    }
+}
+
 pub(super) fn extent(array: Option<&Array>, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
     match array {
         Some(Array::Value(e)) => {
@@ -443,6 +515,33 @@ pub(super) fn extent(array: Option<&Array>, sink: &mut FullState<'_, '_>) -> Res
             sink.add("Scalar", len)
         }
         None => sink.add("Fixed", 0i64),
+    }
+}
+
+fn inner_dimension(array: &Array, axis: usize, data: &Program<Scheduled>) -> Option<usize> {
+    let mut ty = match array {
+        Array::Value(e) => &data.types[data.expressions[*e].ty].ty,
+        Array::Zip(inputs) => return inner_dimension(inputs.first()?, axis, data),
+        Array::Literal(items) => {
+            return inner_dimension(&Array::Value(*items.first()?), axis - 1, data);
+        }
+        Array::Range { .. } => return None,
+    };
+    let mut axis = axis;
+    loop {
+        if let Type::Constructed(TypeName::Tuple(_), fields) = ty {
+            ty = fields.first()?;
+            continue;
+        }
+        let dims = ty.array_dims()?;
+        if axis < dims.len() {
+            let Type::Constructed(TypeName::Size(n), _) = dims[axis] else {
+                return None;
+            };
+            return Some(n);
+        }
+        axis -= dims.len();
+        ty = ty.elem_type()?;
     }
 }
 

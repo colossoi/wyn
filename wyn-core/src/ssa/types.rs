@@ -1,4 +1,4 @@
-//! SSA (Static Single Assignment) form for MIR.
+//! Wyn-specific instructions and program records built on the generic SSA IR.
 //!
 //! This module provides a proper SSA representation with:
 //! - **SSA values** (ValueId) produced exactly once
@@ -41,20 +41,10 @@ use slotmap::SlotMap;
 
 // Re-export shared and SSA-specific ID types.
 pub use crate::flow::{BlockId, ControlHeader, ExecutionModel};
-pub use crate::ssa::framework::{InstId, PlaceId, ValueId};
-// Re-export Terminator from wyn-ssa.
-pub use crate::ssa::framework::Terminator;
-// Re-export BasicBlock from wyn-ssa.
-pub use crate::ssa::framework::BasicBlock;
-
-/// A compile-time constant value that can be carried inline in a `ValueRef`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConstantValue {
-    I32(i32),
-    U32(u32),
-    F32(u32), // stored as bits for Eq/Hash
-    Bool(bool),
-}
+pub use crate::ssa::ir::{ConstantValue, InstId, PlaceId, ValueId, ValueRef};
+// Re-export control-flow types from the generic SSA IR.
+pub use crate::ssa::ir::BasicBlock;
+pub use crate::ssa::ir::Terminator;
 
 /// Backend-neutral constant-expression tree promoted out of a function body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,93 +67,6 @@ pub enum AddressableConstantKind {
 pub struct AddressableConstant {
     pub id: AddressableConstantId,
     pub value: AddressableConstantValue,
-}
-
-impl ConstantValue {
-    pub fn from_f32(v: f32) -> Self {
-        ConstantValue::F32(v.to_bits())
-    }
-    pub fn as_f32(&self) -> Option<f32> {
-        match self {
-            ConstantValue::F32(bits) => Some(f32::from_bits(*bits)),
-            _ => None,
-        }
-    }
-}
-
-/// A reference to a value: either an SSA instruction result or an inline constant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ValueRef {
-    Ssa(ValueId),
-    Const(ConstantValue),
-}
-
-impl ValueRef {
-    pub fn as_ssa(&self) -> Option<ValueId> {
-        match self {
-            ValueRef::Ssa(id) => Some(*id),
-            _ => None,
-        }
-    }
-    pub fn as_const(&self) -> Option<ConstantValue> {
-        match self {
-            ValueRef::Const(c) => Some(*c),
-            _ => None,
-        }
-    }
-    pub fn map_ssa(&self, f: impl Fn(ValueId) -> ValueId) -> ValueRef {
-        match self {
-            ValueRef::Ssa(id) => ValueRef::Ssa(f(*id)),
-            ValueRef::Const(c) => ValueRef::Const(*c),
-        }
-    }
-    pub fn substitute(&mut self, f: &mut impl FnMut(&mut ValueId)) {
-        if let ValueRef::Ssa(id) = self {
-            f(id);
-        }
-    }
-}
-
-impl From<ValueId> for ValueRef {
-    fn from(id: ValueId) -> Self {
-        ValueRef::Ssa(id)
-    }
-}
-
-// =============================================================================
-// Terminator extension: remap (block target remapping not in wyn-ssa)
-// =============================================================================
-
-/// Extension methods for Terminator that wyn-core needs but aren't in wyn-ssa.
-pub trait TerminatorExt {
-    fn remap(&self, rv: &impl Fn(ValueId) -> ValueId, rb: &impl Fn(BlockId) -> BlockId) -> Terminator;
-}
-
-impl TerminatorExt for Terminator {
-    fn remap(&self, rv: &impl Fn(ValueId) -> ValueId, rb: &impl Fn(BlockId) -> BlockId) -> Terminator {
-        match self {
-            Terminator::Branch { target, args } => Terminator::Branch {
-                target: rb(*target),
-                args: args.iter().map(|value| value.map_ssa(rv)).collect(),
-            },
-            Terminator::CondBranch {
-                cond,
-                then_target,
-                then_args,
-                else_target,
-                else_args,
-            } => Terminator::CondBranch {
-                cond: cond.map_ssa(rv),
-                then_target: rb(*then_target),
-                then_args: then_args.iter().map(|value| value.map_ssa(rv)).collect(),
-                else_target: rb(*else_target),
-                else_args: else_args.iter().map(|value| value.map_ssa(rv)).collect(),
-            },
-            Terminator::Return(Some(value)) => Terminator::Return(Some(value.map_ssa(rv))),
-            Terminator::Return(None) => Terminator::Return(None),
-            Terminator::Unreachable => Terminator::Unreachable,
-        }
-    }
 }
 
 // =============================================================================
@@ -319,7 +222,7 @@ impl<R: Clone> InstKind<R> {
     }
 
     /// Apply a substitution function to all ValueRef references in place.
-    pub fn substitute_values(&mut self, sub: &mut impl FnMut(&mut ValueRef)) {
+    pub fn substitute_values(&mut self, sub: &mut (impl FnMut(&mut ValueRef) + ?Sized)) {
         match self {
             InstKind::Op { operands, .. } => {
                 for o in operands {
@@ -367,6 +270,16 @@ impl<R: Clone> InstKind<R> {
     }
 }
 
+impl<R: Clone> crate::ssa::ir::VisitValues for InstKind<R> {
+    fn values(&self) -> Vec<ValueRef> {
+        self.value_uses()
+    }
+
+    fn visit_values_mut(&mut self, visit: &mut dyn FnMut(&mut ValueRef)) {
+        self.substitute_values(visit);
+    }
+}
+
 impl<R> InstKind<R> {
     pub fn try_map_resource<S, E>(self, map: &mut impl FnMut(R) -> Result<S, E>) -> Result<InstKind<S>, E> {
         Ok(match self {
@@ -408,10 +321,10 @@ pub struct PlaceInfo {
 // Function Body
 // =============================================================================
 
-/// The concrete wyn-ssa Function type used throughout wyn-core.
-pub type WynFunction = ssa::framework::Function<InstKind, Type<TypeName>>;
-/// The concrete wyn-ssa InstNode type.
-pub type WynInstNode = ssa::framework::InstNode<InstKind>;
+/// The generic SSA function specialized to Wyn instructions and types.
+pub type WynFunction = ssa::ir::Function<InstKind, Type<TypeName>>;
+/// The generic SSA instruction node specialized to Wyn instructions.
+pub type WynInstNode = ssa::ir::InstNode<InstKind>;
 
 /// An SSA function body.
 #[derive(Debug, Clone)]
@@ -516,14 +429,6 @@ impl FuncBody {
 }
 
 // =============================================================================
-// Instr trait implementation for InstKind
-// =============================================================================
-
-// =============================================================================
-// Display Implementations
-// =============================================================================
-
-// =============================================================================
 // Program-Level Types
 // =============================================================================
 
@@ -553,6 +458,16 @@ pub mod stage {
     #[derive(Clone, Copy, Debug)]
     pub enum ElaboratedTag {}
     pub type Elaborated = Program<ElaboratedTag, BackendGlobal>;
+
+    /// SSA whose freely movable pure expressions are interned and floating.
+    #[derive(Clone, Copy, Debug)]
+    pub enum OptimizedTag {}
+    pub type Optimized = Program<OptimizedTag, BackendGlobal>;
+
+    /// Optimized SSA whose reachable expressions have concrete block placement.
+    #[derive(Clone, Copy, Debug)]
+    pub enum PlacedTag {}
+    pub type Placed = Program<PlacedTag, BackendGlobal>;
 
     /// SSA whose top-level function and constant definitions are reachable
     /// from at least one entry point.

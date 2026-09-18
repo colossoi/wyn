@@ -12,6 +12,7 @@
   (Length ExprKey)
   (Scalar ExprKey)
   (ChunkCount Extent i64)
+  (Product Extent Extent)
   (Stored ValueKey))
 ; Empty collectives have no chunks; their combine phase writes the neutral.
 (relation Site (OperationKey RegionKey))
@@ -169,7 +170,7 @@
 (function AbiBoundKnown (AbiValue) bool :merge (or old new))
 (relation AbiStorage (AbiValue BindingKey i64))
 (relation TypeStride (TypeKey i64))
-(relation AbiUniform (AbiValue i64))
+(relation AbiHostInput (AbiValue i64))
 (relation AbiCapacity (ValueKey AbiValue i64))
 (relation AbiCapacityNeed (ValueKey AbiValue))
 (relation AbiCapacityInput (ValueKey i64))

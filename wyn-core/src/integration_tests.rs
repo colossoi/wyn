@@ -12785,7 +12785,9 @@ entry nested_view(
                 "leaf table parameter must address array storage"
             );
 
-            let reachable = ssa::filter_reachable(ssa.clone());
+            let optimized = ssa::optimize(ssa.clone());
+            let placed = ssa::place_floating(optimized).expect("floating SSA placement succeeds");
+            let reachable = ssa::filter_reachable(placed);
             assert!(
                 reachable.functions.iter().all(|function| !function.name.contains("leaf")),
                 "the fully inlined leaf helper must be removed before backend lowering"
@@ -13326,7 +13328,9 @@ entry main(input: [1]u32) ([1]u32, [1]u32) =
                 "reproducer must reach SSA with helpers orphaned by physical inlining"
             );
 
-            let reachable = ssa::filter_reachable(ssa.clone());
+            let optimized = ssa::optimize(ssa.clone());
+            let placed = ssa::place_floating(optimized).expect("floating SSA placement succeeds");
+            let reachable = ssa::filter_reachable(placed);
             assert!(
                 reachable.functions.is_empty(),
                 "the fully inlined entry must not retain any callable definitions"
@@ -15026,7 +15030,10 @@ entry world_to_clip_loop_invariant(
             InstKind::Op {
                 tag: OpTag::Call(function),
                 ..
-            } => Some((*function, inst.parent)),
+            } => Some((
+                *function,
+                inst.placement.block().expect("elaborated call is assigned to a block"),
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();

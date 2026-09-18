@@ -110,16 +110,10 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
         );
 
         let pc_ptr_type = constructor.get_or_create_ptr_type(spirv::StorageClass::PushConstant, pc_struct);
-        // Reuse the same push constant variable across entry points in the same module.
-        // SPIR-V allows at most one PushConstant variable per module.
-        let var_id = if let Some(existing) = constructor.push_constant_var {
-            existing
-        } else {
-            let var_id =
-                constructor.builder.variable(pc_ptr_type, None, spirv::StorageClass::PushConstant, None);
-            constructor.push_constant_var = Some(var_id);
-            var_id
-        };
+        // Each entry may use one push-constant variable. Its layout can differ
+        // from other entries, particularly after unused parameters are removed.
+        let var_id =
+            constructor.builder.variable(pc_ptr_type, None, spirv::StorageClass::PushConstant, None);
         interfaces.push(var_id);
         Some(var_id)
     } else {

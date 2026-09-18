@@ -504,6 +504,8 @@ pub fn lower_egir_to_ssa(
 
 /// Validate and lower elaborated SSA to SPIR-V.
 pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowered> {
+    let program = ssa::optimize(program);
+    let program = ssa::place_floating(program)?;
     let program = ssa::filter_reachable(program);
     let program = ssa::prepare_spirv(program)?;
     let spirv = spirv::lower_ssa_program(&program)?;
@@ -539,6 +541,8 @@ pub fn lower_ssa_to_wgsl_with_pipeline_and_options(
     program: ssa::stage::Elaborated,
     options: wgsl::WgslOptions,
 ) -> error::Result<LoweredWgsl> {
+    let program = ssa::optimize(program);
+    let program = ssa::place_floating(program)?;
     let program = ssa::filter_reachable(program);
     let program = ssa::prepare_wgsl(program)?;
     let lowered = wgsl::ssa_lowering::lower_with_abi(&program, options)?;
@@ -558,7 +562,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
     parameter_blocks: &[wgsl::ssa_lowering::ParameterBlock],
 ) -> error::Result<()> {
     use pipeline_descriptor::{
-        Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, Pipeline,
+        Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, HostSizeInput, Pipeline,
     };
 
     for pipeline in &mut descriptor.pipelines {
@@ -633,6 +637,42 @@ fn adapt_pipeline_descriptor_for_wgsl(
                     .collect(),
             });
             block_binding_indices.push(binding_index);
+        }
+
+        for binding in &mut compute.bindings {
+            let Binding::StorageBuffer {
+                length: Some(BufferLen::HostProvided { inputs, .. }),
+                ..
+            } = binding
+            else {
+                continue;
+            };
+            for input in inputs {
+                let HostSizeInput::PushConstant {
+                    name,
+                    push_constant_offset,
+                    scalar,
+                } = input
+                else {
+                    continue;
+                };
+                let Some((block, member)) = blocks.iter().find_map(|block| {
+                    block
+                        .members
+                        .iter()
+                        .find(|m| m.name == *name && m.push_constant_offset == *push_constant_offset)
+                        .map(|m| (*block, m))
+                }) else {
+                    return Err(err_wgsl!("host size input '{}' has no WGSL parameter", name));
+                };
+                *input = HostSizeInput::Uniform {
+                    name: name.clone(),
+                    set: block.set,
+                    binding: block.binding,
+                    offset: member.offset,
+                    scalar: *scalar,
+                };
+            }
         }
 
         for stage in &mut compute.stages {

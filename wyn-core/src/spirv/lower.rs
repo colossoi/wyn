@@ -929,7 +929,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     pub(super) fn lower_terminator(
         &mut self,
         _block_id: BlockId,
-        _block: &ssa::framework::BasicBlock,
+        _block: &ssa::ir::BasicBlock,
         term: &Terminator,
     ) -> Result<()> {
         let current_block = self.current_block;
@@ -1056,7 +1056,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 .insts
                 .values()
                 .find(|i| i.result == Some(value))
-                .map(|i| format!("produced in Block({:?})", i.parent));
+                .map(|instruction| format!("produced at {:?}", instruction.placement));
             let block_param = self.body.inner.blocks.iter().find_map(|(bid, b)| {
                 b.params.contains(&value).then(|| format!("block param of Block({:?})", bid))
             });

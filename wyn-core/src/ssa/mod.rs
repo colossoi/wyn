@@ -7,8 +7,7 @@
 //!
 //! ## Submodules
 //!
-//! - `framework`: Generic `Function` / `BasicBlock` / `InstNode` / `Terminator`
-//!   types parameterized over instruction + value-type kind.
+//! - `ir`: Generic SSA representation and structural transformations.
 //! - `types`: Wyn-specific `InstKind`, `Program`, and the
 //!   concrete `FuncBody = Function<InstKind, Type>` instantiation.
 //! - `builder`: `FuncBuilder` that EGIR's `elaborate` uses to materialize SSA.
@@ -20,8 +19,9 @@
 pub mod addressable_constants;
 pub mod backend_validation;
 pub mod builder;
-pub mod framework;
+pub mod ir;
 pub mod layout;
+mod optimize;
 pub mod print;
 pub mod reachability;
 pub(crate) mod storage_function_variants;
@@ -33,9 +33,25 @@ use crate::error;
 use crate::spirv;
 use crate::CodegenTarget;
 pub use addressable_constants::promote_addressable_constants;
+pub use optimize::optimize;
 pub use reachability::filter_reachable;
 pub use types::{context, stage, Program};
 pub use uses::{eliminate_dead_pure_instructions, UseSite, ValueUses};
+
+/// Assign every reachable floating expression to a concrete SSA block.
+pub fn place_floating(mut program: stage::Optimized) -> error::Result<stage::Placed> {
+    for body in program
+        .functions
+        .iter_mut()
+        .map(|function| &mut function.body)
+        .chain(program.entry_points.iter_mut().map(|entry| &mut entry.body))
+        .chain(program.constants.iter_mut().map(|constant| &mut constant.body))
+    {
+        ir::schedule_floating(&mut body.inner)
+            .map_err(|error| error::CompilerError::Internal(error.to_string()))?;
+    }
+    Ok(program.retag())
+}
 
 fn eliminate_dead_values(program: &mut stage::Reachable) {
     for function in &mut program.functions {

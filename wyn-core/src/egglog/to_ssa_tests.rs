@@ -28,6 +28,78 @@ fn compile(source: &str) -> naga::Module {
     module
 }
 
+fn assert_ssa_dominance<Tag>(
+    phase: &str,
+    program: &crate::ssa::Program<Tag, crate::ssa::context::BackendGlobal>,
+) {
+    for body in program
+        .functions
+        .iter()
+        .map(|function| &function.body)
+        .chain(program.entry_points.iter().map(|entry| &entry.body))
+    {
+        let dominators = wyn_graph::DominatorTree::build(body.inner.entry, |block, successors| {
+            successors.extend(body.inner.blocks[block].term.successors())
+        });
+        for node in body.inner.insts.values() {
+            let Some(parent) = node.placement.block() else {
+                panic!("{phase}: floating instruction remained after placement")
+            };
+            if !dominators.is_reachable(parent) {
+                continue;
+            }
+            for value in node.data.ssa_uses() {
+                let Some(producer) = body.inner.block_of_value(value) else {
+                    panic!("{phase}: operand {value:?} remained floating")
+                };
+                assert!(
+                    dominators.dominates(producer, parent),
+                    "{phase}: {value:?} in {producer:?} used by {parent:?}; producer {:?}; consumer {node:?}",
+                    body.inner.inst_of_value(value).map(|instruction| &body.inner.insts[instruction])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn literal_and_runtime_nested_array_indices_reach_wgsl() {
+    compile(include_str!("../../../testfiles/composite_2d_local.wyn"));
+}
+
+#[test]
+fn nested_mountain_shader_preserves_ssa_dominance() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let source = include_str!("../../../testfiles/playground/mountains.wyn");
+            let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+            let program = schedule(
+                simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap())
+                    .unwrap(),
+                PipelineTopologyPolicy::AllowGenerated,
+            )
+            .unwrap();
+            let ssa = to_ssa(&program, CodegenTarget::Wgsl).unwrap();
+            assert_ssa_dominance("before", &ssa);
+            lower_ssa_to_wgsl(ssa.clone()).unwrap();
+            let placed = crate::ssa::place_floating(crate::ssa::optimize(ssa)).unwrap();
+            assert_ssa_dominance("after", &placed);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn ranked_bucket_scatter_writes_through_nested_storage() {
+    compile(
+        "entry main(dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) =
+        bucket_scatter_2d(dest,
+            [[(-1, 9), (0, 10), (0, 11)], [(0, 12), (1, 20), (2, 9)]])",
+    );
+}
+
 #[test]
 fn fused_map_reduce_reaches_the_existing_wgsl_backend() {
     compile("entry main(xs: []f32) f32 = reduce(|a: f32, b: f32| a + b, 0.0, map(|x: f32| x * 2.0, xs))");
@@ -40,6 +112,81 @@ fn fused_indexed_updates_reach_wgsl() {
         reduce_by_index(dest, |a:i32,b:i32|a+b, 0,
             map(|x:i32|x-1,xs), map(|x:i32|x*3,xs))",
     );
+}
+
+#[test]
+fn integer_indexed_reductions_select_atomic_and_compare_exchange_kernels() {
+    for (operator, primitive) in [("a+b", "atomicAdd"), ("max(a,b)", "atomicCompareExchangeWeak")] {
+        let source = format!(
+            "entry main(dest:*[3]i32, xs:[137]i32) [3]i32 =
+            reduce_by_index(dest, |a:i32,b:i32| {operator}, 0, map(|x:i32|x%3,xs), xs)"
+        );
+        compile(&source);
+        let output = pipeline(&source);
+        assert!(output.wgsl.contains(primitive), "{primitive}: {}", output.wgsl);
+        let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+            panic!("compute");
+        };
+        assert_eq!(p.stages[0].workgroup_size, (64, 1, 1));
+    }
+}
+
+#[test]
+fn cooperative_recipes_emit_barriers_and_workgroup_storage() {
+    for source in [
+        "entry main(xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
+        "entry main(xs:[]i32) []i32 = filter(|x:i32|x%3==0,xs)",
+    ] {
+        compile(source);
+        let output = pipeline(source);
+        assert!(output.wgsl.contains("workgroupBarrier"));
+        assert!(output.wgsl.contains("var<workgroup>"));
+    }
+}
+
+#[test]
+fn scalar_domain_collectives_publish_scratch_and_capacity_dependencies() {
+    for source in [
+        include_str!("../../../testfiles/reduce_map_iota.wyn"),
+        include_str!("../../../testfiles/tinyporto_filter_scan.wyn"),
+    ] {
+        compile(source);
+        let output = pipeline(source);
+        for p in &output.pipeline.pipelines {
+            let Pipeline::Compute(p) = p else { continue };
+            for binding in &p.bindings {
+                if let pipeline_descriptor::Binding::StorageBuffer {
+                    length: Some(pipeline_descriptor::BufferLen::HostProvided { inputs, .. }),
+                    ..
+                } = binding
+                {
+                    assert!(!inputs.is_empty());
+                    assert!(inputs
+                        .iter()
+                        .all(|i| matches!(i, pipeline_descriptor::HostSizeInput::Uniform { .. })));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn external_functions_retain_their_declared_signatures() {
+    let tlc = infer_input_slice_bounds(
+        compile_thru_tlc(
+            "#[linked(\"foreign_add\")] extern add(a:i32,b:i32) i32\nentry main(x:i32) i32 = add(x, 3)",
+        )
+        .unwrap(),
+    );
+    let program = schedule(
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let ssa = to_ssa(&program, CodegenTarget::Spirv).unwrap();
+    let external = ssa.functions.iter().find(|f| f.linkage_name.as_deref() == Some("foreign_add")).unwrap();
+    assert_eq!(external.body.params().len(), 2);
+    assert_eq!(external.body.return_ty, crate::types::i32());
 }
 
 #[test]
@@ -472,7 +619,18 @@ fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
     let (inputs, stride) = lengths[0];
     assert_eq!(stride, 16);
     assert_eq!(
-        inputs.iter().map(|i| (i.name.as_str(), i.offset, i.scalar)).collect::<Vec<_>>(),
+        inputs
+            .iter()
+            .map(|i| {
+                let crate::pipeline_descriptor::HostSizeInput::Uniform {
+                    name, offset, scalar, ..
+                } = i
+                else {
+                    panic!("uniform input");
+                };
+                (name.as_str(), *offset, *scalar)
+            })
+            .collect::<Vec<_>>(),
         [
             ("frame_resolution_x", 16, HostSizeScalar::F32),
             ("frame_resolution_y", 20, HostSizeScalar::F32)
@@ -521,6 +679,7 @@ fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
         placements: Default::default(),
         data: &data,
         functions: vec![],
+        externs: Default::default(),
         specializations: Default::default(),
         active: Default::default(),
         used: Default::default(),
@@ -559,6 +718,27 @@ fn runtime_launches_use_buffer_and_scalar_domains() {
             }
         ));
     }
+}
+
+#[test]
+fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
+    let source = "entry main(n:u32) []u32 = map(|i:u32|i+1u32, 0u32..<n)";
+    compile(source);
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let program = schedule(
+        simplify_and_place(insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let output = lower_ssa_to_spirv(to_ssa(&program, CodegenTarget::Spirv).unwrap()).unwrap();
+    let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
 }
 
 #[test]

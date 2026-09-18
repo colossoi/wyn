@@ -627,7 +627,7 @@ impl TypeEmitter {
 // -----------------------------------------------------------------------------
 
 fn wgsl_var(id: ValueId) -> String {
-    use crate::ssa::framework::Key;
+    use crate::ssa::ir::Key;
     let ffi = id.data().as_ffi();
     let idx = ffi & 0xFFFFFFFF;
     let ver = ffi >> 32;
@@ -650,7 +650,7 @@ fn storage_buffer_name(binding: BindingRef, writable: bool, mixed: bool) -> Stri
 }
 
 fn wgsl_place(id: ssa::types::PlaceId) -> String {
-    use crate::ssa::framework::Key;
+    use crate::ssa::ir::Key;
     let ffi = id.data().as_ffi();
     let idx = ffi & 0xFFFFFFFF;
     let ver = ffi >> 32;
@@ -1885,7 +1885,7 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
         Self {
             ctx,
             body,
-            uses: ssa::ValueUses::analyze(body),
+            uses: ssa::ValueUses::analyze(&body.inner),
             value_map: LookupMap::new(),
             declared: LookupSet::new(),
             addressable: LookupSet::new(),

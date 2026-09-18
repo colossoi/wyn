@@ -29,7 +29,7 @@ enum Definition {
 /// Definition order is preserved. Only instructions in CFG-reachable blocks
 /// contribute graph edges, so a stale call in a disconnected block does not
 /// keep its target alive.
-pub fn filter_reachable(program: ssa::stage::Elaborated) -> ssa::stage::Reachable {
+pub fn filter_reachable(program: ssa::stage::Placed) -> ssa::stage::Reachable {
     retain_reachable(program).retag()
 }
 
