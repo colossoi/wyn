@@ -1,0 +1,10 @@
+-- A stable radix partition with a compiler-allocated destination.
+def radix_bit<[n]>(pairs: [n]vec2u32, ids: [n]i32, bit: u32) [n]vec2u32 =
+  let zero = map(|p| if ((p.x >> bit) & 1u32) == 0u32 then 1i32 else 0i32, pairs) in
+  let prefix = scan(|a,b| a+b, 0i32, zero) in
+  let total = prefix[length(pairs)-1] in
+  let destinations = map(|i| if zero[i] == 1 then prefix[i]-1 else total+i-prefix[i], ids) in
+  scatter(replicate(length(pairs), @[0u32,0u32]), destinations, pairs)
+
+entry main(pairs: []vec2u32) []vec2u32 =
+  radix_bit(pairs, 0i32..<length(pairs), 0u32)

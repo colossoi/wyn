@@ -56,6 +56,99 @@ fn literal_tuple_reduction_has_a_fixed_scratch_capacity() {
 }
 
 #[test]
+fn scatter_local_destination_preserves_initial_values() {
+    for source in [
+        "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = let dest = [7i32, 7i32, 7i32, 7i32] in scatter(dest, [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = spread(4, 7i32, [2i32, 0i32], [30i32, 10i32])",
+    ] {
+        let result = compile(source);
+        assert_eq!(run(&result, vec![])[0].ints(), [10, 7, 30, 7], "{source}");
+    }
+}
+
+#[test]
+fn scatter_local_runtime_destination() {
+    let result = compile(
+        "entry main(xs: []i32) []i32 = scatter(replicate(length(xs), 7i32), [2i32, 0i32], [30i32, 10i32])",
+    );
+    assert_eq!(
+        run(&result, vec![Value::array(0..5)])[0].ints(),
+        [10, 7, 30, 7, 7]
+    );
+    assert_eq!(run(&result, vec![Value::array(0..1)])[0].ints(), [10]);
+    assert!(run(&result, vec![Value::array(0..0)])[0].ints().is_empty());
+}
+
+#[test]
+fn scatter_local_bounds_empty_updates_and_consumers() {
+    for (source, expected) in [
+        ("entry main() [4]i32 = scatter(0i32..<4, [-1, 4, 1, 1], [90, 90, 8, 9])", vec![0, 9, 2, 3]),
+        ("entry main() [4]i32 = scatter([7, 8, 9, 10], 0i32..<0, 0i32..<0)", vec![7, 8, 9, 10]),
+        ("entry main() [4]i32 = let a = scatter([7, 7, 7, 7], [1], [10]) in map(|x| x+1, scatter(a, [2], [20]))", vec![8, 11, 21, 8]),
+    ] {
+        assert_eq!(run(&compile(source), vec![])[0].ints(), expected, "{source}");
+    }
+}
+
+#[test]
+fn scatter_local_copy_does_not_change_a_value_parameter() {
+    let result = compile("entry main(xs: [4]i32) ([4]i32, [4]i32) = (scatter(xs, [1], [99]), xs)");
+    let input = Value::array([1, 2, 3, 4]);
+    let output = run(&result, vec![input.clone()]);
+    let Value::Tuple(fields) = &output[0] else {
+        panic!("tuple result")
+    };
+    assert_eq!(fields[0].ints(), [1, 99, 3, 4]);
+    assert_eq!(fields[1].ints(), [1, 2, 3, 4]);
+    assert_eq!(input.ints(), [1, 2, 3, 4]);
+}
+
+#[test]
+fn scatter_local_copy_preserves_its_producer_and_can_be_discarded() {
+    let result = compile("entry main() ([4]i32, [4]i32) = let initial = replicate(4, 7i32) in (initial, scatter(initial, [1], [99]))");
+    let output = run(&result, vec![]);
+    let Value::Tuple(fields) = &output[0] else {
+        panic!("tuple result")
+    };
+    assert_eq!(fields[0].ints(), [7, 7, 7, 7]);
+    assert_eq!(fields[1].ints(), [7, 99, 7, 7]);
+    let discarded = compile("entry main() i32 = let _ = scatter([1, 2], [0], [9]) in 42");
+    assert_eq!(run(&discarded, vec![]), [Value::Int(42)]);
+}
+
+#[test]
+fn scatter_local_inside_runtime_loop() {
+    let result = compile(
+        "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
+    );
+    assert_eq!(run(&result, vec![Value::Int(3)])[0].ints(), [10, 11, 12, 7]);
+}
+
+#[test]
+fn scatter_local_radix_partition_is_stable_across_scan_chunks() {
+    let result = compile(
+        r#"
+entry main(keys: []i32) []i32 =
+  let ids = 0i32..<length(keys) in
+  let zero = map(|key| if key % 2 == 0 then 1 else 0, keys) in
+  let prefix = scan(|a,b| a+b, 0i32, zero) in
+  let total = prefix[length(keys)-1] in
+  let destinations = map(|i| if zero[i] == 1 then prefix[i]-1 else total+i-prefix[i], ids) in
+  scatter(replicate(length(keys), 0i32), destinations, ids)
+"#,
+    );
+    for count in [4, 65, 130] {
+        let keys: Vec<i64> = (0..count).map(|i| (i * 7 + 3) % 11).collect();
+        let expected: Vec<i64> = (0..count)
+            .filter(|&i| keys[i as usize] % 2 == 0)
+            .chain((0..count).filter(|&i| keys[i as usize] % 2 != 0))
+            .collect();
+        assert_eq!(run(&result, vec![Value::array(keys)])[0].ints(), expected);
+    }
+}
+
+#[test]
 fn map_after_scatter_does_not_wait_for_its_own_length_read() {
     let result = compile(
         "entry update(positions: []i32, fb: *[]i32) *[]i32 =

@@ -48,6 +48,14 @@
        (FreshValue (Result op 1)) (FreshValue (Result op 2))) :ruleset allocation)
 (rule ((UpdatedResult op i source))
       ((SameBacking (Result op i) source)) :ruleset allocation)
+; Value destinations receive independent storage with the destination's shape,
+; not the number of updates. The ordered kernel initializes it before writing.
+(rule ((InitializedResult op i t n))
+      ((ElementType (Result op i) t) (CapacityExtent (Result op i) n)
+       (LiveLength (Result op i) n) (FreshValue (Result op i))
+       (BufferSlot op "output" i (Result op i))) :ruleset allocation)
+(rule ((InitializedResult op i t n) (Produces stage (Result op i)))
+      ((Materialize (Result op i))) :ruleset allocation)
 (rule ((UpdatedResult op i source) (ValueRef source old) (Produces stage (Result op i)))
       ((Clobbers stage old)) :ruleset allocation)
 

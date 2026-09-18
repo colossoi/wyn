@@ -1243,9 +1243,8 @@ impl<'a> Transformer<'a> {
 
     /// `scatter(dest, indices, values)` → `SoacOp::Scatter`. Writes
     /// `values[i]` into `dest[indices[i]]` for each `i`; out-of-bounds indices
-    /// are ignored (Futhark semantics). The `dest` must be a Var (a `#[storage]`
-    /// buffer param in the rasterizer use case) — its `Place`
-    /// carries the symbol the egglog conversion resolves to the dest's view.
+    /// are ignored (Futhark semantics). Bind destination expressions so the
+    /// `Place` names the actual array passed to egglog conversion.
     fn transform_soac_scatter(
         &mut self,
         args: &[ast::Expression<ast::HolesResolvedTree>],
@@ -1260,10 +1259,15 @@ impl<'a> Transformer<'a> {
         let dest_elem_ty = self.get_array_element_type(&dest_term.ty);
         let idx_elem_ty = self.get_array_element_type(&indices_term.ty);
         let val_elem_ty = self.get_array_element_type(&values_term.ty);
+        let mut binds = Vec::new();
         let dest = Place {
             id: match &dest_term.kind {
                 TermKind::Var(VarRef::Symbol(sym)) => sym.clone(),
-                _ => self.fresh("_w_scatter_dest"),
+                _ => {
+                    let sym = self.fresh("_w_scatter_dest");
+                    binds.push((sym, dest_term.ty.clone(), dest_term));
+                    sym
+                }
             },
             elem_ty: dest_elem_ty,
         };
@@ -1286,7 +1290,6 @@ impl<'a> Transformer<'a> {
             data: (),
         };
 
-        let mut binds = Vec::new();
         let indices = self.soac_input(indices_term, &mut binds);
         let values = self.soac_input(values_term, &mut binds);
         let soac = self.mk_term(

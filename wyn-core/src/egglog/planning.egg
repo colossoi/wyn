@@ -38,6 +38,7 @@
 (relation ScanComponent (OperationKey i64 TypeKey))
 (relation MappedComponent (OperationKey i64 TypeKey))
 (relation UpdatedResult (OperationKey i64 ExprKey))
+(relation InitializedResult (OperationKey i64 TypeKey Extent))
 (relation FilterResult (OperationKey TypeKey))
 (relation BucketResult (OperationKey ExprKey))
 (relation CounterType (TypeKey))

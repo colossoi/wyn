@@ -236,6 +236,9 @@ pub enum OperationKind {
     },
     Scatter {
         destination: Place,
+        /// Copy a value destination into fresh writable result storage.
+        /// External storage destinations retain their in-place semantics.
+        initialize: bool,
         body: SoacBody,
         inputs: Vec<Array>,
     },

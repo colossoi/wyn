@@ -15,6 +15,7 @@ use crate::egglog::data::{
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::InputSliceBoundsInferred;
 use crate::tlc::{DefMeta, Lambda, VarRef};
+use crate::types::TypeExt;
 use crate::types::{array_elem, canonical_storage_buffer_ty, is_copy, tuple, SoacOwnership, Type};
 use crate::{builtins, tlc, LookupMap};
 use egglog_engine::ast::Parser;
@@ -353,6 +354,49 @@ impl Converter {
         };
         Ok(Place { value, elem_ty })
     }
+    /// Storage updates remain observable through the original view. Ordinary
+    /// array values instead initialize an independent scatter result. Fixed
+    /// entry buffers can still have a composite type at this import boundary.
+    fn is_storage_destination(&self, value: ExprId) -> bool {
+        let expression = self.expressions.resolve(value);
+        if self
+            .types
+            .resolve(expression.ty)
+            .ty
+            .array_variant()
+            .is_some_and(crate::types::is_array_variant_view)
+        {
+            return true;
+        }
+        match expression.kind {
+            ExprKind::Parameter(parameter) => {
+                let source = self.data.symbols[self.data.parameters[parameter].symbol].source;
+                self.data
+                    .entry_params
+                    .values()
+                    .any(|p| p.binding.as_ref().is_some_and(|binding| binding.param_sym == source))
+            }
+            ExprKind::OperationResult(op) => match &self.data.operations[op].kind {
+                OperationKind::Screma {
+                    inputs, reuse_inputs, ..
+                } => {
+                    matches!(reuse_inputs.as_slice(), [Some(0)])
+                        && matches!(inputs.first(), Some(Array::Value(input)) if self.is_storage_destination(*input))
+                }
+                OperationKind::Scatter { destination, .. }
+                | OperationKind::BucketScatter { destination, .. }
+                | OperationKind::ReduceByIndex { destination, .. } => {
+                    self.is_storage_destination(destination.value)
+                }
+                _ => false,
+            },
+            ExprKind::Coerce(inner) | ExprKind::Project { tuple: inner, .. } => {
+                self.is_storage_destination(inner)
+            }
+            _ => false,
+        }
+    }
+
     fn soac(&mut self, soac: &SoacOp, term: &Term, scope: &mut Scope) -> Result<ExprId, ConvertError> {
         let kind = match soac {
             SoacOp::Map {
@@ -430,11 +474,15 @@ impl Converter {
                     reuse_input: (*destination == SoacOwnership::UniqueInput).then_some(0),
                 }
             }
-            SoacOp::Scatter { dest, lam, inputs } => OperationKind::Scatter {
-                destination: self.place(dest, scope)?,
-                body: self.soac_body(lam, scope)?,
-                inputs: self.arrays(inputs, scope)?,
-            },
+            SoacOp::Scatter { dest, lam, inputs } => {
+                let destination = self.place(dest, scope)?;
+                OperationKind::Scatter {
+                    initialize: !self.is_storage_destination(destination.value),
+                    destination,
+                    body: self.soac_body(lam, scope)?,
+                    inputs: self.arrays(inputs, scope)?,
+                }
+            }
             SoacOp::BucketScatter {
                 dest,
                 lam,

@@ -315,10 +315,16 @@ pub(super) fn facts(
                 } else {
                     sink.add("IndexedWrite", key)?;
                 }
-                let destination = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
-                sink.add("UpdatedResult", (key, 0i64, destination))?;
+                let destination_expr = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
+                if matches!(op.kind, OperationKind::Scatter { initialize: true, .. }) {
+                    let ty = sink.add("TypeId", i64::from(destination.elem_ty.as_u32()))?;
+                    let n = sink.add("Length", destination_expr)?;
+                    sink.add("InitializedResult", (key, 0i64, ty, n))?;
+                } else {
+                    sink.add("UpdatedResult", (key, 0i64, destination_expr))?;
+                }
                 if matches!(op.kind, OperationKind::BucketScatter { .. }) {
-                    sink.add("BucketResult", (key, destination))?;
+                    sink.add("BucketResult", (key, destination_expr))?;
                     None
                 } else {
                     Some(inputs)

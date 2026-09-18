@@ -15,7 +15,7 @@ fn compile(source: &str) -> naga::Module {
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    let ssa = to_ssa(&program, CodegenTarget::Wgsl).unwrap();
+    let ssa = to_ssa(&program, CodegenTarget::Wgsl).unwrap_or_else(|error| panic!("{error}\n{source}"));
     let source = lower_ssa_to_wgsl(ssa).unwrap();
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|e| panic!("{}\n{source}", e.emit_to_string(&source)));
@@ -372,8 +372,28 @@ fn runtime_control_keeps_collectives_inside_device_execution() {
 }
 
 #[test]
+fn scatter_local_destinations_reach_wgsl() {
+    for source in [
+        include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
+        "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
+        "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",
+        "entry main(xs: []i32) []i32 = scatter(replicate(length(xs), 7i32), [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = scatter([7i32, 7i32, 7i32, 7i32], [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = spread(4, 7i32, [2i32, 0i32], [30i32, 10i32])",
+    ] {
+        compile(source);
+    }
+}
+
+#[test]
 fn existing_spirv_backend_also_accepts_the_handoff() {
     for source in [
+        include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
+        "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
+        "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",
+        "entry main(xs: []i32) []i32 = scatter(replicate(length(xs), 7i32), [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = scatter([7i32, 7i32, 7i32, 7i32], [2i32, 0i32], [30i32, 10i32])",
+        "entry main() [4]i32 = spread(4, 7i32, [2i32, 0i32], [30i32, 10i32])",
         "entry main(xs: []i32) []i32 = map(|x: i32| x * 2, xs)",
         "entry main(xs: []i32) [2]i32 = [xs[0], xs[1]]",
         include_str!("../../../testfiles/filter_captures_runtime_array.wyn"),

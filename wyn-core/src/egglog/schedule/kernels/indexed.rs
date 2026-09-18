@@ -14,10 +14,26 @@ impl Planner<'_> {
         match self.data.operations[op].kind.clone() {
             OperationKind::Scatter {
                 destination,
+                initialize,
                 body,
                 inputs,
             } => {
-                let dest = Value::Source(destination.value);
+                let source = Value::Source(destination.value);
+                let (entry, dest) = if initialize {
+                    let dest = self.slot(op, "output", 0, local);
+                    let copy = self.start_loop(
+                        entry,
+                        Value::Int(0),
+                        Value::op("length", [source.clone()]),
+                        vec![],
+                    );
+                    let value = self.load(copy.body, source, copy.index.clone(), "initial");
+                    self.store(copy.body, &dest, copy.index.clone(), value);
+                    self.finish_loop(&copy, copy.body, vec![]);
+                    (copy.done, dest)
+                } else {
+                    (entry, source)
+                };
                 let loop_ = self.start_loop(entry, Value::Int(0), length(&inputs), vec![]);
                 let args = self.read_inputs(loop_.body, &inputs, loop_.index.clone());
                 let values = self.invoke_body(loop_.body, &body, args, "item")?;

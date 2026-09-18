@@ -23,6 +23,7 @@
 (rule ((ArrayResult op i t)) ((ResultSlot op i)) :ruleset residency)
 (rule ((TotalResult op i t)) ((ResultSlot op i)) :ruleset residency)
 (rule ((UpdatedResult op i e)) ((ResultSlot op i)) :ruleset residency)
+(rule ((InitializedResult op i t n)) ((ResultSlot op i)) :ruleset residency)
 (rule ((FilterResult op t)) ((ResultSlot op 0) (ResultSlot op 1)) :ruleset residency)
 (rule ((BucketResult op destination)) ((ResultSlot op 1) (ResultSlot op 2)) :ruleset residency)
 (rule ((ParameterValue e)) ((ValueRef e (Source e))) :ruleset residency)
