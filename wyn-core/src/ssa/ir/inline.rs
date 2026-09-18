@@ -21,6 +21,12 @@ where
     let super::Terminator::Return(Some(returned)) = callee.blocks[callee.entry].term else {
         return None;
     };
+    // Callees are optimized before callers, so some dependencies may already
+    // be floating rather than listed in the entry block. Schedule a private
+    // copy to clone every live dependency in order, without changing the
+    // callee's placement or copying dead floating instructions.
+    let mut callee = callee.clone();
+    super::schedule_floating(&mut callee).ok()?;
     let mut values: HashMap<_, _> = callee.params.iter().copied().zip(arguments.iter().copied()).collect();
     for &instruction in &callee.blocks[callee.entry].insts {
         let node = &callee.insts[instruction];

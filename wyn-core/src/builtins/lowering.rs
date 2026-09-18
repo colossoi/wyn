@@ -49,6 +49,36 @@ pub enum BuiltinLowering {
     },
 }
 
+impl BuiltinLowering {
+    /// Whether this lowering may execute on a path that did not evaluate it
+    /// before. Shared by Egglog placement and late SSA motion; catalog purity
+    /// must also hold. Pure does not imply safe to speculate (e.g. derivatives,
+    /// memory reads, or operations with operand-domain restrictions).
+    pub(crate) fn is_speculatable(&self) -> bool {
+        use PrimOp::*;
+        match self {
+            Self::PrimOp(GlslExt(ext)) | Self::ExtInstSplat { ext, .. } => {
+                // GLSL.std.450: rounding, abs/sign, angle conversions, trig,
+                // unrestricted hyperbolic functions, exp/exp2, min/max, mix,
+                // step, fma, length/distance/cross, and reflect. Keep log,
+                // sqrt, pow, normalize, clamp, smoothstep, etc. guarded.
+                // https://registry.khronos.org/SPIR-V/specs/unified1/GLSL.std.450.html
+                matches!(ext, 1..=15 | 18..=22 | 27 | 29 | 37..=42 | 46 | 48 | 50 | 66..=68 | 71)
+            }
+            Self::PrimOp(
+                Dot | OuterProduct | MatrixTimesMatrix | MatrixTimesVector | VectorTimesMatrix
+                | VectorTimesScalar | MatrixTimesScalar | FAdd | FSub | FMul | IAdd | ISub | IMul
+                | FOrdEqual | FOrdNotEqual | FOrdLessThan | FOrdGreaterThan | FOrdLessThanEqual
+                | FOrdGreaterThanEqual | IEqual | INotEqual | SLessThan | ULessThan | SGreaterThan
+                | UGreaterThan | SLessThanEqual | ULessThanEqual | SGreaterThanEqual | UGreaterThanEqual
+                | BitwiseAnd | BitwiseOr | BitwiseXor | Not | IsNan | IsInf | Bitcast | SIToFP | UIToFP
+                | SConvert | UConvert | FPConvert,
+            ) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Core primitive operations that map fairly directly to SPIR-V/backend ops.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimOp {

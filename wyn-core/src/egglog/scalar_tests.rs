@@ -323,6 +323,65 @@ fn explicit_loop_hoists_invariants_but_keeps_iteration_and_accumulator_dependenc
 }
 
 #[test]
+fn loop_invariant_math_intrinsics_are_hoisted() {
+    for name in [
+        "sin", "cos", "tan", "atan", "sinh", "cosh", "tanh", "asinh", "exp", "exp2", "round", "trunc",
+        "fract", "radians", "degrees",
+    ] {
+        let name = format!("f32.{name}");
+        let c = compile(&format!(
+            "entry main(n:i32, x:f32) f32 = loop acc=0.0 for i<n do acc + {name}(x)"
+        ));
+        let builtin = catalog().lookup_by_any_name(&name).unwrap().id;
+        assert!(c.state.placements.values().any(|p| {
+            matches!(p.before, PlacementSite::Operation(op) if matches!(c.ir.operations[op].kind, OperationKind::Loop { .. }))
+                && matches!(&c.ir.expressions[p.expression].kind, ExprKind::PureApp { function, .. }
+                    if matches!(c.ir.expressions[*function].kind, ExprKind::Builtin(id) if c.ir.builtins[id].builtin == builtin))
+        }), "{name} should move before the loop");
+        wgsl(&schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap());
+    }
+    for expression in ["vec.sin(x)", "mix(x, y, a)", "step(a, x)"] {
+        let c = compile(&format!(
+            "entry main(n:i32, x:vec2f32, y:vec2f32, a:f32) vec2f32 = \
+             loop acc=@[0.0,0.0] for i<n do acc + {expression}"
+        ));
+        assert!(!c.state.placements.is_empty(), "{expression} should be hoisted");
+        wgsl(&schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap());
+    }
+}
+
+#[test]
+fn intrinsic_hoisting_preserves_domains_and_iteration_dependencies() {
+    for expression in [
+        "f32.sqrt(x)",
+        "f32.rsqrt(x)",
+        "f32.log(x)",
+        "f32.log2(x)",
+        "f32.asin(x)",
+        "f32.acos(x)",
+        "f32.acosh(x)",
+        "f32.atanh(x)",
+        "f32.pow(x,y)",
+        "f32.atan2(x,y)",
+        "clamp(x,y,z)",
+        "smoothstep(y,z,x)",
+        "f32.sin(f32.log(x))",
+        "f32.sin(acc)",
+        "f32.sin(f32(i))",
+    ] {
+        let c = compile(&format!(
+            "entry main(n:i32, x:f32, y:f32, z:f32) f32 = \
+             loop acc=0.0 for i<n do acc + {expression}"
+        ));
+        assert!(
+            c.state.placements.is_empty(),
+            "{expression} must stay in the loop"
+        );
+        wgsl(&schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap());
+    }
+}
+
+#[test]
 fn nested_loop_invariants_refresh_on_each_outer_iteration() {
     let c = compile(
         "entry main(n:i32) i32 = loop total=0 for i<n do total + (loop acc=0 for j<3 do acc + i*i + j)",

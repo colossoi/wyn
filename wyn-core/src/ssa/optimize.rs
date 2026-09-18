@@ -3,6 +3,7 @@
 use super::ir::{inline_single_block, LoopScopes, Substitutions};
 use super::stage::{Elaborated, Optimized};
 use super::types::{BlockId, ConstantValue, FuncBody, InstId, InstKind, ValueId, ValueRef, WynFunction};
+use crate::builtins::{by_id, Purity};
 use crate::op::{BinaryOperator, OpTag};
 use crate::scalar_eval::{binary, Scalar};
 use crate::types::{is_array_variant_view, is_virtual_array, Type, TypeExt, TypeName};
@@ -26,7 +27,7 @@ type ExpressionKey = (
     Vec<ValueRef>,
 );
 
-/// Inline small pure helpers, fold constants, and intern movable expressions.
+/// Inline small helpers, fold constants, and intern movable expressions.
 /// A separate pass assigns floating expressions to blocks before lowering.
 pub fn optimize(mut program: Elaborated) -> Optimized {
     let indices: HashMap<_, _> = program.functions.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
@@ -103,11 +104,28 @@ fn is_small_inline_candidate(helper: &FuncBody, argument_count: usize) -> bool {
     helper.num_blocks() == 1
         && helper.num_insts() <= SMALL_HELPER_INSTRUCTION_LIMIT
         && helper.inner.params.len() == argument_count
-        && helper.inner.insts.values().all(|node| node.result.is_some() && movable(&node.data))
+        // Cloning at the call site preserves execution and instruction order;
+        // it does not require permission to speculate. Op instructions contain
+        // only value operands. Place-bearing instructions need a place remapper
+        // and are deliberately excluded from this single-block inliner.
+        && helper.inner.insts.values().all(|node| {
+            node.result.is_some() && matches!(node.data, InstKind::Op { .. })
+        })
 }
 
 fn movable(data: &InstKind) -> bool {
     match data {
+        InstKind::Op {
+            tag: OpTag::Intrinsic { id, overload_idx },
+            ..
+        } => {
+            let builtin = by_id(*id);
+            builtin.raw.purity == Purity::Pure
+                && builtin
+                    .overloads()
+                    .get(*overload_idx)
+                    .is_some_and(|overload| overload.lowering.is_speculatable())
+        }
         InstKind::Op {
             tag: OpTag::BinOp(op),
             ..

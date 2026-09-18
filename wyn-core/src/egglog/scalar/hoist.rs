@@ -1,7 +1,6 @@
 //! Binding availability is relative to an invocation, never to an ExprId alone.
 use super::fold::lowering;
 use super::OptimizeError;
-use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::egglog::data::{ExprId, ExprKind, Ir, PlacementData, PlacementId, PlacementSite};
 use crate::egglog::timing::span;
 use crate::types::{Type, TypeName};
@@ -62,18 +61,7 @@ fn total_node(data: &Ir, id: ExprId) -> bool {
                 "+" | "-" | "*" | "==" | "!=" | "<" | "<=" | ">" | ">=" | "&" | "|" | "^" | "&&" | "||"
             ),
             ExprKind::UnOp(_) => true,
-            _ => matches!(
-                lowering(data, *function),
-                Some(BuiltinLowering::PrimOp(
-                    PrimOp::Bitcast
-                        | PrimOp::SIToFP
-                        | PrimOp::UIToFP
-                        | PrimOp::SConvert
-                        | PrimOp::UConvert
-                        | PrimOp::FPConvert
-                        | PrimOp::GlslExt(4 | 5 | 8 | 9)
-                ))
-            ),
+            _ => lowering(data, *function).is_some_and(|lowering| lowering.is_speculatable()),
         },
         _ => false,
     }
