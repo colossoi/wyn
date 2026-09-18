@@ -1,4 +1,4 @@
-//! Foundational, domain-independent data structures shared by Wyn crates.
+//! Foundational, domain-independent data structures and utilities shared by Wyn crates.
 //!
 //! This crate sits at the bottom of the Wyn dependency graph. It must not
 //! depend on compiler phases or other Wyn crates.
@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod persistent_sets;
+pub mod timing;
 
 use std::hash::Hash;
 use std::marker::PhantomData;

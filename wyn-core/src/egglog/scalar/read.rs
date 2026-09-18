@@ -2,7 +2,6 @@
 use super::term::{app, key};
 use super::{error, intern_expr, OptimizeError};
 use crate::egglog::data::{Array, ExprId, ExprKind, Ir};
-use crate::egglog::timing::span;
 use egglog_engine::ast::Literal;
 use egglog_engine::extract::{CostModel, Extractor, TreeAdditiveCostModel};
 use egglog_engine::sort::S;
@@ -29,7 +28,6 @@ impl CostModel<u64> for Cost {
 }
 
 pub(super) fn extract(graph: &EGraph, data: &mut Ir) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
-    let _timing = span("extract expressions");
     let Some(sort) = graph.get_sort_by_name("Expr") else {
         return Err(error("missing expression sort"));
     };

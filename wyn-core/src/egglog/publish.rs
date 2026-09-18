@@ -2,7 +2,6 @@
 use super::abi::error;
 use super::abi::Abi;
 use super::data::{EntryData, EntryId as SourceEntryId, OutputData, OutputId, SymbolData, SymbolId};
-use super::timing::span;
 use super::OptimizeError;
 use crate::flow::ExecutionModel;
 use crate::interface::publish::PipelineDescriptorPublish;
@@ -25,7 +24,6 @@ pub(super) fn publish(
     outputs: &IdArena<OutputId, OutputData>,
     entries: &mut [EntryPoint],
 ) -> Result<PipelineDescriptor, OptimizeError> {
-    let _timing = span("publish pipeline ABI");
     let mut pipeline = PipelineDescriptor::default();
     let mut associations = vec![];
     let entry_indices: BTreeMap<_, _> = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();

@@ -8,7 +8,6 @@ use crate::egglog::data::{ExprId, ExprKind, Ir, OperationId, ParameterId, Region
 use crate::egglog::dependencies::analyze;
 use crate::egglog::rewrite::Rewriter;
 use crate::egglog::scalar::error;
-use crate::egglog::timing::{span, time};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Context<'a> {
@@ -26,13 +25,13 @@ pub(super) struct Context<'a> {
 }
 
 pub(super) fn run(data: &mut Ir, placements: &mut Placements) -> Result<(), OptimizeError> {
-    let summary = time("analyze dependencies", || analyze(data));
-    time("validate dependency order", || summary.schedules(data))?;
-    let uses = time("collect expression uses", || uses::analyze(data, &summary.live));
+    let summary = analyze(data);
+    summary.schedules(data)?;
+    let uses = uses::analyze(data, &summary.live);
     let regions: Vec<_> = uses.scopes.keys().copied().collect();
     let mut context = Context {
         placements,
-        rewrite: time("index expressions", || Rewriter::new(data)),
+        rewrite: Rewriter::new(data),
         uses,
         live: summary.live,
         lexical: Regions::new(data),
@@ -43,7 +42,6 @@ pub(super) fn run(data: &mut Ir, placements: &mut Placements) -> Result<(), Opti
         total: BTreeMap::new(),
         choices: BTreeMap::new(),
     };
-    let _timing = span("specialize bodies");
     for r in regions {
         context.region(data, r)?;
     }

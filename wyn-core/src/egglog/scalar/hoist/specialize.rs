@@ -6,7 +6,6 @@ use crate::egglog::data::{
     SoacBody,
 };
 use crate::egglog::scalar::error;
-use crate::egglog::timing::{span, time};
 use std::collections::{BTreeMap, BTreeSet};
 use wyn_base::persistent_sets::EMPTY;
 
@@ -23,12 +22,11 @@ pub(super) fn apply(
     let replacement = match context.specializations.get(&key) {
         Some(&r) => r,
         None => {
-            let r = time("clone body", || clone_region(data, region, values, context));
+            let r = clone_region(data, region, values, context);
             context.specializations.insert(key, r);
             r
         }
     };
-    let _timing = span("rewrite capture arguments");
     let mut kind = data.operations[op].kind.clone();
     let mut changed = false;
     kind.for_each_callback_mut(&mut |body| {

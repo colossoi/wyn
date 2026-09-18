@@ -3,7 +3,7 @@ use super::fold::lowering;
 use super::OptimizeError;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::egglog::data::{ExprId, ExprKind, Ir, PlacementData, PlacementId, PlacementSite};
-use crate::egglog::timing::{span, time};
+use crate::egglog::timing::span;
 use crate::types::{Type, TypeName};
 use placements::Placements;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,18 +17,12 @@ mod specialize;
 mod uses;
 
 pub(super) fn run(data: &mut Ir) -> Result<IdArena<PlacementId, PlacementData>, OptimizeError> {
-    let _timing = span("hoisting");
+    let _timing = span("egglog hoisting");
     let mut placements = Placements::default();
-    time("specialize SOAC captures", || {
-        captures::run(data, &mut placements)
-    })?;
+    captures::run(data, &mut placements)?;
     let mut analysis = analysis::Analysis::new(data)?;
-    time("select loop and branch placements", || {
-        analysis.place(data, &mut placements)
-    });
-    Ok(time("prune placements", || {
-        placements.finish(data, &analysis.uses, &analysis.control)
-    }))
+    analysis.place(data, &mut placements);
+    Ok(placements.finish(data, &analysis.uses, &analysis.control))
 }
 
 pub(super) fn ordered(data: &Ir, selected: &BTreeSet<ExprId>) -> Vec<ExprId> {

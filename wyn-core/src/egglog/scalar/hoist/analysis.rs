@@ -3,7 +3,6 @@ use super::uses::Uses;
 use super::{bounds, total_node, uses, OptimizeError, Placements};
 use crate::egglog::data::{ExprId, ExprKind, Ir, OperationKind, PlacementSite};
 use crate::egglog::dependencies::analyze;
-use crate::egglog::timing::{span, time};
 use bounds::Bounds;
 use std::collections::BTreeMap;
 use wyn_base::persistent_sets::{Set, EMPTY};
@@ -16,28 +15,24 @@ pub(super) struct Analysis {
 }
 impl Analysis {
     pub(super) fn new(data: &Ir) -> Result<Self, OptimizeError> {
-        let _timing = span("analyze placements");
-        let summary = time("analyze dependencies", || analyze(data));
-        let schedules = time("validate dependency order", || summary.schedules(data))?;
-        let control = time("derive binding bounds", || bounds::analyze(data, &schedules))?;
-        let uses = time("collect expression uses", || uses::analyze(data, &summary.live));
-        let lexical = time("propagate binding bounds", || {
-            let mut values: BTreeMap<ExprId, Option<DfsInterval>> = BTreeMap::new();
-            for &e in &uses.dag.order {
-                let bound = match data.expressions[e].kind {
-                    ExprKind::Parameter(p) => control.regions.get(&data.parameters[p].region).copied(),
-                    ExprKind::OperationResult(op) => control.operations.get(&op).map(|&(_, b)| b),
-                    _ if total_node(data, e) => data.expressions[e]
-                        .kind
-                        .children()
-                        .into_iter()
-                        .try_fold(DfsInterval::ANY, |a, x| values[&x].and_then(|b| a.intersect(b))),
-                    _ => None,
-                };
-                values.insert(e, bound);
-            }
-            values
-        });
+        let summary = analyze(data);
+        let schedules = summary.schedules(data)?;
+        let control = bounds::analyze(data, &schedules)?;
+        let uses = uses::analyze(data, &summary.live);
+        let mut lexical: BTreeMap<ExprId, Option<DfsInterval>> = BTreeMap::new();
+        for &e in &uses.dag.order {
+            let bound = match data.expressions[e].kind {
+                ExprKind::Parameter(p) => control.regions.get(&data.parameters[p].region).copied(),
+                ExprKind::OperationResult(op) => control.operations.get(&op).map(|&(_, b)| b),
+                _ if total_node(data, e) => data.expressions[e]
+                    .kind
+                    .children()
+                    .into_iter()
+                    .try_fold(DfsInterval::ANY, |a, x| lexical[&x].and_then(|b| a.intersect(b))),
+                _ => None,
+            };
+            lexical.insert(e, bound);
+        }
         Ok(Self {
             uses,
             control,

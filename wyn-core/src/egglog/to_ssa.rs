@@ -29,7 +29,7 @@ mod values;
 /// Static compute pipelines publish the same resources and dispatch order.
 /// TODO: the runtime descriptor cannot yet execute host branches/repeated launches.
 pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elaborated, OptimizeError> {
-    let _timing = span("to SSA");
+    let _timing = span("egglog to SSA");
     if let Some(root) = data.state.unsupported_host {
         return Err(error(format!(
             "TODO: runtime publication of conditional or repeated host dispatches ({root:?})"
@@ -52,7 +52,6 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
     let roots = &data.state.abi.roots;
     let mut entries = vec![];
     for &(root, owner, size, finish) in roots {
-        let _entry = span("lower entry or kernel");
         compiler.used.clear();
         let mut lower = Body::new(&mut compiler, root, &[], size[0])?;
         lower.entry = Some(owner);

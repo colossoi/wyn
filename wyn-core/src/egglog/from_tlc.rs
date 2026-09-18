@@ -12,7 +12,6 @@ use crate::egglog::data::{
     LoopKind, OperationData, OperationKind, OriginData, OriginId, ParameterData, Place, ProgramData,
     Reduction, RegionData, RegionId, Scan, ScremaForm, SoacBody, SymbolData, SymbolId, TypeData, TypeId,
 };
-use crate::egglog::timing::time;
 use crate::tlc::data::{ExplicitCapturesPayload, ExplicitClosurePayload};
 use crate::tlc::stage::InputSliceBoundsInferred;
 use crate::tlc::{DefMeta, Lambda, VarRef};
@@ -45,8 +44,7 @@ pub enum ConvertError {
 /// Egglog receives only the fusion summary. This conversion neither mutates TLC
 /// nor runs optimization or extraction.
 pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>, ConvertError> {
-    let _timing = span("from TLC");
-    let import = span("import sidecar");
+    let _timing = span("egglog from TLC");
     let mut converter = Converter::default();
     converter.data.programs.alloc(ProgramData {
         next_auto_storage_binding: program.global_context.auto_storage_binding_ids.peek_id(),
@@ -134,12 +132,9 @@ pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>,
     converter.data.types = converter.types.into_arena();
     converter.data.expressions = converter.expressions.into_arena();
     converter.data.origins = converter.origins.into_arena();
-    drop(import);
 
     let mut sink = Egglog::new();
-    time("derive fusion facts", || emit(&converter.data, &mut sink))
-        .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
-    let _parse = span("parse fusion facts");
+    emit(&converter.data, &mut sink).map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     let program = Parser::default()
         .get_program_from_string(Some("wyn-from-tlc.egg".into()), &sink.text)
         .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;

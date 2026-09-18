@@ -6,7 +6,6 @@ use crate::egglog::blocks::{
 use crate::egglog::data::{
     BufferId, DispatchId, EntryId, ExprId, ExprKind, Ir, OperationId, OutputId, TypeId,
 };
-use crate::egglog::timing::span;
 use crate::egglog::visit::Operand;
 use crate::egglog::{OptimizeError, Program, Scheduled};
 use crate::ssa::types::AtomicOp;
@@ -40,7 +39,6 @@ pub(in crate::egglog) fn read(
     graph: &EGraph,
     data: &mut Program<Scheduled>,
 ) -> Result<Readout, OptimizeError> {
-    let _timing = span("read completed plan");
     let mut result = Readout::default();
     let operations = keys(graph, "OperationId")?;
     let expressions = keys(graph, "ExprId")?;

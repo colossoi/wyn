@@ -2,7 +2,7 @@
 use super::data::intern_expr;
 use super::{term, Expressions, OptimizeError, Placed, Program, Simplified};
 use crate::egglog::rewrite::all;
-use crate::egglog::timing::{span, time};
+use crate::egglog::timing::span;
 
 mod fold;
 mod hoist;
@@ -15,27 +15,23 @@ pub fn simplify(
     algebra: bool,
 ) -> Result<Program<Simplified>, OptimizeError> {
     let data = &mut program.ir;
-    let _timing = span("arithmetic EqSat");
+    let _timing = span("egglog arithmetic EqSat");
     let Expressions { mut graph } = program.state;
     // Keep alternatives in one e-graph throughout analysis and extraction.
     // Bound reassociation to avoid exponential exploration of long sums.
     fold::register(&mut graph);
-    time("load arithmetic rules and facts", || {
-        graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))?;
-        graph.update(|sink| fold::facts(data, sink))
-    })?;
-    time("arithmetic and algebra rules", || {
-        graph.parse_and_run_program(
-            None,
-            if algebra {
-                "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
-            } else {
-                "(run-schedule (saturate (run arithmetic)))"
-            },
-        )
-    })?;
+    graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))?;
+    graph.update(|sink| fold::facts(data, sink))?;
+    graph.parse_and_run_program(
+        None,
+        if algebra {
+            "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
+        } else {
+            "(run-schedule (saturate (run arithmetic)))"
+        },
+    )?;
     let replacements = read::extract(&graph, data)?;
-    time("apply extracted expressions", || all(data, &replacements));
+    all(data, &replacements);
     Ok(Program {
         ir: program.ir,
         state: Simplified,

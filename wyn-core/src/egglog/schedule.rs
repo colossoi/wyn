@@ -11,7 +11,7 @@ use crate::egglog::data::{
     SoacBody,
 };
 use crate::egglog::dependencies::analyze;
-use crate::egglog::timing::{span, time};
+use crate::egglog::timing::span;
 use crate::interface::EntryKind;
 use crate::types::{Type, TypeName};
 use crate::PipelineTopologyPolicy;
@@ -32,7 +32,7 @@ pub fn schedule(
     program: Program<Placed>,
     topology: PipelineTopologyPolicy,
 ) -> Result<Program<Scheduled>, OptimizeError> {
-    let _timing = span("scheduling");
+    let _timing = span("egglog scheduling");
     let mut converted = Program {
         ir: program.ir,
         state: Scheduled {
@@ -40,8 +40,8 @@ pub fn schedule(
             ..Scheduled::default()
         },
     };
-    let summary = time("analyze dependencies", || analyze(&converted));
-    let schedules = time("validate dependency order", || summary.schedules(&converted))?;
+    let summary = analyze(&converted);
+    let schedules = summary.schedules(&converted)?;
     let entries: Vec<_> = converted.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
     let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
     converted.state.abi.inputs = super::abi::inputs(
@@ -56,30 +56,23 @@ pub fn schedule(
     )?;
     let mut host_inputs = vec![];
     let mut graph = EGraph::default();
-    time("load planning schema", || {
-        graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
-        graph.parse_and_run_program(None, KEYS)?;
-        graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)
+    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
+    graph.parse_and_run_program(None, KEYS)?;
+    graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)?;
+    graph.update(|mut sink| {
+        outputs(&mut converted, &mut sink)?;
+        facts(&converted, &summary, count_type, topology, &mut sink)?;
+        abi::facts(
+            &converted.state.abi.inputs,
+            &converted.state.outputs,
+            &converted.entries,
+            &converted.types,
+            &mut sink,
+            &mut host_inputs,
+        )
     })?;
-    time("read planning facts", || {
-        graph.update(|mut sink| {
-            outputs(&mut converted, &mut sink)?;
-            facts(&converted, &summary, count_type, topology, &mut sink)?;
-            abi::facts(
-                &converted.state.abi.inputs,
-                &converted.state.outputs,
-                &converted.entries,
-                &converted.types,
-                &mut sink,
-                &mut host_inputs,
-            )
-        })
-    })?;
-    time("derive stages, storage and dispatch order", || {
-        graph.parse_and_run_program(None, RUN)
-    })?;
+    graph.parse_and_run_program(None, RUN)?;
     let resources = read(&graph, &mut converted)?;
-    let plan = span("build blocks and dispatches");
     let operation_values = converted
         .ir
         .expressions
@@ -112,33 +105,28 @@ pub fn schedule(
             interface.kind = FunctionKind::Entry(entry);
         }
     }
-    drop(plan);
     if !planner.resources.stages.is_empty() {
         return Err(error("planned dispatches were not lowered"));
     }
-    let dispatch_order = time("validate blocks", || validation::validate(planner.data, topology))?;
-    let roots = time("read shader interfaces", || {
-        abi::read(
-            &graph,
-            planner.data,
-            &planner.resources.buffers,
-            &planner.resources.launches,
-            &entry_roots,
-            &host_inputs,
-        )
-    })?;
+    let dispatch_order = validation::validate(planner.data, topology)?;
+    let roots = abi::read(
+        &graph,
+        planner.data,
+        &planner.resources.buffers,
+        &planner.resources.launches,
+        &entry_roots,
+        &host_inputs,
+    )?;
     planner.output_copies()?;
-    planner.data.state.physical_kernels = time("finalize physical kernel graph", || {
-        publication::build_physical_kernel_graph(
-            &graph,
-            &roots,
-            &dispatch_order,
-            &mut planner.data.state.abi,
-            &planner.data.state.dispatches,
-            &planner.data.ir.entries,
-            &planner.data.state.blocks,
-        )
-    })?;
+    planner.data.state.physical_kernels = publication::build_physical_kernel_graph(
+        &graph,
+        &roots,
+        &dispatch_order,
+        &mut planner.data.state.abi,
+        &planner.data.state.dispatches,
+        &planner.data.ir.entries,
+        &planner.data.state.blocks,
+    )?;
     Ok(converted)
 }
 

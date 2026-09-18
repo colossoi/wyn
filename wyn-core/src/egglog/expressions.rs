@@ -6,7 +6,7 @@ use crate::egglog::data::{
     Array, ExprId, ExprKind, Ir, LoopKind, OperationId, OperationKind, RegionId, SoacBody, SymbolId,
 };
 use crate::egglog::dependencies::{analyze, Dependencies};
-use crate::egglog::timing::{span, time};
+use crate::egglog::timing::span;
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, EGraph, FullState, RawValues, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -18,19 +18,13 @@ pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 /// facts directly into egglog. The graph and its source-root table pass to
 /// scalar simplification without an intervening textual or command representation.
 pub fn insert_expressions(program: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
-    let _timing = span("insert expressions");
-    let dependencies = time("analyze dependencies", || analyze(&program.ir));
-    time("validate dependency order", || {
-        dependencies.schedules(&program.ir)
-    })?;
+    let _timing = span("egglog insert expressions");
+    let dependencies = analyze(&program.ir);
+    dependencies.schedules(&program.ir)?;
     let mut graph = EGraph::default();
-    time("load expression schema", || {
-        graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
-        graph.parse_and_run_program(Some("expressions.egg".into()), include_str!("expressions.egg"))
-    })?;
-    time("read expression facts", || {
-        graph.update(|sink| Ok(read(&program.ir, &dependencies, sink)))
-    })??;
+    graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
+    graph.parse_and_run_program(Some("expressions.egg".into()), include_str!("expressions.egg"))?;
+    graph.update(|sink| Ok(read(&program.ir, &dependencies, sink)))??;
     Ok(Program {
         ir: program.ir,
         state: Expressions { graph },
