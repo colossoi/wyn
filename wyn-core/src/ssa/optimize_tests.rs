@@ -52,6 +52,192 @@ fn common_branch_work_moves_to_its_operand_dominator_but_division_stays_guarded(
 }
 
 #[test]
+fn division_and_remainder_used_by_a_condition_are_reused_in_both_arms() {
+    for source in [
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+      map(|i|
+        let q = i / width
+        let r = i % width in
+        if q < r then q - r else q + r,
+        indices)"#,
+        r#"entry repro(indices: []i32, width: i32) []i32 =
+      map(|i|
+        loop total = 0 for j < 3 do
+          let q = (i + j) / width
+          let r = (i + j) % width in
+          total + (if q < r then q - r else q + r),
+        indices)"#,
+    ] {
+        assert_branch_division_reuse(source);
+    }
+}
+
+fn assert_branch_division_reuse(source: &str) {
+    let ssa = crate::compile_thru_ssa(source).unwrap();
+    let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
+    for operator in [BinaryOperator::Divide, BinaryOperator::Remainder] {
+        let sites = placed
+            .functions
+            .iter()
+            .flat_map(|f| f.body.inner.insts.values())
+            .filter(
+                |node| matches!(node.data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator),
+            )
+            .count();
+        assert_eq!(sites, 1, "{operator:?} must be shared before backend lowering");
+    }
+    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap().spirv;
+    let module = wspirv::dr::load_words(&spirv).unwrap();
+    for opcode in [wspirv::spirv::Op::SDiv, wspirv::spirv::Op::SRem] {
+        assert_eq!(
+            module.all_inst_iter().filter(|inst| inst.class.opcode == opcode).count(),
+            1,
+            "{opcode:?} must be emitted once"
+        );
+    }
+    let bytes = spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
+fn partial_arithmetic_is_reused_locally_but_not_from_a_sibling_or_into_a_merge() {
+    for operator in [
+        BinaryOperator::Divide,
+        BinaryOperator::Remainder,
+        BinaryOperator::FloorDivide,
+        BinaryOperator::FloorRemainder,
+        BinaryOperator::Power,
+    ] {
+        let mut body = FuncBuilder::new(
+            vec![
+                (i32(), "x".into()),
+                (i32(), "width".into()),
+                (bool_type(), "condition".into()),
+            ],
+            i32(),
+        )
+        .finish_unchecked();
+        let entry = body.inner.entry;
+        // Allocate the merge first to make allocation order differ from dominance order.
+        let merge = body.inner.create_block();
+        let joined = body.inner.add_block_param(merge, i32());
+        let left = body.inner.create_block();
+        let right = body.inner.create_block();
+        let x = body.inner.params[0].into();
+        let width = body.inner.params[1].into();
+        body.inner.blocks[entry].term = Terminator::CondBranch {
+            cond: body.inner.params[2].into(),
+            then_target: left,
+            then_args: vec![],
+            else_target: right,
+            else_args: vec![],
+        };
+        for block in [left, right, merge] {
+            let a = body.inner.append_inst(block, binary(operator, x, width), i32());
+            let b = body.inner.append_inst(block, binary(operator, x, width), i32());
+            let sum = body.inner.append_inst(block, binary(BinaryOperator::Add, a.into(), b.into()), i32());
+            body.inner.blocks[block].term = if block == merge {
+                let result = body.inner.append_inst(
+                    block,
+                    binary(BinaryOperator::Add, joined.into(), sum.into()),
+                    i32(),
+                );
+                Terminator::Return(Some(result.into()))
+            } else {
+                Terminator::Branch {
+                    target: merge,
+                    args: vec![sum.into()],
+                }
+            };
+        }
+        float_pure_values(&mut body);
+        crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
+        assert!(body.inner.blocks[entry].insts.is_empty());
+        for block in [left, right, merge] {
+            assert_eq!(
+                body.inner.blocks[block].insts.iter().filter(|&&id| {
+                    matches!(body.inner.insts[id].data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator)
+                }).count(),
+                1,
+                "{operator:?}: each arm and the merge must retain its own computation"
+            );
+        }
+    }
+}
+
+#[test]
+fn division_reuse_distinguishes_loop_carried_operands() {
+    let mut body =
+        FuncBuilder::new(vec![(i32(), "x".into()), (i32(), "width".into())], i32()).finish_unchecked();
+    let entry = body.inner.entry;
+    let loop_body = body.inner.create_block();
+    let carried = body.inner.add_block_param(loop_body, i32());
+    let width = body.inner.params[1].into();
+    let initial = body.inner.append_inst(
+        entry,
+        binary(BinaryOperator::Divide, body.inner.params[0].into(), width),
+        i32(),
+    );
+    body.inner.blocks[entry].term = Terminator::Branch {
+        target: loop_body,
+        args: vec![initial.into()],
+    };
+    let a = body.inner.append_inst(
+        loop_body,
+        binary(BinaryOperator::Divide, carried.into(), width),
+        i32(),
+    );
+    let b = body.inner.append_inst(
+        loop_body,
+        binary(BinaryOperator::Divide, carried.into(), width),
+        i32(),
+    );
+    let next = body.inner.append_inst(loop_body, binary(BinaryOperator::Add, a.into(), b.into()), i32());
+    body.inner.blocks[loop_body].term = Terminator::Branch {
+        target: loop_body,
+        args: vec![next.into()],
+    };
+    float_pure_values(&mut body);
+    crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
+    let divisions: Vec<_> = body
+        .inner
+        .insts
+        .values()
+        .filter(|node| {
+            matches!(
+                node.data,
+                InstKind::Op {
+                    tag: OpTag::BinOp(BinaryOperator::Divide),
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(divisions.len(), 2);
+    assert!(divisions.iter().any(|node| node.placement.block() == Some(entry)));
+    assert!(divisions.iter().any(|node| node.placement.block() == Some(loop_body)));
+    let InstKind::Op { operands, .. } = &body.inner.insts[body.inner.inst_of_value(next).unwrap()].data
+    else {
+        panic!("sum")
+    };
+    assert_eq!(*operands, vec![a.into(), a.into()]);
+}
+
+#[test]
 fn dynamic_array_materialization_is_shared_outside_the_loop() {
     let mut body = FuncBuilder::new(vec![(sized_array(128, i32()), "xs".into())], i32()).finish_unchecked();
     let entry = body.inner.entry;
@@ -162,6 +348,75 @@ fn intrinsic(name: &str) -> OpTag<BindingRef, FunctionId> {
     OpTag::Intrinsic {
         id: crate::builtins::catalog().lookup_by_any_name(name).unwrap().id,
         overload_idx: 0,
+    }
+}
+
+#[test]
+fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
+    let float = Type::Constructed(TypeName::Float(32), vec![]);
+    let mut builder = FuncBuilder::new(vec![(float.clone(), "x".into())], float.clone());
+    let x = builder.get_param(0).into();
+    let place = builder.new_place(float.clone());
+    builder
+        .push_void_inst(InstKind::Alloca {
+            elem_ty: float.clone(),
+            result: place,
+        })
+        .unwrap();
+    builder.push_void_inst(InstKind::Store { place, value: x }).unwrap();
+    let child = builder.create_block();
+    let tags = [OpTag::Call(FunctionId::from(99)), intrinsic("f32.d_fdx")];
+    for block in [builder.entry(), child] {
+        builder.switch_to_block_unchecked(block);
+        let loaded = builder.push_inst(InstKind::Load { place }, float.clone()).unwrap();
+        let divided =
+            builder.push_inst(binary(BinaryOperator::Divide, loaded.into(), x), float.clone()).unwrap();
+        for tag in &tags {
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: tag.clone(),
+                        operands: vec![x],
+                    },
+                    float.clone(),
+                )
+                .unwrap();
+        }
+        if block == child {
+            builder.terminate(Terminator::Return(Some(divided.into()))).unwrap();
+        } else {
+            // The child's load must observe this write, not reuse the entry load.
+            builder
+                .push_void_inst(InstKind::Store {
+                    place,
+                    value: divided.into(),
+                })
+                .unwrap();
+            builder
+                .terminate(Terminator::Branch {
+                    target: child,
+                    args: vec![],
+                })
+                .unwrap();
+        }
+    }
+    let mut body = builder.finish().unwrap();
+    float_pure_values(&mut body);
+    crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
+    assert_eq!(
+        body.inner.insts.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
+        2
+    );
+    for tag in tags.into_iter().chain([OpTag::BinOp(BinaryOperator::Divide)]) {
+        assert_eq!(
+            body.inner
+                .insts
+                .values()
+                .filter(|node| { matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag) })
+                .count(),
+            2,
+            "{tag:?}: dominance alone does not prove equal values"
+        );
     }
 }
 

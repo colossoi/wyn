@@ -1,5 +1,5 @@
-//! Late scalar cleanup shared by both compiler routes. Memory operations stay
-//! in place; only total, immutable computations can cross control boundaries.
+//! Late scalar cleanup shared by both compiler routes. Dominating immutable
+//! computations can be reused; only total ones may move across control boundaries.
 use super::ir::{inline_single_block, LoopScopes, Substitutions};
 use super::stage::{Elaborated, Optimized};
 use super::types::{BlockId, ConstantValue, FuncBody, InstId, InstKind, ValueId, ValueRef, WynFunction};
@@ -10,7 +10,7 @@ use crate::types::{is_array_variant_view, is_virtual_array, Type, TypeExt, TypeN
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
 use wyn_base::split_one_mut;
-use wyn_graph::topo_sort_by_dependencies;
+use wyn_graph::{topo_sort_by_dependencies, DominatorTree};
 
 const SMALL_HELPER_INSTRUCTION_LIMIT: usize = 16;
 
@@ -27,7 +27,8 @@ type ExpressionKey = (
     Vec<ValueRef>,
 );
 
-/// Inline small helpers, fold constants, and intern movable expressions.
+/// Inline small helpers, reuse dominating expressions, fold constants, and
+/// intern movable expressions.
 /// A separate pass assigns floating expressions to blocks before lowering.
 pub fn optimize(mut program: Elaborated) -> Optimized {
     let indices: HashMap<_, _> = program.functions.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
@@ -155,6 +156,60 @@ fn movable(data: &InstKind) -> bool {
         } => true,
         _ => false,
     }
+}
+
+fn reusable(data: &InstKind) -> bool {
+    // Partial arithmetic is deterministic for the same SSA operands. Reusing
+    // an already evaluated result needs no proof that it is safe to speculate.
+    // Keep memory, opaque calls, and context-dependent intrinsics excluded.
+    matches!(
+        data,
+        InstKind::Op {
+            tag: OpTag::BinOp(_),
+            ..
+        }
+    ) || movable(data)
+}
+
+fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
+    let function = &mut body.inner;
+    let dominators = DominatorTree::build(function.entry, |block, successors| {
+        successors.extend(function.blocks[block].term.successors());
+    });
+    let mut expressions: HashMap<_, (BlockId, ValueId)> = HashMap::new();
+    let mut replacements = Substitutions::default();
+    for &block in dominators.preorder() {
+        for instruction in std::mem::take(&mut function.blocks[block].insts) {
+            function.insts[instruction].data.substitute_values(&mut |value| replacements.resolve(value));
+            let node = &function.insts[instruction];
+            if let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) {
+                if reusable(&node.data) {
+                    // WGSL declares loop-local instruction results inside the
+                    // loop. Preserve that lifetime until the backend supports
+                    // exporting those results to enclosing lexical scopes.
+                    let key = (
+                        loop_scopes.scope(block),
+                        function.values[result].ty.clone(),
+                        tag.clone(),
+                        operands.clone(),
+                    );
+                    if let Some(&(producer, previous)) = expressions.get(&key) {
+                        if dominators.dominates(producer, block) {
+                            replacements.insert(result, previous.into());
+                            function.insts.remove(instruction);
+                            continue;
+                        }
+                    }
+                    // In dominator preorder a candidate outside the current
+                    // subtree is no longer needed. Never move the retained
+                    // instruction, including when it is guarded or in a loop.
+                    expressions.insert(key, (block, result));
+                }
+            }
+            function.blocks[block].insts.push(instruction);
+        }
+    }
+    replacements.finish(function);
 }
 
 fn integer(function: &WynFunction, value: ValueRef) -> Option<i64> {
@@ -311,6 +366,7 @@ fn float_or_share_instruction(
 
 fn float_pure_values(body: &mut FuncBody) {
     let loop_scopes = LoopScopes::analyze(&body.inner);
+    reuse_dominating_expressions(body, &loop_scopes);
     let mut replacements = Substitutions::default();
     let mut expressions = HashMap::new();
     let blocks = body.inner.blocks.keys().collect::<Vec<_>>();
