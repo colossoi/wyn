@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use wyn_base::split_one_mut;
 use wyn_graph::{topo_sort_by_dependencies, DominatorTree};
 
-const SMALL_HELPER_INSTRUCTION_LIMIT: usize = 16;
+const SMALL_HELPER_INSTRUCTION_LIMIT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ExpressionScope {

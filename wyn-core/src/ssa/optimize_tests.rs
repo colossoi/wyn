@@ -570,6 +570,88 @@ entry repro(points: []vec2f32, angle: f32) []vec2f32 =
 }
 
 #[test]
+fn camera_helper_above_old_inline_limit_is_placed_before_the_march_loop() {
+    let source = r#"
+def camera_term(angle: f32) f32 =
+  let a = f32.sin(f32.sin(f32.sin(f32.sin(angle))))
+  let b = f32.sin(f32.sin(f32.sin(f32.sin(a))))
+  let c = f32.sin(f32.sin(f32.sin(f32.sin(b))))
+  let d = f32.sin(f32.sin(f32.sin(f32.sin(c)))) in
+  f32.cos(d)
+def march(angle: f32) f32 =
+  loop total = 0.0 for k < 20 do
+    total + camera_term(angle) * f32(k)
+entry repro(angles: []f32) []f32 = map(march, angles)
+"#;
+    let ssa = crate::compile_thru_ssa(source).unwrap();
+    let sin = intrinsic("f32.sin");
+    let cos = intrinsic("f32.cos");
+    let camera = ssa
+        .functions
+        .iter()
+        .find(|f| {
+            f.body
+                .inner
+                .insts
+                .values()
+                .any(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == sin))
+        })
+        .unwrap();
+    assert_eq!(
+        camera.body.num_insts(),
+        17,
+        "must exceed the old late-inline limit"
+    );
+    let march = ssa
+        .functions
+        .iter()
+        .find(|f| {
+            f.body.inner.insts.values().any(
+                |node| matches!(&node.data, InstKind::Op { tag: OpTag::Call(id), .. } if *id == camera.id),
+            )
+        })
+        .unwrap()
+        .id;
+    let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
+    let body = &placed.functions.iter().find(|f| f.id == march).unwrap().body;
+    for (expected, count) in [(sin, 16), (cos, 1)] {
+        let nodes = body
+            .inner
+            .insts
+            .values()
+            .filter(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == expected))
+            .collect::<Vec<_>>();
+        assert_eq!(nodes.len(), count);
+        assert!(
+            nodes.iter().all(|node| node.placement.block() == Some(body.inner.entry)),
+            "{expected:?} must be computed before the march loop"
+        );
+    }
+    assert!(!body
+        .inner
+        .insts
+        .values()
+        .any(|node| matches!(node.data, InstKind::Op { tag: OpTag::Call(id), .. } if id == camera.id)));
+    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap();
+    let bytes = spirv.spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
 fn dead_instruction_worklist_removes_long_chains() {
     let mut body = FuncBuilder::new(vec![(i32(), "x".into())], i32()).finish_unchecked();
     let x = body.inner.params[0].into();
