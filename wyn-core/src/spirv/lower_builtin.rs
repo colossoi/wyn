@@ -43,7 +43,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 // to match the result type.
                 let mut operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
                 let result_ssa_ty = inst.result.map(|r| self.body.inner.value_type(r).clone());
+                let mut ext = *ext;
                 if let Some(result_ssa_ty) = result_ssa_ty.as_ref().filter(|ty| ty.is_vec()) {
+                    if let Some(PolyType::Constructed(scalar, _)) = result_ssa_ty.elem_type() {
+                        if let Some(specialized) = catalog().specialize_numeric(id, scalar) {
+                            if let BuiltinLowering::PrimOp(PrimOp::GlslExt(typed_ext)) =
+                                &catalog().get(specialized).overloads()[0].lowering
+                            {
+                                ext = *typed_ext;
+                            }
+                        }
+                    }
                     for &pos in *splat_args {
                         if self.get_value_type_ref(value_refs[pos]).is_scalar() {
                             let splatted = self.splat_scalar(arg_ids[pos], result_ssa_ty, result_ty)?;
@@ -52,7 +62,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     }
                 }
                 let glsl = self.constructor.glsl_ext_inst_id;
-                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, *ext, operands)?)
+                Ok(self.constructor.builder.ext_inst(result_ty, None, glsl, ext, operands)?)
             }
             BuiltinLowering::ByBuiltinId => {
                 let known = catalog().known();

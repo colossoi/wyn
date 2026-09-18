@@ -185,9 +185,8 @@ fn test_constant_folding_mul() {
     }
 }
 
-#[test]
-fn scalar_glsl_math_builtins_constant_fold() {
-    let cases = [
+fn float_math_cases() -> Vec<(&'static str, Vec<f32>, f32)> {
+    vec![
         ("f32.sin", vec![0.0], 0.0),
         ("f32.cos", vec![0.0], 1.0),
         ("f32.tan", vec![0.0], 0.0),
@@ -212,9 +211,35 @@ fn scalar_glsl_math_builtins_constant_fold() {
         ("f32.degrees", vec![std::f32::consts::PI], 180.0),
         ("f32.floor", vec![1.75], 1.0),
         ("f32.ceil", vec![1.25], 2.0),
-    ];
+        ("f32.round", vec![2.5], 2.0),
+        ("f32.round", vec![3.5], 4.0),
+        ("f32.round", vec![-2.5], -2.0),
+        ("f32.trunc", vec![-1.75], -1.0),
+        ("f32.fract", vec![-1.75], 0.25),
+        ("f32.abs", vec![-2.0], 2.0),
+        ("f32.sign", vec![-2.0], -1.0),
+        ("f32.sign", vec![0.0], 0.0),
+        ("f32.sign", vec![2.0], 1.0),
+        ("f32.min", vec![3.0, -2.0], -2.0),
+        ("f32.max", vec![3.0, -2.0], 3.0),
+        ("f32.clamp", vec![-2.0, -1.0, 1.0], -1.0),
+        ("f32.clamp", vec![2.0, -1.0, 1.0], 1.0),
+        ("f32.lerp", vec![2.0, 6.0, 0.25], 3.0),
+        ("f32.fma", vec![2.0, 3.0, 4.0], 10.0),
+        ("f32.mod", vec![-3.5, 2.0], 0.5),
+        ("f32.mod", vec![3.5, -2.0], -0.5),
+        ("mix", vec![2.0, 6.0, 0.25], 3.0),
+        ("smoothstep", vec![0.0, 1.0, 0.25], 0.15625),
+        ("smoothstep", vec![0.0, 1.0, -2.0], 0.0),
+        ("smoothstep", vec![0.0, 1.0, 2.0], 1.0),
+        ("step", vec![0.5, 0.25], 0.0),
+        ("step", vec![0.5, 0.5], 1.0),
+    ]
+}
 
-    for (name, args, expected) in cases {
+#[test]
+fn scalar_glsl_math_builtins_constant_fold() {
+    for (name, args, expected) in float_math_cases() {
         match eval_float_builtin(name, &args).kind {
             TermKind::FloatLit(actual) => {
                 let tolerance = 1.0e-5 * expected.abs().max(1.0);
@@ -236,6 +261,17 @@ fn scalar_glsl_math_keeps_poison_and_non_finite_results_residual() {
         ("f32.log", vec![0.0]),
         ("f32.sqrt", vec![-1.0]),
         ("f32.exp", vec![100.0]),
+        ("f32.asin", vec![2.0]),
+        ("f32.acosh", vec![0.0]),
+        ("f32.atanh", vec![1.0]),
+        ("f32.rsqrt", vec![0.0]),
+        ("f32.pow", vec![0.0, 0.0]),
+        ("f32.clamp", vec![0.0, 2.0, 1.0]),
+        ("smoothstep", vec![1.0, 1.0, 0.5]),
+        ("smoothstep", vec![2.0, 1.0, 0.5]),
+        ("f32.mod", vec![2.0, 0.0]),
+        ("f32.min", vec![f32::NAN, 1.0]),
+        ("f32.max", vec![1.0, f32::INFINITY]),
     ] {
         assert!(
             matches!(eval_float_builtin(name, &args).kind, TermKind::App { .. }),
@@ -283,6 +319,337 @@ fn scalar_glsl_math_folds_inside_lambda_body() {
     match &program.defs[0].body.kind {
         TermKind::Lambda(lam) => assert!(matches!(&lam.body.kind, TermKind::FloatLit(1.0))),
         other => panic!("expected Lambda, got {other:?}"),
+    }
+}
+
+fn make_builtin_call(
+    ids: &mut TermIdSource,
+    name: &str,
+    overload_idx: usize,
+    args: Vec<Term<Empty, Empty>>,
+    result_ty: Type<TypeName>,
+) -> Term<Empty, Empty> {
+    let builtin = builtins::catalog().lookup_by_surface_name(name).expect(name);
+    let func_ty = args.iter().rev().fold(result_ty.clone(), |ret, arg| arrow_ty(arg.ty.clone(), ret));
+    let func = Term {
+        id: ids.next_id(),
+        ty: func_ty,
+        span: make_span(),
+        kind: TermKind::Var(VarRef::Builtin {
+            id: builtin.id,
+            overload_idx,
+        }),
+    };
+    Term {
+        id: ids.next_id(),
+        ty: result_ty,
+        span: make_span(),
+        kind: TermKind::App {
+            func: Box::new(func),
+            args,
+        },
+    }
+}
+
+fn make_float_vector(ids: &mut TermIdSource, values: &[f32]) -> Term<Empty, Empty> {
+    let parts = values.iter().map(|value| make_float(ids, *value)).collect();
+    Term {
+        id: ids.next_id(),
+        ty: types::vec(values.len(), float_ty()),
+        span: make_span(),
+        kind: TermKind::VecLit(parts),
+    }
+}
+
+fn assert_float_vector(term: &Term<Empty, Empty>, expected: &[f32]) {
+    let TermKind::VecLit(parts) = &term.kind else {
+        panic!("expected constant vector: {term:?}")
+    };
+    assert_eq!(parts.len(), expected.len());
+    assert_eq!(term.ty, types::vec(expected.len(), float_ty()));
+    for (part, expected) in parts.iter().zip(expected) {
+        let TermKind::FloatLit(actual) = part.kind else {
+            panic!("expected scalar component: {part:?}")
+        };
+        assert_eq!(part.ty, float_ty());
+        assert!(
+            (actual - expected).abs() <= 1.0e-5 * expected.abs().max(1.0),
+            "{actual} != {expected}"
+        );
+    }
+}
+
+#[test]
+fn vector_math_folds_all_existing_componentwise_overloads() {
+    for (scalar_name, args, expected) in float_math_cases() {
+        let name = match scalar_name {
+            "f32.lerp" => "vec.mix".to_owned(),
+            "f32.fma" => continue, // No vector overload is published in the catalog.
+            "mix" => "vec.mix".to_owned(),
+            "smoothstep" => "vec.smoothstep".to_owned(),
+            "step" => "step".to_owned(),
+            name => name.replacen("f32.", "vec.", 1),
+        };
+        // Exercise the same dispatch both during evaluation and inside a
+        // retained function body, which uses the residual-tree folder.
+        for retained in [false, true] {
+            let mut b = TestBuilder::new();
+            let test_sym = b.sym("test");
+            let ignored = b.sym("ignored");
+            let args = args.iter().map(|value| make_float_vector(&mut b.ids, &[*value; 3])).collect();
+            let mut body = make_builtin_call(&mut b.ids, &name, 0, args, types::vec(3, float_ty()));
+            if retained {
+                body = Term {
+                    id: b.next_id(),
+                    ty: arrow_ty(float_ty(), body.ty.clone()),
+                    span: make_span(),
+                    kind: TermKind::Lambda(Lambda {
+                        params: vec![(ignored, float_ty())],
+                        ret_ty: body.ty.clone(),
+                        body: Box::new(body),
+                    }),
+                };
+            }
+            let result = partial_eval(make_program(test_sym, body, b.finish()));
+            let mut body = &result.defs[0].body;
+            if let TermKind::Lambda(lambda) = &body.kind {
+                body = &lambda.body;
+            }
+            assert_float_vector(body, &[expected; 3]);
+        }
+    }
+}
+
+fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
+    let typed = crate::compile_thru_frontend(source).expect("type check");
+    let typed = crate::ast_type_holes::reject_type_holes(typed).expect("type holes");
+    let tlc = tlc::lower_from_ast(typed).expect("lower to TLC");
+    let tlc = tlc::validate_ownership(tlc).expect("ownership");
+    let tlc = partial_eval(tlc);
+    let def = tlc
+        .defs
+        .iter()
+        .find(|def| tlc.symbols.get(def.name).is_some_and(|symbol| symbol == name))
+        .expect(name);
+    let mut body = &def.body;
+    while let TermKind::Lambda(lambda) = &body.kind {
+        body = &lambda.body;
+    }
+    body.clone()
+}
+
+#[test]
+fn vector_math_folds_source_constants_chains_and_scalar_broadcasts() {
+    for (expression, expected) in [
+        ("vec.sin(@[0.0, 0.0])", vec![0.0, 0.0]),
+        ("vec.pow(@[2.0, 3.0], @[3.0, 2.0])", vec![8.0, 9.0]),
+        ("vec.floor(vec.exp2(@[1.0, 2.0]))", vec![2.0, 4.0]),
+        (
+            "vec.abs(@[-1.0, -2.0, -3.0, -4.0].wzyx)",
+            vec![4.0, 3.0, 2.0, 1.0],
+        ),
+        ("vec.floor(vec2f32(@[1i32, 3i32]))", vec![1.0, 3.0]),
+        ("clamp(@[-2.0, 0.5, 3.0], 0.0, 1.0)", vec![0.0, 0.5, 1.0]),
+        ("mix(@[0.0, 4.0], @[4.0, 8.0], 0.25)", vec![1.0, 5.0]),
+        ("smoothstep(0.0, 1.0, @[0.25, 0.75])", vec![0.15625, 0.84375]),
+        ("step(0.5, @[0.25, 0.5, 0.75])", vec![0.0, 1.0, 1.0]),
+        ("let v = @[-2.0, 4.0] in vec.max(v, @[0.0, 3.0])", vec![0.0, 4.0]),
+        (
+            "let v = vec.exp2(@[1.0, 2.0]) in vec.sqrt(v)",
+            vec![2.0f32.sqrt(), 2.0],
+        ),
+    ] {
+        let source = format!("entry e(x:f32) vec{}f32 = {expression}", expected.len());
+        assert_float_vector(&partial_source_body(&source, "e"), &expected);
+        crate::compile_thru_spirv(&source).unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        let ssa = crate::compile_thru_ssa(&source).expect("SSA");
+        let wgsl = crate::lower_ssa_to_wgsl(ssa).expect("WGSL");
+        validate_math_wgsl(&wgsl);
+    }
+    let source = "def v:vec2f32 = vec.exp2(@[1.0, 2.0])\nentry e(x:f32) vec2f32 = vec.max(v, @[3.0, 3.0])";
+    assert_float_vector(&partial_source_body(source, "e"), &[3.0, 4.0]);
+}
+
+fn validate_math_wgsl(source: &str) {
+    let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| panic!("{error}\n{source}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{error:?}\n{source}"));
+}
+
+#[test]
+fn clamp_runtime_vector_broadcast_matches_constant_folding() {
+    for source in [
+        "entry e(v:vec3f32) vec3f32 = clamp(v, 0.0, 1.0)",
+        "entry e(v:vec3i32) vec3i32 = clamp(v, 0i32, 10i32)",
+        "entry e(v:vec3u32) vec3u32 = clamp(v, 0u32, 10u32)",
+    ] {
+        let spirv = crate::compile_thru_spirv(source).expect("SPIR-V");
+        let options = naga::front::spv::Options::default();
+        let module = naga::front::spv::Frontend::new(spirv.spirv.into_iter(), &options)
+            .parse()
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        let ssa = crate::compile_thru_ssa(source).expect("SSA");
+        validate_math_wgsl(&crate::lower_ssa_to_wgsl(ssa).expect("WGSL"));
+    }
+}
+
+#[test]
+fn generic_integer_math_folds_scalar_and_vector_constants() {
+    let source = "entry e(x:i32) vec3i32 = max(abs(@[-2i32, -3i32, 4i32]), @[1i32, 5i32, 2i32])";
+    let term = partial_source_body(source, "e");
+    let TermKind::VecLit(parts) = term.kind else {
+        panic!("expected integer vector: {term:?}")
+    };
+    let values: Vec<_> = parts
+        .iter()
+        .map(|part| {
+            let TermKind::IntLit(value) = &part.kind else {
+                panic!("{part:?}")
+            };
+            value.parse::<i32>().unwrap()
+        })
+        .collect();
+    assert_eq!(values, [2, 5, 4]);
+    assert!(
+        matches!(partial_source_body("entry e(x:i32) i32 = min(-2i32, 3i32)", "e").kind,
+        TermKind::IntLit(value) if value == "-2")
+    );
+}
+
+#[test]
+fn constant_vectors_remain_valid_arguments_to_polymorphic_helpers() {
+    let source = "def pair(x) = (x, x)\ndef p = pair(@[1.0, 2.0])\nentry e() (vec2f32, vec2f32) = p";
+    crate::compile_thru_spirv(source).expect("constant vector through generic helper");
+}
+
+#[test]
+fn scalar_float_classification_folds_to_booleans() {
+    for (name, input, expected) in [
+        ("f32.isnan", f32::NAN, true),
+        ("f32.isnan", 1.0, false),
+        ("f32.isinf", f32::NEG_INFINITY, true),
+        ("f32.isinf", f32::NAN, false),
+    ] {
+        let mut b = TestBuilder::new();
+        let test_sym = b.sym("test");
+        let arg = make_float(&mut b.ids, input);
+        let body = make_builtin_call(
+            &mut b.ids,
+            name,
+            0,
+            vec![arg],
+            Type::Constructed(TypeName::Bool, vec![]),
+        );
+        let result = partial_eval(make_program(test_sym, body, b.finish()));
+        assert!(matches!(result.defs[0].body.kind, TermKind::BoolLit(value) if value == expected));
+    }
+}
+
+#[test]
+fn vector_math_keeps_unknown_lanes_and_invalid_domains_residual() {
+    for expression in [
+        "vec.sin(@[x, 0.0])",
+        "vec.sqrt(@[4.0, -1.0])",
+        "vec.pow(@[2.0, -2.0], @[2.0, 2.0])",
+        "clamp(@[0.0, 1.0], 2.0, 1.0)",
+        "smoothstep(1.0, 1.0, @[0.0, 2.0])",
+    ] {
+        let source = format!("entry e(x:f32) vec2f32 = {expression}");
+        assert!(
+            matches!(partial_source_body(&source, "e").kind, TermKind::App { .. }),
+            "{source}"
+        );
+    }
+    // Geometry combines lanes and must not go through componentwise lifting.
+    let source = "entry e(x:f32) vec2f32 = normalize(@[3.0, 4.0])";
+    assert!(matches!(
+        partial_source_body(source, "e").kind,
+        TermKind::App { .. }
+    ));
+}
+
+#[test]
+fn scalar_math_preserves_signed_zero_and_declared_precision() {
+    for (name, args, expected) in [
+        ("f32.min", vec![0.0, -0.0], -0.0f32),
+        ("f32.max", vec![-0.0, 0.0], 0.0),
+        ("f32.abs", vec![-0.0], 0.0),
+        ("f32.sign", vec![-0.0], 0.0),
+        ("f32.round", vec![-0.5], -0.0),
+        ("f32.fract", vec![-0.0], 0.0),
+    ] {
+        let TermKind::FloatLit(value) = eval_float_builtin(name, &args).kind else {
+            panic!("{name}")
+        };
+        assert_eq!(value.to_bits(), expected.to_bits(), "{name}");
+    }
+    for (bits, input, expected) in [(16, 1.0004, Some(0.0)), (16, 16.0, None), (64, 1.0, None)] {
+        let ty = Type::Constructed(TypeName::Float(bits), vec![]);
+        let name = if input == 16.0 {
+            "f16.exp2"
+        } else if bits == 16 {
+            "f16.fract"
+        } else {
+            "f64.sin"
+        };
+        let mut b = TestBuilder::new();
+        let test_sym = b.sym("test");
+        let mut arg = make_float(&mut b.ids, input);
+        arg.ty = ty.clone();
+        let body = make_builtin_call(&mut b.ids, name, 0, vec![arg], ty);
+        let result = partial_eval(make_program(test_sym, body, b.finish()));
+        match expected {
+            Some(expected) => {
+                assert!(matches!(result.defs[0].body.kind, TermKind::FloatLit(v) if v == expected))
+            }
+            None => assert!(matches!(result.defs[0].body.kind, TermKind::App { .. })),
+        }
+    }
+}
+
+#[test]
+fn integer_math_respects_width_signedness_and_clamp_domains() {
+    for (name, ty, args, expected) in [
+        ("i8.abs", TypeName::Int(8), vec![-128], Some(-128)),
+        ("i64.abs", TypeName::Int(64), vec![i64::MIN], Some(i64::MIN)),
+        ("i32.sign", TypeName::Int(32), vec![-100], Some(-1)),
+        ("i32.min", TypeName::Int(32), vec![-5, 3], Some(-5)),
+        ("i32.max", TypeName::Int(32), vec![-5, 3], Some(3)),
+        ("u64.max", TypeName::UInt(64), vec![-1, 3], Some(-1)),
+        ("u64.min", TypeName::UInt(64), vec![-1, 3], Some(3)),
+        ("u64.clamp", TypeName::UInt(64), vec![-1, 0, 100], Some(100)),
+        ("i32.clamp", TypeName::Int(32), vec![0, 2, 1], None),
+    ] {
+        let mut b = TestBuilder::new();
+        let test_sym = b.sym("test");
+        let ty = Type::Constructed(ty, vec![]);
+        let args = args
+            .into_iter()
+            .map(|value| {
+                let mut arg = make_int(&mut b.ids, value);
+                arg.ty = ty.clone();
+                arg
+            })
+            .collect();
+        let body = make_builtin_call(&mut b.ids, name, 0, args, ty);
+        let result = partial_eval(make_program(test_sym, body, b.finish()));
+        match expected {
+            Some(expected) => assert!(
+                matches!(&result.defs[0].body.kind, TermKind::IntLit(v) if v == &expected.to_string()),
+                "{name}"
+            ),
+            None => assert!(matches!(result.defs[0].body.kind, TermKind::App { .. }), "{name}"),
+        }
     }
 }
 

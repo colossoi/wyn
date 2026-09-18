@@ -12,15 +12,17 @@ use super::{
 };
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins;
-use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+use crate::builtins::lowering::PrimOp;
 use crate::builtins::{by_id, Purity};
 use crate::op::BinaryOperator;
 use crate::scalar_eval::{self, wrap_int, Scalar};
+use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
 use polytype::Type;
-use spirv::GLOp;
+
+mod builtin;
 
 /// TLC after partial evaluation.
 #[derive(Debug, Clone, Copy)]
@@ -47,14 +49,13 @@ pub fn partial_eval(program: OwnershipValidated) -> PartialEvaled {
                 DefinitionTemplate {
                     arity: def.arity,
                     body: def.body.clone(),
-                    scalar_constant_candidate: matches!(&def.meta, super::DefMeta::Function)
-                        && def.arity == 0,
+                    constant_candidate: matches!(&def.meta, super::DefMeta::Function) && def.arity == 0,
                 },
             )
         })
         .collect();
     let mut evaluator = PartialEvaluator::new(definitions, &mut term_ids);
-    evaluator.discover_global_scalars();
+    evaluator.discover_global_constants();
     let defs = defs.into_iter().map(|def| evaluator.evaluate_definition(def)).collect();
     drop(evaluator);
 
@@ -74,6 +75,8 @@ enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A fixed-size vector whose components are all known scalars.
+    Vector(Vec<Scalar>),
 
     /// Partial application: function waiting for more args. Each
     /// accumulated arg carries its source type so the reifier can
@@ -104,6 +107,13 @@ fn parse_integer_value(spelling: &str, ty: &Type<TypeName>) -> Result<i64, Strin
 }
 
 impl Value {
+    fn is_constant(&self) -> bool {
+        matches!(
+            self,
+            Self::Int(_) | Self::Float(_) | Self::Bool(_) | Self::Vector(_)
+        )
+    }
+
     fn is_known(&self) -> bool {
         !matches!(self, Value::Unknown(_))
     }
@@ -134,7 +144,7 @@ impl Value {
 struct DefinitionTemplate {
     arity: usize,
     body: Term<Empty, Empty>,
-    scalar_constant_candidate: bool,
+    constant_candidate: bool,
 }
 
 struct PartialEvaluator<'a> {
@@ -147,10 +157,10 @@ struct PartialEvaluator<'a> {
     /// Definitions currently being evaluated. Re-entry means recursion, which
     /// is deliberately left residual instead of recursing in the compiler.
     active_defs: LookupSet<SymbolId>,
-    /// Zero-arity globals proven to reduce to immutable scalar values.
-    global_scalars: LookupMap<SymbolId, Scalar>,
-    /// Globals already considered for `global_scalars`, including failures.
-    resolved_global_scalars: LookupSet<SymbolId>,
+    /// Zero-arity globals proven to reduce to scalars or small constant vectors.
+    global_constants: LookupMap<SymbolId, Value>,
+    /// Globals already considered for `global_constants`, including failures.
+    resolved_global_constants: LookupSet<SymbolId>,
 }
 
 impl<'a> PartialEvaluator<'a> {
@@ -160,32 +170,28 @@ impl<'a> PartialEvaluator<'a> {
             term_ids,
             env: LookupMap::new(),
             active_defs: LookupSet::new(),
-            global_scalars: LookupMap::new(),
-            resolved_global_scalars: LookupSet::new(),
+            global_constants: LookupMap::new(),
+            resolved_global_constants: LookupSet::new(),
         }
     }
 
-    /// Discover the scalar constant environment once, before residualizing any
+    /// Discover the constant environment once, before residualizing any
     /// definition bodies. Recursive resolution handles constants defined in
     /// terms of other constants; `active_defs` leaves cycles residual.
-    fn discover_global_scalars(&mut self) {
+    fn discover_global_constants(&mut self) {
         let candidates = self
             .definitions
             .iter()
-            .filter_map(|(symbol, definition)| definition.scalar_constant_candidate.then_some(*symbol))
+            .filter_map(|(symbol, definition)| definition.constant_candidate.then_some(*symbol))
             .collect::<Vec<_>>();
         for symbol in candidates {
-            self.resolve_global_scalar(symbol);
+            self.resolve_global_constant(symbol);
         }
     }
 
     fn evaluate_definition(&mut self, def: Def<UnpinnedPolymorphic>) -> Def<UnpinnedPolymorphic> {
-        let body_val = self
-            .global_scalars
-            .get(&def.name)
-            .copied()
-            .map(Value::from_scalar)
-            .unwrap_or_else(|| self.eval(&def.body));
+        let body_val =
+            self.global_constants.get(&def.name).cloned().unwrap_or_else(|| self.eval(&def.body));
         let body = self.reify(body_val, &def.body.ty, def.body.span);
         let body = body.rewrite(&mut ResidualConstantFolder { evaluator: self });
         Def { body, ..def }
@@ -226,8 +232,8 @@ impl<'a> PartialEvaluator<'a> {
                     val.clone()
                 } else if let Some(def) = self.definitions.get(&sym).cloned() {
                     if def.arity == 0 {
-                        if let Some(value) = self.resolve_global_scalar(sym) {
-                            Value::from_scalar(value)
+                        if let Some(value) = self.resolve_global_constant(sym) {
+                            value
                         } else if !self.active_defs.insert(sym) {
                             Value::Unknown(term.clone())
                         } else {
@@ -370,6 +376,11 @@ impl<'a> PartialEvaluator<'a> {
             }
             TermKind::TupleProj { tuple, idx } => {
                 let tuple_val = self.eval(tuple);
+                if let Value::Vector(values) = &tuple_val {
+                    if let Some(value) = values.get(*idx) {
+                        return Value::from_scalar(*value);
+                    }
+                }
                 let tuple_term = self.reify(tuple_val, &tuple.ty, tuple.span);
                 Value::Unknown(self.mk_term(
                     term.ty.clone(),
@@ -396,6 +407,11 @@ impl<'a> PartialEvaluator<'a> {
             }
             TermKind::VecLit(parts) => {
                 let part_vals: Vec<Value> = parts.iter().map(|p| self.eval(p)).collect();
+                if term.ty.vec_size() == Some(parts.len()) && (2..=4).contains(&parts.len()) {
+                    if let Some(values) = part_vals.iter().map(Value::as_scalar).collect() {
+                        return Value::Vector(values);
+                    }
+                }
                 let part_terms: Vec<Term<Empty, Empty>> =
                     parts.iter().zip(part_vals).map(|(p, v)| self.reify(v, &p.ty, p.span)).collect();
                 Value::Unknown(self.mk_term(term.ty.clone(), term.span, TermKind::VecLit(part_terms)))
@@ -534,7 +550,10 @@ impl<'a> PartialEvaluator<'a> {
         // Check for known function
         if let Some(def) = self.definitions.get(&sym).cloned() {
             let args_len = args.len();
-            let all_known = args.iter().all(|(v, _)| v.is_known());
+            // Vector constants are usable by builtins, but expanding arbitrary
+            // functions with them also requires instantiating polymorphic body
+            // types. Leave those calls for the existing monomorphization pass.
+            let all_known = args.iter().all(|(v, _)| v.is_known() && !matches!(v, Value::Vector(_)));
             if args_len >= def.arity && def.arity > 0 && all_known {
                 if !self.active_defs.insert(sym) {
                     self.reify_call(sym, args, original)
@@ -623,8 +642,8 @@ impl<'a> PartialEvaluator<'a> {
         scalar_eval::unary(op.op, arg.as_scalar()?, ty).map(Value::from_scalar)
     }
 
-    /// Scalar catalog keyholes needed to finish constant defs and pure helper
-    /// calls. Operations not listed here remain ordinary residual calls.
+    /// Evaluate supported pure scalar builtins and their componentwise vector
+    /// forms. Unsupported operations and domains remain residual calls.
     fn eval_builtin(
         &self,
         id: builtins::BuiltinId,
@@ -636,11 +655,18 @@ impl<'a> PartialEvaluator<'a> {
         if def.raw.purity != Purity::Pure || args.iter().any(|(v, _)| !v.is_known()) {
             return None;
         }
-        match &def.overloads().get(overload_idx)?.lowering {
-            BuiltinLowering::PrimOp(PrimOp::GlslExt(op)) => fold_scalar_glsl_ext(*op, args, result_ty),
-            BuiltinLowering::PrimOp(prim) => fold_scalar_conversion(prim, args, result_ty),
-            _ => None,
+        let lowering = &def.overloads().get(overload_idx)?.lowering;
+        // Partial evaluation precedes intrinsic specialization. Resolve generic
+        // numeric operations here as well, without losing broadcast metadata.
+        let scalar_ty = if result_ty.is_vec() { result_ty.elem_type()? } else { result_ty };
+        if let Type::Constructed(scalar, _) = scalar_ty {
+            if let Some(specialized) =
+                builtins::catalog().specialized_numeric_lowering(id, overload_idx, scalar)
+            {
+                return builtin::fold(&specialized, args, result_ty);
+            }
         }
+        builtin::fold(lowering, args, result_ty)
     }
 
     fn literal_value(&self, term: &Term<Empty, Empty>) -> Option<Value> {
@@ -655,6 +681,15 @@ impl<'a> PartialEvaluator<'a> {
             ))),
             TermKind::FloatLit(f) => Some(Value::Float(*f as f64)),
             TermKind::BoolLit(b) => Some(Value::Bool(*b)),
+            TermKind::VecLit(parts)
+                if term.ty.vec_size() == Some(parts.len()) && (2..=4).contains(&parts.len()) =>
+            {
+                parts
+                    .iter()
+                    .map(|part| self.literal_value(part)?.as_scalar())
+                    .collect::<Option<Vec<_>>>()
+                    .map(Value::Vector)
+            }
             _ => None,
         }
     }
@@ -668,6 +703,14 @@ impl<'a> PartialEvaluator<'a> {
             Value::Int(n) => self.mk_term(ty.clone(), span, TermKind::IntLit(n.to_string())),
             Value::Float(f) => self.mk_term(ty.clone(), span, TermKind::FloatLit(f as f32)),
             Value::Bool(b) => self.mk_term(ty.clone(), span, TermKind::BoolLit(b)),
+            Value::Vector(values) => {
+                let elem_ty = ty.elem_type().expect("constant vector must have a vector type");
+                let parts = values
+                    .into_iter()
+                    .map(|value| self.reify(Value::from_scalar(value), elem_ty, span))
+                    .collect();
+                self.mk_term(ty.clone(), span, TermKind::VecLit(parts))
+            }
             Value::Unknown(t) => t,
             Value::Partial { sym, args, .. } => self.reify_partial(sym, args, ty, span),
         }
@@ -700,11 +743,9 @@ impl<'a> PartialEvaluator<'a> {
         bound: &mut LookupSet<SymbolId>,
     ) -> bool {
         let replacement = match &term.kind {
-            TermKind::Var(VarRef::Symbol(name)) if !bound.contains(name) => self
-                .env
-                .get(name)
-                .cloned()
-                .or_else(|| self.global_scalars.get(name).copied().map(Value::from_scalar)),
+            TermKind::Var(VarRef::Symbol(name)) if !bound.contains(name) => {
+                self.env.get(name).cloned().or_else(|| self.global_constants.get(name).cloned())
+            }
             _ => None,
         };
         if let Some(value) = replacement {
@@ -788,27 +829,29 @@ impl<'a> PartialEvaluator<'a> {
         changed
     }
 
-    /// Memoize a zero-arity global only when it reduces to a scalar. This is
-    /// intentionally narrower than general inlining: the resulting environment
-    /// can be copied into residual lambdas without duplicating runtime work or
-    /// aggregate construction.
-    fn resolve_global_scalar(&mut self, symbol: SymbolId) -> Option<Scalar> {
-        if let Some(value) = self.global_scalars.get(&symbol) {
-            return Some(*value);
+    /// Memoize a zero-arity global only when it reduces to a scalar or a small
+    /// constant vector. This is intentionally narrower than general inlining:
+    /// the environment can be copied into residual lambdas without duplicating
+    /// runtime work or unbounded aggregate construction.
+    fn resolve_global_constant(&mut self, symbol: SymbolId) -> Option<Value> {
+        if let Some(value) = self.global_constants.get(&symbol) {
+            return Some(value.clone());
         }
-        if self.resolved_global_scalars.contains(&symbol) {
+        if self.resolved_global_constants.contains(&symbol) {
             return None;
         }
         let definition = self.definitions.get(&symbol)?.clone();
-        if !definition.scalar_constant_candidate || !self.active_defs.insert(symbol) {
+        if !definition.constant_candidate || !self.active_defs.insert(symbol) {
             return None;
         }
         let value = self.eval(&definition.body);
         self.active_defs.remove(&symbol);
-        self.resolved_global_scalars.insert(symbol);
-        let scalar = value.as_scalar()?;
-        self.global_scalars.insert(symbol, scalar);
-        Some(scalar)
+        self.resolved_global_constants.insert(symbol);
+        if !value.is_constant() {
+            return None;
+        }
+        self.global_constants.insert(symbol, value.clone());
+        Some(value)
     }
 
     fn reify_partial(
@@ -913,6 +956,27 @@ impl TermRewriter<Empty, Empty> for ResidualConstantFolder<'_, '_> {
     }
 
     fn rewrite_node(&mut self, term: &mut Term<Empty, Empty>) -> RewriteDecision {
+        if let TermKind::TupleProj { tuple, idx } = &term.kind {
+            if let Some(Value::Vector(values)) = self.evaluator.literal_value(tuple) {
+                if let Some(value) = values.get(*idx) {
+                    term.kind = self.evaluator.reify(Value::from_scalar(*value), &term.ty, term.span).kind;
+                    return RewriteDecision::Changed;
+                }
+            }
+        }
+        // Retained lambdas are not interpreted, but their literal let bindings
+        // must still expose constants to builtin calls (including vector calls).
+        if let TermKind::Let { name, rhs, body, .. } = &mut term.kind {
+            if let Some(value) = self.evaluator.literal_value(rhs) {
+                let saved_env = std::mem::take(&mut self.evaluator.env);
+                self.evaluator.env.insert(*name, value);
+                self.evaluator.substitute_residual_vars_tracked(body, &mut LookupSet::new());
+                self.evaluator.env = saved_env;
+                self.rewrite_tracked(body);
+                term.kind = std::mem::replace(&mut body.kind, TermKind::UnitLit);
+                return RewriteDecision::Changed;
+            }
+        }
         let ty = term.ty.clone();
         let folded = {
             let TermKind::App { func, args } = &term.kind else {
@@ -943,12 +1007,7 @@ impl TermRewriter<Empty, Empty> for ResidualConstantFolder<'_, '_> {
         let Some(value) = folded else {
             return RewriteDecision::Unchanged;
         };
-        term.kind = match value {
-            Value::Int(value) => TermKind::IntLit(value.to_string()),
-            Value::Float(value) => TermKind::FloatLit(value as f32),
-            Value::Bool(value) => TermKind::BoolLit(value),
-            _ => unreachable!("scalar residual folder produced a non-scalar value"),
-        };
+        term.kind = self.evaluator.reify(value, &ty, term.span).kind;
         RewriteDecision::Changed
     }
 }
@@ -960,75 +1019,13 @@ impl TermRewriter<Empty, Empty> for ResidualConstantFolder<'_, '_> {
 /// exponentially, so they are kept as `let`-bindings instead of inlined.
 fn is_duplicable(v: &Value) -> bool {
     match v {
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Partial { .. } => true,
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Vector(_) | Value::Partial { .. } => true,
         // Lambdas stay inlined: they aren't the source of the duplication
         // blowup (that's self-referential value chains), and `apply_var` must
         // see the lambda value in the env to apply it — binding the name to
         // `Var(name)` instead would make `apply_var` self-alias and recurse.
         Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
     }
-}
-
-/// Fold the scalar floating-point portion of GLSL.std.450. Keeping the
-/// dispatch on `GLOp` makes the catalog's lowering metadata the single source
-/// of builtin identity instead of repeating surface names here.
-fn fold_scalar_glsl_ext(
-    op: u32,
-    args: &[(Value, Type<TypeName>)],
-    result_ty: &Type<TypeName>,
-) -> Option<Value> {
-    if !matches!(result_ty, Type::Constructed(TypeName::Float(_), _)) {
-        return None;
-    }
-
-    let arg = |index: usize| match &args.get(index)?.0 {
-        Value::Float(value) => Some(*value as f32),
-        _ => None,
-    };
-    let a = arg(0)?;
-    let result = match GLOp::from_u32(op)? {
-        GLOp::Floor => a.floor(),
-        GLOp::Ceil => a.ceil(),
-        GLOp::Radians => a.to_radians(),
-        GLOp::Degrees => a.to_degrees(),
-        GLOp::Sin => a.sin(),
-        GLOp::Cos => a.cos(),
-        GLOp::Tan => a.tan(),
-        GLOp::Asin => a.asin(),
-        GLOp::Acos => a.acos(),
-        GLOp::Atan => a.atan(),
-        GLOp::Sinh => a.sinh(),
-        GLOp::Cosh => a.cosh(),
-        GLOp::Tanh => a.tanh(),
-        GLOp::Asinh => a.asinh(),
-        GLOp::Acosh => a.acosh(),
-        GLOp::Atanh => a.atanh(),
-        GLOp::Atan2 => {
-            let b = arg(1)?;
-            if a == 0.0 && b == 0.0 {
-                return None;
-            }
-            a.atan2(b)
-        }
-        GLOp::Pow => {
-            let b = arg(1)?;
-            if a < 0.0 || (a == 0.0 && b <= 0.0) {
-                return None;
-            }
-            a.powf(b)
-        }
-        GLOp::Exp => a.exp(),
-        GLOp::Log => a.ln(),
-        GLOp::Exp2 => a.exp2(),
-        GLOp::Log2 => a.log2(),
-        GLOp::Sqrt => a.sqrt(),
-        GLOp::InverseSqrt => a.sqrt().recip(),
-        _ => return None,
-    };
-
-    // WGSL cannot spell non-finite literals, and GLSL.std.450 leaves some
-    // domain errors poison. Preserve the runtime call in either case.
-    result.is_finite().then(|| Value::Float(result as f64))
 }
 
 fn fold_scalar_conversion(

@@ -1648,10 +1648,10 @@ def test6(a:vec2i32, b:vec2i32) vec2i32 = min(a, b)
 fn test_builtin_clamp_curried() {
     typecheck_program(
         r#"
-def test1(x:f32) f32 = clamp(0.0, 1.0, x)
-def test2(v:vec3f32) vec3f32 = clamp(0.0, 1.0, v)
-def test3(x:i32) i32 = clamp(0i32, 100i32, x)
-def test4(lo:u32, hi:u32, x:u32) u32 = clamp(lo, hi, x)
+def test1(x:f32) f32 = clamp(x, 0.0, 1.0)
+def test2(v:vec3f32) vec3f32 = clamp(v, 0.0, 1.0)
+def test3(x:i32) i32 = clamp(x, 0i32, 100i32)
+def test4(lo:u32, hi:u32, x:u32) u32 = clamp(x, lo, hi)
         "#,
     );
 }

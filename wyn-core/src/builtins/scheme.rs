@@ -162,17 +162,19 @@ pub fn vec_scalar_edge_to_vec(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[a, v.clone()], v))
 }
 
-/// `∀n a. a -> a -> vec<n,a> -> vec<n,a>` — clamp(lo, hi, x) /
-/// smoothstep(edge0, edge1, x) with scalar bounds.
+/// `∀n a. vec<n,a> -> a -> a -> vec<n,a>` — clamp(x, lo, hi).
 pub fn vec_clamp_scalar_lohi(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (n, a) = (ctx.new_variable(), ctx.new_variable());
+    let v = vec_type(a.clone(), n);
+    quantify(arrow_chain(&[v.clone(), a.clone(), a], v))
+}
+
+/// `∀n a. a -> a -> vec<n,a> -> vec<n,a>` — smoothstep(edge0, edge1, x).
+pub fn vec_smoothstep_scalar_edges(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let (n, a) = (ctx.new_variable(), ctx.new_variable());
     let v = vec_type(a.clone(), n);
     quantify(arrow_chain(&[a.clone(), a, v.clone()], v))
 }
-
-/// Same shape as `vec_clamp_scalar_lohi` but kept distinct in case the
-/// names diverge later.
-pub use self::vec_clamp_scalar_lohi as vec_smoothstep_scalar_edges;
 
 /// `∀n a. vec<n,a> -> vec<n,a> -> a -> vec<n,a>` — mix(x, y, t).
 pub use self::vec_vec_scalar_to_vec as vec_mix_scalar_interp;

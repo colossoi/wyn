@@ -289,6 +289,32 @@ impl BuiltinCatalog {
         self.numeric_specializations.get(&(generic, scalar.clone())).copied()
     }
 
+    /// Resolve numeric semantics while retaining the selected overload's
+    /// scalar-to-vector broadcasts. Used before specialization and by backends
+    /// for broadcast overloads that cannot become a scalar catalog reference.
+    pub fn specialized_numeric_lowering(
+        &self,
+        generic: BuiltinId,
+        overload_idx: usize,
+        scalar: &ast::TypeName,
+    ) -> Option<BuiltinLowering> {
+        let specialized = self.specialize_numeric(generic, scalar)?;
+        let lowering = &self.get(specialized).overloads().first()?.lowering;
+        match (
+            &self.get(generic).overloads().get(overload_idx)?.lowering,
+            lowering,
+        ) {
+            (
+                BuiltinLowering::ExtInstSplat { splat_args, .. },
+                BuiltinLowering::PrimOp(builtins::lowering::PrimOp::GlslExt(ext)),
+            ) => Some(BuiltinLowering::ExtInstSplat {
+                ext: *ext,
+                splat_args,
+            }),
+            _ => Some(lowering.clone()),
+        }
+    }
+
     /// Resolve one scalar conversion by structural source and destination
     /// types. The returned `BuiltinId` is the only identity carried onward.
     pub fn conversion(&self, target: &ast::TypeName, source: &ast::TypeName) -> Option<BuiltinId> {

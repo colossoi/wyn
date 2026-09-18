@@ -39,10 +39,19 @@ impl TermRewriter<Empty, Empty> for IntrinsicSpecializer<'_> {
 
         // A Symbol is always a user or compiler binding and may shadow a
         // catalog name. Only structural builtin references specialize.
-        let TermKind::Var(VarRef::Builtin { id, .. }) = &func.kind else {
+        let TermKind::Var(VarRef::Builtin { id, overload_idx }) = &func.kind else {
             return RewriteDecision::Unchanged;
         };
         let known = catalog().known();
+
+        // A scalar specialization has no record of which arguments require
+        // broadcasting. Keep the overload; backends resolve its numeric opcode.
+        if matches!(
+            catalog().get(*id).overloads()[*overload_idx].lowering,
+            crate::builtins::BuiltinLowering::ExtInstSplat { .. }
+        ) {
+            return RewriteDecision::Unchanged;
+        }
 
         // Multiplication becomes a structural binary operator and needs no
         // overload-bearing callee.
