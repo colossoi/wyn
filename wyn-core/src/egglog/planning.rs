@@ -377,6 +377,14 @@ pub(super) fn facts(
         sink.add("SourceType", (key, ty))?;
         // Source size and interface leaves supplement the structural facts.
         let abi_value = sink.add("AbiExpr", i64::from(e.as_u32()))?;
+        if crate::types::as_soa_tuple(strip_existentials(&data.types[value.ty].ty)).is_some() {
+            // A logical tuple array has the length of its first component.
+            // Import that relationship even when its fields are literals or
+            // parameters, rather than results with a planned LiveLength.
+            let first = sink.add("AbiField", (abi_value, 0i64))?;
+            let length = sink.add("AbiLength", first)?;
+            sink.add("AbiArrayLength", (abi_value, length))?;
+        }
         if let Some(Type::Constructed(TypeName::Size(n), _)) =
             strip_existentials(&data.types[value.ty].ty).array_size()
         {

@@ -2,8 +2,13 @@
 (rule ((Crossing a b value) (Phase a r) (Phase b r)) ((Before a b)) :ruleset dispatch)
 ; An authored update may share backing, but readers of the old value must finish
 ; first. Join on that particular value version, never on all pairs of stages.
-(rule ((Clobbers writer old) (Needs reader old) (Phase writer r) (Phase reader r) (!= reader writer))
+; Length-only needs do not observe the old contents and must not reverse a
+; producer/consumer dependency through an in-place update.
+(rule ((Clobbers writer old) (Requires (InStage reader) old) (Phase writer r) (Phase reader r) (!= reader writer))
       ((Before reader writer)) :ruleset dispatch)
+(rule ((Clobbers writer old) (Needs (Stage op "scalar") old)
+       (Phase writer r) (Phase (Stage op "scalar") r) (!= (Stage op "scalar") writer))
+      ((Before (Stage op "scalar") writer)) :ruleset dispatch)
 
 ; An operation has separate start/end boundaries so its internal phases remain
 ; ordered without a cycle through one source-operation node.

@@ -33,6 +33,46 @@ fn kernel_count(data: &Program<Scheduled>) -> usize {
 }
 
 #[test]
+fn literal_tuple_reduction_has_a_fixed_scratch_capacity() {
+    let source = "def min_pair(hits: [4](i32, i32)) (i32, i32) =
+         reduce(|(a, ai): (i32, i32), (b, bi): (i32, i32)|
+                  if a < b then (a, ai) else (b, bi),
+                (1000, 0), hits)
+         def hits: [4](i32, i32) = [(4, 0), (2, 1), (1, 2), (3, 3)]
+         entry main() (i32, i32) = min_pair(hits)";
+    let tlc = infer_input_slice_bounds(compile_thru_tlc(source).unwrap());
+    let program = insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap();
+    let program = super::super::place(super::super::simplify(program, false).unwrap()).unwrap();
+    let result = schedule(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
+    assert_eq!(kernel_count(&result), 2);
+    assert!(result.state.abi.bindings.values().all(|binding| matches!(
+        binding.length,
+        Some(crate::pipeline_descriptor::BufferLen::Fixed { .. })
+    )));
+    assert_eq!(
+        run(&result, vec![]),
+        [Value::Tuple(vec![Value::Int(1), Value::Int(2)])]
+    );
+}
+
+#[test]
+fn map_after_scatter_does_not_wait_for_its_own_length_read() {
+    let result = compile(
+        "entry update(positions: []i32, fb: *[]i32) *[]i32 =
+         let pts = positions[0..5] in
+         let indices = map(|p: i32| p, pts) in
+         let values = map(|p: i32| 1, pts) in
+         let updated = scatter(fb, indices, values) in
+         map(|x: i32| x, updated)",
+    );
+    let input = Value::array([1, 3, 0, 4, 2]);
+    let framebuffer = Value::array(0..10);
+    let output = run(&result, vec![input, framebuffer.clone()]);
+    assert_eq!(output[0].ints(), [1, 1, 1, 1, 1, 5, 6, 7, 8, 9]);
+    assert_eq!(framebuffer.ints(), output[0].ints());
+}
+
+#[test]
 fn consuming_fused_maps_reuse_the_input_without_allocating() {
     let result = compile("entry main(xs:*[]i32) []i32 = let a=map(|x:i32|x+7,xs) in map(|x:i32|x*2,a)");
     assert_eq!(kernel_count(&result), 1);
