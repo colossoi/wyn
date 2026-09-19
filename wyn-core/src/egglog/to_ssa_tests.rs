@@ -466,6 +466,8 @@ fn array_updates_preserve_loop_state_and_output_capacity() {
     for source in [
         include_str!("../../../testfiles/regressions/array_update_return.wyn"),
         include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
+        include_str!("../../../testfiles/regressions/array_update_branch.wyn"),
+        include_str!("../../../testfiles/regressions/array_update_nested_queue.wyn"),
         "entry main(n: i32) [4]i32 =
             let (_, output) = loop (i, output) = (0i32, replicate(4, -1i32))
                 while i < n do (i+1, output with [i % 4] = i) in output",

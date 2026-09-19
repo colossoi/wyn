@@ -96,7 +96,7 @@ impl Body<'_, '_> {
                 let Some(element) = input.ty.elem_type() else {
                     return Err(error("storage input element"));
                 };
-                self.view(binding, storage_type(element)?, length)?
+                self.view(binding, storage_type(element)?, length, static_array_length(&input.ty))?
             } else {
                 parameter
             };
@@ -110,10 +110,18 @@ impl Body<'_, '_> {
         self.environment.parameters.insert(id, value.clone());
         Ok(value)
     }
-    fn view(&mut self, binding: BindingRef, element: Type, len: Typed) -> Result<Typed, OptimizeError> {
+    fn view(
+        &mut self,
+        binding: BindingRef,
+        element: Type,
+        len: Typed,
+        count: Option<usize>,
+    ) -> Result<Typed, OptimizeError> {
         let ty = view_array_with_size(
             &element,
-            Type::Constructed(TypeName::SizePlaceholder, vec![]),
+            count
+                .map(|n| Type::Constructed(TypeName::Size(n), vec![]))
+                .unwrap_or_else(|| Type::Constructed(TypeName::SizePlaceholder, vec![])),
             buffer_tag(binding),
         );
         self.op(
@@ -159,7 +167,7 @@ impl Body<'_, '_> {
             Value::Source(id) => self.expression_cached(*id, cache),
             Value::LoopState(value, ty) => {
                 let value = self.value_cached(value, cache)?;
-                self.loop_state(value, &self.compiler.data.types[*ty].ty)
+                self.value_state(value, &self.compiler.data.types[*ty].ty)
             }
             Value::Tuple(values) => {
                 let values = self.values_cached(values, cache)?;
@@ -205,7 +213,15 @@ impl Body<'_, '_> {
                 self.compiler.used.insert(*id);
                 let len = self.value_cached(&buffer.length, cache)?;
                 let len = self.cast(len, &u32_type())?;
-                self.view(declaration.binding, declaration.elem_ty, len)
+                let count = match &buffer.length {
+                    Value::Int(n) => Some(*n as usize),
+                    Value::Source(id) => match &self.compiler.data.expressions[*id].kind {
+                        ExprKind::Int(n) => n.parse::<usize>().ok(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                self.view(declaration.binding, declaration.elem_ty, len, count)
             }
             Value::Primitive(name, args) => {
                 if let ("length", [array]) = (*name, args.as_slice()) {
@@ -538,7 +554,7 @@ impl Body<'_, '_> {
     pub(super) fn apply(
         &mut self,
         function: ExprId,
-        args: Vec<Typed>,
+        mut args: Vec<Typed>,
         ty: Type,
     ) -> Result<Typed, OptimizeError> {
         let tag = match &self.compiler.data.expressions[function].kind {
@@ -583,6 +599,16 @@ impl Body<'_, '_> {
                 OpTag::Call(id)
             }
             other => return Err(error(format!("TODO: unresolved call target {other:?}"))),
+        };
+        // Updates must preserve the actual value representation, including
+        // when source size/buffer variables outlive producer materialization.
+        let update = matches!(tag, OpTag::Intrinsic { id, .. }
+            if id == catalog().known().array_with || id == catalog().known().array_with_in_place);
+        let ty = if update && ty.array_variant().is_some_and(crate::types::is_array_variant_composite) {
+            args[0] = self.value_state(args[0].clone(), &ty)?;
+            args[0].ty.clone()
+        } else {
+            ty
         };
         self.op(tag, args, ty)
     }
@@ -719,7 +745,7 @@ impl Body<'_, '_> {
         };
         self.op(OpTag::Index, vec![array, index], ty)
     }
-    fn loop_state(&mut self, value: Typed, ty: &Type) -> Result<Typed, OptimizeError> {
+    fn value_state(&mut self, value: Typed, ty: &Type) -> Result<Typed, OptimizeError> {
         let ty = strip_existentials(ty);
         if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
             let fields = fields
@@ -727,7 +753,7 @@ impl Body<'_, '_> {
                 .enumerate()
                 .map(|(i, ty)| {
                     let field = self.field(value.clone(), i)?;
-                    self.loop_state(field, ty)
+                    self.value_state(field, ty)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let ty = Type::Constructed(name.clone(), fields.iter().map(|f| f.ty.clone()).collect());
@@ -737,7 +763,13 @@ impl Body<'_, '_> {
         // become composites after an update. Both edges must carry values of
         // the same representation, including when nested in a tuple.
         if ty.array_variant().is_some_and(crate::types::is_array_variant_composite) {
-            let target = concrete(ty)?;
+            // The producer may know the exact length even when the source
+            // state type still has a size variable. Never use bounded capacity
+            // as an exact length or erase the identity of a runtime view.
+            let count = static_array_length(ty)
+                .or_else(|| static_array_length(&value.ty))
+                .ok_or_else(|| error("value array requires a fixed size"))?;
+            let target = sized_array(count.max(1), concrete(ty.elem_type().unwrap())?);
             if value.ty != target {
                 let count = target
                     .as_tensor()
@@ -747,7 +779,7 @@ impl Body<'_, '_> {
                 let mut fields = Vec::with_capacity(count);
                 for i in 0..count {
                     let field = self.index(value.clone(), Self::number(i as u32))?;
-                    fields.push(self.loop_state(field, element)?);
+                    fields.push(self.value_state(field, element)?);
                 }
                 return self.op(OpTag::ArrayLit(count), fields, target);
             }

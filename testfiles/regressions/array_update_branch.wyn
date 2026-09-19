@@ -1,0 +1,6 @@
+-- Updated and unchanged arms must carry the same composite array type.
+entry main(n: i32) [4]i32 =
+  let (a,_i) = loop (a,i) = (replicate(4,-1i32),0i32)
+    while i < n do
+      (if i % 2 == 0 then a with [i % 4] = i else a,i+1)
+  in a
