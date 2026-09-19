@@ -1056,3 +1056,24 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         .unwrap();
     }
 }
+
+#[test]
+fn materialized_boolean_reduction_reaches_both_backends() {
+    for condition in ["xs[0] > 0 || any", "any || xs[0] > 0", "any", "!any"] {
+        let source = format!(
+            "entry repro(xs: []i32) []i32 =
+              let any = reduce(|a,b| a || b,false,map(|x| x != 0,xs)) in
+              [if {condition} then 1i32 else 0i32]"
+        );
+        compile(&source);
+        let output = crate::compile_thru_spirv(&source).unwrap();
+        let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+}

@@ -372,30 +372,38 @@ fn capture_reads_stay_in_their_conditional_arm_or_merge() {
 
 #[test]
 fn split_capture_projections_do_not_materialize_discarded_slots() {
-    let mut capture = Capture::new();
-    capture.data.state.buffers[capture.buffer].element = crate::types::i32();
-    capture.data.state.abi.bindings.get_mut(&capture.buffer).unwrap().elem_ty = crate::types::i32();
-    capture.data.state.materialized.insert(
-        capture.operation,
-        Value::Tuple(vec![
-            Value::op("index", [Value::Buffer(capture.buffer), Value::Int(0)]),
-            Value::Discarded,
-        ]),
-    );
-    let mut compiler = capture.compiler();
-    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
-    let fields =
-        body.values(&[Value::Source(capture.fields[0]), Value::Source(capture.fields[0])]).unwrap();
-    assert_eq!(fields[0].value, fields[1].value);
-    assert_eq!(
-        body.builder
-            .func()
-            .insts
-            .values()
-            .filter(|node| matches!(node.data, InstKind::Load { .. }))
-            .count(),
-        1
-    );
+    for logical_type in [crate::types::i32(), crate::types::bool_type()] {
+        let mut capture = Capture::new();
+        let storage_type = crate::egglog::abi::storage_type(&logical_type).unwrap();
+        capture.data.state.buffers[capture.buffer].element = storage_type.clone();
+        capture.data.state.abi.bindings.get_mut(&capture.buffer).unwrap().elem_ty = storage_type;
+        let scalar = capture.data.ir.expressions[capture.fields[0]].ty;
+        capture.data.ir.types[scalar].ty = logical_type.clone();
+        let pair = capture.data.ir.expressions[capture.result].ty;
+        capture.data.ir.types[pair].ty = crate::types::tuple(vec![logical_type.clone(); 2]);
+        capture.data.state.materialized.insert(
+            capture.operation,
+            Value::Tuple(vec![
+                Value::op("index", [Value::Buffer(capture.buffer), Value::Int(0)]),
+                Value::Discarded,
+            ]),
+        );
+        let mut compiler = capture.compiler();
+        let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+        let fields =
+            body.values(&[Value::Source(capture.fields[0]), Value::Source(capture.fields[0])]).unwrap();
+        assert_eq!(fields[0].value, fields[1].value);
+        assert_eq!(fields[0].ty, logical_type);
+        assert_eq!(
+            body.builder
+                .func()
+                .insts
+                .values()
+                .filter(|node| matches!(node.data, InstKind::Load { .. }))
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]

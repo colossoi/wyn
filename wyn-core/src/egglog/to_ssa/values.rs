@@ -418,7 +418,7 @@ impl Body<'_, '_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.op(OpTag::Vector(items.len()), values, ty)
             }
-            ExprKind::Project { tuple, index } => self.projection(*tuple, *index, cache),
+            ExprKind::Project { tuple, index } => self.projection(*tuple, *index, &ty, cache),
             ExprKind::Coerce(inner) => {
                 let value = self.expression_cached(*inner, cache)?;
                 self.cast(value, &ty)
@@ -507,6 +507,7 @@ impl Body<'_, '_> {
         &mut self,
         tuple: ExprId,
         index: usize,
+        ty: &Type,
         cache: &mut ExpressionCache,
     ) -> Result<Typed, OptimizeError> {
         let data = self.compiler.data;
@@ -521,7 +522,10 @@ impl Body<'_, '_> {
                         let Some(value) = fields.get(index) else {
                             return Err(error("result slot"));
                         };
-                        return self.value_cached(value, cache);
+                        let value = self.value_cached(value, cache)?;
+                        // A split slot retains its storage representation (e.g.
+                        // u32 for bool). Restore the projected logical type.
+                        return self.cast(value, ty);
                     }
                 }
             }
