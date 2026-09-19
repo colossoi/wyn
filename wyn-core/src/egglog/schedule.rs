@@ -515,7 +515,15 @@ impl Planner<'_> {
             merge: after,
             continuing,
         });
-        self.jump(from, loop_header, vec![Value::Source(init), Value::Int(0)]);
+        let state_ty = self.data.operations[op].ty;
+        self.jump(
+            from,
+            loop_header,
+            vec![
+                Value::LoopState(Box::new(Value::Source(init)), state_ty),
+                Value::Int(0),
+            ],
+        );
         let parameters = self.data.regions[header].parameters.clone();
         if let Some(&parameter) = parameters.first() {
             self.emit(test, Instruction::BindParameter(parameter, acc.clone()));
@@ -551,7 +559,10 @@ impl Planner<'_> {
         self.jump(
             end,
             continuing,
-            vec![self.result(body), Value::op("add", [index, Value::Int(1)])],
+            vec![
+                Value::LoopState(Box::new(self.result(body)), state_ty),
+                Value::op("add", [index, Value::Int(1)]),
+            ],
         );
         self.emit(after, Instruction::BindResult(op, acc));
         Ok(after)
@@ -637,7 +648,7 @@ mod schedule_tests;
 fn materialized(value: &Value) -> bool {
     match value {
         Value::Buffer(_) | Value::Source(_) | Value::Discarded => true,
-        Value::Field(value, _) => materialized(value),
+        Value::Field(value, _) | Value::LoopState(value, _) => materialized(value),
         Value::Tuple(values) | Value::Primitive(_, values) => values.iter().any(materialized),
         _ => false,
     }

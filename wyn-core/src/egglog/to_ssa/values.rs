@@ -157,6 +157,10 @@ impl Body<'_, '_> {
                 Ok(value)
             }
             Value::Source(id) => self.expression_cached(*id, cache),
+            Value::LoopState(value, ty) => {
+                let value = self.value_cached(value, cache)?;
+                self.loop_state(value, &self.compiler.data.types[*ty].ty)
+            }
             Value::Tuple(values) => {
                 let values = self.values_cached(values, cache)?;
                 self.tuple(values)
@@ -710,6 +714,41 @@ impl Body<'_, '_> {
             index
         };
         self.op(OpTag::Index, vec![array, index], ty)
+    }
+    fn loop_state(&mut self, value: Typed, ty: &Type) -> Result<Typed, OptimizeError> {
+        let ty = strip_existentials(ty);
+        if let Type::Constructed(name @ (TypeName::Tuple(_) | TypeName::Record(_)), fields) = ty {
+            let fields = fields
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| {
+                    let field = self.field(value.clone(), i)?;
+                    self.loop_state(field, ty)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let ty = Type::Constructed(name.clone(), fields.iter().map(|f| f.ty.clone()).collect());
+            return self.op(OpTag::Tuple(fields.len()), fields, ty);
+        }
+        // Fixed value arrays may start in a producer's storage buffer and
+        // become composites after an update. Both edges must carry values of
+        // the same representation, including when nested in a tuple.
+        if ty.array_variant().is_some_and(crate::types::is_array_variant_composite) {
+            let target = concrete(ty)?;
+            if value.ty != target {
+                let count = target
+                    .as_tensor()
+                    .and_then(|t| t.concrete_dim(0))
+                    .ok_or_else(|| error("loop value array requires a fixed size"))?;
+                let element = target.elem_type().unwrap();
+                let mut fields = Vec::with_capacity(count);
+                for i in 0..count {
+                    let field = self.index(value.clone(), Self::number(i as u32))?;
+                    fields.push(self.loop_state(field, element)?);
+                }
+                return self.op(OpTag::ArrayLit(count), fields, target);
+            }
+        }
+        self.cast(value, ty)
     }
     pub(super) fn cast(&mut self, value: Typed, ty: &Type) -> Result<Typed, OptimizeError> {
         let ty = strip_existentials(ty);

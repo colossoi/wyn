@@ -332,6 +332,7 @@ impl Machine<'_> {
                 frame.locals.get(name).unwrap_or_else(|| panic!("unbound local {name}")).clone()
             }
             Code::Source(id) => self.source(*id, frame),
+            Code::LoopState(value, _) => self.value(value, frame),
             Code::Array(array) => self.array(array, frame),
             Code::Workgroup { id, count, .. } => self
                 .shared
@@ -516,6 +517,11 @@ fn primitive(name: &str, args: Vec<Value>) -> Value {
             Value::LengthOnly(n) => *n as i64,
             value => value.elements().len() as i64,
         }),
+        "_w_intrinsic_array_with_inplace" => {
+            let mut elements = args[0].elements();
+            elements[args[1].int() as usize] = args[2].clone();
+            Value::values(elements)
+        }
         "index" => args[0].at(args[1].int() as usize),
         "slice" if matches!(args[0], Value::Discarded | Value::LengthOnly(_)) => {
             Value::LengthOnly(args[1].int() as usize)

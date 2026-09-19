@@ -1,0 +1,4 @@
+entry repro(n: i32) [4]i32 =
+  let (output,_i) = loop (output,i) = (replicate(4,-1i32),0i32)
+    while i < n do (output with [i % 4] = i,i+1) in
+  output

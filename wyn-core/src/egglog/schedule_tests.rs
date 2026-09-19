@@ -1154,3 +1154,29 @@ fn result_copy_waits_for_its_entry_launches_and_publishes_storage() {
         assert!(owned.iter().all(|k| k.resources.iter().all(|r| r.resource != resource)));
     }
 }
+
+#[test]
+fn array_update_output_capacity() {
+    let result = compile(include_str!(
+        "../../../testfiles/regressions/array_update_return.wyn"
+    ));
+    assert!(result.state.abi.bindings.values().all(|binding| matches!(
+        binding.length,
+        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: 16 })
+    )));
+    assert_eq!(run(&result, vec![]), [Value::array([-1, -1, -1, 2])]);
+}
+
+#[test]
+fn array_update_loop_preserves_unwritten_elements_and_wraps() {
+    let result = compile(include_str!(
+        "../../../testfiles/regressions/array_update_loop.wyn"
+    ));
+    for n in [-1, 0, 1, 4, 5, 9] {
+        let mut expected = [-1; 4];
+        for i in 0..n {
+            expected[i as usize % 4] = i;
+        }
+        assert_eq!(run(&result, vec![Value::Int(n)]), [Value::array(expected)]);
+    }
+}

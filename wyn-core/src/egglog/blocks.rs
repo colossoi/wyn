@@ -81,6 +81,8 @@ pub enum Value {
     Local(String),
     Int(u32),
     Source(ExprId),
+    /// Preserve the declared value representation across a source loop edge.
+    LoopState(Box<Value>, TypeId),
     Array(Array),
     Buffer(BufferId),
     Workgroup {

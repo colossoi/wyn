@@ -27,7 +27,7 @@
        (LiveLength (Result op i) n) (FreshValue (Result op i))) :ruleset allocation)
 (rule ((TotalResult op i t))
       ((ElementType (Result op i) t) (CapacityExtent (Result op i) (Fixed 1))
-       (LiveLength (Result op i) (Fixed 1)) (FreshValue (Result op i))) :ruleset allocation)
+       (FreshValue (Result op i))) :ruleset allocation)
 (rule ((FilterResult op t) (InputDomain op n))
       ((ElementType (Result op 0) t) (CapacityExtent (Result op 0) n)
        (LiveLength (Result op 0) (Stored (Result op 1)))
@@ -101,7 +101,9 @@
 (rule ((= storage (Backing value))) ((AbiStorageAlias (AbiResource value) (AbiResource storage))) :ruleset abi)
 (rule ((= value (AbiResource (Source (ExprId e))))) ((AbiAlias value (AbiExpr e))) :ruleset abi)
 (rule ((LiveLength value n)) ((AbiArrayLength (AbiResource value) (AbiExtent n))) :ruleset abi)
-(rule ((CapacityExtent value n)) ((AbiArrayBound (AbiResource value) (AbiExtent n))) :ruleset abi)
+; A scalar slot can contain a whole array or tuple. Its allocation count is
+; not a bound on that value's array length.
+(rule ((CapacityExtent value n) (LiveLength value live)) ((AbiArrayBound (AbiResource value) (AbiExtent n))) :ruleset abi)
 (rule ((SameBacking value (ExprId e))) ((AbiAlias (AbiResource value) (AbiExpr e))) :ruleset abi)
 (rule ((ValueRef (ExprId e) value)) ((AbiStorageAlias (AbiExpr e) (AbiResource value))) :ruleset abi)
 (rule ((DirectResult (ExprId e) op i)) ((AbiAlias (AbiExpr e) (AbiResource (Result op i)))) :ruleset abi)

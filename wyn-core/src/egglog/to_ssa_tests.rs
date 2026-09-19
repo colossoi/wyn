@@ -461,8 +461,42 @@ fn scatter_local_destinations_reach_wgsl() {
 }
 
 #[test]
+fn array_updates_preserve_loop_state_and_output_capacity() {
+    use pipeline_descriptor::{Binding, BufferLen};
+    for source in [
+        include_str!("../../../testfiles/regressions/array_update_return.wyn"),
+        include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
+        "entry main(n: i32) [4]i32 =
+            let (_, output) = loop (i, output) = (0i32, replicate(4, -1i32))
+                while i < n do (i+1, output with [i % 4] = i) in output",
+    ] {
+        compile(source);
+        for descriptor in [
+            pipeline(source).pipeline,
+            crate::compile_thru_spirv(source).unwrap().pipeline,
+        ] {
+            let [result] = descriptor.source_results.as_slice() else {
+                panic!("one array result");
+            };
+            let Pipeline::Compute(p) = &descriptor.pipelines[result.pipeline_index] else {
+                panic!("compute result");
+            };
+            assert!(
+                p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
+            set, binding, length: Some(BufferLen::Fixed { bytes: 16 }), ..
+        } if (*set, *binding) == (result.set, result.binding))),
+                "{source}\n{:?}",
+                p.bindings
+            );
+        }
+    }
+}
+
+#[test]
 fn existing_spirv_backend_also_accepts_the_handoff() {
     for source in [
+        include_str!("../../../testfiles/regressions/array_update_return.wyn"),
+        include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
         include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
         "entry main(n: i32) [4]i32 = loop acc = [7, 7, 7, 7] for k < n do scatter(acc, [k], [k+10])",
         "entry main() [4]i32 = scatter(replicate(4, 7i32), [2i32, 0i32], [30i32, 10i32])",

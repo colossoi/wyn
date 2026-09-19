@@ -212,7 +212,7 @@ fn check_value(data: &Program<Scheduled>, value: &Value) -> Result<(), OptimizeE
             return Err(error("unknown opaque source expression"))
         }
         Value::Buffer(id) if data.state.buffers.get(*id).is_none() => return Err(error("unknown buffer")),
-        Value::Field(value, _) => check_value(data, value)?,
+        Value::Field(value, _) | Value::LoopState(value, _) => check_value(data, value)?,
         Value::Tuple(values) | Value::Primitive(_, values) => {
             for value in values {
                 check_value(data, value)?;
