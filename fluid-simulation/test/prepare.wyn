@@ -1,0 +1,17 @@
+-- Combined spatial integration test, not a minimal reproducer. Currently
+-- blocked by nested replicate lowering (neighbors.wyn) and boolean reduction
+-- readback (bool_reduce_repro.wyn). Check compilation AND shader validation.
+--   wyn build fluid-simulation/test/prepare.wyn -o /tmp/prepare.spv
+--   extra/viz/target/release/viz validate /tmp/prepare.spv
+-- Expected: particle IDs in velocity.x reorder to [3,1,2,0], neighbor counts
+-- are [3,3,3,1], and overflow is [0]. Do not execute a shader failing validation.
+
+module S = import "pkg:spatial"
+entry prepare() ([]vec4f32,[]i32,[]u32,[]i32,[]i32) =
+  let ids = 0i32..<4 in
+  let positions = [@[8.0,8.0,8.0,0.35],@[1.5,1.0,1.0,0.35],@[1.0,1.0,1.0,0.35],@[1.0,1.5,1.0,0.35]] in
+  let velocities = map(|i| @[f32(i),0.0,0.0,0.0],ids) in
+  let slots = 0i32..<80 in
+  let old = map(|i| if i == 0 then 0u32 else 1073741824u32,slots) in
+  let (p,v,tree,neighbors,counts,overflow) = S.prepare(positions,velocities,ids,old,slots,0i32..<3072,16.0,1.7,2) in
+  (v,counts,tree,neighbors,[if overflow then 1 else 0])

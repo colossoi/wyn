@@ -1,0 +1,61 @@
+module Tree = import "octree"
+module Hilbert = import "hilbert"
+
+-- A cornerstone leaf's containing spatial cube from its Hilbert interval.
+def cube(key: u32, span: u32, world_size: f32) (vec3f32,vec3f32) =
+  let (cell,rest) = loop (cell,rest) = (1u32,span) while rest > 1u32 do (cell*2u32,rest/8u32) in
+  let p = Hilbert.decode(key) in
+  let lo = @[f32((p.x/cell)*cell),f32((p.y/cell)*cell),f32((p.z/cell)*cell)]*(world_size/1024.0) in
+  (lo,lo+f32(cell)*(world_size/1024.0))
+
+def intersects(a: vec3f32,b: vec3f32,c: vec3f32,d: vec3f32) bool =
+  a.x <= d.x && a.y <= d.y && a.z <= d.z && b.x >= c.x && b.y >= c.y && b.z >= c.z
+
+-- One BFS per occupied leaf. Queue stores parent Hilbert intervals, equivalent
+-- to upstream's first-child-node queue; children are visited in Hilbert order.
+-- Result: 256 candidate leaf indices, count, overflow flag.
+def leaf_neighbors<[n],[m]>(leaf: i32, positions: [n]vec4f32, corners: [m]u32,
+                           offsets: [m]i32, radius: f32, world_size: f32) [258]i32 =
+  let empty = replicate(258,-1i32) in
+  if leaf+1 >= length(corners) then (empty with [256] = 0) with [257] = 0 else
+  let first = offsets[leaf] in let last = offsets[leaf+1] in
+  if first == last then (empty with [256] = 0) with [257] = 0 else
+  let (lo,hi,j) = loop (lo,hi,j) = (positions[first].xyz,positions[first].xyz,first+1)
+    while j < last do (min(lo,positions[j].xyz),max(hi,positions[j].xyz),j+1) in
+  let box_lo = lo-radius in let box_hi = hi+radius in
+  let queue0 = replicate(1024,@[0u32,0u32]) with [0] = @[0u32,1073741824u32] in
+  let (queue,head,tail,output,count,overflow) =
+    loop (queue,head,tail,output,count,overflow) = (queue0,0i32,1i32,empty,0i32,false)
+    while head < tail && !overflow do
+      let node = queue[head % 1024] in
+      let (low,high) = cube(node.x,node.y,world_size) in
+      let slot = Tree.lower_bound(corners,node.x) in
+      let hit = intersects(low,high,box_lo,box_hi) in
+      let is_leaf = slot+1 < length(corners) && corners[slot] == node.x && corners[slot+1] == node.x+node.y in
+      if !hit then (queue,head+1,tail,output,count,overflow)
+      else if is_leaf then
+        let occupied = offsets[slot] < offsets[slot+1] in
+        let result = if occupied && count < 256 then output with [count] = slot else output in
+        (queue,head+1,tail,result,if occupied then min(count+1,256) else count,occupied && count >= 256)
+      else
+        let child_span = node.y/8u32 in
+        let (q,k) = loop (q,k) = (queue,0i32) while k < 8 do
+          (q with [(tail+k)%1024] = @[node.x+u32(k)*child_span,child_span],k+1) in
+        (q,head+1,tail+8,output,count,tail+8-(head+1) > 1024) in
+  (output with [256] = count) with [257] = if overflow then 1 else 0
+
+-- Narrow phase: preserve candidate traversal order and the 96-neighbor cap.
+-- The final two slots expose count and candidate-list overflow.
+def particle_neighbors<[n],[m]>(i: i32, positions: [n]vec4f32, offsets: [m]i32,
+                                candidates: [258]i32, radius: f32) [98]i32 =
+  let (result,count,li,j) = loop (result,count,li,j) = (replicate(98,-1i32),0i32,0i32,0i32)
+    while li < candidates[256] && count < 96 do
+      let leaf = candidates[li] in
+      let first = offsets[leaf] in let last = offsets[leaf+1] in
+      let index = first+j in
+      if index >= last then (result,count,li+1,0i32) else
+        let r = positions[i].xyz-positions[index].xyz in
+        let hit = dot(r,r) < radius*radius in
+        (if hit then result with [count] = index else result,
+         if hit then count+1 else count,li,j+1) in
+  (result with [96] = count) with [97] = candidates[257]

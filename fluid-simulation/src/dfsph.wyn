@@ -1,0 +1,126 @@
+-- DFSPH equations ported from MarcVivas/fluid-simulation (MIT).
+-- Unit particle mass; positions.w is collision radius. Exact compact support.
+-- Each map is a parallel particle pass; gathers publish intermediate buffers.
+def dt: f32 = 1.0 / 90.0
+def h: f32 = 1.7
+def rest_density: f32 = 1.0
+
+def kernel(r: vec3f32) f32 =
+  let q = max(h*h - dot(r,r), 0.0) in
+  (315.0 / (64.0 * 3.14159265359 * h**9.0)) * q*q*q
+
+def gradient(r: vec3f32) vec3f32 =
+  let d2 = dot(r,r) in
+  if d2 <= 0.000000000001 || d2 >= h*h then @[0.0,0.0,0.0]
+  else let d = f32.sqrt(d2) in
+    (-45.0 / (3.14159265359 * h**6.0)) * (h-d)*(h-d) / d * r
+
+-- Density and reciprocal pressure-system diagonal, including self density.
+def density_factor<[n]>(p: vec4f32, positions: [n]vec4f32) vec2f32 =
+  let (rho,g,g2,j) = loop (rho,g,g2,j) = (0.0,@[0.0,0.0,0.0],0.0,0i32)
+    while j < length(positions) do
+      let r = p.xyz - positions[j].xyz in
+      let grad = gradient(r) in
+      (rho + kernel(r), g + grad, g2 + dot(grad,grad), j+1) in
+  let denom = dot(g,g) + g2 in
+  @[rho, if denom > 0.000001 then 1.0 / denom else 0.0]
+
+def coefficient<[n]>(i: i32, positions: [n]vec4f32, velocities: [n]vec4f32,
+                factors: [n]vec2f32, density_solve: bool) f32 =
+  let (rate,j) = loop (rate,j) = (0.0,0i32) while j < length(positions) do
+    (rate + dot(velocities[i].xyz - velocities[j].xyz,
+                gradient(positions[i].xyz - positions[j].xyz)),j+1) in
+  let residual = if density_solve then
+    max(factors[i].x + dt*rate - rest_density,0.0) else max(rate,0.0) in
+  residual * factors[i].y / (if density_solve then dt*dt else dt)
+
+def pressure_velocity<[n]>(i: i32, positions: [n]vec4f32, velocities: [n]vec4f32,
+                      coefficients: [n]f32) vec4f32 =
+  let (correction,j) = loop (correction,j) = (@[0.0,0.0,0.0],0i32)
+    while j < length(positions) do
+      (correction + (coefficients[i] + coefficients[j]) *
+        gradient(positions[i].xyz - positions[j].xyz),j+1) in
+  @[ (velocities[i].xyz - dt*correction)..., 0.0 ]
+
+def project<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32,
+            factors: [n]vec2f32, density_solve: bool, ids: [n]i32) [n]vec4f32 =
+  let coefficients = map(|i| coefficient(i,positions,velocities,factors,density_solve),
+                         ids) in
+  map(|i| pressure_velocity(i,positions,velocities,coefficients),ids)
+
+def external(p: vec4f32, v: vec4f32, bounds: vec3f32) vec4f32 =
+  let lower = clamp(1.0 - (p.xyz - p.w) / 0.35,@[0.0,0.0,0.0],@[1.0,1.0,1.0]) in
+  let upper = clamp(1.0 - (bounds - p.w - p.xyz) / 0.35,@[0.0,0.0,0.0],@[1.0,1.0,1.0]) in
+  let a = @[0.0,-9.8,0.0] + 40.0*(lower*lower - upper*upper) in
+  @[(v.xyz * f32.exp(-0.001*dt) + dt*a)...,0.0]
+
+def collision_velocity(x: f32, v: f32, lo: f32, hi: f32) f32 =
+  if x <= lo then max(v,0.0) else if x >= hi then min(v,0.0) else v
+
+def integrate(p: vec4f32, v: vec4f32, bounds: vec3f32) (vec4f32,vec4f32) =
+  let x = p.xyz + dt*v.xyz in
+  let hi = bounds - p.w in
+  (@[clamp(x.x,p.w,hi.x),clamp(x.y,p.w,hi.y),clamp(x.z,p.w,hi.z),p.w],
+   @[collision_velocity(x.x,v.x,p.w,hi.x),collision_velocity(x.y,v.y,p.w,hi.y),
+     collision_velocity(x.z,v.z,p.w,hi.z),0.0])
+
+-- Upstream default: one divergence iteration, external forces, one density
+-- iteration, then integrate. All pressure updates read a frozen velocity pass.
+def step<[n]>(positions: [n]vec4f32, velocities: [n]vec4f32, bounds: vec3f32, ids: [n]i32)
+    ([n]vec4f32,[n]vec4f32) =
+  let factors = map(|p| density_factor(p,positions),positions) in
+  let divergence_free = project(positions,velocities,factors,false,ids) in
+  let accelerated = map(|i| external(positions[i],divergence_free[i],bounds),
+                        ids) in
+  let corrected = project(positions,accelerated,factors,true,ids) in
+  let integrated = map(|i| integrate(positions[i],corrected[i],bounds),ids) in
+  (map(|(p,_v)| p,integrated),map(|(_p,v)| v,integrated))
+
+-- Neighbor-list variant; layout matches upstream 32-particle tiles.
+def neighbor_address(i: i32, ordinal: i32) i32 =
+  (i/32)*96*32 + ordinal*32 + i%32
+
+-- Density and reciprocal pressure-system diagonal, including self density.
+def density_factor_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, neighbors: [k]i32, counts: [n]i32) vec2f32 =
+  let (rho,g,g2,j) = loop (rho,g,g2,j) = (0.0,@[0.0,0.0,0.0],0.0,0i32)
+    while j < counts[i] do
+      let r = positions[i].xyz - positions[neighbors[neighbor_address(i,j)]].xyz in
+      let grad = gradient(r) in
+      (rho + kernel(r), g + grad, g2 + dot(grad,grad), j+1) in
+  let denom = dot(g,g) + g2 in
+  @[rho, if denom > 0.000001 then 1.0 / denom else 0.0]
+
+def coefficient_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, velocities: [n]vec4f32,
+                factors: [n]vec2f32, density_solve: bool, neighbors: [k]i32, counts: [n]i32) f32 =
+  let (rate,j) = loop (rate,j) = (0.0,0i32) while j < counts[i] do
+    (rate + dot(velocities[i].xyz - velocities[neighbors[neighbor_address(i,j)]].xyz,
+                gradient(positions[i].xyz - positions[neighbors[neighbor_address(i,j)]].xyz)),j+1) in
+  let residual = if density_solve then
+    max(factors[i].x + dt*rate - rest_density,0.0) else max(rate,0.0) in
+  residual * factors[i].y / (if density_solve then dt*dt else dt)
+
+def pressure_velocity_neighbors<[n],[k]>(i: i32, positions: [n]vec4f32, velocities: [n]vec4f32,
+                      coefficients: [n]f32, neighbors: [k]i32, counts: [n]i32) vec4f32 =
+  let (correction,j) = loop (correction,j) = (@[0.0,0.0,0.0],0i32)
+    while j < counts[i] do
+      (correction + (coefficients[i] + coefficients[neighbors[neighbor_address(i,j)]]) *
+        gradient(positions[i].xyz - positions[neighbors[neighbor_address(i,j)]].xyz),j+1) in
+  @[ (velocities[i].xyz - dt*correction)..., 0.0 ]
+
+def project_neighbors<[n],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
+            factors: [n]vec2f32, density_solve: bool, ids: [n]i32, neighbors: [k]i32, counts: [n]i32) [n]vec4f32 =
+  let coefficients = map(|i| coefficient_neighbors(i,positions,velocities,factors,density_solve,neighbors,counts),
+                         ids) in
+  map(|i| pressure_velocity_neighbors(i,positions,velocities,coefficients,neighbors,counts),ids)
+
+-- Upstream default: one divergence iteration, external forces, one density
+-- iteration, then integrate. All pressure updates read a frozen velocity pass.
+def step_neighbors<[n],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32, bounds: vec3f32, ids: [n]i32, neighbors: [k]i32, counts: [n]i32)
+    ([n]vec4f32,[n]vec4f32) =
+  let factors = map(|i| density_factor_neighbors(i,positions,neighbors,counts),ids) in
+  let divergence_free = project_neighbors(positions,velocities,factors,false,ids,neighbors,counts) in
+  let accelerated = map(|i| external(positions[i],divergence_free[i],bounds),
+                        ids) in
+  let corrected = project_neighbors(positions,accelerated,factors,true,ids,neighbors,counts) in
+  let integrated = map(|i| integrate(positions[i],corrected[i],bounds),ids) in
+  (map(|(p,_v)| p,integrated),map(|(_p,v)| v,integrated))

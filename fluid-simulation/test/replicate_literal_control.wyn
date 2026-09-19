@@ -1,0 +1,9 @@
+-- Passing control for replicate_repro.wyn: only the initializer differs.
+--   wyn build fluid-simulation/test/replicate_literal_control.wyn -o /tmp/literal.spv
+-- Expected: compilation succeeds, output is 16 bytes; n=2 gives [0,1,-1,-1].
+-- Compare with replicate_repro.wyn when investigating loop array representation.
+
+entry repro(n: i32) [4]i32 =
+  let (output,_i) = loop (output,i) = ([-1i32,-1i32,-1i32,-1i32],0i32)
+    while i < n do (output with [i % 4] = i,i+1) in
+  output

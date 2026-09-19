@@ -1,0 +1,18 @@
+-- FIXED: compiler 2026-09-18 20:36; SPIR-V and WGSL GPU outputs match
+-- the scalar reference, without changing the shared integration map.
+-- Neighbor-list solver fixture; former shared integration-map failure:
+-- "fusion body composition disagrees with its legality facts".
+--   wyn build fluid-simulation/test/step_neighbors.wyn -o /tmp/step-neighbors.spv
+-- Smaller reproducer: fusion_repro.wyn. Expected: two 64-byte output arrays;
+-- check_neighbors_step.py compares them with the scalar physics reference.
+
+module Fluid = import "../src/dfsph"
+entry step() ([]vec4f32,[]vec4f32) =
+  let positions = [@[5.0,5.0,5.0,0.35],@[5.7,5.0,5.0,0.35],
+                   @[0.35,0.36,0.35,0.35],@[15.65,11.64,9.65,0.35]] in
+  let velocities = [@[1.0,0.0,0.0,0.0],@[-1.0,0.0,0.0,0.0],
+                    @[-2.0,-3.0,-4.0,0.0],@[2.0,3.0,4.0,0.0]] in
+  let neighbors = map(|address|
+    let i = address%32 in let j = (address/32)%96 in
+    if i < 2 && j < 2 then j else if i < 4 && j == 0 then i else -1i32,0i32..<3072) in
+  Fluid.step_neighbors(positions,velocities,@[16.0,12.0,10.0],0i32..<4,neighbors,[2i32,2i32,1i32,1i32])

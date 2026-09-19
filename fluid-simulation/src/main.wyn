@@ -1,0 +1,39 @@
+module Spatial = import "pkg:spatial"
+module Fluid = import "dfsph"
+import "pkg:presets"
+module Renderer = import "pkg:renderer"
+
+-- Two 2,160-particle blocks; persistent Cornerstone octree and tiled neighbors.
+def count: i32 = 4320
+def tree_capacity: i32 = 4097
+def leaf_threshold: i32 = 32
+def bounds: vec3f32 = @[56.0,35.0,30.0]
+
+entry fluid(previous_positions: []vec4f32, previous_velocities: []vec4f32,
+            previous_tree: []u32, frame: u32, preset: i32, running: i32,
+            resolution: vec3f32, mouse: vec4f32,
+            keyboard: texture2d, _kbd_samp: sampler,
+            screen: render_target<vec4f32>)
+    ([]vec4f32,[]vec4f32,[]u32,render_target<vec4f32>) =
+  let reset = frame < 2u32 || texture_load(keyboard,@[82i32,0i32],0).x > 0.5 in
+  let active = (texture_load(keyboard,@[32i32,2i32],0).x > 0.5) != (running != 0) in
+  let prev_p = previous_positions[0..count] in
+  let prev_v = previous_velocities[0..count] in
+  let current_p = map(|i| if reset then let (p,_v) = particle(i,count,preset,bounds,Fluid.h * 0.85) in p
+                         else prev_p[i],0i32..<count) in
+  let current_v = map(|i| if reset then let (_p,v) = particle(i,count,preset,bounds,Fluid.h * 0.85) in v
+                         else prev_v[i],0i32..<count) in
+  let tree_slots = 0i32..<tree_capacity in
+  let old_tree = previous_tree[0..tree_capacity] in
+  let starting_tree = map(|i| if reset then
+    if i == 0 then 0u32 else 1073741824u32 else old_tree[i],tree_slots) in
+  let (sorted_p,sorted_v,tree,neighbors,counts,overflow) = Spatial.prepare(
+    current_p,current_v,0i32..<count,starting_tree,tree_slots,
+    0i32..<(((count+31)/32)*32*96),max(bounds.x,max(bounds.y,bounds.z)),Fluid.h,leaf_threshold) in
+  let (stepped_p,stepped_v) = Fluid.step_neighbors(sorted_p,sorted_v,bounds,0i32..<count,neighbors,counts) in
+  let positions = map(|i| if active && !reset && !overflow then stepped_p[i] else current_p[i],0i32..<count) in
+  let velocities = map(|i| if active && !reset && !overflow then stepped_v[i] else current_v[i],0i32..<count) in
+  let raster = rasterize_triangles(direct_draw(3u32,1u32),Renderer.vertex_main) in
+  let image = shade(screen,raster,|_value,coord,_facing,_primitive,_sample|
+    if overflow then @[0.7,0.0,0.1,1.0] else Renderer.pixel(positions,velocities,coord.xy,resolution,mouse,bounds)) in
+  (positions,velocities,tree,image)

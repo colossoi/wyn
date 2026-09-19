@@ -1,0 +1,34 @@
+-- Initial conditions adapted from upstream initial_state.rs (MIT).
+import "pkg:rng"
+def jitter(i: i32, axis: u32) f32 =
+  let key = fasthash.seed(u32(i)*2654435761u32 + 11u32) in
+  (f32(fasthash.at_u32(key,axis) >> 8u32)/16777216.0*2.0-1.0)*0.007
+
+def side_count(n: i32) i32 =
+  let s = max(1i32,i32(f32.floor(f32(n)**(1.0/3.0)))) in
+  if s*s*s < n then s+1 else s
+
+-- preset: 0 colliding blocks, 1 double dam break, 2 rotating block.
+def particle(i: i32, n: i32, preset: i32, bounds: vec3f32, spacing: f32) (vec4f32,vec4f32) =
+  let rotating = preset == 2 in
+  let half = n / 2 in
+  let right = i >= half in
+  let count = if rotating then n else if right then n-half else half in
+  let side = side_count(count) in
+  let width = f32(side)*spacing in
+  let local = if rotating || !right then i else i-half in
+  let cell = @[f32(local/(side*side)),f32((local/side)%side),f32(local%side)] in
+  let x0 = if right then max(bounds.x-width-spacing,spacing) else spacing in
+  let corner = if rotating then
+      @[max(bounds.x*0.5-width*0.5,spacing),spacing,max(bounds.z*0.5-width*0.5,spacing)]
+    else if preset == 1 then @[x0,spacing,spacing]
+    else @[x0,bounds.y*0.5-width*0.5,bounds.z*0.5-width*0.5] in
+  let p = corner + spacing*cell + @[jitter(i,0u32),jitter(i,1u32),jitter(i,2u32)] in
+  let r = @[p.x-bounds.x*0.5,0.0,p.z-bounds.z*0.5] in
+  let d = magnitude(r) in
+  let v = if rotating then
+      if d > 0.1 then @[-r.z,0.0,r.x]/d * (4.5*clamp(d/(width*0.5),0.2,1.0))
+      else @[0.0,0.0,0.0]
+    else if preset == 1 then @[0.0,0.0,0.0]
+    else @[if right then -6.0 else 6.0,0.0,0.0] in
+  (@[p...,0.35],@[v...,0.0])

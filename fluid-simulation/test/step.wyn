@@ -1,0 +1,16 @@
+-- FIXED: compiler 2026-09-18 20:36; SPIR-V and WGSL GPU outputs match
+-- the scalar reference, without changing the shared integration map.
+-- Larger fusion reproducer and numerical solver fixture. Former failure:
+-- "fusion body composition disagrees with its legality facts" while fusing
+-- the shared integration result with its position/velocity projections.
+--   wyn build fluid-simulation/test/step.wyn -o /tmp/step.spv
+-- Smaller reproducer: fusion_repro.wyn. Expected: two 64-byte output arrays;
+-- check.py compares their values with the scalar physics reference.
+
+module Fluid = import "../src/dfsph"
+entry step() ([]vec4f32,[]vec4f32) =
+  let positions = [@[5.0,5.0,5.0,0.35],@[5.7,5.0,5.0,0.35],
+                   @[0.35,0.36,0.35,0.35],@[15.65,11.64,9.65,0.35]] in
+  let velocities = [@[1.0,0.0,0.0,0.0],@[-1.0,0.0,0.0,0.0],
+                    @[-2.0,-3.0,-4.0,0.0],@[2.0,3.0,4.0,0.0]] in
+  Fluid.step(positions,velocities,@[16.0,12.0,10.0],0i32..<4)

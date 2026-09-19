@@ -1,0 +1,6 @@
+module S = import "pkg:spatial"
+entry hilbert() []vec4u32 =
+  map(|i|
+    let p = @[f32((i*137)%1024),f32((i*293)%1024),f32((i*617)%1024)] in
+    let key = S.Hilbert.encode(p,1024.0) in
+    @[key,(S.Hilbert.decode(key))...],0i32..<128)

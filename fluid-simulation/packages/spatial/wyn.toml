@@ -1,0 +1,9 @@
+manifest-version = 1
+[package]
+name = "fluid/spatial"
+version = "v0.1.0"
+wyn = "v0.1.0"
+library = "src/lib.wyn"
+
+[dependencies]
+sort = { package = "wyn/sort", version = "v0.1.0", path = "../../../pkg/sort" }

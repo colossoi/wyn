@@ -1,0 +1,45 @@
+-- Cornerstone octree, same split rule and 30-bit key domain as upstream.
+-- Trailing entries are the 2^30 sentinel. The last active boundary is sentinel.
+def sentinel: u32 = 1073741824u32
+
+def lower_bound<[n]>(keys: [n]u32, value: u32) i32 =
+  let (lo,hi) = loop (lo,hi) = (0i32,length(keys)) while lo < hi do
+    let mid = lo+(hi-lo)/2 in
+    if keys[mid] < value then (mid+1,hi) else (lo,mid) in lo
+
+-- One subdivision round. ncrit is upstream's device subgroup size (32/64).
+-- Returns the old tree and overflow=true if the next tree cannot fit.
+def split<[n],[m]>(keys: [n]u32, corners: [m]u32, slots: [m]i32, ncrit: i32)
+    ([m]u32,bool) =
+  let counts = map(|i|
+    if i+1 >= length(corners) then 0i32 else
+    let lo = corners[i] in let hi = corners[i+1] in
+    if lo >= sentinel then 0i32 else
+    if hi-lo >= 8u32 && lower_bound(keys,hi)-lower_bound(keys,lo) > ncrit
+    then 8i32 else 1i32,slots) in
+  let ends = scan(|a,b| a+b,0i32,counts) in
+  let total = ends[length(ends)-1] in
+  let overflow = total >= length(corners) in
+  let next = map(|i|
+    if overflow then corners[i] else if i >= total then sentinel else
+    let (lo,hi) = loop (lo,hi) = (0i32,length(ends)) while lo < hi do
+      let mid = lo+(hi-lo)/2 in
+      if ends[mid] <= i then (mid+1,hi) else (lo,mid) in
+    let before = ends[lo]-counts[lo] in
+    corners[lo]+u32(i-before)*((corners[lo+1]-corners[lo])/u32(counts[lo])),slots) in
+  (next,overflow)
+
+-- Ten rounds reach the finest possible cell, retaining previous subdivisions.
+def build<[n],[m]>(keys: [n]u32, previous: [m]u32, slots: [m]i32, ncrit: i32)
+    ([m]u32,bool) =
+  let (t1,e1) = split(keys,previous,slots,ncrit) in
+  let (t2,e2) = split(keys,t1,slots,ncrit) in
+  let (t3,e3) = split(keys,t2,slots,ncrit) in
+  let (t4,e4) = split(keys,t3,slots,ncrit) in
+  let (t5,e5) = split(keys,t4,slots,ncrit) in
+  let (t6,e6) = split(keys,t5,slots,ncrit) in
+  let (t7,e7) = split(keys,t6,slots,ncrit) in
+  let (t8,e8) = split(keys,t7,slots,ncrit) in
+  let (t9,e9) = split(keys,t8,slots,ncrit) in
+  let (t10,e10) = split(keys,t9,slots,ncrit) in
+  (t10,e1 || e2 || e3 || e4 || e5 || e6 || e7 || e8 || e9 || e10)

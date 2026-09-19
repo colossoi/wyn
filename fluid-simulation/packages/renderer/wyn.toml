@@ -1,0 +1,10 @@
+manifest-version = 1
+
+[package]
+name = "fluid/renderer"
+version = "v0.1.0"
+wyn = "v0.1.0"
+library = "src/lib.wyn"
+
+[dependencies]
+gfx = { package = "wyn/gfx", version = "v0.1.0", path = "../../../pkg/gfx" }

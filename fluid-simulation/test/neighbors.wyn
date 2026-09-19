@@ -1,0 +1,16 @@
+-- Retest (installed compiler 2026-09-18 20:27): both targets compile;
+-- SPIR-V validates; both targets return the expected 98-element GPU result.
+-- Former failure: nested loop/branch state initialized by replicate failed SSA lowering:
+-- "shader interface: runtime-sized array requires a storage view".
+--   wyn build fluid-simulation/test/neighbors.wyn -o /tmp/neighbors.spv
+-- Expected: 392-byte output ([98]i32): indices 0 and 1, then 94 unused -1 slots,
+-- followed by neighbor count 2 and overflow flag 0.
+-- An earlier, separate output-size bug emitted only 4 bytes; that bug was fixed.
+
+module S = import "pkg:spatial"
+entry neighbors() [98]i32 =
+  let positions = [@[1.0,1.0,1.0,0.35],@[1.5,1.0,1.0,0.35],@[8.0,8.0,8.0,0.35]] in
+  let corners = [0u32,1073741824u32] in
+  let offsets = [0i32,3i32] in
+  let candidates = S.Neighbors.leaf_neighbors(0,positions,corners,offsets,1.7,16.0) in
+  S.Neighbors.particle_neighbors(0,positions,offsets,candidates,1.7)

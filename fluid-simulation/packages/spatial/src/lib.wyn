@@ -1,0 +1,33 @@
+module Hilbert = import "hilbert"
+module Sort = import "pkg:sort"
+module Octree = import "octree"
+module Neighbors = import "neighbors"
+
+-- Flat 32-particle tiled layout used by upstream DFSPH shaders.
+def neighbor_address(i: i32, ordinal: i32) i32 =
+  (i/32)*96*32 + ordinal*32 + i%32
+
+-- Sort, retain/refine the cornerstone tree, build broad and narrow phases.
+-- leaf_slots includes the sentinel slot; neighbor_slots includes padded tiles.
+def prepare<[n],[m],[k]>(positions: [n]vec4f32, velocities: [n]vec4f32,
+      ids: [n]i32, previous_tree: [m]u32, leaf_slots: [m]i32,
+      neighbor_slots: [k]i32, world_size: f32, radius: f32, ncrit: i32)
+    ([n]vec4f32,[n]vec4f32,[m]u32,[k]i32,[n]i32,bool) =
+  let pairs = map(|i| @[Hilbert.encode(positions[i].xyz,world_size),u32(i)],ids) in
+  let sorted = Sort.radix_sort(pairs,ids) in
+  let keys = map(|p| p.x,sorted) in
+  let p = map(|pair| positions[i32(pair.y)],sorted) in
+  let v = map(|pair| velocities[i32(pair.y)],sorted) in
+  let (tree,tree_overflow) = Octree.build(keys,previous_tree,leaf_slots,ncrit) in
+  let offsets = map(|key| Octree.lower_bound(keys,key),tree) in
+  let leaves = map(|i| Neighbors.leaf_neighbors(i,p,tree,offsets,radius,world_size),leaf_slots) in
+  let neighbors = map(|i|
+    let leaf = Octree.lower_bound(tree,keys[i]+1u32)-1 in
+    Neighbors.particle_neighbors(i,p,offsets,leaves[leaf],radius),ids) in
+  let tiled = map(|address|
+    let i = (address/(96*32))*32 + address%32 in
+    let ordinal = (address%(96*32))/32 in
+    if i < length(p) then neighbors[i][ordinal] else -1i32,neighbor_slots) in
+  let counts = map(|row| row[96],neighbors) in
+  let overflow = tree_overflow || reduce(|a,b| a || b,false,map(|row| row[97] != 0,neighbors)) in
+  (p,v,tree,tiled,counts,overflow)

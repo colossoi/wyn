@@ -1,0 +1,12 @@
+-- Retest (installed compiler 2026-09-18 20:27): builds in SPIR-V and WGSL;
+-- SPIR-V validates; both targets pass zero/nonzero reduction GPU readbacks.
+-- Former failure: build succeeded, but SPIR-V validation rejected LogicalOr with a
+-- bool operand and a u32 operand (materialized reduction result not converted).
+-- Reproduce from the repository root:
+--   wyn build fluid-simulation/test/bool_reduce_repro.wyn -o /tmp/bool-reduce.spv
+--   extra/viz/target/release/viz validate /tmp/bool-reduce.spv
+-- Expected: valid shader; for nonempty xs, result is [1] iff any element is nonzero.
+
+entry repro(xs: []i32) []i32 =
+  let any = reduce(|a,b| a || b,false,map(|x| x != 0,xs)) in
+  [if xs[0] > 0 || any then 1i32 else 0i32]

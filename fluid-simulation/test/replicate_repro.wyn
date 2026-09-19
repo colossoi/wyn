@@ -1,0 +1,11 @@
+-- Regression reproducer: FIXED in the installed compiler retested 2026-09-18.
+-- Former failure: type checking passed, but SPIR-V/WGSL SSA lowering reported
+-- "argument types differ": loop-carried storage view vs composite [4]i32.
+--   wyn build fluid-simulation/test/replicate_repro.wyn -o /tmp/replicate.spv
+-- Expected: successful compilation, 16-byte output; n=2 gives [0,1,-1,-1],
+-- n=0 gives [-1,-1,-1,-1]. Literal comparison: replicate_literal_control.wyn.
+
+entry repro(n: i32) [4]i32 =
+  let (output,_i) = loop (output,i) = (replicate(4,-1i32),0i32)
+    while i < n do (output with [i % 4] = i,i+1) in
+  output

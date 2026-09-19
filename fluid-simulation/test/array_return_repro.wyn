@@ -1,0 +1,10 @@
+-- Regression reproducer: FIXED in the installed compiler retested 2026-09-18.
+-- Former failure: compilation succeeded but the descriptor allocated 4 bytes
+-- for the [4]i32 output instead of 16 bytes, truncating GPU readback.
+--   wyn build fluid-simulation/test/array_return_repro.wyn -o /tmp/array-return.spv
+-- Inspect /tmp/array-return.json: output length must be fixed, bytes=16.
+-- Expected GPU output: [-1,-1,-1,2]. Both SPIR-V and WGSL passed the retest.
+
+entry array_return() [4]i32 =
+  let xs = [-1i32,-1i32,-1i32,-1i32] in
+  xs with [3] = 2i32

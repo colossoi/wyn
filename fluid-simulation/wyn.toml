@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "fluid/simulation"
+version = "v0.1.0"
+wyn = "v0.1.0"
+library = "src/main.wyn"
+
+[dependencies]
+presets = { package = "fluid/presets", version = "v0.1.0", path = "packages/presets" }
+renderer = { package = "fluid/renderer", version = "v0.1.0", path = "packages/renderer" }
+spatial = { package = "fluid/spatial", version = "v0.1.0", path = "packages/spatial" }
+sort = { package = "wyn/sort", version = "v0.1.0", path = "../pkg/sort" }

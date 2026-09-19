@@ -1,0 +1,40 @@
+-- Portable sphere renderer: nearest ray hit, with orbit camera and ground grid.
+import "pkg:gfx"
+def vertex_main(vi: u32, ii: u32, di: u32) vertex<vec2f32> =
+  vertex_output(if vi == 0u32 then @[-1.0,-1.0,0.0,1.0]
+    else if vi == 1u32 then @[3.0,-1.0,0.0,1.0] else @[-1.0,3.0,0.0,1.0],@[0.0,0.0])
+
+def pixel(positions: []vec4f32, velocities: []vec4f32, coord: vec2f32,
+          resolution: vec3f32, mouse: vec4f32, bounds: vec3f32) vec4f32 =
+  let azimuth = if mouse.z > 0.0 then (mouse.x/resolution.x-0.5)*6.28 else 0.45 in
+  let elevation = if mouse.z > 0.0 then (mouse.y/resolution.y-0.5)*1.8 else -0.3 in
+  let camera = { target = bounds*0.5, azimuth = azimuth, elevation = elevation,
+                 distance = bounds.x*1.65 } in
+  let (eye,ray) = gfx.camera.orbit.ray(
+    gfx.camera.ray_direction(45.0,resolution.xy,@[coord.x,resolution.y-coord.y]),camera) in
+  let floor_t = if ray.y < -0.00001 then -eye.y/ray.y else 100000.0 in
+  let floor_p = eye + ray*floor_t in
+  let on_floor = floor_t > 0.0 && floor_p.x >= 0.0 && floor_p.x <= bounds.x
+    && floor_p.z >= 0.0 && floor_p.z <= bounds.z in
+  let initial_t = if on_floor then floor_t else 100000.0 in
+  let (nearest,hit,j) = loop (nearest,hit,j) = (initial_t,-1i32,0i32)
+    while j < length(positions) do
+      let p = positions[j] in
+      let oc = eye-p.xyz in
+      let b = dot(oc,ray) in
+      let c = dot(oc,oc)-p.w*p.w in
+      let disc = b*b-c in
+      let t = -b-f32.sqrt(max(disc,0.0)) in
+      let closer = disc > 0.0 && t > 0.0 && t < nearest in
+      (if closer then t else nearest,if closer then j else hit,j+1) in
+  let background = if on_floor then
+      let grid = min(floor_p.x % 1.0,floor_p.z % 1.0) < 0.035 in
+      if grid then @[0.12,0.20,0.27] else @[0.045,0.08,0.12]
+    else @[0.015,0.025,0.045] in
+  let color = if hit < 0 then background else
+    let normal = normalize(eye + nearest*ray - positions[hit].xyz) in
+    let light = 0.25+0.75*max(dot(normal,normalize(@[-0.4,0.8,0.6])),0.0) in
+    let speed = clamp(magnitude(velocities[hit].xyz)/10.0,0.0,1.0) in
+    let tint = @[0.05+speed*0.4,0.4+speed*0.4,0.95] in
+    light*tint in
+  @[color...,1.0]

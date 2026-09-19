@@ -1,0 +1,7 @@
+module S = import "pkg:spatial"
+entry octree() ([]u32,[]i32) =
+  let keys = [0u32,1u32,2u32,3u32] in
+  let slots = 0i32..<16 in
+  let corners = map(|i| if i == 0 then 0u32 else 1073741824u32,slots) in
+  let (next,overflow) = S.Octree.split(keys,corners,slots,2) in
+  (next,[if overflow then 1 else 0])

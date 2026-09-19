@@ -1,0 +1,12 @@
+-- FIXED: installed compiler 2026-09-18 20:36 builds both targets.
+-- The full shared-map solver fixtures also pass GPU numerical checks.
+-- Former failure: compilation rejected fusion of a shared tuple-producing integration
+-- map with its projections: "fusion body composition disagrees with its
+-- legality facts" (family/OperationId numbers may change).
+--   wyn build fluid-simulation/test/fusion_repro.wyn -o /tmp/fusion.spv
+-- Expected: successful compilation returning two arrays of four vec4 values.
+
+module F = import "../src/dfsph"
+entry repro(p: []vec4f32, v: []vec4f32) ([]vec4f32,[]vec4f32) =
+  let integrated = map(|i| F.integrate(p[i],v[i],@[16.0,12.0,10.0]),0i32..<4) in
+  (map(|(p,_v)| p,integrated),map(|(_p,v)| v,integrated))

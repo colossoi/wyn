@@ -1,0 +1,32 @@
+-- Matching 30-bit Hilbert state machine from upstream HilbertHelpers.slang.
+def encode(position: vec3f32, world_size: f32) u32 =
+  let p = clamp(position / world_size,@[0.0,0.0,0.0],@[1.0,1.0,1.0])*1024.0 in
+  let (px,py,pz,key,level) = loop (px,py,pz,key,level) =
+    (min(u32(p.x),1023u32),min(u32(p.y),1023u32),min(u32(p.z),1023u32),0u32,9i32)
+    while level >= 0 do
+      let xi = (px >> u32(level)) & 1u32 in
+      let yi = (py >> u32(level)) & 1u32 in
+      let zi = (pz >> u32(level)) & 1u32 in
+      let octant = (xi << 2u32) | (yi << 1u32) | zi in
+      let table = [0u32,1u32,3u32,2u32,7u32,6u32,4u32,5u32] in
+      let mx = if xi != 0u32 && (yi == 0u32 || zi != 0u32) then 4294967295u32 else 0u32 in
+      let my = if (xi != 0u32 && (yi != 0u32 || zi != 0u32)) || (yi != 0u32 && zi == 0u32) then 4294967295u32 else 0u32 in
+      let mz = if (xi != 0u32 && yi == 0u32 && zi == 0u32) || (yi != 0u32 && zi == 0u32) then 4294967295u32 else 0u32 in
+      let x = px ^ mx in let y = py ^ my in let z = pz ^ mz in
+      let next = if zi != 0u32 then @[y,z,x] else if yi == 0u32 then @[z,y,x] else @[x,y,z] in
+      (next.x,next.y,next.z,(key << 3u32)+table[i32(octant)],level-1) in key
+
+def decode(key: u32) vec3u32 =
+  let (px,py,pz,level) = loop (px,py,pz,level) = (0u32,0u32,0u32,0u32)
+    while level < 10u32 do
+      let octant = (key >> (3u32*level)) & 7u32 in
+      let xi = octant >> 2u32 in let yi = (octant >> 1u32) & 1u32 in let zi = octant & 1u32 in
+      let p = if (yi ^ zi) != 0u32 then @[pz,px,py]
+        else if (xi == 0u32 && yi == 0u32 && zi == 0u32) || (xi != 0u32 && yi != 0u32 && zi != 0u32) then @[pz,py,px]
+        else @[px,py,pz] in
+      let mask = (1u32 << level)-1u32 in
+      let mx = if xi != 0u32 && (yi != 0u32 || zi != 0u32) then mask else 0u32 in
+      let my = if (xi != 0u32 && (yi == 0u32 || zi == 0u32)) || (xi == 0u32 && yi != 0u32 && zi != 0u32) then mask else 0u32 in
+      let mz = if (xi != 0u32 && yi == 0u32 && zi == 0u32) || (yi != 0u32 && zi != 0u32) then mask else 0u32 in
+      ((p.x ^ mx) | (xi << level),(p.y ^ my) | ((xi ^ yi) << level),
+       (p.z ^ mz) | ((yi ^ zi) << level),level+1u32) in @[px,py,pz]
