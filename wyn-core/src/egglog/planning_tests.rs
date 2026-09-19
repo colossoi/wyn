@@ -460,6 +460,7 @@ fn sliced_in_place_update_keeps_value_versions_and_shared_backing() {
         r#"{MAP}
         (SliceView (ExprId 3) (ExprId 2) (ExprId 10) (ExprId 11))
         (Site (OperationId 1) (RegionId 0)) (IndexedWrite (OperationId 1))
+        (InputDomain (OperationId 1) (Fixed 4))
         (UpdatedResult (OperationId 1) 0 (ExprId 3))
         (Operand (OperationId 1) "environment" (ExprId 3))
         (DirectResult (ExprId 4) (OperationId 1) 0)
@@ -475,9 +476,9 @@ fn sliced_in_place_update_keeps_value_versions_and_shared_backing() {
         &mut g,
         r#"
         (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
-        (= (Access (Stage (OperationId 1) "ordered") (Result (OperationId 0) 0)) 3)
+        (= (Access (Stage (OperationId 1) "scatter") (Result (OperationId 0) 0)) 3)
         (= (& (Access (Stage (OperationId 2) "elements") (Result (OperationId 0) 0)) 1) 1)
-        (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "ordered"))
+        (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "scatter"))
         (OrderEdge (End (OperationId 2)) (Gate 0))
         (OrderEdge (Gate 0) (Start (OperationId 1)))
     "#,
@@ -835,6 +836,7 @@ fn old_value_readers_precede_updates_without_a_precomputed_effect_edge() {
     let mut g = graph(&format!(
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0)) (IndexedWrite (OperationId 1))
+        (InputDomain (OperationId 1) (Fixed 4))
         (UpdatedResult (OperationId 1) 0 (ExprId 2))
         (Operand (OperationId 1) "environment" (ExprId 2))
         (Site (OperationId 2) (RegionId 0))
@@ -851,8 +853,8 @@ fn old_value_readers_precede_updates_without_a_precomputed_effect_edge() {
     check(
         &mut g,
         r#"
-        (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "ordered"))
-        (Before (Stage (OperationId 1) "ordered") (Stage (OperationId 3) "elements"))
+        (Before (Stage (OperationId 2) "elements") (Stage (OperationId 1) "scatter"))
+        (Before (Stage (OperationId 1) "scatter") (Stage (OperationId 3) "elements"))
         (= (Backing (Result (OperationId 1) 0)) (Result (OperationId 0) 0))
     "#,
     );
@@ -865,7 +867,8 @@ fn bucket_counts_and_overflow_are_typed_fresh_resources() {
     let mut g = graph(
         r#"
         (HostRoot 0 (RegionId 0)) (Site (OperationId 0) (RegionId 0))
-        (IndexedWrite (OperationId 0))
+        (BucketShape (OperationId 0) false)
+        (InputDomain (OperationId 0) (Fixed 4))
         (ParameterValue (ExprId 0))
         (UpdatedResult (OperationId 0) 0 (ExprId 0))
         (BucketResult (OperationId 0) (ExprId 0))

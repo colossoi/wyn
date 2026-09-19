@@ -172,7 +172,7 @@ fn maps_into_reduce_by_index_preserve_collisions_and_initial_bins() {
 }
 
 #[test]
-fn maps_into_scatter_preserve_last_write_and_invalid_index_guards() {
+fn maps_into_scatter_preserve_equal_writes_and_invalid_index_guards() {
     check_args(
         "entry main(dest: *[3]i32, xs: [5]i32) [3]i32 =
         scatter(dest, map(|x:i32|x-1, xs), map(|x:i32|x*7, xs))",

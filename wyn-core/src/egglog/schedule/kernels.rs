@@ -167,6 +167,32 @@ impl Planner<'_> {
         let value = match recipe {
             Recipe::Elements | Recipe::Totals | Recipe::Prefixes => self.parallel_screma(op, host)?,
             Recipe::Compact => self.parallel_filter(op, host)?,
+            Recipe::Scatter => {
+                let OperationKind::Scatter {
+                    destination,
+                    initialize,
+                    ..
+                } = self.data.operations[op].kind.clone()
+                else {
+                    return Err(error("scatter recipe requires a scatter operation"));
+                };
+                if initialize && !crate::egglog::data::is_scratch(&self.data.ir, destination.value) {
+                    let kernel = self.kernel(op, "initialize");
+                    let source = Value::Source(destination.value);
+                    let dest = self.slot(op, "output", 0, false);
+                    let copy = self.invocations(kernel, Value::op("length", [source.clone()]));
+                    let value = self.load(copy.body, source, copy.index.clone(), "initial");
+                    self.store(copy.body, &dest, copy.index.clone(), value);
+                    self.finish_loop(&copy, copy.body, vec![]);
+                    self.returns(copy.done, vec![]);
+                    self.dispatch(op, host, kernel);
+                }
+                let kernel = self.kernel(op, "scatter");
+                let (end, value) = self.indexed(op, kernel, false, None)?;
+                self.returns(end, vec![]);
+                self.dispatch(op, host, kernel);
+                value
+            }
             Recipe::Buckets => {
                 let clear = self.kernel(op, "clear");
                 let OperationKind::BucketScatter { ref destination, .. } = self.data.operations[op].kind
@@ -324,7 +350,7 @@ impl Planner<'_> {
         );
     }
 
-    fn allocate_slots(&mut self, op: OperationId, block: BlockId, local: bool) {
+    pub(super) fn allocate_slots(&mut self, op: OperationId, block: BlockId, local: bool) {
         let body = self.data.state.blocks[block].body;
         let instructions = &mut self.data.state.bodies[body].instructions;
         if local {
@@ -349,7 +375,7 @@ impl Planner<'_> {
         }
     }
 
-    fn slot(&self, op: OperationId, name: &str, index: usize, local: bool) -> Value {
+    pub(super) fn slot(&self, op: OperationId, name: &str, index: usize, local: bool) -> Value {
         let key = (op, name.into(), index as u32);
         if local {
             Value::Buffer(self.resources.local_slots[&key])
@@ -409,7 +435,11 @@ impl Planner<'_> {
         let mut captures = BTreeSet::new();
         self.data.operations[op].kind.for_each_operand(&mut |operand| {
             if let Operand::Value(_, e) = operand {
-                captures.insert(e);
+                captures.insert(crate::egglog::data::scatter_operand(
+                    &self.data.ir,
+                    &self.data.operations[op].kind,
+                    e,
+                ));
             }
         });
         captures.into_iter().collect()

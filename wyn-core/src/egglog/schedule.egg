@@ -1,11 +1,12 @@
 ; Select an execution recipe from collective structure and sidecar effect proofs.
 ; No scalar expressions or lambda implementation enter this pass.
 (datatype AtomicUpdate (AtomicAdd) (AtomicAnd) (AtomicOr) (AtomicXor) (AtomicCas))
-(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Serial) (Atomic AtomicUpdate) (Buckets))
+(datatype Recipe (Elements) (Totals) (Prefixes) (Compact) (Scatter) (Serial) (Atomic AtomicUpdate) (Buckets))
 ; Only the presence of scans and reductions determines the recipe.
 (relation CollectiveShape (OperationKey bool bool))
 (relation FilterShape (OperationKey))
 (relation IndexedWrite (OperationKey))
+(relation ScatterReadConflict (OperationKey))
 (relation IndexedReducer (OperationKey bool AtomicUpdate))
 (relation BucketShape (OperationKey bool))
 (function Plan (OperationKey) Recipe :no-merge)
@@ -18,6 +19,7 @@
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
 (rule ((Callback op r) (Site child r) (= (ParallelSafe child) false))
       ((set (ParallelSafe op) false) (set (ParallelBodySafe op) false)) :ruleset structure)
+(rule ((ScatterReadConflict op)) ((set (ParallelBodySafe op) false)) :ruleset structure)
 (ruleset schedule)
 (rule ((CollectiveShape op false false) (= (ParallelBodySafe op) true)) ((set (Plan op) (Elements))) :ruleset schedule)
 (rule ((CollectiveShape op false true) (= (ParallelBodySafe op) true)) ((set (Plan op) (Totals))) :ruleset schedule)
@@ -25,9 +27,10 @@
 (rule ((CollectiveShape op scans reductions) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((FilterShape op) (= (ParallelBodySafe op) true)) ((set (Plan op) (Compact))) :ruleset schedule)
 (rule ((FilterShape op) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
-; Preserve ordering for potentially colliding writes until atomic/disjointness
-; proofs are available. A single-invocation kernel implements the serial loop.
-(rule ((IndexedWrite op)) ((set (Plan op) (Serial))) :ruleset schedule)
+; Scatter's caller must ensure colliding writes have identical values.
+; Effectful callbacks still require serial execution.
+(rule ((IndexedWrite op) (= (ParallelBodySafe op) true)) ((set (Plan op) (Scatter))) :ruleset schedule)
+(rule ((IndexedWrite op) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op false kind)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true kind) (= (ParallelBodySafe op) false)) ((set (Plan op) (Serial))) :ruleset schedule)
 (rule ((IndexedReducer op true update) (= (ParallelBodySafe op) true)) ((set (Plan op) (Atomic update))) :ruleset schedule)
@@ -63,6 +66,16 @@
 (rule ((= (Plan op) (Compact)))
       ((KernelPhase op "compact" (Fixed 64) 64)
        (PhaseEnds op "compact" "compact")) :ruleset schedule)
+(rule ((= (Plan op) (Scatter)) (InputDomain op n))
+      ((KernelPhase op "scatter" n 64)) :ruleset schedule)
+(rule ((= (Plan op) (Scatter)) (InitializedResult op i t n))
+      ((KernelPhase op "initialize" n 64)
+       (PhaseEnds op "initialize" "scatter")
+       (PhaseLink op "initialize" "scatter")) :ruleset schedule)
+(rule ((= (Plan op) (Scatter)) (UpdatedResult op i source))
+      ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
+(rule ((= (Plan op) (Scatter)) (Phase (Stage op "scatter") r))
+      ((PhaseInput (Stage op "scatter") op "input")) :ruleset schedule)
 (rule ((= (Plan op) (Serial)))
       ((KernelPhase op "ordered" (Fixed 1) 1) (PhaseEnds op "ordered" "ordered")) :ruleset schedule)
 (rule ((= (Plan op) (Atomic update)) (InputDomain op n))
@@ -92,6 +105,8 @@
       ((Produces (Stage op "offsets") (Result op i))) :ruleset schedule)
 (rule ((TotalResult op i t) (Phase (Stage op "combine") r))
       ((Produces (Stage op "combine") (Result op i))) :ruleset schedule)
+(rule ((= (Plan op) (Scatter)) (ResultSlot op i) (Phase (Stage op "scatter") r))
+      ((Produces (Stage op "scatter") (Result op i))) :ruleset schedule)
 (rule ((= (Plan op) (Serial)) (ResultSlot op i) (Phase (Stage op "ordered") r))
       ((Produces (Stage op "ordered") (Result op i))) :ruleset schedule)
 (rule ((= (Plan op) (Atomic update)) (ResultSlot op i) (Phase (Stage op "atomic") r))
@@ -130,3 +145,7 @@
 (rule ((Phase (Stage op "scalar") r)) ((DeviceOperation op)) :ruleset schedule)
 (rule ((DeviceOperation op) (= recipe (Plan op)) (BufferSlot op name i value) (ElementType value t) (CapacityExtent value n))
       ((LocalBuffer op name i t n)) :ruleset schedule)
+
+(rule ((= (Plan op) (Scatter)) (UninitializedResult op i t n)) ((PhaseEnds op "scatter" "scatter")) :ruleset schedule)
+
+(rule ((DeviceOperation op) (UninitializedResult op i t n)) ((LocalBuffer op "output" i t n)) :ruleset schedule)

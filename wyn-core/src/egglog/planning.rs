@@ -183,6 +183,7 @@ pub(super) fn facts(
             sink.add("Enters", (key, r))?;
         }
         match &op.kind {
+            k if super::data::scratch_source(data, k).is_some() => {}
             OperationKind::If { .. } | OperationKind::Loop { .. } => {
                 sink.add("SourceControl", key)?;
             }
@@ -237,6 +238,7 @@ pub(super) fn facts(
                 return;
             }
             if let Operand::Value(role, e) = operand {
+                let e = super::data::scatter_operand(data, &op.kind, e);
                 let role = if matches!(role, OperandRole::Input) { "input" } else { "environment" };
                 values.insert(e);
                 result = (|| {
@@ -248,6 +250,16 @@ pub(super) fn facts(
         });
         result?;
         let inputs = match &op.kind {
+            k if super::data::scratch_source(data, k).is_some() => {
+                let source = super::data::scratch_source(data, k).unwrap();
+                let e = sink.add("ExprId", i64::from(source.as_u32()))?;
+                let n = sink.add("Scalar", e)?;
+                let elem = crate::types::array_elem(&data.types[op.ty].ty).unwrap();
+                let ty = data.types.iter().find(|(_, t)| &t.ty == elem).map(|(&id, _)| id).unwrap();
+                let ty = sink.add("TypeId", i64::from(ty.as_u32()))?;
+                sink.add("UninitializedResult", (key, 0i64, ty, n))?;
+                None
+            }
             OperationKind::Screma {
                 form,
                 inputs,
@@ -342,12 +354,44 @@ pub(super) fn facts(
                     }
                 } else {
                     sink.add("IndexedWrite", key)?;
+                    // The collision contract does not authorize read/write races.
+                    // Preserve ordered execution if an in-place scatter reads its
+                    // destination through an input or callback capture.
+                    if matches!(
+                        op.kind,
+                        OperationKind::Scatter {
+                            initialize: false,
+                            ..
+                        }
+                    ) {
+                        let destination_reads = array_references(data, destination.value);
+                        let mut overlaps = false;
+                        op.kind.for_each_operand(&mut |operand| {
+                            if let Operand::Value(OperandRole::Input | OperandRole::Capture, e) = operand {
+                                overlaps |= !destination_reads.is_disjoint(&array_references(data, e));
+                            }
+                        });
+                        if overlaps {
+                            sink.add("ScatterReadConflict", key)?;
+                        }
+                    }
                 }
                 let destination_expr = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
                 if matches!(op.kind, OperationKind::Scatter { initialize: true, .. }) {
                     let ty = imported.ty(destination.elem_ty, sink)?;
-                    let n = sink.add("Length", destination_expr)?;
-                    sink.add("InitializedResult", (key, 0i64, ty, n))?;
+                    let n = if let Some(length) = super::data::scratch_extent(data, destination.value) {
+                        let e = sink.add("ExprId", i64::from(length.as_u32()))?;
+                        values.insert(length);
+                        sink.add("Scalar", e)?
+                    } else {
+                        sink.add("Length", destination_expr)?
+                    };
+                    let fact = if super::data::is_scratch(data, destination.value) {
+                        "UninitializedResult"
+                    } else {
+                        "InitializedResult"
+                    };
+                    sink.add(fact, (key, 0i64, ty, n))?;
                 } else {
                     sink.add("UpdatedResult", (key, 0i64, destination_expr))?;
                 }
@@ -734,3 +778,42 @@ pub(super) fn outputs(
 #[cfg(test)]
 #[path = "planning_tests.rs"]
 mod tests;
+
+// Conservative storage provenance for the in-place scatter guard. Operation
+// results are followed as well: a previous update can retain its input storage.
+fn array_references(data: &super::Ir, root: super::data::ExprId) -> BTreeSet<super::data::ExprId> {
+    let mut seen = BTreeSet::new();
+    let mut arrays = BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(e) = pending.pop() {
+        if !seen.insert(e) {
+            continue;
+        }
+        if data.types[data.expressions[e].ty].ty.is_array() {
+            arrays.insert(e);
+        }
+        if let ExprKind::OperationResult(op) = data.expressions[e].kind {
+            match &data.operations[op].kind {
+                OperationKind::Scatter {
+                    destination,
+                    initialize: false,
+                    ..
+                }
+                | OperationKind::BucketScatter { destination, .. }
+                | OperationKind::ReduceByIndex { destination, .. } => pending.push(destination.value),
+                OperationKind::Screma {
+                    inputs, reuse_inputs, ..
+                } => {
+                    for &i in reuse_inputs.iter().flatten() {
+                        inputs[i].for_each_value(&mut |e| pending.push(e));
+                    }
+                }
+                OperationKind::Index { array, .. } => pending.push(*array),
+                _ => {}
+            }
+        } else {
+            pending.extend(data.expressions[e].kind.children());
+        }
+    }
+    arrays
+}

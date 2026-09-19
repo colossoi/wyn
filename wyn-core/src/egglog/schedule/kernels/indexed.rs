@@ -18,8 +18,14 @@ impl Planner<'_> {
                 body,
                 inputs,
             } => {
+                let parallel =
+                    !local && matches!(self.resources.recipes.get(&op), Some(super::Recipe::Scatter));
                 let source = Value::Source(destination.value);
-                let (entry, dest) = if initialize {
+                let (entry, dest) = if initialize
+                    && (parallel || crate::egglog::data::is_scratch(&self.data.ir, destination.value))
+                {
+                    (entry, self.slot(op, "output", 0, local))
+                } else if initialize {
                     let dest = self.slot(op, "output", 0, local);
                     let copy = self.start_loop(
                         entry,
@@ -34,7 +40,11 @@ impl Planner<'_> {
                 } else {
                     (entry, source)
                 };
-                let loop_ = self.start_loop(entry, Value::Int(0), length(&inputs), vec![]);
+                let loop_ = if parallel {
+                    self.invocations(entry, length(&inputs))
+                } else {
+                    self.start_loop(entry, Value::Int(0), length(&inputs), vec![])
+                };
                 let args = self.read_inputs(loop_.body, &inputs, loop_.index.clone());
                 let values = self.invoke_body(loop_.body, &body, args, "item")?;
                 let [pair] = values.as_slice() else {

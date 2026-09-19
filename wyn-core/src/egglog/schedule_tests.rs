@@ -380,7 +380,7 @@ fn scatter_local_runtime_destination() {
 #[test]
 fn scatter_local_bounds_empty_updates_and_consumers() {
     for (source, expected) in [
-        ("entry main() [4]i32 = scatter(0i32..<4, [-1, 4, 1, 1], [90, 90, 8, 9])", vec![0, 9, 2, 3]),
+        ("entry main() [4]i32 = scatter(0i32..<4, [-1, 4, 1, 1], [90, 90, 9, 9])", vec![0, 9, 2, 3]),
         ("entry main() [4]i32 = scatter([7, 8, 9, 10], 0i32..<0, 0i32..<0)", vec![7, 8, 9, 10]),
         ("entry main() [4]i32 = let a = scatter([7, 7, 7, 7], [1], [10]) in map(|x| x+1, scatter(a, [2], [20]))", vec![8, 11, 21, 8]),
     ] {
@@ -947,9 +947,9 @@ fn noncommutative_associative_reduction_preserves_chunk_order() {
 }
 
 #[test]
-fn ordered_scatter_and_parallel_ranked_buckets_preserve_results_and_overflow() {
+fn parallel_scatter_and_ranked_buckets_preserve_results_and_overflow() {
     let scatter =
-        compile("entry main(dest: *[3]i32) [3]i32 = scatter(dest, [0, 0, -1, 3, 2], [1, 2, 9, 9, 7])");
+        compile("entry main(dest: *[3]i32) [3]i32 = scatter(dest, [0, 0, -1, 3, 2], [2, 2, 9, 9, 7])");
     let output = run(&scatter, vec![Value::array([10, 20, 30])]);
     assert_eq!(output[0].ints(), [2, 20, 7]);
     let buckets = compile("entry main(dest: *[2][2]i32) ([2][2]i32, [2]u32, u32) = bucket_scatter_2d(dest, [[(-1, 9), (0, 10), (0, 11)], [(0, 12), (1, 20), (2, 9)]])");
@@ -1162,7 +1162,7 @@ fn array_update_output_capacity() {
     ));
     assert!(result.state.abi.bindings.values().all(|binding| matches!(
         binding.length,
-        Some(crate::pipeline_descriptor::BufferLen::Fixed { bytes: 16 })
+        Some(crate::host::interface::BufferLen::Fixed { bytes: 16 })
     )));
     assert_eq!(run(&result, vec![]), [Value::array([-1, -1, -1, 2])]);
 }
@@ -1192,4 +1192,104 @@ fn shared_fused_helpers_keep_call_arguments_and_results_separate() {
     assert_eq!(fields[0].ints(), [2, 4, 6, 8]);
     assert_eq!(fields[1].ints(), [6, 8, 10, 12]);
     assert_eq!(fields[2].ints(), [20, 28, 36, 44]);
+}
+
+#[test]
+fn scatter_fuses_maps_into_parallel_writes() {
+    let data = compile(
+        "entry main(dest: *[4]i32, xs: [4]i32) [4]i32 = scatter(dest, map(|x| x-1,xs), map(|x| x*7,xs))",
+    );
+    let kernels: Vec<_> = data
+        .state
+        .blocks
+        .values()
+        .filter_map(|b| b.interface.as_ref())
+        .filter_map(|f| match f.kind {
+            FunctionKind::Kernel(width) => Some(width),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kernels, vec![[64, 1, 1]]);
+    assert_eq!(
+        run(
+            &data,
+            vec![Value::array([10, 20, 30, 40]), Value::array([1, 1, 4, -1])]
+        )[0]
+        .ints(),
+        [7, 20, 30, 28]
+    );
+}
+
+#[test]
+fn in_place_scatter_alias_does_not_become_parallel() {
+    let data = compile("entry main(xs: *[4]i32) [4]i32 = scatter(xs,[3,2,1,0],xs)");
+    let kernels: Vec<_> = data
+        .state
+        .blocks
+        .values()
+        .filter_map(|b| b.interface.as_ref())
+        .filter_map(|f| match f.kind {
+            FunctionKind::Kernel(width) => Some(width),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kernels, vec![[1, 1, 1]]);
+}
+
+#[test]
+fn scratch_scatter_has_no_initialization_dispatch() {
+    let result = compile("entry main(xs: [4]i32) [4]i32 = scatter((#[scratch] xs), [3,2,1,0], xs)");
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        result.state.buffers.values().filter(|b| matches!(b.storage, Storage::Device)).count(),
+        1
+    );
+    assert_eq!(
+        run(&result, vec![Value::array([10, 20, 30, 40])])[0].ints(),
+        [40, 30, 20, 10]
+    );
+}
+#[test]
+fn scratch_scatter_inside_device_loop() {
+    let result = compile("entry main(xs: [4]i32, n:i32) [4]i32 = loop ys = xs for i < n do scatter((#[scratch] ys), [3,2,1,0], ys)");
+    assert_eq!(
+        run(&result, vec![Value::array([10, 20, 30, 40]), Value::Int(3)])[0].ints(),
+        [40, 30, 20, 10]
+    );
+}
+
+#[test]
+fn scratch_annotation_drops_replicate_and_supports_runtime_shape() {
+    let result = compile(
+        "entry main(xs: []i32) []i32 = scatter((#[scratch] replicate(length(xs),7i32)),0..<length(xs),xs)",
+    );
+    // Two existing scalar length publications plus the scatter; no fill or copy.
+    assert_eq!(kernel_count(&result), 3);
+    for n in [0, 1, 65, 137] {
+        let values: Vec<_> = (0..n).collect();
+        assert_eq!(run(&result, vec![Value::array(values.clone())])[0].ints(), values);
+    }
+}
+#[test]
+fn scratch_shared_destination_gives_independent_scatter_results() {
+    let result = compile("entry main() ([2]i32,[2]i32) = let blank = #[scratch] replicate(2,0i32) in (scatter(blank,[0,1],[10,20]),scatter(blank,[0,1],[30,40]))");
+    let output = run(&result, vec![]);
+    let Value::Tuple(fields) = &output[0] else {
+        panic!("tuple");
+    };
+    assert_eq!(fields[0].ints(), [10, 20]);
+    assert_eq!(fields[1].ints(), [30, 40]);
+}
+
+#[test]
+fn scratch_partial_scatter_can_read_the_written_elements() {
+    let result =
+        compile("entry main() i32 = let xs = scatter((#[scratch] replicate(4,0i32)),[2],[42]) in xs[2]");
+    assert_eq!(run(&result, vec![]), [Value::Int(42)]);
+}
+
+#[test]
+fn scratch_annotation_in_module_keeps_sibling_functions_visible() {
+    let result = compile("module S = { def blank(xs:[4]i32) [4]i32 = #[scratch] xs def put(xs:[4]i32) [4]i32 = scatter(blank(xs),[0,1,2,3],xs) } entry main() [4]i32 = S.put([1,2,3,4])");
+    assert_eq!(run(&result, vec![])[0].ints(), [1, 2, 3, 4]);
 }

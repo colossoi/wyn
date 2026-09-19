@@ -374,7 +374,7 @@ impl Body<'_, '_> {
         if let Some(binding) = self.compiler.host.captures.get(&(self.root, id)).copied() {
             let ty = self.compiler.data.types[self.compiler.data.expressions[id].ty].ty.clone();
             let element = storage_type(&ty)?;
-            let view = self.view(binding, element, Self::number(1))?;
+            let view = self.view(binding, element, Self::number(1), Some(1))?;
             let value = self.index(view, Self::number(0))?;
             let value = self.cast(value, &ty)?;
             self.environment.expressions.insert(id, value.clone());

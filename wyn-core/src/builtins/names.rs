@@ -29,6 +29,10 @@ pub const INTRINSIC_LENGTH: &str = "_w_intrinsic_length";
 
 /// Allocate an uninitialized buffer of a given array type.
 pub const INTRINSIC_UNINIT: &str = "_w_intrinsic_uninit";
+/// Typed expression marker emitted by `#[scratch]`.
+pub const INTRINSIC_SCRATCH: &str = "_w_intrinsic_scratch";
+/// Allocation-only lowering of a scratch expression, after shape extraction.
+pub const INTRINSIC_SCRATCH_ALLOC: &str = "_w_intrinsic_scratch_alloc";
 
 /// `arr[start..end]` — produces a view aliasing the source.
 pub const INTRINSIC_SLICE: &str = "_w_intrinsic_slice";

@@ -20,6 +20,7 @@ pub(in crate::egglog) enum Recipe {
     Totals,
     Prefixes,
     Compact,
+    Scatter,
     Serial,
     Atomic(AtomicOp),
     Buckets,
@@ -92,6 +93,7 @@ pub(in crate::egglog) fn read(
                 ("Totals", Recipe::Totals),
                 ("Prefixes", Recipe::Prefixes),
                 ("Compact", Recipe::Compact),
+                ("Scatter", Recipe::Scatter),
                 ("Serial", Recipe::Serial),
                 ("Buckets", Recipe::Buckets),
             ] {
@@ -260,7 +262,11 @@ pub(in crate::egglog) fn read(
             let mut captures = BTreeSet::new();
             data.operations[key.0].kind.for_each_operand(&mut |operand| {
                 if let Operand::Value(_, e) = operand {
-                    captures.insert(e);
+                    captures.insert(crate::egglog::data::scatter_operand(
+                        &data.ir,
+                        &data.operations[key.0].kind,
+                        e,
+                    ));
                 }
             });
             captures.into_iter().collect()

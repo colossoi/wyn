@@ -223,3 +223,5 @@
 
 (relation Callback (OperationKey RegionKey))
 (relation AbiInvokes (RootKey RegionKey))
+
+(relation UninitializedResult (OperationKey i64 TypeKey Extent))

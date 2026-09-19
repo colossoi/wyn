@@ -616,6 +616,28 @@ static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
             },
         ],
     },
+    BuiltinDefRaw {
+        surface_name: crate::builtins::names::INTRINSIC_SCRATCH,
+        intrinsic_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH],
+        impl_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: Some(builtins::scheme::scratch_annotation_scheme),
+            lowering: BuiltinLowering::ByBuiltinId,
+        }],
+    },
+    BuiltinDefRaw {
+        surface_name: crate::builtins::names::INTRINSIC_SCRATCH_ALLOC,
+        intrinsic_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH_ALLOC],
+        impl_source_names: &[crate::builtins::names::INTRINSIC_SCRATCH_ALLOC],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: Some(builtins::scheme::scratch_alloc_scheme),
+            lowering: BuiltinLowering::ByBuiltinId,
+        }],
+    },
     // ---- Internal intrinsics with real backend lowerings ----
     // `length` is user-callable as `length(arr)` — surface name distinct
     // from the internal `_w_intrinsic_length` so NameResolution can

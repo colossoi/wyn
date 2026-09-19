@@ -366,6 +366,15 @@ impl Planner<'_> {
             return self.scalar_dispatch(op, block);
         }
         let kind = self.data.operations[op].kind.clone();
+        if super::data::scratch_source(&self.data.ir, &kind).is_some() {
+            if !device && !self.resources.slots.contains_key(&(op, "output".into(), 0)) {
+                return Ok(block);
+            }
+            self.allocate_slots(op, block, device);
+            let value = self.slot(op, "output", 0, device);
+            self.emit(block, Instruction::BindResult(op, value));
+            return Ok(block);
+        }
         let owner = self.data.state.blocks[block].function;
         match kind {
             OperationKind::If {

@@ -202,15 +202,15 @@ fn term_contains_free_type_variable<C: Payload, S: Payload>(term: &Term<C, S>) -
     found
 }
 
-/// True if `term` contains a SOAC, an explicit array producer, or a `length`
-/// call. All must be visible in the caller so egglog can build complete
+/// True if `term` contains a SOAC, an explicit array producer, or a `length` / `#[scratch]`
+/// operation. All must be visible in the caller so egglog can build complete
 /// producer/use edges and derive dispatch extents without interprocedural
 /// summaries.
 pub(super) fn contains_array_work<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     if matches!(&term.kind, TermKind::Soac(_) | TermKind::ArrayExpr(_)) {
         return true;
     }
-    if is_length_intrinsic_call(term) {
+    if is_array_shape_intrinsic_call(term) {
         return true;
     }
     let mut found = false;
@@ -222,7 +222,7 @@ pub(super) fn contains_array_work<C: Payload, S: Payload>(term: &Term<C, S>) -> 
     found
 }
 
-fn is_length_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
+fn is_array_shape_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     let TermKind::App { func, args } = &term.kind else {
         return false;
     };
@@ -232,7 +232,7 @@ fn is_length_intrinsic_call<C: Payload, S: Payload>(term: &Term<C, S>) -> bool {
     let TermKind::Var(super::VarRef::Builtin { id, .. }) = &func.kind else {
         return false;
     };
-    *id == builtins::catalog().known().length
+    *id == builtins::catalog().known().length || *id == builtins::catalog().known().scratch_annotation
 }
 
 fn any_def_calls_candidate(

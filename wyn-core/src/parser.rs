@@ -1970,6 +1970,27 @@ impl<'a> Parser<'a> {
         // Check for unary operators: - and !
         // Postfix operators ([], .) bind tighter than unary, so we parse postfix for the operand
         match self.peek() {
+            Some(Token::AttributeStart) => {
+                let start = self.current_span();
+                self.advance();
+                let attribute = self.expect_identifier()?;
+                if attribute != "scratch" {
+                    bail_parse_at!(start, "unsupported expression attribute: {}", attribute);
+                }
+                self.expect(Token::RightBracket)?;
+                let operand = self.parse_unary_expression()?;
+                let span = start.merge(&operand.h.span);
+                let function = self.node_counter.mk_node(
+                    ExprKind::Identifier(Identifier {
+                        qualifiers: vec![],
+                        name: crate::builtins::names::INTRINSIC_SCRATCH.into(),
+                    }),
+                    start,
+                );
+                Ok(self
+                    .node_counter
+                    .mk_node(ExprKind::Application(Box::new(function), vec![operand]), span))
+            }
             Some(Token::BinOp(op)) if op == "-" => {
                 let start_span = self.current_span();
                 self.advance();

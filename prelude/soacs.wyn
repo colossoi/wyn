@@ -101,8 +101,12 @@ def partition<[n], A>(p: A -> bool, xs: [n]A) =
 -- | Build a length-`size` array initialised to `default`, then
 -- write `values[k]` at index `indices[k]` for each `k`. Indices
 -- outside `[0, size)` and duplicate indices follow the underlying
--- `scatter` semantics: duplicates resolve to one of the writes
--- (which one is unspecified), out-of-bounds writes are discarded.
+-- `scatter` semantics: writes to the same index must carry identical values.
+-- Conflicting values have unspecified behavior; no winner is guaranteed.
+-- Out-of-bounds writes are discarded. This caller contract permits parallel
+-- writes; use reduce_by_index/hist when collisions need to be combined.
+-- Use `#[scratch] replicate(size, default)` as a scatter destination to omit
+-- initialization; every element must then be written before it is read.
 def spread<[n], [m], A>(
     size: i32,           -- ^ Length of the output array.
     default: A,          -- ^ Fill value for indices not written.

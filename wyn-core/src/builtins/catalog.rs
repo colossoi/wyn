@@ -121,6 +121,8 @@ impl BuiltinDef {
 pub struct KnownBuiltinIds {
     pub select: BuiltinId,
     pub uninit: BuiltinId,
+    pub scratch_annotation: BuiltinId,
+    pub scratch_alloc: BuiltinId,
     pub array_with: BuiltinId,
     pub array_with_in_place: BuiltinId,
     pub length: BuiltinId,
@@ -205,6 +207,8 @@ impl BuiltinCatalog {
         let known = KnownBuiltinIds {
             select: resolve(N::INTRINSIC_SELECT),
             uninit: resolve(N::INTRINSIC_UNINIT),
+            scratch_annotation: resolve(N::INTRINSIC_SCRATCH),
+            scratch_alloc: resolve(N::INTRINSIC_SCRATCH_ALLOC),
             array_with: resolve(N::INTRINSIC_ARRAY_WITH),
             array_with_in_place: resolve(N::INTRINSIC_ARRAY_WITH_INPLACE),
             length: resolve(N::INTRINSIC_LENGTH),

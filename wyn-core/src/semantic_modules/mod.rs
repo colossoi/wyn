@@ -682,8 +682,10 @@ impl SemanticModules {
         use crate::ast::ExprKind;
         match &expr.kind {
             ExprKind::Identifier(identifier) => {
-                identifier.name.starts_with("_w_intrinsic_")
-                    || (identifier.qualifiers.is_empty() && identifier.name.starts_with("_w_intrinsic_"))
+                // A source annotation does not turn its enclosing function
+                // into an intrinsic declaration that module checking can skip.
+                identifier.name != crate::builtins::names::INTRINSIC_SCRATCH
+                    && identifier.name.starts_with("_w_intrinsic_")
             }
             ExprKind::Application(func, args) => {
                 Self::expr_uses_intrinsic(func) || args.iter().any(Self::expr_uses_intrinsic)

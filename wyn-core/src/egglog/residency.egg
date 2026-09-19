@@ -99,3 +99,5 @@
 (rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)
+
+(rule ((UninitializedResult op i t n)) ((ResultSlot op i)) :ruleset residency)

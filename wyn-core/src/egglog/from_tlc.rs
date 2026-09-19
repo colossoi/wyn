@@ -592,6 +592,68 @@ impl Converter {
             scope,
         ))
     }
+    fn scratch_length(
+        &mut self,
+        value: ExprId,
+        span: Span,
+        scope: &mut Scope,
+    ) -> Result<ExprId, ConvertError> {
+        let expr = self.expressions.resolve(value).clone();
+        let ty = self.types.resolve(expr.ty).ty.clone();
+        if let Some(crate::types::Type::Constructed(crate::types::TypeName::Size(n), _)) = ty.array_size() {
+            let int = self.ty(&crate::types::i32());
+            return Ok(self.expr(int, ExprKind::Int(n.to_string())));
+        }
+        let array = match expr.kind {
+            ExprKind::Coerce(inner) => return self.scratch_length(inner, span, scope),
+            ExprKind::Project { tuple, index } => match self.expressions.resolve(tuple).kind.clone() {
+                ExprKind::Tuple(fields) => return self.scratch_length(fields[index], span, scope),
+                ExprKind::OperationResult(op) => match &self.data.operations[op].kind {
+                    OperationKind::Screma { inputs, .. } => inputs.first().cloned(),
+                    _ => None,
+                },
+                _ => None,
+            },
+            ExprKind::Array(array) => Some(array),
+            ExprKind::OperationResult(op) => match &self.data.operations[op].kind {
+                OperationKind::Screma { inputs, .. } => inputs.first().cloned(),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(array) = array {
+            match array {
+                Array::Value(v) => return self.scratch_length(v, span, scope),
+                Array::Range { len, .. } => return Ok(len),
+                Array::Literal(values) => {
+                    let int = self.ty(&crate::types::i32());
+                    return Ok(self.expr(int, ExprKind::Int(values.len().to_string())));
+                }
+                Array::Zip(_) => {}
+            }
+        }
+        let int = self.ty(&crate::types::i32());
+        let function_ty = self.ty(&crate::types::function(ty, crate::types::i32()));
+        let function = self.var(
+            VarRef::Builtin {
+                id: catalog().known().length,
+                overload_idx: 0,
+            },
+            function_ty,
+            span,
+            scope,
+        )?;
+        Ok(self.operation(
+            OperationKind::Call {
+                function,
+                args: vec![value],
+            },
+            int,
+            span,
+            scope,
+        ))
+    }
+
     fn pure_callee(&self, function: ExprId, args: &[ExprId], result: TypeId) -> bool {
         match &self.expressions.resolve(function).kind {
             ExprKind::BinOp(_) | ExprKind::UnOp(_) => true,
@@ -654,7 +716,34 @@ impl Converter {
             TermKind::App { func, args } => {
                 let function = self.term(func, scope)?;
                 let args = self.terms(args, scope)?;
-                if self.pure_callee(function, &args, ty) {
+                if matches!(self.expressions.resolve(function).kind, ExprKind::Builtin(id) if self.data.builtins[id].builtin == catalog().known().scratch_annotation)
+                {
+                    // The annotation retains the expression's type and shape,
+                    // but not its element computation.
+                    let length = self.scratch_length(args[0], term.span, scope)?;
+                    let elem = array_elem(&term.ty).unwrap().clone();
+                    self.ty(&elem);
+                    let function_ty =
+                        self.ty(&crate::types::function(crate::types::i32(), term.ty.clone()));
+                    let function = self.var(
+                        VarRef::Builtin {
+                            id: catalog().known().scratch_alloc,
+                            overload_idx: 0,
+                        },
+                        function_ty,
+                        term.span,
+                        scope,
+                    )?;
+                    self.operation(
+                        OperationKind::Call {
+                            function,
+                            args: vec![length],
+                        },
+                        ty,
+                        term.span,
+                        scope,
+                    )
+                } else if self.pure_callee(function, &args, ty) {
                     self.expr(ty, ExprKind::PureApp { function, args })
                 } else {
                     self.operation(OperationKind::Call { function, args }, ty, term.span, scope)

@@ -469,7 +469,7 @@ fn scatter_local_destinations_reach_wgsl() {
 
 #[test]
 fn array_updates_preserve_loop_state_and_output_capacity() {
-    use pipeline_descriptor::{Binding, BufferLen};
+    use crate::host::interface::{Binding, BufferLen};
     for source in [
         include_str!("../../../testfiles/regressions/array_update_return.wyn"),
         include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
@@ -481,8 +481,8 @@ fn array_updates_preserve_loop_state_and_output_capacity() {
     ] {
         compile(source);
         for descriptor in [
-            pipeline(source).pipeline,
-            crate::compile_thru_spirv(source).unwrap().pipeline,
+            pipeline(source).program.interface,
+            crate::compile_thru_spirv(source).unwrap().program.interface,
         ] {
             let [result] = descriptor.source_results.as_slice() else {
                 panic!("one array result");
@@ -1073,7 +1073,7 @@ fn materialized_tuple_projections_reach_both_backends() {
     compile(source);
     let output = crate::compile_thru_spirv(source).unwrap();
     let outputs = output
-        .pipeline
+        .program.interface
         .pipelines
         .iter()
         .flat_map(|pipeline| match pipeline {
@@ -1081,8 +1081,8 @@ fn materialized_tuple_projections_reach_both_backends() {
             _ => panic!("expected a compute pipeline"),
         })
         .filter_map(|binding| match binding {
-            pipeline_descriptor::Binding::StorageBuffer {
-                usage: pipeline_descriptor::BufferUsage::Output,
+            crate::host::interface::Binding::StorageBuffer {
+                usage: crate::host::interface::BufferUsage::Output,
                 length,
                 ..
             } => Some(length),
@@ -1092,7 +1092,7 @@ fn materialized_tuple_projections_reach_both_backends() {
     assert_eq!(outputs.len(), 2);
     assert!(outputs
         .iter()
-        .all(|length| matches!(length, Some(pipeline_descriptor::BufferLen::Fixed { bytes: 64 }))));
+        .all(|length| matches!(length, Some(crate::host::interface::BufferLen::Fixed { bytes: 64 }))));
     let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
     let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
     naga::valid::Validator::new(

@@ -669,3 +669,29 @@ pub fn image_load_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
         result,
     ))
 }
+
+/// A fresh, uninitialized array with the input's shape and element type.
+pub fn scratch_annotation_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (a, n, s, r, out_s, out_r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
+    quantify(arrow_chain(
+        &[array_type(a.clone(), s, n.clone(), r)],
+        array_type(a, out_s, n, out_r),
+    ))
+}
+
+pub fn scratch_alloc_scheme(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let (a, n, s, r) = (
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+        ctx.new_variable(),
+    );
+    quantify(arrow_chain(&[i32_ty()], array_type(a, s, n, r)))
+}

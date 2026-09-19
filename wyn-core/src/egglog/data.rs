@@ -537,3 +537,42 @@ pub(super) fn is_slice(data: &Ir, mut function: ExprId) -> bool {
     matches!(data.expressions[function].kind, ExprKind::Builtin(id)
         if data.builtins[id].builtin == catalog().known().slice)
 }
+
+/// Scalar length of an allocation-only scratch call.
+pub(super) fn scratch_source(data: &Ir, kind: &OperationKind) -> Option<ExprId> {
+    let OperationKind::Call { function, args } = kind else {
+        return None;
+    };
+    let function = value_source(data, *function);
+    let ExprKind::Builtin(id) = data.expressions[function].kind else {
+        return None;
+    };
+    (data.builtins[id].builtin == catalog().known().scratch_alloc && args.len() == 1).then(|| args[0])
+}
+pub(super) fn scratch_extent(data: &Ir, expression: ExprId) -> Option<ExprId> {
+    let expression = value_source(data, expression);
+    let ExprKind::OperationResult(op) = data.expressions[expression].kind else {
+        return None;
+    };
+    scratch_source(data, &data.operations[op].kind)
+}
+pub(super) fn is_scratch(data: &Ir, expression: ExprId) -> bool {
+    scratch_extent(data, expression).is_some()
+}
+
+/// Scratch destinations contribute shape, never initial element data.
+pub(super) fn scatter_operand(data: &Ir, kind: &OperationKind, e: ExprId) -> ExprId {
+    if let OperationKind::Scatter {
+        destination,
+        initialize: true,
+        ..
+    } = kind
+    {
+        if e == destination.value {
+            if let Some(length) = scratch_extent(data, e) {
+                return length;
+            }
+        }
+    }
+    e
+}

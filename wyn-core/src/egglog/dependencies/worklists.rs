@@ -27,7 +27,8 @@ pub(super) fn safety(
         let mut regions = BTreeSet::new();
         let mut producer = None;
         match kind {
-            k if length_source(data, k).is_some() => {}
+            k if length_source(data, k).is_some()
+                || super::super::data::scratch_source(data, k).is_some() => {}
             OperationKind::Index { array, .. } => {
                 if !is_copy(&data.types[data.expressions[*array].ty].ty) {
                     producer = fresh_source(data, *array);
