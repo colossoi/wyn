@@ -176,6 +176,10 @@ try {
     Write-Host "SPIR-V:    $spvPath"
     Write-Host "Descriptor: $descriptorPath"
     Write-Host "Running $name..."
+    $vizCommand = (@($vizBinary) + $vizArguments | ForEach-Object {
+        "'" + $_.Replace("'", "''") + "'"
+    }) -join ' '
+    Write-Host "& $vizCommand"
     Invoke-NativeChecked $vizBinary $vizArguments 'viz'
 } finally {
     Pop-Location

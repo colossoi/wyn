@@ -141,4 +141,6 @@ viz_arguments=(pipeline "$spv_path")
 echo "SPIR-V:     $spv_path"
 echo "Descriptor: $descriptor_path"
 echo "Running $name..."
+printf '%q ' "$viz_binary" "${viz_arguments[@]}"
+printf '\n'
 "$viz_binary" "${viz_arguments[@]}"

@@ -218,7 +218,8 @@ enum Command {
         /// Disable GPU validation layers (validation is ON by default)
         #[arg(long)]
         no_validate: bool,
-        /// Window size as WxH (e.g. --size 256x256)
+        /// Window size as WxH (e.g. --size 256x256). Defaults to 800x600,
+        /// subject to platform scaling.
         #[arg(long, value_parser = parse_size)]
         size: Option<(u32, u32)>,
         /// Maximum number of frames to render before exiting (for debugging)
