@@ -348,6 +348,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
         for (param_ty, arg_ty) in param_types.iter().zip(arg_types) {
             extend_type_substitution(param_ty, arg_ty, &mut subst);
         }
+        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
         subst
     }
 
@@ -358,6 +359,7 @@ impl<'symbols, 'ids> Monomorphizer<'symbols, 'ids> {
     ) -> Option<TypeSubstitution> {
         let mut subst = TypeSubstitution::new();
         extend_type_substitution(info.polymorphic_type(), concrete_type, &mut subst);
+        normalize_buffer_substitutions(info.polymorphic_type(), &mut subst);
         (!subst.is_empty()).then_some(subst)
     }
 
@@ -520,3 +522,23 @@ fn format_type_compact(ty: &Type<TypeName>) -> String {
 #[cfg(test)]
 #[path = "monomorphize_tests.rs"]
 mod monomorphize_tests;
+
+/// An unresolved buffer identity is not a distinct implementation. Otherwise
+/// a chain of calls creates one specialization per fresh result-buffer variable,
+/// even though their element types, extents and representations are identical.
+/// Concrete storage bindings remain distinct; unresolved buffer variables
+/// alone do not distinguish implementations.
+fn normalize_buffer_substitutions(ty: &Type<TypeName>, subst: &mut TypeSubstitution) {
+    if let Type::Constructed(name, fields) = ty {
+        if *name == TypeName::Array {
+            if let Some(Type::Variable(id)) = fields.last() {
+                if matches!(subst.get(id), Some(Type::Variable(_))) {
+                    subst.insert(*id, Type::Constructed(TypeName::NoBuffer, vec![]));
+                }
+            }
+        }
+        for field in fields {
+            normalize_buffer_substitutions(field, subst);
+        }
+    }
+}

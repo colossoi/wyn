@@ -61,7 +61,7 @@ fn empty_planning_schedule_terminates_without_advancing() {
     let mut graph = EGraph::default();
     graph.parse_and_run_program(None, SCHEMA).unwrap();
     graph.parse_and_run_program(None, include_str!("fusion.egg")).unwrap();
-    graph.parse_and_run_program(None, include_str!("schedule.egg")).unwrap();
+    super::reachability::run(&mut graph).unwrap();
     graph.parse_and_run_program(None, "(check (PlanningRound 0))").unwrap();
     assert!(graph.function_to_dag("FusionStep", usize::MAX, false).unwrap().0.is_empty());
 }
@@ -292,6 +292,46 @@ fn fused_scan_allocates_output_when_its_unique_input_is_absorbed() {
     // The later gather still observes a materialized scan result.
     assert!(entry_ops(&result.ir).contains(&scan));
     assert_eq!(entry_ops(&result.ir).last(), original.last());
+}
+
+#[test]
+fn horizontal_projections_accept_shared_structure_of_arrays_inputs() {
+    let helpers = "
+        def collision(x:f32,v:f32,lo:f32,hi:f32) f32 =
+            if x <= lo then max(v,0.0) else if x >= hi then min(v,0.0) else v
+        def integrate(p:vec4f32,v:vec4f32,bounds:vec3f32) (vec4f32,vec4f32) =
+            let x = p.xyz + (1.0/90.0)*v.xyz in
+            let hi = bounds-p.w in
+            (@[clamp(x.x,p.w,hi.x),clamp(x.y,p.w,hi.y),clamp(x.z,p.w,hi.z),p.w],
+             @[collision(x.x,v.x,p.w,hi.x),collision(x.y,v.y,p.w,hi.y),
+               collision(x.z,v.z,p.w,hi.z),0.0])";
+    for nested in [false, true] {
+        let element = if nested { "(a,(b,a))" } else { "(a,b)" };
+        let velocity = if nested { "|(_p,(v,_q))|v" } else { "|(_p,v)|v" };
+        let source = format!(
+            "{helpers}
+        entry repro(p:[]vec4f32,v:[]vec4f32) ([]vec4f32,[]vec4f32) =
+            let integrated=map(|i|
+                let (a,b)=integrate(p[i],v[i],@[16.0,12.0,10.0]) in {element},0i32..<4) in
+            (map(|(p,_v)|p,integrated),map({velocity},integrated))"
+        );
+        let input = imported(&source);
+        assert_eq!(entry_ops(&input.ir).len(), 3);
+        let result = optimized(input);
+        let ops = entry_ops(&result.ir);
+        assert_eq!(ops.len(), 2);
+        let projections = form(&result.ir, ops[1]);
+        let parameters = body_signature(&projections.pre).0;
+        assert_eq!(parameters.len(), 1);
+        let Type::Constructed(TypeName::Tuple(2), fields) = &result.ir.types[parameters[0]].ty else {
+            panic!("expected one tuple-valued callback argument");
+        };
+        assert_eq!(
+            matches!(&fields[1], Type::Constructed(TypeName::Tuple(2), _)),
+            nested
+        );
+        assert_eq!(body_signature(&projections.post).1.len(), 2);
+    }
 }
 
 #[test]

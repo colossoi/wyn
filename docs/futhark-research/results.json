@@ -1,0 +1,1463 @@
+{
+  "version": "Futhark 0.27.1.\ngit: f547a39abb1f3773f7cdb324ec8ea7cb8cf13ea0\nCompiled with GHC 9.10.3.\n\nCopyright (C) DIKU, University of Copenhagen, released under the ISC license.\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n",
+  "results": [
+    {
+      "fixture": "radix-loop-nested.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.3,
+      "max_rss_kib": 61684,
+      "ir_bytes": 11991,
+      "radix_bit_calls": 0,
+      "soac_nodes": 5,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.007
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.021
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        }
+      ]
+    },
+    {
+      "fixture": "radix-loop-nested.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 0.31,
+      "max_rss_kib": 63260,
+      "ir_bytes": 11227,
+      "radix_bit_calls": 0,
+      "soac_nodes": 3,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.01
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        }
+      ]
+    },
+    {
+      "fixture": "radix-loop-nested.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 0.43,
+      "max_rss_kib": 78624,
+      "ir_bytes": 37448,
+      "radix_bit_calls": 0,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.01
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.009
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.015
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.002
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.002
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.002
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.005
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.01
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.001
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.005
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.003
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.002
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.008
+        }
+      ]
+    },
+    {
+      "fixture": "radix-loop-top.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.33,
+      "max_rss_kib": 61224,
+      "ir_bytes": 10323,
+      "radix_bit_calls": 0,
+      "soac_nodes": 4,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.006
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.02
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        }
+      ]
+    },
+    {
+      "fixture": "radix-loop-top.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 0.31,
+      "max_rss_kib": 62872,
+      "ir_bytes": 9705,
+      "radix_bit_calls": 0,
+      "soac_nodes": 2,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.019
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.006
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        }
+      ]
+    },
+    {
+      "fixture": "radix-loop-top.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 0.32,
+      "max_rss_kib": 66156,
+      "ir_bytes": 9555,
+      "radix_bit_calls": 0,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.018
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.006
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.0
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.0
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.0
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.0
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.0
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.001
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.001
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested-noinline.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.31,
+      "max_rss_kib": 64224,
+      "ir_bytes": 16289,
+      "radix_bit_calls": 30,
+      "soac_nodes": 5,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.009
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.021
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.003
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested-noinline.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 0.33,
+      "max_rss_kib": 66460,
+      "ir_bytes": 15971,
+      "radix_bit_calls": 30,
+      "soac_nodes": 3,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.008
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.003
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.007
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.005
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.002
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested-noinline.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 0.4,
+      "max_rss_kib": 73636,
+      "ir_bytes": 15836,
+      "radix_bit_calls": 30,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.008
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.003
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.007
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.005
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.002
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.004
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.013
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.003
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.001
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.002
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.004
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.001
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.004
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.002
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.003
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.6,
+      "max_rss_kib": 59616,
+      "ir_bytes": 256472,
+      "radix_bit_calls": 0,
+      "soac_nodes": 121,
+      "scan_nodes": 30,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.01
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.021
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.064
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.145
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.031
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 1.08,
+      "max_rss_kib": 61748,
+      "ir_bytes": 236411,
+      "radix_bit_calls": 0,
+      "soac_nodes": 61,
+      "scan_nodes": 30,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.007
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.022
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.053
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.139
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.013
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.039
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.445
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.006
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.041
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.014
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-nested.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 3.03,
+      "max_rss_kib": 74944,
+      "ir_bytes": 684601,
+      "radix_bit_calls": 0,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.008
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.023
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.054
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.146
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.014
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.04
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.452
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.007
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.042
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.014
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.146
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.207
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.033
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.034
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.033
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.095
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.043
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.09
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.039
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.12
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.041
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.245
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.039
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.055
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.097
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.039
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.081
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.098
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.038
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.064
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.094
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.144
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top-inline.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.64,
+      "max_rss_kib": 62568,
+      "ir_bytes": 286221,
+      "radix_bit_calls": 0,
+      "soac_nodes": 120,
+      "scan_nodes": 30,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.009
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.186
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.029
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.028
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.027
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.019
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.03
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top-inline.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 1.02,
+      "max_rss_kib": 65180,
+      "ir_bytes": 267381,
+      "radix_bit_calls": 0,
+      "soac_nodes": 60,
+      "scan_nodes": 30,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.006
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.178
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.03
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.029
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.028
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.009
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.035
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.309
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.008
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.077
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.015
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top-inline.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 1.55,
+      "max_rss_kib": 69136,
+      "ir_bytes": 268245,
+      "radix_bit_calls": 0,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.006
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.176
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.029
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.029
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.028
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.009
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.036
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.308
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.008
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.075
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.015
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.033
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.058
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.011
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.011
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.009
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.027
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.011
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.027
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.012
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.036
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.011
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.034
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.009
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.016
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.049
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.011
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.027
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.03
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.01
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.019
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.032
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.041
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top.fut",
+      "stage": "before-fusion",
+      "exit_code": 0,
+      "wall_seconds": 0.31,
+      "max_rss_kib": 63852,
+      "ir_bytes": 13867,
+      "radix_bit_calls": 30,
+      "soac_nodes": 4,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.009
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.016
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top.fut",
+      "stage": "standard",
+      "exit_code": 0,
+      "wall_seconds": 0.33,
+      "max_rss_kib": 65320,
+      "ir_bytes": 13573,
+      "radix_bit_calls": 30,
+      "soac_nodes": 2,
+      "scan_nodes": 1,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.006
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.016
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.005
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        }
+      ]
+    },
+    {
+      "fixture": "radix-unrolled-top.fut",
+      "stage": "gpu",
+      "exit_code": 0,
+      "wall_seconds": 0.35,
+      "max_rss_kib": 68384,
+      "ir_bytes": 13777,
+      "radix_bit_calls": 30,
+      "soac_nodes": 0,
+      "scan_nodes": 0,
+      "pass_timings": [
+        {
+          "pass": "simplify",
+          "seconds": 0.006
+        },
+        {
+          "pass": "Inline conservatively",
+          "seconds": 0.016
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "Inline aggressively",
+          "seconds": 0.002
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Fuse SOACs",
+          "seconds": 0.006
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.004
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "flatten",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "Remove dead functions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "add global params",
+          "seconds": 0.001
+        },
+        {
+          "pass": "optimise generalized reductions",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "tile loops",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "hist accs",
+          "seconds": 0.001
+        },
+        {
+          "pass": "unstream",
+          "seconds": 0.003
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.001
+        },
+        {
+          "pass": "reduce device synchronizations",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.003
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.001
+        },
+        {
+          "pass": "merge GPU bodies",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "sink",
+          "seconds": 0.001
+        },
+        {
+          "pass": "optimise array layout gpu",
+          "seconds": 0.001
+        },
+        {
+          "pass": "simplify",
+          "seconds": 0.002
+        },
+        {
+          "pass": "CSE",
+          "seconds": 0.003
+        }
+      ]
+    }
+  ]
+}

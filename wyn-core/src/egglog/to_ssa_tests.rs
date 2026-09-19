@@ -133,6 +133,13 @@ fn literal_and_runtime_nested_array_indices_reach_wgsl() {
 }
 
 #[test]
+fn mixed_array_scalar_stage_outputs_reach_wgsl() {
+    compile(include_str!(
+        "../../../testfiles/regressions/stage_shared_mixed_tuple.wyn"
+    ));
+}
+
+#[test]
 fn fixed_output_lengths_do_not_emit_element_reads_or_array_constructions() {
     use crate::op::OpTag;
     use crate::ssa::types::InstKind;
@@ -497,6 +504,7 @@ fn array_updates_preserve_loop_state_and_output_capacity() {
 #[test]
 fn existing_spirv_backend_also_accepts_the_handoff() {
     for source in [
+        include_str!("../../../testfiles/regressions/stage_shared_mixed_tuple.wyn"),
         include_str!("../../../testfiles/regressions/array_update_return.wyn"),
         include_str!("../../../testfiles/regressions/array_update_loop.wyn"),
         include_str!("../../../testfiles/regressions/scatter_radix_bit.wyn"),
@@ -1060,6 +1068,42 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
 }
 
 #[test]
+fn materialized_tuple_projections_reach_both_backends() {
+    let source = include_str!("../../../testfiles/regressions/fusion_shared_tuple.wyn");
+    compile(source);
+    let output = crate::compile_thru_spirv(source).unwrap();
+    let outputs = output
+        .pipeline
+        .pipelines
+        .iter()
+        .flat_map(|pipeline| match pipeline {
+            Pipeline::Compute(compute) => compute.bindings.iter(),
+            _ => panic!("expected a compute pipeline"),
+        })
+        .filter_map(|binding| match binding {
+            pipeline_descriptor::Binding::StorageBuffer {
+                usage: pipeline_descriptor::BufferUsage::Output,
+                length,
+                ..
+            } => Some(length),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs
+        .iter()
+        .all(|length| matches!(length, Some(pipeline_descriptor::BufferLen::Fixed { bytes: 64 }))));
+    let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
 fn materialized_boolean_reduction_reaches_both_backends() {
     for condition in ["xs[0] > 0 || any", "any || xs[0] > 0", "any", "!any"] {
         let source = format!(
@@ -1078,4 +1122,18 @@ fn materialized_boolean_reduction_reaches_both_backends() {
         .validate(&module)
         .unwrap();
     }
+}
+
+#[test]
+fn shared_fused_helpers_reach_valid_wgsl() {
+    compile(include_str!(
+        "../../../testfiles/regressions/shared_fusion_helper.wyn"
+    ));
+}
+
+#[test]
+fn runtime_index_into_shared_array_helper_reaches_wgsl() {
+    compile(
+        "def g(n: i32) []f32 = map(|i: i32| f32.i32(i),0i32..<n)\nentry e(j: i32) [1]f32 = [g(256)[j]]",
+    );
 }

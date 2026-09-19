@@ -25,7 +25,7 @@ type SoacOp = tlc::SoacOp<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type SoacBody = tlc::SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Lambda = tlc::Lambda<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
-fn text(converted: &Program<Imported>) -> String {
+fn snapshot(converted: &Program<Imported>) -> String {
     let graph = &converted.state.graph;
     let mut rows = vec![];
     for name in graph.get_function_names() {
@@ -44,6 +44,26 @@ fn run(converted: &Program<Imported>) -> EGraph {
 
 fn source(source: &str) -> InputSliceBoundsInferred {
     infer_input_slice_bounds(compile_to_reachable(source))
+}
+
+#[test]
+fn mixed_array_scalar_stage_outputs_keep_one_shared_producer() {
+    let source = include_str!("../../../testfiles/regressions/stage_shared_mixed_tuple.wyn");
+    let converted = from_tlc(&self::source(source)).unwrap();
+    for expression in ["map(|x| x + 1", "map(|x| x * 2", "map(|x| x > 0", "reduce(|a,b|"] {
+        let start = source.find(expression).unwrap() as u32;
+        let occurrences = converted
+            .operations
+            .values()
+            .filter(|operation| {
+                operation.span.range().start() == start
+                    && matches!(operation.kind, OperationKind::Screma { .. })
+            })
+            .count();
+        assert_eq!(occurrences, 1, "shared producer duplicated: {expression}");
+    }
+    let graph = run(&converted);
+    assert_eq!(graph.get_size("ScremaPlan"), 6);
 }
 
 fn verify_sources(program: &InputSliceBoundsInferred, converted: &Program<Imported>) {
@@ -82,7 +102,7 @@ fn verify_sources(program: &InputSliceBoundsInferred, converted: &Program<Import
         }
     }
     assert_eq!(operations.len(), converted.ir.operations.len());
-    let emitted = text(converted);
+    let emitted = snapshot(converted);
     for removed in [
         "TermId",
         "ExprId",
@@ -126,7 +146,7 @@ fn imports_real_tlc_and_preserves_roots_and_metadata() {
         let converted = from_tlc(&program).expect("import TLC");
         verify_sources(&program, &converted);
         assert_eq!(before, format!("{program:?}"), "conversion must not mutate TLC");
-        assert_eq!(text(&converted), text(&from_tlc(&program).unwrap()));
+        assert_eq!(snapshot(&converted), snapshot(&from_tlc(&program).unwrap()));
         assert_eq!(
             format!("{:?}", converted.ir),
             format!("{:?}", from_tlc(&program).unwrap().ir)
@@ -163,7 +183,7 @@ fn empty_program_is_executable() {
     assert!(converted.ir.expressions.is_empty());
     assert_eq!(converted.ir.programs.len(), 1);
     run(&converted);
-    assert_eq!(text(&converted), text(&from_tlc(&program).unwrap()));
+    assert_eq!(snapshot(&converted), snapshot(&from_tlc(&program).unwrap()));
 }
 
 #[test]
@@ -264,7 +284,7 @@ fn input_bounds_are_arena_records_with_deterministic_ids() {
         }
     }
     let reordered = from_tlc(&program).unwrap();
-    assert_eq!(text(&converted), text(&reordered));
+    assert_eq!(snapshot(&converted), snapshot(&reordered));
     assert_eq!(format!("{:?}", converted.ir), format!("{:?}", reordered.ir));
 }
 
@@ -369,7 +389,7 @@ fn literals_and_names_stay_in_the_sidecar() {
     let program = f.program(vec![tuple]);
     let converted = from_tlc(&program).unwrap();
     verify_sources(&program, &converted);
-    let emitted = text(&converted);
+    let emitted = snapshot(&converted);
     assert!(!emitted.contains("18446744073709551615"));
     for literal in [
         ExprKind::Int("18446744073709551615".into()),
@@ -854,4 +874,28 @@ fn named_body_regions_resolve_forward_references() {
         parameters.len() + captures.len()
     );
     assert!(converted.ir.definitions.values().any(|def| def.body == *region));
+}
+
+#[test]
+fn repeated_array_helpers_are_exposed_for_cross_call_fusion() {
+    let source = include_str!("../../../testfiles/regressions/shared_fusion_helper.wyn");
+    let converted = from_tlc(&self::source(source)).unwrap();
+    let graph = run(&converted);
+    assert_eq!(
+        graph.get_size("ScremaPlan"),
+        8,
+        "all four calls expose their two maps to fusion"
+    );
+    let fused = super::fuse(converted).unwrap();
+    let entry = fused.entries.values().next().unwrap().definition;
+    let body = fused.definitions[entry].body;
+    assert_eq!(
+        fused.regions[body]
+            .members
+            .iter()
+            .filter(|op| matches!(fused.operations[**op].kind, OperationKind::Screma { .. }))
+            .count(),
+        1,
+        "fusion crosses helper boundaries and preserves all observed outputs"
+    );
 }

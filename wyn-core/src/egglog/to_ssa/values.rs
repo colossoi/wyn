@@ -12,9 +12,9 @@ use crate::op::{BinaryOperator, UnaryOperator};
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{ConstantValue, Function, PlaceId, Terminator, ValueRef};
 use crate::types::{
-    array_variant_bounded, bool_type, buffer_tag, extract_function_signature, i32, is_array_variant_view,
-    is_array_variant_virtual, make_array1, no_buffer, sized_array, strip_existentials, view_array_of,
-    view_array_with_size,
+    array_variant_bounded, as_soa_tuple, bool_type, buffer_tag, extract_function_signature, i32,
+    is_array_variant_view, is_array_variant_virtual, make_array1, no_buffer, sized_array,
+    strip_existentials, view_array_of, view_array_with_size,
 };
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
@@ -56,7 +56,11 @@ impl Body<'_, '_> {
             return Err(error(format!("no source ABI for parameter {id:?}")));
         };
         let mut declared = vec![];
-        for input in inputs {
+        for mut input in inputs {
+            // Computed scalar leaves use one-element storage buffers.
+            if input.storage_binding().is_some() && !input.ty.is_array() {
+                input.ty = sized_array(1, input.ty.clone());
+            }
             let ty = if let Some(binding) = input.storage_binding() {
                 let Some(element) = input.ty.elem_type() else {
                     return Err(error("storage input element"));
@@ -79,7 +83,9 @@ impl Body<'_, '_> {
         }
         self.declare_input(id)?;
         let mut values = vec![];
-        for (input, parameter) in self.declared_inputs[&id].clone() {
+        for (position, (input, parameter)) in self.declared_inputs[&id].clone().into_iter().enumerate() {
+            let original = &self.compiler.data.state.abi.inputs[&id][position];
+            let scalar_storage = original.storage_binding().is_some() && !original.ty.is_array();
             let value = if let Some(binding) = input.storage_binding() {
                 let length = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
                     Self::number(u32::try_from(*n).map_err(|_| error("array size exceeds u32"))?)
@@ -100,6 +106,7 @@ impl Body<'_, '_> {
             } else {
                 parameter
             };
+            let value = if scalar_storage { self.index(value, Self::number(0))? } else { value };
             values.push(value);
         }
         let value = if values.len() == 1 { values.remove(0) } else { self.tuple(values)? };
@@ -790,6 +797,25 @@ impl Body<'_, '_> {
         let ty = strip_existentials(ty);
         if value.ty == *ty || (value.ty.is_array() && ty.is_array()) {
             return Ok(value);
+        }
+        // A materialized logical tuple array can reside in one array-of-tuples
+        // buffer. Keep that physical view: indexing supplies the tuple element
+        // directly, without rebuilding every component array in each thread.
+        fn soa_element(ty: &Type) -> Option<Type> {
+            if let Some(fields) = as_soa_tuple(ty) {
+                Some(crate::types::tuple(
+                    fields.iter().map(soa_element).collect::<Option<_>>()?,
+                ))
+            } else {
+                ty.elem_type().cloned()
+            }
+        }
+        if as_soa_tuple(ty).is_some() {
+            if let (Some(actual), Some(expected)) = (value.ty.elem_type(), soa_element(ty)) {
+                if *actual == storage_type(&expected)? {
+                    return Ok(value);
+                }
+            }
         }
         if let (
             Type::Constructed(TypeName::Tuple(_) | TypeName::Record(_), a),

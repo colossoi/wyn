@@ -1,0 +1,22 @@
+[  +  0.000] Reading and type-checking source program
+[  +  0.162] Defunctorising
+[  +  0.001] Full Normalising
+[  +  0.022] Replacing records
+[  +  0.027] Lifting lambdas
+[  +  0.032] Monomorphising
+[  +  0.006] Defunctionalising
+[  +  0.008] Converting to core IR
+[  +  0.007] Type-checking internalised program
+[  +  0.004] Running pass: simplify
+[  +  0.007] Running pass: Inline conservatively
+[  +  0.022] Running pass: simplify
+[  +  0.003] Running pass: Inline aggressively
+[  +  0.053] Running pass: simplify
+[  +  0.139] Running pass: CSE
+[  +  0.013] Running pass: simplify
+[  +  0.039] Running pass: Fuse SOACs
+[  +  0.445] Running pass: CSE
+[  +  0.006] Running pass: simplify
+[  +  0.041] Running pass: Remove dead functions
+[  +  0.014] Running action Prettyprint
+[  +  0.027] Done.

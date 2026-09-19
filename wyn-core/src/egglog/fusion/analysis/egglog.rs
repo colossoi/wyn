@@ -126,7 +126,6 @@ impl Sink for Egglog<'_, '_> {
         self.state.set("Scope", p, region)?;
         self.state.set("IterationDomain", p, domain)?;
         for name in [
-            "Members",
             "DirectInputs",
             "SelfUses",
             "GroupUsesOf",

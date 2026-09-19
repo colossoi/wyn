@@ -1180,3 +1180,16 @@ fn array_update_loop_preserves_unwritten_elements_and_wraps() {
         assert_eq!(run(&result, vec![Value::Int(n)]), [Value::array(expected)]);
     }
 }
+
+#[test]
+fn shared_fused_helpers_keep_call_arguments_and_results_separate() {
+    let source = include_str!("../../../testfiles/regressions/shared_fusion_helper.wyn");
+    let result = compile(source);
+    let output = run(&result, vec![Value::array([0, 1, 2, 3])]);
+    let Value::Tuple(fields) = &output[0] else {
+        panic!("tuple result")
+    };
+    assert_eq!(fields[0].ints(), [2, 4, 6, 8]);
+    assert_eq!(fields[1].ints(), [6, 8, 10, 12]);
+    assert_eq!(fields[2].ints(), [20, 28, 36, 44]);
+}

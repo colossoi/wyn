@@ -4,17 +4,7 @@ use std::collections::BTreeMap;
 use wyn_base::InternIndex;
 
 pub(super) fn all(data: &mut Ir, replacements: &BTreeMap<ExprId, ExprId>) {
-    let mut memo = replacements.clone();
-    let mut rewrite = Rewriter::new(data);
-    let operations: Vec<_> = data.operations.iter().map(|(&id, o)| (id, o.kind.clone())).collect();
-    for (id, mut kind) in operations {
-        rewrite.operation(data, &mut kind, &mut memo);
-        data.operations[id].kind = kind;
-    }
-    let regions: Vec<_> = data.regions.iter().map(|(&id, r)| (id, r.results.clone())).collect();
-    for (id, values) in regions {
-        data.regions[id].results = values.into_iter().map(|v| rewrite.value(data, v, &mut memo)).collect();
-    }
+    Rewriter::new(data).all(data, replacements);
 }
 /// A rewrite session indexes interned values once and incrementally adds results.
 /// Keep it across related substitutions to avoid arena scans for every node.
@@ -25,6 +15,18 @@ impl Rewriter {
     pub fn new(data: &Ir) -> Self {
         Self {
             expressions: InternIndex::from_arena(&data.expressions),
+        }
+    }
+    pub fn all(&mut self, data: &mut Ir, replacements: &BTreeMap<ExprId, ExprId>) {
+        let mut memo = replacements.clone();
+        let operations: Vec<_> = data.operations.iter().map(|(&id, o)| (id, o.kind.clone())).collect();
+        for (id, mut kind) in operations {
+            self.operation(data, &mut kind, &mut memo);
+            data.operations[id].kind = kind;
+        }
+        let regions: Vec<_> = data.regions.iter().map(|(&id, r)| (id, r.results.clone())).collect();
+        for (id, values) in regions {
+            data.regions[id].results = values.into_iter().map(|v| self.value(data, v, &mut memo)).collect();
         }
     }
     pub fn intern(&mut self, data: &mut Ir, ty: TypeId, kind: ExprKind) -> ExprId {

@@ -7,6 +7,7 @@ mod build;
 #[cfg(test)]
 mod parity_tests;
 mod plan;
+mod reachability;
 #[cfg(test)]
 mod tests;
 
@@ -19,8 +20,7 @@ pub fn fuse(mut wyn_program: Program<Imported>) -> Result<Program<Fused>, Optimi
         parse_program("fusion.egg", include_str!("fusion.egg"))
     })?;
     time("egglog fusion / load rules", || graph.run_program(rules))?;
-    let schedule = parse_program("fusion-schedule.egg", include_str!("schedule.egg"))?;
-    time("egglog fusion / run schedule", || graph.run_program(schedule))?;
+    time("egglog fusion / run schedule", || reachability::run(&mut graph))?;
     let steps = time("egglog fusion / read plan", || plan::read(&graph))?;
     let _build = span("egglog fusion / build bodies");
     for step in steps {

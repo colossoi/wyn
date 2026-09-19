@@ -1,0 +1,15 @@
+-- A shared tuple-producing map must survive materialization and horizontal
+-- fusion of its projections without converting the entire intermediate array.
+def collision(x:f32,v:f32,lo:f32,hi:f32) f32 =
+  if x <= lo then max(v,0.0) else if x >= hi then min(v,0.0) else v
+
+def integrate(p:vec4f32,v:vec4f32,bounds:vec3f32) (vec4f32,vec4f32) =
+  let x = p.xyz + (1.0/90.0)*v.xyz in
+  let hi = bounds-p.w in
+  (@[clamp(x.x,p.w,hi.x),clamp(x.y,p.w,hi.y),clamp(x.z,p.w,hi.z),p.w],
+   @[collision(x.x,v.x,p.w,hi.x),collision(x.y,v.y,p.w,hi.y),
+     collision(x.z,v.z,p.w,hi.z),0.0])
+
+entry repro(p:[]vec4f32,v:[]vec4f32) ([]vec4f32,[]vec4f32) =
+  let integrated=map(|i|integrate(p[i],v[i],@[16.0,12.0,10.0]),0i32..<4) in
+  (map(|(p,_v)|p,integrated),map(|(_p,v)|v,integrated))

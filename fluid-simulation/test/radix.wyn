@@ -1,0 +1,6 @@
+module S = import "pkg:sort"
+-- Cross a scan block boundary; exercise all 30 key bits and duplicate keys.
+entry radix() []vec2u32 =
+  let ids = 0i32..<257 in
+  let pairs = map(|i| @[(u32.i32((i*73)%31) << 25u32) + u32.i32(i%3),u32.i32(i)],ids) in
+  S.radix_sort(pairs,ids)

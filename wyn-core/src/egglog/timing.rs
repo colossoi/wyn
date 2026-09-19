@@ -30,7 +30,10 @@ impl Drop for Report {
 }
 
 pub(super) fn span(name: &'static str) -> Option<Span<'static>> {
-    ENABLED.get().then(|| Span::new(name))
+    ENABLED.get().then(|| {
+        eprintln!("{name}: starting");
+        Span::new(name)
+    })
 }
 
 pub(super) fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {

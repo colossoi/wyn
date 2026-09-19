@@ -53,7 +53,11 @@ if __name__ == '__main__':
                 assert hilbert[i*4:i*4+4] == [encode(p),*p], (target,i)
             sort, = run(ROOT/'fluid-simulation/test/spatial.wyn',directory,target)
             assert sort == [0,3,1,2,2,1,3,0], (target,sort)
+            radix, = run(ROOT/'fluid-simulation/test/radix.wyn',directory,target)
+            pairs = [((((i*73)%31) << 25) + i%3, i) for i in range(257)]
+            expected = [v for pair in sorted(pairs, key=lambda p: p[0]) for v in pair]
+            assert radix == expected, (target, 'radix ordering/stability', radix)
             tree,overflow = run(ROOT/'fluid-simulation/test/octree.wyn',directory,target)
             assert tree == [i*(1<<27) for i in range(8)]+[1<<30]*8,(target,tree)
             assert overflow == [0]
-            print(target, 'Hilbert oracle, 30-bit radix sort, cornerstone split: passed')
+            print(target, 'Hilbert oracle, 30-bit radix sort and stability across scan blocks, cornerstone split: passed')

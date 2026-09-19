@@ -1,7 +1,7 @@
 //! Compiler mid-end using [egglog](https://github.com/egraphs-good/egglog).
 //!
 //! [`from_tlc()`] accepts normalized TLC with inferred input bounds and
-//! returns an egglog fusion graph together with [`Ir`]. [`fuse`]
+//! returns [`Ir`]. [`fuse`] inserts native fusion facts, plans, and
 //! applies fusion decisions to the sidecar. [`insert_expressions`] adds a
 //! separate typed expression DAG with region uses and dependency facts.
 //! [`simplify`] uses equality saturation for scalar algebra. [`place`] records

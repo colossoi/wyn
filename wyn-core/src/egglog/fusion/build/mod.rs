@@ -7,7 +7,7 @@ use crate::egglog::data::{
 };
 use crate::egglog::rewrite::all;
 use crate::egglog::OptimizeError;
-use crate::types::{canonical_storage_buffer_ty, tuple, Type, TypeExt, TypeName};
+use crate::types::{as_soa_tuple, canonical_storage_buffer_ty, tuple, Type, TypeExt, TypeName};
 use body::{finish, invoke, region};
 use envelope::envelope;
 use filter::masked;
@@ -164,11 +164,18 @@ fn element(data: &mut Ir, array: &Array) -> Option<TypeId> {
     Some(intern_type(data, value))
 }
 fn element_type(data: &Ir, array: &Array) -> Option<Type> {
-    match array {
-        Array::Value(id) => {
-            let array_ty = canonical_storage_buffer_ty(&data.types[data.expressions[*id].ty].ty);
-            array_ty.elem_type().cloned()
+    fn logical_element(ty: &Type) -> Option<Type> {
+        let ty = canonical_storage_buffer_ty(ty);
+        if let Some(fields) = as_soa_tuple(&ty) {
+            // A stored tuple of arrays still supplies one tuple-valued element
+            // to the callback, including any nested tuple boundaries.
+            Some(tuple(fields.iter().map(logical_element).collect::<Option<_>>()?))
+        } else {
+            ty.elem_type().cloned()
         }
+    }
+    match array {
+        Array::Value(id) => logical_element(&data.types[data.expressions[*id].ty].ty),
         Array::Literal(xs) => Some(data.types[data.expressions[*xs.first()?].ty].ty.clone()),
         Array::Range { start, .. } => Some(data.types[data.expressions[*start].ty].ty.clone()),
         Array::Zip(xs) => Some(tuple(

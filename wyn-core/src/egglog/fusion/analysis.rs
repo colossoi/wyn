@@ -12,10 +12,10 @@ use sink::{InputSite, Kind, Operation, Sink};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod egglog;
+use egglog::Egglog;
 mod facts;
 mod sink;
 mod summary;
-pub(in crate::egglog) use egglog::Egglog;
 
 /// Load declarations once and insert all source facts in one native update.
 pub(in crate::egglog) fn import(data: &Ir) -> Result<EGraph, OptimizeError> {

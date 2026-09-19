@@ -1,43 +1,39 @@
--- Stable LSD radix pass: scan zeros, then scatter each key/index exactly once.
-def radix_bit<[n]>(pairs: [n]vec2u32, ids: [n]i32, bit: u32) [n]vec2u32 =
-  let zero = map(|p| if ((p.x >> bit) & 1u32) == 0u32 then 1i32 else 0i32,pairs) in
-  let prefix = scan(|a,b| a+b,0i32,zero) in
+-- Stable LSD radix pass over two bits. Scan four bucket counts together;
+-- each key/index pair scatters once to its bucket's offset plus local rank.
+def radix_digit<[n]>(pairs: [n]vec2u32, bit: u32) [n]vec2u32 =
+  let flags = map(|p|
+    let digit = (p.x >> bit) & 3u32 in
+    @[if digit == 0u32 then 1i32 else 0i32,
+      if digit == 1u32 then 1i32 else 0i32,
+      if digit == 2u32 then 1i32 else 0i32,
+      if digit == 3u32 then 1i32 else 0i32],pairs) in
+  let prefix = scan(|a,b| a+b,@[0i32,0i32,0i32,0i32],flags) in
   let total = prefix[length(pairs)-1] in
-  let destinations = map(|i| if zero[i] == 1 then prefix[i]-1 else total+i-prefix[i],ids) in
+  let destinations = map(|(p,rank)|
+    let digit = (p.x >> bit) & 3u32 in
+    if digit == 0u32 then rank.x-1
+    else if digit == 1u32 then total.x+rank.y-1
+    else if digit == 2u32 then total.x+total.y+rank.z-1
+    else total.x+total.y+total.z+rank.w-1,zip(pairs,prefix)) in
   scatter(replicate(length(pairs),@[0u32,0u32]),destinations,pairs)
 
--- Thirty stable binary passes cover 30-bit unsigned keys in pairs.x.
+-- Fifteen stable four-bucket passes cover 30-bit unsigned keys in pairs.x.
 -- pairs.y is carried unchanged; equal keys retain their input order.
--- Requires nonempty pairs and ids = 0i32..<length(pairs).
-def radix_sort<[n]>(pairs: [n]vec2u32, ids: [n]i32) [n]vec2u32 =
-  let p1 = radix_bit(pairs,ids,0u32) in
-  let p2 = radix_bit(p1,ids,1u32) in
-  let p3 = radix_bit(p2,ids,2u32) in
-  let p4 = radix_bit(p3,ids,3u32) in
-  let p5 = radix_bit(p4,ids,4u32) in
-  let p6 = radix_bit(p5,ids,5u32) in
-  let p7 = radix_bit(p6,ids,6u32) in
-  let p8 = radix_bit(p7,ids,7u32) in
-  let p9 = radix_bit(p8,ids,8u32) in
-  let p10 = radix_bit(p9,ids,9u32) in
-  let p11 = radix_bit(p10,ids,10u32) in
-  let p12 = radix_bit(p11,ids,11u32) in
-  let p13 = radix_bit(p12,ids,12u32) in
-  let p14 = radix_bit(p13,ids,13u32) in
-  let p15 = radix_bit(p14,ids,14u32) in
-  let p16 = radix_bit(p15,ids,15u32) in
-  let p17 = radix_bit(p16,ids,16u32) in
-  let p18 = radix_bit(p17,ids,17u32) in
-  let p19 = radix_bit(p18,ids,18u32) in
-  let p20 = radix_bit(p19,ids,19u32) in
-  let p21 = radix_bit(p20,ids,20u32) in
-  let p22 = radix_bit(p21,ids,21u32) in
-  let p23 = radix_bit(p22,ids,22u32) in
-  let p24 = radix_bit(p23,ids,23u32) in
-  let p25 = radix_bit(p24,ids,24u32) in
-  let p26 = radix_bit(p25,ids,25u32) in
-  let p27 = radix_bit(p26,ids,26u32) in
-  let p28 = radix_bit(p27,ids,27u32) in
-  let p29 = radix_bit(p28,ids,28u32) in
-  let p30 = radix_bit(p29,ids,29u32) in
-  p30
+-- Requires nonempty pairs. ids is retained for compatibility with callers.
+-- Explicit passes keep scans parallel until host dispatch loops are supported.
+def radix_sort<[n]>(pairs: [n]vec2u32, _ids: [n]i32) [n]vec2u32 =
+  let p1 = radix_digit(pairs,0u32) in
+  let p2 = radix_digit(p1,2u32) in
+  let p3 = radix_digit(p2,4u32) in
+  let p4 = radix_digit(p3,6u32) in
+  let p5 = radix_digit(p4,8u32) in
+  let p6 = radix_digit(p5,10u32) in
+  let p7 = radix_digit(p6,12u32) in
+  let p8 = radix_digit(p7,14u32) in
+  let p9 = radix_digit(p8,16u32) in
+  let p10 = radix_digit(p9,18u32) in
+  let p11 = radix_digit(p10,20u32) in
+  let p12 = radix_digit(p11,22u32) in
+  let p13 = radix_digit(p12,24u32) in
+  let p14 = radix_digit(p13,26u32) in
+  radix_digit(p14,28u32)

@@ -1028,12 +1028,23 @@ fn computed_leaf_types(ty: &Type) -> Option<Vec<(Vec<usize>, String, Type)>> {
                 }
                 true
             }
+            // Preserve scalar metadata alongside computed arrays. Rejecting
+            // the whole aggregate here substitutes its producer at every
+            // projection, duplicating all of its array work across stages.
+            _ if ty.is_scalar() || ty.is_vec() || ty.is_mat() || *ty == bool_ty() => {
+                leaves.push((path.clone(), labels.join("_"), ty.clone()));
+                true
+            }
             _ => false,
         }
     }
 
     let mut leaves = Vec::new();
-    collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves).then_some(leaves)
+    let supported = collect(ty, &mut Vec::new(), &mut Vec::new(), &mut leaves);
+    // Ordinary scalar root bindings remain orchestration expressions; only
+    // aggregates containing a buffer output introduce a compute stage.
+    let has_buffer = leaves.iter().any(|(_, _, ty)| ty.is_array() || is_indirect_draw_command_type(ty));
+    (supported && has_buffer).then_some(leaves)
 }
 
 fn is_indirect_draw_command_type(ty: &Type) -> bool {
@@ -1991,7 +2002,15 @@ fn append_external_param(
         name: name.to_string(),
         span: Span::generated(),
         ty: external_ty.clone(),
-        attributes: external_binding_attribute(&external_ty, binding).into_iter().collect(),
+        // Computed values are written through storage outputs, including
+        // scalar leaves of mixed aggregates. Their consumers must use the
+        // same storage binding rather than treating scalars as uniforms.
+        attributes: vec![Attribute::Storage {
+            set: AUTO_STORAGE_SET,
+            binding,
+            layout: interface::StorageLayout::Std430,
+            access: interface::StorageAccess::ReadOnly,
+        }],
     });
 }
 
@@ -2142,8 +2161,8 @@ fn build_compute_stage(
 }
 
 /// Make a generated compute stage's value shape match its flattened storage
-/// output declarations. Root orchestration may bind arrays inside nested
-/// tuples/records, but entry ABIs expose one storage slot per array leaf.
+/// output declarations. Root orchestration may bind arrays and scalar metadata
+/// inside nested tuples/records; entry ABIs expose one storage slot per leaf.
 /// Bind the original value once and project those leaves in declaration order.
 fn flatten_compute_output(
     body: Term,

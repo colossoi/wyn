@@ -301,7 +301,7 @@ impl Reader<'_, '_, '_> {
             return Ok(());
         }
         if !self.live.contains(&id) {
-            return Err(error("reachable expression refers to an inactive operation"));
+            return Err(error(&format!("reachable expression refers to inactive {id:?}")));
         }
         let Some(source) = self.data.operations.get(id) else {
             return Err(error("missing source operation"));

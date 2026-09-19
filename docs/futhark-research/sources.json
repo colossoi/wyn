@@ -1,0 +1,55 @@
+{
+  "research_date": "2026-09-19",
+  "compiler_commit": "f547a39abb1f3773f7cdb324ec8ea7cb8cf13ea0",
+  "pdfs": [
+    {
+      "file": "futhark-2013-t2-graph-reduction-fusion.pdf",
+      "url": "https://futhark-lang.org/publications/fhpc13.pdf",
+      "bytes": 356972,
+      "pages": 12,
+      "sha256": "fbac949ec9a5a1ea55ed173d73e1cc82a8a7c25da2d9132334db06cb1997d8a4"
+    },
+    {
+      "file": "futhark-2016-redomap-fusion.pdf",
+      "url": "https://futhark-lang.org/publications/array16.pdf",
+      "bytes": 407127,
+      "pages": 8,
+      "sha256": "e7b49362cd9768bf96da973fb227ee01f5e8103c396f2779c38d965506e6128c"
+    },
+    {
+      "file": "futhark-2017-design-implementation-thesis.pdf",
+      "url": "https://futhark-lang.org/publications/troels-henriksen-phd-thesis.pdf",
+      "bytes": 2496043,
+      "pages": 181,
+      "sha256": "5186ba6c15193bf5bdcf9bd4907d438908b9ac891848314d33f944a15865fcf2"
+    },
+    {
+      "file": "futhark-2017-nested-parallelism.pdf",
+      "url": "https://futhark-lang.org/publications/pldi17.pdf",
+      "bytes": 1015230,
+      "pages": 16,
+      "sha256": "766b77c1735f79f95d14885ffa6a5e8fb101260bb15c7865698fc8d206b16516"
+    },
+    {
+      "file": "futhark-2019-flattening-by-expansion.pdf",
+      "url": "https://futhark-lang.org/publications/array19.pdf",
+      "bytes": 1406834,
+      "pages": 11,
+      "sha256": "e7582fcfc9ae127e01a99c9f9332198b73ed56b562c07063b03613691e4011b7"
+    },
+    {
+      "file": "futhark-2019-incremental-flattening.pdf",
+      "url": "https://futhark-lang.org/publications/ppopp19.pdf",
+      "bytes": 977169,
+      "pages": 15,
+      "sha256": "84f0d7aa0feaddd74b6be6dc5cd5a506e873c8d5e7b11c62b962c7ad62b7f3fe"
+    },
+    {
+      "file": "futhark-2026-full-flattening-thesis.pdf",
+      "url": "https://futhark-lang.org/student-projects/amir-msc-thesis.pdf",
+      "bytes": 1650680,
+      "pages": 85,
+      "sha256": "3f33de97b82284001c0444d48455da916d58bebabeb0a02050a069442cefbf0d"
+    }
+  ]
+}

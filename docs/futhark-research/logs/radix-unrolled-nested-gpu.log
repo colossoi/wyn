@@ -1,0 +1,44 @@
+[  +  0.000] Reading and type-checking source program
+[  +  0.168] Defunctorising
+[  +  0.001] Full Normalising
+[  +  0.024] Replacing records
+[  +  0.028] Lifting lambdas
+[  +  0.033] Monomorphising
+[  +  0.006] Defunctionalising
+[  +  0.009] Converting to core IR
+[  +  0.007] Type-checking internalised program
+[  +  0.004] Running pass: simplify
+[  +  0.008] Running pass: Inline conservatively
+[  +  0.023] Running pass: simplify
+[  +  0.003] Running pass: Inline aggressively
+[  +  0.054] Running pass: simplify
+[  +  0.146] Running pass: CSE
+[  +  0.014] Running pass: simplify
+[  +  0.040] Running pass: Fuse SOACs
+[  +  0.452] Running pass: CSE
+[  +  0.007] Running pass: simplify
+[  +  0.042] Running pass: Remove dead functions
+[  +  0.014] Running pass: flatten
+[  +  0.146] Running pass: simplify
+[  +  0.207] Running pass: Remove dead functions
+[  +  0.033] Running pass: add global params
+[  +  0.034] Running pass: optimise generalized reductions
+[  +  0.033] Running pass: simplify
+[  +  0.095] Running pass: tile loops
+[  +  0.043] Running pass: simplify
+[  +  0.090] Running pass: hist accs
+[  +  0.039] Running pass: unstream
+[  +  0.120] Running pass: CSE
+[  +  0.041] Running pass: simplify
+[  +  0.245] Running pass: sink
+[  +  0.039] Running pass: reduce device synchronizations
+[  +  0.055] Running pass: simplify
+[  +  0.097] Running pass: CSE
+[  +  0.039] Running pass: merge GPU bodies
+[  +  0.081] Running pass: simplify
+[  +  0.098] Running pass: sink
+[  +  0.038] Running pass: optimise array layout gpu
+[  +  0.064] Running pass: simplify
+[  +  0.094] Running pass: CSE
+[  +  0.144] Running action Prettyprint
+[  +  0.064] Done.

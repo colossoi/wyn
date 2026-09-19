@@ -1,4 +1,4 @@
-//! Retain backend-ready TLC structure in arenas and emit its fusion summary.
+//! Retain backend-ready TLC structure in arenas for native fact insertion.
 use super::data::body_signature;
 use super::fusion::analysis::import;
 use super::timing::span;
@@ -41,7 +41,7 @@ pub enum ConvertError {
 /// values are structurally interned in the sidecar; local lets become references.
 /// Operations have their own identities and remain in their execution regions.
 /// Map/reduce/scan construct Scremas directly.
-/// Egglog receives only the fusion summary. This conversion neither mutates TLC
+/// Import the native fusion summary once. This conversion neither mutates TLC
 /// nor runs optimization or extraction.
 pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>, ConvertError> {
     let _timing = span("egglog from TLC");
