@@ -43,14 +43,15 @@ locations do not prescribe runtime API objects.
 
 ## Language foundation
 
-WHL uses a strict subset of Common Lisp syntax and semantics, extended with the
-Wyn declarations and GPU primitives defined here. The subset is positive: only
+WHL uses a subset of Common Lisp syntax and control flow, with fixed-width
+numeric types and the Wyn declarations and GPU primitives defined here. Only
 explicitly permitted forms, functions, reader features, and declaration options
 are supported. The rest of Common Lisp is not implicitly available.
 
 The [Common Lisp HyperSpec](https://www.lispworks.com/documentation/HyperSpec/Front/index.htm)
-is the reference for included Common Lisp constructs. WHL restricts permitted
-syntax and operands rather than assigning familiar forms different meanings.
+is the reference for included Common Lisp constructs. Ordinary arithmetic keeps
+its Common Lisp meaning for results within the declared numeric range. WHL
+requires range checks and provides explicitly named wrapping operations.
 Standard constructs such as `dotimes` and `and` are built into WHL; no
 macroexpander is required.
 
@@ -61,7 +62,7 @@ reader accepts:
 
 - Proper parenthesized lists, including the empty list `()`.
 - Symbols, keyword symbols such as `:read`, and the constants `t` and `nil`.
-- Signed decimal integers of arbitrary size.
+- Decimal integer literals within their fixed-width type.
 - Decimal floating-point literals such as `3.5`, `3.5f0`, and `3.5d0`.
 - Double-quoted strings. Backslash quotes the following character; it does not
   introduce C-style escapes such as a newline escape.
@@ -76,19 +77,37 @@ Strings, including paths and shader entry names, retain case. Keywords and `t`
 evaluate to themselves. `nil` denotes both false and the empty list; every other
 value, including zero, is true.
 
-Integers are read in base ten. An omitted float exponent marker, or `e` or `f`,
-denotes single precision; `d` denotes double precision. WHL uses finite IEEE
-binary32 and binary64 host floats. A Common Lisp reference implementation must
-provide those formats and use the normal single-precision reader default. Float
-overflow and non-finite host results are errors. Shader arithmetic and raw buffer
-contents are governed by the device contract instead.
+Integers are read in base ten. A literal has the type required by its declaration,
+conversion, or arithmetic operands; without such context it is `i32`. An omitted
+float exponent marker, or `e` or `f`, denotes `f32`; `d` denotes `f64`.
+Floating-point results use IEEE binary32 or binary64, rounded to nearest with
+ties to even. Float overflow and non-finite host results are errors.
+
+The normal scalar types are `i32`, `u32`, and `f32`. Explicit `i64` and `u64`
+are available for byte sizes, offsets, and wider intermediate calculations;
+`f64` is available when explicitly requested. Signed integers use two's
+complement. The corresponding host declaration keywords are `:i32`, `:u32`,
+`:f32`, `:i64`, `:u64`, and `:f64`. Generic `:integer` and `:real` types are
+not part of the host interface.
+
+The integer ranges correspond to Common Lisp's `(signed-byte 32)`,
+`(unsigned-byte 32)`, `(signed-byte 64)`, and `(unsigned-byte 64)` types.
+These are value-range contracts; declaring operands with those types does not
+make Common Lisp arithmetic wrap or constrain an undeclared result.
+
+Conversions have the form `(i32 value)`, `(u32 value)`, `(f32 value)`,
+`(i64 value)`, `(u64 value)`, or `(f64 value)`. Integer conversions require an
+integer value in range; they never truncate or wrap. A literal operand is read
+in the requested type, so `(u32 4294967295)` is valid. Floating conversions round
+to the requested precision. Float-to-integer conversion requires an explicit
+`floor` or `ceiling` first. No conversion silently enlarges the destination type.
 
 Quoted data may contain permitted literals, symbols, and proper lists. Runtime
-values also include exact rationals produced by arithmetic and opaque resource
-handles. Ratio literals, dotted lists, character and vector literals, backquote,
-comma, escaped symbol names, package qualification other than keywords, custom
-readtables, and all `#` reader syntax are excluded. In particular, reading an
-artifact cannot execute code through `#.`.
+values also include opaque resource handles. Arbitrary-precision integers and
+rational values are excluded. Ratio literals, dotted lists, character and vector
+literals, backquote, comma, escaped symbol names, package qualification other
+than keywords, custom readtables, and all `#` reader syntax are excluded. In
+particular, reading an artifact cannot execute code through `#.`.
 
 ### Evaluation and binding
 
@@ -132,26 +151,41 @@ floor ceiling mod min max
 not list
 ```
 
-They use Common Lisp argument counts and numeric semantics, restricted to real
-numbers. Integers and rational arithmetic are exact and do not wrap. In
-particular, `(/ 3 2)` produces the exact rational number three halves; `/` is not
-truncating integer division. `floor` and `ceiling` accept an optional nonzero
-divisor and round the quotient toward negative and positive infinity,
-respectively. `mod` uses the remainder associated with `floor`. Division by zero
-is an error.
+Ordinary functions use Common Lisp argument counts. Arithmetic operands have the
+same fixed-width type; literals may take their type from another operand.
+Convert other mixed operands explicitly. Integer `+`, `-`, `*`, `min`, and
+`max` return that type. Every intermediate result must fit; overflow is an error.
+An implementation must not rely on a host language's unchecked overflow behavior.
 
-Common Lisp multiple-value behavior is retained, including the remainder returned
-by `floor` and `ceiling`. WHL has no forms for capturing secondary values;
-argument and initializer positions use the primary value. The external entry
-interface likewise observes only the primary return value. See the definitions
-of [`/`](https://www.lispworks.com/documentation/HyperSpec/Body/f_sl.htm) and
-[`floor` and `ceiling`](https://www.lispworks.com/documentation/HyperSpec/Body/f_floorc.htm).
+Integer `/` is permitted only when its exact result is an integer in range.
+For example, `(/ 6 2)` is valid, while `(/ 3 2)` is outside the subset. Use
+`(/ (f32 3) (f32 2))` for floating-point division, or `floor` and `ceiling` for
+integer division with explicit rounding. There is no rational arithmetic.
 
-Mixed rational and float calculations use Common Lisp numeric coercion, with
-double precision taking precedence over single precision. Allocation sizes,
-offsets, logical lengths, loop counts, and dispatch dimensions must be integers
-when consumed. A rational or float is not silently truncated at a GPU boundary.
-Typed scalar arguments are checked against the declared device type.
+`floor` and `ceiling` accept an optional nonzero divisor and round the quotient
+toward negative and positive infinity, respectively. Integer operands retain
+their type; `f32` operands produce an `i32` quotient and `f64` operands an `i64`
+quotient, with range checks. `mod` uses the remainder associated with `floor`.
+Division by zero and an unrepresentable quotient, including the signed minimum
+divided by minus one, are errors. Rounding must not introduce avoidable overflow:
+`(ceiling (u32 4294967295) 64)` is valid even though adding 63 first would overflow.
+
+Common Lisp multiple-value behavior is retained for ordinary functions,
+including the remainder returned by `floor` and `ceiling`. WHL has no forms for
+capturing secondary values; argument and initializer positions use the primary
+value. The external entry interface likewise observes only the primary result.
+
+The explicit binary operations `i32-add`, `i32-sub`, `i32-mul`, `u32-add`,
+`u32-sub`, and `u32-mul` preserve Wyn's 32-bit wrapping arithmetic. Both operands
+have the named type; the result retains its low 32 bits and interprets them with
+the named signedness. These are WHL extensions, not overrides of Common Lisp
+`+`, `-`, or `*`. For example, `(u32-add (u32 4294967295) 1)` returns zero.
+
+Allocation sizes and byte offsets fit `u64`; dispatch dimensions and draw counts
+fit `u32`. Values crossing a GPU boundary are range-checked integer conversions.
+They cannot be floating-point values or acquire wrapping behavior at the boundary.
+An element index fitting 32 bits does not imply that its byte offset fits 32 bits:
+multiply a widened index by the element stride before using it as a byte offset.
 
 `not` returns `t` exactly when its operand is `nil`. `list` constructs a proper
 list from its evaluated arguments. Lists carry argument collections, metadata,
@@ -309,13 +343,13 @@ that representation. Layout offsets and strides refer to these encodings.
 (define-host-entry 'sum-array
   :function 'host-sum-array
   :parameters '((input :buffer :read :element :f32 :stride 4)
-                (n :integer))
+                (n :u32))
   :results '((result :buffer :read :element :f32 :stride 4 :ownership :owned)))
 ```
 
 An entry associates a public name with a WHL function. Input names and order
-match its parameters. Host scalar types are `:integer` and `:real`, as well as
-the device scalar types. Resources use the descriptions above. Entries also
+match its parameters. Host scalars use the fixed-width types defined above and
+`:bool`. Resources use the descriptions above. Entries also
 allow `(name :host-buffer access)` for a caller-supplied byte span and
 `(name :texture-view usage :dimension dimension :format format :samples count)`
 for a view, including a render target. A host `:texture` description can name an
@@ -347,7 +381,7 @@ flow requires explicit readback.
 
 ## Buffers and transfers
 
-Sizes and offsets are nonnegative integer byte counts. Operations must stay
+Sizes and offsets are nonnegative byte counts fitting `u64`. Operations must stay
 within resources. Capacity and logical array length are distinct: dispatch
 padding and spare capacity do not change the logical length.
 
@@ -355,7 +389,7 @@ padding and spare capacity do not change the logical length.
 | --- | --- |
 | `(gpu-alloc bytes)` | Create an owned device buffer of the requested logical byte capacity, with undefined contents. |
 | `(gpu-free resource)` | End ownership of an allocation or sampler; return `nil`. |
-| `(gpu-buffer-size buffer)` | Return byte capacity. |
+| `(gpu-buffer-size buffer)` | Return byte capacity as `u64`. |
 | `(gpu-copy destination destination-offset source source-offset bytes)` | Copy between device buffers, host spans, or one of each; return `nil`. |
 | `(gpu-read-scalar buffer offset 'type)` | Read a device scalar and return its host value. |
 | `(gpu-write-scalar buffer offset 'type value)` | Encode and write a scalar; return `nil`. |
@@ -449,7 +483,7 @@ a caller receiving an owned view owns that backing allocation.
 
 `gpu-texture-size` returns the selected mip's three extents.
 `gpu-texture-dimension` returns the extent selected by the quoted symbol `width`,
-`height`, or `depth-or-layers`, allowing scalar calculations without list access.
+`height`, or `depth-or-layers`, returning `u32` and allowing scalar calculations without list access.
 Both accept an allocation or view, with mip indices relative to the view.
 `(gpu-texture-mip-levels texture)` returns the number of mip levels available
 through an allocation or view.
@@ -666,7 +700,7 @@ and unsupported features are errors, not requests to change a draw.
 
 Names are quoted static symbols. Device properties are capabilities exposed by
 the selected device and execution environment, not raw API struct fields.
-Numeric properties return nonnegative integers:
+Numeric properties return `u64` for byte quantities and `u32` for dimensions and counts:
 
 | Property | Unit or meaning |
 | --- | --- |
@@ -734,7 +768,7 @@ They illustrate orchestration; device algorithms remain in referenced shaders.
 ```lisp
 (defun host-sum-array (input n)
   (let* ((groups (ceiling n 64))
-         (partials (gpu-alloc (* groups 4)))
+         (partials (gpu-alloc (* (u64 groups) (u64 4))))
          (result (gpu-alloc 4)))
     (if (= n 0)
         (gpu-write-scalar result 0 'f32 0.0)
@@ -762,7 +796,7 @@ Logical release of partials is safe even while phase two is queued.
   (let* ((groups (ceiling n 64))
          (src input)
          (dst scratch)
-         (flags (gpu-alloc (* n 4)))
+         (flags (gpu-alloc (* (u64 n) (u64 4))))
          (offsets (gpu-alloc (* n 4))))
     (if (> n 0)
         (dotimes (pass passes)
@@ -833,15 +867,17 @@ SPIR-V or WGSL; its default is SPIR-V for WHL and WGSL for Rust/WGPU. Rust/WGPU
 requires WGSL. There is no JSON pipeline output.
 
 The Rust emitter constructs syntax with `quote` and `syn` and formats it with
-`prettyplease`. Its generated module uses WGPU 27 and `num-bigint`, `num-integer`,
-and `num-traits` for mathematical size arithmetic. Host inputs are explicit
-function parameters; resource-name and packed-field tables expose their source
+`prettyplease`. Its generated module depends on WGPU 27 and uses Rust's native
+fixed-width scalar types. Host inputs are explicit function parameters;
+resource-name and packed-field tables expose their source
 identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
 or interpreter is involved.
 
 The compiler publishes host-computable integer allocation expressions, including
 scalar interface reads, arithmetic, and logical input lengths. Expressions lifted
-from typed 32-bit Wyn arithmetic preserve wrapping using `mod`; size arithmetic
-uses mathematical integers. Capacities requiring unsupported scalar conversions
+from typed 32-bit Wyn arithmetic use explicit wrapping operations. Generated
+capacity expressions use checked `i64` intermediates and convert to `u64` byte sizes
+or `u32` launch dimensions at the API boundary. Standalone count and dimension
+parameters are `u32`. Capacities requiring unsupported scalar conversions
 or device-only values remain explicit caller-supplied resources. The source
 program still determines logical lengths independently of allocation capacity.

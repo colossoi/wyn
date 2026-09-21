@@ -6,9 +6,9 @@ use syn::{parse2, parse_file, File, Item, UseTree};
 
 use crate::{
     Allocation, Binding, BlendMode, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr, FillMode,
-    FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline, PrimitiveTopology, Program,
-    ResourceId, Scissor, ShaderFormat, ShaderStage, StorageImageFormat, TextureViewDimension, VertexFormat,
-    Viewport,
+    FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
+    PrimitiveTopology, Program, ResourceId, Scissor, ShaderFormat, ShaderStage, StorageImageFormat,
+    TextureViewDimension, VertexFormat, Viewport,
 };
 
 fn resource(id: ResourceId) -> Ident {
@@ -28,12 +28,13 @@ fn texture_format(format: StorageImageFormat) -> TokenStream {
 }
 
 impl Program {
-    /// Generate a Rust module using WGPU 27 and arbitrary-precision size arithmetic.
+    /// Generate a Rust module using WGPU 27 and fixed-width size arithmetic.
     pub fn to_rust_wgpu(&self, module_path: &str, format: ShaderFormat) -> Result<String, HostError> {
         if format != ShaderFormat::Wgsl {
             return Err(HostError::Invalid("rust-wgpu requires WGSL shader output".into()));
         }
         let support = parse_file(include_str!("rust_support.rs"))?;
+        let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
         let functions = self
             .entries
             .iter()
@@ -70,11 +71,9 @@ impl Program {
             }
         }
         let mut syntax: File = parse2(quote! {
-            //! Generated Wyn host code. Dependencies: wgpu 27, num-bigint 0.4,
-            //! num-integer 0.1, and num-traits 0.2.
-            pub mod support {#support}
+            //! Generated Wyn host code. Dependency: wgpu 27.
+            pub mod support {#support pub mod arithmetic {#arithmetic}}
             use support::{HostError, Resource, ceiling, dimension, floor, read_host_scalar, read_scalar, size};
-            use num_bigint::BigInt;
             use std::borrow::Cow;
             use wgpu::{
                 BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent, BlendFactor,
@@ -101,18 +100,30 @@ impl Program {
 
     fn rust_expr(&self, expr: &Expr, entry: &Entry) -> TokenStream {
         match expr {
-            Expr::Integer(n) => quote!(BigInt::from(#n)),
+            Expr::I32 { op, left, right } | Expr::U32 { op, left, right } => {
+                let left = self.rust_expr(left, entry);
+                let right = self.rust_expr(right, entry);
+                let convert =
+                    if matches!(expr, Expr::I32 { .. }) { quote!(i32_value) } else { quote!(u32_value) };
+                let method = match op {
+                    IntegerOp::Add => quote!(wrapping_add),
+                    IntegerOp::Subtract => quote!(wrapping_sub),
+                    IntegerOp::Multiply => quote!(wrapping_mul),
+                };
+                quote!(i64::from(support::arithmetic::#convert(#left)?.#method(support::arithmetic::#convert(#right)?)))
+            }
+            Expr::Integer(n) => quote!(#n),
             Expr::Input(name) => {
                 let id = scalar(name);
-                quote!(#id.clone())
+                quote!(i64::from(#id))
             }
             Expr::BufferSize(r) => {
                 let id = resource(*r);
                 if entry.inputs.contains(r) {
-                    quote!(BigInt::from(#id.size()))
+                    quote!(support::arithmetic::signed_size(#id.size())?)
                 } else {
                     let bytes = format_ident!("resource_{}_bytes", r.0);
-                    quote!(BigInt::from(#bytes))
+                    quote!(support::arithmetic::signed_size(#bytes)?)
                 }
             }
             Expr::ReadScalar {
@@ -130,25 +141,25 @@ impl Program {
             Expr::TextureDimension { resource: r, axis } => {
                 let id = resource(*r);
                 match axis {
-                    0 => quote!(BigInt::from(#id.width())),
-                    1 => quote!(BigInt::from(#id.height())),
-                    _ => quote!(BigInt::from(#id.depth_or_array_layers())),
+                    0 => quote!(i64::from(#id.width())),
+                    1 => quote!(i64::from(#id.height())),
+                    _ => quote!(i64::from(#id.depth_or_array_layers())),
                 }
             }
             Expr::Add(a, b) => {
                 let a = self.rust_expr(a, entry);
                 let b = self.rust_expr(b, entry);
-                quote!((#a + #b))
+                quote!(support::arithmetic::add(#a,#b)?)
             }
             Expr::Subtract(a, b) => {
                 let a = self.rust_expr(a, entry);
                 let b = self.rust_expr(b, entry);
-                quote!((#a - #b))
+                quote!(support::arithmetic::subtract(#a,#b)?)
             }
             Expr::Multiply(a, b) => {
                 let a = self.rust_expr(a, entry);
                 let b = self.rust_expr(b, entry);
-                quote!((#a * #b))
+                quote!(support::arithmetic::multiply(#a,#b)?)
             }
             Expr::Floor(a, b) => {
                 let a = self.rust_expr(a, entry);
@@ -163,7 +174,7 @@ impl Program {
             Expr::Mod(a, b) => {
                 let a = self.rust_expr(a, entry);
                 let b = self.rust_expr(b, entry);
-                quote!(support::modulo(#a,#b)?)
+                quote!(support::arithmetic::modulo(#a,#b)?)
             }
             Expr::Min(a, b) => {
                 let a = self.rust_expr(a, entry);
@@ -194,7 +205,7 @@ impl Program {
         }
         for name in &entry.scalar_inputs {
             let name = scalar(name);
-            params.push(quote!(#name:BigInt));
+            params.push(quote!(#name:u32));
         }
         let mut code = vec![];
         for a in &entry.allocations {
@@ -205,8 +216,8 @@ impl Program {
                     let length = format_ident!("resource_{}_bytes", r.0);
                     let label = &self.interface.frame_graph.resources[r.0].name;
                     code.push(quote!{
-                        let #length=size(&(#bytes))?;
-                        if #length>device.limits().max_buffer_size {return Err(HostError(format!("buffer {} exceeds device limit",#label)));}
+                        let #length=size(#bytes)?;
+                        if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
                         let #id=device.create_buffer(&BufferDescriptor{
                             label:Some(#label),size:#length.max(4),mapped_at_creation:false,
                             usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
@@ -227,7 +238,7 @@ impl Program {
                     let format = texture_format(*format);
                     let label = &self.interface.frame_graph.resources[r.0].name;
                     code.push(quote!{let #id=device.create_texture(&TextureDescriptor{
-                        label:Some(#label),size:Extent3d{width:dimension(&(#width))?,height:dimension(&(#height))?,depth_or_array_layers:1},
+                        label:Some(#label),size:Extent3d{width:dimension(#width)?,height:dimension(#height)?,depth_or_array_layers:1},
                         mip_level_count:1,sample_count:1,dimension:TextureDimension::D2,format:#format,
                         usage:TextureUsages::STORAGE_BINDING|TextureUsages::TEXTURE_BINDING|TextureUsages::RENDER_ATTACHMENT|TextureUsages::COPY_SRC|TextureUsages::COPY_DST,
                         view_formats:&[],
@@ -340,12 +351,12 @@ impl Program {
             .iter()
             .map(|e| {
                 let e = self.rust_expr(e, entry);
-                quote!(dimension(&(#e))?)
+                quote!(dimension(#e)?)
             })
             .collect::<Vec<_>>();
         Ok(quote! {{
             let groups=[#(#dims),*];
-            if groups.iter().any(|&n|n>device.limits().max_compute_workgroups_per_dimension){return Err(HostError("dispatch exceeds device limits".into()));}
+            if groups.iter().any(|&n|n>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
             let pipeline=device.create_compute_pipeline(&ComputePipelineDescriptor{
                 label:Some(#name),layout:None,module:&shader,entry_point:Some(#name),compilation_options:Default::default(),cache:None,
             });
@@ -563,7 +574,7 @@ impl Program {
                 DrawCount::BufferLength => Expr::Input(format!("count-resource-{}", r.0)),
             };
             let expr = self.rust_expr(&expr, entry);
-            quote!(dimension(&(#expr))?)
+            quote!(dimension(#expr)?)
         };
         let index = |f: &IndexFormat| match f {
             IndexFormat::Uint16 => quote!(IndexFormat::Uint16),

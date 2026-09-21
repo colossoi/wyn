@@ -427,16 +427,8 @@ pub(super) fn facts(
                     if let (Some(operation), Some(signed)) = (operation, signed) {
                         let left = sink.add("AbiExpr", i64::from(args[0].as_u32()))?;
                         let right = sink.add("AbiExpr", i64::from(args[1].as_u32()))?;
-                        let mut result = sink.add("AbiBinary", (operation, left, right))?;
-                        let modulus = sink.add("AbiNumber", 4294967296i64)?;
-                        let bias = sink.add("AbiNumber", 2147483648i64)?;
-                        if signed {
-                            result = sink.add("AbiBinary", ("add", result, bias))?;
-                        }
-                        result = sink.add("AbiBinary", ("mod", result, modulus))?;
-                        if signed {
-                            result = sink.add("AbiBinary", ("sub", result, bias))?;
-                        }
+                        let operation = format!("{}_{operation}", if signed { "i32" } else { "u32" });
+                        let result = sink.add("AbiBinary", (operation, left, right))?;
                         sink.add("AbiAlias", (abi_value, result))?;
                     }
                 }

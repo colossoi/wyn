@@ -1,5 +1,6 @@
 //! Typed host programs with WHL and Rust/WGPU emitters.
 
+pub mod arithmetic;
 pub mod interface;
 mod program;
 mod rust_wgpu;
@@ -10,7 +11,7 @@ pub use interface::{
     CullMode, DepthTest, DispatchLen, DispatchSize, DrawBufferRef, DrawCall, DrawCount, FillMode,
     FragmentOutput, FragmentState, FrameAccess, FrameBindingRef, FrameGraph, FramePass, FramePassKind,
     FrameResource, FrameResourceExtent, FrameResourceKind, FrontFace, GraphicsInvocation, GraphicsPipeline,
-    GraphicsStage, HostSizeInput, HostSizeScalar, IndexFormat, ModuleInterface, Pipeline,
+    GraphicsStage, HostSizeInput, HostSizeScalar, IndexFormat, IntegerOp, ModuleInterface, Pipeline,
     PrimitiveTopology, RasterState, SamplerBindingType, Scissor, ShaderStage, SizeExpr, SizeOp,
     SourceResultBinding, StageBindingUses, StorageImageFormat, StorageTextureSize, TextureSampleType,
     TextureViewDimension, UniformMember, VertexAttribute, VertexFormat, Viewport,

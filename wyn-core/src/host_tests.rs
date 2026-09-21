@@ -1,3 +1,6 @@
+use crate::host::arithmetic::{
+    add, ceiling, dimension, floor, modulo, multiply, signed_size, size, subtract,
+};
 use crate::host::{Allocation, Operation, Pipeline, Program, ShaderFormat};
 use crate::{compile_thru_ssa, lower_ssa_to_wgsl_with_program};
 
@@ -78,7 +81,11 @@ fn both_host_outputs_include_buffer_capacity_arithmetic() {
     assert!(rust.contains("create_compute_pipeline"));
     assert!(rust.contains("dispatch_workgroups"));
     assert!(rust.contains("floor("));
-    assert!(rust.contains("BigInt"));
+    assert!(rust.contains("i64"));
+    assert!(rust.contains("u64"));
+    for dependency in ["BigInt", "num_bigint", "num_integer", "num_traits"] {
+        assert!(!rust.contains(dependency), "unexpected dependency: {dependency}");
+    }
     assert!(!rust.contains("todo!"));
 }
 
@@ -94,11 +101,48 @@ fn integer_capacity_expressions_reach_both_hosts() {
         .any(|a| matches!(a,Allocation::Buffer{bytes,..} if bytes.to_whl().contains("gpu-read-scalar"))));
     let whl = program.to_whl("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     check_whl(&whl);
-    assert!(whl.contains("(mod "), "{whl}");
-    assert!(whl.contains("4294967296"));
+    assert!(whl.contains("(i32-add "), "{whl}");
+    assert!(whl.contains("(i32-mul "), "{whl}");
+    assert!(!whl.contains("4294967296"));
     let rust = program.to_rust_wgpu("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("modulo("));
+    assert!(rust.contains(".wrapping_add("));
+    assert!(rust.contains(".wrapping_mul("));
     assert!(rust.contains("read_scalar(device"));
+}
+
+#[test]
+fn fixed_width_host_arithmetic_checks_overflow_and_keeps_large_byte_sizes() {
+    let bytes = multiply(i64::from(u32::MAX), 16).unwrap();
+    assert_eq!(size(bytes).unwrap(), 68_719_476_720);
+    assert_eq!(signed_size(size(bytes).unwrap()).unwrap(), bytes);
+    assert!(dimension(bytes).is_err());
+    assert!(size(-1).is_err());
+    assert!(signed_size(u64::MAX).is_err());
+    assert!(add(i64::MAX, 1).is_err());
+    assert!(subtract(i64::MIN, 1).is_err());
+    assert!(multiply(i64::MAX, 2).is_err());
+    assert_eq!(dimension(i64::from(u32::MAX)).unwrap(), u32::MAX);
+}
+
+#[test]
+fn fixed_width_division_rounds_without_overflowing_intermediates() {
+    for (a, b, down, up, remainder) in [
+        (5, 2, 2, 3, 1),
+        (-5, 2, -3, -2, 1),
+        (5, -2, -3, -2, -1),
+        (-5, -2, 2, 3, -1),
+    ] {
+        assert_eq!(floor(a, b).unwrap(), down);
+        assert_eq!(ceiling(a, b).unwrap(), up);
+        assert_eq!(modulo(a, b).unwrap(), remainder);
+    }
+    assert_eq!(ceiling(i64::MAX, 2).unwrap(), (i64::MAX / 2) + 1);
+    assert_eq!(modulo(i64::MIN, i64::MAX).unwrap(), i64::MAX - 1);
+    for (a, b) in [(1, 0), (i64::MIN, -1)] {
+        assert!(floor(a, b).is_err());
+        assert!(ceiling(a, b).is_err());
+        assert!(modulo(a, b).is_err());
+    }
 }
 
 #[test]

@@ -7,7 +7,7 @@ use crate::egglog::abi::error;
 use crate::egglog::data::BufferId;
 use crate::egglog::planning::{number, rows};
 use crate::egglog::{OptimizeError, Program, Scheduled};
-use crate::host::{BufferLen, HostSizeInput, HostSizeScalar, SizeExpr, SizeOp};
+use crate::host::{BufferLen, HostSizeInput, HostSizeScalar, IntegerOp, SizeExpr, SizeOp};
 use crate::BindingRef;
 
 pub(super) fn publish(
@@ -68,6 +68,12 @@ pub(super) fn publish(
     graph.constructor_enodes("AbiBinary", |node| {
         let name = graph.value_to_base::<S>(node.children[0]);
         let op = match name.as_str() {
+            "i32_add" => Some(SizeOp::I32(IntegerOp::Add)),
+            "i32_sub" => Some(SizeOp::I32(IntegerOp::Subtract)),
+            "i32_mul" => Some(SizeOp::I32(IntegerOp::Multiply)),
+            "u32_add" => Some(SizeOp::U32(IntegerOp::Add)),
+            "u32_sub" => Some(SizeOp::U32(IntegerOp::Subtract)),
+            "u32_mul" => Some(SizeOp::U32(IntegerOp::Multiply)),
             "add" => Some(SizeOp::Add),
             "sub" => Some(SizeOp::Subtract),
             "mul" => Some(SizeOp::Multiply),

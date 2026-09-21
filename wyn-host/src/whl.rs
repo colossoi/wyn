@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use crate::{
     Access, Allocation, Binding, BlendMode, BufferLen, CullMode, DepthTest, DrawCall, DrawCount, Entry,
-    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, Operation, Pipeline,
+    Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
     PrimitiveTopology, Program, ResourceId, SamplerBindingType, Scissor, ShaderFormat, ShaderStage,
     StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember, VertexFormat, Viewport,
 };
@@ -94,20 +94,33 @@ fn vertex_type(v: &VertexFormat) -> String {
 impl Expr {
     pub fn to_whl(&self) -> String {
         match self {
-            Self::Integer(n) => n.to_string(),
-            Self::Input(n) => n.clone(),
-            Self::BufferSize(r) => format!("(gpu-buffer-size {})", resource(*r)),
+            Self::I32 { op, left, right } | Self::U32 { op, left, right } => {
+                let ty = if matches!(self, Self::I32 { .. }) { "i32" } else { "u32" };
+                let op = match op {
+                    IntegerOp::Add => "add",
+                    IntegerOp::Subtract => "sub",
+                    IntegerOp::Multiply => "mul",
+                };
+                format!(
+                    "(i64 ({ty}-{op} ({ty} {}) ({ty} {})))",
+                    left.to_whl(),
+                    right.to_whl()
+                )
+            }
+            Self::Integer(n) => format!("(i64 {n})"),
+            Self::Input(n) => format!("(i64 {n})"),
+            Self::BufferSize(r) => format!("(i64 (gpu-buffer-size {}))", resource(*r)),
             Self::ReadScalar {
                 resource: r,
                 offset,
                 signed,
             } => format!(
-                "(gpu-read-scalar {} {offset} '{})",
+                "(i64 (gpu-read-scalar {} {offset} '{}))",
                 resource(*r),
                 if *signed { "i32" } else { "u32" }
             ),
             Self::TextureDimension { resource: r, axis } => format!(
-                "(gpu-texture-dimension {} 0 '{})",
+                "(i64 (gpu-texture-dimension {} 0 '{}))",
                 resource(*r),
                 match axis {
                     0 => "width",
@@ -387,7 +400,7 @@ impl Program {
             )?;
         }
         for scalar in &entry.scalar_inputs {
-            writeln!(out, "    ({scalar} :integer)")?;
+            writeln!(out, "    ({scalar} :u32)")?;
         }
         write!(out, "  )\n  :results '(")?;
         for (i, &id) in entry.results.iter().enumerate() {

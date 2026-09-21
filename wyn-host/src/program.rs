@@ -3,8 +3,8 @@ use thiserror::Error;
 
 use crate::{
     Binding, BufferLen, BufferUsage, DepthTest, DispatchLen, DispatchSize, DrawBufferRef, DrawCall,
-    DrawCount, FrameResource, FrameResourceKind, HostSizeInput, HostSizeScalar, ModuleInterface, Pipeline,
-    SizeExpr, SizeOp, StorageTextureSize,
+    DrawCount, FrameResource, FrameResourceKind, HostSizeInput, HostSizeScalar, IntegerOp, ModuleInterface,
+    Pipeline, SizeExpr, SizeOp, StorageTextureSize,
 };
 
 #[derive(Debug, Error)]
@@ -26,9 +26,19 @@ pub enum ShaderFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResourceId(pub usize);
 
-/// Mathematical integer expressions used for capacities and launch dimensions.
+/// Checked i64 capacity arithmetic, with explicit wrapping i32/u32 source operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
+    I32 {
+        op: IntegerOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    U32 {
+        op: IntegerOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     Integer(i64),
     Input(String),
     BufferSize(ResourceId),
@@ -83,7 +93,13 @@ impl Expr {
             | Self::TextureDimension { resource: id, .. } => {
                 result.insert(*id);
             }
-            Self::Add(a, b)
+            Self::I32 {
+                left: a, right: b, ..
+            }
+            | Self::U32 {
+                left: a, right: b, ..
+            }
+            | Self::Add(a, b)
             | Self::Subtract(a, b)
             | Self::Multiply(a, b)
             | Self::Mod(a, b)
@@ -103,7 +119,13 @@ impl Expr {
             Self::Input(name) => {
                 result.insert(name.clone());
             }
-            Self::Add(a, b)
+            Self::I32 {
+                left: a, right: b, ..
+            }
+            | Self::U32 {
+                left: a, right: b, ..
+            }
+            | Self::Add(a, b)
             | Self::Subtract(a, b)
             | Self::Multiply(a, b)
             | Self::Mod(a, b)
@@ -606,6 +628,16 @@ impl Program {
                 let a = Box::new(self.size_expression(pipeline, left)?);
                 let b = Box::new(self.size_expression(pipeline, right)?);
                 match op {
+                    SizeOp::I32(op) => Expr::I32 {
+                        op: *op,
+                        left: a,
+                        right: b,
+                    },
+                    SizeOp::U32(op) => Expr::U32 {
+                        op: *op,
+                        left: a,
+                        right: b,
+                    },
                     SizeOp::Add => Expr::Add(a, b),
                     SizeOp::Subtract => Expr::Subtract(a, b),
                     SizeOp::Multiply => Expr::Multiply(a, b),

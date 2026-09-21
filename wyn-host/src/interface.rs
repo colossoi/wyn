@@ -1466,7 +1466,16 @@ pub enum SizeExpr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegerOp {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeOp {
+    I32(IntegerOp),
+    U32(IntegerOp),
     Add,
     Subtract,
     Multiply,
