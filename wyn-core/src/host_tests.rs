@@ -108,7 +108,9 @@ fn integer_capacity_expressions_reach_both_hosts() {
     let rust = program.to_rust_wgpu("sizes.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains(".wrapping_add("));
     assert!(rust.contains(".wrapping_mul("));
-    assert!(rust.contains("support::read_i32(device"));
+    assert!(rust.contains("n: &Buffer"));
+    let compact: String = rust.split_whitespace().collect();
+    assert!(compact.contains("support::read_i32(device,queue,&n,"));
     assert!(!rust.contains("read_host_scalar"));
 }
 
@@ -298,6 +300,67 @@ fn generated_buffer_names_do_not_alias_source_inputs_with_the_same_name() {
     assert!(!entry.inputs.contains(&entry.results[0]));
     let resource = &program.interface.frame_graph.resources[entry.results[0].0];
     assert_eq!(resource.name, "main_output_2");
+}
+
+#[test]
+fn rust_buffer_arguments_keep_source_names_in_bindings_sizes_and_results() {
+    let program = compile("entry main(buffer:[]i32) []i32 = map(|x:i32|x+1,buffer)");
+    let rust = program.to_rust_wgpu("map.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("buffer: &Buffer"), "{rust}");
+    assert!(rust.contains("buffer.size()"));
+    assert!(rust.contains("resource: buffer.as_entire_binding()"));
+
+    let program = compile("entry echo(samples:[]i32) []i32 = samples");
+    let rust = program.to_rust_wgpu("echo.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("samples: &Buffer"));
+    assert!(rust.contains("Buffer::clone(&samples)"));
+}
+
+#[test]
+fn rust_graphics_arguments_keep_buffer_texture_and_sampler_source_names() {
+    let program = compile(include_str!("../../testfiles/texture_sample.wyn"));
+    let rust = program.to_rust_wgpu("texture.wgsl", ShaderFormat::Wgsl).unwrap();
+    for parameter in [
+        "positions: &Buffer",
+        "tex: &Texture",
+        "samp: &Sampler",
+        "screen: &Texture",
+    ] {
+        assert!(rust.contains(parameter), "missing {parameter} in {rust}");
+    }
+    assert!(rust.contains("positions.as_entire_binding()"));
+    let compact: String = rust.split_whitespace().collect();
+    assert!(compact.contains("tex.create_view("));
+    assert!(rust.contains("BindingResource::Sampler(&samp)"));
+    assert!(compact.contains("screen.create_view("));
+    assert!(rust.contains("Texture::clone(&screen)"));
+}
+
+#[test]
+fn rust_argument_names_handle_keywords_and_generated_binding_collisions() {
+    for (source, parameter) in [
+        ("async", "r#async"),
+        ("crate", "crate_2"),
+        ("device", "device_2"),
+        ("queue", "queue_2"),
+        ("shader", "shader_2"),
+        ("groups", "groups_2"),
+        ("pipeline", "pipeline_2"),
+        ("group_0", "group_0_2"),
+        ("resource_1", "resource_1_2"),
+        ("size", "size_2"),
+    ] {
+        let program = compile(&format!(
+            "entry main({source}:[]i32) []i32 = map(|x:i32|x+1,{source})"
+        ));
+        let rust = program.to_rust_wgpu("names.wgsl", ShaderFormat::Wgsl).unwrap();
+        assert!(rust.contains(&format!("{parameter}: &Buffer")), "{rust}");
+        assert!(rust.contains(&format!("{parameter}.size()")), "{rust}");
+        assert!(
+            rust.contains(&format!("resource: {parameter}.as_entire_binding()")),
+            "{rust}"
+        );
+    }
 }
 
 #[test]

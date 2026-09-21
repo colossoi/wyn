@@ -1,8 +1,9 @@
 use crate::rust_results;
-use proc_macro2::{Ident, TokenStream, TokenTree};
+use proc_macro2::{Group, Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote, ToTokens};
 use std::collections::{BTreeMap, BTreeSet};
-use syn::{parse2, parse_file, File, Item, UseTree, Visibility};
+use syn::visit::{self, Visit};
+use syn::{parse2, parse_file, parse_str, ExprPath, File, Item, PatIdent, UseTree, Visibility};
 
 use crate::{
     Allocation, Binding, BlendMode, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr, FillMode,
@@ -48,6 +49,12 @@ impl Program {
         let function_tokens = quote!(#(#functions)*);
         let mut used = BTreeSet::new();
         collect_identifiers(function_tokens.clone(), &mut used);
+        let functions = functions
+            .into_iter()
+            .zip(&self.entries)
+            .map(|(tokens, entry)| self.rust_input_names(entry, tokens))
+            .collect::<Result<Vec<_>, _>>()?;
+        let function_tokens = quote!(#(#functions)*);
         let resource_names = self
             .interface
             .frame_graph
@@ -112,6 +119,47 @@ impl Program {
             _ => true,
         });
         Ok(prettyplease::unparse(&syntax))
+    }
+
+    fn rust_input_names(&self, entry: &Entry, tokens: TokenStream) -> Result<TokenStream, HostError> {
+        let mut names = InputNames::default();
+        names.visit_file(&parse2(tokens.clone())?);
+        names.used.extend(["RESOURCE_NAMES".into(), "BUFFER_FIELDS".into()]);
+        names.used.extend((0..self.entries.len()).map(|i| format!("ENTRY_{i}")));
+        let pipelines: BTreeSet<_> = entry
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => *pipeline,
+            })
+            .collect();
+        let mut replacements = BTreeMap::new();
+        for &id in &entry.inputs {
+            let frame_resource = &self.interface.frame_graph.resources[id.0];
+            let source = frame_resource
+                .bindings
+                .iter()
+                .find(|binding| pipelines.contains(&binding.pipeline_index))
+                .map(|binding| binding.name.as_str())
+                .unwrap_or(&frame_resource.name);
+            let base = rust_results::name(&source.replace('-', "_"));
+            let mut candidate = base.clone();
+            let mut suffix = 2;
+            let name = loop {
+                if !names.used.contains(&candidate) {
+                    if let Ok(ident) = parse_str::<Ident>(&candidate)
+                        .or_else(|_| parse_str::<Ident>(&format!("r#{candidate}")))
+                    {
+                        names.used.insert(candidate);
+                        break ident;
+                    }
+                }
+                candidate = format!("{base}_{suffix}");
+                suffix += 1;
+            };
+            replacements.insert(resource(id).to_string(), name);
+        }
+        Ok(rename_identifiers(tokens, &replacements))
     }
 
     fn rust_expr(&self, expr: &Expr, entry: &Entry) -> TokenStream {
@@ -359,7 +407,7 @@ impl Program {
             .collect::<Vec<_>>();
         Ok(quote! {{
             let groups=[#(#dims),*];
-            if groups.iter().any(|&n|n>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
+            if groups.iter().any(|&group_count|group_count>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
             let pipeline=device.create_compute_pipeline(&ComputePipelineDescriptor{
                 label:Some(#name),layout:None,module:&shader,entry_point:Some(#name),compilation_options:Default::default(),cache:None,
             });
@@ -696,6 +744,45 @@ impl Program {
             }
         })
     }
+}
+
+#[derive(Default)]
+struct InputNames {
+    used: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for InputNames {
+    fn visit_pat_ident(&mut self, pattern: &'ast PatIdent) {
+        self.used.insert(pattern.ident.to_string());
+        visit::visit_pat_ident(self, pattern);
+    }
+
+    fn visit_expr_path(&mut self, expression: &'ast ExprPath) {
+        if let Some(segment) = expression.path.segments.first() {
+            self.used.insert(segment.ident.to_string());
+        }
+        visit::visit_expr_path(self, expression);
+    }
+}
+
+fn rename_identifiers(tokens: TokenStream, replacements: &BTreeMap<String, Ident>) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(id) => {
+                TokenTree::Ident(replacements.get(&id.to_string()).cloned().unwrap_or(id))
+            }
+            TokenTree::Group(group) => {
+                let mut renamed = Group::new(
+                    group.delimiter(),
+                    rename_identifiers(group.stream(), replacements),
+                );
+                renamed.set_span(group.span());
+                TokenTree::Group(renamed)
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => token,
+        })
+        .collect()
 }
 
 fn collect_identifiers(tokens: TokenStream, used: &mut BTreeSet<String>) {

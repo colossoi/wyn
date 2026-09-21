@@ -9,6 +9,6 @@ description = "Wyn host programs and WHL and Rust/WGPU emission"
 [dependencies]
 thiserror.workspace = true
 quote = "1.0"
-syn = { version = "2.0", features = ["full"] }
+syn = { version = "2.0", features = ["full", "visit"] }
 proc-macro2 = "1.0"
 prettyplease = "0.2"
