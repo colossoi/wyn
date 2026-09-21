@@ -1,6 +1,6 @@
 //! Runtime configuration sidecar for `viz pipeline`.
 //!
-//! The compiler-owned `<shader>.json` descriptor describes executable GPU
+//! The compiler-owned `<shader>.wynhost` program describes executable GPU
 //! topology. The optional `<shader>.viz.json` file describes host policy that
 //! is not part of the Wyn program, beginning with cross-frame feedback.
 

@@ -27,7 +27,7 @@ use crate::specs::PushConstantSpec;
                   \n\
                   Drives the wyn compiler's output (and hand-rolled modules):\n\
                   interactive vertex+fragment viewing, headless compute,\n\
-                  descriptor-driven pipelines, naga validation, and adapter\n\
+                  WHL host programs, naga validation, and adapter\n\
                   inspection.",
     version
 )]
@@ -75,7 +75,6 @@ impl From<TopologyArg> for wgpu::PrimitiveTopology {
     }
 }
 
-/// Parse 76-byte raw header hex into 19 big-endian u32 words for SHA256.
 fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
     let sep = if s.contains('x') { 'x' } else { ',' };
     let parts: Vec<&str> = s.splitn(2, sep).collect();
@@ -89,17 +88,18 @@ fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run a pipeline described by a JSON pipeline descriptor
-    #[command(name = "pipeline", visible_alias = "run")]
+    /// Run a WHL host program
+    #[command(name = "pipeline", visible_aliases = ["run", "compute"])]
     Pipeline {
-        /// Path to the SPIR-V or WGSL module
+        /// Path to a .wynhost program or its SPIR-V/WGSL module
         path: PathBuf,
-        /// Path to the pipeline descriptor JSON. Defaults to
-        /// `<shader-path>.json` (the file `wyn compile` writes next to
-        /// its output by default), so this only needs to be supplied
-        /// when the descriptor lives somewhere else.
+        /// WHL program path; defaults to the shader's sibling .wynhost file.
         #[arg(long, short)]
         pipeline: Option<PathBuf>,
+        #[arg(long, help = "Select a source entry by name")]
+        entry: Option<String>,
+        #[arg(long, help = "Run without a window, including graphics programs")]
+        headless: bool,
         /// Runtime configuration sidecar. Defaults to
         /// `<shader-path>.viz.json` when that file exists. Feedback in this
         /// file uses authored entry/input names and source result slots.
@@ -108,7 +108,7 @@ enum Command {
         /// Do not auto-load `<shader-path>.viz.json`.
         #[arg(long, conflicts_with = "config_path")]
         no_config: bool,
-        /// Input data: name:file.json (repeatable)
+        /// Input data: name:file.bin or name:file.json (f32 arrays) (repeatable)
         #[arg(long = "input", value_name = "NAME:FILE")]
         inputs: Vec<String>,
         /// Upload an image file (PNG/JPEG) as the texture binding named
@@ -138,18 +138,12 @@ enum Command {
         /// `SPEC` is `0` (zero-filled) or `rng` (uniform-random `f32`
         /// in `[0, 1)`, one per 4 bytes).
         ///
-        /// The byte count is taken from the descriptor's
-        /// `length: { fixed, bytes }` for that binding when the
-        /// compiler could infer it (typically inputs the shader slices
-        /// as `param[0..K]`). For bindings the compiler can't size
-        /// (e.g. a framebuffer the shader iterates via `length(fb)`),
-        /// declare it explicitly with `--storage-bytes NAME:BYTES`.
+        /// Uses the WHL minimum byte size or --storage-bytes.
         ///
         /// Format: `NAME:SPEC`. Examples: `fb:0`, `state:rng`.
         #[arg(long = "buffer-init", value_name = "NAME:SPEC", verbatim_doc_comment)]
         buffer_inits: Vec<String>,
-        /// Declare the byte size for a storage buffer whose descriptor
-        /// `length` is `host_provided` or `null`. Repeatable. The buffer
+        /// Declare the byte size for a caller-provided storage buffer. Repeatable. The buffer
         /// is zero-initialized unless `--buffer-init NAME:SPEC` supplies
         /// a different initialization policy.
         ///
@@ -173,7 +167,7 @@ enum Command {
         #[arg(long = "output", value_name = "NAME:FILE")]
         outputs: Vec<String>,
         /// Scalar entry input (repeatable). Native SPIR-V pipelines use push
-        /// constants; WGSL pipelines populate descriptor-declared storage
+        /// constants; WGSL pipelines populate WHL-declared storage
         /// parameter blocks.
         ///
         /// Format: `name:type=value`. Type is one of i32, u32, f32,
@@ -185,7 +179,7 @@ enum Command {
         #[arg(long = "push-constant", value_name = "SPEC", verbatim_doc_comment, value_parser = PushConstantSpec::parse)]
         push_constants: Vec<PushConstantSpec>,
         /// Set a uniform block member once at startup (repeatable).
-        /// Placement comes from the descriptor's published member
+        /// Placement comes from the WHL program's published member
         /// layout; value syntax matches --push-constant.
         ///
         /// Format: `name.member:type=value` (or `name:type=value` for
@@ -201,26 +195,15 @@ enum Command {
         ///
         /// `ENTRY` matches the compute pipeline's `entry_point`.
         /// `W` / `H` / `D` are total thread counts on each axis (viz
-        /// divides by the descriptor's `workgroup_size` to compute
+        /// divides by the WHL program's `workgroup_size` to compute
         /// workgroup counts). `D` defaults to 1 when omitted.
-        ///
-        /// Only meaningful in interactive mode (when the descriptor
-        /// has a graphics pipeline); ignored in headless mode. Useful
-        /// when the compiler's default dispatch doesn't match the
-        /// resource you want to fill — e.g. a storage-image-writing
-        /// compute whose default is 1 thread.
         ///
         /// Examples:
         ///   "paint:1024x1024"
         ///   "erode_b:512x512x1"
         #[arg(long = "dispatch", value_name = "ENTRY:WxH[xD]", verbatim_doc_comment)]
         dispatch: Vec<String>,
-        /// Directory of per-binding files. For each `storage_buffer`
-        /// declared in the descriptor (other than recognized
-        /// host-uploaded names like `keyboard`), and for each
-        /// `vertex_inputs[i]` declared on a graphics pipeline, viz
-        /// loads `<dir>/<name>.bin` — a flat little-endian byte file —
-        /// and binds it as a storage buffer or a vertex buffer.
+        /// Load source argument buffers from <dir>/<name>.bin.
         #[arg(long)]
         storage_dir: Option<PathBuf>,
         /// Flat little-endian u32 index buffer file. When present, viz
@@ -241,12 +224,12 @@ enum Command {
         /// Maximum number of frames to render before exiting (for debugging)
         #[arg(long)]
         max_frames: Option<u32>,
-        /// Override the vertex count published by the pipeline descriptor.
+        /// Override the vertex count published by the host program.
         /// Ignored when `--index-buffer` is supplied (the index file's
         /// length drives `draw_indexed` instead).
         #[arg(long)]
         vertex_count: Option<u32>,
-        /// Override the primitive topology published by the pipeline descriptor.
+        /// Override the primitive topology published by the host program.
         #[arg(long, value_enum)]
         topology: Option<TopologyArg>,
         /// Print verbose output
@@ -291,6 +274,8 @@ fn main() -> Result<()> {
         Command::Pipeline {
             path,
             pipeline,
+            entry,
+            headless,
             config_path,
             no_config,
             inputs,
@@ -331,7 +316,7 @@ fn main() -> Result<()> {
 
             // Parse `--buffer-init NAME:SPEC` into a name → spec map.
             // The byte count is resolved later from
-            // `--storage-bytes` or the descriptor's `length`.
+            // `--storage-bytes` or the WHL program's `length`.
             let buffer_init_specs: HashMap<String, gpu::BufferInitSpec> = buffer_inits
                 .iter()
                 .map(|s| {
@@ -382,7 +367,7 @@ fn main() -> Result<()> {
 
             // Parse `--dispatch ENTRY:WxH[xD]` into a HashMap keyed by
             // compute entry-point name. Total thread counts; viz
-            // divides by the descriptor's workgroup_size at use.
+            // divides by the WHL program's workgroup_size at use.
             let dispatch_overrides: HashMap<String, (u32, u32, u32)> = dispatch
                 .iter()
                 .map(|s| {
@@ -413,9 +398,8 @@ fn main() -> Result<()> {
                     eprintln!("[viz pipeline] config: {}", config_path.display());
                 }
             }
-            let pipeline_path = pipeline.unwrap_or_else(|| path.with_extension("json"));
+            let pipeline_path = pipeline.unwrap_or_else(|| path.with_extension("wynhost"));
             pollster::block_on(modes::pipeline::run_pipeline(
-                path,
                 pipeline_path,
                 input_map,
                 output_map,
@@ -423,6 +407,8 @@ fn main() -> Result<()> {
                 &dispatch_overrides,
                 &sidecar.feedback,
                 modes::pipeline::InteractiveOpts {
+                    entry,
+                    headless,
                     storage_dir,
                     buffer_inits: buffer_init_specs,
                     storage_bytes: storage_bytes_map,

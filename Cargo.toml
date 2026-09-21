@@ -6,6 +6,7 @@ members = [
     "wyn",
     "wyn-analyzer",
     "wyn-host",
+    "wyn-host-interp",
     "wyn-spirv",
     "wyn-graph",
     "wyn-module-graph",

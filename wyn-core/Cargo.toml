@@ -23,6 +23,7 @@ wyn-module-graph = { path = "../wyn-module-graph" }
 wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }
 
 [dev-dependencies]
+wyn-host-interp = { path = "../wyn-host-interp" }
 env_logger.workspace = true
 stacker = "0.1.25"
 # Used for in-process WGSL and SPIR-V validation in backend tests.

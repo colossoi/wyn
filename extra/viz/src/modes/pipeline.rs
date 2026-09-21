@@ -1,891 +1,273 @@
-//! `pipeline` subcommand — execute a pipeline described by a JSON
-//! pipeline-descriptor sidecar (the same format `wyn-core` emits),
-//! reading inputs from `--input name:file.json` and writing outputs
-//! to `--output name:file.json` (or stdout if no output path).
-
-use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
+use wgpu::{Device, InstanceFlags, PresentMode, PrimitiveTopology, Queue, Texture};
+mod inputs;
+mod outputs;
 
 use anyhow::{anyhow, Context, Result};
-use wgpu::{CommandEncoderDescriptor, PipelineLayoutDescriptor};
-use winit::event_loop::EventLoop;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::PathBuf;
+use wyn_host_interp::gpu::WgpuBackend;
+use wyn_host_interp::{Backend, Entry, Number, Program, Value};
 
-use crate::app::{App, InteractivePipelineSpec};
-use crate::config::{FeedbackInitial, FeedbackSpec};
-use crate::gpu::{
-    build_bind_groups, build_parameter_block_bytes, build_push_constant_bytes, create_binding_buffers,
-    create_headless_device, readback_buffer, resolve_dispatch_size_with_parameters, ComputeExecutor,
-};
-use crate::json::{write_f32_json, Binding, BufferUsage, ComputePipeline, Pipeline, PipelineDescriptor};
-use crate::specs::PushConstantSpec;
-use crate::spirv::load_shader_module;
-use wyn_pipeline_descriptor::ShaderStage;
+use crate::app::App;
+use crate::config::FeedbackSpec;
+use crate::gpu::{BufferInitSpec, DeviceRequest, GpuContext};
+use crate::specs::{PushConstantSpec, UniformSpec};
 
-/// Knobs that only mean anything on the interactive path. Bundled so
-/// `run_pipeline`'s signature doesn't grow N positional args every
-/// time the interactive mode learns another flag.
 pub struct InteractiveOpts {
     pub storage_dir: Option<PathBuf>,
-    /// Host storage buffers to allocate and seed once, by binding name →
-    /// init spec (from `--buffer-init NAME:SPEC`). The byte size is
-    /// resolved at runtime per binding: explicit `--storage-bytes`
-    /// override first, otherwise the descriptor's `length: Fixed
-    /// { bytes }`, otherwise an error.
-    pub buffer_inits: HashMap<String, crate::gpu::BufferInitSpec>,
-    /// Explicit byte size for a binding (from `--storage-bytes
-    /// NAME:BYTES`). Backs any binding the descriptor publishes with
-    /// `length: null` (e.g. a framebuffer the shader iterates via
-    /// `length(fb)`).
+    pub buffer_inits: HashMap<String, BufferInitSpec>,
     pub storage_bytes: HashMap<String, u64>,
-    /// Bindings declared as framebuffers (from `--framebuffer
-    /// NAME[:FORMAT]`). Sized by `--size W×H × format.bytes_per_texel()`
-    /// and always zero-initialized. Shorthand for the common
-    /// `--storage-bytes NAME:W*H*B --buffer-init NAME:0` pair.
     pub framebuffers: HashMap<String, FramebufferFormat>,
     pub index_buffer: Option<PathBuf>,
-    pub present_mode: wgpu::PresentMode,
+    pub present_mode: PresentMode,
     pub validate: bool,
     pub size: Option<(u32, u32)>,
     pub max_frames: Option<u32>,
     pub vertex_count: Option<u32>,
-    pub topology: Option<wgpu::PrimitiveTopology>,
-    /// Image files to upload as host textures, by binding name (from
-    /// `--image NAME:FILE`). Decoded eagerly on the interactive path.
+    pub topology: Option<PrimitiveTopology>,
     pub images: HashMap<String, PathBuf>,
-    /// Storage textures to dump as PNG at the `--max-frames` exit, by
-    /// binding name (from `--dump-texture NAME:FILE`).
     pub dump_textures: HashMap<String, PathBuf>,
-    /// Uniform block member values to write once at startup (from
-    /// `--uniform NAME.MEMBER:TYPE=VALUE`), placed via the
-    /// descriptor's published member layout.
-    pub uniform_values: Vec<crate::specs::UniformSpec>,
+    pub uniform_values: Vec<UniformSpec>,
+    pub entry: Option<String>,
+    pub headless: bool,
 }
 
-/// Per-texel format for a `--framebuffer` binding. v1 supports
-/// `vec4f32` only — the format the wyn-emitted graphics pipelines
-/// scatter into today.
-#[derive(Debug, Clone, Copy)]
-pub enum FramebufferFormat {
-    Vec4F32,
-}
-
-impl Default for FramebufferFormat {
+impl Default for InteractiveOpts {
     fn default() -> Self {
-        Self::Vec4F32
+        Self {
+            storage_dir: None,
+            buffer_inits: HashMap::new(),
+            storage_bytes: HashMap::new(),
+            framebuffers: HashMap::new(),
+            index_buffer: None,
+            present_mode: PresentMode::Fifo,
+            validate: true,
+            size: None,
+            max_frames: None,
+            vertex_count: None,
+            topology: None,
+            images: HashMap::new(),
+            dump_textures: HashMap::new(),
+            uniform_values: Vec::new(),
+            entry: None,
+            headless: false,
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum FramebufferFormat {
+    #[default]
+    Vec4F32,
 }
 
 impl FramebufferFormat {
     pub fn bytes_per_texel(self) -> u64 {
-        match self {
-            Self::Vec4F32 => 16,
-        }
+        16
     }
 }
-
 impl std::str::FromStr for FramebufferFormat {
     type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "vec4f32" => Ok(Self::Vec4F32),
-            other => Err(anyhow!(
-                "--framebuffer: unsupported format '{other}'. Supported: vec4f32"
-            )),
+    fn from_str(value: &str) -> Result<Self> {
+        if value == "vec4f32" {
+            Ok(Self::Vec4F32)
+        } else {
+            Err(anyhow!("unsupported framebuffer format {value}"))
         }
     }
 }
 
-impl std::fmt::Display for FramebufferFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Vec4F32 => f.write_str("vec4f32"),
-        }
-    }
+pub struct RunSpec {
+    pub program: Program,
+    pub base: PathBuf,
+    pub sources: Option<BTreeMap<String, Vec<u8>>>,
+    pub inputs: HashMap<String, PathBuf>,
+    pub outputs: HashMap<String, PathBuf>,
+    pub constants: Vec<PushConstantSpec>,
+    pub dispatch: BTreeMap<String, [u32; 3]>,
+    pub feedback: Vec<FeedbackSpec>,
+    pub opts: InteractiveOpts,
+    pub verbose: bool,
 }
 
-/// Resolve every host-allocated storage buffer the run needs into a
-/// concrete `BufferInit` keyed by binding name. Two flag families feed
-/// in:
-///
-///   * `--framebuffer NAME[:FORMAT]` — sized as `W × H ×
-///     format.bytes_per_texel()` from `--size`, zero-initialized. Hard
-///     errors if the same name also appears in `--buffer-init`,
-///     `--storage-bytes`, or the descriptor's `length: Fixed { bytes }`
-///     with a disagreeing byte count.
-///   * `--buffer-init NAME:SPEC` — size precedence:
-///       1. `--storage-bytes NAME:BYTES` if supplied;
-///       2. otherwise the descriptor's `length: Fixed { bytes }`.
-///     Both present → must agree. Neither present → error pointing at
-///     `--storage-bytes`.
-///   * `--storage-bytes NAME:BYTES` without an init spec allocates a
-///     zero-initialized host-provided buffer of that capacity.
-fn resolve_buffer_inits(
-    desc: &PipelineDescriptor,
-    inits: &HashMap<String, crate::gpu::BufferInitSpec>,
-    storage_bytes: &HashMap<String, u64>,
-    framebuffers: &HashMap<String, FramebufferFormat>,
-    size: Option<(u32, u32)>,
-) -> Result<HashMap<String, crate::gpu::BufferInit>> {
-    use wyn_pipeline_descriptor::{Binding, BufferLen};
-    let descriptor_bytes: HashMap<&str, u64> = desc
-        .pipelines
-        .iter()
-        .flat_map(|p| match p {
-            Pipeline::Compute(cp) => cp.bindings.as_slice(),
-            Pipeline::Graphics(gp) => gp.bindings.as_slice(),
-        })
-        .filter_map(|b| match b {
-            Binding::StorageBuffer {
-                name,
-                length: Some(BufferLen::Fixed { bytes }),
-                ..
-            } => Some((name.as_str(), *bytes)),
-            _ => None,
-        })
-        .collect();
-
-    let mut out = HashMap::new();
-
-    for (name, &format) in framebuffers {
-        if inits.contains_key(name) {
-            return Err(anyhow!(
-                "--framebuffer {name} conflicts with --buffer-init {name}:<spec>; \
-                 framebuffers are always zero-initialized"
-            ));
-        }
-        if storage_bytes.contains_key(name) {
-            return Err(anyhow!(
-                "--framebuffer {name} conflicts with --storage-bytes {name}:<bytes>; \
-                 framebuffer size is computed from --size and format"
-            ));
-        }
-        let (w, h) =
-            size.ok_or_else(|| anyhow!("--framebuffer {name} requires --size W×H to compute byte count"))?;
-        let bytes = w as u64 * h as u64 * format.bytes_per_texel();
-        if let Some(&desc_bytes) = descriptor_bytes.get(name.as_str()) {
-            if desc_bytes != bytes {
-                return Err(anyhow!(
-                    "--framebuffer {name} (--size {w}×{h} × {format} = {bytes}) \
-                     disagrees with the descriptor's length:{{fixed,bytes:{desc_bytes}}} \
-                     on binding `{name}`"
-                ));
-            }
-        }
-        out.insert(
-            name.clone(),
-            crate::gpu::BufferInit {
-                bytes,
-                spec: crate::gpu::BufferInitSpec::Zero,
-            },
-        );
-    }
-
-    for (name, &spec) in inits {
-        let from_flag = storage_bytes.get(name).copied();
-        let from_desc = descriptor_bytes.get(name.as_str()).copied();
-        let bytes = match (from_flag, from_desc) {
-            (Some(a), Some(b)) if a != b => {
-                return Err(anyhow!(
-                    "--storage-bytes {name}:{a} disagrees with the descriptor's \
-                     length:{{fixed,bytes:{b}}} on binding `{name}`; the two must \
-                     match (or drop one of them)"
-                ));
-            }
-            (Some(a), _) => a,
-            (None, Some(b)) => b,
-            (None, None) => {
-                return Err(anyhow!(
-                    "--buffer-init {name}:<spec>: descriptor doesn't publish a fixed \
-                     length for binding `{name}`; declare its byte size with \
-                     `--storage-bytes {name}:BYTES`"
-                ));
-            }
-        };
-        out.insert(name.clone(), crate::gpu::BufferInit { bytes, spec });
-    }
-
-    // An explicit capacity is sufficient for an output/scratch buffer; zero
-    // initialization is the least surprising default when no init spec was
-    // requested separately.
-    for (name, &bytes) in storage_bytes {
-        if out.contains_key(name) {
-            continue;
-        }
-        if let Some(&desc_bytes) = descriptor_bytes.get(name.as_str()) {
-            if desc_bytes != bytes {
-                return Err(anyhow!(
-                    "--storage-bytes {name}:{bytes} disagrees with the descriptor's \
-                     length:{{fixed,bytes:{desc_bytes}}} on binding `{name}`"
-                ));
-            }
-        }
-        out.insert(
-            name.clone(),
-            crate::gpu::BufferInit {
-                bytes,
-                spec: crate::gpu::BufferInitSpec::Zero,
-            },
-        );
-    }
-    Ok(out)
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub time: f32,
+    pub delta: f32,
+    pub index: u32,
+    pub mouse: [f32; 4],
+    pub keyboard: [u8; 768],
 }
 
-/// Resolve source-level sidecar selectors to physical descriptor slots. The
-/// authored input name comes from the compute binding table; the result slot
-/// comes from `PipelineDescriptor::source_results`, so generated `_output`
-/// names never enter the configuration contract.
-fn resolve_feedback_specs(
-    desc: &PipelineDescriptor,
-    specs: &[FeedbackSpec],
-) -> Result<Vec<crate::gpu::FeedbackPair>> {
-    use wyn_pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
-
-    let mut resolved = Vec::with_capacity(specs.len());
-    let mut writes = std::collections::HashSet::new();
-    for spec in specs {
-        let matches = desc
-            .source_results
-            .iter()
-            .filter(|result| result.entry == spec.entry && result.result == spec.result)
-            .collect::<Vec<_>>();
-        let result = match matches.as_slice() {
-            [result] => *result,
-            [] => {
-                let available = desc
-                    .source_results
-                    .iter()
-                    .map(|result| format!("{}[{}]", result.entry, result.result))
-                    .collect::<Vec<_>>();
-                return Err(anyhow!(
-                    "feedback '{}:{} <- result {}' cannot find that source result in the descriptor; \
-                     available storage results: {}. Recompile the shader with the current wyn compiler",
-                    spec.entry,
-                    spec.input,
-                    spec.result,
-                    if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
-                ));
-            }
-            _ => {
-                return Err(anyhow!(
-                    "descriptor publishes source result '{}[{}]' more than once",
-                    spec.entry,
-                    spec.result
-                ));
-            }
-        };
-
-        let pipeline = desc.pipelines.get(result.pipeline_index).ok_or_else(|| {
-            anyhow!(
-                "source result '{}[{}]' references missing pipeline {}",
-                spec.entry,
-                spec.result,
-                result.pipeline_index
-            )
-        })?;
-        let Pipeline::Compute(compute) = pipeline else {
-            return Err(anyhow!(
-                "feedback source result '{}[{}]' is not produced by a compute pipeline",
-                spec.entry,
-                spec.result
-            ));
-        };
-
-        let read = compute
-            .bindings
-            .iter()
-            .find_map(|binding| match binding {
-                Binding::StorageBuffer {
-                    set,
-                    binding,
-                    name,
-                    access: Access::ReadOnly | Access::ReadWrite,
-                    ..
-                } if name == &spec.input => Some((*set, *binding)),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "feedback '{}:{}' cannot find a readable storage-buffer input named '{}'",
-                    spec.entry,
-                    spec.input,
-                    spec.input
-                )
-            })?;
-
-        let write = compute
-            .bindings
-            .iter()
-            .find_map(|binding| match binding {
-                Binding::StorageBuffer {
-                    set,
-                    binding,
-                    usage: BufferUsage::Output,
-                    access: Access::WriteOnly | Access::ReadWrite,
-                    ..
-                } if (*set, *binding) == (result.set, result.binding) => Some((*set, *binding)),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "source result '{}[{}]' does not resolve to a writable output buffer",
-                    spec.entry,
-                    spec.result
-                )
-            })?;
-
-        if !writes.insert(write) {
-            return Err(anyhow!(
-                "source result '{}[{}]' is configured as feedback more than once",
-                spec.entry,
-                spec.result
-            ));
-        }
-        let initial = match &spec.initial {
-            FeedbackInitial::Zero => crate::gpu::FeedbackInit::Zero,
-            FeedbackInitial::Rng => crate::gpu::FeedbackInit::Rng,
-            FeedbackInitial::File { path } => crate::gpu::FeedbackInit::Bytes(
-                fs::read(path)
-                    .with_context(|| format!("failed to read feedback initial file: {}", path.display()))?,
-            ),
-        };
-        resolved.push(crate::gpu::FeedbackPair {
-            read_set: read.0,
-            read_binding: read.1,
-            write_set: write.0,
-            write_binding: write.1,
-            initial,
-        });
-    }
-    Ok(resolved)
+pub struct Runner {
+    pub backend: WgpuBackend,
+    spec: RunSpec,
+    entry: Entry,
+    arguments: Vec<Value>,
+    updates: Vec<inputs::Update>,
+    targets: Vec<usize>,
+    present: Option<usize>,
+    pub results: Vec<Value>,
+    width: u32,
+    height: u32,
 }
 
 pub async fn run_pipeline(
-    spv_path: PathBuf,
-    pipeline_path: PathBuf,
+    host_path: PathBuf,
     inputs: HashMap<String, PathBuf>,
     outputs: HashMap<String, PathBuf>,
-    push_constants: &[PushConstantSpec],
-    dispatch_overrides: &HashMap<String, (u32, u32, u32)>,
-    feedback_specs: &[FeedbackSpec],
-    interactive_opts: InteractiveOpts,
-    verbose: bool,
-) -> Result<()> {
-    let desc_json = fs::read_to_string(&pipeline_path)
-        .with_context(|| format!("Failed to read pipeline descriptor: {}", pipeline_path.display()))?;
-    let desc: PipelineDescriptor =
-        serde_json::from_str(&desc_json).with_context(|| "Failed to parse pipeline descriptor JSON")?;
-
-    if desc.pipelines.is_empty() {
-        return Err(anyhow!("Pipeline descriptor has no pipelines"));
-    }
-
-    // Auto-detect interactive vs headless. A descriptor with a
-    // `Graphics` pipeline asks for a window: switch to the interactive
-    // path. Otherwise stick with the original headless compute runner.
-    let has_graphics = desc.pipelines.iter().any(|p| matches!(p, Pipeline::Graphics(_)));
-    if has_graphics {
-        if !inputs.is_empty() {
-            eprintln!(
-                "[viz pipeline] --input is ignored in interactive mode \
-                 (descriptor has a graphics pipeline; inputs come from sidecar feedback / \
-                 --buffer-init / --storage-dir)"
-            );
-        }
-        if !outputs.is_empty() && interactive_opts.max_frames.is_none() {
-            eprintln!(
-                "[viz pipeline] --output in interactive mode dumps buffers at the \
-                 --max-frames exit; without --max-frames the run never reaches the \
-                 dump. Pass --max-frames N to snapshot after N frames."
-            );
-        }
-        return run_pipeline_interactive(
-            spv_path,
-            desc,
-            dispatch_overrides.clone(),
-            feedback_specs.to_vec(),
-            outputs,
-            push_constants.to_vec(),
-            interactive_opts,
-            verbose,
-        );
-    }
-    if !feedback_specs.is_empty() {
-        eprintln!(
-            "[viz pipeline] sidecar feedback is ignored in headless mode \
-             (no frames, no previous-state notion)"
-        );
-    }
-    if !interactive_opts.images.is_empty() {
-        eprintln!(
-            "[viz pipeline] --image is ignored in headless mode \
-             (texture bindings are only wired on the interactive path)"
-        );
-    }
-
-    let (device, queue) = create_headless_device(verbose).await?;
-    let module = load_shader_module(&device, &spv_path)?;
-
-    for (pi, pipeline) in desc.pipelines.iter().enumerate() {
-        match pipeline {
-            Pipeline::Compute(cp) => {
-                run_compute(
-                    &device,
-                    &queue,
-                    &module,
-                    cp,
-                    &inputs,
-                    &outputs,
-                    push_constants,
-                    &interactive_opts.storage_bytes,
-                    verbose,
-                )
-                .with_context(|| format!("Pipeline {} (compute) failed", pi))?;
-            }
-            Pipeline::Graphics(_) => {
-                // Unreachable now (caught above), kept for completeness
-                // if a future descriptor shape allows mixed headless +
-                // graphics dispatches.
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Interactive path. Opens a window, runs every compute pipeline in
-/// the descriptor each frame, then renders the one graphics pipeline.
-/// Activated automatically when the descriptor contains a graphics
-/// pipeline (the headless `--input` / `--output` flags are ignored).
-fn run_pipeline_interactive(
-    spv_path: PathBuf,
-    desc: PipelineDescriptor,
-    dispatch_overrides: HashMap<String, (u32, u32, u32)>,
-    feedback_specs: Vec<FeedbackSpec>,
-    outputs: HashMap<String, PathBuf>,
-    parameter_values: Vec<PushConstantSpec>,
+    constants: &[PushConstantSpec],
+    dispatch: &HashMap<String, (u32, u32, u32)>,
+    feedback: &[FeedbackSpec],
     opts: InteractiveOpts,
     verbose: bool,
 ) -> Result<()> {
-    let feedback_pairs = resolve_feedback_specs(&desc, &feedback_specs)?;
-    let graphics = desc
-        .pipelines
-        .iter()
-        .find_map(|pipeline| match pipeline {
-            Pipeline::Graphics(graphics)
-                if graphics.stages.iter().any(|stage| matches!(stage.stage, ShaderStage::Vertex))
-                    && graphics.stages.iter().any(|stage| matches!(stage.stage, ShaderStage::Fragment)) =>
-            {
-                Some(graphics)
-            }
-            _ => None,
-        })
-        .ok_or_else(|| anyhow!("descriptor lacks a unified vertex/fragment graphics pipeline"))?;
-    let vertex_entry = graphics
-        .stages
-        .iter()
-        .find_map(|s| matches!(s.stage, ShaderStage::Vertex).then(|| s.entry_point.clone()))
-        .ok_or_else(|| anyhow!("descriptor lacks a vertex stage"))?;
-    let fragment_entry = graphics
-        .stages
-        .iter()
-        .find_map(|s| matches!(s.stage, ShaderStage::Fragment).then(|| s.entry_point.clone()))
-        .ok_or_else(|| anyhow!("descriptor lacks a fragment stage"))?;
-    let mut draw = graphics.invocation.draw.clone();
-    if let Some(vertex_count) = opts.vertex_count {
-        match &mut draw {
-            wyn_pipeline_descriptor::DrawCall::Direct {
-                vertex_count: published,
-                ..
-            } => *published = vertex_count,
-            wyn_pipeline_descriptor::DrawCall::Indexed { .. }
-            | wyn_pipeline_descriptor::DrawCall::Indirect { .. }
-            | wyn_pipeline_descriptor::DrawCall::IndexedIndirect { .. } => {
-                return Err(anyhow!(
-                    "--vertex-count can only override a descriptor direct draw"
-                ));
-            }
-        }
-    }
-    let fragment_state = graphics.invocation.fragment_state;
-    let topology = opts.topology.unwrap_or_else(|| wgpu_topology(graphics.invocation.topology));
-
-    let resolved_buffer_inits = resolve_buffer_inits(
-        &desc,
-        &opts.buffer_inits,
-        &opts.storage_bytes,
-        &opts.framebuffers,
-        opts.size,
-    )?;
-    // Decode `--image` files eagerly so a bad path or unsupported
-    // format fails before the window opens.
-    let images: HashMap<String, crate::gpu::LoadedImage> = opts
-        .images
-        .iter()
-        .map(|(name, path)| {
-            let img = image::open(path)
-                .with_context(|| format!("--image {}: failed to load {}", name, path.display()))?
-                .to_rgba8();
-            let (width, height) = img.dimensions();
-            if verbose {
-                println!(
-                    "[viz pipeline] --image {}: {} ({}x{})",
-                    name,
-                    path.display(),
-                    width,
-                    height
-                );
-            }
-            Ok((
-                name.clone(),
-                crate::gpu::LoadedImage {
-                    rgba8: img.into_raw(),
-                    width,
-                    height,
-                },
-            ))
-        })
-        .collect::<Result<_>>()?;
-    let spec = InteractivePipelineSpec {
-        shader_path: spv_path,
-        descriptor: desc,
-        vertex_entry,
-        fragment_entry,
-        dispatch_overrides,
-        feedback_pairs,
-        max_frames: opts.max_frames,
-        verbose,
-        validate: opts.validate,
-        present_mode: opts.present_mode,
-        size: opts.size,
-        draw,
-        topology,
-        fragment_state,
-        storage_dir: opts.storage_dir,
-        buffer_inits: resolved_buffer_inits,
-        parameter_values,
-        index_buffer: opts.index_buffer,
-        outputs,
-        images,
-        dump_textures: opts.dump_textures,
-        uniform_values: opts.uniform_values,
-    };
-
-    let event_loop = EventLoop::new().context("failed to create event loop")?;
-    let mut app = App::new_pipeline(spec);
-    event_loop.run_app(&mut app).map_err(|e| anyhow!(e)).context("winit event loop errored")?;
-    Ok(())
-}
-
-fn wgpu_topology(topology: wyn_pipeline_descriptor::PrimitiveTopology) -> wgpu::PrimitiveTopology {
-    match topology {
-        wyn_pipeline_descriptor::PrimitiveTopology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
-        wyn_pipeline_descriptor::PrimitiveTopology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
-        wyn_pipeline_descriptor::PrimitiveTopology::LineList => wgpu::PrimitiveTopology::LineList,
-        wyn_pipeline_descriptor::PrimitiveTopology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
-        wyn_pipeline_descriptor::PrimitiveTopology::PointList => wgpu::PrimitiveTopology::PointList,
-    }
-}
-
-/// Create wgpu buffers for a set of bindings. Returns a map from binding number
-
-/// Run a compute pipeline as a sequence of dispatches over a shared
-/// binding table. Single-stage and multi-stage pipelines use the same
-/// dispatch path.
-fn run_compute(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    module: &wgpu::ShaderModule,
-    mp: &ComputePipeline,
-    inputs: &HashMap<String, PathBuf>,
-    outputs: &HashMap<String, PathBuf>,
-    push_constants: &[PushConstantSpec],
-    storage_bytes: &HashMap<String, u64>,
-    verbose: bool,
-) -> Result<()> {
-    if verbose {
-        println!("Running compute pipeline ({} stages)", mp.stages.len());
-        for (i, stage) in mp.stages.iter().enumerate() {
-            println!(
-                "  Stage {}: {} (reads {:?}, writes {:?})",
-                i, stage.entry_point, stage.reads, stage.writes
-            );
-        }
-    }
-
-    let parameter_bytes = build_parameter_block_bytes(&mp.bindings, push_constants, verbose)?;
-    let has_native_push_constants =
-        mp.bindings.iter().any(|binding| matches!(binding, Binding::PushConstant { .. }));
-    // Preserve the legacy descriptor-less sequential packing path only when
-    // this is not a WGSL storage-parameter pipeline.
-    let pc_bytes = if has_native_push_constants || parameter_bytes.is_empty() {
-        build_push_constant_bytes(&mp.bindings, push_constants, verbose)?
-    } else {
-        Vec::new()
-    };
-    let total_pc_size = pc_bytes.len() as u32;
-
-    // Stage-0's dispatch sizes any `SameAsDispatch` output bindings —
-    // the one-stage case carries the only stage's dispatch, while the
-    // multi-stage case carries phase 1's, which is the size primary
-    // outputs are tied to in current reduce/scan/scheduler layouts.
-    let dispatch_hint = mp.stages.first().map(|s| &s.dispatch_size);
-    let buffers = create_binding_buffers(
-        device,
-        queue,
-        &mp.bindings,
+    let source =
+        fs::read_to_string(&host_path).with_context(|| format!("reading {}", host_path.display()))?;
+    let program = Program::parse(&source)?;
+    let base = host_path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+    let graphical = !program.graphics.is_empty() && !opts.headless;
+    let spec = RunSpec {
+        program,
+        base,
+        sources: None,
         inputs,
-        dispatch_hint,
-        &pc_bytes,
-        &parameter_bytes,
-        storage_bytes,
+        outputs,
+        constants: constants.to_vec(),
+        dispatch: dispatch.iter().map(|(name, (x, y, z))| (name.clone(), [*x, *y, *z])).collect(),
+        feedback: feedback.to_vec(),
+        opts,
         verbose,
-    )?;
-    let (layouts, bind_groups) = build_bind_groups(device, &mp.bindings, &buffers)?;
-
-    let pc_ranges: Vec<wgpu::PushConstantRange> = if total_pc_size > 0 {
-        vec![wgpu::PushConstantRange {
-            stages: wgpu::ShaderStages::COMPUTE,
-            range: 0..total_pc_size,
-        }]
-    } else {
-        vec![]
     };
-
-    let layout_refs = layouts.iter().collect::<Vec<_>>();
-    let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-        label: Some("multi_compute_layout"),
-        bind_group_layouts: &layout_refs,
-        push_constant_ranges: &pc_ranges,
-    });
-    let bind_group_refs = bind_groups.iter().collect::<Vec<_>>();
-
-    // Execute stages in order
-    for (si, stage) in mp.stages.iter().enumerate() {
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(&format!("stage_{}", stage.entry_point)),
-            layout: Some(&pipeline_layout),
-            module,
-            entry_point: Some(&stage.entry_point),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let dispatch = resolve_dispatch_size_with_parameters(
-            &stage.dispatch_size,
-            &buffers,
-            &pc_bytes,
-            &parameter_bytes,
-        );
-        if verbose {
-            println!(
-                "Stage {} ({}): dispatch {} x {} x {}",
-                si, stage.entry_point, dispatch.0, dispatch.1, dispatch.2
-            );
-        }
-
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some(&format!("stage_{}_encoder", si)),
-        });
-        let stage_label = format!("stage_{}", si);
-        ComputeExecutor {
-            label: &stage_label,
-            pipeline: &pipeline,
-            bind_groups: &bind_group_refs,
-            push_constant_bytes: &pc_bytes,
-            dispatch,
-            timestamps: None,
-        }
-        .record(&mut encoder);
-        queue.submit(Some(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
+    if graphical {
+        return App::run(spec);
     }
-
-    // Read back and output results
-    output_results(device, queue, &mp.bindings, &buffers, outputs)?;
-
-    Ok(())
+    let context = GpuContext::request(DeviceRequest {
+        instance_flags: if spec.opts.validate { InstanceFlags::VALIDATION } else { InstanceFlags::empty() },
+        ..Default::default()
+    })
+    .await?;
+    if spec.verbose {
+        eprintln!("GPU: {}", context.adapter.get_info().name);
+    }
+    let (width, height) = spec.opts.size.unwrap_or((800, 600));
+    let count = spec.opts.max_frames.unwrap_or(1);
+    if count == 0 {
+        return Err(anyhow!("--max-frames must be positive"));
+    }
+    let mut runner = Runner::new(spec, context.device, context.queue, width, height)?;
+    for index in 0..count {
+        runner.run_frame(
+            &Frame {
+                width,
+                height,
+                time: index as f32 / 60.0,
+                delta: 1.0 / 60.0,
+                index,
+                mouse: [0.0; 4],
+                keyboard: [0; 768],
+            },
+            None,
+        )?;
+    }
+    runner.output(true)
 }
 
-/// Print f32 data to stdout — fallback for outputs without an
-/// explicit `--output name:file.json` redirection.
-fn print_f32_data(name: &str, data: &[f32]) {
-    println!("\n=== {} ({} elements) ===", name, data.len());
-    let show = data.len().min(64);
-    for (i, chunk) in data[..show].chunks(8).enumerate() {
-        print!("  [{:3}]: ", i * 8);
-        for val in chunk {
-            print!("{:8.3} ", val);
+impl Runner {
+    pub fn new(spec: RunSpec, device: Device, queue: Queue, width: u32, height: u32) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(anyhow!("target dimensions must be positive"));
         }
-        println!();
+        let entry = if let Some(name) = &spec.opts.entry {
+            spec.program.entry(name)?.clone()
+        } else if spec.program.entries.len() == 1 {
+            let Some(entry) = spec.program.entries.values().next() else {
+                return Err(anyhow!("no host entry"));
+            };
+            entry.clone()
+        } else {
+            return Err(anyhow!(
+                "select --entry from: {}",
+                spec.program
+                    .entries
+                    .values()
+                    .map(|e| e.source_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        let mut backend = match &spec.sources {
+            Some(sources) => WgpuBackend::with_sources(device, queue, &spec.program, sources)?,
+            None => WgpuBackend::new(device, queue, &spec.program, &spec.base)?,
+        };
+        backend.dispatch_overrides = spec.dispatch.clone();
+        backend.vertex_count = spec.opts.vertex_count;
+        backend.topology = spec.opts.topology;
+        let mut runner = Self {
+            backend,
+            spec,
+            entry,
+            arguments: Vec::new(),
+            updates: Vec::new(),
+            targets: Vec::new(),
+            present: None,
+            results: Vec::new(),
+            width,
+            height,
+        };
+        runner.prepare()?;
+        Ok(runner)
     }
-    if data.len() > show {
-        println!("  ... ({} more elements)", data.len() - show);
-    }
-    println!();
-}
 
-/// Read back output/intermediate buffers and write/print results.
-fn output_results(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    bindings: &[Binding],
-    buffers: &crate::gpu::StorageBuffers,
-    outputs: &HashMap<String, PathBuf>,
-) -> Result<()> {
-    for b in bindings {
-        if let Binding::StorageBuffer {
-            set,
-            binding,
-            name,
-            usage,
-            ..
-        } = b
-        {
-            // Only read back output and intermediate buffers (skip inputs unless
-            // explicitly requested via --output)
-            let should_output = *usage != BufferUsage::Input || outputs.contains_key(name.as_str());
-
-            if !should_output {
-                continue;
-            }
-
-            if let Some((buf, size)) = buffers.get(&(*set, *binding)) {
-                let data = readback_buffer(device, queue, buf, *size)?;
-
-                if let Some(path) = outputs.get(name.as_str()) {
-                    write_f32_json(path, &data)?;
-                    println!("Wrote {} elements to {}", data.len(), path.display());
-                } else {
-                    print_f32_data(name, &data);
+    pub fn run_frame(&mut self, frame: &Frame, screen: Option<Texture>) -> Result<()> {
+        if frame.width != self.width || frame.height != self.height {
+            self.width = frame.width;
+            self.height = frame.height;
+            self.resize_targets()?;
+        }
+        if let (Some(index), Some(texture)) = (self.present, screen) {
+            self.arguments[index] = self.backend.import_texture(texture);
+        }
+        self.update(frame)?;
+        let result = self.spec.program.run(&self.entry.source_name, &self.arguments, &mut self.backend)?;
+        self.results = match self.entry.results.len() {
+            0 => Vec::new(),
+            1 => vec![result],
+            _ => result.list()?.to_vec(),
+        };
+        for feedback in &self.spec.feedback {
+            let Some(value) = self.results.get(feedback.result) else {
+                return Err(anyhow!("unknown feedback result {}", feedback.result));
+            };
+            match self.destination(&feedback.input)? {
+                inputs::Destination::Resource(index) => self.arguments[index] = value.clone(),
+                inputs::Destination::Field {
+                    argument,
+                    offset,
+                    size,
+                } => {
+                    self.backend.call(
+                        &self.spec.program,
+                        "gpu-copy",
+                        &[
+                            self.arguments[argument].clone(),
+                            Value::Number(Number::U64(offset)),
+                            value.clone(),
+                            Value::Number(Number::U64(0)),
+                            Value::Number(Number::U64(size)),
+                        ],
+                    )?;
                 }
             }
         }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wyn_pipeline_descriptor::{
-        Access, BufferLen, BufferUsage, ComputePipeline, ComputeStage, DispatchSize, FrameGraph, Pipeline,
-        SourceResultBinding, StageBindingUses,
-    };
-
-    fn feedback_descriptor() -> PipelineDescriptor {
-        PipelineDescriptor {
-            pipelines: vec![Pipeline::Compute(ComputePipeline {
-                bindings: vec![
-                    Binding::StorageBuffer {
-                        set: 0,
-                        binding: 0,
-                        access: Access::ReadOnly,
-                        usage: BufferUsage::Input,
-                        name: "previous".to_string(),
-                        resource: None,
-                        length: Some(BufferLen::Fixed { bytes: 16 }),
-                        members: Vec::new(),
-                    },
-                    Binding::StorageBuffer {
-                        set: 0,
-                        binding: 3,
-                        access: Access::WriteOnly,
-                        usage: BufferUsage::Output,
-                        name: "compiler_generated_output_name".to_string(),
-                        resource: None,
-                        length: Some(BufferLen::Fixed { bytes: 16 }),
-                        members: Vec::new(),
-                    },
-                ],
-                stages: vec![ComputeStage {
-                    entry_point: "pulse".to_string(),
-                    owner: "pulse".to_string(),
-                    workgroup_size: (64, 1, 1),
-                    dispatch_size: DispatchSize::Fixed {
-                        x: 1,
-                        y: 1,
-                        z: 1,
-                        explicit: false,
-                    },
-                    uses: StageBindingUses {
-                        reads: vec![0],
-                        writes: vec![1],
-                    },
-                }],
-                default_total_threads: None,
-            })],
-            source_results: vec![SourceResultBinding {
-                entry: "pulse".to_string(),
-                result: 0,
-                pipeline_index: 0,
-                set: 0,
-                binding: 3,
-            }],
-            frame_graph: FrameGraph::default(),
+        let mut retained = self.arguments.clone();
+        retained.extend(self.results.iter().cloned());
+        if let Some(indices) = &self.backend.index_buffer {
+            retained.push(indices.clone());
         }
-    }
-
-    #[test]
-    fn feedback_resolution_uses_source_result_not_generated_output_name() {
-        let specs = vec![FeedbackSpec {
-            entry: "pulse".to_string(),
-            input: "previous".to_string(),
-            result: 0,
-            initial: FeedbackInitial::Zero,
-        }];
-        let resolved = resolve_feedback_specs(&feedback_descriptor(), &specs).expect("resolve feedback");
-        assert_eq!(resolved.len(), 1);
-        assert_eq!((resolved[0].read_set, resolved[0].read_binding), (0, 0));
-        assert_eq!((resolved[0].write_set, resolved[0].write_binding), (0, 3));
-    }
-
-    #[test]
-    fn feedback_resolution_rejects_descriptors_without_source_results() {
-        let mut descriptor = feedback_descriptor();
-        descriptor.source_results.clear();
-        let specs = vec![FeedbackSpec {
-            entry: "pulse".to_string(),
-            input: "previous".to_string(),
-            result: 0,
-            initial: FeedbackInitial::Zero,
-        }];
-        let error = resolve_feedback_specs(&descriptor, &specs).unwrap_err();
-        assert!(error.to_string().contains("Recompile the shader"));
-    }
-
-    #[test]
-    fn storage_bytes_fulfills_host_provided_capacity_without_an_init_flag() {
-        let mut descriptor = feedback_descriptor();
-        let Pipeline::Compute(compute) = &mut descriptor.pipelines[0] else {
-            unreachable!()
-        };
-        let Binding::StorageBuffer { length, .. } = &mut compute.bindings[1] else {
-            unreachable!()
-        };
-        *length = Some(BufferLen::HostProvided {
-            inputs: Vec::new(),
-            elem_bytes: 4,
-        });
-
-        let storage_bytes = HashMap::from([("compiler_generated_output_name".to_string(), 4096)]);
-        let resolved = resolve_buffer_inits(
-            &descriptor,
-            &HashMap::new(),
-            &storage_bytes,
-            &HashMap::new(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            resolved["compiler_generated_output_name"],
-            crate::gpu::BufferInit {
-                bytes: 4096,
-                spec: crate::gpu::BufferInitSpec::Zero,
-            }
-        );
+        self.backend.retain_resources(&retained);
+        Ok(())
     }
 }

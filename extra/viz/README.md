@@ -5,12 +5,12 @@ GPU shader runner for Wyn-compiled SPIR-V and WGSL modules.
 ## Commands
 
 ```
-viz pipeline <shader.spv>    # Run from the pipeline descriptor JSON
-                             # (defaults to the sibling <shader>.json that
-                             # `wyn compile` writes; -p overrides).
-                             # Graphics descriptor -> interactive window;
-                             # compute-only -> headless with --input/--output.
-viz run <shader.spv>         # Alias for `pipeline`
+viz pipeline <program.wynhost> # Interpret WHL; graphics opens a window.
+viz run <shader.spv>          # Use the sibling <shader>.wynhost (-p overrides).
+viz compute <program.wynhost> # Alias; compute-only programs run headless.
+                             # Results print by default; --output NAME:FILE saves them.
+                             # --headless also runs graphics without a window.
+                             # --entry selects a source entry when there are several.
 viz validate <shader.spv>    # Validate a SPIR-V module (headless naga)
 viz info                     # Show GPU device info
 viz testpattern              # Render a built-in test pattern
@@ -44,7 +44,7 @@ the sidecar.
 `viz pipeline shader.spv` automatically loads `shader.viz.json` when present.
 Use `--config FILE` when the sidecar lives elsewhere, or `--no-config` to skip
 automatic loading. Feedback selectors deliberately do not use generated
-descriptor binding names such as `particles_output`.
+shader binding names such as `particles_output`.
 
 ## Host-provided images
 
@@ -70,13 +70,13 @@ viz pipeline shader.spv --image input_image:photo.png
 
 The texture is Rgba8Unorm at the file's native size; sample with
 normalized UVs to fit any window. Raw file bytes are uploaded as-is
-(sRGB stays sRGB-encoded, Shadertoy-style). Interactive mode only.
+(sRGB stays sRGB-encoded, Shadertoy-style). Available in headless and interactive runs.
 
 ## Uniform block values
 
 `--uniform NAME.MEMBER:TYPE=VALUE` (repeatable) writes one member of a
 uniform block once at startup, placed by the descriptor's published
-member layout (`Binding::Uniform { size, members }`). Value syntax
+member layout in WHL. Value syntax
 matches `--push-constant`; use `NAME:TYPE=VALUE` for a bare
 scalar/vector uniform. Block buffers are zero-initialized, so unset
 members read as zero.

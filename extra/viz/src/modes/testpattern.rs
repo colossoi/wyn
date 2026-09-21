@@ -1,12 +1,9 @@
-//! `testpattern` subcommand — interactive viewer running a built-in
-//! WGSL test pattern (no shader file required, always validates).
-
-use anyhow::{anyhow, Context, Result};
-use winit::event_loop::EventLoop;
-
-use wgpu::PresentMode;
-
-use crate::app::{App, PipelineSpec, Shader};
+use crate::app::App;
+use crate::modes::pipeline::{InteractiveOpts, RunSpec};
+use anyhow::Result;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use wyn_host_interp::Program;
 
 const TEST_PATTERN_SHADER: &str = r#"
 // Resolution uniform (16-byte aligned)
@@ -52,18 +49,43 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+const HOST: &str = r#"
+(define-host-program :version 1)
+(define-gpu-module 'shaders :format :wgsl :path "testpattern.wgsl")
+(define-gpu-graphics 'pattern
+  :vertex '(shaders "vs_main") :fragment '(shaders "fs_main")
+  :parameters '((globals :buffer :read :layout (:size 16 :alignment 16 :fields ((source-resolution (:bytes 12) 0)))))
+  :abi '((globals :uniform 0 0)) :vertex-inputs '() :color-outputs '((0 :caller))
+  :depth-format nil :samples 1 :topology :triangle-list :front-face :counter-clockwise
+  :cull :none :fill :fill :depth-test :disabled :depth-write nil :blend :replace :color-write t)
+(define-host-entry 'pattern :function 'host-pattern :source-name "testpattern"
+  :parameters '((globals :buffer :read :layout (:size 16 :alignment 16 :fields ((source-resolution (:bytes 12) 0))) :source-name "globals")
+                (screen :texture :read-write :dimension :d2 :format :caller :samples 1 :source-name "screen"))
+  :results '((screen :texture :read-write :dimension :d2 :format :caller :samples 1 :source-name "screen" :ownership :borrowed :alias screen)))
+(defun host-pattern (globals screen)
+  (let ((target (gpu-texture-view screen :usage :render-target :dimension :d2 :mip 0 :mip-count 1 :layer 0 :layer-count 1)))
+    (gpu-draw 'pattern :args (list globals) :vertices nil :colors (list (list 0 target :load :store nil))
+      :depth nil :viewport :target :scissor :target :draw '(:direct 3 1 0 0))
+    screen))
+"#;
+
 pub fn run_test_pattern(max_frames: Option<u32>, verbose: bool) -> Result<()> {
-    eprintln!("[viz] Test pattern mode - built-in WGSL shader");
-    let spec = PipelineSpec {
-        shader: Shader(TEST_PATTERN_SHADER),
-        max_frames,
+    App::run(RunSpec {
+        program: Program::parse(HOST)?,
+        base: PathBuf::new(),
+        sources: Some(BTreeMap::from([(
+            "shaders".into(),
+            TEST_PATTERN_SHADER.as_bytes().to_vec(),
+        )])),
+        inputs: HashMap::new(),
+        outputs: HashMap::new(),
+        constants: Vec::new(),
+        dispatch: BTreeMap::new(),
+        feedback: Vec::new(),
+        opts: InteractiveOpts {
+            max_frames,
+            ..Default::default()
+        },
         verbose,
-        validate: true,
-        present_mode: PresentMode::Fifo,
-        size: None,
-    };
-    let event_loop = EventLoop::new().context("failed to create event loop")?;
-    let mut app = App::new(spec);
-    event_loop.run_app(&mut app).map_err(|e| anyhow!(e)).context("winit event loop errored")?;
-    Ok(())
+    })
 }

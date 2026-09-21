@@ -5,7 +5,6 @@ use anyhow::{anyhow, Result};
 #[derive(Debug, Clone)]
 pub struct PushConstantSpec {
     pub name: String,
-    pub offset: u32,
     pub data: Vec<u8>,
 }
 
@@ -23,13 +22,8 @@ impl PushConstantSpec {
 
         Ok(Self {
             name: name.to_string(),
-            offset: 0, // filled in later
             data,
         })
-    }
-
-    pub fn byte_size(&self) -> u32 {
-        self.data.len() as u32
     }
 }
 

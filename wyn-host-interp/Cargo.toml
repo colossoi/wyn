@@ -1,0 +1,15 @@
+[package]
+name = "wyn-host-interp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+wgpu = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+thiserror.workspace = true
+wgpu = { version = "27", features = ["spirv"], optional = true }
+pollster = { version = "0.3", optional = true }

@@ -1,19 +1,7 @@
-//! Re-export of the shared `wyn_pipeline_descriptor` types plus the
-//! f32-array I/O used by the descriptor-driven `pipeline` mode.
-//!
-//! The descriptor schema lives in its own crate so the compiler
-//! (which serializes it) and host runtimes (which deserialize it)
-//! share a single source of truth.
-
 use std::fs;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-
-pub use wyn_pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, DispatchLen, DispatchSize, Pipeline, PipelineDescriptor,
-    StorageImageFormat,
-};
 
 pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {
     let content =
@@ -26,11 +14,4 @@ pub fn load_f32_json(path: &Path) -> Result<Vec<f32>> {
         .enumerate()
         .map(|(i, v)| v.as_f64().map(|f| f as f32).ok_or_else(|| anyhow!("Element {} is not a number", i)))
         .collect()
-}
-
-/// Write f32 data as a JSON array to a file.
-pub fn write_f32_json(path: &Path, data: &[f32]) -> Result<()> {
-    let json =
-        serde_json::to_string_pretty(&data.iter().map(|&f| serde_json::json!(f)).collect::<Vec<_>>())?;
-    fs::write(path, json).with_context(|| format!("Failed to write: {}", path.display()))
 }

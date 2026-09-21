@@ -101,6 +101,16 @@ fn entry_stage_binding_uses(entry: &EntryPublication, bindings: &[Binding]) -> S
         let access = Access::from(StorageAccess::from(declaration.role));
         record(declaration.binding, access);
     }
+    for input in &entry.inputs {
+        let Some(constant) = input.push_constant() else {
+            continue;
+        };
+        for (index, binding) in bindings.iter().enumerate() {
+            if matches!(binding, Binding::PushConstant { offset, .. } if *offset == constant.offset) {
+                uses.record(index, Access::ReadOnly);
+            }
+        }
+    }
     uses
 }
 

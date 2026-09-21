@@ -729,3 +729,6 @@ mod literal_expansion_tests;
 
 #[cfg(test)]
 mod host_tests;
+
+#[cfg(test)]
+mod host_interp_tests;

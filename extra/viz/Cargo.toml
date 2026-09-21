@@ -19,8 +19,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 env_logger = "0.11"
-bytemuck = { version = "1.14", features = ["derive"] }
 rspirv = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-wyn-pipeline-descriptor = { path = "../../wyn-pipeline-descriptor" }
+wyn-host-interp = { path = "../../wyn-host-interp", features = ["wgpu"] }
+half = "2.7"
