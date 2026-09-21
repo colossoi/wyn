@@ -381,8 +381,9 @@ fixed element count or `:dynamic`. `:range :caller` means the caller supplies th
 logical element range in the backing buffer, including any view offset. This
 range must fit the buffer and, for a fixed-length array, have the declared count.
 An `(:unsupported "type description")` layout records a type for which the
-compiler cannot yet publish a decoder; targets must report an error rather than
-guess its representation. Layout descriptions can include storage scalars `:i8`,
+compiler cannot yet publish a complete storage layout. Descriptive targets retain
+this information; a client requiring a layout must reject it rather than guess
+its representation. Layout descriptions can include storage scalars `:i8`,
 `:u8`, `:i16`, and `:u16` without adding those types to WHL host arithmetic.
 
 Inputs are borrowed; access annotations state whether the program may modify
@@ -898,30 +899,38 @@ resource-name and packed-field tables expose their source
 identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
 or interpreter is involved.
 
-Rust host functions return an entry-specific output handle, such as
-`FrobnicatorOutput` from `host_frobnicator`. Its buffer fields are private and
-have named accessors for subsequent GPU work. `read_frobnicator` reads the entry's
-results into native Rust values: `i32`, `u32`, `f32`, fixed arrays for vectors and
-matrices, `Vec<T>` for returned arrays, tuples for positional results, and structs
-with authored field names for records. Each entry has one public reader for all
-its results. It copies the requested buffer spans into one staging allocation,
-submits those copies together, and maps and waits once before decoding the whole
-tuple or record. Texture results provide named texture accessors and retain GPU
-handles; these readers do not perform pixel
-readback. Byte decoding, staging buffers, and scalar reads used by host arithmetic
-are private implementation details of the generated module.
+Published shader names identify their source entry and phase, for example
+`totals_partials`, `totals_combine`, or `scene_vertex`. Buffer names identify
+source outputs or scratch storage, such as `totals_result_0` and `totals_scratch`.
+Numeric suffixes distinguish repeated names. Shader declarations and host
+programs use the same assigned entry-point names.
 
-For example, an entry named `frobnicator` returning `(i32, u32, f32)` has
-`read_frobnicator(&device, &queue, &output) -> Result<(i32, u32, f32), HostError>`.
-An entry returning `{count:u32, gain:f32}` instead returns a struct with `count`
-and `gain` fields. A scalar entry returns its native scalar type directly.
-Array readers additionally require a `Range<u32>` identifying the returned view
-in its backing buffer. They never infer the live length from allocation capacity.
-Readback requires `COPY_SRC` on borrowed result buffers and waits for queued GPU
-work before decoding. The native reader blocks during that single wait. Empty
-array spans perform no GPU copy; an entirely empty batch performs no submission
-or wait. Integer byte-offset calculations use `u64`, including for arrays whose
-element indices fit `u32`.
+Rust host functions return an `output::OutputDescriptor` containing the entry
+name and its output values in source order, followed by any additional render
+targets. Each value preserves its source name, value/tuple-field/record-field
+kind, resource identity, and retained WGPU resource handle. Repeated resource
+identities indicate shared backing, so a client can recognize aliases.
+
+Buffer outputs carry their scalar and composite layouts, including field names,
+byte offsets, element strides, and fixed array counts where known. Their
+`BufferRange::Bytes { offset, size }` uses `u64` byte quantities. A
+`BufferRange::CallerProvided` explicitly marks a logical view whose byte range
+is not published. In particular, a returned array's allocation capacity does
+not determine its live length or view offset. Texture outputs retain WGPU
+texture handles for presentation, further GPU work, or client readback.
+
+For example, an entry named `statistics` returning `(i32, u32, f32)` has
+`host_statistics(...) -> Result<OutputDescriptor, HostError>`. Its descriptor
+contains three tuple-field outputs with their buffers and layouts. An entry
+returning `{count:u32, gain:f32}` instead supplies two record-field outputs
+named `count` and `gain`. Even a one-field record preserves its record kind.
+
+The client owns output readback, synchronization, batching, and decoding.
+Generated host code returns the descriptors without performing those operations
+or calling a client helper library. Optional readback or decoding helpers can
+live in a separate library and be called by the client. Scalar reads required
+to evaluate host allocation or launch arithmetic remain private operations of
+the host program; they do not decode entry outputs for the client.
 
 The compiler publishes host-computable integer allocation expressions, including
 scalar interface reads, arithmetic, and logical input lengths. Expressions lifted

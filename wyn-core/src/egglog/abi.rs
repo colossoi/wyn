@@ -26,6 +26,7 @@ use wyn_base::IdArena;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Abi {
+    pub entry_names: BTreeMap<BlockId, String>,
     pub root_accesses: BTreeMap<BlockId, BTreeMap<BindingRef, crate::ResourceAccess>>,
     pub entry_roots: BTreeMap<EntryId, Vec<BlockId>>,
     pub inputs: BTreeMap<ParameterId, Vec<EntryInput>>,

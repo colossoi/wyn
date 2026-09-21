@@ -57,14 +57,14 @@ pub enum ResultLayout {
         fields: Vec<ResultField>,
         size: u32,
     },
-    /// A returned array view. Readers require its logical element range in
+    /// A returned array view. Clients require its logical element range in
     /// the backing buffer; allocation capacity does not determine that range.
     Array {
         element: Box<ResultLayout>,
         stride: u32,
         length: Option<u32>,
     },
-    /// Keep unsupported source types descriptive without guessing a decoder.
+    /// A source type whose complete storage layout has not been published.
     Unsupported(String),
 }
 

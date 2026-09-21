@@ -11,7 +11,7 @@ use crate::{
     TextureViewDimension, VertexFormat, Viewport,
 };
 
-fn resource(id: ResourceId) -> Ident {
+pub(crate) fn resource(id: ResourceId) -> Ident {
     format_ident!("resource_{}", id.0)
 }
 fn scalar(name: &str) -> Ident {
@@ -35,7 +35,10 @@ impl Program {
         }
         let support = parse_file(include_str!("rust_support.rs"))?;
         let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
-        let readback = parse_file(include_str!("readback.rs"))?;
+        let mut result_types = parse_file(include_str!("results.rs"))?;
+        result_types.items.retain(|item| !matches!(item, Item::Impl(_)));
+        let result_types = result_types.items;
+        let output_types = parse_file(include_str!("rust_output.rs"))?;
         let functions = self
             .entries
             .iter()
@@ -73,7 +76,9 @@ impl Program {
         }
         let mut syntax: File = parse2(quote! {
             //! Generated Wyn host code. Dependency: wgpu 27.
-            mod support {#support pub mod arithmetic {#arithmetic} pub mod readback {#readback}}
+            mod support {#support pub mod arithmetic {#arithmetic}}
+            pub mod output {#output_types #(#result_types)*}
+            use output::{OutputDescriptor,OutputValue,OutputResource,BufferRange,ResultKind,ResultLayout,ResultScalar,ResultField};
             pub use support::HostError;
             use support::{ceiling, dimension, floor, size};
             use std::borrow::Cow;
@@ -145,7 +150,7 @@ impl Program {
                 let id = resource(*r);
                 let ty = if *signed { quote!(i32) } else { quote!(u32) };
                 if matches!(self.resource_binding(*r), Some(Binding::PushConstant { .. })) {
-                    quote!(i64::from(#ty::from_le_bytes(support::readback::bytes::<4>(#id,u64::from(#offset))?)))
+                    quote!(i64::from(#ty::from_le_bytes(support::scalar_bytes(#id,#offset)?)))
                 } else {
                     let read = if *signed { quote!(read_i32) } else { quote!(read_u32) };
                     quote!(i64::from(support::#read(device,queue,&#id,#offset)?))
@@ -270,17 +275,13 @@ impl Program {
             });
         }
         let results = self.rust_results(entry)?;
-        let result_declaration = results.declaration;
-        let result_handle = results.handle;
-        let outputs = results.values;
         let entry_id = format_ident!("ENTRY_{}", index);
         Ok(quote! {
             pub const #entry_id:&str=#source_name;
-            #result_declaration
-            pub fn #name(device:&Device,queue:&Queue,#(#params),*)->Result<#result_handle,HostError>{
+            pub fn #name(device:&Device,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
                 let shader=device.create_shader_module(ShaderModuleDescriptor{label:Some(#source_name),source:ShaderSource::Wgsl(Cow::Borrowed(include_str!(#module_path)))});
                 #(#code)*
-                Ok(#result_handle {#(#outputs),*})
+                Ok(#results)
             }
         })
     }

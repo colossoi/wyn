@@ -124,7 +124,7 @@ pub fn schedule(
         &dispatch_order,
         &mut planner.data.state.abi,
         &planner.data.state.dispatches,
-        &planner.data.ir.entries,
+        &planner.data.ir,
         &planner.data.state.blocks,
     )?;
     Ok(converted)

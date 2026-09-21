@@ -5,6 +5,7 @@ use crate::egglog::blocks::{Storage, Value};
 use crate::egglog::data::{
     BlockId, BufferId, DispatchId, EntryData, EntryId, OutputData, OutputId, ParameterId, TypeData, TypeId,
 };
+use crate::egglog::names;
 use crate::egglog::planning::{number, rows};
 use crate::egglog::{OptimizeError, Program, Scheduled};
 use crate::host::{BufferLen, DispatchLen, DispatchSize, HostSizeInput, HostSizeScalar};
@@ -202,6 +203,10 @@ pub(in crate::egglog) fn read(
     let mut reserved: BTreeSet<_> =
         data.state.abi.inputs.values().flatten().filter_map(|i| i.descriptor_binding()).collect();
     reserved.extend(pinned.values().map(|(b, _)| *b));
+    let mut used_names: BTreeSet<_> =
+        data.state.abi.inputs.values().flatten().map(|i| i.name.clone()).collect();
+    used_names.extend(pinned.values().map(|(_, name)| name.clone()));
+    let buffer_names = names::buffers(data, &pinned.keys().copied().collect(), &mut used_names)?;
     let mut next = data.programs.values().map(|p| p.next_auto_storage_binding).max().unwrap_or(0);
     // Numbering is deterministic serialization of the allocation and pin facts.
     for (&id, buffer) in &data.state.buffers {
@@ -216,7 +221,7 @@ pub(in crate::egglog) fn read(
             }
             let binding = BindingRef::new(0, next);
             next = next.checked_add(1).ok_or_else(|| error("too many bindings"))?;
-            (binding, format!("egg_resource{}", id.as_u32()))
+            (binding, buffer_names[&id].clone())
         };
         data.state.abi.bindings.insert(
             id,

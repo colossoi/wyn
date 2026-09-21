@@ -1,17 +1,17 @@
 //! Publish the finalized resource/dispatch readout through the shared ABI.
 use super::abi::error;
+use super::names;
 use super::{OptimizeError, Program, Scheduled};
 use crate::flow::ExecutionModel;
 use crate::host::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, GraphicsPipeline, GraphicsStage,
-    ModuleInterface, Pipeline, ResultKind, ShaderStage, SourceResultBinding,
+    ModuleInterface, Pipeline, ShaderStage, SourceResultBinding,
 };
 use crate::interface::publish::ModuleInterfacePublish;
 use crate::interface::results::result_layout;
 use crate::interface::StorageRole;
 use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
 use crate::ssa::types::EntryPoint;
-use crate::types::{strip_existentials, Type, TypeName};
 use crate::BindingRef;
 use crate::{EntryId, LookupMap, ResourceAccess};
 use std::collections::{BTreeMap, BTreeSet};
@@ -138,27 +138,11 @@ pub(super) fn publish(
             let Some(binding) = abi.buffer_bindings.get(&id).copied() else {
                 return Err(error("output has no physical binding"));
             };
-            let region = &data.regions[data.definitions[source_entries[owner].definition].body];
-            let result_type =
-                region.results.first().map(|e| strip_existentials(&data.types[data.expressions[*e].ty].ty));
-            let name = match result_type {
-                Some(Type::Constructed(TypeName::Record(names), _)) => {
-                    let Some(name) = names.0.get(output.index) else {
-                        return Err(error("source result has no record field"));
-                    };
-                    name.clone()
-                }
-                Some(Type::Constructed(TypeName::Tuple(_), _)) => format!("result_{}", output.index),
-                _ => source_name.clone(),
-            };
+            let (name, kind) = names::result_field(&data.ir, output)?;
             pipeline.source_results.push(SourceResultBinding {
                 entry: source_name.clone(),
                 name,
-                kind: match result_type {
-                    Some(Type::Constructed(TypeName::Record(_), _)) => ResultKind::RecordField,
-                    Some(Type::Constructed(TypeName::Tuple(_), _)) => ResultKind::TupleField,
-                    _ => ResultKind::Value,
-                },
+                kind,
                 layout: result_layout(&data.types[data.expressions[output.expression].ty].ty),
                 result: output.index,
                 pipeline_index,

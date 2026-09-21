@@ -40,18 +40,14 @@ impl Case {
             .expect("run compiler")
     }
 
-    fn assert_compiled(&self, target: &str, result: &Output, egglog: bool) {
+    fn assert_compiled(&self, target: &str, result: &Output) {
         assert!(
             result.status.success(),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
         let mir = fs::read_to_string(self.directory.join("output.ssa")).expect("SSA output");
-        assert_eq!(
-            mir.contains("egg_kernel_"),
-            egglog,
-            "unexpected compiler route: {mir}"
-        );
+        assert!(mir.contains("main_compute"), "missing source entry name: {mir}");
         let host = fs::read_to_string(self.directory.join("output.wynhost")).expect("WHL output");
         assert!(host.contains("(define-host-program :version 1)"));
         assert!(host.contains("(gpu-dispatch "));
@@ -77,7 +73,7 @@ fn default_route_compiles_spirv_and_wgsl() {
     for target in ["spirv", "wgsl"] {
         let case = Case::new();
         let result = case.compile(target, &[]);
-        case.assert_compiled(target, &result, true);
+        case.assert_compiled(target, &result);
     }
 }
 
@@ -85,7 +81,7 @@ fn default_route_compiles_spirv_and_wgsl() {
 fn explicit_egglog_route_emits_shader() {
     let case = Case::new();
     let result = case.compile("wgsl", &["--egglog"]);
-    case.assert_compiled("wgsl", &result, true);
+    case.assert_compiled("wgsl", &result);
 }
 
 #[test]
@@ -97,5 +93,5 @@ fn direct_compiles_authored_compute() {
     )
     .unwrap();
     let result = case.compile("wgsl", &["--direct"]);
-    case.assert_compiled("wgsl", &result, true);
+    case.assert_compiled("wgsl", &result);
 }

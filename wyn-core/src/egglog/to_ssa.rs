@@ -1,6 +1,7 @@
 //! SSA handoff from scheduled blocks and the derived resource plan.
 use super::abi::{concrete, u32_type};
 use super::blocks::{Control, Exit, Instruction, Storage, Value};
+use super::names;
 use super::scalar::placement_index;
 use super::timing::span;
 use super::{OptimizeError, PlacementSite};
@@ -95,7 +96,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             .collect();
         entries.push(EntryPoint {
             id: EntryId::from(root.as_u32()),
-            name: entry_name(root),
+            name: data.state.abi.entry_names[&root].clone(),
             body,
             execution_model: if compute {
                 ExecutionModel::Compute {
@@ -127,10 +128,6 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             },
         ),
     )
-}
-
-fn entry_name(root: BlockId) -> String {
-    format!("egg_kernel_{}", root.as_u32())
 }
 
 fn error(message: impl Into<String>) -> OptimizeError {
@@ -171,9 +168,12 @@ impl Compiler<'_> {
         }
         let index = u32::try_from(self.functions.len()).map_err(|_| error("too many helpers"))?;
         let id = FunctionId::from(index);
+        let Some(function) = &self.data.state.blocks[source].interface else {
+            return Err(error("device function has no interface"));
+        };
         self.functions.push(Function {
             id,
-            name: format!("egg_helper_{}_{}", source.as_u32(), index),
+            name: names::function(&self.data.ir, &function.name, index),
             body,
             span: Span::generated(),
             linkage_name: None,

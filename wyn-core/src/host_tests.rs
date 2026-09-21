@@ -1,9 +1,9 @@
 use crate::host::arithmetic::{
     add, ceiling, dimension, floor, modulo, multiply, signed_size, size, subtract,
 };
-use crate::host::readback;
 use crate::host::{Allocation, Operation, Pipeline, Program, ResultLayout, ResultScalar, ShaderFormat};
 use crate::{compile_thru_ssa, lower_ssa_to_wgsl_with_program};
+use std::collections::BTreeSet;
 
 fn compile(source: &str) -> Program {
     lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap().program
@@ -113,54 +113,62 @@ fn integer_capacity_expressions_reach_both_hosts() {
 }
 
 #[test]
-fn named_result_readers_preserve_native_scalar_types() {
+fn scalar_output_descriptors_preserve_names_types_and_byte_ranges() {
     for (ty, literal, scalar) in [
         ("i32", "-7", ResultScalar::I32),
         ("u32", "4294967295u32", ResultScalar::U32),
         ("f32", "2.5", ResultScalar::F32),
     ] {
-        let program = compile(&format!("entry frobnicator() {ty} = {literal}"));
-        assert_eq!(program.interface.source_results[0].name, "frobnicator");
+        let program = compile(&format!("entry result() {ty} = {literal}"));
+        assert_eq!(program.interface.source_results[0].name, "result");
         assert_eq!(
             program.interface.source_results[0].layout,
             ResultLayout::Scalar(scalar)
         );
-        let rust = program.to_rust_wgpu("frobnicator.wgsl", ShaderFormat::Wgsl).unwrap();
-        assert!(rust.contains("pub fn read_frobnicator("), "{rust}");
-        assert!(rust.contains(&format!("-> Result<{ty}, HostError>")), "{rust}");
-        assert!(rust.contains("-> Result<FrobnicatorOutput, HostError>"));
-        assert!(rust.contains("pub use support::HostError;"));
-        assert!(!rust.contains("pub mod support"));
-        assert!(!rust.contains("enum Resource"));
-        assert!(!rust.contains("read_scalar"));
+        let rust = program.to_rust_wgpu("result.wgsl", ShaderFormat::Wgsl).unwrap();
+        assert!(rust.contains("-> Result<OutputDescriptor, HostError>"), "{rust}");
+        assert!(rust.contains("name: \"result\""));
+        assert!(rust.contains(&format!("ResultLayout::Scalar(ResultScalar::{scalar:?})")));
+        assert!(rust.contains("size: 4u64"));
+        assert!(rust.contains("Buffer::clone("));
+        assert!(rust.contains("pub mod output"));
+        for operation in [
+            "pub fn read_",
+            "map_async",
+            "copy_buffer_to_buffer",
+            "from_le_bytes",
+        ] {
+            assert!(
+                !rust.contains(operation),
+                "output descriptor contains {operation}"
+            );
+        }
     }
 }
 
 #[test]
-fn record_results_are_read_together_with_authored_field_names() {
-    let program = compile("entry main() {frobnicator:i32, gain:f32} = {frobnicator=7, gain=2.5}");
+fn record_output_descriptors_preserve_authored_field_names() {
+    let program = compile("entry main() {count:i32, gain:f32} = {count=7, gain=2.5}");
     let results = &program.interface.source_results;
     assert_eq!(
         results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-        ["frobnicator", "gain"]
+        ["count", "gain"]
     );
     let rust = program.to_rust_wgpu("record.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("pub fn read_main("), "{rust}");
-    assert!(!rust.contains("pub fn read_frobnicator("));
-    assert!(!rust.contains("pub fn read_gain("));
-    assert_eq!(rust.matches("support::read_buffers(").count(), 1);
-    assert!(rust.contains("pub frobnicator: i32"));
-    assert!(rust.contains("pub gain: f32"));
+    assert!(rust.contains("name: \"count\""));
+    assert!(rust.contains("name: \"gain\""));
+    assert_eq!(rust.matches("kind: ResultKind::RecordField").count(), 2);
+    assert!(!rust.contains("pub fn read_"));
     let whl = program.to_whl("record.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(whl.contains(":source-name \"frobnicator\""));
+    assert!(whl.contains(":source-name \"count\""));
     assert!(whl.contains(":value-layout :i32"));
     check_whl(&whl);
 }
 
 #[test]
-fn array_readers_use_element_ranges_and_padded_vector_stride() {
+fn array_output_descriptors_publish_padding_and_unknown_view_ranges() {
     let program =
-        compile("entry frobnicator(xs: []vec3f32) []vec3f32 = map(|x:vec3f32| x + @[1.0,2.0,3.0],xs)");
+        compile("entry positions(xs: []vec3f32) []vec3f32 = map(|x:vec3f32| x + @[1.0,2.0,3.0],xs)");
     let ResultLayout::Array { element, stride, .. } = &program.interface.source_results[0].layout else {
         panic!("array layout");
     };
@@ -174,105 +182,122 @@ fn array_readers_use_element_ranges_and_padded_vector_stride() {
         }
     ));
     let rust = program.to_rust_wgpu("vectors.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("Result<Vec<[f32; 3usize]>, HostError>"), "{rust}");
-    assert!(rust.contains("frobnicator_elements: std::ops::Range<u32>"));
-    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(compact.contains("element_range(frobnicator_elements.clone(),16u32,output.frobnicator.size()"));
+    assert!(rust.contains("range: BufferRange::CallerProvided"), "{rust}");
+    assert!(rust.contains("layout: ResultLayout::Array"));
+    assert!(rust.contains("stride: 16u32"));
+    assert!(rust.contains("length: None"));
+    assert!(!rust.contains("map_async"));
 }
 
 #[test]
-fn tuple_results_use_one_reader_and_one_gpu_round_trip() {
-    let program = compile("entry frobnicator() (i32,u32,f32) = (-7,4294967295u32,2.5)");
+fn tuple_output_descriptors_require_no_readback_or_decoder() {
+    let program = compile("entry statistics() (i32,u32,f32) = (-7,4294967295u32,2.5)");
     let rust = program.to_rust_wgpu("tuple.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("-> Result<(i32, u32, f32), HostError>"), "{rust}");
-    assert_eq!(rust.matches("pub fn read_frobnicator(").count(), 1);
-    assert_eq!(rust.matches("support::read_buffers(").count(), 1);
-    assert_eq!(rust.matches("queue.submit(Some(encoder.finish()))").count(), 2); // dispatch plus batched readback
-    assert_eq!(rust.matches(".map_async(").count(), 1);
-    assert_eq!(rust.matches(".poll(").count(), 1);
-    assert!(!rust.contains("pub fn read_result_"));
+    assert_eq!(rust.matches("kind: ResultKind::TupleField").count(), 3);
+    for (index, scalar) in ["I32", "U32", "F32"].iter().enumerate() {
+        assert!(rust.contains(&format!("name: \"result_{index}\"")));
+        assert!(rust.contains(&format!("ResultLayout::Scalar(ResultScalar::{scalar})")));
+    }
+    for operation in [
+        "pub fn read_",
+        "map_async",
+        "copy_buffer_to_buffer",
+        "from_le_bytes",
+        ".poll(",
+    ] {
+        assert!(
+            !rust.contains(operation),
+            "output descriptor contains {operation}"
+        );
+    }
 }
 
 #[test]
-fn single_field_records_remain_records_in_the_result_api() {
-    let program = compile("entry frobnicator() {value:i32} = {value=7}");
+fn single_field_record_output_descriptor_preserves_record_shape() {
+    let program = compile("entry main() {value:i32} = {value=7}");
     let rust = program.to_rust_wgpu("single.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(rust.contains("pub struct Frobnicator {"), "{rust}");
-    assert!(rust.contains("pub value: i32"));
-    assert!(rust.contains("-> Result<Frobnicator, HostError>"));
+    assert!(rust.contains("kind: ResultKind::RecordField"), "{rust}");
+    assert!(rust.contains("name: \"value\""));
 }
 
 #[test]
-fn batch_readback_packs_exact_spans_into_one_aligned_allocation() {
-    let (copies, size) =
-        readback::copy_ranges(&[(2..6, 8), (12..12, 16), (16..28, 32), (0..4, 4)]).unwrap();
-    assert_eq!(size, 24);
-    assert_eq!(copies[0].source, 0..8);
-    assert_eq!(copies[0].mapped, 2..6);
-    assert_eq!(copies[1].mapped, 8..8);
-    assert!(copies[1].source.is_empty());
-    assert_eq!(copies[2].staging_offset, 8);
-    assert_eq!(copies[2].source, 16..28);
-    assert_eq!(copies[2].mapped, 8..20);
-    assert_eq!(copies[3].mapped, 20..24);
-    assert_eq!(readback::copy_ranges(&[(0..0, 0), (4..4, 4)]).unwrap().1, 0);
-    assert!(readback::copy_ranges(&[(3..2, 8)]).is_err());
-    assert!(readback::copy_ranges(&[(0..3, 3)]).is_err());
-    assert!(readback::copy_ranges(&[(0..u64::MAX, u64::MAX)]).is_err());
-    assert!(readback::copy_ranges(&[(0..u64::MAX - 3, u64::MAX), (0..4, 4)]).is_err());
-    let high = u64::MAX - 7;
+fn output_descriptors_preserve_nested_record_offsets() {
+    let program = compile("entry particles(xs: []{position:vec3f32, weight:f32}) []{position:vec3f32, weight:f32} = map(|x| {position=x.position,weight=x.weight+1.0},xs)");
+    let ResultLayout::Array { element, stride, .. } = &program.interface.source_results[0].layout else {
+        panic!("array layout");
+    };
+    let ResultLayout::Record { fields, size } = element.as_ref() else {
+        panic!("record layout");
+    };
+    assert_eq!((*stride, *size), (16, 16));
     assert_eq!(
-        readback::copy_ranges(&[(0..8, 8), (high..high + 4, u64::MAX)]).unwrap().0[1].mapped,
-        8..12
+        fields.iter().map(|f| (f.name.as_str(), f.offset)).collect::<Vec<_>>(),
+        [("position", 0), ("weight", 12)]
     );
+    let rust = program.to_rust_wgpu("particles.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("offset: 12u32"));
+    assert!(rust.contains("ResultLayout::Record"));
+    assert!(!rust.contains("from_le_bytes"));
 }
 
 #[test]
-fn result_decoding_preserves_signed_unsigned_and_float_values() {
-    let mut data = Vec::new();
-    data.extend((-7i32).to_le_bytes());
-    data.extend(u32::MAX.to_le_bytes());
-    data.extend(2.5f32.to_le_bytes());
-    assert_eq!(i32::from_le_bytes(readback::bytes(&data, 0).unwrap()), -7);
-    assert_eq!(u32::from_le_bytes(readback::bytes(&data, 4).unwrap()), u32::MAX);
-    assert_eq!(f32::from_le_bytes(readback::bytes(&data, 8).unwrap()), 2.5);
-    assert!(readback::bytes::<4>(&data, 10).is_err());
-    assert!(readback::bytes::<4>(&data, u64::MAX).is_err());
-    assert!(readback::at(u64::MAX, 1).is_err());
+fn output_descriptors_do_not_require_a_rust_decoder_for_every_type() {
+    let program = compile("entry main() f16 = 1.0f16");
+    assert!(matches!(
+        program.interface.source_results[0].layout,
+        ResultLayout::Unsupported(_)
+    ));
+    let rust = program.to_rust_wgpu("half.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("ResultLayout::Unsupported("));
+    assert!(rust.contains("range: BufferRange::CallerProvided"));
+    assert!(!rust.contains("from_le_bytes"));
 }
 
 #[test]
-fn result_array_decoding_excludes_padding_and_unused_capacity() {
-    let data: Vec<_> = [1.0f32, 2.0, 3.0, 99.0, 4.0, 5.0, 6.0, 99.0, 7.0, 8.0, 9.0, 99.0]
-        .into_iter()
-        .flat_map(f32::to_le_bytes)
-        .collect();
-    let range = readback::element_range(1..2, 16, data.len() as u64).unwrap();
-    let values = readback::array(
-        &data[range.start as usize..range.end as usize],
-        1,
-        16,
-        |bytes, offset| {
-            Ok([
-                f32::from_le_bytes(readback::bytes(bytes, offset)?),
-                f32::from_le_bytes(readback::bytes(bytes, readback::at(offset, 4)?)?),
-                f32::from_le_bytes(readback::bytes(bytes, readback::at(offset, 8)?)?),
-            ])
-        },
-    )
-    .unwrap();
-    assert_eq!(values, [[4.0, 5.0, 6.0]]);
-    assert!(
-        readback::array::<u32>(&[], 0, 4, |_, _| panic!("empty array is not decoded")).unwrap().is_empty()
-    );
-    assert!(readback::element_range(2..1, 4, 16).is_err());
-    assert!(readback::element_range(0..5, 4, 16).is_err());
-    assert!(readback::element_range(0..1, 0, 16).is_err());
-    assert_eq!(
-        readback::element_range(u32::MAX - 1..u32::MAX, 16, u64::MAX).unwrap().end,
-        u64::from(u32::MAX) * 16
-    );
-    assert!(readback::array::<u32>(&[0; 3], 1, 4, |_, _| panic!("short buffer is rejected")).is_err());
+fn published_shader_names_identify_source_phases_and_stay_consistent() {
+    let source = "entry totals(xs:[137]i32,ys:[67]i32) (i32,i32) = (reduce(|a:i32,b:i32|a+b,0,xs),reduce(|a:i32,b:i32|a*b,1,ys))";
+    let ssa = compile_thru_ssa(source).unwrap();
+    let names: BTreeSet<_> = ssa.entry_points.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names.len(), ssa.entry_points.len());
+    assert!(names.iter().all(|n| n.starts_with("totals_")), "{names:?}");
+    assert!(names.contains("totals_partials"));
+    assert!(names.contains("totals_combine"));
+    for kernel in ssa.global_context.physical_kernels.kernels() {
+        let entry = ssa.entry_points.iter().find(|e| e.id == kernel.entry).unwrap();
+        assert_eq!(kernel.entry_point, entry.name);
+    }
+    let compiled = lower_ssa_to_wgsl_with_program(ssa).unwrap();
+    let module = naga::front::wgsl::parse_str(&compiled.wgsl).unwrap();
+    let shader_names: BTreeSet<_> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
+    for pipeline in &compiled.program.interface.pipelines {
+        let Pipeline::Compute(pipeline) = pipeline else {
+            panic!("compute pipeline")
+        };
+        for stage in &pipeline.stages {
+            assert!(shader_names.contains(stage.entry_point.as_str()));
+        }
+    }
+    let resource_names: Vec<_> =
+        compiled.program.interface.frame_graph.resources.iter().map(|r| r.name.as_str()).collect();
+    assert!(resource_names.contains(&"totals_result_0"), "{resource_names:?}");
+    assert!(resource_names.contains(&"totals_result_1"));
+    assert!(resource_names.iter().any(|n| n.starts_with("totals_scratch")));
+    let whl = compiled.program.to_whl("totals.wgsl", ShaderFormat::Wgsl).unwrap();
+    let rust = compiled.program.to_rust_wgpu("totals.wgsl", ShaderFormat::Wgsl).unwrap();
+    for artifact in [&compiled.wgsl, &whl, &rust] {
+        for prefix in ["egg_kernel", "egg_resource", "egg_helper"] {
+            assert!(!artifact.contains(prefix), "unexpected generated name {prefix}");
+        }
+    }
+}
+
+#[test]
+fn generated_buffer_names_do_not_alias_source_inputs_with_the_same_name() {
+    let program = compile("entry main(main_output:[4]i32) [4]i32 = map(|x:i32|x+1,main_output)");
+    let entry = &program.entries[0];
+    assert!(!entry.inputs.contains(&entry.results[0]));
+    let resource = &program.interface.frame_graph.resources[entry.results[0].0];
+    assert_eq!(resource.name, "main_output_2");
 }
 
 #[test]
@@ -347,6 +372,19 @@ fn graphics_capture_uses_the_produced_buffer_after_its_writer() {
     let rust = program.to_rust_wgpu("conway.wgsl", ShaderFormat::Wgsl).unwrap();
     assert!(rust.contains("create_render_pipeline"));
     assert!(rust.contains("begin_render_pass"));
+    assert!(rust.contains("OutputResource::Texture(Texture::clone("));
+    assert!(!rust.contains("read_buffers"));
+    for pipeline in &program.interface.pipelines {
+        if let Pipeline::Graphics(graphics) = pipeline {
+            for stage in &graphics.stages {
+                assert!(
+                    stage.entry_point.starts_with(&format!("{}_", stage.owner)),
+                    "{}",
+                    stage.entry_point
+                );
+            }
+        }
+    }
 }
 
 #[test]

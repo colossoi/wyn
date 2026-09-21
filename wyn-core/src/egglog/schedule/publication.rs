@@ -2,7 +2,8 @@
 use super::{error, FunctionKind, OptimizeError};
 use crate::egglog::abi::Abi;
 use crate::egglog::blocks::{BlockData, DispatchData};
-use crate::egglog::data::{BlockId, DispatchId, EntryData, EntryId as SourceEntryId};
+use crate::egglog::data::{BlockId, DispatchId, Ir};
+use crate::egglog::names;
 use crate::egglog::planning::rows;
 use crate::host::DispatchSize;
 use crate::interface::EntryKind;
@@ -18,9 +19,10 @@ pub(super) fn build_physical_kernel_graph(
     order: &[DispatchId],
     abi: &mut Abi,
     dispatches: &IdArena<DispatchId, DispatchData>,
-    entries: &IdArena<SourceEntryId, EntryData>,
+    ir: &Ir,
     blocks: &IdArena<BlockId, BlockData>,
 ) -> Result<PhysicalKernelGraph, OptimizeError> {
+    let entries = &ir.entries;
     for &id in order {
         let d = &dispatches[id];
         abi.entry_roots.entry(d.owner).or_default().push(d.kernel);
@@ -30,6 +32,7 @@ pub(super) fn build_physical_kernel_graph(
             abi.entry_roots.entry(owner).or_default().push(root);
         }
     }
+    abi.entry_names = names::entry_points(abi, ir, blocks)?;
     let by_binding: BTreeMap<_, _> =
         abi.buffer_bindings.iter().map(|(&id, &binding)| (binding, id)).collect();
     let mut kernels = vec![];
@@ -68,7 +71,7 @@ pub(super) fn build_physical_kernel_graph(
             kernels.push(PhysicalKernel {
                 id,
                 entry: EntryId::from(root.as_u32()),
-                entry_point: format!("egg_kernel_{}", root.as_u32()),
+                entry_point: abi.entry_names[&root].clone(),
                 label: function.name.clone(),
                 source_entry: Some(EntryId::from(owner.as_u32())),
                 output_routes: vec![],
