@@ -3,6 +3,10 @@ setlocal
 
 cd /d "%~dp0\.."
 
+echo Generating endpoint mesh...
+node scripts\build_masthead_ends.mjs
+if errorlevel 1 goto :fail
+
 echo Compiling scene.wyn...
 cargo run --release --bin wyn -- build testfiles\acko_masthead --graphics -o testfiles\acko_masthead\scene.spv
 if errorlevel 1 goto :fail
@@ -14,9 +18,7 @@ if errorlevel 1 goto :fail
 echo OK: scene.spv built and validated
 echo.
 echo To render:
-echo   extra\viz\target\release\viz.exe pipeline testfiles\acko_masthead\scene.spv ^
---storage-dir testfiles\acko_masthead ^
---index-buffer testfiles\acko_masthead\indices.bin -v
+echo   extra\viz\target\release\viz.exe run testfiles\acko_masthead\scene.spv --storage-dir testfiles\acko_masthead
 goto :eof
 
 :fail

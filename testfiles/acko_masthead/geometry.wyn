@@ -1,0 +1,75 @@
+open f32
+
+type track_surface = { position: vec3f32, normal: vec3f32, ao: f32 }
+
+-- Arc lengths are relative to each track's resting start. A ring has 8 or 16
+-- profile vertices; track_ranges stores its first vertex and ring/profile counts.
+def sample_section(position: []vec4f32, normal: []vec4f32, arc: []f32,
+                   range: vec4u32, distance: f32, corner: i32,
+                   width_scale: f32, height_scale: f32,
+                   axial_offset: f32, cap_normal: f32) track_surface =
+  let @[first_vertex, ring_count, profile_count, _reserved] = range in
+  let first = i32(first_vertex) in
+  let profile = i32(profile_count) in
+  let (lower, upper) =
+    loop (lo, hi) = (0, i32(ring_count) - 1) while lo + 1 < hi do
+      let mid = (lo + hi) / 2 in
+      if arc[first + mid * profile] <= distance then (mid, hi) else (lo, mid)
+  in
+  let a = first + lower * profile in
+  let b = first + upper * profile in
+  let blend = (distance - arc[a]) / (arc[b] - arc[a]) in
+  let point = |k: i32| position[a + k] + (position[b + k] - position[a + k]) * blend in
+  let vertex = point(corner) in
+  let p = point(0).xyz in
+  let opposite = point(profile / 2).xyz in
+  let adjacent = point(profile - 1).xyz in
+  let center = (p + opposite) * 0.5 in
+  let width_axis = normalize((p + adjacent) * 0.5 - center) in
+  let height_axis = normalize(p - adjacent) in
+  let tangent = normalize(cross(width_axis, height_axis)) in
+  let radial = vertex.xyz - center in
+  let shaped = radial * height_scale
+             + width_axis * dot(radial, width_axis) * (width_scale - height_scale) in
+  let side_normal = normal[a + corner].xyz
+                  + (normal[b + corner].xyz - normal[a + corner].xyz) * blend in
+  { position = center + shaped + tangent * axial_offset,
+    normal = if cap_normal == 0.0 then side_normal else tangent * cap_normal,
+    ao = vertex.w }
+
+def reveal_offset(time: f32, motion: vec4f32) f32 =
+  let @[speed, bend, duration, _length] = motion in
+  let remaining = max(0.0, (duration - time) / bend) in
+  let eased = if remaining < 0.5 then remaining * remaining else remaining - 0.25 in
+  -eased * bend * speed
+
+-- Packed vertex tags hold track (bits 0..3), endpoint role (4..7), and
+-- profile corner (8..11). End rings move along the same curve as the body.
+def deform_track(index: i32, position: []vec4f32, normal: []vec4f32,
+                 arc: []f32, motion: vec4f32, tag: u32,
+                 range: vec4u32, arrow: vec4f32, shape: vec4f32,
+                 time: f32) track_surface =
+  let @[arrow_width, aspect, truncate, shift] = arrow in
+  let @[body_width, bevel_depth, _reserved_a, _reserved_b] = shape in
+  let role = i32((tag / 16u32) % 16u32) in
+  let corner = i32(tag / 256u32) in
+  let start = reveal_offset(time, motion) in
+  let arrow_length = arrow_width / aspect in
+  let finish = start + motion.w - arrow_length - max(0.0, truncate - arrow_length) in
+  let section = |distance, width, height, offset, cap|
+    sample_section(position, normal, arc, range, distance, corner, width, height, offset, cap)
+  in
+  if role == 0 then
+    if arc[index] >= start && arc[index] <= finish then
+      { position = position[index].xyz, normal = normal[index].xyz, ao = position[index].w }
+    else section(clamp(arc[index], start, finish), 1.0, 1.0, 0.0, 0.0)
+  else if role == 1 then section(start - bevel_depth, 0.0, 0.0, 0.0, -1.0)
+  else if role == 2 then section(start - bevel_depth, 0.8, 0.8, 0.0, -1.0)
+  else if role == 3 then section(start, 1.0, 1.0, 0.0, 0.0)
+  else if role == 4 then section(finish, 1.0, 1.0, 0.0, 0.0)
+  else if role <= 7 then
+    let advance = f32(role - 5) * 0.5 * (arrow_length - truncate) in
+    let width = arrow_width / body_width * (1.0 - advance / arrow_length) in
+    section(finish + shift, width, 1.0, advance - shift, 0.0)
+  else if role == 8 then section(finish + bevel_depth, 0.8, 0.8, 0.0, 1.0)
+  else section(finish + bevel_depth, 0.0, 0.0, 0.0, 1.0)
