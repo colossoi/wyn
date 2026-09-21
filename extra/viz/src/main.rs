@@ -88,10 +88,10 @@ fn parse_size(s: &str) -> std::result::Result<(u32, u32), String> {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run a WHL host program
+    /// Run a shader with its WHL host program
     #[command(name = "pipeline", visible_aliases = ["run", "compute"])]
     Pipeline {
-        /// Path to a .wynhost program or its SPIR-V/WGSL module
+        /// Path to a SPIR-V/WGSL shader, or directly to a .wynhost program
         path: PathBuf,
         /// WHL program path; defaults to the shader's sibling .wynhost file.
         #[arg(long, short)]
@@ -400,6 +400,7 @@ fn main() -> Result<()> {
             }
             let pipeline_path = pipeline.unwrap_or_else(|| path.with_extension("wynhost"));
             pollster::block_on(modes::pipeline::run_pipeline(
+                path,
                 pipeline_path,
                 input_map,
                 output_map,

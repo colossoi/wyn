@@ -1,6 +1,7 @@
 use wgpu::{Device, InstanceFlags, PresentMode, PrimitiveTopology, Queue, Texture};
 mod inputs;
 mod outputs;
+mod shaders;
 
 use anyhow::{anyhow, Context, Result};
 use std::collections::{BTreeMap, HashMap};
@@ -115,6 +116,7 @@ pub struct Runner {
 }
 
 pub async fn run_pipeline(
+    path: PathBuf,
     host_path: PathBuf,
     inputs: HashMap<String, PathBuf>,
     outputs: HashMap<String, PathBuf>,
@@ -127,12 +129,13 @@ pub async fn run_pipeline(
     let source =
         fs::read_to_string(&host_path).with_context(|| format!("reading {}", host_path.display()))?;
     let program = Program::parse(&source)?;
+    let sources = shaders::load(&program, &path)?;
     let base = host_path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
     let graphical = !program.graphics.is_empty() && !opts.headless;
     let spec = RunSpec {
         program,
         base,
-        sources: None,
+        sources,
         inputs,
         outputs,
         constants: constants.to_vec(),

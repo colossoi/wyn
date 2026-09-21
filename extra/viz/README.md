@@ -5,9 +5,9 @@ GPU shader runner for Wyn-compiled SPIR-V and WGSL modules.
 ## Commands
 
 ```
-viz pipeline <program.wynhost> # Interpret WHL; graphics opens a window.
-viz run <shader.spv>          # Use the sibling <shader>.wynhost (-p overrides).
-viz compute <program.wynhost> # Alias; compute-only programs run headless.
+viz pipeline <shader.spv>    # Load this shader and its sibling .wynhost (-p overrides).
+viz run <shader.wgsl>        # Alias; graphics opens a window.
+viz compute <shader.spv>     # Alias; compute-only programs run headless.
                              # Results print by default; --output NAME:FILE saves them.
                              # --headless also runs graphics without a window.
                              # --entry selects a source entry when there are several.
@@ -15,6 +15,11 @@ viz validate <shader.spv>    # Validate a SPIR-V module (headless naga)
 viz info                     # Show GPU device info
 viz testpattern              # Render a built-in test pattern
 ```
+
+The shader path selects the actual SPIR-V or WGSL file to load. Its WHL program
+must declare one GPU module with the same format. You can also pass a `.wynhost`
+path directly; that form loads the module paths declared inside the program,
+relative to the host file.
 
 ## Cross-frame feedback
 
