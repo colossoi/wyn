@@ -1,8 +1,8 @@
-use crate::whl::symbol;
+use crate::rust_results;
 use proc_macro2::{Ident, TokenStream, TokenTree};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, ToTokens};
 use std::collections::{BTreeMap, BTreeSet};
-use syn::{parse2, parse_file, File, Item, UseTree};
+use syn::{parse2, parse_file, File, Item, UseTree, Visibility};
 
 use crate::{
     Allocation, Binding, BlendMode, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr, FillMode,
@@ -35,6 +35,7 @@ impl Program {
         }
         let support = parse_file(include_str!("rust_support.rs"))?;
         let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
+        let readback = parse_file(include_str!("readback.rs"))?;
         let functions = self
             .entries
             .iter()
@@ -72,8 +73,9 @@ impl Program {
         }
         let mut syntax: File = parse2(quote! {
             //! Generated Wyn host code. Dependency: wgpu 27.
-            pub mod support {#support pub mod arithmetic {#arithmetic}}
-            use support::{HostError, Resource, ceiling, dimension, floor, read_host_scalar, read_scalar, size};
+            mod support {#support pub mod arithmetic {#arithmetic} pub mod readback {#readback}}
+            pub use support::HostError;
+            use support::{ceiling, dimension, floor, size};
             use std::borrow::Cow;
             use wgpu::{
                 BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent, BlendFactor,
@@ -91,6 +93,15 @@ impl Program {
             pub const BUFFER_FIELDS:&[(usize,&str,u32,u32)]=&[#(#buffer_fields),*];
             #function_tokens
         })?;
+        for item in &mut syntax.items {
+            if let Item::Mod(module) = item {
+                if module.ident == "support" {
+                    if let Some((_, items)) = &mut module.content {
+                        retain_helpers(items, &used);
+                    }
+                }
+            }
+        }
         syntax.items.retain_mut(|item| match item {
             Item::Use(import) => retain_import(&mut import.tree, &used),
             _ => true,
@@ -132,10 +143,12 @@ impl Program {
                 signed,
             } => {
                 let id = resource(*r);
+                let ty = if *signed { quote!(i32) } else { quote!(u32) };
                 if matches!(self.resource_binding(*r), Some(Binding::PushConstant { .. })) {
-                    quote!(read_host_scalar(#id,#offset,#signed)?)
+                    quote!(i64::from(#ty::from_le_bytes(support::readback::bytes::<4>(#id,u64::from(#offset))?)))
                 } else {
-                    quote!(read_scalar(device,queue,&#id,#offset,#signed)?)
+                    let read = if *signed { quote!(read_i32) } else { quote!(read_u32) };
+                    quote!(i64::from(support::#read(device,queue,&#id,#offset)?))
                 }
             }
             Expr::TextureDimension { resource: r, axis } => {
@@ -190,7 +203,7 @@ impl Program {
     }
 
     fn rust_entry(&self, index: usize, entry: &Entry, module_path: &str) -> Result<TokenStream, HostError> {
-        let name = format_ident!("host_{}", symbol(&entry.name).replace('-', "_"));
+        let name = format_ident!("host_{}", rust_results::name(&entry.name));
         let source_name = &entry.name;
         let mut params = vec![];
         for &r in &entry.inputs {
@@ -256,29 +269,18 @@ impl Program {
                 Operation::Draw { pipeline } => self.rust_draw(*pipeline, ordinal, entry)?,
             });
         }
-        let mut outputs = vec![];
-        for (i, &r) in entry.results.iter().enumerate() {
-            let id = resource(r);
-            let label = format!("result-{i}");
-            let value = match self.interface.frame_graph.resources[r.0].kind {
-                FrameResourceKind::StorageBuffer | FrameResourceKind::Uniform => {
-                    quote!(Resource::Buffer(Buffer::clone(&#id)))
-                }
-                FrameResourceKind::Texture | FrameResourceKind::StorageTexture => {
-                    quote!(Resource::Texture(Texture::clone(&#id)))
-                }
-                FrameResourceKind::Sampler => quote!(Resource::Sampler(Sampler::clone(&#id))),
-                FrameResourceKind::PushConstant => quote!(Resource::Bytes(#id.to_vec())),
-            };
-            outputs.push(quote!((#label,#value)));
-        }
+        let results = self.rust_results(entry)?;
+        let result_declaration = results.declaration;
+        let result_handle = results.handle;
+        let outputs = results.values;
         let entry_id = format_ident!("ENTRY_{}", index);
         Ok(quote! {
             pub const #entry_id:&str=#source_name;
-            pub fn #name(device:&Device,queue:&Queue,#(#params),*)->Result<Vec<(&'static str,Resource)>,HostError>{
+            #result_declaration
+            pub fn #name(device:&Device,queue:&Queue,#(#params),*)->Result<#result_handle,HostError>{
                 let shader=device.create_shader_module(ShaderModuleDescriptor{label:Some(#source_name),source:ShaderSource::Wgsl(Cow::Borrowed(include_str!(#module_path)))});
                 #(#code)*
-                Ok(vec![#(#outputs),*])
+                Ok(#result_handle {#(#outputs),*})
             }
         })
     }
@@ -370,6 +372,69 @@ impl Program {
             queue.submit(Some(encoder.finish()));
         }})
     }
+}
+
+/// Emit only support items reachable from this program's host functions.
+fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
+    fn dependencies(items: &[Item], used: &mut BTreeSet<String>) {
+        for item in items {
+            let name = match item {
+                Item::Fn(item) => Some(&item.sig.ident),
+                Item::Struct(item) => Some(&item.ident),
+                Item::Enum(item) => Some(&item.ident),
+                Item::Mod(item) => {
+                    if let Some((_, items)) = &item.content {
+                        dependencies(items, used);
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if name.is_some_and(|name| used.contains(&name.to_string())) {
+                collect_identifiers(item.to_token_stream(), used);
+            }
+        }
+    }
+    fn trim(items: &mut Vec<Item>, used: &BTreeSet<String>) {
+        items.retain_mut(|item| match item {
+            Item::Fn(item) => used.contains(&item.sig.ident.to_string()),
+            Item::Struct(item) => used.contains(&item.ident.to_string()),
+            Item::Enum(item) => used.contains(&item.ident.to_string()),
+            Item::Mod(item) => {
+                if let Some((_, items)) = &mut item.content {
+                    trim(items, used);
+                    items.iter().any(|item| !matches!(item, Item::Use(_)))
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        });
+        let mut references = BTreeSet::new();
+        for item in items.iter().filter(|item| !matches!(item, Item::Use(_))) {
+            collect_identifiers(item.to_token_stream(), &mut references);
+        }
+        // Public reexports can be referenced by the enclosing generated module.
+        items.retain_mut(|item| match item {
+            Item::Use(import) => {
+                if matches!(import.vis, Visibility::Public(_)) {
+                    retain_import(&mut import.tree, used)
+                } else {
+                    retain_import(&mut import.tree, &references)
+                }
+            }
+            _ => true,
+        });
+    }
+    let mut used = roots.clone();
+    loop {
+        let count = used.len();
+        dependencies(items, &mut used);
+        if used.len() == count {
+            break;
+        }
+    }
+    trim(items, &used);
 }
 
 impl Program {

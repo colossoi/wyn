@@ -117,13 +117,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             span: Span::generated(),
         });
     }
-    let pipeline = super::publish::publish(
-        &data.state.abi,
-        &data.entries,
-        &data.symbols,
-        &data.state.outputs,
-        &mut entries,
-    )?;
+    let pipeline = super::publish::publish(data, &mut entries)?;
     Ok(
         ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
             BackendGlobal {

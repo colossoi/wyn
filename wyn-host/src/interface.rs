@@ -1,5 +1,6 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
+use crate::{ResultKind, ResultLayout};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
@@ -23,6 +24,10 @@ pub struct ModuleInterface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceResultBinding {
     pub entry: String,
+    /// Authored record field, or entry name for a single unnamed result.
+    pub name: String,
+    pub kind: ResultKind,
+    pub layout: ResultLayout,
     pub result: usize,
     pub pipeline_index: usize,
     pub set: u32,

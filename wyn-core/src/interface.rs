@@ -13,6 +13,7 @@
 
 pub mod lowering;
 pub mod publish;
+pub(crate) mod results;
 
 use crate::ast;
 use crate::ast::Span;

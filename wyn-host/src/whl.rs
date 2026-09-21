@@ -3,8 +3,9 @@ use std::fmt::Write;
 use crate::{
     Access, Allocation, Binding, BlendMode, BufferLen, CullMode, DepthTest, DrawCall, DrawCount, Entry,
     Expr, FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
-    PrimitiveTopology, Program, ResourceId, SamplerBindingType, Scissor, ShaderFormat, ShaderStage,
-    StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember, VertexFormat, Viewport,
+    PrimitiveTopology, Program, ResourceId, ResultLayout, ResultScalar, SamplerBindingType, Scissor,
+    ShaderFormat, ShaderStage, StorageImageFormat, TextureSampleType, TextureViewDimension, UniformMember,
+    VertexFormat, Viewport,
 };
 
 pub(crate) fn symbol(name: &str) -> String {
@@ -403,13 +404,25 @@ impl Program {
             writeln!(out, "    ({scalar} :u32)")?;
         }
         write!(out, "  )\n  :results '(")?;
+        let mut source_results =
+            self.interface.source_results.iter().filter(|r| r.entry == entry.name).collect::<Vec<_>>();
+        source_results.sort_by_key(|r| r.result);
         for (i, &id) in entry.results.iter().enumerate() {
+            let source_result = source_results.get(i);
+            let source_name = source_result
+                .map(|r| r.name.as_str())
+                .unwrap_or(&self.interface.frame_graph.resources[id.0].name);
             write!(
                 out,
-                "\n    (result-{i} {} :ownership {}",
+                "\n    ({} {} :source-name {} :ownership {}",
+                symbol(source_name),
                 self.resource_description(id),
+                string(source_name),
                 if entry.inputs.contains(&id) { ":borrowed" } else { ":owned" }
             )?;
+            if let Some(result) = source_result {
+                write!(out, " :value-layout {}", result.layout.to_whl())?;
+            }
             if entry.inputs.contains(&id) {
                 write!(out, " :alias {}", resource(id))?;
             }
@@ -673,6 +686,59 @@ impl Program {
         }
         writeln!(out, "))")?;
         Ok(())
+    }
+}
+
+impl ResultLayout {
+    pub fn to_whl(&self) -> String {
+        match self {
+            Self::Scalar(scalar) => match scalar {
+                ResultScalar::I8 => ":i8",
+                ResultScalar::I16 => ":i16",
+                ResultScalar::I32 => ":i32",
+                ResultScalar::I64 => ":i64",
+                ResultScalar::U8 => ":u8",
+                ResultScalar::U16 => ":u16",
+                ResultScalar::U32 => ":u32",
+                ResultScalar::U64 => ":u64",
+                ResultScalar::F32 => ":f32",
+                ResultScalar::F64 => ":f64",
+                ResultScalar::Bool => ":bool",
+            }
+            .into(),
+            Self::Sequence {
+                element,
+                count,
+                stride,
+            } => format!(
+                "(:sequence :count {count} :stride {stride} :element {})",
+                element.to_whl()
+            ),
+            Self::Array {
+                element,
+                stride,
+                length,
+            } => format!(
+                "(:array :length {} :stride {stride} :range :caller :element {})",
+                length.map(|n| n.to_string()).unwrap_or_else(|| ":dynamic".into()),
+                element.to_whl()
+            ),
+            Self::Record { fields, size } | Self::Tuple { fields, size } => format!(
+                "({} :size {size} :fields ({}))",
+                if matches!(self, Self::Record { .. }) { ":record" } else { ":tuple" },
+                fields
+                    .iter()
+                    .map(|f| format!(
+                        "({} :offset {} :layout {})",
+                        string(&f.name),
+                        f.offset,
+                        f.layout.to_whl()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Self::Unsupported(description) => format!("(:unsupported {})", string(description)),
+        }
     }
 }
 

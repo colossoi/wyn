@@ -3,6 +3,7 @@
 use crate::ast::TypeName;
 use crate::host;
 use crate::host::UniformMember;
+use crate::interface::results::result_layout;
 use crate::interface::StorageLayout;
 use crate::ssa::layout::{block_layout, type_byte_size, vertex_format};
 use crate::EntryId;
@@ -11,7 +12,7 @@ use polytype::Type;
 
 use crate::flow::ExecutionModel;
 use crate::host::{
-    Access, BackingRef, Binding, BufferUsage, FragmentOutput, ModuleInterface, Pipeline,
+    Access, BackingRef, Binding, BufferUsage, FragmentOutput, ModuleInterface, Pipeline, ResultKind,
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
     VertexAttribute,
 };
@@ -393,6 +394,15 @@ impl ModuleInterfacePublish for ModuleInterface {
                 };
                 let source_result = SourceResultBinding {
                     entry: entry.name.clone(),
+                    kind: if entry.outputs.len() == 1 { ResultKind::Value } else { ResultKind::TupleField },
+                    name: output.target().map(str::to_owned).unwrap_or_else(|| {
+                        if entry.outputs.len() == 1 {
+                            entry.name.clone()
+                        } else {
+                            format!("result_{i}")
+                        }
+                    }),
+                    layout: result_layout(&output.ty),
                     result: i,
                     pipeline_index,
                     set: br.set,

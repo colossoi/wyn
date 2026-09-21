@@ -3,6 +3,9 @@
 pub mod arithmetic;
 pub mod interface;
 mod program;
+pub mod readback;
+mod results;
+mod rust_results;
 mod rust_wgpu;
 mod whl;
 
@@ -17,3 +20,4 @@ pub use interface::{
     TextureViewDimension, UniformMember, VertexAttribute, VertexFormat, Viewport,
 };
 pub use program::{Allocation, Entry, Expr, HostError, Operation, Program, ResourceId, ShaderFormat};
+pub use results::{ResultField, ResultKind, ResultLayout, ResultScalar};

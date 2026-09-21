@@ -1,29 +1,29 @@
 //! Publish the finalized resource/dispatch readout through the shared ABI.
 use super::abi::error;
-use super::abi::Abi;
-use super::data::{EntryData, EntryId as SourceEntryId, OutputData, OutputId, SymbolData, SymbolId};
-use super::OptimizeError;
+use super::{OptimizeError, Program, Scheduled};
 use crate::flow::ExecutionModel;
 use crate::host::{
     Access, Binding, BufferUsage, ComputePipeline, ComputeStage, GraphicsPipeline, GraphicsStage,
-    ModuleInterface, Pipeline, ShaderStage, SourceResultBinding,
+    ModuleInterface, Pipeline, ResultKind, ShaderStage, SourceResultBinding,
 };
 use crate::interface::publish::ModuleInterfacePublish;
+use crate::interface::results::result_layout;
 use crate::interface::StorageRole;
 use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
 use crate::ssa::types::EntryPoint;
+use crate::types::{strip_existentials, Type, TypeName};
 use crate::BindingRef;
 use crate::{EntryId, LookupMap, ResourceAccess};
 use std::collections::{BTreeMap, BTreeSet};
-use wyn_base::IdArena;
 
 pub(super) fn publish(
-    abi: &Abi,
-    source_entries: &IdArena<SourceEntryId, EntryData>,
-    symbols: &IdArena<SymbolId, SymbolData>,
-    outputs: &IdArena<OutputId, OutputData>,
+    data: &Program<Scheduled>,
     entries: &mut [EntryPoint],
 ) -> Result<ModuleInterface, OptimizeError> {
+    let abi = &data.state.abi;
+    let source_entries = &data.entries;
+    let symbols = &data.symbols;
+    let outputs = &data.state.outputs;
     let mut pipeline = ModuleInterface::default();
     let mut associations = vec![];
     let entry_indices: BTreeMap<_, _> = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
@@ -129,9 +129,6 @@ pub(super) fn publish(
         }));
         associations.push(ids);
         for output in outputs.values().filter(|o| o.entry == owner) {
-            // TODO: extend SourceResultBinding with view offset/live-length
-            // metadata. It currently publishes backing/capacity only; a
-            // compacted result's count remains explicit in the egglog plan.
             let Some(id) = output.buffer else {
                 return Err(error(format!(
                     "output {} of {source_name} has no planned backing",
@@ -141,8 +138,28 @@ pub(super) fn publish(
             let Some(binding) = abi.buffer_bindings.get(&id).copied() else {
                 return Err(error("output has no physical binding"));
             };
+            let region = &data.regions[data.definitions[source_entries[owner].definition].body];
+            let result_type =
+                region.results.first().map(|e| strip_existentials(&data.types[data.expressions[*e].ty].ty));
+            let name = match result_type {
+                Some(Type::Constructed(TypeName::Record(names), _)) => {
+                    let Some(name) = names.0.get(output.index) else {
+                        return Err(error("source result has no record field"));
+                    };
+                    name.clone()
+                }
+                Some(Type::Constructed(TypeName::Tuple(_), _)) => format!("result_{}", output.index),
+                _ => source_name.clone(),
+            };
             pipeline.source_results.push(SourceResultBinding {
                 entry: source_name.clone(),
+                name,
+                kind: match result_type {
+                    Some(Type::Constructed(TypeName::Record(_), _)) => ResultKind::RecordField,
+                    Some(Type::Constructed(TypeName::Tuple(_), _)) => ResultKind::TupleField,
+                    _ => ResultKind::Value,
+                },
+                layout: result_layout(&data.types[data.expressions[output.expression].ty].ty),
                 result: output.index,
                 pipeline_index,
                 set: binding.set,

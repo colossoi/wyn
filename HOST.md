@@ -357,8 +357,33 @@ allocation or a view; shader calls always take a view of the required usage.
 For `:texture-view`, sampled usage permits reads, storage usage permits reads
 and writes, and render-target usage permits attachment reads and writes.
 
-Host entry declarations and resource parameters may include a `:source-name`
+Host entry declarations, resource parameters, and results may include a `:source-name`
 string preserving the authored name independently of WHL symbol encoding.
+
+Buffer results may include `:value-layout` describing the source value stored in
+the resource. A scalar layout is its type keyword. Composite layouts are:
+
+```lisp
+(:sequence :count 3 :stride 4 :element :f32)
+(:record :size 16 :fields (("position" :offset 0 :layout
+                            (:sequence :count 3 :stride 4 :element :f32))
+                         ("weight" :offset 12 :layout :f32)))
+(:tuple :size 8 :fields (("result_0" :offset 0 :layout :i32)
+                        ("result_1" :offset 4 :layout :f32)))
+(:array :length :dynamic :stride 16 :range :caller :element
+  (:sequence :count 3 :stride 4 :element :f32))
+```
+
+Offsets and strides are bytes and include the shader storage layout's padding.
+Sequences represent vectors, matrix columns, and embedded fixed arrays. Records
+retain field names; tuples retain positional order. Array length is either a
+fixed element count or `:dynamic`. `:range :caller` means the caller supplies the
+logical element range in the backing buffer, including any view offset. This
+range must fit the buffer and, for a fixed-length array, have the declared count.
+An `(:unsupported "type description")` layout records a type for which the
+compiler cannot yet publish a decoder; targets must report an error rather than
+guess its representation. Layout descriptions can include storage scalars `:i8`,
+`:u8`, `:i16`, and `:u16` without adding those types to WHL host arithmetic.
 
 Inputs are borrowed; access annotations state whether the program may modify
 them. Resource results require `:ownership :owned` for a newly allocated resource
@@ -872,6 +897,31 @@ fixed-width scalar types. Host inputs are explicit function parameters;
 resource-name and packed-field tables expose their source
 identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
 or interpreter is involved.
+
+Rust host functions return an entry-specific output handle, such as
+`FrobnicatorOutput` from `host_frobnicator`. Its buffer fields are private and
+have named accessors for subsequent GPU work. `read_frobnicator` reads the entry's
+results into native Rust values: `i32`, `u32`, `f32`, fixed arrays for vectors and
+matrices, `Vec<T>` for returned arrays, tuples for positional results, and structs
+with authored field names for records. Each entry has one public reader for all
+its results. It copies the requested buffer spans into one staging allocation,
+submits those copies together, and maps and waits once before decoding the whole
+tuple or record. Texture results provide named texture accessors and retain GPU
+handles; these readers do not perform pixel
+readback. Byte decoding, staging buffers, and scalar reads used by host arithmetic
+are private implementation details of the generated module.
+
+For example, an entry named `frobnicator` returning `(i32, u32, f32)` has
+`read_frobnicator(&device, &queue, &output) -> Result<(i32, u32, f32), HostError>`.
+An entry returning `{count:u32, gain:f32}` instead returns a struct with `count`
+and `gain` fields. A scalar entry returns its native scalar type directly.
+Array readers additionally require a `Range<u32>` identifying the returned view
+in its backing buffer. They never infer the live length from allocation capacity.
+Readback requires `COPY_SRC` on borrowed result buffers and waits for queued GPU
+work before decoding. The native reader blocks during that single wait. Empty
+array spans perform no GPU copy; an entirely empty batch performs no submission
+or wait. Integer byte-offset calculations use `u64`, including for arrays whose
+element indices fit `u32`.
 
 The compiler publishes host-computable integer allocation expressions, including
 scalar interface reads, arithmetic, and logical input lengths. Expressions lifted
