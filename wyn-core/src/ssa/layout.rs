@@ -3,7 +3,7 @@
 use crate::ast::{Type, TypeName};
 use crate::interface::StorageLayout;
 use crate::types::TypeExt;
-use wyn_pipeline_descriptor::VertexFormat;
+use wyn_host::VertexFormat;
 
 #[cfg(test)]
 #[path = "layout_tests.rs"]

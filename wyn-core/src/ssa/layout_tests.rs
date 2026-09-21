@@ -4,7 +4,7 @@
 use super::vertex_format;
 use crate::ast::{Type, TypeName};
 use crate::types;
-use wyn_pipeline_descriptor::VertexFormat;
+use wyn_host::VertexFormat;
 
 fn scalar(tn: TypeName) -> Type {
     Type::Constructed(tn, vec![])

@@ -45,10 +45,12 @@ fn literal_tuple_reduction_has_a_fixed_scratch_capacity() {
     let program = super::super::place(super::super::simplify(program, false).unwrap()).unwrap();
     let result = schedule(program, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(kernel_count(&result), 2);
-    assert!(result.state.abi.bindings.values().all(|binding| matches!(
-        binding.length,
-        Some(crate::pipeline_descriptor::BufferLen::Fixed { .. })
-    )));
+    assert!(result
+        .state
+        .abi
+        .bindings
+        .values()
+        .all(|binding| matches!(binding.length, Some(crate::host::BufferLen::Fixed { .. }))));
     assert_eq!(
         run(&result, vec![]),
         [Value::Tuple(vec![Value::Int(1), Value::Int(2)])]

@@ -5,7 +5,7 @@ members = [
     "wyn-diagnostics",
     "wyn",
     "wyn-analyzer",
-    "wyn-pipeline-descriptor",
+    "wyn-host",
     "wyn-spirv",
     "wyn-graph",
     "wyn-module-graph",

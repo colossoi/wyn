@@ -19,10 +19,10 @@ use crate::ast::Span;
 use crate::builtins;
 use crate::err_type_at;
 use crate::error;
+use crate::host;
 use crate::interface::lowering::AUTO_STORAGE_SET;
 use crate::interface::{self, Attribute, EntryKind};
 use crate::op;
-use crate::pipeline_descriptor;
 use crate::types;
 use crate::types::{Diet, Type, TypeExt, TypeName, TypeScheme};
 use crate::BindingRef;
@@ -1135,15 +1135,15 @@ fn callback_lambda(
 fn graphics_invocation(
     rasterizer: builtins::BuiltinId,
     draw: &Term,
-    raster_state: pipeline_descriptor::RasterState,
-    fragment_state: pipeline_descriptor::FragmentState,
+    raster_state: host::RasterState,
+    fragment_state: host::FragmentState,
     root_lambda: &Lambda,
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
     builtins: &InvocationBuiltins,
-) -> Option<pipeline_descriptor::GraphicsInvocation> {
-    use crate::pipeline_descriptor::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
+) -> Option<host::GraphicsInvocation> {
+    use crate::host::{DrawCall, DrawCount, GraphicsInvocation, PrimitiveTopology};
 
     let topology_index = builtins
         .rasterizers
@@ -1280,7 +1280,7 @@ fn indirect_command_source(
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
-) -> Option<(pipeline_descriptor::DrawBufferRef, u64)> {
+) -> Option<(host::DrawBufferRef, u64)> {
     if let TermKind::Index { array, index } = &command.kind {
         let command_index = u32_literal(index)? as u64;
         return Some((
@@ -1301,14 +1301,14 @@ fn draw_buffer_source(
     root_entry: &EntryPoint<()>,
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
-) -> Option<pipeline_descriptor::DrawBufferRef> {
+) -> Option<host::DrawBufferRef> {
     let (symbol, path) = projected_symbol_path(array)?;
     let (symbol, path) = resolve_projection(symbol, &path, computed_origins);
     if path.is_empty() {
         if let Some((index, _)) =
             root_lambda.params.iter().enumerate().find(|(_, (candidate, _))| *candidate == symbol)
         {
-            return Some(pipeline_descriptor::DrawBufferRef {
+            return Some(host::DrawBufferRef {
                 set: AUTO_STORAGE_SET,
                 binding: index as u32,
                 name: root_entry.declaration.params.get(index)?.name.clone(),
@@ -1318,7 +1318,7 @@ fn draw_buffer_source(
     }
     let value = computed.iter().find(|value| value.symbol == symbol)?;
     let leaf = value.leaves.iter().find(|leaf| leaf.path == path)?;
-    Some(pipeline_descriptor::DrawBufferRef {
+    Some(host::DrawBufferRef {
         set: AUTO_STORAGE_SET,
         binding: leaf.binding,
         name: leaf.output_name.clone(),
@@ -1335,18 +1335,18 @@ fn array_type_parts(mut ty: &Type) -> Option<(&Type, &Type)> {
     Some((args.first()?, args.get(2)?))
 }
 
-fn array_draw_count(array: &Term) -> Option<pipeline_descriptor::DrawCount> {
+fn array_draw_count(array: &Term) -> Option<host::DrawCount> {
     match array_type_parts(&array.ty).map(|(_, size)| size) {
         Some(Type::Constructed(TypeName::Size(count), _)) => {
-            Some(pipeline_descriptor::DrawCount::Fixed(u32::try_from(*count).ok()?))
+            Some(host::DrawCount::Fixed(u32::try_from(*count).ok()?))
         }
-        Some(_) => Some(pipeline_descriptor::DrawCount::BufferLength),
+        Some(_) => Some(host::DrawCount::BufferLength),
         None => None,
     }
 }
 
-fn index_format(array: &Term) -> Option<pipeline_descriptor::IndexFormat> {
-    use crate::pipeline_descriptor::IndexFormat;
+fn index_format(array: &Term) -> Option<host::IndexFormat> {
+    use crate::host::IndexFormat;
     match array_type_parts(&array.ty)?.0 {
         Type::Constructed(TypeName::UInt(16), _) => Some(IndexFormat::Uint16),
         Type::Constructed(TypeName::UInt(32), _) => Some(IndexFormat::Uint32),
@@ -1359,8 +1359,8 @@ fn is_u16_array(ty: &Type) -> bool {
         Some(Type::Constructed(TypeName::UInt(16), _))
     )
 }
-fn parse_raster_state(term: &Term) -> Option<pipeline_descriptor::RasterState> {
-    use crate::pipeline_descriptor::{CullMode, FillMode, FrontFace, RasterState, Scissor, Viewport};
+fn parse_raster_state(term: &Term) -> Option<host::RasterState> {
+    use crate::host::{CullMode, FillMode, FrontFace, RasterState, Scissor, Viewport};
 
     let viewport_term = record_component(term, "viewport")?;
     let viewport = match sum_tag(viewport_term)? {
@@ -1413,8 +1413,8 @@ fn parse_raster_state(term: &Term) -> Option<pipeline_descriptor::RasterState> {
     })
 }
 
-fn parse_fragment_state(term: &Term) -> Option<pipeline_descriptor::FragmentState> {
-    use crate::pipeline_descriptor::{BlendMode, DepthTest, FragmentState};
+fn parse_fragment_state(term: &Term) -> Option<host::FragmentState> {
+    use crate::host::{BlendMode, DepthTest, FragmentState};
 
     let depth_test = match sum_tag(record_component(term, "depth_test")?)? {
         0 => DepthTest::Disabled,

@@ -1,11 +1,11 @@
 use crate::egglog::{from_tlc, fuse, insert_expressions, schedule, simplify_and_place, to_ssa};
+use crate::host::Pipeline;
 use crate::interface::EntryParamBindingKind;
-use crate::pipeline_descriptor::Pipeline;
 use crate::tlc::infer_input_slice_bounds;
 use crate::PipelineTopologyPolicy;
 use crate::{
-    compile_thru_tlc, lower_ssa_to_spirv, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_pipeline,
-    pipeline_descriptor, CodegenTarget, LoweredWgsl,
+    compile_thru_tlc, host, lower_ssa_to_spirv, lower_ssa_to_wgsl, lower_ssa_to_wgsl_with_program,
+    CodegenTarget, LoweredWgsl,
 };
 
 fn compile(source: &str) -> naga::Module {
@@ -183,7 +183,7 @@ fn integer_indexed_reductions_select_atomic_and_compare_exchange_kernels() {
         compile(&source);
         let output = pipeline(&source);
         assert!(output.wgsl.contains(primitive), "{primitive}: {}", output.wgsl);
-        let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+        let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
             panic!("compute");
         };
         assert_eq!(p.stages[0].workgroup_size, (64, 1, 1));
@@ -211,18 +211,16 @@ fn scalar_domain_collectives_publish_scratch_and_capacity_dependencies() {
     ] {
         compile(source);
         let output = pipeline(source);
-        for p in &output.pipeline.pipelines {
+        for p in &output.program.interface.pipelines {
             let Pipeline::Compute(p) = p else { continue };
             for binding in &p.bindings {
-                if let pipeline_descriptor::Binding::StorageBuffer {
-                    length: Some(pipeline_descriptor::BufferLen::HostProvided { inputs, .. }),
+                if let host::Binding::StorageBuffer {
+                    length: Some(host::BufferLen::HostProvided { inputs, .. }),
                     ..
                 } = binding
                 {
                     assert!(!inputs.is_empty());
-                    assert!(inputs
-                        .iter()
-                        .all(|i| matches!(i, pipeline_descriptor::HostSizeInput::Uniform { .. })));
+                    assert!(inputs.iter().all(|i| matches!(i, host::HostSizeInput::Uniform { .. })));
                 }
             }
         }
@@ -274,17 +272,17 @@ fn invocation_local_filter_keeps_a_bounded_array_length() {
 
 #[test]
 fn computed_array_outputs_have_storage_and_a_writer() {
-    use pipeline_descriptor::{Binding, BufferLen};
+    use host::{Binding, BufferLen};
     for source in [
         include_str!("../../../testfiles/array_param_view_multi.wyn"),
         include_str!("../../../testfiles/array_param_view_slice.wyn"),
     ] {
         compile(source);
         let output = pipeline(source);
-        let [result] = output.pipeline.source_results.as_slice() else {
+        let [result] = output.program.interface.source_results.as_slice() else {
             panic!("one array result");
         };
-        let Pipeline::Compute(p) = &output.pipeline.pipelines[result.pipeline_index] else {
+        let Pipeline::Compute(p) = &output.program.interface.pipelines[result.pipeline_index] else {
             panic!("compute result");
         };
         assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
@@ -314,7 +312,7 @@ fn scalar_loop_result_is_stored_before_parallel_consumers() {
         map(|x: i32| x + bias, xs)";
     compile(source);
     let output = pipeline(source);
-    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute pipeline");
     };
     assert_eq!(p.stages.len(), 2);
@@ -429,14 +427,14 @@ fn vector_input_and_runtime_gather_after_scan_reach_wgsl() {
 
 #[test]
 fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
-    use pipeline_descriptor::{Pipeline, ShaderStage};
+    use host::{Pipeline, ShaderStage};
     let source = include_str!("../../../testfiles/unified_triangle.wyn");
     let module = compile(source);
     assert_eq!(module.entry_points.len(), 2);
     assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Vertex));
     assert!(module.entry_points.iter().any(|e| e.stage == naga::ShaderStage::Fragment));
     let output = pipeline(source);
-    let [Pipeline::Graphics(graphics)] = output.pipeline.pipelines.as_slice() else {
+    let [Pipeline::Graphics(graphics)] = output.program.interface.pipelines.as_slice() else {
         panic!("one graphics pipeline");
     };
     assert_eq!(graphics.stages.len(), 2);
@@ -444,7 +442,7 @@ fn graphics_stages_preserve_shader_interfaces_and_draw_metadata() {
     assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Vertex)));
     assert!(graphics.stages.iter().any(|s| matches!(s.stage, ShaderStage::Fragment)));
     assert!(!graphics.fragment_outputs.is_empty());
-    assert!(output.pipeline.source_results.is_empty());
+    assert!(output.program.interface.source_results.is_empty());
 }
 
 fn pipeline(source: &str) -> LoweredWgsl {
@@ -454,12 +452,12 @@ fn pipeline(source: &str) -> LoweredWgsl {
         PipelineTopologyPolicy::AllowGenerated,
     )
     .unwrap();
-    lower_ssa_to_wgsl_with_pipeline(to_ssa(&program, CodegenTarget::Wgsl).unwrap()).unwrap()
+    lower_ssa_to_wgsl_with_program(to_ssa(&program, CodegenTarget::Wgsl).unwrap()).unwrap()
 }
 
 #[test]
 fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
-    use pipeline_descriptor::{Binding, BufferLen, Pipeline};
+    use host::{Binding, BufferLen, Pipeline};
     let output = pipeline("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias, xs)");
     let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
     naga::valid::Validator::new(
@@ -473,12 +471,12 @@ fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
         .expressions
         .iter()
         .any(|(_, x)| matches!(x, naga::Expression::ArrayLength(_)))));
-    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
     assert_eq!(p.stages.len(), 1);
     assert_eq!(p.stages[0].owner, "main");
-    let result = &output.pipeline.source_results[0];
+    let result = &output.program.interface.source_results[0];
     assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer { set, binding, length: Some(BufferLen::LikeInput { set: 0, binding: 0, elem_bytes: 4, src_elem_bytes: 4 }), .. } if (*set, *binding) == (result.set, result.binding))));
     assert!(p.bindings.iter().any(
         |b| matches!(b, Binding::StorageBuffer { members, .. } if members.iter().any(|m| m.name == "bias"))
@@ -488,9 +486,9 @@ fn runtime_input_lengths_and_output_allocations_share_the_published_bindings() {
 
 #[test]
 fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
-    use pipeline_descriptor::{Binding, BufferLen, Pipeline};
+    use host::{Binding, BufferLen, Pipeline};
     let output = pipeline("entry main(xs: [137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)");
-    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute pipeline")
     };
     assert_eq!(p.stages.len(), 3, "chunks, combine, scalar result publication");
@@ -510,30 +508,30 @@ fn reduction_publication_has_scratch_writers_readers_and_a_source_result() {
     assert!(p.stages[0].writes.contains(&scratch));
     assert!(p.stages[1].reads.contains(&scratch));
     assert!(!p.stages[1].writes.contains(&scratch));
-    assert_eq!(output.pipeline.source_results.len(), 1);
-    assert_eq!(output.pipeline.frame_graph.passes.len(), 3);
-    assert!(output.pipeline.frame_graph.topological_order().is_ok());
+    assert_eq!(output.program.interface.source_results.len(), 1);
+    assert_eq!(output.program.interface.frame_graph.passes.len(), 3);
+    assert!(output.program.interface.frame_graph.topological_order().is_ok());
 }
 
 #[test]
 fn independent_entries_keep_their_own_dispatches_and_results() {
     let output = pipeline("entry first(xs:[5]i32) [5]i32 = map(|x:i32|x+1,xs)\nentry second(xs:[9]i32) [9]i32 = map(|x:i32|x*2,xs)");
-    assert_eq!(output.pipeline.pipelines.len(), 2);
-    assert_eq!(output.pipeline.source_results.len(), 2);
+    assert_eq!(output.program.interface.pipelines.len(), 2);
+    assert_eq!(output.program.interface.source_results.len(), 2);
     assert_ne!(
-        output.pipeline.source_results[0].pipeline_index,
-        output.pipeline.source_results[1].pipeline_index
+        output.program.interface.source_results[0].pipeline_index,
+        output.program.interface.source_results[1].pipeline_index
     );
     assert_ne!(
-        output.pipeline.source_results[0].binding,
-        output.pipeline.source_results[1].binding
+        output.program.interface.source_results[0].binding,
+        output.program.interface.source_results[1].binding
     );
 }
 
 #[test]
 fn scalar_results_after_collectives_are_executed_and_published() {
     let output = pipeline("entry main(xs:[]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs) * 3 + 1");
-    assert_eq!(output.pipeline.source_results.len(), 1);
+    assert_eq!(output.program.interface.source_results.len(), 1);
     let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
@@ -546,11 +544,11 @@ fn scalar_results_after_collectives_are_executed_and_published() {
 
 #[test]
 fn in_place_results_keep_the_host_input_binding_and_upload_role() {
-    use pipeline_descriptor::{Access, Binding, BufferUsage, Pipeline};
+    use host::{Access, Binding, BufferUsage, Pipeline};
     let output = pipeline("entry main(dest:*[3]i32,xs:[5]i32) [3]i32 = reduce_by_index(dest,|a:i32,b:i32|a+b,0,map(|x:i32|x%3,xs),xs)");
-    let result = &output.pipeline.source_results[0];
+    let result = &output.program.interface.source_results[0];
     assert_eq!((result.set, result.binding), (0, 0));
-    let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
         panic!("compute pipeline")
     };
     assert!(p.bindings.iter().any(|b| matches!(
@@ -567,14 +565,14 @@ fn in_place_results_keep_the_host_input_binding_and_upload_role() {
 
 #[test]
 fn consuming_maps_and_scans_publish_the_input_as_their_read_write_result() {
-    use pipeline_descriptor::{Access, Binding, BufferUsage};
+    use host::{Access, Binding, BufferUsage};
     for (body, buffers, stages) in [
         ("map(|x:i32|x+7,xs)", 1, 1),
         ("scan(|a:i32,b:i32|a+b,0,xs)", 4, 3),
     ] {
         let output = pipeline(&format!("entry main(xs:*[]i32) []i32 = {body}"));
-        assert_eq!(output.pipeline.source_results[0].binding, 0);
-        let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+        assert_eq!(output.program.interface.source_results[0].binding, 0);
+        let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
             panic!("compute")
         };
         assert_eq!(p.bindings.len(), buffers);
@@ -603,10 +601,10 @@ fn fused_maps_publish_reused_nonprimary_inputs() {
         "entry main(xs:*[4]i32,ys:*[4]i32) ([4]i32,[4]i32) = (map(|x:i32|x+1,ys),map(|x:i32|x*2,xs))",
     );
     assert_eq!(
-        output.pipeline.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
+        output.program.interface.source_results.iter().map(|r| r.binding).collect::<Vec<_>>(),
         [1, 0]
     );
-    let Pipeline::Compute(p) = &output.pipeline.pipelines[0] else {
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[0] else {
         panic!("compute")
     };
     assert_eq!(p.bindings.len(), 2);
@@ -638,9 +636,9 @@ fn tuple_of_views_uses_the_tlc_component_bindings() {
         })
         .collect();
     let output = pipeline(source);
-    assert_eq!(output.pipeline.source_results.len(), 2);
+    assert_eq!(output.program.interface.source_results.len(), 2);
     assert_eq!(
-        output.pipeline.source_results.iter().map(|o| o.binding).collect::<Vec<_>>(),
+        output.program.interface.source_results.iter().map(|o| o.binding).collect::<Vec<_>>(),
         expected
     );
     let module = naga::front::wgsl::parse_str(&output.wgsl).unwrap();
@@ -654,12 +652,12 @@ fn tuple_of_views_uses_the_tlc_component_bindings() {
 
 #[test]
 fn computed_graphics_captures_share_the_producer_binding() {
-    use pipeline_descriptor::Binding;
+    use host::Binding;
     let output = pipeline(include_str!("../../../testfiles/playground/conway.wyn"));
-    let [result] = output.pipeline.source_results.as_slice() else {
+    let [result] = output.program.interface.source_results.as_slice() else {
         panic!("one computed board");
     };
-    assert!(output.pipeline.pipelines.iter().any(|p| {
+    assert!(output.program.interface.pipelines.iter().any(|p| {
         let Pipeline::Graphics(p) = p else { return false };
         p.bindings.iter().any(|b| {
             matches!(b, Binding::StorageBuffer { set, binding, .. }
@@ -670,7 +668,7 @@ fn computed_graphics_captures_share_the_producer_binding() {
 
 #[test]
 fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
-    use pipeline_descriptor::{Binding, BufferLen, HostSizeScalar};
+    use host::{Binding, BufferLen, HostSizeScalar};
     let source = include_str!("../../../testfiles/regressions/uniform_output_size.wyn")
         .replace("{ resolution: vec3f32 }", "{ padding: f32, resolution: vec3f32 }")
         .replace("([]f32,", "([]vec3f32,")
@@ -680,7 +678,8 @@ fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
         );
     let output = pipeline(&source);
     let lengths: Vec<_> = output
-        .pipeline
+        .program
+        .interface
         .pipelines
         .iter()
         .filter_map(|p| {
@@ -701,7 +700,7 @@ fn host_sized_outputs_publish_uniform_dependencies_and_storage_stride() {
         inputs
             .iter()
             .map(|i| {
-                let crate::pipeline_descriptor::HostSizeInput::Uniform {
+                let crate::host::HostSizeInput::Uniform {
                     name, offset, scalar, ..
                 } = i
                 else {
@@ -780,13 +779,13 @@ fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
 
 #[test]
 fn runtime_launches_use_buffer_and_scalar_domains() {
-    use pipeline_descriptor::{DispatchLen, DispatchSize};
+    use host::{DispatchLen, DispatchSize};
     for source in [
         "entry main(xs: []i32) []i32 = map(|x:i32|x+1,xs)",
         "entry main(n: i32) []i32 = map(|i|i+1,iota(n))",
     ] {
         let output = pipeline(source);
-        let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+        let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
             panic!("compute")
         };
         assert!(matches!(
@@ -822,9 +821,9 @@ fn unsigned_ranges_keep_their_extent_in_the_element_representation() {
 
 #[test]
 fn runtime_collective_scratch_has_an_input_capacity_and_chunk_grid() {
-    use pipeline_descriptor::{Binding, BufferLen, DispatchLen, DispatchSize};
+    use host::{Binding, BufferLen, DispatchLen, DispatchSize};
     let output = pipeline("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
-    let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+    let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
         panic!("compute")
     };
     assert!(matches!(
@@ -845,10 +844,10 @@ fn runtime_collective_scratch_has_an_input_capacity_and_chunk_grid() {
 
 #[test]
 fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
-    use pipeline_descriptor::{Binding, BufferLen};
+    use host::{Binding, BufferLen};
     let output = pipeline(include_str!("../../../testfiles/filter_then_map.wyn"));
-    let result = &output.pipeline.source_results[0];
-    let Pipeline::Compute(p) = &output.pipeline.pipelines[result.pipeline_index] else {
+    let result = &output.program.interface.source_results[0];
+    let Pipeline::Compute(p) = &output.program.interface.pipelines[result.pipeline_index] else {
         panic!("compute")
     };
     assert!(p.bindings.iter().any(|b| matches!(b, Binding::StorageBuffer {
@@ -859,7 +858,7 @@ fn bounded_filter_output_does_not_use_its_packed_backing_as_a_length() {
 #[test]
 fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
     use crate::interface::ComputeDispatchGrid;
-    use pipeline_descriptor::DispatchSize;
+    use host::DispatchSize;
     for source in [
         "entry main(xs:[4096]i32) [4096]i32 = map(|x:i32|x+1,xs)",
         "entry main(xs:[4096]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)",
@@ -876,8 +875,8 @@ fn explicit_grids_preserve_all_axes_in_the_shader_and_descriptor() {
             )
             .unwrap();
             let output =
-                lower_ssa_to_wgsl_with_pipeline(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
-            let [Pipeline::Compute(p)] = output.pipeline.pipelines.as_slice() else {
+                lower_ssa_to_wgsl_with_program(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+            let [Pipeline::Compute(p)] = output.program.interface.pipelines.as_slice() else {
                 panic!("compute")
             };
             assert_eq!(
@@ -930,8 +929,8 @@ fn direct_mode_keeps_collectives_in_the_authored_entry() {
         .unwrap();
         assert!(scheduled.state.dispatches.is_empty());
         let output =
-            lower_ssa_to_wgsl_with_pipeline(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
-        for pipeline in &output.pipeline.pipelines {
+            lower_ssa_to_wgsl_with_program(to_ssa(&scheduled, CodegenTarget::Wgsl).unwrap()).unwrap();
+        for pipeline in &output.program.interface.pipelines {
             if let Pipeline::Compute(p) = pipeline {
                 assert_eq!(p.stages.len(), 1);
             }

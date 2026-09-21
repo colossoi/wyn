@@ -1,8 +1,8 @@
 //! Complete program structure retained outside the egglog fusion graph.
 use crate::ast::Span;
 use crate::builtins::catalog;
+use crate::host::BufferLen;
 use crate::interface::{EntryDecl, EntryParamBinding};
-use crate::pipeline_descriptor::BufferLen;
 use crate::types::{Diet, Type};
 use std::collections::BTreeSet;
 use wyn_base::IdArena;

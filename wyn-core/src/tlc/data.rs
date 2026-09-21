@@ -5,8 +5,8 @@
 //! representation and live here so consumers do not depend on producing
 //! passes.
 
+use crate::host::BufferLen;
 use crate::interface;
-use crate::pipeline_descriptor::BufferLen;
 use crate::types;
 use crate::{LookupMap, SymbolId};
 

@@ -1,31 +1,18 @@
-//! Pipeline descriptor for compiled Wyn programs.
-//!
-//! The compiler emits a JSON pipeline descriptor alongside the SPIR-V module
-//! describing how to execute the program: which entry points to invoke, in
-//! what order, and what GPU resources (buffers, uniforms, push constants) each
-//! stage uses.
-//!
-//! A generic host runtime (e.g. `viz`) reads this descriptor and sets up the
-//! Vulkan/WebGPU pipeline accordingly. All algorithm knowledge lives in the
-//! compiler.
+//! Published shader interfaces, resource identities, and execution domains.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use serde::{Deserialize, Serialize};
-
-/// Top-level pipeline descriptor. One per compiled program.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PipelineDescriptor {
+/// Published shader declarations and physical resource interfaces for one module.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleInterface {
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
     /// Storage bindings that implement authored entry results. This preserves
     /// source-level result identity independently of generated binding names.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_results: Vec<SourceResultBinding>,
     /// Descriptor-derived pass/resource DAG. The compiler rebuilds this after
     /// binding publication so host runtimes can drive scheduling and allocation
     /// from data dependencies instead of hand-authored pass lists.
-    #[serde(default, skip_serializing_if = "FrameGraph::is_empty")]
     pub frame_graph: FrameGraph,
 }
 
@@ -33,7 +20,7 @@ pub struct PipelineDescriptor {
 /// entry. `result` is the zero-based source result slot (a non-tuple return is
 /// slot 0); `pipeline_index` locates the binding table containing `(set,
 /// binding)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceResultBinding {
     pub entry: String,
     pub result: usize,
@@ -42,7 +29,7 @@ pub struct SourceResultBinding {
     pub binding: u32,
 }
 
-impl PipelineDescriptor {
+impl ModuleInterface {
     /// Rebuild the frame graph from the currently published pipelines.
     pub fn rebuild_frame_graph(&mut self) {
         self.frame_graph = FrameGraph::from_pipelines(&self.pipelines);
@@ -51,14 +38,11 @@ impl PipelineDescriptor {
 
 /// A descriptor-level frame graph: passes, logical resources, and the
 /// dependencies induced by same-frame reads/writes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct FrameGraph {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passes: Vec<FramePass>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<FrameResource>,
     /// Draw passes and the command buffers that supply their indirect parameters.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indirect_draws: Vec<IndirectDrawDependency>,
 }
 
@@ -195,22 +179,18 @@ impl FrameGraph {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FramePass {
     pub name: String,
     pub kind: FramePassKind,
     pub pipeline_index: usize,
     pub stage_index: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<FrameAccess>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writes: Vec<FrameAccess>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FramePassKind {
     Compute,
     Vertex,
@@ -226,27 +206,22 @@ impl FramePassKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameAccess {
     pub resource: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FrameResource {
     pub name: String,
     pub kind: FrameResourceKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bindings: Vec<FrameBindingRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extent: Option<FrameResourceExtent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_pass: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pass: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FrameResourceKind {
     StorageBuffer,
     Uniform,
@@ -256,26 +231,22 @@ pub enum FrameResourceKind {
     StorageTexture,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FrameBindingRef {
     pub pipeline_index: usize,
     pub binding_index: usize,
     pub name: String,
     pub kind: FrameResourceKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameResourceExtent {
     StorageTexture {
         size: StorageTextureSize,
     },
     StorageBuffer {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         length: Option<BufferLen>,
     },
     Uniform {
@@ -286,15 +257,14 @@ pub enum FrameResourceExtent {
     },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct IndirectDrawDependency {
     pub draw_pass: usize,
     pub buffer_resource: usize,
 }
 
 /// A single pipeline within the program.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum Pipeline {
     /// One or more compute dispatches sharing a binding table. A
     /// single-dispatch SOAC (Map, Scatter, simple compute) is the
@@ -311,7 +281,7 @@ pub enum Pipeline {
 /// covers single-dispatch SOACs; multi-stage covers Reduce/Scan/
 /// Filter phase chains and the ordered-prefix scheduler's lifted
 /// stages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ComputePipeline {
     /// All bindings used across all stages.
     pub bindings: Vec<Binding>,
@@ -324,13 +294,12 @@ pub struct ComputePipeline {
     /// workgroups without inspecting buffer length. The compiled
     /// shader does not assume the actual length equals this hint —
     /// it remains dynamic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_total_threads: Option<std::num::NonZeroU32>,
 }
 
 /// The `(set, binding)` of a `StorageTexture` allocation that a sampled
 /// `Texture` binding is a view of. See `Binding::Texture::backing`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackingRef {
     pub set: u32,
     pub binding: u32,
@@ -339,11 +308,9 @@ pub struct BackingRef {
 /// Per-stage uses of a pipeline's binding table. Binding declarations describe
 /// slots and their attached resources; this records how one shader entry point
 /// accesses those slots. Indices address the parent pipeline's `bindings`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct StageBindingUses {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reads: Vec<usize>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writes: Vec<usize>,
 }
 
@@ -372,17 +339,15 @@ impl StageBindingUses {
 }
 
 /// A single dispatch stage within a `ComputePipeline`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ComputeStage {
     pub entry_point: String,
     /// Authored entry whose execution this stage implements. Generated stages
     /// retain their source owner instead of asking runtimes to infer it from
     /// the backend entry-point name.
-    #[serde(default)]
     pub owner: String,
     pub workgroup_size: (u32, u32, u32),
     pub dispatch_size: DispatchSize,
-    #[serde(flatten)]
     pub uses: StageBindingUses,
 }
 
@@ -401,15 +366,13 @@ impl std::ops::DerefMut for ComputeStage {
 }
 
 /// Graphics pipeline (vertex + fragment stages).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GraphicsPipeline {
     /// Authored graphics-operation ordinal within the stages' source owner.
     /// Independent of pipeline ordering and generated shader entry-point names.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_operation: Option<u32>,
     pub stages: Vec<GraphicsStage>,
     /// Primitive assembly and draw request selected by the unified invocation.
-    #[serde(default)]
     pub invocation: GraphicsInvocation,
     pub bindings: Vec<Binding>,
     pub vertex_inputs: Vec<VertexAttribute>,
@@ -417,13 +380,11 @@ pub struct GraphicsPipeline {
 }
 
 /// The source-level rasterization request associated with one graphics pipeline.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GraphicsInvocation {
     pub topology: PrimitiveTopology,
     pub draw: DrawCall,
-    #[serde(default)]
     pub raster_state: RasterState,
-    #[serde(default)]
     pub fragment_state: FragmentState,
 }
 
@@ -443,7 +404,7 @@ impl Default for GraphicsInvocation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RasterState {
     pub viewport: Viewport,
     pub scissor: Scissor,
@@ -464,8 +425,7 @@ impl Default for RasterState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Viewport {
     Target,
     Custom {
@@ -475,8 +435,7 @@ pub enum Viewport {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scissor {
     Target,
     Custom {
@@ -485,30 +444,27 @@ pub enum Scissor {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontFace {
     Clockwise,
     CounterClockwise,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CullMode {
     None,
     Front,
     Back,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillMode {
     Fill,
     Line,
     Point,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FragmentState {
     pub depth_test: DepthTest,
     pub depth_write: bool,
@@ -527,8 +483,7 @@ impl Default for FragmentState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepthTest {
     Disabled,
     Never,
@@ -540,16 +495,14 @@ pub enum DepthTest {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlendMode {
     Replace,
     SourceOver,
     Add,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimitiveTopology {
     TriangleList,
     TriangleStrip,
@@ -559,25 +512,22 @@ pub enum PrimitiveTopology {
 }
 
 /// A descriptor-visible reference to an array buffer consumed by draw execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrawBufferRef {
     pub set: u32,
     pub binding: u32,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexFormat {
     Uint16,
     Uint32,
 }
 
 /// The number of index elements or indirect commands consumed by a draw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "count", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawCount {
     Fixed(u32),
     /// Use the logical element count of the referenced array, not its allocation capacity.
@@ -590,8 +540,7 @@ impl Default for DrawCount {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrawCall {
     Direct {
         vertex_count: u32,
@@ -611,7 +560,6 @@ pub enum DrawCall {
     Indirect {
         commands: DrawBufferRef,
         offset: u64,
-        #[serde(default)]
         draw_count: DrawCount,
     },
     IndexedIndirect {
@@ -619,13 +567,12 @@ pub enum DrawCall {
         index_format: IndexFormat,
         commands: DrawBufferRef,
         offset: u64,
-        #[serde(default)]
         draw_count: DrawCount,
     },
 }
 
 impl DrawBufferRef {
-    fn frame_name(&self) -> &str {
+    pub(crate) fn frame_name(&self) -> &str {
         self.resource.as_deref().unwrap_or(&self.name)
     }
 }
@@ -647,14 +594,12 @@ impl DrawCall {
 }
 
 /// A stage in a graphics pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GraphicsStage {
     pub entry_point: String,
     /// Authored entry whose execution this stage implements.
-    #[serde(default)]
     pub owner: String,
     pub stage: ShaderStage,
-    #[serde(flatten)]
     pub uses: StageBindingUses,
 }
 
@@ -673,16 +618,14 @@ impl std::ops::DerefMut for GraphicsStage {
 }
 
 /// Shader stage type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShaderStage {
     Vertex,
     Fragment,
 }
 
 /// How to determine the compute dispatch grid size.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchSize {
     /// Fixed dispatch grid (absolute workgroup counts).
     Fixed {
@@ -694,7 +637,6 @@ pub enum DispatchSize {
         /// default `1x1x1` placeholder that domain inference may upgrade.
         /// Lets the scheduler tell a user-pinned `#[dispatch(1,1,1)]` apart
         /// from the unspecified default instead of guessing from the value.
-        #[serde(default)]
         explicit: bool,
     },
     /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
@@ -706,8 +648,7 @@ pub enum DispatchSize {
 }
 
 /// The source of truth for a `DerivedFrom` dispatch's iteration count.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchLen {
     /// One iteration per element of the buffer at (`set`, `binding`) — e.g.
     /// `map(f, arr)` over a storage-buffer input. The host reads the buffer's
@@ -720,8 +661,6 @@ pub enum DispatchLen {
         elem_bytes: u32,
     },
     /// A compile-time-known iteration count — e.g. `map(f, iota(6144))`.
-    /// (Struct variant, not `Fixed(u32)`, so it serializes under the internal
-    /// `kind` tag.)
     Fixed {
         count: u32,
     },
@@ -755,7 +694,7 @@ pub enum DispatchLen {
 /// the value. Uniform buffers always publish these members. A storage buffer
 /// publishes them when the WGSL backend uses it as the WebGPU replacement for
 /// an entry point's packed push-constant block.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct UniformMember {
     pub name: String,
     pub offset: u32,
@@ -763,8 +702,7 @@ pub struct UniformMember {
 }
 
 /// A GPU resource binding used by the pipeline.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum Binding {
     /// Storage buffer (descriptor set binding).
     StorageBuffer {
@@ -776,17 +714,14 @@ pub enum Binding {
         name: String,
         /// Logical frame-graph resource viewed through this binding. Producer
         /// and consumer bindings may have different local names and slots.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
         /// Sizing policy for compiler-managed buffers and fixed-size WGSL
         /// parameter blocks. `None` for variable host inputs (sized from the
         /// supplied data) and ordinary unsized outputs.
-        #[serde(default)]
         length: Option<BufferLen>,
         /// Named fields when this storage binding represents a packed
         /// host-populated parameter block. Ordinary array buffers leave this
         /// empty.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         members: Vec<UniformMember>,
     },
     /// Uniform buffer (descriptor set binding).
@@ -794,14 +729,10 @@ pub enum Binding {
         set: u32,
         binding: u32,
         name: String,
-        /// std140 byte size of the block. `0` in descriptors that
-        /// predate block-layout publication (hosts fall back to their
-        /// known-name tables).
-        #[serde(default)]
+        /// Published std140 block size in bytes.
         size: u32,
         /// Flattened block members in declaration order — the record
         /// fields of a record-typed uniform. Empty when unpublished.
-        #[serde(default)]
         members: Vec<UniformMember>,
     },
     /// Push constant range.
@@ -825,14 +756,12 @@ pub enum Binding {
         sample_type: TextureSampleType,
         view_dimension: TextureViewDimension,
         multisampled: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         backing: Option<BackingRef>,
         /// The logical render-target resource this samples, from
         /// `#[view(name, sampled)]` on a resource with no storage backing. It
         /// is the frame-graph identity — a fragment `#[target(name)]` write and
         /// this read share the resource `name`, so a producer→consumer edge
         /// forms. `None` for a host-provided texture or a storage-backed view.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
     },
     /// Sampler (descriptor set binding). Bound from a
@@ -861,13 +790,11 @@ pub enum Binding {
         name: String,
         format: StorageImageFormat,
         access: Access,
-        #[serde(default)]
         size: StorageTextureSize,
         /// The logical `resource` this storage view accesses, from
         /// `#[view(name, storage_read|storage_write)]`. Frame-graph identity:
         /// storage views, sampled views, and a fragment `#[target(name)]` of the
         /// same resource collapse to one texture-kind resource keyed by `name`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
     },
 }
@@ -875,8 +802,7 @@ pub enum Binding {
 /// Resolution policy for a storage texture's backing `wgpu::Texture`.
 /// Resolved by the host at allocation time (and on window resize for
 /// `SameAsWindow`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageTextureSize {
     /// Track the swapchain surface size. The default — a fragment
     /// shader sampling this texture covers each output pixel exactly
@@ -1496,8 +1422,7 @@ fn push_unique_access(accesses: &mut Vec<FrameAccess>, access: FrameAccess) {
 
 /// Scalar type of a host-visible value that may influence a host-provided
 /// buffer capacity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostSizeScalar {
     I32,
     U32,
@@ -1507,36 +1432,78 @@ pub enum HostSizeScalar {
 /// One host-visible scalar value that may influence a host-provided buffer
 /// capacity. This is dependency metadata, not a formula: the host application
 /// remains responsible for choosing the allocation size.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostSizeInput {
     Uniform {
         name: String,
         set: u32,
         binding: u32,
         offset: u32,
-        #[serde(rename = "type")]
         scalar: HostSizeScalar,
     },
     PushConstant {
         name: String,
         push_constant_offset: u32,
-        #[serde(rename = "type")]
         scalar: HostSizeScalar,
     },
+}
+
+/// A host-computable byte-count expression with physical interface leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SizeExpr {
+    Integer(i64),
+    Scalar(HostSizeInput),
+    BufferLength {
+        set: u32,
+        binding: u32,
+        stride: u32,
+    },
+    Binary {
+        op: SizeOp,
+        left: Box<SizeExpr>,
+        right: Box<SizeExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeOp {
+    Add,
+    Subtract,
+    Multiply,
+    Floor,
+    Ceiling,
+    Mod,
+    Min,
+    Max,
+}
+
+impl SizeExpr {
+    pub fn inputs_mut(&mut self) -> Vec<&mut HostSizeInput> {
+        match self {
+            Self::Scalar(input) => vec![input],
+            Self::Binary { left, right, .. } => {
+                let mut inputs = left.inputs_mut();
+                inputs.extend(right.inputs_mut());
+                inputs
+            }
+            Self::Integer(_) | Self::BufferLength { .. } => vec![],
+        }
+    }
 }
 
 /// Allocation policy for a storage buffer. Some policies are resolved from
 /// descriptor metadata; `HostProvided` is an explicit request for the host
 /// application to supply a byte capacity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferLen {
+    /// Compute an allocation capacity from the published host expression.
+    Computed {
+        bytes: SizeExpr,
+    },
     /// The host application must provide the allocation capacity. `inputs`
     /// identifies host-visible scalar values that may influence the logical
     /// length, but deliberately does not encode the size calculation.
     HostProvided {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         inputs: Vec<HostSizeInput>,
         elem_bytes: u32,
     },
@@ -1570,6 +1537,13 @@ pub enum BufferLen {
 }
 
 impl BufferLen {
+    pub fn inputs_mut(&mut self) -> Vec<&mut HostSizeInput> {
+        match self {
+            Self::HostProvided { inputs, .. } => inputs.iter_mut().collect(),
+            Self::Computed { bytes } => bytes.inputs_mut(),
+            Self::Fixed { .. } | Self::LikeInput { .. } | Self::SameAsDispatch { .. } => vec![],
+        }
+    }
     /// Resolve to a byte size given a lookup of already-allocated buffers'
     /// byte sizes by (set, binding). Returns `None` if a referenced source
     /// buffer hasn't been sized yet, or when a separate context is needed:
@@ -1587,7 +1561,9 @@ impl BufferLen {
                 let bytes = src_bytes(*set, *binding)?;
                 Some(bytes / *src_elem_bytes as u64 * *elem_bytes as u64)
             }
-            BufferLen::SameAsDispatch { .. } | BufferLen::HostProvided { .. } => None,
+            BufferLen::Computed { .. }
+            | BufferLen::SameAsDispatch { .. }
+            | BufferLen::HostProvided { .. } => None,
         }
     }
 
@@ -1602,8 +1578,7 @@ impl BufferLen {
 }
 
 /// Access mode for a storage buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Access {
     ReadOnly,
     WriteOnly,
@@ -1611,8 +1586,7 @@ pub enum Access {
 }
 
 /// How a buffer is used in the pipeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BufferUsage {
     /// Read-only input from the host.
     Input,
@@ -1625,8 +1599,7 @@ pub enum BufferUsage {
 /// Sampled type of a texture binding. Mirrors the wgpu
 /// `TextureSampleType` subset Wyn produces. v1 always emits
 /// `Float { filterable: true }` (the only `texture2d` sampled type).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TextureSampleType {
     Float {
         filterable: bool,
@@ -1637,8 +1610,7 @@ pub enum TextureSampleType {
 }
 
 /// View dimension of a texture binding. v1 always emits `D2`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextureViewDimension {
     D1,
     D2,
@@ -1649,8 +1621,7 @@ pub enum TextureViewDimension {
 }
 
 /// Sampler binding mode. v1 always emits `Filtering`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SamplerBindingType {
     Filtering,
     NonFiltering,
@@ -1663,8 +1634,7 @@ pub enum SamplerBindingType {
 /// The whitelist starts narrow — formats are added as shaders demand
 /// them. Names match the lowercase wgpu/WGSL spelling for round-trip
 /// clarity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageImageFormat {
     Rgba8Unorm,
     Rgba16Float,
@@ -1675,8 +1645,7 @@ pub enum StorageImageFormat {
 /// Scalar/vector format of a vertex-buffer attribute. Mirrors the
 /// wgpu `VertexFormat` subset Wyn can currently produce — 32-bit
 /// float / signed-int / unsigned-int scalars and 2-4 wide vectors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VertexFormat {
     Float32,
     Float32x2,
@@ -1710,7 +1679,7 @@ impl VertexFormat {
 /// stride = `format.byte_size()`), mirroring viz's one-`.bin`-per-
 /// binding `--storage-dir` convention. Interleaved buffers (explicit
 /// offset/stride) are a later extension.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VertexAttribute {
     pub slot: u32,
     pub name: String,
@@ -1718,12 +1687,12 @@ pub struct VertexAttribute {
 }
 
 /// Fragment output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct FragmentOutput {
     pub location: u32,
     pub name: String,
 }
 
 #[cfg(test)]
-#[path = "lib_tests.rs"]
-mod tests;
+#[path = "interface_tests.rs"]
+mod interface_tests;

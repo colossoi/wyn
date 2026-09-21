@@ -58,10 +58,11 @@ fn direct_compiles_authored_graphics_for_both_backends() {
         );
         assert!(output.is_file(), "direct {target} output was not written");
 
-        let descriptor = fs::read_to_string(output.with_extension("json")).expect("pipeline descriptor");
-        assert!(descriptor.contains(r#""kind": "graphics""#));
-        assert!(!descriptor.contains(r#""kind": "compute""#));
-        assert!(!descriptor.contains(r#""usage": "intermediate""#));
+        let host = fs::read_to_string(output.with_extension("wynhost")).expect("WHL output");
+        assert!(host.contains("(define-gpu-graphics "));
+        assert!(!host.contains("(gpu-dispatch "));
+        assert!(!host.contains("(gpu-alloc "));
+        assert!(!output.with_extension("json").exists());
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }

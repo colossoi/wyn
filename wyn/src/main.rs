@@ -9,7 +9,7 @@ use thiserror::Error;
 use wyn_core::egglog::{
     from_tlc, fuse, insert_expressions, place, schedule, simplify, to_ssa, with_timings,
 };
-use wyn_core::pipeline_descriptor::PipelineDescriptor;
+use wyn_core::host::{HostError, Program, ShaderFormat};
 use wyn_core::ssa::stage::Elaborated;
 use wyn_core::tlc::stage::InputSliceBoundsInferred;
 use wyn_core::PipelineTopologyPolicy;
@@ -43,6 +43,14 @@ impl Target {
     }
 }
 
+/// Host-language and execution-API pair.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum TargetDouble {
+    #[default]
+    WhlUnknown,
+    RustWgpu,
+}
+
 struct CompileOptions {
     target: Target,
     algebra: bool,
@@ -57,7 +65,7 @@ struct CompileOptions {
 
 struct Compilation {
     code: CompiledCode,
-    pipeline: PipelineDescriptor,
+    program: Program,
     auxiliary: Vec<TextArtifact>,
 }
 
@@ -109,8 +117,12 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Target output format
-        #[arg(short, long, default_value = "spirv")]
-        target: Target,
+        #[arg(short, long)]
+        target: Option<Target>,
+
+        /// Host-language and execution-API pair
+        #[arg(long, default_value = "whl-unknown")]
+        target_double: TargetDouble,
 
         /// Output typed lambda calculus representation
         #[arg(long, value_name = "FILE")]
@@ -198,8 +210,8 @@ enum DriverError {
     #[error("{0}")]
     PackagePreparation(#[from] PreparationError),
 
-    #[error("Pipeline descriptor serialization error: {0}")]
-    DescriptorSerialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    Host(#[from] HostError),
 
     #[error(transparent)]
     EgglogConversionError(#[from] wyn_core::egglog::from_tlc::ConvertError),
@@ -519,6 +531,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             input,
             output,
             target,
+            target_double,
             output_tlc,
             output_mir,
             egglog: _,
@@ -533,6 +546,7 @@ fn run(cli: Cli) -> Result<(), DriverError> {
             input,
             output,
             target,
+            target_double,
             output_tlc,
             output_mir,
             algebra,
@@ -555,7 +569,8 @@ fn run(cli: Cli) -> Result<(), DriverError> {
 fn build(
     input: PathBuf,
     output: Option<PathBuf>,
-    target: Target,
+    target: Option<Target>,
+    target_double: TargetDouble,
     output_tlc: Option<PathBuf>,
     output_mir: Option<PathBuf>,
     algebra: bool,
@@ -566,6 +581,15 @@ fn build(
     warning_limit: usize,
     verbose: bool,
 ) -> Result<(), DriverError> {
+    let target = target.unwrap_or(match target_double {
+        TargetDouble::WhlUnknown => Target::Spirv,
+        TargetDouble::RustWgpu => Target::Wgsl,
+    });
+    if matches!(target_double, TargetDouble::RustWgpu) && !matches!(target, Target::Wgsl) {
+        return Err(DriverError::InvalidOption(
+            "--target-double rust-wgpu requires --target wgsl".into(),
+        ));
+    }
     if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
         return Err(DriverError::InvalidOption(
             "--wgsl-emulate-u64 requires --target wgsl".to_string(),
@@ -600,7 +624,7 @@ fn build(
     };
     let output_path = output_path(&normalized_input, output, target)?;
     let compilation = compile(parsed_modules, options)?;
-    write_artifacts(&output_path, compilation, verbose)?;
+    write_artifacts(&output_path, compilation, target_double, verbose)?;
 
     // Always-on wall-clock summary (per-pass breakdown is available via
     // `-v`). Printed to stderr so it doesn't pollute any piped output.
@@ -764,13 +788,13 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
 
     let soac_lowered = ssa;
 
-    let (code, pipeline) = match target {
+    let (code, program) = match target {
         Target::Spirv => {
             let lowered = retain_source(
                 time("lower", verbose, || wyn_core::lower_ssa_to_spirv(soac_lowered)),
                 &source_graph,
             )?;
-            (CompiledCode::Spirv(lowered.spirv), lowered.pipeline)
+            (CompiledCode::Spirv(lowered.spirv), lowered.program)
         }
         Target::Wgsl => {
             let options = if wgsl_emulate_u64 {
@@ -780,29 +804,38 @@ fn compile(modules: ParsedModules, options: CompileOptions) -> Result<Compilatio
             };
             let lowered = retain_source(
                 time("wgsl_lower", verbose, || {
-                    wyn_core::lower_ssa_to_wgsl_with_pipeline_and_options(soac_lowered, options)
+                    wyn_core::lower_ssa_to_wgsl_with_program_and_options(soac_lowered, options)
                 }),
                 &source_graph,
             )?;
 
-            (CompiledCode::Wgsl(lowered.wgsl), lowered.pipeline)
+            (CompiledCode::Wgsl(lowered.wgsl), lowered.program)
         }
     };
 
     Ok(Compilation {
         code,
-        pipeline,
+        program,
         auxiliary,
     })
 }
 
-fn write_artifacts(output_path: &Path, compilation: Compilation, verbose: bool) -> Result<(), DriverError> {
+fn write_artifacts(
+    output_path: &Path,
+    compilation: Compilation,
+    target_double: TargetDouble,
+    verbose: bool,
+) -> Result<(), DriverError> {
     let Compilation {
         code,
-        pipeline,
+        program,
         auxiliary,
     } = compilation;
 
+    let shader_format = match &code {
+        CompiledCode::Spirv(_) => ShaderFormat::Spirv,
+        CompiledCode::Wgsl(_) => ShaderFormat::Wgsl,
+    };
     match code {
         CompiledCode::Spirv(words) => {
             let mut file = fs::File::create(output_path)?;
@@ -832,14 +865,23 @@ fn write_artifacts(output_path: &Path, compilation: Compilation, verbose: bool) 
         }
     }
 
-    // Both executable backends share the same planned runtime contract.
-    if !pipeline.pipelines.is_empty() {
-        let mut descriptor_path = output_path.to_owned();
-        descriptor_path.set_extension("json");
-        fs::write(&descriptor_path, serde_json::to_string_pretty(&pipeline)?)?;
-        if verbose {
-            info!("Wrote pipeline descriptor to {}", descriptor_path.display());
-        }
+    let mut host_path = output_path.to_owned();
+    host_path.set_extension(match target_double {
+        TargetDouble::WhlUnknown => "wynhost",
+        TargetDouble::RustWgpu => "rs",
+    });
+    let Some(module_name) = output_path.file_name().and_then(|name| name.to_str()) else {
+        return Err(DriverError::InvalidOption(
+            "shader output needs a UTF-8 file name".into(),
+        ));
+    };
+    let source = match target_double {
+        TargetDouble::WhlUnknown => program.to_whl(module_name, shader_format)?,
+        TargetDouble::RustWgpu => program.to_rust_wgpu(module_name, shader_format)?,
+    };
+    fs::write(&host_path, source)?;
+    if verbose {
+        info!("Wrote host program to {}", host_path.display());
     }
 
     Ok(())

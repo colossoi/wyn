@@ -10,12 +10,12 @@ use crate::binding_layout::{
     extract_storage_image_binding, extract_storage_image_resource, extract_texture_backing,
     extract_texture_binding, extract_texture_resource, extract_uniform_binding,
 };
+use crate::host::{BufferLen, DispatchSize};
 use crate::interface::lowering::extract_size_hint;
 use crate::interface::{
     BindingExposure, EntryInput, EntryInputKind, EntryKind, EntryParamBinding, EntryParamBindingKind,
     IoDecoration, PushConstantSlot, StorageAccess, StorageBindingDecl, TextureSource,
 };
-use crate::pipeline_descriptor::{BufferLen, DispatchSize};
 use crate::ssa::layout::type_byte_size;
 use crate::types::{
     bool_type, canonical_storage_buffer_ty, sized_array, strip_existentials, Diet, Type, TypeExt, TypeName,

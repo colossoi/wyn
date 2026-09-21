@@ -1,4 +1,5 @@
 //! Source interface facts and final ABI readout. No generated bodies are re-imported.
+use super::host_sizes;
 use crate::egglog::abi::{error, storage_type};
 use crate::egglog::blocks::{Storage, Value};
 use crate::egglog::data::{
@@ -6,10 +7,10 @@ use crate::egglog::data::{
 };
 use crate::egglog::planning::{number, rows};
 use crate::egglog::{OptimizeError, Program, Scheduled};
+use crate::host::{BufferLen, DispatchLen, DispatchSize, HostSizeInput, HostSizeScalar};
 use crate::interface::{
     Attribute, EntryInput, EntryInputKind, EntryKind, StorageBindingDecl, StorageLayout, StorageRole,
 };
-use crate::pipeline_descriptor::{BufferLen, DispatchLen, DispatchSize, HostSizeInput, HostSizeScalar};
 use crate::ssa::layout::{block_layout, storage_elem_stride, type_byte_size};
 use crate::types::{Type, TypeExt, TypeName};
 use crate::{BindingRef, ResourceAccess};
@@ -379,6 +380,7 @@ pub(in crate::egglog) fn read(
             data.state.grids[dispatch.grid].groups = [Value::Int(x), Value::Int(y), Value::Int(z)];
         }
     }
+    host_sizes::publish(graph, data, buffers, &binding_ids, host_inputs)?;
     Ok(roots)
 }
 

@@ -17,7 +17,7 @@ smallvec = "1.13"
 itertools = "0.14.0"
 half = "2.7"
 wyn-base = { path = "../wyn-base" }
-wyn-pipeline-descriptor = { path = "../wyn-pipeline-descriptor" }
+wyn-host = { path = "../wyn-host" }
 wyn-graph = { path = "../wyn-graph" }
 wyn-module-graph = { path = "../wyn-module-graph" }
 wspirv = { package = "wyn-spirv", path = "../wyn-spirv" }

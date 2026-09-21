@@ -9,6 +9,9 @@ use crate::ast::Span;
 
 #[derive(Debug, Error)]
 pub enum CompilerError {
+    #[error(transparent)]
+    Host(#[from] wyn_host::HostError),
+
     #[error("Parse error: {0}")]
     ParseError(String, Option<Span>),
 
@@ -62,7 +65,8 @@ impl CompilerError {
             Self::ModuleError(_, span) => *span,
             Self::FlatteningError(_, span) => *span,
             Self::TypeHole(errors) => errors.iter().find_map(|error| error.span),
-            Self::IoError(_)
+            Self::Host(_)
+            | Self::IoError(_)
             | Self::FormattingError(_)
             | Self::SpirvBuilderError(_)
             | Self::Internal(_) => None,

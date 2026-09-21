@@ -21,6 +21,7 @@ use egglog_engine::{Error, FullState, RawValues, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub(super) mod abi;
+mod host_sizes;
 mod read;
 pub(super) use read::{number, read, rows, Readout, Recipe};
 
@@ -408,6 +409,36 @@ pub(super) fn facts(
                 if let Some(n) = n.parse::<i64>().ok().filter(|&n| n >= 0) {
                     let n = sink.add("AbiNumber", n)?;
                     sink.add("AbiAlias", (abi_value, n))?;
+                }
+            }
+            ExprKind::PureApp { function, args } if args.len() == 2 => {
+                if let ExprKind::BinOp(op) = &data.expressions[*function].kind {
+                    let operation = match op.as_str() {
+                        "+" => Some("add"),
+                        "-" => Some("sub"),
+                        "*" => Some("mul"),
+                        _ => None,
+                    };
+                    let signed = match &data.types[value.ty].ty {
+                        Type::Constructed(TypeName::Int(32), _) => Some(true),
+                        Type::Constructed(TypeName::UInt(32), _) => Some(false),
+                        _ => None,
+                    };
+                    if let (Some(operation), Some(signed)) = (operation, signed) {
+                        let left = sink.add("AbiExpr", i64::from(args[0].as_u32()))?;
+                        let right = sink.add("AbiExpr", i64::from(args[1].as_u32()))?;
+                        let mut result = sink.add("AbiBinary", (operation, left, right))?;
+                        let modulus = sink.add("AbiNumber", 4294967296i64)?;
+                        let bias = sink.add("AbiNumber", 2147483648i64)?;
+                        if signed {
+                            result = sink.add("AbiBinary", ("add", result, bias))?;
+                        }
+                        result = sink.add("AbiBinary", ("mod", result, modulus))?;
+                        if signed {
+                            result = sink.add("AbiBinary", ("sub", result, bias))?;
+                        }
+                        sink.add("AbiAlias", (abi_value, result))?;
+                    }
                 }
             }
             ExprKind::Array(array) => {

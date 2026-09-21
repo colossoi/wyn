@@ -52,10 +52,10 @@ impl Case {
             egglog,
             "unexpected compiler route: {mir}"
         );
-        let descriptor: serde_json::Value =
-            serde_json::from_slice(&fs::read(self.directory.join("output.json")).expect("descriptor"))
-                .expect("valid descriptor JSON");
-        assert!(!descriptor["pipelines"].as_array().expect("pipelines").is_empty());
+        let host = fs::read_to_string(self.directory.join("output.wynhost")).expect("WHL output");
+        assert!(host.contains("(define-host-program :version 1)"));
+        assert!(host.contains("(gpu-dispatch "));
+        assert!(!self.directory.join("output.json").exists());
         if target == "spirv" {
             let binary = fs::read(self.directory.join("output.spv")).expect("SPIR-V output");
             assert_eq!(binary.get(..4), Some([0x03, 0x02, 0x23, 0x07].as_slice()));

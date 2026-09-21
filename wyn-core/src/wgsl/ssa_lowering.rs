@@ -15,9 +15,9 @@ use crate::builtins;
 use crate::builtins::{by_id, catalog, BuiltinId};
 use crate::err_wgsl;
 use crate::err_wgsl_at;
+use crate::host;
 use crate::interface;
 use crate::op;
-use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::structured;
 use crate::types;
@@ -3513,8 +3513,8 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
     }
 }
 
-fn wgsl_storage_image_format(format: pipeline_descriptor::StorageImageFormat) -> &'static str {
-    use crate::pipeline_descriptor::StorageImageFormat;
+fn wgsl_storage_image_format(format: host::StorageImageFormat) -> &'static str {
+    use crate::host::StorageImageFormat;
     match format {
         StorageImageFormat::Rgba8Unorm => "rgba8unorm",
         StorageImageFormat::Rgba16Float => "rgba16float",

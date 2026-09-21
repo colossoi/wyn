@@ -4,8 +4,8 @@
 //! map view-indexing uses to recover a buffer var.
 
 use super::*;
+use crate::host;
 use crate::interface;
-use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::types;
 
@@ -355,7 +355,7 @@ impl Constructor {
     pub(super) fn create_storage_image(
         &mut self,
         br: BindingRef,
-        format: pipeline_descriptor::StorageImageFormat,
+        format: host::StorageImageFormat,
         access: interface::StorageAccess,
     ) -> spirv::Word {
         if let Some(&(var_id, _)) = self.storage_images.get(&br) {

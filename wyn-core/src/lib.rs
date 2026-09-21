@@ -34,10 +34,8 @@ pub mod name_registry;
 pub mod tlc;
 
 pub mod egglog;
-/// Re-export of the pipeline descriptor format. Lives in its own
-/// crate so host runtimes (e.g. `extra/viz`) can deserialize the
-/// JSON without pulling in the whole compiler.
-pub use wyn_pipeline_descriptor as pipeline_descriptor;
+/// Portable host programs and shader interface metadata.
+pub use wyn_host as host;
 pub mod spirv;
 pub mod structured;
 pub mod wgsl;
@@ -405,7 +403,7 @@ pub fn lower_ssa_to_spirv(program: ssa::stage::Elaborated) -> error::Result<Lowe
     let spirv = spirv::lower_ssa_program(&program)?;
     Ok(Lowered {
         spirv,
-        pipeline: program.global_context.pipeline,
+        program: host::Program::new(program.global_context.pipeline)?,
     })
 }
 
@@ -420,18 +418,18 @@ pub fn lower_ssa_to_wgsl_with_options(
     program: ssa::stage::Elaborated,
     options: wgsl::WgslOptions,
 ) -> error::Result<String> {
-    Ok(lower_ssa_to_wgsl_with_pipeline_and_options(program, options)?.wgsl)
+    Ok(lower_ssa_to_wgsl_with_program_and_options(program, options)?.wgsl)
 }
 
 /// Validate and lower elaborated SSA to WGSL while retaining its runtime
-/// pipeline descriptor.
-pub fn lower_ssa_to_wgsl_with_pipeline(program: ssa::stage::Elaborated) -> error::Result<LoweredWgsl> {
-    lower_ssa_to_wgsl_with_pipeline_and_options(program, wgsl::WgslOptions::default())
+/// host program.
+pub fn lower_ssa_to_wgsl_with_program(program: ssa::stage::Elaborated) -> error::Result<LoweredWgsl> {
+    lower_ssa_to_wgsl_with_program_and_options(program, wgsl::WgslOptions::default())
 }
 
 /// Validate and lower elaborated SSA to WGSL while retaining its runtime
-/// pipeline descriptor and using an explicit backend legalization policy.
-pub fn lower_ssa_to_wgsl_with_pipeline_and_options(
+/// host program and using an explicit backend legalization policy.
+pub fn lower_ssa_to_wgsl_with_program_and_options(
     program: ssa::stage::Elaborated,
     options: wgsl::WgslOptions,
 ) -> error::Result<LoweredWgsl> {
@@ -441,21 +439,21 @@ pub fn lower_ssa_to_wgsl_with_pipeline_and_options(
     let program = ssa::prepare_wgsl(program)?;
     let lowered = wgsl::ssa_lowering::lower_with_abi(&program, options)?;
     let mut pipeline = program.global_context.pipeline;
-    adapt_pipeline_descriptor_for_wgsl(&mut pipeline, &lowered.parameter_blocks)?;
+    adapt_host_interface_for_wgsl(&mut pipeline, &lowered.parameter_blocks)?;
     Ok(LoweredWgsl {
         wgsl: lowered.source,
-        pipeline,
+        program: host::Program::new(pipeline)?,
     })
 }
 
 /// Rewrite target-neutral push-constant contracts to the read-only storage
 /// blocks actually declared by the WGSL backend. SPIR-V lowering deliberately
 /// bypasses this adaptation and retains native push constants.
-fn adapt_pipeline_descriptor_for_wgsl(
-    descriptor: &mut pipeline_descriptor::PipelineDescriptor,
+fn adapt_host_interface_for_wgsl(
+    descriptor: &mut host::ModuleInterface,
     parameter_blocks: &[wgsl::ssa_lowering::ParameterBlock],
 ) -> error::Result<()> {
-    use pipeline_descriptor::{
+    use host::{
         Access, Binding, BufferLen, BufferUsage, DispatchLen, DispatchSize, HostSizeInput, Pipeline,
     };
 
@@ -523,7 +521,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
                 members: block
                     .members
                     .iter()
-                    .map(|member| pipeline_descriptor::UniformMember {
+                    .map(|member| host::UniformMember {
                         name: member.name.clone(),
                         offset: member.offset,
                         size: member.size,
@@ -535,13 +533,12 @@ fn adapt_pipeline_descriptor_for_wgsl(
 
         for binding in &mut compute.bindings {
             let Binding::StorageBuffer {
-                length: Some(BufferLen::HostProvided { inputs, .. }),
-                ..
+                length: Some(length), ..
             } = binding
             else {
                 continue;
             };
-            for input in inputs {
+            for input in length.inputs_mut() {
                 let HostSizeInput::PushConstant {
                     name,
                     push_constant_offset,
@@ -633,7 +630,7 @@ fn adapt_pipeline_descriptor_for_wgsl(
         }
     }) {
         return Err(err_wgsl!(
-            "WGSL pipeline descriptor still contains a push constant with no WebGPU binding"
+            "WGSL host program still contains a push constant with no WebGPU binding"
         ));
     }
 
@@ -644,13 +641,13 @@ fn adapt_pipeline_descriptor_for_wgsl(
 /// Final SPIR-V output
 pub struct Lowered {
     pub spirv: Vec<u32>,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+    pub program: host::Program,
 }
 
 /// Final WGSL output and the runtime contract for dispatching it.
 pub struct LoweredWgsl {
     pub wgsl: String,
-    pub pipeline: pipeline_descriptor::PipelineDescriptor,
+    pub program: host::Program,
 }
 
 // =============================================================================
@@ -729,3 +726,6 @@ pub fn compile_thru_spirv(source: &str) -> std::result::Result<Lowered, Box<dyn 
 
 #[cfg(test)]
 mod literal_expansion_tests;
+
+#[cfg(test)]
+mod host_tests;

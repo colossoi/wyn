@@ -8,8 +8,8 @@
 //! `Vec<Option<...>>` aligned to the body params, so consumers can
 //! iterate them in lockstep instead of joining by symbol.
 
+use crate::host;
 use crate::interface;
-use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::types;
 use polytype::Type;
@@ -244,9 +244,9 @@ pub fn extract_storage_image_binding(
     param: &EntryParamDecl,
 ) -> Option<(
     BindingRef,
-    pipeline_descriptor::StorageImageFormat,
+    host::StorageImageFormat,
     interface::StorageAccess,
-    pipeline_descriptor::StorageTextureSize,
+    host::StorageTextureSize,
 )> {
     param.attributes.iter().find_map(|attribute| match attribute {
         Attribute::StorageImage {

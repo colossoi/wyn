@@ -183,7 +183,7 @@ fn distinct_entry_push_constant_layouts_have_distinct_variables() {
 
 #[test]
 fn render_target_load_fetches_only_fields_used_by_the_fragment_output() {
-    use crate::pipeline_descriptor::{Binding, Pipeline};
+    use crate::host::{Binding, Pipeline};
     use std::collections::{HashMap, HashSet};
     use wspirv::dr::Operand;
     use wspirv::spirv::{Decoration, ExecutionModel, Op};
@@ -273,7 +273,8 @@ entry repro(scene: render_target<{scene_ty}>, surface: render_target<f32>)
             let set = decoration(variable, Decoration::DescriptorSet);
             let binding = decoration(variable, Decoration::Binding);
             let name = lowered
-                .pipeline
+                .program
+                .interface
                 .pipelines
                 .iter()
                 .filter_map(|p| match p {

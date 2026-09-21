@@ -1,11 +1,11 @@
 //! Lower source entry declarations into the shared shader interface.
 
 use crate::ast::TypeName;
+use crate::host::BufferLen;
 use crate::interface::{
     Attribute, BindingExposure, EntryDecl, EntryInput, EntryInputKind, EntryOutput, EntryOutputDestination,
     EntryOutputKind, EntryParamDecl, IoDecoration, ResolvedAttribute,
 };
-use crate::pipeline_descriptor::BufferLen;
 use crate::ssa::layout::{storage_elem_stride, type_byte_size};
 use crate::types::{array_size, canonical_storage_buffer_ty, strip_existentials, TypeExt};
 use crate::BindingRef;

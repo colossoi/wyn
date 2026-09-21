@@ -1,7 +1,7 @@
 //! Final physical kernel metadata shared by compiler routes and SSA.
 
+use crate::host::DispatchLen;
 use crate::interface::OutputSlotId;
-use crate::pipeline_descriptor::DispatchLen;
 use crate::{EntryId, ResourceId, ResourceUse};
 use std::collections::HashSet;
 

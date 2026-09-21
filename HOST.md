@@ -19,9 +19,9 @@ execution define the program's meaning and the obligations of any future
 consumer that executes or translates it.
 
 The compiler's internal representation is an implementation choice. WHL need not
-be an intermediate step through which other host-language outputs pass. A future
-Rust backend may lower directly from shared compiler structures without
-generating or parsing WHL. Rust host-code generation is future work.
+be an intermediate step through which other host-language outputs pass. The
+Rust/WGPU backend lowers directly from shared compiler structures without
+generating or parsing WHL.
 
 ## Compiler and consumer responsibilities
 
@@ -250,7 +250,8 @@ Resource parameter descriptions have these shapes:
 
 Access is `:read`, `:write`, or `:read-write`. Buffer handles are untyped byte
 allocations; element type and positive stride describe the shader's
-interpretation. An element type is a device scalar, `(:vector scalar count)`
+interpretation. An element type is a device scalar, an opaque byte sequence `(:bytes count)`,
+`(:vector scalar count)`
 with count 2, 3, or 4, or a record layout. A record layout is
 `(:size bytes :alignment bytes :fields ((name type offset) ...))`. Field names
 are unique. Sizes, strides, offsets, and alignment include device padding and
@@ -261,7 +262,13 @@ Dynamic bounds remain host calculations and shader preconditions.
 
 A texture parameter accepts a view with the declared dimension, format, and
 sample count. The ABI specifies sampled or storage usage. Sampled parameters
-are read-only. Sampler kinds are `:filtering`, `:non-filtering`, or `:comparison`.
+are read-only and may specify `:sample-type` as `:filterable-float`, `:float`,
+`:sint`, `:uint`, or `:depth`. `:format :caller` constrains the caller-supplied
+format by that sample type instead of selecting an allocation format.
+`:samples :multisampled` requires a caller-selected sample count greater than one.
+Color outputs may likewise use `:caller` when the target supplies their format.
+Allocated textures always have concrete formats and sample counts. Sampler kinds
+are `:filtering`, `:non-filtering`, or `:comparison`.
 
 The required `:abi` list supplies the selected artifact's physical interface:
 
@@ -269,7 +276,13 @@ The required `:abi` list supplies the selected artifact's physical interface:
 (parameter kind group binding)
 (:scalar-block kind group binding bytes ((parameter offset) ...))
 (:scalar-block :push-constant base-offset bytes ((parameter offset) ...))
+(parameter :push-constant base-offset bytes)
 ```
+
+An opaque byte sequence preserves a packed field whose interpretation belongs
+to the shader interface. Raw push-constant mappings take a `:host-buffer :read`
+parameter with an optional `:min-bytes` bound and pass its bytes without repacking.
+Scalar reads may also address host byte spans.
 
 For resources, kind is `:storage`, `:uniform`, `:sampled-texture`,
 `:storage-texture`, or `:sampler`. For a scalar block it is `:storage` or
@@ -309,6 +322,9 @@ for a view, including a render target. A host `:texture` description can name an
 allocation or a view; shader calls always take a view of the required usage.
 For `:texture-view`, sampled usage permits reads, storage usage permits reads
 and writes, and render-target usage permits attachment reads and writes.
+
+Host entry declarations and resource parameters may include a `:source-name`
+string preserving the authored name independently of WHL symbol encoding.
 
 Inputs are borrowed; access annotations state whether the program may modify
 them. Resource results require `:ownership :owned` for a newly allocated resource
@@ -435,6 +451,8 @@ a caller receiving an owned view owns that backing allocation.
 `gpu-texture-dimension` returns the extent selected by the quoted symbol `width`,
 `height`, or `depth-or-layers`, allowing scalar calculations without list access.
 Both accept an allocation or view, with mip indices relative to the view.
+`(gpu-texture-mip-levels texture)` returns the number of mip levels available
+through an allocation or view.
 For array views, the layer extent is the selected layer count. Target-size
 allocations use explicit entry arguments or queries on a passed-in target,
 not an implicit window-size policy.
@@ -805,3 +823,25 @@ has an 8 by 8 by 1 workgroup, guards excess invocations, and initializes the who
 image. The sampled view aliases its storage output, so the draw must observe
 the compute writes. The temporary texture is logically freed after the draw;
 the caller retains the screen for presentation or further work.
+
+## Compiler output selection
+
+`wyn build` selects the host output with `--target-double whl-unknown` (the
+default) or `--target-double rust-wgpu`. WHL uses `.wynhost`; Rust/WGPU uses
+`.rs`. The shader remains a separate sibling artifact. `--target` selects
+SPIR-V or WGSL; its default is SPIR-V for WHL and WGSL for Rust/WGPU. Rust/WGPU
+requires WGSL. There is no JSON pipeline output.
+
+The Rust emitter constructs syntax with `quote` and `syn` and formats it with
+`prettyplease`. Its generated module uses WGPU 27 and `num-bigint`, `num-integer`,
+and `num-traits` for mathematical size arithmetic. Host inputs are explicit
+function parameters; resource-name and packed-field tables expose their source
+identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
+or interpreter is involved.
+
+The compiler publishes host-computable integer allocation expressions, including
+scalar interface reads, arithmetic, and logical input lengths. Expressions lifted
+from typed 32-bit Wyn arithmetic preserve wrapping using `mod`; size arithmetic
+uses mathematical integers. Capacities requiring unsupported scalar conversions
+or device-only values remain explicit caller-supplied resources. The source
+program still determines logical lengths independently of allocation capacity.

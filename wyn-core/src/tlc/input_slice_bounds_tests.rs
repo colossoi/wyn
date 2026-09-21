@@ -1,7 +1,7 @@
 //! Unit tests for the TLC slice-bound inference. See module-level docs
 //! on `input_slice_bounds` for the contract.
 
-use crate::pipeline_descriptor::BufferLen;
+use crate::host::BufferLen;
 use crate::test_pipeline;
 use crate::tlc::{self, DefMeta};
 use crate::LookupMap;

@@ -39,7 +39,7 @@ use polytype::Type;
 
 use crate::ast::TypeName;
 use crate::builtins::{catalog, BuiltinId};
-use crate::pipeline_descriptor::BufferLen;
+use crate::host::BufferLen;
 use crate::types::TypeExt;
 use crate::SymbolId;
 

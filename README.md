@@ -40,7 +40,7 @@ The native CLI and WebAssembly compiler use the same typestate pipeline:
 3. **Egglog** imports TLC into typed sidecar arenas, fuses SOACs, inserts the
    expression graph, simplifies scalar expressions, places computations, and
    schedules physical kernels and resources.
-4. **SSA** receives scheduled blocks and the published pipeline descriptor,
+4. **SSA** receives scheduled blocks and the published shader interface,
    optimizes and places pure instructions, and removes unreachable functions.
 5. **Backend** validates and legalizes SSA for SPIR-V or WGSL, then emits the
    shader and its runtime contract.
@@ -71,11 +71,11 @@ host stages and intermediate resources.
 
 ### Backend boundary
 
-`lower_ssa_to_spirv` and `lower_ssa_to_wgsl_with_pipeline_and_options` perform
+`lower_ssa_to_spirv` and `lower_ssa_to_wgsl_with_program_and_options` perform
 SSA optimization, expression placement, reachability filtering, and target
 preparation. The WGSL path also adapts push-constant contracts to storage
-parameter blocks. The descriptor records the bindings and dispatch order the
-host must execute; `extra/viz` consumes this contract.
+parameter blocks. The compiler publishes a host program that records resource lifetimes, bindings,
+and dispatch order. See [HOST.md](HOST.md) for WHL and Rust/WGPU output.
 
 Tests can use `compile_thru_frontend`, `compile_thru_tlc`, `compile_thru_ssa`,
 and `compile_thru_spirv` to stop at shared pipeline checkpoints.
@@ -107,6 +107,9 @@ cargo run --bin wyn -- build input.wyn -o output.spv
 
 # Compile to WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
+
+# Emit Rust/WGPU host code alongside WGSL
+cargo run --bin wyn -- build input.wyn --target-double rust-wgpu -o output.wgsl
 
 # Use the egglog route with WGSL output and an optional SSA dump
 cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --output-mir output.ssa
@@ -169,7 +172,7 @@ host control continues; explicit dispatch dependencies describe stage ordering.
 Buffer element types and dynamic grid formulas remain in the sidecar.
 
 The SSA adapter publishes source inputs, planned storage, output bindings, and
-static dispatch order through the pipeline descriptor. Conditional or repeated
+static dispatch order through the shader interface and host program. Conditional or repeated
 host dispatches still produce explicit unsupported-operation diagnostics.
 
 Graphics vocabulary is opt-in. Without `--graphics`, names such as

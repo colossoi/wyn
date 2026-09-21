@@ -1,0 +1,14 @@
+[package]
+name = "wyn-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Wyn host programs and WHL and Rust/WGPU emission"
+
+[dependencies]
+thiserror.workspace = true
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+proc-macro2 = "1.0"
+prettyplease = "0.2"

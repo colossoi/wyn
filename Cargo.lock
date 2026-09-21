@@ -1521,6 +1521,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2504,7 +2514,6 @@ dependencies = [
  "env_logger",
  "log",
  "serde",
- "serde_json",
  "thiserror 1.0.69",
  "toml",
  "wyn-core",
@@ -2552,8 +2561,8 @@ dependencies = [
  "thiserror 1.0.69",
  "wyn-base",
  "wyn-graph",
+ "wyn-host",
  "wyn-module-graph",
- "wyn-pipeline-descriptor",
  "wyn-spirv",
 ]
 
@@ -2568,6 +2577,17 @@ dependencies = [
 name = "wyn-graph"
 version = "0.1.0"
 dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "wyn-host"
+version = "0.1.0"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
  "thiserror 1.0.69",
 ]
 
@@ -2591,14 +2611,6 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "wyn-module-graph",
-]
-
-[[package]]
-name = "wyn-pipeline-descriptor"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@
 // `builder::TypeId` / `builder::ConstId` / etc. path literals
 // throughout this module reach the typed wrapper that lives in the
 // `wyn-spirv` crate (renamed to `wspirv` in our `Cargo.toml`).
+use crate::host;
 use crate::interface;
-use crate::pipeline_descriptor;
 use crate::ssa;
 use crate::EntryId;
 use crate::FunctionId;
@@ -377,8 +377,8 @@ impl Constructor {
 /// SPIR-V `ImageFormat` literal used in `OpTypeImage`. Kept in lock-step
 /// with the wgpu side: every format we emit here must also be allocated
 /// by the host with the matching `wgpu::TextureFormat`.
-fn storage_image_format_to_spirv(f: pipeline_descriptor::StorageImageFormat) -> spirv::ImageFormat {
-    use crate::pipeline_descriptor::StorageImageFormat as F;
+fn storage_image_format_to_spirv(f: host::StorageImageFormat) -> spirv::ImageFormat {
+    use crate::host::StorageImageFormat as F;
     match f {
         F::Rgba8Unorm => spirv::ImageFormat::Rgba8,
         F::Rgba16Float => spirv::ImageFormat::Rgba16f,

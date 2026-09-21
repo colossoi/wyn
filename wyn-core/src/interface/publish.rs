@@ -1,22 +1,22 @@
 //! Publish compiler entry interfaces into the host pipeline descriptor.
 
 use crate::ast::TypeName;
+use crate::host;
+use crate::host::UniformMember;
 use crate::interface::StorageLayout;
-use crate::pipeline_descriptor;
-use crate::pipeline_descriptor::UniformMember;
 use crate::ssa::layout::{block_layout, type_byte_size, vertex_format};
 use crate::EntryId;
 use crate::{BindingRef, LookupMap, LookupSet};
 use polytype::Type;
 
 use crate::flow::ExecutionModel;
-use crate::interface::EntryPublication;
-use crate::interface::{EntryInputKind, IoDecoration, StorageAccess, TextureSource};
-use crate::pipeline_descriptor::{
-    Access, BackingRef, Binding, BufferUsage, FragmentOutput, Pipeline, PipelineDescriptor,
+use crate::host::{
+    Access, BackingRef, Binding, BufferUsage, FragmentOutput, ModuleInterface, Pipeline,
     SamplerBindingType, SourceResultBinding, StageBindingUses, TextureSampleType, TextureViewDimension,
     VertexAttribute,
 };
+use crate::interface::EntryPublication;
+use crate::interface::{EntryInputKind, IoDecoration, StorageAccess, TextureSource};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -30,7 +30,7 @@ fn entries_by_id<'a>(entries: &[&'a EntryPublication]) -> LookupMap<EntryId, &'a
     entries.iter().map(|entry| (entry.id, *entry)).collect()
 }
 
-pub trait PipelineDescriptorPublish {
+pub trait ModuleInterfacePublish {
     /// Append `Binding::StorageBuffer` / `Uniform` / `PushConstant` /
     /// `Texture` / `Sampler` entries to the descriptor's per-pipeline
     /// bindings list for each `(set, binding)` recorded on the entry's
@@ -205,7 +205,7 @@ fn publish_pipeline_stage_uses(
         }
     }
 }
-impl PipelineDescriptorPublish for PipelineDescriptor {
+impl ModuleInterfacePublish for ModuleInterface {
     fn publish_implicit_bindings(
         &mut self,
         entries: &[&EntryPublication],
@@ -519,7 +519,7 @@ enum DescriptorShape {
         binding_type: SamplerBindingType,
     },
     StorageTexture {
-        format: pipeline_descriptor::StorageImageFormat,
+        format: host::StorageImageFormat,
     },
 }
 
@@ -540,7 +540,7 @@ struct DescriptorLayout {
 }
 
 impl DescriptorLayout {
-    fn from_pipeline(pipeline: &PipelineDescriptor) -> Result<Self, DescriptorError> {
+    fn from_pipeline(pipeline: &ModuleInterface) -> Result<Self, DescriptorError> {
         let mut layout = Self {
             slots: LookupMap::new(),
         };

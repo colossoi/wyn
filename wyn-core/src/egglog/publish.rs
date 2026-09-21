@@ -4,13 +4,13 @@ use super::abi::Abi;
 use super::data::{EntryData, EntryId as SourceEntryId, OutputData, OutputId, SymbolData, SymbolId};
 use super::OptimizeError;
 use crate::flow::ExecutionModel;
-use crate::interface::publish::PipelineDescriptorPublish;
+use crate::host::{
+    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, GraphicsPipeline, GraphicsStage,
+    ModuleInterface, Pipeline, ShaderStage, SourceResultBinding,
+};
+use crate::interface::publish::ModuleInterfacePublish;
 use crate::interface::StorageRole;
 use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
-use crate::pipeline_descriptor::{
-    Access, Binding, BufferUsage, ComputePipeline, ComputeStage, GraphicsPipeline, GraphicsStage, Pipeline,
-    PipelineDescriptor, ShaderStage, SourceResultBinding,
-};
 use crate::ssa::types::EntryPoint;
 use crate::BindingRef;
 use crate::{EntryId, LookupMap, ResourceAccess};
@@ -23,8 +23,8 @@ pub(super) fn publish(
     symbols: &IdArena<SymbolId, SymbolData>,
     outputs: &IdArena<OutputId, OutputData>,
     entries: &mut [EntryPoint],
-) -> Result<PipelineDescriptor, OptimizeError> {
-    let mut pipeline = PipelineDescriptor::default();
+) -> Result<ModuleInterface, OptimizeError> {
+    let mut pipeline = ModuleInterface::default();
     let mut associations = vec![];
     let entry_indices: BTreeMap<_, _> = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
     let mut graphics_groups = BTreeMap::new();
@@ -230,6 +230,68 @@ pub(super) fn publish(
         }
         for id in &associations[index] {
             entries[entry_indices[id]].pipeline_storage_accesses = union.clone();
+        }
+    }
+    // Graphics captures share the physical storage and capacity of their compute producer.
+    let compute_storage: BTreeMap<_, _> = pipeline
+        .pipelines
+        .iter()
+        .filter_map(|item| {
+            let Pipeline::Compute(compute) = item else {
+                return None;
+            };
+            Some(compute.bindings.iter())
+        })
+        .flatten()
+        .filter_map(|item| {
+            let Binding::StorageBuffer {
+                set,
+                binding,
+                resource,
+                name,
+                usage,
+                length,
+                ..
+            } = item
+            else {
+                return None;
+            };
+            Some((
+                BindingRef::new(*set, *binding),
+                (
+                    resource.as_ref().unwrap_or(name).clone(),
+                    usage.clone(),
+                    length.clone(),
+                ),
+            ))
+        })
+        .collect();
+    for item in &mut pipeline.pipelines {
+        let Pipeline::Graphics(graphics) = item else {
+            continue;
+        };
+        for binding in &mut graphics.bindings {
+            let Binding::StorageBuffer {
+                set,
+                binding,
+                resource,
+                usage,
+                length,
+                ..
+            } = binding
+            else {
+                continue;
+            };
+            let slot = BindingRef::new(*set, *binding);
+            if let Some((name, compute_usage, compute_length)) = compute_storage.get(&slot) {
+                *resource = Some(name.clone());
+                *length = compute_length.clone();
+                *usage = if *compute_usage == BufferUsage::Input {
+                    BufferUsage::Input
+                } else {
+                    BufferUsage::Intermediate
+                };
+            }
         }
     }
     pipeline.rebuild_frame_graph();
