@@ -321,6 +321,96 @@ fn rust_buffer_arguments_keep_source_names_in_bindings_sizes_and_results() {
 }
 
 #[test]
+fn rust_caller_provided_results_use_source_fields() {
+    for (ty, value, parameters) in [
+        ("[]i32", "xs", &["result"][..]),
+        (
+            "([]i32, []i32)",
+            "(xs, ys)",
+            &["result_field_0", "result_field_1"][..],
+        ),
+        (
+            "{ao:[]i32, coarse:[]i32}",
+            "{ao=xs, coarse=ys}",
+            &["result_ao", "result_coarse"][..],
+        ),
+    ] {
+        let program = compile(&format!(
+            "entry generated(count:f32) {ty} = let xs = iota(i32(count)) let ys = iota(i32(count+1.0)) in {value}"
+        ));
+        let entry = &program.entries[0];
+        assert!(
+            entry.results.iter().all(|id| entry.inputs.contains(id)),
+            "output requires caller storage"
+        );
+        let rust = program.to_rust_wgpu("results.wgsl", ShaderFormat::Wgsl).unwrap();
+        for parameter in parameters {
+            assert_eq!(
+                rust.matches(&format!("{parameter}: &Buffer")).count(),
+                1,
+                "{rust}"
+            );
+            assert!(
+                rust.contains(&format!("resource: {parameter}.as_entire_binding()")),
+                "{rust}"
+            );
+            assert!(rust.contains(&format!("Buffer::clone(&{parameter})")), "{rust}");
+        }
+    }
+}
+
+#[test]
+fn rust_caller_provided_result_names_avoid_source_input_collisions() {
+    let program = compile(
+        "entry generated(result_field_1:[]i32, count:f32) ([]i32, []i32) = (result_field_1, iota(i32(count)))"
+    );
+    let rust = program.to_rust_wgpu("collision.wgsl", ShaderFormat::Wgsl).unwrap();
+    for parameter in ["result_field_1", "result_field_1_2"] {
+        assert!(rust.contains(&format!("{parameter}: &Buffer")), "{rust}");
+        assert!(rust.contains(&format!("Buffer::clone(&{parameter})")), "{rust}");
+    }
+}
+
+#[test]
+fn rust_caller_provided_graphics_intermediates_use_resource_ids() {
+    let program = compile(
+        r#"
+entry scene(count:f32, target:render_target<vec4f32>) render_target<vec4f32> =
+  let vertices = map(|i:i32| @[f32(i), 0.0, 0.0, 1.0], iota(i32(count)))
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index:u32, _:u32, _:u32|
+      vertex_output(vertices[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0])) in
+  shade(target, triangles, |value, _, _, _, _| value)
+"#,
+    );
+    let entry = &program.entries[0];
+    assert!(program.interface.source_results.is_empty());
+    let scratch = entry
+        .inputs
+        .iter()
+        .find(|id| {
+            let resource = &program.interface.frame_graph.resources[id.0];
+            resource.bindings.iter().any(|binding| {
+                matches!(
+                    program.bindings(binding.pipeline_index)[binding.binding_index],
+                    Binding::StorageBuffer {
+                        usage: crate::host::BufferUsage::Output | crate::host::BufferUsage::Intermediate,
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("graphics capture requires caller storage");
+    let rust = program.to_rust_wgpu("scratch.wgsl", ShaderFormat::Wgsl).unwrap();
+    let name = format!("scratch_{}", scratch.0);
+    assert!(rust.contains(&format!("{name}: &Buffer")), "{rust}");
+    assert!(
+        rust.matches(&format!("resource: {name}.as_entire_binding()")).count() >= 2,
+        "{rust}"
+    );
+}
+
+#[test]
 fn rust_graphics_arguments_keep_buffer_texture_and_sampler_source_names() {
     let program = compile(include_str!("../../testfiles/texture_sample.wyn"));
     let rust = program.to_rust_wgpu("texture.wgsl", ShaderFormat::Wgsl).unwrap();

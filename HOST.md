@@ -953,6 +953,15 @@ source outputs or scratch storage, such as `totals_result_0` and `totals_scratch
 Numeric suffixes distinguish repeated names. Shader declarations and host
 programs use the same assigned entry-point names.
 
+Rust arguments for caller-provided output buffers use `result` for a single
+value, `result_field_<index>` for a zero-based tuple field, or
+`result_<name>` for a record field. Caller-provided intermediate buffers use
+`scratch_<resource-id>`, with the ID from `RESOURCE_NAMES`. These IDs are local
+to the compiled module and can change when the program changes. Shared result
+backing uses the first source result's name. Source inputs keep their input
+names, including inputs returned directly. Argument names receive `_2`, `_3`,
+etc. when needed to avoid collisions with other arguments or generated locals.
+
 Extracted compute and graphics stages retain their source root separately from
 their shader names. One host call schedules all of that root's stages, shares
 the produced buffers with their consumers, and returns the authored compute

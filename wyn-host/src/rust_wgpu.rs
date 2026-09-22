@@ -9,10 +9,10 @@ use syn::{
 };
 
 use crate::{
-    Allocation, Binding, BlendMode, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr, FillMode,
-    FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
-    PrimitiveTopology, Program, ResourceId, Scissor, ShaderFormat, ShaderStage, StorageImageFormat,
-    TextureViewDimension, VertexFormat, Viewport,
+    Allocation, Binding, BlendMode, BufferUsage, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr,
+    FillMode, FrameResourceKind, FrontFace, HostError, IndexFormat, IntegerOp, Operation, Pipeline,
+    PrimitiveTopology, Program, ResourceId, ResultKind, Scissor, ShaderFormat, ShaderStage,
+    StorageImageFormat, TextureViewDimension, VertexFormat, Viewport,
 };
 
 pub(crate) fn resource(id: ResourceId) -> Ident {
@@ -150,12 +150,46 @@ impl Program {
         let mut replacements = BTreeMap::new();
         for &id in &entry.inputs {
             let frame_resource = &self.interface.frame_graph.resources[id.0];
-            let source = frame_resource
-                .bindings
-                .iter()
-                .find(|binding| pipelines.contains(&binding.pipeline_index))
-                .map(|binding| binding.name.as_str())
-                .unwrap_or(&frame_resource.name);
+            let binding =
+                frame_resource.bindings.iter().find(|binding| pipelines.contains(&binding.pipeline_index));
+            let mut source =
+                binding.map(|binding| binding.name.clone()).unwrap_or_else(|| frame_resource.name.clone());
+            // Caller-provided storage can back a result or an intermediate
+            // whose capacity cannot be computed by the host. Name it from its
+            // role in this entry, independently of the producer's shader name.
+            let compiler_storage = frame_resource.bindings.iter().any(|binding| {
+                pipelines.contains(&binding.pipeline_index)
+                    && matches!(
+                        self.bindings(binding.pipeline_index)[binding.binding_index],
+                        Binding::StorageBuffer {
+                            usage: BufferUsage::Output | BufferUsage::Intermediate,
+                            ..
+                        }
+                    )
+            });
+            if compiler_storage {
+                let result = self
+                    .interface
+                    .source_results
+                    .iter()
+                    .filter(|result| {
+                        result.entry == entry.name
+                            && frame_resource.bindings.iter().any(|binding| {
+                                binding.pipeline_index == result.pipeline_index
+                                    && binding.set == Some(result.set)
+                                    && binding.binding == Some(result.binding)
+                            })
+                    })
+                    .min_by_key(|result| result.result);
+                source = match result {
+                    Some(result) => match result.kind {
+                        ResultKind::Value => "result".into(),
+                        ResultKind::RecordField => format!("result_{}", result.name),
+                        ResultKind::TupleField => format!("result_field_{}", result.result),
+                    },
+                    None => format!("scratch_{}", id.0),
+                };
+            }
             let base = rust_results::name(&source.replace('-', "_"));
             let mut candidate = base.clone();
             let mut suffix = 2;
