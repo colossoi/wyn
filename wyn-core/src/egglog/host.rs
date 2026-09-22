@@ -52,6 +52,9 @@ pub(super) fn plan(data: &Program<Scheduled>) -> Result<Host, OptimizeError> {
         let root = dispatch.kernel;
         let stage = &data.state.abi.entry_names[&root];
         for &expression in &dispatch.captures {
+            if !data.state.execution.host_values.contains(&expression) {
+                continue;
+            }
             if !matches!(
                 data.expressions[expression].kind,
                 ExprKind::PureApp { .. } | ExprKind::If { .. } | ExprKind::Coerce(_)
@@ -103,6 +106,9 @@ pub(super) fn plan(data: &Program<Scheduled>) -> Result<Host, OptimizeError> {
             continue;
         }
         for (&op, materialized) in &data.state.materialized {
+            if !data.state.execution.host_operations.contains(&op) {
+                continue;
+            }
             let Some(ty) = scalar_type(&data.types[data.operations[op].ty].ty) else {
                 continue;
             };
@@ -144,6 +150,9 @@ pub(super) fn plan(data: &Program<Scheduled>) -> Result<Host, OptimizeError> {
         let tasks: Option<Vec<_>> = outputs
             .into_iter()
             .map(|output| {
+                if !data.state.execution.host_values.contains(&output.expression) {
+                    return None;
+                }
                 let ty = scalar_type(&data.types[data.expressions[output.expression].ty].ty)?;
                 let value = lower.expression(output.expression)?;
                 let slot = *data.state.abi.buffer_bindings.get(&output.buffer?)?;
@@ -329,24 +338,10 @@ impl<'a> Lower<'a> {
             ExprKind::Tuple(fields) => {
                 ScalarExpr::Tuple(fields.iter().map(|e| self.expression(*e)).collect::<Option<_>>()?)
             }
-            ExprKind::Project { tuple, index } => {
-                // SOAC results can be split across buffers. Read only the
-                // selected scalar field, without requiring its sibling arrays.
-                if let ExprKind::OperationResult(op) = data.expressions[*tuple].kind {
-                    if let Some(Value::Tuple(fields)) = data.state.materialized.get(&op) {
-                        let buffer = singleton_buffer(fields.get(*index)?)?;
-                        return Some(ScalarExpr::Read {
-                            source: source(*data.state.abi.buffer_bindings.get(&buffer)?),
-                            offset: 0,
-                            ty: scalar_type(ty)?,
-                        });
-                    }
-                }
-                ScalarExpr::Field {
-                    tuple: Box::new(self.expression(*tuple)?),
-                    index: *index,
-                }
-            }
+            ExprKind::Project { tuple, index } => ScalarExpr::Field {
+                tuple: Box::new(self.expression(*tuple)?),
+                index: *index,
+            },
             ExprKind::Parameter(p) => {
                 if let Some(value) = self.parameters.get(p) {
                     return Some(value.clone());
@@ -442,12 +437,6 @@ impl<'a> Lower<'a> {
             ExprKind::OperationResult(op) => {
                 if let Some(value) = self.operations.get(op) {
                     value.clone()
-                } else if let Some(buffer) = data.state.materialized.get(op).and_then(singleton_buffer) {
-                    ScalarExpr::Read {
-                        source: source(*data.state.abi.buffer_bindings.get(&buffer)?),
-                        offset: 0,
-                        ty: scalar_type(ty)?,
-                    }
                 } else {
                     self.operation(*op)?
                 }

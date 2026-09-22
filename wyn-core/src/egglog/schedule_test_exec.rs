@@ -85,6 +85,7 @@ struct Frame {
     buffers: BTreeMap<BufferId, Value>,
 }
 
+#[derive(Clone)]
 struct Machine<'a> {
     data: &'a Program<Scheduled>,
     buffers: BTreeMap<BufferId, Value>,
@@ -443,7 +444,16 @@ impl Machine<'_> {
                 frame.parameters.get(id).unwrap_or_else(|| panic!("unbound parameter {id:?}")).clone()
             }
             ExprKind::OperationResult(id) => {
-                frame.operations.get(id).unwrap_or_else(|| panic!("unbound operation {id:?}")).clone()
+                if let Some(value) = frame.operations.get(id) {
+                    value.clone()
+                } else if let Some((helper, captures)) = self.data.state.execution.expansions.get(id) {
+                    let args = captures.iter().map(|&e| self.source(e, frame)).collect();
+                    // Rematerialized helpers are read-only. Use an invocation
+                    // frame with the same backing arrays and dispatch context.
+                    self.clone().call(*helper, args).into_iter().next().unwrap()
+                } else {
+                    panic!("unbound operation {id:?}");
+                }
             }
             ExprKind::Array(array) => self.array(array, frame),
             ExprKind::Tuple(ids) => Value::Tuple(ids.iter().map(|&id| self.source(id, frame)).collect()),

@@ -25,19 +25,6 @@ impl Planner<'_> {
         let totals = self.slot(op, "totals", 0, false);
         let offsets = self.slot(op, "offsets", 0, false);
 
-        let flags_kernel = self.kernel(op, "flags");
-        let invocation = self.invocations(flags_kernel, n.clone());
-        let (active, i) = (invocation.body, invocation.index.clone());
-        let elements = self.read_inputs(active, &inputs, i.clone());
-        let elements = self.invoke_body(active, &map, elements, "map")?;
-        let result = self.invoke_body(active, &body, elements, "predicate")?;
-        let [predicate] = result.as_slice() else {
-            return Err(error("filter predicate must return one value"));
-        };
-        self.store(active, &flags, i, Value::op("bool_to_u32", [predicate.clone()]));
-        self.finish_loop(&invocation, active, vec![]);
-        self.dispatch(op, host, flags_kernel);
-
         let prefix_kernel = self.kernel(op, "local_offsets");
         let element = intern_type(&mut self.data.ir, Type::Constructed(TypeName::UInt(32), vec![]));
         let shared = [0, 1].map(|id| Value::Workgroup {
@@ -71,7 +58,16 @@ impl Planner<'_> {
         let pad = self.block(prefix_kernel, vec![]);
         let loaded = self.block(prefix_kernel, vec!["flag".into()]);
         self.branch(tile_loop.body, valid.clone(), read, pad, Some(loaded));
-        let flag = self.load(read, flags.clone(), index.clone(), "flag");
+        // Evaluate each live predicate in the same invocation that scans its
+        // tile. Padding lanes skip the predicate but participate in barriers.
+        let elements = self.read_inputs(read, &inputs, index.clone());
+        let elements = self.invoke_body(read, &map, elements, "map")?;
+        let result = self.invoke_body(read, &body, elements, "predicate")?;
+        let [predicate] = result.as_slice() else {
+            return Err(error("filter predicate must return one value"));
+        };
+        let flag = Value::op("bool_to_u32", [predicate.clone()]);
+        self.store(read, &flags, index.clone(), flag.clone());
         self.jump(read, loaded, vec![flag]);
         self.jump(pad, loaded, vec![Value::Int(0)]);
         let flag = Value::local("flag");

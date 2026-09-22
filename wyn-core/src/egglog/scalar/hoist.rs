@@ -37,7 +37,7 @@ pub(super) fn ordered(data: &Ir, selected: &BTreeSet<ExprId>) -> Vec<ExprId> {
 
 // A whitelist is intentional: catalog purity alone does not prove that an
 // expression is safe on paths that previously did not evaluate it.
-fn total_node(data: &Ir, id: ExprId) -> bool {
+pub(in crate::egglog) fn total_node(data: &Ir, id: ExprId) -> bool {
     match &data.expressions[id].kind {
         ExprKind::Int(_)
         | ExprKind::FloatBits(_)

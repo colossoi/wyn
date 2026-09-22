@@ -6,11 +6,15 @@
       ((set (ContainsCollective parent) true)) :ruleset structure)
 (rule ((Site op r) (= true (ContainsCollective op))) ((SplitRegion r)) :ruleset structure)
 (rule ((ScalarCandidate op t) (= false (ContainsCollective op)))
-      ((ScalarValue op t) (set (ScalarBoundary op) true)) :ruleset classify)
+      ((set (ScalarBoundary op) true)) :ruleset classify)
+(rule ((ScalarCandidate op t) (= false (ContainsCollective op)) (= (Rematerialize op) false))
+      ((ScalarValue op t)) :ruleset residency)
 ; Keep runtime control and its collectives in one device invocation. Nested
 ; SOACs use local serial recipes instead of conditional/repeated host launches.
 (rule ((ScalarCandidate op t) (SourceControl op))
-      ((ScalarValue op t) (set (ScalarBoundary op) true)) :ruleset classify)
+      ((set (ScalarBoundary op) true)) :ruleset classify)
+(rule ((ScalarCandidate op t) (SourceControl op) (= (Rematerialize op) false))
+      ((ScalarValue op t)) :ruleset residency)
 (rule ((HostRoot entry r)) ((HostRegion r)) :ruleset residency)
 (rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
 (rule ((OwnedRegion entry r) (Site op r) (Enters op child))
@@ -55,8 +59,8 @@
 ; Only actual uses join those summaries; there is no stage x expression search.
 (rule ((PhaseInput stage op role) (Operand op role e)) ((Demand (InStage stage) e)) :ruleset residency)
 ; Scalar control bodies may capture earlier executions through nested regions.
-(rule ((Phase (Stage op "scalar") r) (SourceDependency op before) (Produces producer (Result before i)))
-      ((Needs (Stage op "scalar") (Result before i))) :ruleset residency)
+(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") r) (SourceDependency op before) (Produces producer (Result before i)))
+      ((Needs (Stage leader "scalar") (Result before i))) :ruleset residency)
 ; Lengths follow view metadata; reading an allocation's size does not require
 ; waiting for its element writer. Compacted lengths do require the count writer.
 (rule ((PhaseDomain stage n width)) ((ExtentDemand stage n)) :ruleset residency)
@@ -71,7 +75,7 @@
 (rule ((LengthDemand stage e) (ValueRef e value) (SameBacking value source)) ((LengthDemand stage source)) :ruleset residency)
 (rule ((LengthDemand stage e) (SliceView e source start end))
       ((Demand (InStage stage) start) (Demand (InStage stage) end)) :ruleset residency)
-(rule ((HostRegion r) (Site op r) (ScalarSite op) (Operand op role e))
+(rule ((HostRegion r) (Site op r) (ScalarSite op) (= (ScalarBoundary op) false) (Operand op role e))
       ((Demand (InOperation op) e)) :ruleset residency)
 (rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit) e)) :ruleset residency)
 (rule ((Demand site e) (References e value)) ((Requires site value)) :ruleset residency)

@@ -8,6 +8,7 @@ mod fold;
 mod hoist;
 mod read;
 pub(super) use hoist::index as placement_index;
+pub(super) use hoist::total_node;
 
 /// Fold constants and simplify scalar expressions, optionally exploring algebraic alternatives.
 pub fn simplify(

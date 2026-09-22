@@ -33,6 +33,80 @@ fn kernel_count(data: &Program<Scheduled>) -> usize {
 }
 
 #[test]
+fn immutable_input_scalar_loads_are_read_by_their_consumers() {
+    let result = compile("entry main(xs: []i32) []i32 = let first = xs[0] in map(|x:i32|x+first, xs)");
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9])]),
+        [Value::array([10, 7, 14])]
+    );
+}
+
+#[test]
+fn dynamic_indices_and_small_helpers_rematerialize_in_consumers() {
+    let result = compile(
+        "def adjust(x:i32) i32=x*x+1
+        entry main(xs:[]i32,k:i32) []i32 =
+        let bias=adjust(xs[k]) in map(|x:i32|x+bias,xs)",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9]), Value::Int(1)]),
+        [Value::array([10, 7, 14])]
+    );
+}
+
+#[test]
+fn consecutive_gpu_scalar_loops_share_one_kernel_and_keep_intermediates_local() {
+    let result = compile(
+        "entry main(xs:[]i32,n:i32) []i32 =
+        let a=loop acc=xs[0] for i<n do acc+i in
+        let b=loop acc=a for i<n do acc+i*2 in map(|x:i32|x+b,xs)",
+    );
+    assert_eq!(kernel_count(&result), 2);
+    let group = result.state.execution.groups.values().find(|group| group.len() == 2).unwrap();
+    assert!(!result.state.materialized.contains_key(&group[0]));
+    assert!(result.state.materialized.contains_key(&group[1]));
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9]), Value::Int(4)]),
+        [Value::array([28, 25, 32])]
+    );
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9]), Value::Int(0)]),
+        [Value::array([10, 7, 14])]
+    );
+}
+
+#[test]
+fn mutable_scalar_snapshot_stays_before_the_update() {
+    let result = compile(
+        "entry main(xs:*[3]i32) [3]i32 =
+        let old=xs[0] in let updated=scatter(xs,[0],[100]) in
+        map(|x:i32|x+old,updated)",
+    );
+    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9])]),
+        [Value::array([105, 7, 14])]
+    );
+}
+
+#[test]
+fn mutable_alias_through_control_preserves_the_snapshot() {
+    let result = compile(
+        "entry main(xs:*[3]i32,flag:bool) [3]i32 =
+        let view=if flag then xs[0..2] else xs[1..3] in let old=view[0] in
+        let updated=scatter(xs,[0],[100]) in map(|x:i32|x+old,updated)",
+    );
+    for (flag, expected) in [(true, [105, 7, 14]), (false, [102, 4, 11])] {
+        assert_eq!(
+            run(&result, vec![Value::array([5, 2, 9]), Value::Bool(flag)]),
+            [Value::array(expected)]
+        );
+    }
+}
+
+#[test]
 fn literal_tuple_reduction_has_a_fixed_scratch_capacity() {
     let source = "def min_pair(hits: [4](i32, i32)) (i32, i32) =
          reduce(|(a, ai): (i32, i32), (b, bi): (i32, i32)|
@@ -311,10 +385,10 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
     let scan = compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
     assert_eq!(kernel_count(&scan), 3);
-    assert_eq!(kernel_count(&filter), 4);
+    assert_eq!(kernel_count(&filter), 3);
     for (result, names) in [
         (&scan, &["chunks", "combine", "offsets"][..]),
-        (&filter, &["flags", "local_offsets", "offsets", "compact"][..]),
+        (&filter, &["local_offsets", "offsets", "compact"][..]),
     ] {
         let stages: std::collections::BTreeMap<_, _> = result
             .state

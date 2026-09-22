@@ -402,7 +402,7 @@ fn compacted_capacity_and_live_count_are_distinct() {
         (Produces (Stage (OperationId 0) "compact") (Result (OperationId 0) 0))
     "#,
     );
-    assert_eq!(count(&g, "Phase"), 4);
+    assert_eq!(count(&g, "Phase"), 3);
     assert_eq!(count(&g, "Allocation"), 6);
     g.parse_and_run_program(
         None,

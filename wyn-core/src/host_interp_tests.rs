@@ -93,13 +93,13 @@ fn uniform_sized_launches_scale_with_capacity_and_clamp_the_grid() {
 }
 
 #[test]
-fn reduction_dispatches_parallel_stages_and_copies_scalar_result_on_host() {
+fn reduction_dispatches_parallel_stages_and_publishes_scalar_result_on_gpu() {
     let program = generated("entry sum(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)");
     let mut backend = Trace::default();
     let input = backend.input(vec![0; 137 * 4]);
     let result = program.run("sum", &[input], &mut backend).unwrap();
-    assert_eq!(backend.dispatches.len(), 2);
-    assert_eq!(backend.scalar_writes.len(), 1);
+    assert_eq!(backend.dispatches.len(), 3);
+    assert!(backend.scalar_writes.is_empty());
     assert!(!backend.freed.is_empty());
     assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 4);
 }

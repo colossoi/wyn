@@ -112,8 +112,20 @@ fn fixed_output_lengths_do_not_emit_element_reads_or_array_constructions() {
             expected,
             "only the indexed output value needs array constructions: {array}"
         );
+        let calls = instructions
+            .values()
+            .filter(|node| {
+                matches!(
+                    node.data,
+                    InstKind::Op {
+                        tag: OpTag::Call(_),
+                        ..
+                    }
+                )
+            })
+            .count();
         assert_eq!(
-            instructions.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
+            instructions.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count() + calls,
             expected,
             "length queries must not reload the captured element: {array}"
         );
@@ -325,7 +337,7 @@ fn scan_and_filter_emit_all_scheduled_kernels() {
     let scan = compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
     assert_eq!(scan.entry_points.len(), 3);
-    assert_eq!(filter.entry_points.len(), 4);
+    assert_eq!(filter.entry_points.len(), 3);
 }
 
 #[test]

@@ -100,7 +100,7 @@ impl Program {
                     quote!(#primitive::from_le_bytes(support::scalar_bytes(#name, #offset)?))
                 } else {
                     let reader = format_ident!("read_{}", primitive);
-                    quote!(support::#reader(device, queue, &#name, #offset)?)
+                    quote!(support::#reader(device, queue, encoder, &#name, #offset)?)
                 };
                 if *ty == ScalarType::Bool {
                     quote!(#read != 0)
@@ -172,7 +172,9 @@ impl Program {
         } else {
             quote!(value.to_le_bytes())
         };
-        Ok(quote!({let value = #value; queue.write_buffer(&#resource, #offset, &#bytes);}))
+        Ok(
+            quote!({let value = #value; support::write_buffer(device, encoder, &#resource, #offset, &#bytes);}),
+        )
     }
 }
 

@@ -131,6 +131,15 @@ cargo run --bin wyn -- build input.wyn --output-tlc out.tlc --output-mir out.ssa
 cd extra/viz && cargo run -- pipeline ../../shader.wgsl
 ```
 
+Generated Rust/WGPU modules provide `host_<entry>` to record and submit an entry.
+Entries without CPU readbacks also provide `encode_<entry>`, taking
+`&mut HostContext` and `&mut wgpu::CommandEncoder`. The caller can record attachment
+clears, generated compute/render passes, and other commands in the same encoder,
+then submit once. Reuse the context across frames and submit recorded calls in
+order. If recording fails, discard the encoder because it may contain partial
+commands. Entries requiring CPU readbacks submit the pending commands and readback
+copy together, then resume recording after the read completes.
+
 The egglog route constructs `map`, `reduce`, and `scan` as Scremas
 in `egglog::from_tlc`. Full expressions, types, bodies, argument values, control
 flow, and metadata are retained in `IdArena` sidecars. Fusion receives only a
@@ -159,12 +168,21 @@ absorption. Horizontal fusion and fusion across scan barriers remain unimplement
 After expression insertion, `schedule.egg` selects execution recipes. Rust instantiates their
 CFGs and scalar payloads in sidecar arenas. Maps use parallel elementwise kernels;
 reductions use chunk and combine dispatches; scans add an offset application
-dispatch; filters use flags, local offsets, combined offsets and compaction.
+dispatch; filters evaluate predicates and local offsets together, then combine
+offsets and compact.
 Chunks contain 64 consecutive elements and preserve operator order. Combine
 dispatches use one invocation. Grid-stride loops cap launches at 65,535
 workgroups. Empty inputs still initialize collective identities and lengths.
 Nested array work becomes local device loops. Potentially colliding indexed
 writes and effectful bodies use ordered single-invocation kernels.
+
+The same scheduling egraph derives CPU availability, bounded rematerialization
+costs, and scalar kernel groups in its existing structure, classification, and
+residency passes. CPU-available scalar computations can run on the host; GPU
+dependencies remain on the GPU. Cheap, immutable scalar expressions can be
+evaluated by their consumers. Consecutive compatible GPU scalar operations share
+a kernel, with only escaping results stored in buffers. Mutable reads, effects,
+and unbounded work are excluded from rematerialization.
 
 The scaffold preserves host branches and loops, including conditional and
 repeated dispatch sites. A launch completes and makes its writes visible before

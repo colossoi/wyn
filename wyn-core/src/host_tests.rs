@@ -76,6 +76,19 @@ fn host_program_preserves_compute_phases_and_returns_source_results() {
 }
 
 #[test]
+fn rust_recording_api_batches_scan_passes_and_scratch_clears() {
+    let program = compile("entry main(xs: []i32) []i32 = scan(|a:i32,b:i32|a+b,0,xs)");
+    let rust = program.to_rust_wgpu("scan.wgsl", ShaderFormat::Wgsl).unwrap();
+    let (wrapper, recording) = rust.split_once("pub fn encode_main(").unwrap();
+    assert_eq!(wrapper.matches("queue.submit(").count(), 1);
+    assert_eq!(wrapper.matches("create_command_encoder(").count(), 1);
+    assert!(!recording.contains("queue.submit("));
+    assert!(!recording.contains("create_command_encoder("));
+    assert!(recording.contains("encoder.clear_buffer("));
+    assert_eq!(recording.matches("pass.dispatch_workgroups(").count(), 3);
+}
+
+#[test]
 fn both_host_outputs_include_buffer_capacity_arithmetic() {
     let program = compile("entry main(xs: []i32) []i32 = map(|x:i32|x+1,xs)");
     let whl = program.to_whl("map.wgsl", ShaderFormat::Wgsl).unwrap();
@@ -114,8 +127,12 @@ fn integer_capacity_expressions_reach_both_hosts() {
     assert!(rust.contains(".wrapping_mul("));
     assert!(rust.contains("n: &Buffer"));
     let compact: String = rust.split_whitespace().collect();
-    assert!(compact.contains("support::read_i32(device,queue,&n,"));
+    assert!(compact.contains("support::read_i32(device,queue,encoder,&n,"));
     assert!(!rust.contains("read_host_scalar"));
+    assert!(
+        !rust.contains("pub fn encode_main("),
+        "readback entries must own their submissions"
+    );
 }
 
 #[test]
@@ -138,12 +155,7 @@ fn scalar_output_descriptors_preserve_names_types_and_byte_ranges() {
         assert!(rust.contains("size: 4u64"));
         assert!(rust.contains("Buffer::clone("));
         assert!(rust.contains("pub mod output"));
-        for operation in [
-            "pub fn read_",
-            "map_async",
-            "copy_buffer_to_buffer",
-            "from_le_bytes",
-        ] {
+        for operation in ["pub fn read_", "map_async", "from_le_bytes"] {
             assert!(
                 !rust.contains(operation),
                 "output descriptor contains {operation}"
@@ -204,13 +216,7 @@ fn tuple_output_descriptors_require_no_readback_or_decoder() {
         assert!(rust.contains(&format!("name: \"result_{index}\"")));
         assert!(rust.contains(&format!("ResultLayout::Scalar(ResultScalar::{scalar})")));
     }
-    for operation in [
-        "pub fn read_",
-        "map_async",
-        "copy_buffer_to_buffer",
-        "from_le_bytes",
-        ".poll(",
-    ] {
+    for operation in ["pub fn read_", "map_async", "from_le_bytes", ".poll("] {
         assert!(
             !rust.contains(operation),
             "output descriptor contains {operation}"
@@ -347,7 +353,7 @@ fn rust_caller_provided_results_use_source_fields() {
         for parameter in parameters {
             assert_eq!(
                 rust.matches(&format!("{parameter}: &Buffer")).count(),
-                1,
+                1 + usize::from(rust.contains("pub fn encode_generated(")),
                 "{rust}"
             );
             assert!(
@@ -619,7 +625,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
         let rust = program.to_rust_wgpu("storage_access", format).unwrap();
         let phase = rust
             .split("let compute_")
-            .find(|phase| phase.contains("entry_point: Some(\"reproduce_local_offsets\")"))
+            .find(|phase| phase.contains("entry_point: Some(\"reproduce_compact\")"))
             .unwrap();
         let layout = phase.split("let pipeline =").next().unwrap();
         let binding = layout
@@ -635,7 +641,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
         let phase = whl
             .kernels
             .values()
-            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_local_offsets")
+            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_compact")
             .unwrap();
         let abi = phase.options.get(":abi").unwrap().list().unwrap();
         let binding = abi
@@ -811,7 +817,7 @@ fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
                 matches!(allocation, Allocation::Buffer { resource, .. } if !entry.results.contains(resource))
             }).count();
             assert_eq!(call.matches("support::scratch_buffer(").count(), scratch);
-            assert_eq!(call.matches("scratch_reset.clear_buffer(").count(), scratch);
+            assert_eq!(call.matches("encoder.clear_buffer(").count(), scratch);
             let returned_buffers = entry.allocations.iter().filter(|allocation| {
                 matches!(allocation, Allocation::Buffer { resource, .. } if entry.results.contains(resource))
             }).count();

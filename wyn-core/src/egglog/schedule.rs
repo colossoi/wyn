@@ -62,6 +62,7 @@ pub fn schedule(
     graph.update(|mut sink| {
         outputs(&mut converted, &mut sink)?;
         facts(&converted, &summary, count_type, topology, &mut sink)?;
+        super::execution::order_facts(&schedules, &mut sink)?;
         abi::facts(
             &converted.state.abi.inputs,
             &converted.state.outputs,
@@ -272,12 +273,17 @@ impl Planner<'_> {
         device: bool,
     ) -> Result<BlockId, OptimizeError> {
         for op in self.schedules.get(&region).cloned().unwrap_or_default() {
-            for value in self.placements.get(&PlacementSite::Operation(op)).cloned().unwrap_or_default() {
-                self.emit(block, Instruction::BindExpression(value, Value::Source(value)));
+            if device || !self.data.state.execution.leaders.contains_key(&op) {
+                self.emit_placements(op, block);
             }
             block = self.operation(op, block, device)?;
         }
         Ok(block)
+    }
+    fn emit_placements(&mut self, op: OperationId, block: BlockId) {
+        for value in self.placements.get(&PlacementSite::Operation(op)).cloned().unwrap_or_default() {
+            self.emit(block, Instruction::BindExpression(value, Value::Source(value)));
+        }
     }
     fn result(&self, region: RegionId) -> Value {
         let values: Vec<_> = self.data.regions[region].results.iter().copied().map(Value::Source).collect();
@@ -293,6 +299,29 @@ impl Planner<'_> {
         block: BlockId,
         device: bool,
     ) -> Result<BlockId, OptimizeError> {
+        if !device && self.data.state.execution.leaders.get(&op).is_some_and(|&leader| leader != op) {
+            return Ok(block);
+        }
+        if !device && self.data.state.execution.rematerialized.contains(&op) {
+            let captures = super::planning::scalar_captures(&self.data.ir, op);
+            let names: Vec<_> = (0..captures.len()).map(|i| format!("c{i}")).collect();
+            let helper = self.function(
+                format!("expand{}", op.as_u32()),
+                FunctionKind::Device,
+                names.clone(),
+                1,
+            );
+            for (&e, name) in captures.iter().zip(names) {
+                self.emit(helper, Instruction::BindExpression(e, Value::Local(name)));
+            }
+            let end = self.operation(op, helper, true)?;
+            let Some(&result) = self.operation_values.get(&op) else {
+                return Err(error("missing rematerialized result expression"));
+            };
+            self.returns(end, vec![Value::Source(result)]);
+            self.data.state.execution.expansions.insert(op, (helper, captures));
+            return Ok(block);
+        }
         if !device && self.resources.stages.contains_key(&(op, "scalar".into())) {
             return self.scalar_dispatch(op, block);
         }

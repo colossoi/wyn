@@ -41,6 +41,30 @@ pub(in crate::egglog) fn read(
 ) -> Result<Readout, OptimizeError> {
     let mut result = Readout::default();
     let operations = keys(graph, "OperationId")?;
+    graph.function_entries("Rematerialize", |entry| {
+        if graph.value_to_base::<bool>(entry.output) {
+            data.state.execution.rematerialized.insert(OperationId::from(operations[&entry.inputs[0]]));
+        }
+    })?;
+    rows(graph, "HostValue", |a| {
+        data.state.execution.host_values.insert(ExprId::from(number(graph, a[0])?));
+        Ok(())
+    })?;
+    rows(graph, "HostOperation", |a| {
+        data.state.execution.host_operations.insert(OperationId::from(number(graph, a[0])?));
+        Ok(())
+    })?;
+    let mut members = BTreeMap::new();
+    rows(graph, "PlannedScalar", |a| {
+        let leader = OperationId::from(number(graph, a[0])?);
+        let op = OperationId::from(number(graph, a[1])?);
+        members.insert((leader, number(graph, a[2])?), op);
+        data.state.execution.leaders.insert(op, leader);
+        Ok(())
+    })?;
+    for ((leader, _), member) in members {
+        data.state.execution.groups.entry(leader).or_default().push(member);
+    }
     let expressions = keys(graph, "ExprId")?;
     let mut status = Ok(());
     graph.function_entries_while("Plan", |entry| {
@@ -221,8 +245,14 @@ pub(in crate::egglog) fn read(
         let grid = data.state.grids.alloc(GridData {
             groups: [groups, Value::Int(1), Value::Int(1)],
         });
-        let captures = if key.1 == "scalar" {
-            scalar_captures(&data.ir, key.0)
+        let captures: Vec<_> = if key.1 == "scalar" {
+            let members = data.state.execution.groups.get(&key.0).cloned().unwrap_or_else(|| vec![key.0]);
+            let mut captures = BTreeSet::new();
+            for &op in &members {
+                captures.extend(scalar_captures(&data.ir, op));
+            }
+            captures.retain(|&e| !matches!(data.expressions[e].kind, ExprKind::OperationResult(op) if members.contains(&op)));
+            captures.into_iter().collect()
         } else {
             let mut captures = BTreeSet::new();
             data.operations[key.0].kind.for_each_operand(&mut |operand| {
@@ -336,7 +366,7 @@ pub(in crate::egglog) fn read(
 
 // Capture external leaves, not whole expressions: branches and partial
 // expressions must still execute inside the scalar invocation that owns them.
-fn scalar_captures(data: &Ir, op: OperationId) -> Vec<ExprId> {
+pub(in crate::egglog) fn scalar_captures(data: &Ir, op: OperationId) -> Vec<ExprId> {
     let mut operations = vec![op];
     let mut regions = BTreeSet::new();
     let mut pending_regions = data.operations[op].kind.structured_regions();

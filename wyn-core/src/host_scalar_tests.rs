@@ -159,25 +159,49 @@ fn spirv_host_captures_keep_push_constant_inputs() {
 }
 
 #[test]
-fn shared_scalar_readback_runs_between_reduction_and_map() {
+fn gpu_scalar_capture_stays_between_reduction_and_map_without_readback() {
     let compiled = lower_ssa_to_wgsl_with_program(compile_thru_ssa(
         "entry main(xs:[137]i32) []i32=let total=reduce(|a:i32,b:i32|a+b,0,xs) in map(|x:i32|x+total*total,xs)"
     ).unwrap()).unwrap();
     let host = &compiled.program;
     let operations = &host.entries[0].operations;
-    let scalar = operations.iter().position(|op| matches!(op, Operation::Scalar { .. })).unwrap();
-    assert!(scalar > 0);
-    assert!(operations[..scalar].iter().all(|op| matches!(op, Operation::Dispatch { .. })));
-    assert!(matches!(operations[scalar + 1], Operation::Dispatch { .. }));
+    assert!(operations.iter().all(|op| matches!(op, Operation::Dispatch { .. })));
     let whl = host.to_whl("test.wgsl", ShaderFormat::Wgsl).unwrap();
-    let read = whl.find("gpu-read-scalar").unwrap();
-    assert!(whl[..read].contains("(gpu-dispatch "), "{whl}");
-    assert!(whl[read..].contains("(gpu-dispatch "), "{whl}");
+    assert!(!whl.contains("gpu-read-scalar"), "{whl}");
+    let rust = host.to_rust_wgpu("test.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("pub fn encode_main("), "{rust}");
+    assert!(!rust.contains("read_gpu_word"), "{rust}");
+}
+
+#[test]
+fn cpu_available_operations_can_cross_materialized_scalar_boundaries() {
+    let compiled = compile_thru_ssa(
+        "entry main(xs:[]i32,n:i32) []i32 =
+        let a=loop acc=0 for i<n do acc+i in
+        let b=loop acc=a for i<n do acc+i*2 in map(|x:i32|x+b,xs)",
+    )
+    .unwrap();
+    let host = host::Program::new(compiled.global_context.pipeline).unwrap();
+    let whl = host.to_whl("test.spv", ShaderFormat::Spirv).unwrap();
+    let rust = host.to_rust_wgpu("test.spv", ShaderFormat::Spirv).unwrap();
+    assert!(!rust.contains("read_gpu_word"), "{rust}");
+    assert_eq!(
+        host.entries[0].operations.iter().filter(|op| matches!(op, Operation::Dispatch { .. })).count(),
+        1
+    );
     let program = Program::parse(&whl).unwrap();
     let mut backend = Trace::default();
-    let xs = backend.input(vec![0; 137 * 4]);
-    program.run("main", &[xs], &mut backend).unwrap();
-    assert!(!backend.scalar_writes.is_empty());
+    let args = program
+        .entry("main")
+        .unwrap()
+        .parameters
+        .iter()
+        .map(|p| {
+            backend.input(if p.source_name() == "xs" { vec![0; 12] } else { 4i32.to_le_bytes().to_vec() })
+        })
+        .collect::<Vec<_>>();
+    program.run("main", &args, &mut backend).unwrap();
+    assert!(backend.scalar_writes.iter().any(|(_, word)| i32::from_le_bytes(*word) == 18));
 }
 
 #[test]

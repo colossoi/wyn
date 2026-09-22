@@ -99,7 +99,7 @@ impl Program {
             use wgpu::{
                 BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent, BlendFactor,
                 BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages, ColorTargetState,
-                ColorWrites, CompareFunction, ComputePassDescriptor, ComputePipelineDescriptor,
+                ColorWrites, CommandEncoder, CompareFunction, ComputePassDescriptor, ComputePipelineDescriptor,
                 DepthStencilState, Device, Extent3d, Face, FragmentState, FrontFace, IndexFormat,
                 LoadOp, MultisampleState, Operations, PolygonMode, PrimitiveState, PrimitiveTopology,
                 Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
@@ -249,7 +249,7 @@ impl Program {
                     quote!(i64::from(#ty::from_le_bytes(support::scalar_bytes(#id,#offset)?)))
                 } else {
                     let read = if *signed { quote!(read_i32) } else { quote!(read_u32) };
-                    quote!(i64::from(support::#read(device,queue,&#id,#offset)?))
+                    quote!(i64::from(support::#read(device,queue,encoder,&#id,#offset)?))
                 }
             }
             Expr::TextureDimension { resource: r, axis } => {
@@ -311,8 +311,10 @@ impl Program {
         context: &mut RustContext,
     ) -> Result<TokenStream, HostError> {
         let name = format_ident!("host_{}", rust_results::name(&entry.name));
+        let encode_name = format_ident!("encode_{}", rust_results::name(&entry.name));
         let source_name = &entry.name;
         let mut params = vec![];
+        let mut arguments = vec![];
         for &r in &entry.inputs {
             let id = resource(r);
             let ty = match self.interface.frame_graph.resources[r.0].kind {
@@ -322,10 +324,12 @@ impl Program {
                 FrameResourceKind::Sampler => quote!(&Sampler),
             };
             params.push(quote!(#id:#ty));
+            arguments.push(quote!(#id));
         }
         for name in &entry.scalar_inputs {
             let name = scalar(name);
             params.push(quote!(#name:u32));
+            arguments.push(quote!(#name));
         }
         let mut code = vec![];
         let mut scratch = vec![];
@@ -343,7 +347,7 @@ impl Program {
                         let slot = r.0;
                         scratch.push(quote! {
                             if let Some(buffer) = context.scratch.get(&#slot) {
-                                scratch_reset.clear_buffer(buffer, 0, None);
+                                encoder.clear_buffer(buffer, 0, None);
                             }
                         });
                         quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
@@ -384,9 +388,7 @@ impl Program {
                 0,
                 quote! {
                     if !context.scratch.is_empty() {
-                        let mut scratch_reset = device.create_command_encoder(&Default::default());
                         #(#scratch)*
-                        queue.submit(Some(scratch_reset.finish()));
                     }
                 },
             );
@@ -420,15 +422,43 @@ impl Program {
         context.device |= device.is_some();
         let context_param =
             if device.is_some() || used.contains("context") { quote!(context) } else { quote!(_context) };
-        let queue_param = if used.contains("queue") { quote!(queue) } else { quote!(_queue) };
-        Ok(quote! {
-            pub const #entry_id:&str=#source_name;
-            pub fn #name(#context_param:&mut HostContext,#queue_param:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
-                #device
-                #(#code)*
-                Ok(#results)
-            }
-        })
+        // A recording API must never submit the caller's encoder behind its
+        // back. Entries with genuine GPU readbacks retain the submitting API,
+        // batching everything between readbacks into one command buffer.
+        if used.contains("queue") {
+            Ok(quote! {
+                pub const #entry_id:&str=#source_name;
+                pub fn #name(#context_param:&mut HostContext,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
+                    #device
+                    let mut commands=device.create_command_encoder(&Default::default());
+                    let encoder=&mut commands;
+                    #(#code)*
+                    let output=#results;
+                    queue.submit(Some(commands.finish()));
+                    Ok(output)
+                }
+            })
+        } else {
+            context.device = true;
+            Ok(quote! {
+                pub const #entry_id:&str=#source_name;
+                /// Record and submit this entry. Reuse the context across calls.
+                pub fn #name(context:&mut HostContext,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
+                    let mut encoder=context.device.create_command_encoder(&Default::default());
+                    let output=#encode_name(context,&mut encoder,#(#arguments),*)?;
+                    queue.submit(Some(encoder.finish()));
+                    Ok(output)
+                }
+                /// Record this entry without submitting or waiting for the GPU.
+                /// Submit recorded calls in order, including calls sharing a context.
+                /// On error, discard the encoder; it may contain partial commands.
+                pub fn #encode_name(#context_param:&mut HostContext,encoder:&mut CommandEncoder,#(#params),*)->Result<OutputDescriptor,HostError>{
+                    #device
+                    #(#code)*
+                    Ok(#results)
+                }
+            })
+        }
     }
 
     fn rust_bindings(
@@ -523,13 +553,11 @@ impl Program {
             if groups.iter().any(|&group_count|group_count>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
             let pipeline = &context.#cached;
             #bindings
-            let mut encoder=device.create_command_encoder(&Default::default());
             {
                 let mut pass=encoder.begin_compute_pass(&ComputePassDescriptor{label:Some(#name),timestamp_writes:None});
                 pass.set_pipeline(&pipeline);#(#sets)*
                 pass.dispatch_workgroups(groups[0],groups[1],groups[2]);
             }
-            queue.submit(Some(encoder.finish()));
         }};
         Ok((create, run))
     }
@@ -814,7 +842,6 @@ impl Program {
             #(#views)*
             let pipeline=context.#cached([#(#formats),*],#depth_format,#sample_count)?;
             #bindings
-            let mut encoder=device.create_command_encoder(&Default::default());
             {
                 let mut pass=encoder.begin_render_pass(&RenderPassDescriptor{
                     label:Some(#vertex_name),color_attachments:&[#(#colors),*],depth_stencil_attachment:#depth_attachment,
@@ -822,7 +849,6 @@ impl Program {
                 });
                 pass.set_pipeline(&pipeline);#(#sets)* #(#vertices)* #viewport #scissor #draw
             }
-            queue.submit(Some(encoder.finish()));
         }};
         Ok((color_count, create, run))
     }

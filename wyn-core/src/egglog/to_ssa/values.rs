@@ -322,6 +322,14 @@ impl Body<'_, '_> {
             ExprKind::OperationResult(op) => {
                 if let Some(v) = self.environment.operations.get(op) {
                     Ok(v.clone())
+                } else if let Some((function, captures)) = data.state.execution.expansions.get(op) {
+                    let args = captures
+                        .iter()
+                        .map(|&e| self.expression_cached(e, cache))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let id =
+                        self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
+                    self.op(OpTag::Call(id), args, ty)
                 } else {
                     let Some(value) = data.state.materialized.get(op) else {
                         return Err(error(format!("unmaterialized capture {op:?}")));

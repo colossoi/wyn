@@ -91,17 +91,27 @@ impl Planner<'_> {
         host: BlockId,
     ) -> Result<BlockId, OptimizeError> {
         let kernel = self.kernel(op, "scalar");
-        let end = self.operation(op, kernel, true)?;
-        let Some(result) = self.operation_values.get(&op) else {
-            return Err(error("missing scalar result expression"));
-        };
-        let result = *result;
-        self.allocate_slots(op, host, false);
-        let destination = self.slot(op, "scalar", 0, false);
-        self.store(end, &destination, Value::Int(0), Value::Source(result));
+        let members = self.data.state.execution.groups.get(&op).cloned().unwrap_or_else(|| vec![op]);
+        let mut end = kernel;
+        let mut results = vec![];
+        for member in members {
+            self.emit_placements(member, end);
+            end = self.operation(member, end, true)?;
+            let Some(&result) = self.operation_values.get(&member) else {
+                return Err(error("missing scalar result expression"));
+            };
+            self.allocate_slots(member, host, false);
+            let destination = self.slot(member, "scalar", 0, false);
+            self.store(end, &destination, Value::Int(0), Value::Source(result));
+            if !matches!(destination, Value::Discarded) {
+                results.push((member, singleton(destination)));
+            }
+        }
         self.returns(end, vec![]);
         self.dispatch(op, host, kernel);
-        self.emit(host, Instruction::BindResult(op, singleton(destination)));
+        for (member, value) in results {
+            self.emit(host, Instruction::BindResult(member, value));
+        }
         Ok(host)
     }
 

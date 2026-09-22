@@ -27,6 +27,7 @@ mod abi;
 mod blocks;
 mod data;
 mod dependencies;
+mod execution;
 mod expressions;
 pub mod from_tlc;
 mod fusion;

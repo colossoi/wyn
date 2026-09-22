@@ -1,10 +1,10 @@
 //! Private support for generated host arithmetic and draw commands.
 pub use arithmetic::{ceiling, dimension, floor, size};
-use std::error::Error;
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::mpsc;
-use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, MapMode, PollType, Queue};
+use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, MapMode, PollType, Queue};
 
 #[derive(Debug)]
 pub enum HostError {
@@ -40,7 +40,8 @@ pub fn spirv_words(bytes: &[u8]) -> Result<Vec<u32>, HostError> {
     if bytes.len() < 20 || bytes.len() % 4 != 0 {
         return Err(HostError::Invalid("invalid SPIR-V module size".into()));
     }
-    let words: Vec<_> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let words: Vec<_> =
+        bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     if words[0] != 0x0723_0203 {
         return Err(HostError::Invalid("invalid SPIR-V module header".into()));
     }
@@ -57,6 +58,7 @@ pub fn push_constant_bytes(bytes: &[u8], size: u32) -> Result<&[u8], HostError> 
 fn read_gpu_word(
     device: &Device,
     queue: &Queue,
+    encoder: &mut CommandEncoder,
     buffer: &Buffer,
     offset: u32,
 ) -> Result<[u8; 4], HostError> {
@@ -77,9 +79,10 @@ fn read_gpu_word(
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, 4);
-    queue.submit(Some(encoder.finish()));
+    // Include all producers and the readback copy in the same submission.
+    let pending = std::mem::replace(encoder, device.create_command_encoder(&Default::default()));
+    queue.submit(Some(pending.finish()));
     let (sender, receiver) = mpsc::channel();
     staging.slice(..).map_async(MapMode::Read, move |result| {
         // Dropping the receiver cancels observation of this completed mapping.
@@ -116,16 +119,61 @@ pub fn scalar_bytes(bytes: &[u8], offset: u32) -> Result<[u8; 4], HostError> {
     bytes.try_into().map_err(|_| HostError::Invalid("invalid host scalar byte span".into()))
 }
 
-pub fn read_i32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) -> Result<i32, HostError> {
-    Ok(i32::from_le_bytes(read_gpu_word(device, queue, buffer, offset)?))
+pub fn read_i32(
+    device: &Device,
+    queue: &Queue,
+    encoder: &mut CommandEncoder,
+    buffer: &Buffer,
+    offset: u32,
+) -> Result<i32, HostError> {
+    Ok(i32::from_le_bytes(read_gpu_word(
+        device, queue, encoder, buffer, offset,
+    )?))
 }
 
-pub fn read_u32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) -> Result<u32, HostError> {
-    Ok(u32::from_le_bytes(read_gpu_word(device, queue, buffer, offset)?))
+pub fn read_u32(
+    device: &Device,
+    queue: &Queue,
+    encoder: &mut CommandEncoder,
+    buffer: &Buffer,
+    offset: u32,
+) -> Result<u32, HostError> {
+    Ok(u32::from_le_bytes(read_gpu_word(
+        device, queue, encoder, buffer, offset,
+    )?))
 }
 
-pub fn read_f32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) -> Result<f32, HostError> {
-    Ok(f32::from_le_bytes(read_gpu_word(device, queue, buffer, offset)?))
+pub fn read_f32(
+    device: &Device,
+    queue: &Queue,
+    encoder: &mut CommandEncoder,
+    buffer: &Buffer,
+    offset: u32,
+) -> Result<f32, HostError> {
+    Ok(f32::from_le_bytes(read_gpu_word(
+        device, queue, encoder, buffer, offset,
+    )?))
+}
+
+pub fn write_buffer(
+    device: &Device,
+    encoder: &mut CommandEncoder,
+    buffer: &Buffer,
+    offset: u64,
+    bytes: &[u8],
+) {
+    // Queue::write_buffer executes before the entire next submission. Record
+    // a copy instead so uploads retain their order relative to clears and uses,
+    // including multiple generated calls recorded into one caller-owned encoder.
+    let staging = device.create_buffer(&BufferDescriptor {
+        label: Some("Wyn scalar upload"),
+        size: bytes.len() as u64,
+        usage: BufferUsages::COPY_SRC,
+        mapped_at_creation: true,
+    });
+    staging.slice(..).get_mapped_range_mut().copy_from_slice(bytes);
+    staging.unmap();
+    encoder.copy_buffer_to_buffer(&staging, 0, buffer, offset, bytes.len() as u64);
 }
 
 pub fn draw_end(first: u32, count: u32) -> Result<u32, HostError> {

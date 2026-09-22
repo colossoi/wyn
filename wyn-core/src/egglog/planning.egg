@@ -27,6 +27,8 @@
 (relation ScalarCandidate (OperationKey TypeKey))
 (function ContainsCollective (OperationKey) bool :merge (or old new))
 (function ScalarBoundary (OperationKey) bool :merge (or old new))
+(function ParallelSafe (OperationKey) bool :merge (and old new))
+(function ParallelBodySafe (OperationKey) bool :merge (and old new))
 (relation SplitRegion (RegionKey))
 (relation ScalarValue (OperationKey TypeKey))
 (relation InputDomain (OperationKey Extent))

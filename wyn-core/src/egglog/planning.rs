@@ -23,10 +23,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub(super) mod abi;
 mod host_sizes;
 mod read;
+pub(super) use read::scalar_captures;
 pub(super) use read::{number, read, rows, Readout, Recipe};
 
 pub(super) const RULES: &str = concat!(
     include_str!("planning.egg"),
+    "\n",
+    include_str!("execution.egg"),
     "\n",
     include_str!("schedule.egg"),
     "\n",
@@ -60,6 +63,7 @@ pub(super) fn facts(
     topology: PipelineTopologyPolicy,
     sink: &mut FullState<'_, '_>,
 ) -> Result<(), Error> {
+    super::execution::facts(data, summary, sink)?;
     let count_type = sink.add("TypeId", i64::from(count_type.as_u32()))?;
     sink.add("CounterType", count_type)?;
     let mut values = BTreeSet::new();
@@ -454,7 +458,7 @@ pub(super) fn facts(
                 ) {
                     sink.add("ResultTuple", (key, operation))?;
                 } else {
-                    sink.add("DirectResult", (key, operation, 0i64))?;
+                    sink.add("ScalarResult", (key, operation))?;
                 }
             }
             ExprKind::Project { tuple, index } => {

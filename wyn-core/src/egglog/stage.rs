@@ -66,6 +66,7 @@ pub struct Scheduled {
     pub(super) physical_kernels: PhysicalKernelGraph,
     pub(super) unsupported_host: Option<BlockId>,
     pub(super) materialized: std::collections::BTreeMap<super::OperationId, super::Value>,
+    pub(super) execution: super::execution::Execution,
     pub(super) placements: IdArena<PlacementId, PlacementData>,
     pub(super) outputs: IdArena<OutputId, OutputData>,
     pub(super) blocks: IdArena<BlockId, BlockData>,

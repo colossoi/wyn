@@ -136,9 +136,13 @@
 ; Root environments use source values already present in the planning graph.
 (rule ((Phase stage r) (= stage (Stage op name)) (Operand op role (ExprId e)))
       ((AbiRootNeed (KernelRoot stage) (AbiExpr e))) :ruleset abi)
+(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") r) (Operand op role (ExprId e)))
+      ((AbiRootNeed (KernelRoot (Stage leader "scalar")) (AbiExpr e))) :ruleset abi)
 
 (rule ((Phase stage r) (= stage (Stage op name)) (Enters op child))
       ((AbiInvokes (KernelRoot stage) child)) :ruleset abi)
+(rule ((ScalarGroup op leader) (Phase (Stage leader "scalar") r) (Enters op child))
+      ((AbiInvokes (KernelRoot (Stage leader "scalar")) child)) :ruleset abi)
 (rule ((Phase stage r) (= stage (Stage op name)) (Callback op child))
       ((AbiInvokes (KernelRoot stage) child)) :ruleset abi)
 (rule ((AbiInvokes root r) (Site op r) (Operand op role (ExprId e)))

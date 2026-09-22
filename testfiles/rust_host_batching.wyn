@@ -1,0 +1,18 @@
+entry affine(xs: []i32, bias: i32) []i32 = map(|x:i32| x + bias*bias, xs)
+
+entry dynamic(n: i32) []i32 = iota(n*2+3)
+
+entry captured(xs: [137]i32) []i32 =
+  let total = reduce(|a:i32,b:i32| a+b, 0, xs) in
+  map(|x:i32| x + total*total, xs)
+
+entry indexed(xs: []i32) []i32 =
+  let first = xs[0] in map(|x:i32| x+first, xs)
+
+def adjust(x:i32) i32=x*x+1
+entry dynamic_index(xs:[]i32,k:i32) []i32 =
+  let bias=adjust(xs[k]) in map(|x:i32|x+bias,xs)
+
+entry grouped(xs:[]i32,n:i32) []i32 =
+  let a=loop acc=xs[0] for i<n do acc+i in
+  let b=loop acc=a for i<n do acc+i*2 in map(|x:i32|x+b,xs)
