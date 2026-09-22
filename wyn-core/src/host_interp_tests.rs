@@ -37,12 +37,69 @@ fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
 }
 
 #[test]
-fn reduction_executes_every_published_stage_and_releases_temporaries() {
+fn uniform_sized_launches_scale_with_capacity_and_clamp_the_grid() {
+    struct LaunchTrace {
+        trace: Trace,
+        bytes: u64,
+    }
+    impl Backend for LaunchTrace {
+        fn call(&mut self, program: &Program, name: &str, args: &[Value]) -> Result<Value> {
+            match name {
+                "gpu-buffer-size" => {
+                    assert_eq!(args[0], Value::Resource(2), "map output capacity");
+                    Ok(Value::Number(Number::U64(self.bytes)))
+                }
+                "gpu-texture-view" => Ok(args[0].clone()),
+                "gpu-draw" => Ok(Value::Nil),
+                _ => self.trace.call(program, name, args),
+            }
+        }
+    }
+    let source = include_str!("../../testfiles/rust_host_runtime_dispatch.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let program = Program::parse(&program.to_whl("runtime_dispatch", format).unwrap()).unwrap();
+        for (elements, groups) in [
+            (0, 1),
+            (64, 1),
+            (65, 2),
+            (320 * 200, 1_000),
+            (1280 * 800, 16_000),
+            (65_535 * 64 + 1, 65_535),
+        ] {
+            let mut backend = LaunchTrace {
+                trace: Trace::default(),
+                bytes: elements * 16,
+            };
+            // Uniform contents are deliberately unavailable: launching from
+            // capacity must not require scalar readback or extra host inputs.
+            program
+                .run(
+                    "reproduce",
+                    &[Value::Resource(1), Value::Resource(2), Value::Resource(3)],
+                    &mut backend,
+                )
+                .unwrap();
+            let [(_, actual)] = backend.trace.dispatches.as_slice() else {
+                panic!("one parallel map");
+            };
+            assert_eq!(actual, &[groups, 1, 1], "{format:?}, capacity={elements}");
+        }
+    }
+}
+
+#[test]
+fn reduction_dispatches_parallel_stages_and_copies_scalar_result_on_host() {
     let program = generated("entry sum(xs:[137]i32) i32 = reduce(|a:i32,b:i32|a+b,0,xs)");
     let mut backend = Trace::default();
     let input = backend.input(vec![0; 137 * 4]);
     let result = program.run("sum", &[input], &mut backend).unwrap();
-    assert_eq!(backend.dispatches.len(), program.kernels.len());
+    assert_eq!(backend.dispatches.len(), 2);
+    assert_eq!(backend.scalar_writes.len(), 1);
     assert!(!backend.freed.is_empty());
     assert_eq!(backend.buffers[&result.handle().unwrap()].len(), 4);
 }

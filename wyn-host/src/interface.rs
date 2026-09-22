@@ -1,11 +1,13 @@
 //! Published shader interfaces, resource identities, and execution domains.
 
-use crate::{ResultKind, ResultLayout};
+use crate::{ResultKind, ResultLayout, ScalarTask};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Published shader declarations and physical resource interfaces for one module.
 #[derive(Debug, Clone, Default)]
 pub struct ModuleInterface {
+    /// Scalar evaluations ordered at their consuming or replaced dispatch sites.
+    pub scalar_tasks: Vec<ScalarTask>,
     /// Individual pipelines in this program (one per top-level entry or multi-dispatch SOAC).
     pub pipelines: Vec<Pipeline>,
     /// Storage bindings that implement authored entry results. This preserves
@@ -122,58 +124,61 @@ impl FrameGraph {
                     }
                 }
                 Pipeline::Graphics(graphics) => {
-                    // Each `#[target(name)]` fragment output writes a render
-                    // resource, keyed by name as a texture so it shares identity
-                    // with any downstream pass that samples it. Attributed to the
-                    // fragment stage, which produces the attachments.
-                    let target_writes: Vec<FrameAccess> = graphics
+                    let Some(stage) = graphics.stages.first() else {
+                        continue;
+                    };
+                    // A draw is one scheduling operation. Its attachment writes
+                    // become available only after all shader inputs are ready.
+                    let mut writes: Vec<FrameAccess> = graphics
                         .fragment_outputs
                         .iter()
                         .map(|output| FrameAccess {
                             resource: builder.ensure_named(FrameResourceKind::Texture, &output.name),
                         })
                         .collect();
+                    let mut reads = Vec::new();
+                    let mut produces = BTreeSet::new();
+                    for stage in &graphics.stages {
+                        let accesses =
+                            builder.stage_accesses(pipeline_index, &graphics.bindings, &stage.uses);
+                        for access in accesses.reads {
+                            push_unique_access(&mut reads, access);
+                        }
+                        for access in accesses.writes {
+                            push_unique_access(&mut writes, access);
+                        }
+                        produces.extend(accesses.produces);
+                    }
+                    for attribute in &graphics.vertex_inputs {
+                        let resource =
+                            builder.ensure_named(FrameResourceKind::StorageBuffer, &attribute.name);
+                        push_unique_access(&mut reads, FrameAccess { resource });
+                    }
                     let indirect_resource = graphics.invocation.draw.indirect_commands().map(|buffer| {
                         builder.ensure_named(FrameResourceKind::StorageBuffer, buffer.frame_name())
                     });
                     let index_resource = graphics.invocation.draw.indices().map(|buffer| {
                         builder.ensure_named(FrameResourceKind::StorageBuffer, buffer.frame_name())
                     });
-                    for (stage_index, stage) in graphics.stages.iter().enumerate() {
-                        let accesses =
-                            builder.stage_accesses(pipeline_index, &graphics.bindings, &stage.uses);
-                        let is_vertex = matches!(stage.stage, ShaderStage::Vertex);
-                        let mut stage_reads = accesses.reads;
-                        if is_vertex {
-                            for resource in [indirect_resource, index_resource].into_iter().flatten() {
-                                if !stage_reads.iter().any(|access| access.resource == resource) {
-                                    stage_reads.push(FrameAccess { resource });
-                                }
-                            }
-                        }
-                        let mut stage_writes = accesses.writes;
-                        if matches!(stage.stage, ShaderStage::Fragment) {
-                            stage_writes.extend(target_writes.iter().cloned());
-                        }
-                        builder.push_pass(
-                            FramePassKind::from_shader_stage(&stage.stage),
-                            stage.entry_point.clone(),
-                            pipeline_index,
-                            stage_index,
-                            stage_reads,
-                            stage_writes,
-                            accesses.produces,
-                            &mut last_writer,
-                            &mut last_readers,
-                        );
-                        if is_vertex {
-                            if let Some(buffer_resource) = indirect_resource {
-                                builder.graph.indirect_draws.push(IndirectDrawDependency {
-                                    draw_pass: builder.graph.passes.len() - 1,
-                                    buffer_resource,
-                                });
-                            }
-                        }
+                    for resource in [indirect_resource, index_resource].into_iter().flatten() {
+                        push_unique_access(&mut reads, FrameAccess { resource });
+                    }
+                    builder.push_pass(
+                        FramePassKind::Draw,
+                        stage.entry_point.clone(),
+                        pipeline_index,
+                        0,
+                        reads,
+                        writes,
+                        produces,
+                        &mut last_writer,
+                        &mut last_readers,
+                    );
+                    if let Some(buffer_resource) = indirect_resource {
+                        builder.graph.indirect_draws.push(IndirectDrawDependency {
+                            draw_pass: builder.graph.passes.len() - 1,
+                            buffer_resource,
+                        });
                     }
                 }
             }
@@ -189,6 +194,7 @@ pub struct FramePass {
     pub name: String,
     pub kind: FramePassKind,
     pub pipeline_index: usize,
+    /// Compute-stage index; zero for a draw containing all graphics stages.
     pub stage_index: usize,
     pub reads: Vec<FrameAccess>,
     pub writes: Vec<FrameAccess>,
@@ -198,17 +204,7 @@ pub struct FramePass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FramePassKind {
     Compute,
-    Vertex,
-    Fragment,
-}
-
-impl FramePassKind {
-    fn from_shader_stage(stage: &ShaderStage) -> Self {
-        match stage {
-            ShaderStage::Vertex => FramePassKind::Vertex,
-            ShaderStage::Fragment => FramePassKind::Fragment,
-        }
-    }
+    Draw,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,19 +641,20 @@ pub enum DispatchSize {
         explicit: bool,
     },
     /// Dispatch `ceil(len / workgroup_size)` workgroups, where `len` is the
-    /// number of iterations resolved from the explicit `DispatchLen` source.
+    /// launch bound resolved from the explicit `DispatchLen` source.
     DerivedFrom {
         len: DispatchLen,
         workgroup_size: u32,
     },
 }
 
-/// The source of truth for a `DerivedFrom` dispatch's iteration count.
+/// The source of a `DerivedFrom` dispatch's launch bound. Grid-stride kernels
+/// enforce their logical iteration count independently of this bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchLen {
-    /// One iteration per element of the buffer at (`set`, `binding`) — e.g.
-    /// `map(f, arr)` over a storage-buffer input. The host reads the buffer's
-    /// element count.
+    /// Launch from the capacity of the buffer at (`set`, `binding`) — e.g.
+    /// the input to `map(f, arr)`, or an output covering a uniform-sized domain.
+    /// The host uses the buffer's byte size without reading its contents.
     InputBinding {
         set: u32,
         binding: u32,
@@ -1612,7 +1609,8 @@ pub enum BufferUsage {
 
 /// Sampled type of a texture binding. Mirrors the wgpu
 /// `TextureSampleType` subset Wyn produces. v1 always emits
-/// `Float { filterable: true }` (the only `texture2d` sampled type).
+/// `Float`; filtering is required only when the shader samples the texture
+/// through a sampler, rather than loading texels at integer coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextureSampleType {
     Float {

@@ -239,9 +239,9 @@ impl WgpuBackend {
                 return Err(gpu_error("missing vertex module"));
             };
             let blend = match state.text(":blend")? {
-                ":replace" => BlendState::REPLACE,
-                ":source-over" => BlendState::ALPHA_BLENDING,
-                ":add" => BlendState {
+                ":replace" => None,
+                ":source-over" => Some(BlendState::ALPHA_BLENDING),
+                ":add" => Some(BlendState {
                     color: BlendComponent {
                         src_factor: BlendFactor::One,
                         dst_factor: BlendFactor::One,
@@ -252,7 +252,7 @@ impl WgpuBackend {
                         dst_factor: BlendFactor::One,
                         operation: BlendOperation::Add,
                     },
-                },
+                }),
                 _ => return Err(gpu_error("invalid blend mode")),
             };
             let targets = formats
@@ -260,7 +260,7 @@ impl WgpuBackend {
                 .map(|format| {
                     format.map(|format| ColorTargetState {
                         format,
-                        blend: Some(blend),
+                        blend,
                         write_mask: if state.get(":color-write").is_ok_and(Value::truth) {
                             ColorWrites::ALL
                         } else {

@@ -1,4 +1,5 @@
 use crate::number::{calculate, compare};
+use crate::scalar;
 use crate::{Backend, Error, Form, Number, NumberType, Program, Result, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6,6 +7,7 @@ type Scope = BTreeMap<String, (Value, bool)>;
 
 pub(crate) fn builtin(name: &str) -> bool {
     name.starts_with("gpu-")
+        || name.starts_with("wyn-")
         || name.starts_with("define-")
         || NumberType::parse(name).is_some()
         || matches!(
@@ -41,6 +43,7 @@ pub(crate) fn builtin(name: &str) -> bool {
                 | ">="
                 | "not"
                 | "list"
+                | "nth"
                 | "i32-add"
                 | "i32-sub"
                 | "i32-mul"
@@ -310,6 +313,13 @@ impl<B: Backend> Interpreter<'_, B> {
                     return Ok(Value::Number(value.number()?.convert(kind)?));
                 }
                 match name {
+                    name if name.starts_with("wyn-") => scalar::evaluate(name, &values),
+                    "nth" => {
+                        let [index, list] = values.as_slice() else {
+                            return Err(Error::Invalid("nth needs an index and list".into()));
+                        };
+                        Ok(list.list()?.get(index.u32()? as usize).cloned().unwrap_or(Value::Nil))
+                    }
                     "list" => Ok(if values.is_empty() { Value::Nil } else { Value::List(values) }),
                     "not" => {
                         let [value] = values.as_slice() else {

@@ -81,7 +81,8 @@ Integers are read in base ten. A literal has the type required by its declaratio
 conversion, or arithmetic operands; without such context it is `i32`. An omitted
 float exponent marker, or `e` or `f`, denotes `f32`; `d` denotes `f64`.
 Floating-point results use IEEE binary32 or binary64, rounded to nearest with
-ties to even. Float overflow and non-finite host results are errors.
+ties to even. Float overflow and non-finite results from ordinary host arithmetic
+are errors. The typed scalar extensions below can carry non-finite device values.
 
 The normal scalar types are `i32`, `u32`, and `f32`. Explicit `i64` and `u64`
 are available for byte sizes, offsets, and wider intermediate calculations;
@@ -176,7 +177,7 @@ capturing secondary values; argument and initializer positions use the primary
 value. The external entry interface likewise observes only the primary result.
 
 The explicit binary operations `i32-add`, `i32-sub`, `i32-mul`, `u32-add`,
-`u32-sub`, and `u32-mul` preserve Wyn's 32-bit wrapping arithmetic. Both operands
+`u32-sub`, and `u32-mul` provide explicit 32-bit wrapping arithmetic. Both operands
 have the named type; the result retains its low 32 bits and interprets them with
 the named signedness. These are WHL extensions, not overrides of Common Lisp
 `+`, `-`, or `*`. For example, `(u32-add (u32 4294967295) 1)` returns zero.
@@ -189,7 +190,38 @@ multiply a widened index by the element stride before using it as a byte offset.
 
 `not` returns `t` exactly when its operand is `nil`. `list` constructs a proper
 list from its evaluated arguments. Lists carry argument collections, metadata,
-and multiple entry results. WHL provides no list mutation operations.
+and multiple entry results. `(nth index list)` selects a zero-based element,
+returning `nil` when the nonnegative index is outside the list. WHL provides no
+list mutation operations.
+
+### Typed scalar extensions
+
+Compiler-published sequential scalar calculations use ordinary `+`, `-`, and `*`.
+Moving a calculation between host and device does not promise a portable result
+when an intermediate value overflows its source type.
+
+Other scalar operations use `wyn-T-operation`, where `T` is `i32`, `u32`, `f32`,
+or `bool`. Operands must have the named type. Comparisons return `t` or `nil`;
+conversions return the destination type. These extensions supply operations
+outside the ordinary Lisp subset:
+
+- Integers: `div` and `rem` truncate toward zero and reject zero divisors or
+  unrepresentable quotients; `neg`, `not`, `and`, `or`, `xor`, `shl`, `shr`,
+  `min`, `max`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, and conversions `to-i32`,
+  `to-u32`, `to-f32`. Signed integers additionally support `abs` and `sign`.
+  Shift counts outside 0–31 have no portable Wyn result.
+- Booleans: `not`, `and`, `or`, `xor`, `eq`, and `ne`.
+- Floats: `div`, `rem`, `neg`, comparisons, conversions, and the scalar math
+  operations `round`, `round-even`, `trunc`, `abs`, `sign`, `floor`, `ceil`,
+  `fract`, `radians`, `degrees`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+  `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`, `atan2`, `pow`, `exp`,
+  `log`, `exp2`, `log2`, `sqrt`, `rsqrt`, `min`, `max`, `isnan`, and `isinf`.
+  Float inequality is ordered: `ne` returns false if either operand is NaN.
+  These operations round to `f32` and can produce non-finite values.
+
+`(wyn-f32-bits bits)` constructs an `f32` from its `u32` bit pattern.
+Scalar `f32` reads and writes preserve that representation, including non-finite
+values. Transcendental results need not be bit-identical between CPU and GPU.
 
 ### Iteration
 
@@ -890,7 +922,9 @@ the caller retains the screen for presentation or further work.
 default) or `--target-double rust-wgpu`. WHL uses `.wynhost`; Rust/WGPU uses
 `.rs`. The shader remains a separate sibling artifact. `--target` selects
 SPIR-V or WGSL; its default is SPIR-V for WHL and WGSL for Rust/WGPU. Rust/WGPU
-requires WGSL. There is no JSON pipeline output.
+also supports SPIR-V with WGPU's `spirv` feature enabled. SPIR-V push-constant
+inputs use byte slices and require the device's `PUSH_CONSTANTS` feature and a
+sufficient `max_push_constant_size` limit. There is no JSON pipeline output.
 
 The Rust emitter constructs syntax with `quote` and `syn` and formats it with
 `prettyplease`. Its generated module depends on WGPU 27 and uses Rust's native
@@ -899,11 +933,36 @@ resource-name and packed-field tables expose their source
 identities and layouts. Scalar readback uses native WGPU polling. No WHL parser
 or interpreter is involved.
 
+Create one generated `HostContext::new(&device)` per compiled module and reuse
+it across calls: `host_statistics(&mut context, &queue, ...)`. Context creation
+loads the shader and builds compute pipelines. Graphics pipelines are cached
+on first use by color/depth attachment formats and sample count; replacing or
+resizing a target with the same formats does not rebuild its pipeline.
+
+Internal scratch buffers are cached by allocation site and exact byte size.
+They are reset before reuse; a size change replaces the cached buffer. Returned
+buffers remain independently owned, so subsequent calls do not overwrite live
+results. `context.clear_caches()` releases scratch buffers and graphics variants;
+the shader and compute pipelines remain ready. Dropping the context releases
+its retained GPU handles. Calls using one context must use its device's queue
+and resources.
+
 Published shader names identify their source entry and phase, for example
 `totals_partials`, `totals_combine`, or `scene_vertex`. Buffer names identify
 source outputs or scratch storage, such as `totals_result_0` and `totals_scratch`.
 Numeric suffixes distinguish repeated names. Shader declarations and host
 programs use the same assigned entry-point names.
+
+Extracted compute and graphics stages retain their source root separately from
+their shader names. One host call schedules all of that root's stages, shares
+the produced buffers with their consumers, and returns the authored compute
+results in source order. Intermediate compute outputs remain internal even
+when they cross a stage boundary.
+
+A graphics pipeline is one draw operation in the frame graph. Its dependencies
+combine all shader stages, vertex/index buffers, and indirect commands. Attachment
+consumers wait for the complete draw, including any computation that supplies
+its vertex inputs.
 
 Rust host functions return an `output::OutputDescriptor` containing the entry
 name and its output values in source order, followed by any additional render
@@ -940,3 +999,19 @@ or `u32` launch dimensions at the API boundary. Standalone count and dimension
 parameters are `u32`. Capacities requiring unsupported scalar conversions
 or device-only values remain explicit caller-supplied resources. The source
 program still determines logical lengths independently of allocation capacity.
+
+For parallel grid-stride kernels with a host-sized domain, the compiler can use
+an input or output buffer whose allocation covers that domain as a launch bound.
+The launch is `min(65535, max(1, ceil((capacity / stride) / workgroup_size)))`.
+This needs no readback of uniform fields. Spare capacity changes only the launch;
+the shader still enforces the source's logical length. Explicit grids and phases
+that require a single workgroup retain their declared launch.
+
+The compiler also publishes sequential `bool`, `i32`, `u32`, and `f32`
+calculations, including scalar branches, counted and while loops, and statically
+resolved scalar calls. Shared scalar expressions captured by a parallel SOAC
+are evaluated before its dispatch and written to a scalar capture buffer.
+Dependencies produced by earlier device work are read at that point. A wholly
+host-computable scalar stage replaces its dispatch. Unsupported operations or
+types retain their device implementation; branches or loops containing dispatches
+are not yet published as host control flow.

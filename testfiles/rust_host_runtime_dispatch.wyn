@@ -1,0 +1,17 @@
+-- A uniform-sized map must launch in parallel using its domain's buffer capacity.
+type frame_globals = { resolution: vec3f32 }
+
+entry reproduce(frame: frame_globals, surface: render_target<vec4f32>)
+    ([]vec4f32, render_target<vec4f32>) =
+  let w = i32(frame.resolution.x)
+  let h = i32(frame.resolution.y)
+  let pixels = map(|i| @[f32(i), 0.0, 0.0, 1.0], iota(w * h))
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32|
+      let positions = [@[-1.0, -1.0, 0.0, 1.0],
+                       @[3.0, -1.0, 0.0, 1.0],
+                       @[-1.0, 3.0, 0.0, 1.0]] in
+      vertex_output(positions[i32(index)], 0.0))
+  let image = shade(surface, triangles,
+    |_, position, _, _, _| pixels[i32(position.y) * w + i32(position.x)]) in
+  (pixels, image)

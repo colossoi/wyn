@@ -91,8 +91,15 @@
       ((set (RootLaunch (KernelRoot stage)) (InputLaunch binding stride width))) :ruleset abi-final)
 (rule ((AbiGridDomain stage n width) (= (AbiBoundKnown n) false) (AbiParameterCount n offset))
       ((set (RootLaunch (KernelRoot stage)) (ParameterLaunch offset width))) :ruleset abi-final)
-; Only the application knows a HostProvided domain. Preserve inferred status so
-; the runtime's existing host-sizing hook can choose its grid.
+; A parallel grid-stride kernel may launch from an allocation covering its
+; domain, including a caller-sized output. Keep this separate from AbiBoundInput:
+; using an output as its own allocation bound would make its capacity circular.
+(rule ((AbiGridDomain stage n width) (= (FixedPhaseGrid stage) false)
+       (AbiCapacity buffer n stride) (AbiBufferBinding buffer binding)
+       (= access (AbiAccess (KernelRoot stage) binding)))
+      ((AbiGridCapacity (KernelRoot stage) binding stride width)) :ruleset abi-final)
+; Preserve unresolved status for host-sized domains. ABI readout can select a
+; published capacity as the launch bound without reading uniform data back.
 (rule ((AbiGridDomain stage n width)) ((AbiGridNeed stage n)) :ruleset abi-final)
 (rule ((AbiGridNeed stage n) (AbiChild n child)) ((AbiGridNeed stage child)) :ruleset abi-final)
 (rule ((AbiGridDomain stage n width)) ((set (AbiGridResolved stage) false)) :ruleset abi-final)

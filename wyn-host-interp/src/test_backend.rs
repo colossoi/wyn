@@ -7,6 +7,7 @@ pub struct Trace {
     pub buffers: BTreeMap<u64, Vec<u8>>,
     pub dispatches: Vec<(String, Vec<u32>)>,
     pub freed: Vec<u64>,
+    pub scalar_writes: Vec<(u64, [u8; 4])>,
 }
 
 impl Trace {
@@ -35,8 +36,24 @@ impl Backend for Trace {
                 Value::Number(match args[2].text()? {
                     "i32" => Number::I32(i32::from_le_bytes(word)),
                     "u32" => Number::U32(u32::from_le_bytes(word)),
+                    "f32" => Number::F32(f32::from_le_bytes(word)),
+                    "bool" => return Ok(Value::boolean(u32::from_le_bytes(word) != 0)),
                     _ => panic!("scalar type"),
                 })
+            }
+            "gpu-write-scalar" => {
+                let offset = args[1].u64()? as usize;
+                let word = match args[2].text()? {
+                    "i32" => (args[3].number()?.integer()? as i32).to_le_bytes(),
+                    "u32" => args[3].u32()?.to_le_bytes(),
+                    "f32" => (args[3].number()?.real() as f32).to_le_bytes(),
+                    "bool" => u32::from(args[3].truth()).to_le_bytes(),
+                    _ => panic!("scalar type"),
+                };
+                let buffer = args[0].handle()?;
+                self.scalar_writes.push((buffer, word));
+                self.buffers.get_mut(&buffer).unwrap()[offset..offset + 4].copy_from_slice(&word);
+                Value::Nil
             }
             "gpu-dispatch" => {
                 let options = Options::parse(&args[1..], &[":groups", ":args"])?;

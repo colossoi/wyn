@@ -368,6 +368,7 @@ struct RootShape<'a> {
     computed: Vec<ComputedValue>,
     computed_origins: ProjectionOrigins,
     targets: LookupMap<SymbolId, TargetValue>,
+    results: Vec<(ProjectionOrigin, interface::SourceResult)>,
 }
 
 /// Unified roots have been replaced by their final compute or graphics stage
@@ -509,6 +510,7 @@ fn extract_root(
                     &shape.computed,
                     &shape.computed_origins,
                     &shape.targets,
+                    &shape.results,
                     builtins,
                     symbols,
                     term_ids,
@@ -850,11 +852,77 @@ fn root_shape<'a>(
     }
 
     Some(RootShape {
+        results: source_results(current, &computed_origins, root_name),
         operations,
         computed,
         computed_origins,
         targets,
     })
+}
+
+/// Resolve returned array projections while the source root and its tuple/record
+/// shape are still available. Intermediate compute outputs have no source result.
+fn source_results(
+    term: &Term,
+    origins: &ProjectionOrigins,
+    root_name: &str,
+) -> Vec<(ProjectionOrigin, interface::SourceResult)> {
+    fn collect(
+        term: &Term,
+        origins: &ProjectionOrigins,
+        name: String,
+        kind: host::ResultKind,
+        index: &mut usize,
+        results: &mut Vec<(ProjectionOrigin, interface::SourceResult)>,
+    ) {
+        if let TermKind::Tuple(values) = &term.kind {
+            let record_fields = match types::strip_existentials(&term.ty) {
+                Type::Constructed(TypeName::Record(fields), _) => Some(fields),
+                _ => None,
+            };
+            for (field, value) in values.iter().enumerate() {
+                let (name, kind) = match record_fields.and_then(|fields| fields.0.get(field)) {
+                    Some(name) => (name.clone(), host::ResultKind::RecordField),
+                    None => (format!("result_{field}"), host::ResultKind::TupleField),
+                };
+                collect(value, origins, name, kind, index, results);
+            }
+            return;
+        }
+        if let (Some(origin), Some(leaves)) =
+            (projection_origin(term, origins), computed_leaf_types(&term.ty))
+        {
+            let multiple = leaves.len() > 1;
+            for (path, label, _) in leaves {
+                let mut projected = origin.clone();
+                projected.path.extend(path);
+                results.push((
+                    projected,
+                    interface::SourceResult {
+                        index: *index,
+                        name: if multiple { format!("{name}_{label}") } else { name.clone() },
+                        kind,
+                    },
+                ));
+                *index += 1;
+            }
+        } else {
+            // Render targets retain their result positions without becoming
+            // compute outputs.
+            *index += 1;
+        }
+    }
+    let mut results = vec![];
+    let mut index = 0;
+    collect(
+        term,
+        origins,
+        root_name.to_string(),
+        host::ResultKind::Value,
+        &mut index,
+        &mut results,
+    );
+    results
 }
 
 fn graphics_operation<'a>(
@@ -1971,6 +2039,7 @@ fn build_compute_stage(
     computed: &[ComputedValue],
     computed_origins: &ProjectionOrigins,
     targets: &LookupMap<SymbolId, TargetValue>,
+    results: &[(ProjectionOrigin, interface::SourceResult)],
     builtins: &InvocationBuiltins,
     symbols: &mut SymbolTable,
     term_ids: &mut TermIdSource,
@@ -2035,7 +2104,7 @@ fn build_compute_stage(
             }),
         })
         .collect();
-    Some(stage_def(
+    let mut stage = stage_def(
         operation.entry_name.clone(),
         EntryKind::Compute,
         params,
@@ -2046,7 +2115,25 @@ fn build_compute_stage(
         root,
         symbols,
         term_ids,
-    ))
+    );
+    let DefMeta::EntryPoint(entry) = &mut stage.meta else {
+        return None;
+    };
+    entry.declaration.source_entry = Some(interface::SourceEntry {
+        name: root_entry.declaration.name.clone(),
+        outputs: operation
+            .outputs
+            .iter()
+            .map(|leaf| {
+                results
+                    .iter()
+                    .filter(|(origin, _)| origin.producer == operation.symbol && origin.path == leaf.path)
+                    .map(|(_, result)| result.clone())
+                    .collect()
+            })
+            .collect(),
+    });
+    Some(stage)
 }
 
 /// Make a generated compute stage's value shape match its flattened storage
@@ -2971,6 +3058,7 @@ fn stage_def(
                 entry_kind: kind,
                 compute_dispatch: None,
                 graphics_group,
+                source_entry: None,
                 name,
                 name_span: span,
                 size_params: vec![],

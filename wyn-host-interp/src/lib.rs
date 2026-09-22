@@ -2,6 +2,7 @@ mod eval;
 mod number;
 mod program;
 mod reader;
+mod scalar;
 mod value;
 
 #[cfg(feature = "wgpu")]

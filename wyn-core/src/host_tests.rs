@@ -1,9 +1,13 @@
 use crate::host::arithmetic::{
     add, ceiling, dimension, floor, modulo, multiply, signed_size, size, subtract,
 };
-use crate::host::{Allocation, Operation, Pipeline, Program, ResultLayout, ResultScalar, ShaderFormat};
-use crate::{compile_thru_ssa, lower_ssa_to_wgsl_with_program};
+use crate::host::{
+    Allocation, Binding, Expr, Operation, Pipeline, Program, ResultKind, ResultLayout, ResultScalar,
+    ShaderFormat, TextureSampleType,
+};
+use crate::{compile_thru_ssa, lower_ssa_to_spirv, lower_ssa_to_wgsl_with_program};
 use std::collections::BTreeSet;
+use wyn_host_interp::Program as WhlProgram;
 
 fn compile(source: &str) -> Program {
     lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap().program
@@ -343,7 +347,8 @@ fn rust_argument_names_handle_keywords_and_generated_binding_collisions() {
         ("crate", "crate_2"),
         ("device", "device_2"),
         ("queue", "queue_2"),
-        ("shader", "shader_2"),
+        ("shader", "shader"),
+        ("context", "context_2"),
         ("groups", "groups_2"),
         ("pipeline", "pipeline_2"),
         ("group_0", "group_0_2"),
@@ -451,10 +456,485 @@ fn graphics_capture_uses_the_produced_buffer_after_its_writer() {
 }
 
 #[test]
-fn whl_paths_escape_lisp_strings_and_rust_requires_wgsl() {
+fn whl_paths_escape_lisp_strings() {
     let program = compile("entry main() i32 = 1");
     let whl = program.to_whl("a\\b\"c.wgsl", ShaderFormat::Wgsl).unwrap();
     check_whl(&whl);
     assert!(whl.contains("a\\\\b\\\"c.wgsl"));
-    assert!(program.to_rust_wgpu("shader.spv", ShaderFormat::Spirv).is_err());
+}
+
+#[test]
+fn rust_spirv_embeds_binary_and_binds_compute_push_constants() {
+    let program = lower_ssa_to_spirv(
+        compile_thru_ssa("entry main(xs: []i32, bias: i32) []i32 = map(|x:i32|x+bias*bias,xs)").unwrap(),
+    )
+    .unwrap()
+    .program;
+    let rust = program.to_rust_wgpu("shader.spv", ShaderFormat::Spirv).unwrap();
+    assert!(rust.contains("ShaderSource::SpirV"));
+    assert!(rust.contains("include_bytes!(\"shader.spv\")"));
+    assert!(rust.contains("PushConstantRange"));
+    assert!(rust.contains("pass.set_push_constants("));
+    assert!(rust.contains("bias: &[u8]"));
+    assert!(!rust.contains("include_str!"));
+}
+
+#[test]
+fn rust_spirv_emits_explicit_graphics_layouts() {
+    let program = lower_ssa_to_spirv(
+        compile_thru_ssa(include_str!("../../testfiles/playground/conway.wyn")).unwrap(),
+    )
+    .unwrap()
+    .program;
+    let rust = program.to_rust_wgpu("conway.spv", ShaderFormat::Spirv).unwrap();
+    assert!(rust.contains("ShaderStages::VERTEX | ShaderStages::FRAGMENT"));
+    assert!(rust.contains("create_render_pipeline"));
+    assert!(rust.contains("create_pipeline_layout"));
+}
+
+#[test]
+fn rust_host_replacement_disables_blending_and_preserves_other_modes() {
+    let source = include_str!("../../testfiles/rust_host_replace_float_target.wyn");
+    for (mode, expected) in [
+        ("replace", "blend: None"),
+        ("source_over", "blend: Some(BlendState::ALPHA_BLENDING)"),
+        ("add", "blend: Some(BlendState {"),
+    ] {
+        let source = source.replace("#replace", &format!("#{mode}"));
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(&source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let rust = program.to_rust_wgpu("float_target", format).unwrap();
+            assert!(
+                rust.contains(expected),
+                "missing {expected} for {mode} / {format:?}"
+            );
+            assert!(!rust.contains("BlendState::REPLACE"));
+        }
+    }
+}
+
+#[test]
+fn filter_phase_layout_matches_the_selected_shader_storage_access() {
+    let source = include_str!("../../testfiles/rust_host_storage_access_mismatch.wyn");
+    for (format, read_only) in [(ShaderFormat::Spirv, true), (ShaderFormat::Wgsl, false)] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let rust = program.to_rust_wgpu("storage_access", format).unwrap();
+        let phase = rust
+            .split("let compute_")
+            .find(|phase| phase.contains("entry_point: Some(\"reproduce_local_offsets\")"))
+            .unwrap();
+        let layout = phase.split("let pipeline =").next().unwrap();
+        let binding = layout
+            .split("BindGroupLayoutEntry {")
+            .find(|entry| entry.trim_start().starts_with("binding: 2u32,"))
+            .unwrap();
+        assert!(
+            binding.contains(&format!("read_only: {read_only}")),
+            "{format:?}: {binding}"
+        );
+
+        let whl = WhlProgram::parse(&program.to_whl("storage_access", format).unwrap()).unwrap();
+        let phase = whl
+            .kernels
+            .values()
+            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_local_offsets")
+            .unwrap();
+        let abi = phase.options.get(":abi").unwrap().list().unwrap();
+        let binding = abi
+            .iter()
+            .map(|value| value.list().unwrap())
+            .find(|binding| {
+                binding[1].text().unwrap() == ":storage"
+                    && binding[2].u32().unwrap() == 0
+                    && binding[3].u32().unwrap() == 2
+            })
+            .unwrap();
+        let parameter =
+            phase.parameters.iter().find(|parameter| parameter.name == binding[0].text().unwrap()).unwrap();
+        assert_eq!(
+            parameter.access.as_deref(),
+            Some(if read_only { ":read" } else { ":read-write" })
+        );
+    }
+}
+
+#[test]
+fn uniform_sized_maps_launch_from_their_domain_capacity() {
+    let source = include_str!("../../testfiles/rust_host_runtime_dispatch.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let [entry] = program.entries.as_slice() else {
+            panic!("one host entry");
+        };
+        let pixels = entry.results[0];
+        assert!(
+            entry.inputs.contains(&pixels),
+            "caller provides the output capacity"
+        );
+        let [Operation::Dispatch { groups, .. }, Operation::Draw { .. }] = entry.operations.as_slice()
+        else {
+            panic!("one map followed by its consuming draw");
+        };
+        let expected = Expr::Min(
+            Box::new(Expr::Max(
+                Box::new(Expr::BufferSize(pixels).floor(16).unwrap().ceiling(64).unwrap()),
+                Box::new(Expr::Integer(1)),
+            )),
+            Box::new(Expr::Integer(65_535)),
+        );
+        assert_eq!(groups, &[expected, Expr::Integer(1), Expr::Integer(1)]);
+        let rust = program.to_rust_wgpu("runtime_dispatch", format).unwrap();
+        let call = rust.split_once("pub fn host_reproduce(").unwrap().1;
+        assert!(call.contains(".size()"), "{call}");
+        assert!(call.contains("ceiling("), "{call}");
+        let whl = program.to_whl("runtime_dispatch", format).unwrap();
+        assert!(whl.contains(&groups[0].to_whl()), "{whl}");
+    }
+}
+
+#[test]
+fn texture_consumers_wait_for_draws_with_delayed_vertex_inputs() {
+    let source = include_str!("../../testfiles/rust_host_draw_consumer_order.wyn");
+    let control = source.replace(
+        "let selected = filter(|v: vec4f32| v.w > 0.0, values) in\n  map(|v| v, selected)",
+        "map(|v| v, values)",
+    );
+    assert_ne!(control, source, "control removes the filter dependency chain");
+    for source in [source, control.as_str()] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let [entry] = program.entries.as_slice() else {
+                panic!("one source entry")
+            };
+            let draw = |source_operation| {
+                entry
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, operation)| {
+                        let Operation::Draw { pipeline } = operation else {
+                            return None;
+                        };
+                        let Pipeline::Graphics(graphics) = &program.interface.pipelines[*pipeline] else {
+                            panic!("draw pipeline")
+                        };
+                        (graphics.source_operation == Some(source_operation)).then_some((index, *pipeline))
+                    })
+                    .unwrap()
+            };
+            let sampled = entry.results[0];
+            let (sample_position, sample_pipeline, sample_stage) = entry
+                .operations
+                .iter()
+                .enumerate()
+                .find_map(|(index, operation)| {
+                    let Operation::Dispatch { pipeline, stage, .. } = operation else {
+                        return None;
+                    };
+                    let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                        panic!("compute pipeline")
+                    };
+                    compute.stages[*stage]
+                        .uses
+                        .writes
+                        .iter()
+                        .any(|&binding| program.binding_resource(*pipeline, binding).unwrap() == sampled)
+                        .then_some((index, *pipeline, *stage))
+                })
+                .unwrap();
+            let (ground, ground_pipeline) = draw(0);
+            let (props, props_pipeline) = draw(1);
+            let (resolve, resolve_pipeline) = draw(2);
+            assert!(
+                ground < props && props < sample_position && sample_position < resolve,
+                "{format:?}: ground={ground}, props={props}, sampling={sample_position}, resolve={resolve}"
+            );
+            let rust = program.to_rust_wgpu("draw_order", format).unwrap();
+            let call: String =
+                rust.split_once("pub fn host_reproduce(").unwrap().1.split_whitespace().collect();
+            let whl = program.to_whl("draw_order", format).unwrap();
+            let rust_operations = [
+                format!("context.render_{ground_pipeline}("),
+                format!("context.render_{props_pipeline}("),
+                format!("&context.compute_{sample_pipeline}_{sample_stage}"),
+                format!("context.render_{resolve_pipeline}("),
+            ];
+            let whl_operations = [
+                format!("(gpu-draw 'graphics-{ground_pipeline}"),
+                format!("(gpu-draw 'graphics-{props_pipeline}"),
+                format!("(gpu-dispatch 'kernel-{sample_pipeline}-{sample_stage}"),
+                format!("(gpu-draw 'graphics-{resolve_pipeline}"),
+            ];
+            for (output, operations) in [(call.as_str(), rust_operations), (whl.as_str(), whl_operations)] {
+                let positions = operations.map(|operation| output.find(&operation).unwrap());
+                assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+            }
+        }
+    }
+}
+
+#[test]
+fn rust_context_keeps_pipeline_creation_out_of_entry_calls() {
+    for source in [
+        include_str!("../../testfiles/rust_host_storage_access_mismatch.wyn"),
+        include_str!("../../testfiles/rust_host_frame_composition.wyn"),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let rust = program.to_rust_wgpu("shader", format).unwrap();
+            let (context, call) = rust.split_once("pub fn host_reproduce(").unwrap();
+            assert!(context.contains("pub struct HostContext"));
+            assert_eq!(context.matches("create_shader_module").count(), 1);
+            for creation in [
+                "create_shader_module",
+                "create_compute_pipeline",
+                "create_render_pipeline",
+                "create_pipeline_layout",
+            ] {
+                assert!(
+                    !call.contains(creation),
+                    "{format:?}: {creation} inside entry call"
+                );
+            }
+            let entry = &program.entries[0];
+            let scratch = entry.allocations.iter().filter(|allocation| {
+                matches!(allocation, Allocation::Buffer { resource, .. } if !entry.results.contains(resource))
+            }).count();
+            assert_eq!(call.matches("support::scratch_buffer(").count(), scratch);
+            assert_eq!(call.matches("scratch_reset.clear_buffer(").count(), scratch);
+            let returned_buffers = entry.allocations.iter().filter(|allocation| {
+                matches!(allocation, Allocation::Buffer { resource, .. } if entry.results.contains(resource))
+            }).count();
+            assert_eq!(call.matches("device.create_buffer(").count(), returned_buffers);
+        }
+    }
+}
+
+#[test]
+fn texture_load_bindings_do_not_require_filtering() {
+    let source = include_str!("../../testfiles/rust_host_unfiltered_float_texture.wyn");
+    let mixed = format!(
+        "def sample_color(tex: texture2d, samp: sampler, uv: vec2f32) f32 =\n\
+         let color = texture_sample(tex, samp, uv, 0.0) in color.x\n{}",
+        source
+            .replace(
+                "source: render_target<f32>,",
+                "source: render_target<f32>, sampled: texture2d, samp: sampler,"
+            )
+            .replace(
+                "target_load(source, @[0i32, 0i32], 0u32)",
+                "let x = target_load(source, @[0i32, 0i32], 0u32) in sample_color(sampled, samp, @[x, x])"
+            )
+    );
+    for (source, expected) in [
+        (source, vec![("source", false)]),
+        (mixed.as_str(), vec![("sampled", true), ("source", false)]),
+        (
+            include_str!("../../testfiles/texture_sample.wyn"),
+            vec![("tex", true)],
+        ),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let mut filterable = program
+                .interface
+                .pipelines
+                .iter()
+                .flat_map(|pipeline| {
+                    let bindings = match pipeline {
+                        Pipeline::Compute(compute) => &compute.bindings,
+                        Pipeline::Graphics(graphics) => &graphics.bindings,
+                    };
+                    bindings.iter().filter_map(|binding| match binding {
+                        Binding::Texture {
+                            name,
+                            sample_type: TextureSampleType::Float { filterable },
+                            ..
+                        } => Some((name.as_str(), *filterable)),
+                        _ => None,
+                    })
+                })
+                .collect::<Vec<_>>();
+            filterable.sort_unstable();
+            assert_eq!(filterable, expected, "{format:?}: {source}");
+            let rust = program.to_rust_wgpu("texture_load", format).unwrap();
+            let whl = program.to_whl("texture_load", format).unwrap();
+            check_whl(&whl);
+            for (_, value) in &expected {
+                assert!(rust.contains(&format!("filterable: {value}")));
+                let sample_type = if *value { ":filterable-float" } else { ":float" };
+                assert!(whl.contains(&format!(":sample-type {sample_type}")));
+            }
+        }
+    }
+}
+
+#[test]
+fn graphics_root_composes_multiple_computations_and_source_results() {
+    let source = include_str!("../../testfiles/rust_host_frame_composition.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let [entry] = program.entries.as_slice() else {
+            panic!(
+                "one source root, got {:?}",
+                program.entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+            );
+        };
+        assert_eq!(entry.name, "reproduce");
+        assert_eq!(entry.inputs.len(), 2);
+        assert_eq!(entry.results.len(), 3);
+        assert_eq!(
+            entry.operations.iter().filter(|op| matches!(op, Operation::Dispatch { .. })).count(),
+            2
+        );
+        let draw = entry.operations.iter().position(|op| matches!(op, Operation::Draw { .. })).unwrap();
+        for &id in &entry.results[..2] {
+            assert!(!entry.inputs.contains(&id));
+            assert!(entry
+                .allocations
+                .iter()
+                .any(|a| matches!(a, Allocation::Buffer { resource, .. } if *resource == id)));
+            assert!(entry.operations.iter().any(|op| {
+                let Operation::Dispatch { pipeline, stage, .. } = op else {
+                    return false;
+                };
+                let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                    return false;
+                };
+                compute.stages[*stage]
+                    .uses
+                    .writes
+                    .iter()
+                    .any(|&b| program.binding_resource(*pipeline, b).unwrap() == id)
+            }));
+        }
+        let Operation::Draw { pipeline } = entry.operations[draw] else {
+            unreachable!()
+        };
+        assert!(program
+            .parameter_indices(pipeline, None)
+            .iter()
+            .any(|&b| program.binding_resource(pipeline, b).unwrap() == entry.results[0]));
+        assert!(entry.operations[..draw].iter().any(|op| {
+            let Operation::Dispatch { pipeline, stage, .. } = op else {
+                return false;
+            };
+            let Pipeline::Compute(compute) = &program.interface.pipelines[*pipeline] else {
+                return false;
+            };
+            compute.stages[*stage]
+                .uses
+                .writes
+                .iter()
+                .any(|&b| program.binding_resource(*pipeline, b).unwrap() == entry.results[0])
+        }));
+        let results = &program.interface.source_results;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.entry == "reproduce"));
+        assert_eq!(
+            results.iter().map(|r| (r.result, r.name.as_str())).collect::<Vec<_>>(),
+            [(0, "result_0"), (1, "result_1")]
+        );
+        let rust = program.to_rust_wgpu("composition", format).unwrap();
+        assert_eq!(rust.matches("pub fn host_").count(), 1);
+        assert_eq!(rust.matches("pass.dispatch_workgroups(").count(), 2);
+        assert_eq!(rust.matches("OutputResource::Buffer {").count(), 2);
+        assert_eq!(rust.matches("OutputResource::Texture(Texture::clone(").count(), 1);
+    }
+}
+
+#[test]
+fn graphics_root_preserves_return_order_and_omits_intermediate_results() {
+    let source = include_str!("../../testfiles/rust_host_frame_composition.wyn");
+    for (source, shifted_result, result_count) in [
+        (
+            source.replace("(shifted, doubled, image)", "(doubled, shifted, image)"),
+            Some(1),
+            3,
+        ),
+        (
+            source
+                .replace(
+                    "([]vec4f32, []vec4f32, render_target<vec4f32>)",
+                    "([]vec4f32, render_target<vec4f32>)",
+                )
+                .replace("(shifted, doubled, image)", "(doubled, image)"),
+            None,
+            2,
+        ),
+        (
+            source.replace("(shifted, doubled, image)", "(shifted, shifted, image)"),
+            Some(0),
+            3,
+        ),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(&source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let [entry] = program.entries.as_slice() else {
+                panic!("one source root")
+            };
+            assert_eq!(entry.results.len(), result_count);
+            let graphics = entry
+                .operations
+                .iter()
+                .find_map(|op| match op {
+                    Operation::Draw { pipeline } => Some(*pipeline),
+                    _ => None,
+                })
+                .unwrap();
+            let captures = program
+                .parameter_indices(graphics, None)
+                .into_iter()
+                .map(|b| program.binding_resource(graphics, b).unwrap())
+                .collect::<BTreeSet<_>>();
+            match shifted_result {
+                Some(index) => assert!(captures.contains(&entry.results[index])),
+                None => assert!(!captures.contains(&entry.results[0])),
+            }
+            let mut results = program.interface.source_results.iter().collect::<Vec<_>>();
+            results.sort_by_key(|r| r.result);
+            assert_eq!(results.len(), result_count - 1);
+            for (index, result) in results.iter().enumerate() {
+                assert_eq!(result.result, index);
+                assert_eq!(result.name, format!("result_{index}"));
+                assert_eq!(result.kind, ResultKind::TupleField);
+            }
+            assert_eq!(
+                program.to_rust_wgpu("composition", format).unwrap().matches("pub fn host_").count(),
+                1
+            );
+        }
+    }
 }

@@ -159,7 +159,7 @@ impl Program {
                 Pipeline::Compute(c) => {
                     for (s, stage) in c.stages.iter().enumerate() {
                         writeln!(out,"(define-gpu-kernel 'kernel-{p}-{s}\n  :module 'shaders :entry {}\n  :workgroup-size '({} {} {})",string(&stage.entry_point),stage.workgroup_size.0,stage.workgroup_size.1,stage.workgroup_size.2)?;
-                        self.write_parameters(&mut out, p, Some(s))?;
+                        self.write_parameters(&mut out, p, Some(s), format)?;
                         writeln!(out, ")\n")?;
                     }
                 }
@@ -176,7 +176,7 @@ impl Program {
                             None => writeln!(out, "  :{label} nil")?,
                         }
                     }
-                    self.write_parameters(&mut out, p, None)?;
+                    self.write_parameters(&mut out, p, None, format)?;
                     write!(out, "\n  :vertex-inputs '(")?;
                     for a in &g.vertex_inputs {
                         write!(
@@ -258,15 +258,18 @@ impl Program {
         }
     }
 
-    fn write_parameters(&self, out: &mut String, p: usize, stage: Option<usize>) -> Result<(), HostError> {
+    fn write_parameters(
+        &self,
+        out: &mut String,
+        p: usize,
+        stage: Option<usize>,
+        format: ShaderFormat,
+    ) -> Result<(), HostError> {
         let indices = self.parameter_indices(p, stage);
         write!(out, "  :parameters '(")?;
         for &b in &indices {
-            write!(
-                out,
-                "\n    (argument-{b} {})",
-                self.binding_description(&self.bindings(p)[b])
-            )?;
+            let binding = self.shader_binding(p, stage, b, format)?;
+            write!(out, "\n    (argument-{b} {})", self.binding_description(&binding))?;
         }
         write!(out, ")\n  :abi '(")?;
         for &b in &indices {
@@ -461,7 +464,9 @@ impl Program {
             .operations
             .iter()
             .map(|op| match op {
-                Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => *pipeline,
+                Operation::Dispatch { pipeline, .. }
+                | Operation::Draw { pipeline }
+                | Operation::Scalar { pipeline, .. } => *pipeline,
             })
             .collect::<std::collections::BTreeSet<_>>()
         {
@@ -510,6 +515,7 @@ impl Program {
         writeln!(out, "  )")?;
         for op in &entry.operations {
             match op{
+            Operation::Scalar{pipeline,task}=>writeln!(out,"    {}",self.whl_scalar_task(*pipeline,&self.interface.scalar_tasks[*task])?)?,
             Operation::Dispatch{pipeline:p,stage:s,groups}=>writeln!(out,"    (gpu-dispatch 'kernel-{p}-{s}\n      :groups (list {} {} {})\n      :args (list {}))",groups[0].to_whl(),groups[1].to_whl(),groups[2].to_whl(),self.arguments(*p,Some(*s))?)?,
             Operation::Draw{pipeline:p}=>self.write_draw(out,*p)?,
         }

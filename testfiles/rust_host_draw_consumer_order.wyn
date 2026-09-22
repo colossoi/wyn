@@ -1,0 +1,29 @@
+-- A texture consumer must wait for the whole draw, including its filtered vertices.
+def filtered(values: []vec4f32) []vec4f32 =
+  let selected = filter(|v: vec4f32| v.w > 0.0, values) in
+  map(|v| v, selected)
+
+def replace_state: fragment_state = {
+  depth_test = #disabled, depth_write = false,
+  blend = #replace, color_write = true,
+}
+
+entry reproduce(values: []vec4f32, coords: []vec2i32,
+                scene: render_target<f32>, surface: render_target<vec4f32>)
+    ([]f32, render_target<f32>, render_target<vec4f32>) =
+  let visible = filtered(values)
+  let ground_raster = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32| vertex_output(values[i32(index)], 0.2))
+  let ground = shade_with(replace_state, scene, ground_raster,
+    |value, _, _, _, _| value)
+  let prop_raster = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32| vertex_output(visible[i32(index)], 0.8))
+  let scene_image = shade_with(replace_state, ground, prop_raster,
+    |value, _, _, _, _| value)
+  let sampled = map(|coord: vec2i32| target_load(scene_image, coord, 0u32), coords)
+  let resolve_raster = rasterize_triangles(direct_draw(3u32, 1u32),
+    |index: u32, _: u32, _: u32| vertex_output(values[i32(index)], 0.0))
+  let image = shade(surface, resolve_raster,
+    |_, position, _, _, _|
+      @[sampled[i32(position.x) % length(sampled)], 0.0, 0.0, 1.0]) in
+  (sampled, scene_image, image)

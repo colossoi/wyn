@@ -8,6 +8,7 @@ use super::{
 #[test]
 fn frame_graph_aliases_storage_texture_views_and_orders_consumers() {
     let mut descriptor = ModuleInterface {
+        scalar_tasks: vec![],
         pipelines: vec![
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![Binding::StorageTexture {
@@ -85,6 +86,7 @@ fn frame_graph_fragment_target_write_orders_downstream_reader() {
     // samples a texture named `scene_depth` resolve to one resource, so the
     // reader depends on the fragment that produced it.
     let mut descriptor = ModuleInterface {
+        scalar_tasks: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,
@@ -189,6 +191,7 @@ fn producer_consumer_descriptor(producer_first: bool) -> ModuleInterface {
     let pipelines = if producer_first { vec![producer, consumer] } else { vec![consumer, producer] };
 
     let mut descriptor = ModuleInterface {
+        scalar_tasks: vec![],
         pipelines,
         source_results: Vec::new(),
         frame_graph: FrameGraph::default(),
@@ -260,6 +263,7 @@ fn frame_graph_reports_a_producer_consumer_cycle() {
     // and reads `occ`. Declared reduce-first, so the hazard sweep also wants
     // `cull` after `reduce`.
     let mut descriptor = ModuleInterface {
+        scalar_tasks: vec![],
         pipelines: vec![
             Pipeline::Compute(ComputePipeline {
                 bindings: vec![inst(Access::ReadOnly, BufferUsage::Input), occ(Access::WriteOnly)],
@@ -294,6 +298,7 @@ fn frame_graph_target_write_merges_with_storage_read_view() {
     // even though the read binding is a storage texture. The compute depends
     // on the fragment.
     let mut descriptor = ModuleInterface {
+        scalar_tasks: vec![],
         pipelines: vec![
             Pipeline::Graphics(GraphicsPipeline {
                 source_operation: None,

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -174,6 +175,10 @@ impl Allocation {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Scalar {
+        pipeline: usize,
+        task: usize,
+    },
     Dispatch {
         pipeline: usize,
         stage: usize,
@@ -245,7 +250,6 @@ impl Program {
             .topological_order()
             .map_err(|cycle| HostError::Invalid(format!("cyclic pass dependencies: {cycle:?}")))?;
         let mut entries = BTreeMap::<String, Entry>::new();
-        let mut graphics = BTreeMap::<usize, usize>::new();
         for index in order {
             let pass = &program.interface.frame_graph.passes[index];
             let pipeline = pass.pipeline_index;
@@ -262,11 +266,6 @@ impl Program {
                     )
                 }
                 Pipeline::Graphics(g) => {
-                    let visited = graphics.entry(pipeline).or_default();
-                    *visited += 1;
-                    if *visited < g.stages.len() {
-                        continue;
-                    }
                     let Some(stage) = g.stages.first() else {
                         return Err(HostError::Invalid("graphics pipeline without stages".into()));
                     };
@@ -281,7 +280,23 @@ impl Program {
                 operations: vec![],
                 results: vec![],
             });
-            entry.operations.push(operation);
+            let mut replaced = false;
+            if let Operation::Dispatch { stage, .. } = &operation {
+                let Pipeline::Compute(compute) = &program.interface.pipelines[pipeline] else {
+                    return Err(HostError::Invalid(
+                        "compute operation in graphics pipeline".into(),
+                    ));
+                };
+                for (task, scalar) in program.interface.scalar_tasks.iter().enumerate() {
+                    if scalar.stage == compute.stages[*stage].entry_point {
+                        entry.operations.push(Operation::Scalar { pipeline, task });
+                        replaced |= scalar.replaces_dispatch;
+                    }
+                }
+            }
+            if !replaced {
+                entry.operations.push(operation);
+            }
         }
         for (_, mut entry) in entries {
             program.prepare_entry(&mut entry)?;
@@ -304,6 +319,40 @@ impl Program {
             Pipeline::Compute(p) => &p.bindings,
             Pipeline::Graphics(p) => &p.bindings,
         }
+    }
+
+    /// Match the shader declaration rather than allocation-wide access. SPIR-V
+    /// qualifies compute storage per entry point; WGSL uses the pipeline union.
+    pub(crate) fn shader_binding(
+        &self,
+        pipeline: usize,
+        stage: Option<usize>,
+        index: usize,
+        format: ShaderFormat,
+    ) -> Result<Cow<'_, Binding>, HostError> {
+        let binding = &self.bindings(pipeline)[index];
+        if let (
+            ShaderFormat::Spirv,
+            Some(stage),
+            Pipeline::Compute(compute),
+            Binding::StorageBuffer { access, .. },
+        ) = (format, stage, &self.interface.pipelines[pipeline], binding)
+        {
+            let Some(stage_access) = compute.stages[stage].uses.access(index) else {
+                return Err(HostError::Invalid(format!(
+                    "storage binding {index} has no access in {}",
+                    compute.stages[stage].entry_point
+                )));
+            };
+            if *access != stage_access {
+                let mut binding = binding.clone();
+                if let Binding::StorageBuffer { access, .. } = &mut binding {
+                    *access = stage_access;
+                }
+                return Ok(Cow::Owned(binding));
+            }
+        }
+        Ok(Cow::Borrowed(binding))
     }
 
     pub fn binding_resource(&self, pipeline: usize, binding: usize) -> Result<ResourceId, HostError> {
@@ -447,7 +496,7 @@ impl Program {
                     }
                     *pipeline
                 }
-                Operation::Draw { pipeline } => *pipeline,
+                Operation::Draw { pipeline } | Operation::Scalar { pipeline, .. } => *pipeline,
             };
             pipelines.insert(pipeline);
             for index in 0..self.bindings(pipeline).len() {

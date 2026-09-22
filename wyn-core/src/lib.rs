@@ -49,6 +49,7 @@ mod slice_range_tests;
 use wyn_base::IdArena;
 
 use ast::NodeCounter;
+use host::ScalarSource;
 use std::collections::BTreeMap;
 // =============================================================================
 // Collection aliases
@@ -566,6 +567,37 @@ fn adapt_host_interface_for_wgsl(
             }
         }
 
+        for task in &mut descriptor.scalar_tasks {
+            if !compute.stages.iter().any(|stage| stage.entry_point == task.stage) {
+                continue;
+            }
+            let mut missing = None;
+            task.value.reads_mut(&mut |source, offset| {
+                let ScalarSource::PushConstant { name, offset: base } = source else {
+                    return;
+                };
+                let found = blocks.iter().find_map(|block| {
+                    block
+                        .members
+                        .iter()
+                        .find(|member| member.name == *name && member.push_constant_offset == *base)
+                        .map(|member| (*block, member))
+                });
+                if let Some((block, member)) = found {
+                    *offset += member.offset;
+                    *source = ScalarSource::Binding {
+                        set: block.set,
+                        binding: block.binding,
+                    };
+                } else {
+                    missing = Some(name.clone());
+                }
+            });
+            if let Some(name) = missing {
+                return Err(err_wgsl!("host scalar '{}' has no WGSL parameter", name));
+            }
+        }
+
         for stage in &mut compute.stages {
             stage.reads = stage
                 .reads
@@ -732,3 +764,5 @@ mod host_tests;
 
 #[cfg(test)]
 mod host_interp_tests;
+#[cfg(test)]
+mod host_scalar_tests;

@@ -1,6 +1,7 @@
 //! Private support for generated host arithmetic and draw commands.
 pub use arithmetic::{ceiling, dimension, floor, size};
 use std::error::Error;
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::mpsc;
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, MapMode, PollType, Queue};
@@ -18,6 +19,40 @@ impl Display for HostError {
     }
 }
 impl Error for HostError {}
+
+pub fn scratch_buffer(
+    device: &Device,
+    buffers: &mut BTreeMap<usize, Buffer>,
+    slot: usize,
+    descriptor: &BufferDescriptor<'_>,
+) -> Buffer {
+    if let Some(buffer) = buffers.get(&slot) {
+        if buffer.size() == descriptor.size {
+            return buffer.clone();
+        }
+    }
+    let buffer = device.create_buffer(descriptor);
+    buffers.insert(slot, buffer.clone());
+    buffer
+}
+
+pub fn spirv_words(bytes: &[u8]) -> Result<Vec<u32>, HostError> {
+    if bytes.len() < 20 || bytes.len() % 4 != 0 {
+        return Err(HostError::Invalid("invalid SPIR-V module size".into()));
+    }
+    let words: Vec<_> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    if words[0] != 0x0723_0203 {
+        return Err(HostError::Invalid("invalid SPIR-V module header".into()));
+    }
+    Ok(words)
+}
+
+pub fn push_constant_bytes(bytes: &[u8], size: u32) -> Result<&[u8], HostError> {
+    let Some(bytes) = bytes.get(..size as usize) else {
+        return Err(HostError::Invalid("push constant input is too short".into()));
+    };
+    Ok(bytes)
+}
 
 fn read_gpu_word(
     device: &Device,
@@ -87,6 +122,10 @@ pub fn read_i32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) ->
 
 pub fn read_u32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) -> Result<u32, HostError> {
     Ok(u32::from_le_bytes(read_gpu_word(device, queue, buffer, offset)?))
+}
+
+pub fn read_f32(device: &Device, queue: &Queue, buffer: &Buffer, offset: u32) -> Result<f32, HostError> {
+    Ok(f32::from_le_bytes(read_gpu_word(device, queue, buffer, offset)?))
 }
 
 pub fn draw_end(first: u32, count: u32) -> Result<u32, HostError> {

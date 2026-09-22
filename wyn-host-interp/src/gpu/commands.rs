@@ -84,9 +84,9 @@ impl WgpuBackend {
                     "u64" => Number::U64(u64::from_le_bytes(
                         bytes.as_slice().try_into().map_err(gpu_error)?,
                     )),
-                    "f32" => Number::f32(f32::from_le_bytes(
+                    "f32" => Number::F32(f32::from_le_bytes(
                         bytes.as_slice().try_into().map_err(gpu_error)?,
-                    ))?,
+                    )),
                     "f64" => Number::f64(f64::from_le_bytes(
                         bytes.as_slice().try_into().map_err(gpu_error)?,
                     ))?,
@@ -136,7 +136,12 @@ impl WgpuBackend {
                         "u64" => {
                             u64::try_from(number.integer()?).map_err(gpu_error)?.to_le_bytes().to_vec()
                         }
-                        "f32" => (number.convert(NumberType::F32)?.real() as f32).to_le_bytes().to_vec(),
+                        "f32" => match number {
+                            Number::F32(value) => value.to_le_bytes().to_vec(),
+                            number => {
+                                (number.convert(NumberType::F32)?.real() as f32).to_le_bytes().to_vec()
+                            }
+                        },
                         "f64" => number.convert(NumberType::F64)?.real().to_le_bytes().to_vec(),
                         _ => return Err(gpu_error("invalid scalar type")),
                     }

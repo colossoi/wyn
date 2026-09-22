@@ -1,0 +1,3 @@
+-- Each physical SPIR-V phase needs its own storage access qualifiers.
+entry reproduce() []i32 =
+  filter(|i| i % 3i32 == 0i32, iota(128i32))

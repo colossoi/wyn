@@ -24,6 +24,7 @@ mod optimize;
 pub mod print;
 pub mod reachability;
 pub(crate) mod storage_function_variants;
+mod texture_sampling;
 pub mod types;
 pub mod uses;
 
@@ -73,6 +74,7 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
         ));
     }
     eliminate_dead_values(&mut program);
+    texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
     Ok(program.retag())
@@ -88,6 +90,7 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
     }
     promote_addressable_constants(&mut program);
     eliminate_dead_values(&mut program);
+    texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     Ok(program.retag())
 }

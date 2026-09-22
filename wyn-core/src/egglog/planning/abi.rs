@@ -357,6 +357,35 @@ pub(in crate::egglog) fn read(
         status.is_ok()
     })?;
     status?;
+    // All candidates cover the launch domain. Select deterministically by
+    // physical binding, independently of the order in which facts were read.
+    let mut capacities = BTreeMap::new();
+    rows(graph, "AbiGridCapacity", |a| {
+        let candidate = (binding_ids[&a[1]], number(graph, a[2])?, number(graph, a[3])?);
+        capacities
+            .entry(roots[&a[0]])
+            .and_modify(|old| *old = std::cmp::min(*old, candidate))
+            .or_insert(candidate);
+        Ok(())
+    })?;
+    for (root, (binding, elem_bytes, workgroup_size)) in capacities {
+        if matches!(
+            sizes.get(&root),
+            Some(DispatchSize::Fixed { explicit: false, .. })
+        ) {
+            sizes.insert(
+                root,
+                DispatchSize::DerivedFrom {
+                    len: DispatchLen::InputBinding {
+                        set: binding.set,
+                        binding: binding.binding,
+                        elem_bytes,
+                    },
+                    workgroup_size,
+                },
+            );
+        }
+    }
     for &(root, owner, width, _) in &data.state.abi.roots {
         if data.ir.entries[owner].declaration.entry_kind != EntryKind::Compute {
             continue;

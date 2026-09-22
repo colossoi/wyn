@@ -1,9 +1,12 @@
+use crate::rust_context::{compute_name, render_name, RustContext};
 use crate::rust_results;
 use proc_macro2::{Group, Ident, TokenStream, TokenTree};
-use quote::{format_ident, quote, ToTokens};
+use quote::{format_ident, quote};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
-use syn::{parse2, parse_file, parse_str, ExprPath, File, Item, PatIdent, UseTree, Visibility};
+use syn::{
+    parse2, parse_file, parse_str, Block, ExprPath, File, Item, Macro, PatIdent, Path, UseTree, Visibility,
+};
 
 use crate::{
     Allocation, Binding, BlendMode, CullMode, DepthTest, DrawCall, DrawCount, Entry, Expr, FillMode,
@@ -18,7 +21,7 @@ pub(crate) fn resource(id: ResourceId) -> Ident {
 fn scalar(name: &str) -> Ident {
     format_ident!("{}", name.replace('-', "_"))
 }
-fn texture_format(format: StorageImageFormat) -> TokenStream {
+pub(crate) fn texture_format(format: StorageImageFormat) -> TokenStream {
     let variant = match format {
         StorageImageFormat::Rgba8Unorm => quote!(Rgba8Unorm),
         StorageImageFormat::Rgba16Float => quote!(Rgba16Float),
@@ -31,24 +34,27 @@ fn texture_format(format: StorageImageFormat) -> TokenStream {
 impl Program {
     /// Generate a Rust module using WGPU 27 and fixed-width size arithmetic.
     pub fn to_rust_wgpu(&self, module_path: &str, format: ShaderFormat) -> Result<String, HostError> {
-        if format != ShaderFormat::Wgsl {
-            return Err(HostError::Invalid("rust-wgpu requires WGSL shader output".into()));
-        }
+        let dependency = match format {
+            ShaderFormat::Wgsl => "Generated Wyn host code. Dependency: wgpu 27.",
+            ShaderFormat::Spirv => "Generated Wyn host code. Dependency: wgpu 27 with the spirv feature.",
+        };
         let support = parse_file(include_str!("rust_support.rs"))?;
         let arithmetic = parse_file(include_str!("arithmetic.rs"))?;
         let mut result_types = parse_file(include_str!("results.rs"))?;
         result_types.items.retain(|item| !matches!(item, Item::Impl(_)));
         let result_types = result_types.items;
         let output_types = parse_file(include_str!("rust_output.rs"))?;
+        let mut context = RustContext::default();
         let functions = self
             .entries
             .iter()
             .enumerate()
-            .map(|(i, e)| self.rust_entry(i, e, module_path))
+            .map(|(i, e)| self.rust_entry(i, e, format, &mut context))
             .collect::<Result<Vec<_>, _>>()?;
-        let function_tokens = quote!(#(#functions)*);
+        let context = context.emit(module_path, format);
+        let function_tokens = quote!(#context #(#functions)*);
         let mut used = BTreeSet::new();
-        collect_identifiers(function_tokens.clone(), &mut used);
+        ReferencedNames(&mut used).visit_file(&parse2(function_tokens.clone())?);
         let functions = functions
             .into_iter()
             .zip(&self.entries)
@@ -82,13 +88,14 @@ impl Program {
             }
         }
         let mut syntax: File = parse2(quote! {
-            //! Generated Wyn host code. Dependency: wgpu 27.
+            #![doc = #dependency]
             mod support {#support pub mod arithmetic {#arithmetic}}
             pub mod output {#output_types #(#result_types)*}
             use output::{OutputDescriptor,OutputValue,OutputResource,BufferRange,ResultKind,ResultLayout,ResultScalar,ResultField};
             pub use support::HostError;
             use support::{ceiling, dimension, floor, size};
             use std::borrow::Cow;
+            use std::collections::{BTreeMap, HashMap};
             use wgpu::{
                 BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent, BlendFactor,
                 BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages, ColorTargetState,
@@ -100,9 +107,14 @@ impl Program {
                 ShaderSource, StoreOp, Texture, TextureDescriptor, TextureDimension, TextureFormat,
                 TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexAttribute,
                 VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+                BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BufferBindingType,
+                PipelineLayoutDescriptor, SamplerBindingType, ShaderStages, StorageTextureAccess,
+                TextureSampleType, Features, PushConstantRange,
+                ShaderModule, ComputePipeline, RenderPipeline,
             };
             pub const RESOURCE_NAMES:&[(usize,&str)]=&[#(#resource_names),*];
             pub const BUFFER_FIELDS:&[(usize,&str,u32,u32)]=&[#(#buffer_fields),*];
+            #context
             #function_tokens
         })?;
         for item in &mut syntax.items {
@@ -130,7 +142,9 @@ impl Program {
             .operations
             .iter()
             .map(|operation| match operation {
-                Operation::Dispatch { pipeline, .. } | Operation::Draw { pipeline } => *pipeline,
+                Operation::Dispatch { pipeline, .. }
+                | Operation::Draw { pipeline }
+                | Operation::Scalar { pipeline, .. } => *pipeline,
             })
             .collect();
         let mut replacements = BTreeMap::new();
@@ -255,7 +269,13 @@ impl Program {
         }
     }
 
-    fn rust_entry(&self, index: usize, entry: &Entry, module_path: &str) -> Result<TokenStream, HostError> {
+    fn rust_entry(
+        &self,
+        index: usize,
+        entry: &Entry,
+        format: ShaderFormat,
+        context: &mut RustContext,
+    ) -> Result<TokenStream, HostError> {
         let name = format_ident!("host_{}", rust_results::name(&entry.name));
         let source_name = &entry.name;
         let mut params = vec![];
@@ -274,6 +294,7 @@ impl Program {
             params.push(quote!(#name:u32));
         }
         let mut code = vec![];
+        let mut scratch = vec![];
         for a in &entry.allocations {
             match a {
                 Allocation::Buffer { resource: r, bytes } => {
@@ -281,13 +302,25 @@ impl Program {
                     let bytes = self.rust_expr(bytes, entry);
                     let length = format_ident!("resource_{}_bytes", r.0);
                     let label = &self.interface.frame_graph.resources[r.0].name;
+                    let allocate = if entry.results.contains(r) {
+                        quote!(device.create_buffer(&descriptor))
+                    } else {
+                        context.scratch = true;
+                        let slot = r.0;
+                        scratch.push(quote! {
+                            if let Some(buffer) = context.scratch.get(&#slot) {
+                                scratch_reset.clear_buffer(buffer, 0, None);
+                            }
+                        });
+                        quote!(support::scratch_buffer(device, &mut context.scratch, #slot, &descriptor))
+                    };
                     code.push(quote!{
                         let #length=size(#bytes)?;
                         if #length>device.limits().max_buffer_size {return Err(HostError::Invalid(format!("buffer {} exceeds device limit",#label)));}
-                        let #id=device.create_buffer(&BufferDescriptor{
+                        let #id={ let descriptor=BufferDescriptor{
                             label:Some(#label),size:#length.max(4),mapped_at_creation:false,
                             usage:BufferUsages::STORAGE|BufferUsages::COPY_SRC|BufferUsages::COPY_DST|BufferUsages::VERTEX|BufferUsages::INDEX|BufferUsages::INDIRECT,
-                        });
+                        }; #allocate };
                     });
                 }
                 Allocation::Texture {
@@ -312,22 +345,52 @@ impl Program {
                 }
             }
         }
+        if !scratch.is_empty() {
+            code.insert(
+                0,
+                quote! {
+                    if !context.scratch.is_empty() {
+                        let mut scratch_reset = device.create_command_encoder(&Default::default());
+                        #(#scratch)*
+                        queue.submit(Some(scratch_reset.finish()));
+                    }
+                },
+            );
+        }
         for (ordinal, op) in entry.operations.iter().enumerate() {
             code.push(match op {
+                Operation::Scalar { pipeline, task } => {
+                    self.rust_scalar_task(*pipeline, &self.interface.scalar_tasks[*task])?
+                }
                 Operation::Dispatch {
                     pipeline,
                     stage,
                     groups,
-                } => self.rust_dispatch(*pipeline, *stage, groups, entry)?,
-                Operation::Draw { pipeline } => self.rust_draw(*pipeline, ordinal, entry)?,
+                } => {
+                    let (create, run) = self.rust_dispatch(*pipeline, *stage, groups, entry, format)?;
+                    context.compute.insert((*pipeline, *stage), create);
+                    run
+                }
+                Operation::Draw { pipeline } => {
+                    let (count, create, run) = self.rust_draw(*pipeline, ordinal, entry, format)?;
+                    context.graphics.insert(*pipeline, (count, create));
+                    run
+                }
             });
         }
         let results = self.rust_results(entry)?;
         let entry_id = format_ident!("ENTRY_{}", index);
+        let mut used = BTreeSet::new();
+        ReferencedNames(&mut used).visit_block(&parse2::<Block>(quote!({#(#code)* #results}))?);
+        let device = used.contains("device").then(|| quote!(let device = &context.device.clone();));
+        context.device |= device.is_some();
+        let context_param =
+            if device.is_some() || used.contains("context") { quote!(context) } else { quote!(_context) };
+        let queue_param = if used.contains("queue") { quote!(queue) } else { quote!(_queue) };
         Ok(quote! {
             pub const #entry_id:&str=#source_name;
-            pub fn #name(device:&Device,queue:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
-                let shader=device.create_shader_module(ShaderModuleDescriptor{label:Some(#source_name),source:ShaderSource::Wgsl(Cow::Borrowed(include_str!(#module_path)))});
+            pub fn #name(#context_param:&mut HostContext,#queue_param:&Queue,#(#params),*)->Result<OutputDescriptor,HostError>{
+                #device
                 #(#code)*
                 Ok(#results)
             }
@@ -341,9 +404,15 @@ impl Program {
     ) -> Result<(TokenStream, Vec<TokenStream>), HostError> {
         let mut groups = BTreeMap::<u32, Vec<TokenStream>>::new();
         let mut views = vec![];
+        let mut sets = vec![];
         for b in self.parameter_indices(p, s) {
             let binding = &self.bindings(p)[b];
             let id = resource(self.binding_resource(p, b)?);
+            if let Binding::PushConstant { offset, size, .. } = binding {
+                let stages = s.is_none().then(|| quote!(ShaderStages::VERTEX | ShaderStages::FRAGMENT,));
+                sets.push(quote!(pass.set_push_constants(#stages #offset, support::push_constant_bytes(#id, #size)?);));
+                continue;
+            }
             let Some((set, slot)) = binding.slot() else {
                 return Err(HostError::Invalid(
                     "rust-wgpu shader has an unlowered push constant".into(),
@@ -377,8 +446,9 @@ impl Program {
             groups.entry(set).or_default().push(quote!(BindGroupEntry{binding:#slot,resource:#value}));
         }
         let mut binds = vec![];
-        let mut sets = vec![];
-        for (set, entries) in groups {
+        let count = groups.keys().next_back().map_or(0, |set| set + 1);
+        for set in 0..count {
+            let entries = groups.get(&set).map(Vec::as_slice).unwrap_or(&[]);
             let name = format_ident!("group_{}", set);
             binds.push(quote!(let #name=device.create_bind_group(&BindGroupDescriptor{label:None,layout:&pipeline.get_bind_group_layout(#set),entries:&[#(#entries),*]});));
             sets.push(quote!(pass.set_bind_group(#set,&#name,&[]);));
@@ -392,11 +462,14 @@ impl Program {
         s: usize,
         groups: &[Expr; 3],
         entry: &Entry,
-    ) -> Result<TokenStream, HostError> {
+        format: ShaderFormat,
+    ) -> Result<(TokenStream, TokenStream), HostError> {
         let Pipeline::Compute(c) = &self.interface.pipelines[p] else {
             return Err(HostError::Invalid("dispatch without compute declaration".into()));
         };
         let name = &c.stages[s].entry_point;
+        let cached = compute_name(p, s);
+        let layout = self.rust_layout(p, Some(s), format)?;
         let (bindings, sets) = self.rust_bindings(p, Some(s))?;
         let dims = groups
             .iter()
@@ -405,12 +478,16 @@ impl Program {
                 quote!(dimension(#e)?)
             })
             .collect::<Vec<_>>();
-        Ok(quote! {{
+        let create = quote! {
+            #layout
+            let pipeline=device.create_compute_pipeline(&ComputePipelineDescriptor{
+                label:Some(#name),layout:Some(&layout),module:&shader,entry_point:Some(#name),compilation_options:Default::default(),cache:None,
+            });
+        };
+        let run = quote! {{
             let groups=[#(#dims),*];
             if groups.iter().any(|&group_count|group_count>device.limits().max_compute_workgroups_per_dimension){return Err(HostError::Invalid("dispatch exceeds device limits".into()));}
-            let pipeline=device.create_compute_pipeline(&ComputePipelineDescriptor{
-                label:Some(#name),layout:None,module:&shader,entry_point:Some(#name),compilation_options:Default::default(),cache:None,
-            });
+            let pipeline = &context.#cached;
             #bindings
             let mut encoder=device.create_command_encoder(&Default::default());
             {
@@ -419,7 +496,8 @@ impl Program {
                 pass.dispatch_workgroups(groups[0],groups[1],groups[2]);
             }
             queue.submit(Some(encoder.finish()));
-        }})
+        }};
+        Ok((create, run))
     }
 }
 
@@ -440,7 +518,7 @@ fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
                 _ => None,
             };
             if name.is_some_and(|name| used.contains(&name.to_string())) {
-                collect_identifiers(item.to_token_stream(), used);
+                ReferencedNames(used).visit_item(item);
             }
         }
     }
@@ -461,7 +539,7 @@ fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
         });
         let mut references = BTreeSet::new();
         for item in items.iter().filter(|item| !matches!(item, Item::Use(_))) {
-            collect_identifiers(item.to_token_stream(), &mut references);
+            ReferencedNames(&mut references).visit_item(item);
         }
         // Public reexports can be referenced by the enclosing generated module.
         items.retain_mut(|item| match item {
@@ -487,7 +565,13 @@ fn retain_helpers(items: &mut Vec<Item>, roots: &BTreeSet<String>) {
 }
 
 impl Program {
-    fn rust_draw(&self, p: usize, _ordinal: usize, entry: &Entry) -> Result<TokenStream, HostError> {
+    fn rust_draw(
+        &self,
+        p: usize,
+        _ordinal: usize,
+        entry: &Entry,
+        format: ShaderFormat,
+    ) -> Result<(usize, TokenStream, TokenStream), HostError> {
         let Pipeline::Graphics(g) = &self.interface.pipelines[p] else {
             return Err(HostError::Invalid("draw without graphics declaration".into()));
         };
@@ -498,18 +582,21 @@ impl Program {
         };
         let vertex_name = &vertex.entry_point;
         let fragment = g.stages.iter().find(|s| s.stage == ShaderStage::Fragment);
+        let layout = self.rust_layout(p, None, format)?;
         let (bindings, sets) = self.rust_bindings(p, None)?;
         let mut views = vec![];
         let mut targets = vec![];
         let mut colors = vec![];
+        let mut formats = vec![];
         let color_count = g.fragment_outputs.iter().map(|o| o.location as usize + 1).max().unwrap_or(0);
         targets.resize(color_count, quote!(None));
         colors.resize(color_count, quote!(None));
+        formats.resize(color_count, quote!(TextureFormat::Rgba8Unorm));
         let fragment_state = g.invocation.fragment_state;
         let blend = match fragment_state.blend {
-            BlendMode::Replace => quote!(BlendState::REPLACE),
-            BlendMode::SourceOver => quote!(BlendState::ALPHA_BLENDING),
-            BlendMode::Add => quote!(BlendState {
+            BlendMode::Replace => quote!(None),
+            BlendMode::SourceOver => quote!(Some(BlendState::ALPHA_BLENDING)),
+            BlendMode::Add => quote!(Some(BlendState {
                 color: BlendComponent {
                     src_factor: BlendFactor::One,
                     dst_factor: BlendFactor::One,
@@ -520,7 +607,7 @@ impl Program {
                     dst_factor: BlendFactor::One,
                     operation: BlendOperation::Add
                 }
-            }),
+            })),
         };
         let write_mask = if fragment_state.color_write {
             quote!(ColorWrites::ALL)
@@ -528,18 +615,25 @@ impl Program {
             quote!(ColorWrites::empty())
         };
         let mut target_size = None;
+        let mut sample_count = None;
         for output in &g.fragment_outputs {
             let id = resource(self.target_resource(&output.name)?);
             let view = format_ident!("target_{}", output.location);
             target_size = Some(quote!((#id.width(),#id.height())));
+            sample_count = Some(quote!(#id.sample_count()));
             views.push(quote!(let #view=#id.create_view(&Default::default());));
-            targets[output.location as usize] = quote!(Some(ColorTargetState{format:#id.format(),blend:Some(#blend),write_mask:#write_mask}));
+            let location = output.location as usize;
+            formats[location] = quote!(#id.format());
+            targets[location] = quote!(Some(ColorTargetState{format:formats[#location],blend:#blend,write_mask:#write_mask}));
             colors[output.location as usize] = quote!(Some(RenderPassColorAttachment{view:&#view,resolve_target:None,depth_slice:None,ops:Operations{load:LoadOp::Load,store:StoreOp::Store}}));
         }
-        let (depth_stencil, depth_attachment) = if fragment_state.depth_test != DepthTest::Disabled {
+        let (depth_stencil, depth_attachment, depth_format) = if fragment_state.depth_test
+            != DepthTest::Disabled
+        {
             let id = resource(self.depth_target(p)?);
             if target_size.is_none() {
                 target_size = Some(quote!((#id.width(),#id.height())));
+                sample_count = Some(quote!(#id.sample_count()));
             }
             let depth_compare = match fragment_state.depth_test {
                 DepthTest::Never => quote!(Never),
@@ -554,7 +648,7 @@ impl Program {
             let write = fragment_state.depth_write;
             views.push(quote!(let depth_view=#id.create_view(&Default::default());));
             (
-                quote!(Some(DepthStencilState{format:TextureFormat::Depth32Float,depth_write_enabled:#write,depth_compare:CompareFunction::#depth_compare,stencil:Default::default(),bias:Default::default()})),
+                quote!(Some(DepthStencilState{format:depth_format,depth_write_enabled:#write,depth_compare:CompareFunction::#depth_compare,stencil:Default::default(),bias:Default::default()})),
                 quote!(Some(RenderPassDepthStencilAttachment {
                     view: &depth_view,
                     depth_ops: Some(Operations {
@@ -563,12 +657,16 @@ impl Program {
                     }),
                     stencil_ops: None
                 })),
+                quote!(Some(#id.format())),
             )
         } else {
-            (quote!(None), quote!(None))
+            (quote!(None), quote!(None), quote!(None))
         };
         let Some(target_size) = target_size else {
             return Err(HostError::Invalid("draw has no attachments".into()));
+        };
+        let Some(sample_count) = sample_count else {
+            return Err(HostError::Invalid("draw has no attachment sample count".into()));
         };
         let mut attributes = vec![];
         let mut vertex_buffers = vec![];
@@ -659,15 +757,28 @@ impl Program {
             }
         };
         let draw = self.rust_draw_call(p, &g.invocation.draw, entry)?;
-        Ok(quote! {{
-            #(#views)* #(#attributes)*
+        let cached = render_name(p);
+        let require_depth = (fragment_state.depth_test != DepthTest::Disabled).then(|| {
+            quote! {
+                let Some(depth_format) = depth_format else {
+                    return Err(HostError::Invalid("missing depth attachment format".into()));
+                };
+            }
+        });
+        let create = quote! {
+            #require_depth
+            #(#attributes)* #layout
             let pipeline=device.create_render_pipeline(&RenderPipelineDescriptor{
-                label:Some(#vertex_name),layout:None,
+                label:Some(#vertex_name),layout:Some(&layout),
                 vertex:VertexState{module:&shader,entry_point:Some(#vertex_name),compilation_options:Default::default(),buffers:&[#(#vertex_buffers),*]},
                 fragment:#fragment,
                 primitive:PrimitiveState{topology:PrimitiveTopology::#topology,strip_index_format:None,front_face:FrontFace::#front,cull_mode:#cull,polygon_mode:PolygonMode::#fill,unclipped_depth:false,conservative:false},
-                depth_stencil:#depth_stencil,multisample:MultisampleState::default(),multiview:None,cache:None,
+                depth_stencil:#depth_stencil,multisample:MultisampleState{count:samples,..Default::default()},multiview:None,cache:None,
             });
+        };
+        let run = quote! {{
+            #(#views)*
+            let pipeline=context.#cached([#(#formats),*],#depth_format,#sample_count)?;
             #bindings
             let mut encoder=device.create_command_encoder(&Default::default());
             {
@@ -678,7 +789,8 @@ impl Program {
                 pass.set_pipeline(&pipeline);#(#sets)* #(#vertices)* #viewport #scissor #draw
             }
             queue.submit(Some(encoder.finish()));
-        }})
+        }};
+        Ok((color_count, create, run))
     }
 
     fn rust_draw_call(&self, p: usize, draw: &DrawCall, entry: &Entry) -> Result<TokenStream, HostError> {
@@ -783,6 +895,21 @@ fn rename_identifiers(tokens: TokenStream, replacements: &BTreeMap<String, Ident
             TokenTree::Punct(_) | TokenTree::Literal(_) => token,
         })
         .collect()
+}
+
+/// Struct field names and method names do not refer to imported helpers.
+struct ReferencedNames<'a>(&'a mut BTreeSet<String>);
+
+impl<'ast> Visit<'ast> for ReferencedNames<'_> {
+    fn visit_path(&mut self, path: &'ast Path) {
+        self.0.extend(path.segments.iter().map(|segment| segment.ident.to_string()));
+        visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, node: &'ast Macro) {
+        collect_identifiers(node.tokens.clone(), self.0);
+        visit::visit_macro(self, node);
+    }
 }
 
 fn collect_identifiers(tokens: TokenStream, used: &mut BTreeSet<String>) {

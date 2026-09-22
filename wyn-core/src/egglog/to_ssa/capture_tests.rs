@@ -76,6 +76,7 @@ impl Capture {
 
     fn compiler(&self) -> super::Compiler<'_> {
         super::Compiler {
+            host: Default::default(),
             data: &self.data,
             origins: Default::default(),
             placements: Default::default(),

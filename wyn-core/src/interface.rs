@@ -614,6 +614,9 @@ pub struct EntryDecl {
     /// operation. This identity, rather than the generated stage name, relates
     /// the vertex and fragment stages.
     pub graphics_group: Option<GraphicsStageGroup>,
+    /// Source call and result identities for an extracted compute entry.
+    /// Its physical outputs can include intermediates absent from the source result.
+    pub source_entry: Option<SourceEntry>,
     pub name: String,
     pub name_span: Span,
     pub size_params: Vec<String>,
@@ -622,6 +625,20 @@ pub struct EntryDecl {
     pub outputs: Vec<EntryOutputDecl<ResolvedAttribute>>,
     pub param_diets: Vec<types::Diet>,
     pub return_diet: types::Diet,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceEntry {
+    pub name: String,
+    /// Authored results backed by each physical output, including repeated aliases.
+    pub outputs: Vec<Vec<SourceResult>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceResult {
+    pub index: usize,
+    pub name: String,
+    pub kind: host::ResultKind,
 }
 
 /// Auto-allocated storage-buffer binding(s) for a single compute-entry

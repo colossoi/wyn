@@ -193,6 +193,7 @@
 (function RootLaunch (RootKey) Launch :no-merge)
 (function AbiGridResolved (StageKey) bool :merge (or old new))
 (relation AbiGridDomain (StageKey AbiValue i64))
+(relation AbiGridCapacity (RootKey BindingKey i64 i64))
 (relation AbiLaunchDomain (StageKey Extent i64))
 (relation AbiGridNeed (StageKey AbiValue))
 (relation SourceGrid (i64 i64 i64 i64))

@@ -30,6 +30,7 @@ mod dependencies;
 mod expressions;
 pub mod from_tlc;
 mod fusion;
+mod host;
 mod names;
 mod planning;
 mod publish;

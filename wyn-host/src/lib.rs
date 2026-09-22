@@ -4,8 +4,12 @@ pub mod arithmetic;
 pub mod interface;
 mod program;
 mod results;
+mod rust_context;
+mod rust_layout;
 mod rust_results;
 mod rust_wgpu;
+mod scalar;
+mod scalar_emit;
 mod whl;
 
 pub use interface::{
@@ -20,3 +24,4 @@ pub use interface::{
 };
 pub use program::{Allocation, Entry, Expr, HostError, Operation, Program, ResourceId, ShaderFormat};
 pub use results::{ResultField, ResultKind, ResultLayout, ResultScalar};
+pub use scalar::{ScalarExpr, ScalarSource, ScalarTask, ScalarType};

@@ -305,6 +305,15 @@ impl Body<'_, '_> {
         if let Some(value) = cache.get(&(self.builder.current_block(), id)) {
             return Ok(value.clone());
         }
+        if let Some(binding) = self.compiler.host.captures.get(&(self.root, id)).copied() {
+            let ty = self.compiler.data.types[self.compiler.data.expressions[id].ty].ty.clone();
+            let element = storage_type(&ty)?;
+            let view = self.view(binding, element, Self::number(1))?;
+            let value = self.index(view, Self::number(0))?;
+            let value = self.cast(value, &ty)?;
+            self.environment.expressions.insert(id, value.clone());
+            return Ok(value);
+        }
         let data = self.compiler.data;
         let record = &data.expressions[id];
         let ty = data.types[record.ty].ty.clone();

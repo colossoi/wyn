@@ -315,6 +315,7 @@ impl ModuleInterfacePublish for ModuleInterface {
                         set: br.set,
                         binding: br.binding,
                         name: input.name.clone(),
+                        // Backend preparation refines this from final SSA uses.
                         sample_type: TextureSampleType::Float { filterable: true },
                         view_dimension: TextureViewDimension::D2,
                         multisampled: false,

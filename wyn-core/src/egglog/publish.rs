@@ -10,7 +10,9 @@ use crate::host::{
 use crate::interface::publish::ModuleInterfacePublish;
 use crate::interface::results::result_layout;
 use crate::interface::StorageRole;
-use crate::interface::{BindingExposure, EntryInputKind, EntryKind, EntryPublication, StorageAccess};
+use crate::interface::{
+    BindingExposure, EntryInputKind, EntryKind, EntryPublication, SourceResult, StorageAccess,
+};
 use crate::ssa::types::EntryPoint;
 use crate::BindingRef;
 use crate::{EntryId, LookupMap, ResourceAccess};
@@ -73,6 +75,8 @@ pub(super) fn publish(
         }
         let pipeline_index = pipeline.pipelines.len();
         let source_name = &source_entries[owner].declaration.name;
+        let source_entry = declaration.source_entry.as_ref();
+        let host_owner = source_entry.map_or(source_name, |source| &source.name);
         let mut stages = vec![];
         let mut ids = vec![];
         for &root in blocks {
@@ -115,7 +119,7 @@ pub(super) fn publish(
             entry.stage_descriptor_storage_accesses = accesses.iter().map(|(&b, &a)| (b, a)).collect();
             stages.push(ComputeStage {
                 entry_point: entry.name.clone(),
-                owner: source_name.clone(),
+                owner: host_owner.clone(),
                 workgroup_size: size,
                 dispatch_size,
                 uses: Default::default(),
@@ -138,17 +142,34 @@ pub(super) fn publish(
             let Some(binding) = abi.buffer_bindings.get(&id).copied() else {
                 return Err(error("output has no physical binding"));
             };
-            let (name, kind) = names::result_field(&data.ir, output)?;
-            pipeline.source_results.push(SourceResultBinding {
-                entry: source_name.clone(),
-                name,
-                kind,
-                layout: result_layout(&data.types[data.expressions[output.expression].ty].ty),
-                result: output.index,
-                pipeline_index,
-                set: binding.set,
-                binding: binding.binding,
-            });
+            let results = match source_entry {
+                Some(source) => {
+                    let Some(results) = source.outputs.get(output.index) else {
+                        return Err(error("extracted output has no source result mapping"));
+                    };
+                    results.clone()
+                }
+                None => {
+                    let (name, kind) = names::result_field(&data.ir, output)?;
+                    vec![SourceResult {
+                        index: output.index,
+                        name,
+                        kind,
+                    }]
+                }
+            };
+            for result in results {
+                pipeline.source_results.push(SourceResultBinding {
+                    entry: host_owner.clone(),
+                    name: result.name,
+                    kind: result.kind,
+                    layout: result_layout(&data.types[data.expressions[output.expression].ty].ty),
+                    result: result.index,
+                    pipeline_index,
+                    set: binding.set,
+                    binding: binding.binding,
+                });
+            }
         }
     }
     let publications: Vec<_> = entries

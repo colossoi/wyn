@@ -1,0 +1,10 @@
+-- Both computations belong to the same host call as the draw.
+entry reproduce(values: []vec4f32, target: render_target<vec4f32>)
+    ([]vec4f32, []vec4f32, render_target<vec4f32>) =
+  let shifted = map(|v: vec4f32| v + @[0.1, 0.0, 0.0, 0.0], values)
+  let doubled = map(|v: vec4f32| v * 2.0, values)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32),
+    |vertex_index: u32, _: u32, _: u32|
+      vertex_output(shifted[i32(vertex_index)], @[1.0, 0.0, 0.0, 1.0]))
+  let image = shade(target, triangles, |value, _, _, _, _| value) in
+  (shifted, doubled, image)

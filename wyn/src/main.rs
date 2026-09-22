@@ -585,11 +585,6 @@ fn build(
         TargetDouble::WhlUnknown => Target::Spirv,
         TargetDouble::RustWgpu => Target::Wgsl,
     });
-    if matches!(target_double, TargetDouble::RustWgpu) && !matches!(target, Target::Wgsl) {
-        return Err(DriverError::InvalidOption(
-            "--target-double rust-wgpu requires --target wgsl".into(),
-        ));
-    }
     if wgsl_emulate_u64 && !matches!(target, Target::Wgsl) {
         return Err(DriverError::InvalidOption(
             "--wgsl-emulate-u64 requires --target wgsl".to_string(),

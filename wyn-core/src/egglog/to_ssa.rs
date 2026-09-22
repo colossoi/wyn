@@ -1,6 +1,7 @@
 //! SSA handoff from scheduled blocks and the derived resource plan.
 use super::abi::{concrete, u32_type};
 use super::blocks::{Control, Exit, Instruction, Storage, Value};
+use super::host::{self, Host};
 use super::names;
 use super::scalar::placement_index;
 use super::timing::span;
@@ -44,6 +45,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         origins.entry(origin.expression).or_insert(origin.span);
     }
     let mut compiler = Compiler {
+        host: host::plan(data)?,
         origins,
         placements: placement_index(&data.ir, &data.state.placements),
         data,
@@ -63,6 +65,9 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         let compute = !finish || declaration.entry_kind == EntryKind::Compute;
         lower.finish_outputs = finish && compute;
         lower.graphics_outputs = !compute;
+        for parameter in lower.compiler.host.inputs.get(&root).cloned().unwrap_or_default() {
+            lower.input(parameter)?;
+        }
         // Root parameters are source ABI values. Kernel captures are resolved
         // lazily, so a combine phase does not declare unused input arrays.
         if finish {
@@ -118,7 +123,8 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             span: Span::generated(),
         });
     }
-    let pipeline = super::publish::publish(data, &mut entries)?;
+    let mut pipeline = super::publish::publish(data, &mut entries)?;
+    compiler.host.publish(&mut pipeline, &mut entries)?;
     Ok(
         ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
             BackendGlobal {
@@ -138,6 +144,7 @@ fn builder_error(e: BuilderError) -> OptimizeError {
 }
 
 struct Compiler<'a> {
+    host: Host,
     origins: BTreeMap<ExprId, Span>,
     placements: BTreeMap<PlacementSite, Vec<ExprId>>,
     data: &'a Program<Scheduled>,
@@ -200,6 +207,7 @@ struct Environment {
     buffers: BTreeMap<BufferId, (PlaceId, Type)>,
 }
 struct Body<'a, 'b> {
+    root: BlockId,
     compiler: &'a mut Compiler<'b>,
     builder: FuncBuilder,
     environment: Environment,
@@ -251,6 +259,7 @@ impl<'a, 'b> Body<'a, 'b> {
             _ => [1, 1],
         };
         Ok(Self {
+            root: entry,
             compiler,
             builder,
             environment,
