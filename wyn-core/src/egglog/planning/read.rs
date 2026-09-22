@@ -172,6 +172,12 @@ pub(in crate::egglog) fn read(
     graph.constructor_enodes("Product", |e| {
         chunks.insert(e.eclass, ("mul", e.children[0], e.children[1]));
     })?;
+    rows(graph, "PlannedViewLength", |a| {
+        let expression = ExprId::from(number(graph, a[0])?);
+        let length = extent(graph, a[1], &mut extents, &chunks)?;
+        data.state.execution.view_lengths.insert(expression, length);
+        Ok(())
+    })?;
     rows(graph, "PlannedBuffer", |a| {
         let id = buffers[&a[0]];
         data.state.buffers.insert(

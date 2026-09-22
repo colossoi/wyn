@@ -1,4 +1,7 @@
-use crate::egglog::{from_tlc, fuse, insert_expressions, schedule, simplify_and_place, to_ssa};
+use crate::egglog::{
+    from_tlc, fuse, insert_expressions, schedule, simplify_and_place, to_ssa, Fused, OperationKind,
+    Program, Value,
+};
 use crate::host::Pipeline;
 use crate::interface::EntryParamBindingKind;
 use crate::tlc::infer_input_slice_bounds;
@@ -26,6 +29,42 @@ fn compile(source: &str) -> naga::Module {
     .validate(&module)
     .unwrap_or_else(|e| panic!("{e:?}\n{source}"));
     module
+}
+
+#[test]
+fn length_only_filter_view_lowers_without_its_discarded_element_buffer() {
+    let tlc = infer_input_slice_bounds(
+        compile_thru_tlc("entry main(xs:[]i32) i32=length(filter(|x:i32|x>0,xs))").unwrap(),
+    );
+    // Isolate scheduling: normal fusion replaces this filter with a count reduction.
+    let program = Program {
+        ir: from_tlc(&tlc).unwrap().ir,
+        state: Fused,
+    };
+    let program = schedule(
+        simplify_and_place(insert_expressions(program).unwrap()).unwrap(),
+        PipelineTopologyPolicy::AllowGenerated,
+    )
+    .unwrap();
+    let (&filter, _) =
+        program.operations.iter().find(|(_, op)| matches!(op.kind, OperationKind::Filter { .. })).unwrap();
+    assert!(
+        matches!(&program.state.materialized[&filter], Value::Primitive("slice", args) if matches!(args[0], Value::Discarded))
+    );
+    let source = lower_ssa_to_wgsl(to_ssa(&program, CodegenTarget::Wgsl).unwrap()).unwrap();
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    lower_ssa_to_spirv(to_ssa(&program, CodegenTarget::Spirv).unwrap()).unwrap();
+}
+
+#[test]
+fn length_queries_lower_without_materializing_array_elements() {
+    compile(include_str!("../../../testfiles/length_metadata.wyn"));
 }
 
 pub(super) fn assert_ssa_dominance<Tag>(

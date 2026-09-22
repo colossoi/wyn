@@ -5,6 +5,7 @@ use super::{
 use crate::ast::Span;
 use crate::builtins::catalog;
 use crate::egglog::abi::storage_type;
+use crate::egglog::data::is_slice;
 use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
 use crate::flow::{BlockId, ControlHeader};
 use crate::op::{BinaryOperator, UnaryOperator};
@@ -208,6 +209,9 @@ impl Body<'_, '_> {
             ));
         }
         match array {
+            Value::Primitive("slice", args) if args.len() == 2 => {
+                return self.value_cached(&args[1], cache);
+            }
             Value::Array(array) => return self.array_length_cached(array, cache),
             Value::Tuple(fields) => {
                 let Some(first) = fields.first() else {
@@ -219,9 +223,26 @@ impl Body<'_, '_> {
                 if !self.environment.expressions.contains_key(id)
                     && !cache.contains_key(&(self.builder.current_block(), *id)) =>
             {
+                if let Some(length) = self.compiler.data.state.execution.view_lengths.get(id) {
+                    return self.value_cached(length, cache);
+                }
                 match &self.compiler.data.expressions[*id].kind {
+                    ExprKind::OperationResult(op) if !self.environment.operations.contains_key(op) => {
+                        if let Some(value) = self.compiler.data.state.materialized.get(op) {
+                            return self.length_cached(value, cache);
+                        }
+                    }
                     ExprKind::Array(array) => return self.array_length_cached(array, cache),
                     ExprKind::Coerce(inner) => return self.length_cached(&Value::Source(*inner), cache),
+                    ExprKind::PureApp { function, args }
+                        if is_slice(&self.compiler.data.ir, *function) && args.len() == 3 =>
+                    {
+                        let start = self.expression_cached(args[1], cache)?;
+                        let end = self.expression_cached(args[2], cache)?;
+                        let start = self.cast(start, &u32_type())?;
+                        let end = self.cast(end, &u32_type())?;
+                        return self.primitive("sub", vec![end, start]);
+                    }
                     ExprKind::Tuple(fields) => {
                         let Some(first) = fields.first() else {
                             return Err(error("empty logical array"));

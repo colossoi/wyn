@@ -1,6 +1,8 @@
 //! Import local source facts into the existing scheduling program.
 //! Availability, transitive cost, and execution placement are derived by its rules.
-use super::data::{is_slice, BlockId, ExprId, ExprKind, OperationId, OperationKind, RegionId};
+use super::data::{
+    is_slice, length_source, BlockId, ExprId, ExprKind, OperationId, OperationKind, RegionId,
+};
 use super::dependencies::Dependencies;
 use super::scalar::total_node;
 use super::visit::Operand;
@@ -14,6 +16,7 @@ pub(super) struct Execution {
     pub host_values: BTreeSet<ExprId>,
     pub host_operations: BTreeSet<OperationId>,
     pub rematerialized: BTreeSet<OperationId>,
+    pub view_lengths: BTreeMap<ExprId, super::blocks::Value>,
     pub expansions: BTreeMap<OperationId, (BlockId, Vec<ExprId>)>,
     pub groups: BTreeMap<OperationId, Vec<OperationId>>,
     pub leaders: BTreeMap<OperationId, OperationId>,
@@ -178,13 +181,21 @@ pub(super) fn facts(
                     }
                     OperationKind::Call { function, args } => {
                         class = "simple";
-                        for &arg in args {
-                            sink.add("ReadsValue", (value, i64::from(arg.as_u32())))?;
-                        }
-                        if matches!(data.expressions[*function].kind, ExprKind::Builtin(_)) {
-                            // Builtin applications with motion proofs use PureApp.
-                            class = "opaque";
-                            sink.add("DeviceValue", value)?;
+                        if length_source(data, &operation.kind).is_some() {
+                            // A view's length observes metadata, not its elements or
+                            // the work that produced them. Availability still follows
+                            // the view, including a compacted array's GPU count.
+                            class = "length";
+                            count_children = false;
+                        } else {
+                            for &arg in args {
+                                sink.add("ReadsValue", (value, i64::from(arg.as_u32())))?;
+                            }
+                            if matches!(data.expressions[*function].kind, ExprKind::Builtin(_)) {
+                                // Builtin applications with motion proofs use PureApp.
+                                class = "opaque";
+                                sink.add("DeviceValue", value)?;
+                            }
                         }
                     }
                     OperationKind::EvalGlobal(symbol) => {

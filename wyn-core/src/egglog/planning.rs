@@ -130,6 +130,8 @@ pub(super) fn facts(
         let region = sink.add("RegionId", i64::from(op.region.as_u32()))?;
         sink.add("Site", (key, region))?;
         if let Some(array) = length_source(data, &op.kind) {
+            let source = sink.add("ExprId", i64::from(array.as_u32()))?;
+            sink.add("LengthOperation", (key, source))?;
             let result = sink.add("Result", (key, 0i64))?;
             let result = sink.add("AbiResource", result)?;
             let array = sink.add("AbiExpr", i64::from(array.as_u32()))?;

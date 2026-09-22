@@ -119,7 +119,9 @@
 (rule ((FieldValue (ExprId e) i (ExprId field))) ((AbiFieldValue (AbiExpr e) i (AbiExpr field))) :ruleset abi)
 (rule ((Projection (ExprId e) (ExprId tuple) i)) ((AbiAlias (AbiExpr e) (AbiField (AbiExpr tuple) i)) (AbiChild (AbiExpr e) (AbiExpr tuple))) :ruleset abi)
 (rule ((SliceView (ExprId e) (ExprId source) (ExprId start) (ExprId end)))
-      ((AbiStorageAlias (AbiExpr e) (AbiExpr source)) (AbiArrayLength (AbiExpr e) (AbiBinary "sub" (AbiExpr end) (AbiExpr start)))) :ruleset abi)
+      ((AbiStorageAlias (AbiExpr e) (AbiExpr source))
+       (AbiArrayLength (AbiExpr e) (AbiBinary "sub" (AbiExpr end) (AbiExpr start)))
+       (AbiArrayBound (AbiExpr e) (AbiLength (AbiExpr source)))) :ruleset abi)
 (rule ((CopyOutput output) (OutputOwner output entry)) ((AbiCopyEntry entry)) :ruleset abi)
 
 ; Extents stay in the planning graph through physical-interface publication.

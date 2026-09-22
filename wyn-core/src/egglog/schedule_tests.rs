@@ -33,6 +33,73 @@ fn kernel_count(data: &Program<Scheduled>) -> usize {
 }
 
 #[test]
+fn input_and_slice_lengths_are_evaluated_by_their_consumers() {
+    for source in [
+        "entry main(xs:[]i32) []i32 = let n=length(xs) in map(|i|xs[i]+n,iota(n))",
+        "entry main(xs:[]i32) []i32 = let ys=xs[1..length(xs)] in
+         let n=length(ys) in map(|i|ys[i]+n,iota(n))",
+    ] {
+        let result = compile(source);
+        assert_eq!(kernel_count(&result), 1);
+        for n in [1, 2, 65] {
+            let start = i64::from(source.contains("let ys="));
+            assert_eq!(
+                run(&result, vec![Value::array(0..n)]),
+                [Value::array((start..n).map(|x| x + n - start))]
+            );
+        }
+    }
+    let empty = compile("entry main(xs:[]i32) []i32 = map(|i|i+length(xs),iota(length(xs)))");
+    assert_eq!(kernel_count(&empty), 1);
+    assert_eq!(run(&empty, vec![Value::array([])]), [Value::array([])]);
+}
+
+#[test]
+fn filter_length_consumers_read_the_live_count_without_an_extra_dispatch() {
+    let result = compile(
+        "entry main(xs:[]i32) []i32 = let ys=filter(|x:i32|x>0,xs) in
+         map(|i|ys[i]+length(ys),iota(length(ys)))",
+    );
+    assert_eq!(kernel_count(&result), 4);
+    for xs in [vec![], vec![-1, 0], vec![-1, 3, 0, 7], vec![2; 65]] {
+        let kept: Vec<_> = xs.iter().copied().filter(|&x| x > 0).collect();
+        assert_eq!(
+            run(&result, vec![Value::array(xs)]),
+            [Value::array(kept.iter().map(|&x| x + kept.len() as i64))]
+        );
+    }
+}
+
+#[test]
+fn mutable_input_length_does_not_capture_element_contents() {
+    let result = compile(
+        "entry main(xs:*[3]i32) [3]i32 = let n=length(xs) in
+         let ys=scatter(xs,[0],[100]) in map(|x:i32|x+n,ys)",
+    );
+    assert_eq!(kernel_count(&result), 2);
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9])]),
+        [Value::array([103, 5, 12])]
+    );
+}
+
+#[test]
+fn mapped_array_length_does_not_require_its_discarded_elements() {
+    for (view, start) in [("ys", 0), ("ys[0..length(ys)]", 0), ("ys[1..length(ys)]", 1)] {
+        let result = compile(&format!(
+            "entry main(xs:[]i32) []i32 = let ys=map(|x:i32|x+1,xs) in
+             map(|i|i,iota(length({view})))",
+        ));
+        for n in [0, 1, 65].into_iter().filter(|&n| n >= start) {
+            assert_eq!(
+                run(&result, vec![Value::array(0..n)]),
+                [Value::array(0..n - start)]
+            );
+        }
+    }
+}
+
+#[test]
 fn immutable_input_scalar_loads_are_read_by_their_consumers() {
     let result = compile("entry main(xs: []i32) []i32 = let first = xs[0] in map(|x:i32|x+first, xs)");
     assert_eq!(kernel_count(&result), 1);

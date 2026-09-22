@@ -1,0 +1,16 @@
+-- Lengths observe logical view metadata, even when elements are never stored.
+entry input_length(xs: []i32) []i32 =
+    let n = length(xs) in map(|i| i + n, iota(n))
+
+entry mapped_length(xs: []i32) []i32 =
+    let ys = map(|x:i32| x + 1, xs) in
+    map(|i| i, iota(length(ys)))
+
+entry mapped_slice_length(xs: []i32) []i32 =
+    let ys = map(|x:i32| x + 1, xs) in
+    let view = ys[0..length(ys)] in
+    map(|i| i, iota(length(view)))
+
+entry filtered_length(xs: []i32) []i32 =
+    let ys = filter(|x:i32| x > 0, xs) in
+    map(|i| ys[i] + length(ys), iota(length(ys)))

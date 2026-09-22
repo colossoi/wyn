@@ -19,6 +19,8 @@ pub(super) enum Value {
     Uninitialized,
     /// A dead tuple slot may exist as a handle, but arithmetic cannot observe it.
     Discarded,
+    /// A view can retain a live length after its unused elements are discarded.
+    LengthOnly(usize),
 }
 
 impl Value {
@@ -354,6 +356,14 @@ impl Machine<'_> {
             Code::Primitive("global_id", _) => Value::Int(i64::from(self.invocation)),
             Code::Primitive("global_size", _) => Value::Int(i64::from(self.invocations)),
             Code::Primitive("local_id", _) => Value::Int(i64::from(self.invocation % self.width)),
+            Code::Primitive("length", args) => {
+                if let [Code::Source(id)] = args.as_slice() {
+                    if let Some(length) = self.data.state.execution.view_lengths.get(id) {
+                        return self.value(length, frame);
+                    }
+                }
+                primitive("length", args.iter().map(|v| self.value(v, frame)).collect())
+            }
             Code::Primitive(name, args) => {
                 primitive(name, args.iter().map(|v| self.value(v, frame)).collect())
             }
@@ -451,6 +461,8 @@ impl Machine<'_> {
                     // Rematerialized helpers are read-only. Use an invocation
                     // frame with the same backing arrays and dispatch context.
                     self.clone().call(*helper, args).into_iter().next().unwrap()
+                } else if let Some(value) = self.data.state.materialized.get(id) {
+                    self.value(value, frame)
                 } else {
                     panic!("unbound operation {id:?}");
                 }
@@ -493,9 +505,18 @@ fn field(tuple: Value, index: usize) -> Value {
 
 fn primitive(name: &str, args: Vec<Value>) -> Value {
     match name {
-        "length" => Value::Int(args[0].elements().len() as i64),
+        "length" => Value::Int(match &args[0] {
+            Value::LengthOnly(n) => *n as i64,
+            value => value.elements().len() as i64,
+        }),
         "index" => args[0].at(args[1].int() as usize),
+        "slice" if matches!(args[0], Value::Discarded | Value::LengthOnly(_)) => {
+            Value::LengthOnly(args[1].int() as usize)
+        }
         "slice" => Value::values(args[0].elements()[..args[1].int() as usize].to_vec()),
+        "_w_intrinsic_slice" if matches!(args[0], Value::Discarded | Value::LengthOnly(_)) => {
+            Value::LengthOnly((args[2].int() - args[1].int()) as usize)
+        }
         "_w_intrinsic_slice" => {
             Value::values(args[0].elements()[args[1].int() as usize..args[2].int() as usize].to_vec())
         }

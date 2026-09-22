@@ -2,7 +2,7 @@
 use super::blocks::{
     BlockData, BodyData, Control, Edge, Exit, Function, FunctionKind, Instruction, Storage, Value,
 };
-use super::data::intern_type;
+use super::data::{intern_type, length_source};
 use super::planning::{abi, facts, outputs, read, Readout, Recipe, KEYS, RULES, RUN};
 use super::scalar::placement_index;
 use super::{OptimizeError, Placed, PlacementSite, Program, Scheduled};
@@ -303,6 +303,12 @@ impl Planner<'_> {
             return Ok(block);
         }
         if !device && self.data.state.execution.rematerialized.contains(&op) {
+            if let Some(array) = length_source(&self.data.ir, &self.data.operations[op].kind) {
+                // A metadata query must not capture or construct the elements,
+                // including a filter output whose backing has been discarded.
+                self.data.state.materialized.insert(op, Value::op("length", [Value::Source(array)]));
+                return Ok(block);
+            }
             let captures = super::planning::scalar_captures(&self.data.ir, op);
             let names: Vec<_> = (0..captures.len()).map(|i| format!("c{i}")).collect();
             let helper = self.function(
