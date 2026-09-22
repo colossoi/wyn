@@ -46,12 +46,12 @@
 
 ; Summarize the shared expression DAG once, stopping at execution results. A
 ; shared scalar chain must not be traversed again for every consuming stage.
-(rule ((ValueRef e value)) ((References e value)) :ruleset residency)
+(rule ((ValueRef e value)) ((References e (Contents value))) :ruleset residency)
 (rule ((ChildValue e child) (References child value)) ((References e value)) :ruleset residency)
 (rule ((ForwardValue e child) (References child value)) ((References e value)) :ruleset residency)
 (rule ((Projection e tuple i) (ComputedValue tuple) (References tuple value))
       ((References e value)) :ruleset residency)
-(rule ((ResultTuple e op) (ResultSlot op i)) ((References e (Result op i))) :ruleset residency)
+(rule ((ResultTuple e op) (ResultSlot op i)) ((References e (Contents (Result op i)))) :ruleset residency)
 (rule ((SliceView e source start end) (References source value)) ((References e value)) :ruleset residency)
 (rule ((SliceView e source start end) (References start value)) ((References e value)) :ruleset residency)
 (rule ((SliceView e source start end) (References end value)) ((References e value)) :ruleset residency)
@@ -78,7 +78,9 @@
 (rule ((HostRegion r) (Site op r) (ScalarSite op) (= (ScalarBoundary op) false) (Operand op role e))
       ((Demand (InOperation op) e)) :ruleset residency)
 (rule ((HostRegion r) (ExitValue r e)) ((Demand (AtExit) e)) :ruleset residency)
-(rule ((Demand site e) (References e value)) ((Requires site value)) :ruleset residency)
+(rule ((Demand site e) (References e (Contents value))) ((Requires site value)) :ruleset residency)
+(rule ((Demand (InStage stage) e) (References e (Descriptor source)))
+      ((Needs stage (Source source))) :ruleset residency)
 (rule ((Requires (InStage stage) value)) ((Needs stage value)) :ruleset residency)
 
 ; Any host-region exit requires its values to survive the invocation.

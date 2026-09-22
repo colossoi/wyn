@@ -114,7 +114,7 @@ pub(super) fn publish(
             break;
         }
     }
-    rows(graph, "AbiCapacity", |row| {
+    rows(graph, "AbiAllocationBytes", |row| {
         let Some(id) = buffers.get(&row[0]) else {
             return Ok(());
         };
@@ -127,17 +127,10 @@ pub(super) fn publish(
         ) {
             return Ok(());
         }
-        let Some(count) = known.get(&row[1]) else {
+        let Some(bytes) = known.get(&row[1]) else {
             return Ok(());
         };
-        let stride = number(graph, row[2])?;
-        binding.length = Some(BufferLen::Computed {
-            bytes: SizeExpr::Binary {
-                op: SizeOp::Multiply,
-                left: Box::new(count.clone()),
-                right: Box::new(SizeExpr::Integer(stride.into())),
-            },
-        });
+        binding.length = Some(BufferLen::Computed { bytes: bytes.clone() });
         Ok(())
     })?;
     Ok(())

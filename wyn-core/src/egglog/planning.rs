@@ -272,9 +272,9 @@ pub(super) fn facts(
                 }
                 Some(inputs)
             }
-            OperationKind::Filter { map, inputs, .. } => {
+            OperationKind::Filter { post, inputs, .. } => {
                 sink.add("FilterShape", key)?;
-                if let Some(t) = body_signature(map).1.first() {
+                if let Some(t) = body_signature(post).1.first() {
                     let t = sink.add("TypeId", i64::from(t.as_u32()))?;
                     sink.add("FilterResult", (key, t))?;
                 }

@@ -79,6 +79,7 @@ pub(super) fn apply_step(
         2 => envelope(data, producer, consumer),
         3 | 5 => masked(data, producer, consumer, &lengths),
         4 => indexed(data, producer, &demands),
+        6 => filter::post_map(data, producer, consumer),
         _ => None,
     }) else {
         return Err(OptimizeError::Extraction(format!(

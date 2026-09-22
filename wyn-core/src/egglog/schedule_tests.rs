@@ -487,6 +487,109 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
 }
 
 #[test]
+fn filter_post_map_runs_only_for_survivors_in_the_compact_phase() {
+    let result = compile("entry main(xs:[]i32) []i32 = map(|x:i32|120/x,filter(|x:i32|x!=0,xs))");
+    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(
+        result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
+        6
+    );
+    for n in [0, 1, 63, 64, 65, 137] {
+        for pattern in 0..4 {
+            let xs: Vec<_> = (0..n)
+                .map(|i| match pattern {
+                    0 => i % 5 + 1,
+                    1 => 0,
+                    2 => {
+                        if i % 2 == 0 {
+                            2
+                        } else {
+                            0
+                        }
+                    }
+                    _ => {
+                        if i % 17 == 1 {
+                            3
+                        } else {
+                            0
+                        }
+                    }
+                })
+                .collect();
+            let expected = Value::array(xs.iter().copied().filter(|&x| x != 0).map(|x| 120 / x));
+            assert_eq!(
+                run(&result, vec![Value::array(xs)]),
+                [expected],
+                "n={n}, pattern={pattern}"
+            );
+        }
+    }
+}
+
+#[test]
+fn filter_post_map_composes_chains_and_captured_type_changing_outputs() {
+    let result = compile(
+        "entry main(xs:*[]i32,bias:i32) [](i32,i32) =
+         let ys=filter(|x:i32|x>0,map(|x:i32|x-1,xs)) in
+         let zs=map(|x:i32|x+bias,ys) in map(|x:i32|(x,x*2),zs)",
+    );
+    assert_eq!(kernel_count(&result), 3);
+    let output = run(&result, vec![Value::array([0, 2, 5, 1, 9]), Value::Int(7)]);
+    for (i, x) in [8, 11, 15].into_iter().enumerate() {
+        assert_eq!(
+            output[0].at(i),
+            Value::Tuple(vec![Value::Int(x), Value::Int(x * 2)])
+        );
+    }
+}
+
+#[test]
+fn filter_post_map_record_output_keeps_live_count_and_capacity_distinct() {
+    let result = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
+    assert_eq!(kernel_count(&result), 3);
+    for xs in [
+        vec![],
+        vec![-1; 65],
+        vec![1; 65],
+        (0..137).map(|i| i % 3 - 1).collect(),
+    ] {
+        let n = xs.len() as i64;
+        let values: Vec<_> = xs
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| **x > 0)
+            .map(|(i, _)| {
+                let value = i as i64 + 1;
+                Value::Tuple(vec![Value::Int(value), Value::Int(value * 3 + n)])
+            })
+            .collect();
+        let output = run(&result, vec![Value::array(xs), Value::Int(n)]);
+        let Value::Tuple(fields) = &output[0] else {
+            panic!("expected count and record array");
+        };
+        assert_eq!(fields[0], Value::Int(values.len() as i64));
+        for (i, value) in values.into_iter().enumerate() {
+            assert_eq!(fields[1].at(i), value);
+        }
+    }
+}
+
+#[test]
+fn filter_post_map_executes_in_nested_serial_filters() {
+    let result = compile(
+        "entry main(xs:[]i32) []i32 = map(|x:i32|
+         let kept=filter(|y:i32|y!=0,[-1,0,1,2]) in
+         let mapped=map(|y:i32|x+120/y,kept) in
+         loop total=0 for y in mapped do total+y, xs)",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        run(&result, vec![Value::array([0, 1, 5])]),
+        [Value::array([60, 63, 75])]
+    );
+}
+
+#[test]
 fn consuming_scans_reuse_the_input_only_for_final_prefixes() {
     for (body, multiplier, scratch) in [
         ("scan(|a:i32,b:i32|a+b,0,xs)", 1, 3),

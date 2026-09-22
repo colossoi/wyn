@@ -1,5 +1,5 @@
 use super::body::{finish, invoke};
-use super::{body, result_types};
+use super::{body, input, result_types, wire_input, Wiring};
 use crate::egglog::data::{
     body_signature, intern_expr, intern_type, ExprKind, Ir, OperationId, OperationKind, Reduction,
     ScremaForm, SoacBody,
@@ -7,6 +7,75 @@ use crate::egglog::data::{
 use crate::egglog::rewrite::all;
 use crate::types::{function, tuple};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Apply a whole-stream map to survivors while preserving the filter's count.
+pub(super) fn post_map(data: &mut Ir, producer: OperationId, consumer: OperationId) -> Option<()> {
+    let OperationKind::Filter {
+        map,
+        body,
+        post,
+        inputs,
+        ..
+    } = data.operations[producer].kind.clone()
+    else {
+        return None;
+    };
+    let OperationKind::Screma {
+        form,
+        inputs: consumer_inputs,
+        ..
+    } = data.operations[consumer].kind.clone()
+    else {
+        return None;
+    };
+    let fields = result_types(data, consumer);
+    let [array_ty] = fields.as_slice() else {
+        return None;
+    };
+    let parent = data.operations[consumer].region;
+    let mut wiring = Wiring::new(body_signature(&post).0);
+    let args = (0..body_signature(&post).0.len()).collect();
+    let produced = wiring.call(post, args);
+    let args = consumer_inputs
+        .iter()
+        .map(|array| {
+            let tree = input(data, array, Some(producer));
+            wire_input(data, parent, &mut wiring, &tree, &[], &produced)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mapped = wiring.call(form.pre, args);
+    let mapped = wiring.call(form.post, mapped);
+    let post = wiring.finish(mapped);
+
+    let old_ty = data.operations[consumer].ty;
+    let old_values: Vec<_> = data.expressions.iter().map(|(&id, e)| (id, e.kind.clone())).collect();
+    let result = intern_expr(data, *array_ty, ExprKind::OperationResult(consumer));
+    let tuple = intern_expr(data, old_ty, ExprKind::Tuple(vec![result]));
+    let mut substitutions = BTreeMap::new();
+    for (id, kind) in old_values {
+        match kind {
+            ExprKind::OperationResult(op) if op == producer => {
+                substitutions.insert(id, result);
+            }
+            ExprKind::OperationResult(op) if op == consumer => {
+                substitutions.insert(id, tuple);
+            }
+            _ => {}
+        }
+    }
+    data.operations[consumer].ty = *array_ty;
+    data.operations[consumer].kind = OperationKind::Filter {
+        map,
+        body,
+        post,
+        inputs,
+        // Compaction reads original elements while writing type-changing results.
+        reuse_input: None,
+    };
+    data.regions[parent].members.remove(&producer);
+    all(data, &substitutions);
+    Some(())
+}
 
 /// Mask reduction inputs and, when needed, append a shared count reduction.
 /// Passing the filter as both IDs requests the length-only transformation.
@@ -17,7 +86,11 @@ pub(super) fn masked(
     lengths: &BTreeSet<OperationId>,
 ) -> Option<()> {
     let OperationKind::Filter {
-        map, body, inputs, ..
+        map,
+        body,
+        post,
+        inputs,
+        ..
     } = data.operations[producer].kind.clone()
     else {
         return None;
@@ -47,10 +120,15 @@ pub(super) fn masked(
     let [condition] = predicate.as_slice() else {
         return None;
     };
-    let [mapped] = mapped.as_slice() else {
-        return None;
+    let values = if only_count {
+        vec![]
+    } else {
+        let mapped = invoke(data, &post, mapped)?;
+        let [mapped] = mapped.as_slice() else {
+            return None;
+        };
+        invoke(data, &form.pre, vec![*mapped; consumer_inputs])?
     };
-    let values = if only_count { vec![] } else { invoke(data, &form.pre, vec![*mapped; consumer_inputs])? };
     let neutrals: Vec<_> = form.reductions.iter().flat_map(|r| &r.neutral).copied().collect();
     if values.len() != neutrals.len() {
         return None;

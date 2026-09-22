@@ -203,7 +203,11 @@
       ((union (ResourceBinding buffer) (InputBinding set binding))) :ruleset abi)
 (rule ((AbiCapacity buffer n stride) (= count (AbiBoundConstant n)) (> stride 0)
        (<= count (/ 9223372036854775807 stride)))
-      ((set (BufferCapacity buffer) (FixedCapacity (* count stride)))) :ruleset abi-final)
+      ((set (BufferCapacity buffer) (FixedCapacity (* (max 1 count) stride)))) :ruleset abi-final)
+; A runtime-array binding needs storage for at least one element even when its
+; logical length is zero. Keep the live extent and dispatch domain unchanged.
+(rule ((AbiCapacity buffer n stride))
+      ((AbiAllocationBytes buffer (AbiBinary "mul" (AbiBinary "max" n (AbiNumber 1)) (AbiNumber stride)))) :ruleset abi)
 (rule ((AbiCapacity buffer n stride) (= (AbiBoundKnown n) false) (AbiBoundInput n binding source-stride))
       ((set (BufferCapacity buffer) (InputCapacity binding stride source-stride))) :ruleset abi-final)
 ; SameAsDispatch is valid only when each launched invocation owns at most one

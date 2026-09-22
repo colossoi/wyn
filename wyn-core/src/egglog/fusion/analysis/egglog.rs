@@ -56,6 +56,32 @@ fn domain(array: &Array) -> String {
 }
 impl Sink for Egglog {
     type Dependency = usize;
+    fn scalar_region(&mut self, region: RegionId, operations: &[OperationId]) {
+        let members = operations.iter().map(|op| op.egglog()).collect::<Vec<_>>().join(" ");
+        self.emit(format_args!(
+            "(set (ScalarRegionMembers {}) (set-of {members})) (set (PureRegionMembers {}) (set-empty))",
+            region.egglog(),
+            region.egglog()
+        ));
+        for op in operations {
+            self.emit(format_args!("(ScalarMember {} {})", region.egglog(), op.egglog()));
+        }
+    }
+    fn scalar_operation(&mut self, operation: OperationId, regions: &[RegionId]) {
+        let members = regions.iter().map(|r| r.egglog()).collect::<Vec<_>>().join(" ");
+        self.emit(format_args!(
+            "(set (ScalarCallees {}) (set-of {members})) (set (PureCallees {}) (set-empty))",
+            operation.egglog(),
+            operation.egglog()
+        ));
+        for region in regions {
+            self.emit(format_args!(
+                "(ScalarCall {} {})",
+                operation.egglog(),
+                region.egglog()
+            ));
+        }
+    }
     fn operation(&mut self, id: OperationId, region: RegionId, fact: Operation) {
         let (g, p) = (group(id), source(id));
         self.emit(format_args!("(Current {g} {p}) (Member {g} {}) (set (Owner {p}) {}) (set (Scope {p}) {}) (set (IterationDomain {p}) (SourceDomain {}))", id.egglog(), id.egglog(), region.egglog(), id.egglog()));
@@ -89,6 +115,7 @@ impl Sink for Egglog {
             }
         }
         self.emit(format_args!("(set (DemandLimit {p}) {})", fact.demand_limit));
+        self.emit(format_args!("(set (ArrayOutputs {p}) {})", fact.arrays));
         for (name, yes) in [
             ("HasScans", fact.scans > 0),
             ("HasReductions", fact.reductions > 0),

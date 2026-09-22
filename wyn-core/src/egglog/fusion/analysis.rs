@@ -35,6 +35,7 @@ impl From<OperandRole> for Role {
 /// Read the source once and send facts directly to the selected backend.
 pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), OptimizeError> {
     let mut analysis = Analysis::new(data);
+    facts::scalar_regions(data, &analysis.dependencies, sink);
     let mut schedules = analysis.dependencies.schedules(data)?;
     schedules.retain(|_, ops| {
         ops.iter().any(|id| {

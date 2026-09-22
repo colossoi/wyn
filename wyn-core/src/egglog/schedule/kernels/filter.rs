@@ -11,7 +11,11 @@ impl Planner<'_> {
         host: BlockId,
     ) -> Result<Value, OptimizeError> {
         let OperationKind::Filter {
-            map, body, inputs, ..
+            map,
+            body,
+            post,
+            inputs,
+            ..
         } = self.data.operations[op].kind.clone()
         else {
             return Err(error("invalid compaction recipe"));
@@ -166,6 +170,7 @@ impl Planner<'_> {
         );
         let elements = self.read_inputs(selected, &inputs, i);
         let values = self.invoke_body(selected, &map, elements, "map")?;
+        let values = self.invoke_body(selected, &post, values, "post")?;
         let [value] = values.as_slice() else {
             return Err(error("filter map result arity"));
         };
@@ -188,6 +193,7 @@ impl Planner<'_> {
         local: bool,
         map: &SoacBody,
         body: &SoacBody,
+        post: &SoacBody,
         inputs: &[Array],
     ) -> Result<(BlockId, Value), OptimizeError> {
         let n = length(inputs);
@@ -210,7 +216,11 @@ impl Planner<'_> {
         let count_name = format!("filter_count{}", loop_.body.as_u32());
         let merge = self.block(owner, vec![count_name.clone()]);
         self.branch(loop_.body, predicate.clone(), selected, skipped, Some(merge));
-        self.store(selected, &output, loop_.state[0].clone(), value);
+        let values = self.invoke_body(selected, post, vec![value], "post")?;
+        let [value] = values.as_slice() else {
+            return Err(error("filter post-map result arity"));
+        };
+        self.store(selected, &output, loop_.state[0].clone(), value.clone());
         self.jump(
             selected,
             merge,

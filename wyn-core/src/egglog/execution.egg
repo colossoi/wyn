@@ -86,12 +86,12 @@
 (rule ((ScalarResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false) (Operand op role child))
       ((ChildValue e child)) :ruleset residency)
 ; A length use needs the logical extent, never the old element contents.
+; Resolve those metadata dependencies at the length definition; ordinary
+; References/ChildValue propagation carries them through enclosing expressions.
 (rule ((ScalarResult e op) (= (Rematerialize op) true) (LengthOperation op array))
       ((LengthReference e array)) :ruleset residency)
-(rule ((ChildValue e child) (LengthReference child array)) ((LengthReference e array)) :ruleset residency)
-(rule ((ForwardValue e child) (LengthReference child array)) ((LengthReference e array)) :ruleset residency)
-(rule ((Projection e tuple i) (ComputedValue tuple) (LengthReference tuple array))
-      ((LengthReference e array)) :ruleset residency)
+(rule ((LengthReference e array) (ValueRef array (Source source)))
+      ((References e (Descriptor source))) :ruleset residency)
 (rule ((LengthReference e array) (SliceView array source start end))
       ((ChildValue e start) (ChildValue e end)) :ruleset residency)
 (rule ((LengthReference e array) (ValueRef array value) (LiveLength value n))
@@ -99,11 +99,10 @@
 (rule ((LengthReference e array) (ValueRef array value) (SameBacking value source))
       ((LengthReference e source)) :ruleset residency)
 (rule ((ReferencedExtent e (Length array))) ((LengthReference e array)) :ruleset residency)
-(rule ((ReferencedExtent e (Stored value))) ((References e value)) :ruleset residency)
+(rule ((ReferencedExtent e (Stored value))) ((References e (Contents value))) :ruleset residency)
 (rule ((ReferencedExtent e (Scalar child))) ((ChildValue e child)) :ruleset residency)
 (rule ((ReferencedExtent e (ChunkCount n width))) ((ReferencedExtent e n)) :ruleset residency)
 (rule ((ReferencedExtent e (Product a b))) ((ReferencedExtent e a) (ReferencedExtent e b)) :ruleset residency)
-(rule ((Demand (InStage stage) e) (LengthReference e array)) ((LengthDemand stage array)) :ruleset residency)
 ; Keep exact view extents available even when their element slots are unused.
 ; Direct results and forwarding preserve lengths; sliced views keep their own
 ; bounds and must not inherit the backing resource's live length.
@@ -114,7 +113,7 @@
       ((ViewExtent e (Length destination))) :ruleset residency)
 (rule ((DirectResult e op i) (SameBacking (Result op i) source)) ((ViewExtent e (Length source))) :ruleset residency)
 (rule ((ForwardValue e source) (ViewExtent source n)) ((ViewExtent e n)) :ruleset residency)
-(rule ((Demand site e) (LengthReference e array)) ((QueryLength array)) :ruleset residency)
+(rule ((LengthReference e array)) ((QueryLength array)) :ruleset residency)
 (rule ((LengthDemand stage e)) ((QueryLength e)) :ruleset residency)
 (rule ((QueryLength e) (ViewExtent e (Length source))) ((QueryLength source)) :ruleset residency)
 (rule ((QueryLength (ExprId e)) (ViewExtent (ExprId e) n)) ((PlannedViewLength e n)) :ruleset readout)

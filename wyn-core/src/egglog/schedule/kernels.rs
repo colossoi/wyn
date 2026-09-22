@@ -199,8 +199,12 @@ impl Planner<'_> {
                 self.serial_screma(op, block, local, &form, &inputs)
             }
             OperationKind::Filter {
-                map, body, inputs, ..
-            } => self.serial_filter(op, block, local, &map, &body, &inputs),
+                map,
+                body,
+                post,
+                inputs,
+                ..
+            } => self.serial_filter(op, block, local, &map, &body, &post, &inputs),
             OperationKind::Scatter { .. }
             | OperationKind::BucketScatter { .. }
             | OperationKind::ReduceByIndex { .. } => self.indexed(op, block, local, None),

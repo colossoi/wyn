@@ -133,6 +133,31 @@ fn entry_ops(data: &Ir) -> Vec<OperationId> {
     analyze(data).schedules(data).unwrap().remove(&entry(data)).unwrap_or_default()
 }
 
+#[test]
+fn filter_post_map_rejects_effectful_callbacks() {
+    for source in [
+        "entry main(dest:*[3]i32,xs:[3]i32) []i32 =
+         map(|x:i32|let updated=scatter(dest,[0],[x]) in updated[0],filter(|x:i32|x>0,xs))",
+        "def read(other:[3]i32,x:i32) i32 = other[x]
+         entry main(xs:[3]i32,other:[3]i32) []i32 = map(|x:i32|read(other,x),filter(|x:i32|x>0,xs))",
+    ] {
+        let program = optimized(imported(source));
+        assert_eq!(entry_ops(&program.ir).len(), 2, "{source}");
+    }
+}
+
+#[test]
+fn filter_post_map_captures_array_predicate_and_changes_record_type() {
+    let program = imported(include_str!("../../../../testfiles/rust_host_filter_post.wyn"));
+    let program = optimized(program);
+    assert_eq!(entry_ops(&program.ir).len(), 2);
+    let filter = entry_ops(&program.ir)
+        .into_iter()
+        .find(|op| matches!(program.ir.operations[*op].kind, OperationKind::Filter { .. }))
+        .unwrap();
+    assert!(!analyze(&program.ir).movable.contains(&filter));
+}
+
 fn form(data: &Ir, id: OperationId) -> &ScremaForm {
     let OperationKind::Screma { form, .. } = &data.operations[id].kind else {
         panic!("expected Screma")
@@ -286,6 +311,7 @@ fn opaque_barriers_prevent_stream_and_indexed_fusion_without_effect_tokens() {
     for source in [
         CHAIN,
         "entry indexed(xs: [4]i32, i: i32) i32 = let a=map(|x:i32|x+1,xs) in a[i]",
+        "entry filtered(xs:[4]i32) []i32 = map(|x:i32|x*2,filter(|x:i32|x>0,xs))",
     ] {
         let mut input = imported(source);
         let region = entry(&input.ir);
@@ -379,6 +405,11 @@ fn separate_bodies_and_loop_parameters_do_not_alias() {
 #[test]
 fn capture_dependencies_prevent_absorption() {
     for (source, expected) in [
+        (
+            "entry captured(xs:[4]i32) []i32 =
+             let a=filter(|x:i32|x>0,xs) in map(|x:i32|x+length(a),a)",
+            2,
+        ),
         (
             "entry captured(xs: [4]i32) [4]i32 =
           let a = map(|x: i32| x + 1, xs) in map(|x: i32| x + a[0], a)",

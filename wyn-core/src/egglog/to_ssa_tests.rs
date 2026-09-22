@@ -67,6 +67,21 @@ fn length_queries_lower_without_materializing_array_elements() {
     compile(include_str!("../../../testfiles/length_metadata.wyn"));
 }
 
+#[test]
+fn filter_post_map_record_outputs_lower_in_three_filter_phases() {
+    let module = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
+    let entries: Vec<_> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
+    assert_eq!(
+        entries,
+        [
+            "post_mapped_local_offsets",
+            "post_mapped_offsets",
+            "post_mapped_compact",
+            "post_mapped_finish"
+        ]
+    );
+}
+
 pub(super) fn assert_ssa_dominance<Tag>(
     phase: &str,
     program: &crate::ssa::Program<Tag, crate::ssa::context::BackendGlobal>,

@@ -24,6 +24,54 @@ fn invoke<S: Sink>(
     }
 }
 
+/// Import local call/control-flow edges. Egglog proves the transitive closure;
+/// unknown calls, storage reads and authored writes have no scalar proof.
+pub(super) fn scalar_regions(data: &Ir, execution: &Dependencies, sink: &mut impl Sink) {
+    let definitions: BTreeMap<_, _> = data.definitions.values().map(|d| (d.symbol, d.body)).collect();
+    for (&region, body) in &data.regions {
+        sink.scalar_region(region, &body.members.iter().copied().collect::<Vec<_>>());
+        for &op in &body.members {
+            if execution.discardable.contains(&op) {
+                sink.scalar_operation(op, &[]);
+                continue;
+            }
+            let kind = &data.operations[op].kind;
+            let regions = match kind {
+                OperationKind::Call { function, .. } => {
+                    let callee = match &data.expressions[value_source(data, *function)].kind {
+                        ExprKind::Global(symbol) | ExprKind::Closure { code: symbol, .. } => {
+                            definitions.get(symbol).copied()
+                        }
+                        ExprKind::Lambda(region) => Some(*region),
+                        _ => None,
+                    };
+                    let Some(region) = callee else {
+                        continue;
+                    };
+                    vec![region]
+                }
+                OperationKind::EvalGlobal(symbol) => {
+                    let Some(&region) = definitions.get(symbol) else {
+                        continue;
+                    };
+                    vec![region]
+                }
+                OperationKind::If { .. } | OperationKind::Loop { .. } => kind.structured_regions(),
+                OperationKind::Screma { .. } => kind
+                    .callbacks()
+                    .into_iter()
+                    .filter_map(|body| match body {
+                        SoacBody::Apply { region, .. } => Some(*region),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => continue,
+            };
+            sink.scalar_operation(op, &regions);
+        }
+    }
+}
+
 pub(super) fn operations<S: Sink>(
     data: &Ir,
     execution: &Dependencies,
@@ -64,16 +112,18 @@ pub(super) fn operations<S: Sink>(
                 fact.arrays = post.len();
                 (0..fact.reductions).map(|_| sink.independent()).chain(post).collect::<Vec<_>>()
             }
-            OperationKind::Filter { map, body, .. } => {
+            OperationKind::Filter { map, body, post, .. } => {
                 fact.kind = Kind::Filter;
                 let (pure, values) = invoke(data, map, args, sink);
                 fact.pre_projectable = pure && values.len() == 1;
                 let (pure, predicate) = invoke(data, body, values.clone(), sink);
                 fact.predicate_projectable = pure && predicate.len() == 1;
-                fact.post_projectable = true;
+                let (pure, values) = invoke(data, post, values, sink);
+                fact.post_projectable = pure && values.len() == 1;
                 fact.arrays = 1;
-                fact.element_consumer =
-                    safe_body(map, &execution.safe_regions) && safe_body(body, &execution.safe_regions);
+                fact.element_consumer = safe_body(map, &execution.safe_regions)
+                    && safe_body(body, &execution.safe_regions)
+                    && safe_body(post, &execution.safe_regions);
                 values
             }
             OperationKind::ReduceByIndex { map, body, .. } => {

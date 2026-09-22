@@ -1,7 +1,7 @@
 # Tinyporto fusion: remaining work
 
 Initially audited on 2026-09-22 against the Wyn working tree and sibling
-`../tinyporto` package. Stage 1 is now implemented; its review status is below.
+`../tinyporto` package. Stage 1 was reviewed; Stage 2's review is below.
 Counts labeled as targets remain estimates, not proofs of optimality or measured
 GPU speedups. Pause after each conceptual stage for user review.
 
@@ -35,13 +35,68 @@ Final validation:
 
 These are semantic/compiler and shader validation checks, not GPU benchmarks.
 
-Stage 2 is **not part of the working diff**. Its unfinished implementation is
-parked at `tmp/tinyporto-fusion-recheck/stage2-in-progress.patch`; it has not had
-dedicated post-map validation. Resume it only after Stage 1 review. Stage 3 and
-the optional profiling work have not started.
+Stage 1 was committed as `97d7da7b` and reviewed. Stage 3 and the optional
+profiling work have not started.
 
 Stage 1 artifacts: `tmp/tinyporto-fusion-recheck/stage1.{wgsl,spv,spvasm,mir}`;
 the test log is `tmp/tinyporto-fusion-recheck/stage1-final-tests.log`.
+
+## Stage 2 review
+
+The existing fusion egraph selects a pure map after a filter and attaches it to
+compaction. Named scalar helpers receive purity proofs from their region/call
+edges in that graph. Rust imports those edges and constructs the selected body;
+it does not choose fusion eligibility. The predicate stays in the prefix phase,
+and the post-map executes only for survivors in both parallel and serial filters.
+
+Tinyporto is being edited concurrently, so the integration check uses a copied,
+hash-checked source snapshot in `tmp/tinyporto-fusion-recheck/tinyporto-snapshot/`.
+Hashes of its original manifest and source files are in `source-hashes.json`;
+only the snapshot's dependency paths were adjusted. The sibling checkout is
+untouched. On this snapshot, enabling the post-map reduces **26 entries to 25**:
+**17 compute and 8 graphics**. World updates have 5 compute entries, visibility
+4, AO/coarse depth 3, and GI 5. Prop construction runs inside the selected branch
+of compaction, eliminating the separate map and compacted-index buffer
+(39,592 i32 elements, or 158,368 bytes of capacity).
+
+Length metadata now resolves at its definition and travels through the existing
+`References` propagation. The duplicate length-specific child, forwarding, and
+projection rules are removed. The shared dependency representation distinguishes
+buffer contents from an input descriptor, so querying a mutable array's extent
+does not introduce an old-content read or a cyclic dispatch dependency.
+
+Type-changing post-maps allocate fresh output storage. Empty record arrays
+reserve one physical element to satisfy shader binding requirements while their
+logical length remains zero; the sizing rule is also in egglog.
+
+Coverage includes record and tuple outputs, captured values and predicates,
+named helpers, chained maps, multiple length observers, repeated inputs,
+survivor-only partial arithmetic, and nested serial filters. Raw-array observers,
+slices, captured filter results, effect barriers, and effectful/read-opaque
+callbacks retain separate operations.
+
+Validation:
+
+- `cargo test -p wyn-core -p wyn --quiet`: 1,430 passed, 18 ignored; the final
+  fusion-only run also passed all 39 tests after tightening summary propagation.
+- `scripts/validate_testfiles.ps1 -Release`: 107 SPIR-V files passed. With
+  `-Wgsl`: 106 passed, with the existing `miner` linked-SPIR-V skip.
+- `scripts/test_rust_host_gpu.ps1 -Compiler target/release/wyn.exe`: passed on
+  the Radeon RX 580 Vulkan adapter. Both backends match CPU references across
+  40 post-map cases each: sizes 0, 1, 63, 64, 65, 255, 256, 257, 4096, and 39592,
+  each with dense, empty, alternating, and sparse survivors. These include
+  changing scratch sizes, count publication, and record layout checks.
+- Frozen tinyporto WGSL passes `viz validate`; SPIR-V passes
+  `spirv-val --target-env vulkan1.3`. Both have 25 entries. Formatting and
+  whitespace checks pass.
+
+Artifacts and logs are under `tmp/tinyporto-fusion-recheck/`, including
+`snapshot-before.wgsl`, `stage2-snapshot.{wgsl,spv,spvasm,mir}`,
+`stage2-final-tests.log`, `stage2-final-fusion-tests.log`, and
+`stage2-gpu-tests.log`. GPU execution above checks correctness, not performance.
+
+Stage 2 was reviewed and approved for commit. Stage 3 is the next conceptual
+stage; pause for review before committing it.
 
 ## Verified baseline
 
@@ -230,5 +285,6 @@ fixtures and keep full-application verification as an integration check.
 Core completion means the length-only and avoidable finish dispatches are gone,
 filter post-maps preserve stable semantics, the current tinyporto pipeline is
 around 22 entries, and correctness checks pass. Further fusion ships only when
-measurements support it. This audit ran compilation and SPIR-V validation, not
-GPU execution or performance benchmarks.
+measurements support it. The baseline audit ran compilation and SPIR-V
+validation; Stage 2 adds GPU correctness checks. Performance benchmarking
+remains separate work.

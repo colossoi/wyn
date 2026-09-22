@@ -231,6 +231,8 @@ pub enum OperationKind {
         /// Element transformation before predicate evaluation and compaction.
         map: SoacBody,
         body: SoacBody,
+        /// Element transformation evaluated only for selected elements.
+        post: SoacBody,
         inputs: Vec<Array>,
         reuse_input: Option<usize>,
     },

@@ -164,7 +164,14 @@ impl OperationKind {
                     body(&r.operator);
                 }
             }
-            Self::Filter { map, body: b, .. } | Self::ReduceByIndex { map, body: b, .. } => {
+            Self::Filter {
+                map, body: b, post, ..
+            } => {
+                body(map);
+                body(b);
+                body(post);
+            }
+            Self::ReduceByIndex { map, body: b, .. } => {
                 body(map);
                 body(b);
             }
@@ -190,7 +197,12 @@ impl OperationKind {
                     r.operator.for_each_apply_mut(f);
                 }
             }
-            Self::Filter { map, body, .. } | Self::ReduceByIndex { map, body, .. } => {
+            Self::Filter { map, body, post, .. } => {
+                map.for_each_apply_mut(f);
+                body.for_each_apply_mut(f);
+                post.for_each_apply_mut(f);
+            }
+            Self::ReduceByIndex { map, body, .. } => {
                 map.for_each_apply_mut(f);
                 body.for_each_apply_mut(f);
             }

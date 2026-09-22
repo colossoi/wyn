@@ -213,6 +213,50 @@ fn filter_length_becomes_a_count_reduction() {
 }
 
 #[test]
+fn filter_post_map_keeps_multiple_length_observers_and_stable_values() {
+    check(
+        "entry main(xs:[]i32) (i32,[]i32,i32) =
+         let ys=filter(|x:i32|x>0,xs) in let n=length(ys) in
+         let zs=map(|x:i32|x*3+1,ys) in (n,zs,length(ys))",
+        3,
+    );
+}
+
+#[test]
+fn filter_post_map_leaves_raw_observers_and_sliced_consumers_separate() {
+    check(
+        "entry main(xs:[]i32) ([]i32,[]i32) =
+         let ys=filter(|x:i32|x>0,xs) in (ys,map(|x:i32|x*2,ys))",
+        2,
+    );
+    check_args(
+        "entry main(xs:[5]i32) []i32 =
+         let ys=filter(|x:i32|x>0,xs) in map(|x:i32|x*2,ys[0..1])",
+        2,
+        || vec![Value::array([0, 2, -1, 4, 7])],
+    );
+}
+
+#[test]
+fn filter_post_map_routes_duplicate_inputs() {
+    check(
+        "entry main(xs:[]i32) []i32 = let ys=filter(|x:i32|x>0,xs) in
+         map(|(a,b):(i32,i32)|a+b,zip(ys,ys))",
+        1,
+    );
+}
+
+#[test]
+fn filter_post_map_keeps_multiple_array_outputs_materialized() {
+    check(
+        "entry main(xs:[]i32) ([]i32,[]i32) =
+        let ys=filter(|x:i32|x>0,xs) in
+        (map(|x:i32|x*2,ys),map(|x:i32|x*3,ys))",
+        2,
+    );
+}
+
+#[test]
 fn filtered_reductions_share_a_count_for_multiple_length_observers() {
     check(
         "entry main(xs: []i32) (i32,i32,i32,i32) =

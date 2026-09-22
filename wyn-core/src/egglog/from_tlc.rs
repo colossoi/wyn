@@ -469,6 +469,7 @@ impl Converter {
                 let body = self.soac_body(pred, scope)?;
                 OperationKind::Filter {
                     map: SoacBody::Identity(body_signature(&body).0),
+                    post: SoacBody::Identity(body_signature(&body).0),
                     body,
                     inputs: vec![self.array(input, scope)?],
                     reuse_input: (*destination == SoacOwnership::UniqueInput).then_some(0),

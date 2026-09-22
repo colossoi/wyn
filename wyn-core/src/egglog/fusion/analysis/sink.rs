@@ -34,6 +34,8 @@ pub(in crate::egglog) trait Sink {
     /// A sink-owned handle; analysis never stores the dependency graph itself.
     type Dependency: Copy;
     fn operation(&mut self, id: OperationId, region: RegionId, fact: Operation);
+    fn scalar_region(&mut self, region: RegionId, operations: &[OperationId]);
+    fn scalar_operation(&mut self, operation: OperationId, regions: &[RegionId]);
     fn usage(&mut self, producer: OperationId, consumer: OperationId, role: Role, internal: bool);
     fn observed(&mut self, producer: OperationId);
     fn dependency(&mut self, producer: OperationId, consumer: OperationId);

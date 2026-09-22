@@ -77,7 +77,10 @@
 (relation ReusePermission (OperationKey i64 ExprKey))
 (relation SameBacking (ValueKey ExprKey))
 (relation ValueRef (ExprKey ValueKey))
-(relation References (ExprKey ValueKey))
+; All dependencies share one expression propagation path. A descriptor use
+; requires the input binding without observing its mutable element contents.
+(datatype ValueReference (Contents ValueKey) (Descriptor ExprKey))
+(relation References (ExprKey ValueReference))
 (relation ResultSlot (OperationKey i64))
 (datatype UseKey (InStage StageKey) (InOperation OperationKey) (AtExit))
 (relation Demand (UseKey ExprKey))
@@ -173,6 +176,7 @@
 (relation TypeStride (TypeKey i64))
 (relation AbiHostInput (AbiValue i64))
 (relation AbiCapacity (ValueKey AbiValue i64))
+(relation AbiAllocationBytes (ValueKey AbiValue))
 (relation AbiCapacityNeed (ValueKey AbiValue))
 (relation AbiCapacityInput (ValueKey i64))
 (datatype Capacity

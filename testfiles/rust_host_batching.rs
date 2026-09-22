@@ -1,5 +1,11 @@
 // Copied beside compiler-generated modules by scripts/test_rust_host_gpu.ps1.
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "filter_post_spv.rs"]
+mod filter_post_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "filter_post_wgsl.rs"]
+mod filter_post_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "filter_spv.rs"]
 mod filter_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
@@ -14,7 +20,7 @@ mod wgsl;
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_spv, filter_wgsl, spv, wgsl};
+    use super::{filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, spv, wgsl};
     use wgpu::util::DeviceExt;
 
     fn input(device: &wgpu::Device, values: &[i32]) -> wgpu::Buffer {
@@ -129,6 +135,8 @@ mod tests {
         // and changes in scratch allocation size between calls.
         let mut spv = filter_spv::HostContext::new(&device).unwrap();
         let mut wgsl = filter_wgsl::HostContext::new(&device).unwrap();
+        let mut post_spv = filter_post_spv::HostContext::new(&device).unwrap();
+        let mut post_wgsl = filter_post_wgsl::HostContext::new(&device).unwrap();
         for n in [0i32, 1, 63, 64, 65, 255, 256, 257, 4096, 39592] {
             for pattern in 0..4 {
                 let values: Vec<_> = (0..n.max(1))
@@ -160,7 +168,7 @@ mod tests {
                 );
                 // WGSL publishes a uniform parameter block for each filter stage.
                 let output = filter_wgsl::host_filtered(
-                    &mut wgsl, &queue, &xs, &scalar, &scalar, &scalar, &scalar, &scalar, &scalar,
+                    &mut wgsl, &queue, &xs, &scalar, &scalar, &scalar, &scalar, &scalar,
                 )
                 .unwrap();
                 assert_eq!(
@@ -170,6 +178,38 @@ mod tests {
                 assert_eq!(
                     &read(&device, &queue, buffer!(filter_wgsl, output, 1))[..expected.len()],
                     expected
+                );
+                let records: Vec<_> = expected.iter().flat_map(|&value| [value, value * 3 + n]).collect();
+                let output =
+                    filter_post_spv::host_post_mapped(&mut post_spv, &queue, &n.to_le_bytes(), &xs)
+                        .unwrap();
+                assert_eq!(
+                    read(&device, &queue, buffer!(filter_post_spv, output, 0)),
+                    vec![expected.len() as i32]
+                );
+                assert_eq!(
+                    &read(&device, &queue, buffer!(filter_post_spv, output, 1))[..records.len()],
+                    records,
+                    "SPIR-V n={n}, pattern={pattern}"
+                );
+                let output = filter_post_wgsl::host_post_mapped(
+                    &mut post_wgsl,
+                    &queue,
+                    &xs,
+                    &scalar,
+                    &scalar,
+                    &scalar,
+                    &scalar,
+                )
+                .unwrap();
+                assert_eq!(
+                    read(&device, &queue, buffer!(filter_post_wgsl, output, 0)),
+                    vec![expected.len() as i32]
+                );
+                assert_eq!(
+                    &read(&device, &queue, buffer!(filter_post_wgsl, output, 1))[..records.len()],
+                    records,
+                    "WGSL n={n}, pattern={pattern}"
                 );
             }
         }

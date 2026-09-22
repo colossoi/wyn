@@ -114,10 +114,10 @@
       ((set (ReuseBlocked writer e) true)) :ruleset reuse)
 ; Captures and shifted input aliases may read elements already overwritten.
 (rule ((ReuseAlias (Stage op name) e alias)
-       (Operand op "environment" capture) (References capture alias))
+       (Operand op "environment" capture) (References capture (Contents alias)))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 (rule ((ReuseAlias (Stage op name) e alias)
-       (Operand op "input" other) (!= other e) (References other alias))
+       (Operand op "input" other) (!= other e) (References other (Contents alias)))
       ((set (ReuseBlocked (Stage op name) e) true)) :ruleset reuse)
 ; Explicit output bindings require a separate destination. Preserve authored
 ; input routing when present; infer reuse only for outputs without a hint.

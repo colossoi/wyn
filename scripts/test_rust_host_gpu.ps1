@@ -6,7 +6,7 @@ $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $outDir = Join-Path $workspace 'tmp/rust-host-gpu'
 $null = New-Item -ItemType Directory -Force -Path $outDir
 $wyn = if ($Compiler) { (Resolve-Path -LiteralPath $Compiler).Path } else { Join-Path $workspace 'target/debug/wyn.exe' }
-foreach ($fixture in @('batching', 'filter')) {
+foreach ($fixture in @('batching', 'filter', 'filter_post')) {
     $source = Join-Path $workspace "testfiles/rust_host_$fixture.wyn"
     foreach ($format in @('spirv', 'wgsl')) {
         $suffix = if ($format -eq 'spirv') { 'spv' } else { 'wgsl' }
