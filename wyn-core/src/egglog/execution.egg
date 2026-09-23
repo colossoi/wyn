@@ -78,6 +78,15 @@
       ((ComputedValue e)) :ruleset residency)
 (rule ((ScalarResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false) (Operand op role child))
       ((ChildValue e child)) :ruleset residency)
+; Structured scalar bodies can capture earlier results without listing them
+; as direct operands. Carry those dependencies into the rematerialized value,
+; so publication cannot mistake an element read for a count-only expression.
+(rule ((ScalarResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false)
+       (SourceDependency op before) (ScalarResult child before))
+      ((ChildValue e child)) :ruleset residency)
+(rule ((ScalarResult e op) (= (Rematerialize op) true) (= (ReadsLength op) false)
+       (SourceDependency op before) (ResultTuple child before))
+      ((ChildValue e child)) :ruleset residency)
 ; A length use needs the logical extent, never the old element contents.
 ; Resolve those metadata dependencies at the length definition; ordinary
 ; References/ChildValue propagation carries them through enclosing expressions.

@@ -35,8 +35,6 @@
        (FreshValue (Result op 0)) (FreshValue (Result op 1))) :ruleset allocation)
 (rule ((FilterResult op t) (CounterType count))
       ((ElementType (Result op 1) count)) :ruleset allocation)
-(rule ((= (Plan op) (Compact)) (Scratch op name i n) (CounterType count))
-      ((ElementType (Temporary op name i) count)) :ruleset allocation)
 ; Bucket updates retain the destination; counts and overflow are fresh outputs.
 (rule ((= (Plan op) (Buckets)) (Phase (Stage op "clear") r)
        (= counts (Backing (Result op 1))) (= overflow (Backing (Result op 2))))

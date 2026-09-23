@@ -420,12 +420,14 @@ fn compacted_capacity_and_live_count_are_distinct() {
         (CapacityExtent (Result (OperationId 0) 0) (Length (ExprId 0)))
         (LiveLength (Result (OperationId 0) 0) (Stored (Result (OperationId 0) 1)))
         (Allocation (Result (OperationId 0) 1) (Fixed 1))
-        (Produces (Stage (OperationId 0) "offsets") (Result (OperationId 0) 1))
+        (Produces (Stage (OperationId 0) "compact") (Result (OperationId 0) 1))
         (Produces (Stage (OperationId 0) "compact") (Result (OperationId 0) 0))
+        (PhaseDomain (Stage (OperationId 0) "compact") (Fixed 64) 64)
     "#,
     );
-    assert_eq!(count(&g, "Phase"), 3);
-    assert_eq!(count(&g, "Allocation"), 6);
+    assert_eq!(count(&g, "Phase"), 1);
+    assert_eq!(count(&g, "Allocation"), 2);
+    assert_eq!(count(&g, "Scratch"), 0);
     g.parse_and_run_program(
         None,
         r#"

@@ -59,11 +59,10 @@
        (KernelPhase op "combine" (Fixed 1) 1) (KernelPhase op "offsets" n 64)
        (PhaseEnds op "chunks" "offsets") (PhaseLink op "chunks" "combine")
        (PhaseLink op "combine" "offsets")) :ruleset schedule)
-(rule ((= (Plan op) (Compact)) (InputDomain op n))
-      ((KernelPhase op "local_offsets" n 64)
-       (KernelPhase op "offsets" (Fixed 1) 1) (KernelPhase op "compact" n 64)
-       (PhaseEnds op "local_offsets" "compact")
-       (PhaseLink op "local_offsets" "offsets") (PhaseLink op "offsets" "compact")) :ruleset schedule)
+; Stable compaction runs in one workgroup, looping over the input in tiles.
+(rule ((= (Plan op) (Compact)))
+      ((KernelPhase op "compact" (Fixed 64) 64)
+       (PhaseEnds op "compact" "compact")) :ruleset schedule)
 (rule ((= (Plan op) (Serial)))
       ((KernelPhase op "ordered" (Fixed 1) 1) (PhaseEnds op "ordered" "ordered")) :ruleset schedule)
 (rule ((= (Plan op) (Atomic update)) (InputDomain op n))
@@ -83,7 +82,6 @@
 (rule ((PhaseLink op a b) (Phase (Stage op a) r) (Phase (Stage op b) r))
       ((Before (Stage op a) (Stage op b))) :ruleset schedule)
 (rule ((FirstPhase op first)) ((PhaseInput first op "input")) :ruleset schedule)
-(rule ((Phase (Stage op "compact") r)) ((PhaseInput (Stage op "compact") op "input")) :ruleset schedule)
 
 ; Record the phase that actually writes each result, not just the recipe's last phase.
 (rule ((= (Plan op) (Elements)) (ArrayResult op i t) (Phase (Stage op "elements") r))
@@ -102,7 +100,7 @@
       ((Produces (Stage op "buckets") (Result op i))) :ruleset schedule)
 (rule ((= (Plan op) (Compact)) (Phase (Stage op "compact") r))
       ((Produces (Stage op "compact") (Result op 0))
-       (Produces (Stage op "offsets") (Result op 1))) :ruleset schedule)
+       (Produces (Stage op "compact") (Result op 1))) :ruleset schedule)
 
 ; Scratch is a recipe result with ordinary producers, consumers, and capacity.
 (relation Scratch (OperationKey String i64 Extent))
@@ -123,17 +121,6 @@
       ((Scratch op "mapped" i n) (ElementType (Temporary op "mapped" i) t)
        (Produces (Stage op "chunks") (Temporary op "mapped" i))
        (Needs (Stage op "offsets") (Temporary op "mapped" i))) :ruleset schedule)
-(rule ((= (Plan op) (Compact)) (InputDomain op n) (Phase (Stage op "local_offsets") r))
-      ((Scratch op "flags" 0 n) (Scratch op "local_offsets" 0 n)
-       (Scratch op "totals" 0 (ChunkCount n 64)) (Scratch op "offsets" 0 (ChunkCount n 64))
-       (Produces (Stage op "local_offsets") (Temporary op "flags" 0))
-       (Needs (Stage op "compact") (Temporary op "flags" 0))
-       (Produces (Stage op "local_offsets") (Temporary op "local_offsets" 0))
-       (Needs (Stage op "compact") (Temporary op "local_offsets" 0))
-       (Produces (Stage op "local_offsets") (Temporary op "totals" 0))
-       (Needs (Stage op "offsets") (Temporary op "totals" 0))
-       (Produces (Stage op "offsets") (Temporary op "offsets" 0))
-       (Needs (Stage op "compact") (Temporary op "offsets" 0))) :ruleset schedule)
 (rule ((Scratch op name i n))
       ((FreshValue (Temporary op name i)) (CapacityExtent (Temporary op name i) n)) :ruleset schedule)
 

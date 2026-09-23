@@ -76,6 +76,26 @@ impl Planner<'_> {
                     unreachable!()
                 };
                 let values = self.data.state.bodies[original].results.clone();
+                // EpilogueValue only exposes results already available to lane
+                // zero. Publish attached outputs once, even in a workgroup kernel.
+                let merge = if matches!(
+                    self.data.state.blocks[root].interface.as_ref().map(|f| &f.kind),
+                    Some(FunctionKind::Kernel(size)) if *size != [1, 1, 1]
+                ) {
+                    let write = self.block(root, vec![]);
+                    let done = self.block(root, vec![]);
+                    self.branch(
+                        end,
+                        Value::op("eq", [Value::op("local_id", []), Value::Int(0)]),
+                        write,
+                        done,
+                        Some(done),
+                    );
+                    end = write;
+                    Some(done)
+                } else {
+                    None
+                };
                 for output in &outputs {
                     let Some(buffer) = output.buffer else {
                         return Err(error("copy output has no backing"));
@@ -98,6 +118,10 @@ impl Planner<'_> {
                     } else {
                         self.store(end, &Value::Buffer(buffer), Value::Int(0), source);
                     }
+                }
+                if let Some(done) = merge {
+                    self.jump(end, done, vec![]);
+                    end = done;
                 }
                 self.returns(end, values);
             }

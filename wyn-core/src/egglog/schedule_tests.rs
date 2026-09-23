@@ -60,7 +60,7 @@ fn filter_length_consumers_read_the_live_count_without_an_extra_dispatch() {
         "entry main(xs:[]i32) []i32 = let ys=filter(|x:i32|x>0,xs) in
          map(|i|ys[i]+length(ys),iota(length(ys)))",
     );
-    assert_eq!(kernel_count(&result), 4);
+    assert_eq!(kernel_count(&result), 2);
     for xs in [vec![], vec![-1, 0], vec![-1, 3, 0, 7], vec![2; 65]] {
         let kept: Vec<_> = xs.iter().copied().filter(|&x| x > 0).collect();
         assert_eq!(
@@ -602,14 +602,23 @@ fn reduction_handles_empty_tail_chunks_and_tuple_accumulators() {
 }
 
 #[test]
-fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
+fn scan_has_global_boundaries_and_filter_uses_one_workgroup() {
     let scan = compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
     assert_eq!(kernel_count(&scan), 3);
-    assert_eq!(kernel_count(&filter), 3);
+    assert_eq!(kernel_count(&filter), 1);
+    let dispatch = filter.state.dispatches.values().next().unwrap();
+    assert!(matches!(
+        filter.state.grids[dispatch.grid].groups,
+        [
+            super::super::Value::Int(1),
+            super::super::Value::Int(1),
+            super::super::Value::Int(1)
+        ]
+    ));
     for (result, names) in [
         (&scan, &["chunks", "combine", "offsets"][..]),
-        (&filter, &["local_offsets", "offsets", "compact"][..]),
+        (&filter, &["compact"][..]),
     ] {
         let stages: std::collections::BTreeMap<_, _> = result
             .state
@@ -626,7 +635,7 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
             assert!(result.state.dispatches[stages[pair[1]]].dependencies.contains(&stages[pair[0]]));
         }
     }
-    for n in [0, 1, 63, 64, 65, 137] {
+    for n in [0, 1, 63, 64, 65, 137, 1600] {
         let output = run(&scan, vec![Value::array(0..n)]);
         assert_eq!(
             output[0].ints(),
@@ -643,10 +652,10 @@ fn scan_and_filter_have_global_dispatch_boundaries_and_correct_results() {
 #[test]
 fn filter_post_map_runs_only_for_survivors_in_the_compact_phase() {
     let result = compile("entry main(xs:[]i32) []i32 = map(|x:i32|120/x,filter(|x:i32|x!=0,xs))");
-    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(kernel_count(&result), 1);
     assert_eq!(
         result.state.buffers.values().filter(|b| b.storage == Storage::Device).count(),
-        6
+        2
     );
     for n in [0, 1, 63, 64, 65, 137] {
         for pattern in 0..4 {
@@ -687,7 +696,7 @@ fn filter_post_map_composes_chains_and_captured_type_changing_outputs() {
          let ys=filter(|x:i32|x>0,map(|x:i32|x-1,xs)) in
          let zs=map(|x:i32|x+bias,ys) in map(|x:i32|(x,x*2),zs)",
     );
-    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(kernel_count(&result), 1);
     let output = run(&result, vec![Value::array([0, 2, 5, 1, 9]), Value::Int(7)]);
     for (i, x) in [8, 11, 15].into_iter().enumerate() {
         assert_eq!(
@@ -700,7 +709,7 @@ fn filter_post_map_composes_chains_and_captured_type_changing_outputs() {
 #[test]
 fn filter_post_map_record_output_keeps_live_count_and_capacity_distinct() {
     let result = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
-    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(kernel_count(&result), 1);
     for xs in [
         vec![],
         vec![-1; 65],
@@ -723,6 +732,69 @@ fn filter_post_map_record_output_keeps_live_count_and_capacity_distinct() {
             assert_eq!(fields[1].at(i), value);
         }
     }
+}
+
+#[test]
+fn filter_publishes_draw_commands_in_the_same_dispatch() {
+    // The GPU fixture covers the unsigned ABI conversion as well; the CFG
+    // oracle uses signed integers for the same count-derived command shape.
+    let result = compile(
+        "entry main(xs:[]i32,n:i32) ([4]i32,[]i32) =
+         let ys=filter(|x:i32|x>0,xs[0..n]) in ([36,length(ys),0,0],ys)",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    for n in [0, 1, 63, 64, 65, 137, 1600] {
+        let xs: Vec<_> = (0..n).map(|i| i % 7 - 3).collect();
+        let kept: Vec<_> = xs.iter().copied().filter(|&x| x > 0).collect();
+        let output = run(&result, vec![Value::array(xs), Value::Int(n)]);
+        let Value::Tuple(fields) = &output[0] else {
+            panic!("command and values")
+        };
+        assert_eq!(fields[0].ints(), [36, kept.len() as i64, 0, 0]);
+        assert_eq!(fields[1].ints(), kept);
+    }
+}
+
+#[test]
+fn filter_element_reads_wait_for_the_compacting_dispatch() {
+    let result = compile(
+        "entry main(xs:[]i32) ([]i32,[2]i32) =
+         let ys=filter(|x:i32|x>0,xs) in
+         (ys,[length(ys),if length(ys)>0 then ys[length(ys)-1] else -1])",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        result.state.physical_kernels.kernels().count(),
+        2,
+        "reading elements written by other lanes requires a finish dispatch"
+    );
+    for n in [0, 1, 65, 137] {
+        let xs: Vec<_> = (0..n).map(|i| i % 7 - 3).collect();
+        let kept: Vec<_> = xs.iter().copied().filter(|&x| x > 0).collect();
+        assert_eq!(
+            run(&result, vec![Value::array(xs)]),
+            [Value::Tuple(vec![
+                Value::array(kept.iter().copied()),
+                Value::array([kept.len() as i64, kept.last().copied().unwrap_or(-1)])
+            ])]
+        );
+    }
+}
+
+#[test]
+fn filter_count_epilogue_waits_for_a_helper_reading_another_collective() {
+    let result = compile(
+        "entry main(xs:[]i32) ([]i32,[2]i32) =
+         let zs=map(|x:i32|x*2,xs) in
+         let ys=filter(|x:i32|x>0,xs) in
+         (ys,[length(ys),if length(ys)>0 then zs[0] else -1])",
+    );
+    assert_eq!(kernel_count(&result), 2);
+    assert_eq!(result.state.physical_kernels.kernels().count(), 3);
+    assert_eq!(
+        run(&result, vec![Value::array([-3, 1, 2])]),
+        [Value::Tuple(vec![Value::array([1, 2]), Value::array([2, -6])])]
+    );
 }
 
 #[test]

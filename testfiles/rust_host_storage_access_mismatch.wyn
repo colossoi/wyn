@@ -1,3 +1,5 @@
--- Each physical SPIR-V phase needs its own storage access qualifiers.
+-- The consuming map reads storage written by compaction. SPIR-V can mark
+-- that binding read-only per entry, while WGSL shares a read-write declaration.
 entry reproduce() []i32 =
-  filter(|i| i % 3i32 == 0i32, iota(128i32))
+  let kept = filter(|i| i % 3i32 == 0i32, iota(128i32)) in
+  map(|i| kept[i] + length(kept), iota(length(kept)))

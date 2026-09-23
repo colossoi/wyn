@@ -21,15 +21,10 @@ impl Planner<'_> {
             return Err(error("invalid compaction recipe"));
         };
         let n = length(&inputs);
-        let chunks = chunks(n.clone());
         let output = self.slot(op, "output", 0, false);
         let count = self.slot(op, "length", 0, false);
-        let flags = self.slot(op, "flags", 0, false);
-        let local_offsets = self.slot(op, "local_offsets", 0, false);
-        let totals = self.slot(op, "totals", 0, false);
-        let offsets = self.slot(op, "offsets", 0, false);
 
-        let prefix_kernel = self.kernel(op, "local_offsets");
+        let kernel = self.kernel(op, "compact");
         let element = intern_type(&mut self.data.ir, Type::Constructed(TypeName::UInt(32), vec![]));
         let shared = [0, 1].map(|id| Value::Workgroup {
             id,
@@ -37,31 +32,22 @@ impl Planner<'_> {
             element,
         });
         let lane = Value::op("local_id", []);
-        let group = Value::op(
-            "div",
-            [Value::op("global_id", [Value::Int(0)]), Value::Int(WIDTH)],
-        );
-        let groups = Value::op(
-            "div",
-            [Value::op("global_size", [Value::Int(0)]), Value::Int(WIDTH)],
-        );
-        let per_group = Value::op("ceil_div", [chunks.clone(), groups]);
         // Uniform trip counts keep every lane participating in every barrier,
-        // including partial tiles and a grid smaller than the logical domain.
-        let tile_loop = self.start_loop(prefix_kernel, Value::Int(0), per_group.clone(), vec![]);
-        let tile = Value::op(
-            "add",
-            [Value::op("mul", [group, per_group]), tile_loop.index.clone()],
-        );
+        // including the last partial tile. Each lane carries the same running
+        // count; processing tiles in order makes the compaction stable.
+        let tile_loop = self.start_loop(kernel, Value::Int(0), chunks(n.clone()), vec![Value::Int(0)]);
         let index = Value::op(
             "add",
-            [Value::op("mul", [tile.clone(), Value::Int(WIDTH)]), lane.clone()],
+            [
+                Value::op("mul", [tile_loop.index.clone(), Value::Int(WIDTH)]),
+                lane.clone(),
+            ],
         );
         let valid = Value::op("lt", [index.clone(), n.clone()]);
-        let read = self.block(prefix_kernel, vec![]);
-        let pad = self.block(prefix_kernel, vec![]);
-        let loaded = self.block(prefix_kernel, vec!["flag".into()]);
-        self.branch(tile_loop.body, valid.clone(), read, pad, Some(loaded));
+        let read = self.block(kernel, vec![]);
+        let pad = self.block(kernel, vec![]);
+        let loaded = self.block(kernel, vec!["flag".into()]);
+        self.branch(tile_loop.body, valid, read, pad, Some(loaded));
         // Evaluate each live predicate in the same invocation that scans its
         // tile. Padding lanes skip the predicate but participate in barriers.
         let elements = self.read_inputs(read, &inputs, index.clone());
@@ -71,7 +57,6 @@ impl Planner<'_> {
             return Err(error("filter predicate must return one value"));
         };
         let flag = Value::op("bool_to_u32", [predicate.clone()]);
-        self.store(read, &flags, index.clone(), flag.clone());
         self.jump(read, loaded, vec![flag]);
         self.jump(pad, loaded, vec![Value::Int(0)]);
         let flag = Value::local("flag");
@@ -82,10 +67,10 @@ impl Planner<'_> {
         let mut bank = 0;
         for step in 0..WIDTH.trailing_zeros() {
             let distance = Value::Int(1 << step);
-            let read = self.block(prefix_kernel, vec![]);
-            let skip = self.block(prefix_kernel, vec![]);
+            let read = self.block(kernel, vec![]);
+            let skip = self.block(kernel, vec![]);
             let name = format!("prefix{step}");
-            let merge = self.block(prefix_kernel, vec![name.clone()]);
+            let merge = self.block(kernel, vec![name.clone()]);
             self.branch(
                 block,
                 Value::op("ge", [lane.clone(), distance.clone()]),
@@ -108,67 +93,18 @@ impl Planner<'_> {
             block = merge;
         }
         let total = self.load(block, shared[bank].clone(), Value::Int(WIDTH - 1), "total");
+        // Finish all shared reads before any lane starts the next tile.
         self.emit(block, Instruction::Barrier);
-        let write = self.block(prefix_kernel, vec![]);
-        let written = self.block(prefix_kernel, vec![]);
-        self.branch(block, valid, write, written, Some(written));
-        self.store(write, &local_offsets, index, Value::op("sub", [prefix, flag]));
-        self.jump(write, written, vec![]);
-        let write = self.block(prefix_kernel, vec![]);
-        let done = self.block(prefix_kernel, vec![]);
+        let selected = self.block(kernel, vec![]);
+        let done = self.block(kernel, vec![]);
         self.branch(
-            written,
-            Value::op(
-                "and",
-                [
-                    Value::op("eq", [lane, Value::Int(0)]),
-                    Value::op("lt", [tile.clone(), chunks.clone()]),
-                ],
-            ),
-            write,
-            done,
-            Some(done),
-        );
-        self.store(write, &totals, tile, total);
-        self.jump(write, done, vec![]);
-        self.finish_loop(&tile_loop, done, vec![]);
-        self.returns(tile_loop.done, vec![]);
-        self.dispatch(op, host, prefix_kernel);
-
-        let combine = self.kernel(op, "offsets");
-        let loop_ = self.start_loop(combine, Value::Int(0), chunks, vec![Value::Int(0)]);
-        self.store(loop_.body, &offsets, loop_.index.clone(), loop_.state[0].clone());
-        let total = self.load(loop_.body, totals.clone(), loop_.index.clone(), "total");
-        self.finish_loop(
-            &loop_,
-            loop_.body,
-            vec![Value::op("add", [loop_.state[0].clone(), total])],
-        );
-        self.store(loop_.done, &count, Value::Int(0), loop_.state[0].clone());
-        self.returns(loop_.done, vec![]);
-        self.dispatch(op, host, combine);
-
-        let write = self.kernel(op, "compact");
-        let invocation = self.invocations(write, n.clone());
-        let (active, i) = (invocation.body, invocation.index.clone());
-        let selected = self.block(write, vec![]);
-        let done = self.block(write, vec![]);
-        let flag = self.load(active, flags.clone(), i.clone(), "flag");
-        self.branch(
-            active,
+            block,
             Value::op("ne", [flag, Value::Int(0)]),
             selected,
             done,
             Some(done),
         );
-        let local = self.load(selected, local_offsets.clone(), i.clone(), "local");
-        let offset = self.load(
-            selected,
-            offsets.clone(),
-            Value::op("div", [i.clone(), Value::Int(WIDTH)]),
-            "offset",
-        );
-        let elements = self.read_inputs(selected, &inputs, i);
+        let elements = self.read_inputs(selected, &inputs, index);
         let values = self.invoke_body(selected, &map, elements, "map")?;
         let values = self.invoke_body(selected, &post, values, "post")?;
         let [value] = values.as_slice() else {
@@ -177,12 +113,36 @@ impl Planner<'_> {
         self.store(
             selected,
             &output,
-            Value::op("add", [offset, local]),
+            Value::op(
+                "add",
+                [
+                    tile_loop.state[0].clone(),
+                    Value::op("sub", [prefix, Value::Int(1)]),
+                ],
+            ),
             value.clone(),
         );
         self.jump(selected, done, vec![]);
-        self.finish_loop(&invocation, done, vec![]);
-        self.dispatch(op, host, write);
+        self.finish_loop(
+            &tile_loop,
+            done,
+            vec![Value::op("add", [tile_loop.state[0].clone(), total])],
+        );
+        let write = self.block(kernel, vec![]);
+        let done = self.block(kernel, vec![]);
+        self.branch(
+            tile_loop.done,
+            Value::op("eq", [lane, Value::Int(0)]),
+            write,
+            done,
+            Some(done),
+        );
+        // Lane zero also publishes count-derived ABI outputs in the epilogue.
+        // The loop's initial state supplies zero even when the input is empty.
+        self.store(write, &count, Value::Int(0), tile_loop.state[0].clone());
+        self.jump(write, done, vec![]);
+        self.returns(done, vec![]);
+        self.dispatch(op, host, kernel);
         Ok(Value::op("slice", [output, singleton(count)]))
     }
 

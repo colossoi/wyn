@@ -625,12 +625,12 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
         let rust = program.to_rust_wgpu("storage_access", format).unwrap();
         let phase = rust
             .split("let compute_")
-            .find(|phase| phase.contains("entry_point: Some(\"reproduce_compact\")"))
+            .find(|phase| phase.contains("entry_point: Some(\"reproduce_compute\")"))
             .unwrap();
         let layout = phase.split("let pipeline =").next().unwrap();
         let binding = layout
             .split("BindGroupLayoutEntry {")
-            .find(|entry| entry.trim_start().starts_with("binding: 2u32,"))
+            .find(|entry| entry.trim_start().starts_with("binding: 1u32,"))
             .unwrap();
         assert!(
             binding.contains(&format!("read_only: {read_only}")),
@@ -641,7 +641,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
         let phase = whl
             .kernels
             .values()
-            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_compact")
+            .find(|kernel| kernel.options.text(":entry").unwrap() == "reproduce_compute")
             .unwrap();
         let abi = phase.options.get(":abi").unwrap().list().unwrap();
         let binding = abi
@@ -650,7 +650,7 @@ fn filter_phase_layout_matches_the_selected_shader_storage_access() {
             .find(|binding| {
                 binding[1].text().unwrap() == ":storage"
                     && binding[2].u32().unwrap() == 0
-                    && binding[3].u32().unwrap() == 2
+                    && binding[3].u32().unwrap() == 1
             })
             .unwrap();
         let parameter =
@@ -710,7 +710,7 @@ fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
             ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
         };
         let graph = &program.interface.frame_graph;
-        assert_eq!(graph.passes.len(), 4, "three filter phases and one draw");
+        assert_eq!(graph.passes.len(), 2, "one compaction dispatch and one draw");
         let [indirect] = graph.indirect_draws.as_slice() else {
             panic!("one indirect draw")
         };
@@ -720,7 +720,10 @@ fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
             .position(|pass| pass.writes.iter().any(|w| w.resource == indirect.buffer_resource))
             .unwrap();
         let compact = graph.passes.iter().position(|pass| pass.name.ends_with("compact")).unwrap();
-        assert!(graph.passes[writer].name.ends_with("offsets"));
+        assert_eq!(
+            writer, compact,
+            "compaction also publishes the indirect draw command"
+        );
         let draw = &graph.passes[indirect.draw_pass];
         assert!(draw.depends_on.contains(&writer));
         assert!(draw.depends_on.contains(&compact));

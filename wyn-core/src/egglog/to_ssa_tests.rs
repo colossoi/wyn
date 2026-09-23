@@ -75,17 +75,22 @@ fn scalar_output_epilogues_lower_without_a_finish_entry() {
 }
 
 #[test]
-fn filter_post_map_record_outputs_lower_in_three_filter_phases() {
+fn filter_post_map_record_outputs_lower_in_one_workgroup() {
     let module = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
     let entries: Vec<_> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
-    assert_eq!(
-        entries,
-        [
-            "post_mapped_local_offsets",
-            "post_mapped_offsets",
-            "post_mapped_compact"
-        ]
+    assert_eq!(entries, ["post_mapped_compact"]);
+    assert_eq!(module.entry_points[0].workgroup_size, [64, 1, 1]);
+}
+
+#[test]
+fn filter_element_read_epilogue_lowers_in_a_separate_dispatch() {
+    let module = compile(
+        "entry main(xs:[]i32) ([]i32,[2]i32) =
+         let ys=filter(|x:i32|x>0,xs) in
+         (ys,[length(ys),if length(ys)>0 then ys[length(ys)-1] else -1])",
     );
+    assert_eq!(module.entry_points.len(), 2);
+    assert!(module.entry_points.iter().any(|entry| entry.name.ends_with("finish")));
 }
 
 pub(super) fn assert_ssa_dominance<Tag>(
@@ -397,7 +402,7 @@ fn scan_and_filter_emit_all_scheduled_kernels() {
     let scan = compile("entry main(xs: []i32) []i32 = scan(|a: i32, b: i32| a + b, 0, xs)");
     let filter = compile("entry main(xs: []i32) ?k. [k]i32 = filter(|x: i32| x % 3 == 1, xs)");
     assert_eq!(scan.entry_points.len(), 3);
-    assert_eq!(filter.entry_points.len(), 3);
+    assert_eq!(filter.entry_points.len(), 1);
 }
 
 #[test]

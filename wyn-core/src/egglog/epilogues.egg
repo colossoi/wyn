@@ -1,7 +1,8 @@
 ; Publish an output where all its computed inputs are already available. Limit
-; attachment to one invocation in the entry's own scope; other outputs keep
-; their finish kernel. References is the ordinary dependency summary.
+; attachment to values available to lane zero in the entry's own scope; other
+; outputs keep their finish kernel. References is the ordinary dependency summary.
 (relation OutputExpression (i64 ExprKey))
+(relation EpilogueValue (StageKey ValueKey))
 (relation OutputCandidate (i64 StageKey))
 (function OutputAvailable (StageKey ValueKey) bool :merge (or old new))
 (function OutputBlocked (i64 StageKey) bool :merge (or old new))
@@ -11,15 +12,21 @@
 (ruleset output-blockers)
 (ruleset output-select)
 (ruleset output-fallback)
+(rule ((Produces stage value) (PhaseDomain stage (Fixed 1) 1))
+      ((EpilogueValue stage value)) :ruleset output-candidates)
+; Compaction publishes its count in lane zero. Its element output is written
+; by other lanes and cannot be read here without storage synchronization.
+(rule ((= (Plan op) (Compact)) (Produces (Stage op "compact") (Result op 1)))
+      ((EpilogueValue (Stage op "compact") (Result op 1))) :ruleset output-candidates)
 (rule ((CopyOutput output)) ((set (OutputAttached output) false)) :ruleset output-candidates)
 (rule ((CopyOutput output) (OutputExpression output e) (References e (Contents value))
-       (Produces stage value) (PhaseDomain stage (Fixed 1) 1)
+       (EpilogueValue stage value)
        (= stage (Stage op name)) (ExecutionSummary op true legal cheap)
        (Phase stage r) (OutputOwner output entry) (SourceEntry entry r true))
       ((OutputCandidate output stage) (set (OutputBlocked output stage) false)) :ruleset output-candidates)
 (rule ((OutputCandidate output stage) (OutputExpression output e) (References e (Contents value)))
       ((set (OutputAvailable stage value) false)) :ruleset output-candidates)
-(rule ((OutputCandidate output stage) (Produces stage value))
+(rule ((OutputCandidate output stage) (EpilogueValue stage value))
       ((set (OutputAvailable stage value) true)) :ruleset output-candidates)
 (rule ((OutputCandidate output stage) (OutputExpression output e) (References e (Contents (Source source))))
       ((set (OutputAvailable stage (Source source)) true)) :ruleset output-candidates)

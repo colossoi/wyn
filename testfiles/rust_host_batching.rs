@@ -276,15 +276,15 @@ mod tests {
                 (0..3).map(|i| read(&device, &queue, buffer!(capture_wgsl, output, i))).collect();
             assert_eq!(actual, expected);
         }
-        // Exercise every scan boundary, including padding lanes, empty input,
-        // and changes in scratch allocation size between calls.
+        // Exercise tile boundaries, empty input, and tinyporto-sized domains.
+        // Verify stable compaction, post-maps, and lane-zero count publication.
         let mut spv = filter_spv::HostContext::new(&device).unwrap();
         let mut wgsl = filter_wgsl::HostContext::new(&device).unwrap();
         let mut post_spv = filter_post_spv::HostContext::new(&device).unwrap();
         let mut post_wgsl = filter_post_wgsl::HostContext::new(&device).unwrap();
         let mut command_spv = filter_command_spv::HostContext::new(&device).unwrap();
         let mut command_wgsl = filter_command_wgsl::HostContext::new(&device).unwrap();
-        for n in [0i32, 1, 63, 64, 65, 255, 256, 257, 4096, 39592] {
+        for n in [0i32, 1, 63, 64, 65, 255, 256, 257, 1600, 4096, 63592] {
             for pattern in 0..4 {
                 let values: Vec<_> = (0..n.max(1))
                     .map(|i| {
@@ -314,9 +314,7 @@ mod tests {
                     expected
                 );
                 // WGSL publishes a uniform parameter block for each filter stage.
-                let output =
-                    filter_wgsl::host_filtered(&mut wgsl, &queue, &xs, &scalar, &scalar, &scalar, &scalar)
-                        .unwrap();
+                let output = filter_wgsl::host_filtered(&mut wgsl, &queue, &xs, &scalar, &scalar).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_wgsl, output, 0)),
                     vec![expected.len() as i32]
@@ -338,15 +336,8 @@ mod tests {
                     records,
                     "SPIR-V n={n}, pattern={pattern}"
                 );
-                let output = filter_post_wgsl::host_post_mapped(
-                    &mut post_wgsl,
-                    &queue,
-                    &xs,
-                    &scalar,
-                    &scalar,
-                    &scalar,
-                )
-                .unwrap();
+                let output =
+                    filter_post_wgsl::host_post_mapped(&mut post_wgsl, &queue, &xs, &scalar).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_post_wgsl, output, 0)),
                     vec![expected.len() as i32]
@@ -367,15 +358,8 @@ mod tests {
                     &read(&device, &queue, buffer!(filter_command_spv, output, 1))[..expected.len()],
                     expected
                 );
-                let output = filter_command_wgsl::host_command(
-                    &mut command_wgsl,
-                    &queue,
-                    &xs,
-                    &scalar,
-                    &scalar,
-                    &scalar,
-                )
-                .unwrap();
+                let output =
+                    filter_command_wgsl::host_command(&mut command_wgsl, &queue, &xs, &scalar).unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_command_wgsl, output, 0)),
                     [36, expected.len() as i32, 0, 0]
