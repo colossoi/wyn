@@ -617,10 +617,7 @@ fn filter_post_map_record_output_keeps_live_count_and_capacity_distinct() {
             .iter()
             .enumerate()
             .filter(|(_, x)| **x > 0)
-            .map(|(i, _)| {
-                let value = i as i64 + 1;
-                Value::Tuple(vec![Value::Int(value), Value::Int(value * 3 + n)])
-            })
+            .map(|(_, &value)| Value::Tuple(vec![Value::Int(value), Value::Int(value * 3 + n)]))
             .collect();
         let output = run(&result, vec![Value::array(xs), Value::Int(n)]);
         let Value::Tuple(fields) = &output[0] else {
@@ -645,6 +642,22 @@ fn filter_post_map_executes_in_nested_serial_filters() {
     assert_eq!(
         run(&result, vec![Value::array([0, 1, 5])]),
         [Value::array([60, 63, 75])]
+    );
+}
+
+#[test]
+fn filter_post_map_captured_reads_work_in_nested_serial_filters() {
+    let result = compile(
+        "def read(xs:[]i32,i:i32) i32 = xs[i]
+         entry main(xs:[]i32) []i32 = map(|x:i32|
+         let kept=filter(|i:i32|i>=0 && i<3,[-1,0,1,2,3]) in
+         let mapped=map(|i:i32|x+read(xs,i),kept) in
+         loop total=0 for y in mapped do total+y, xs)",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(
+        run(&result, vec![Value::array([2, 5, 11])]),
+        [Value::array([24, 33, 51])]
     );
 }
 

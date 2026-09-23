@@ -131,15 +131,37 @@ fn entry_ops(data: &Ir) -> Vec<OperationId> {
 
 #[test]
 fn filter_post_map_rejects_effectful_callbacks() {
-    for source in [
+    let program = optimized(imported(
         "entry main(dest:*[3]i32,xs:[3]i32) []i32 =
          map(|x:i32|let updated=scatter(dest,[0],[x]) in updated[0],filter(|x:i32|x>0,xs))",
+    ));
+    assert_eq!(entry_ops(&program.ir).len(), 2);
+}
+
+#[test]
+fn filter_post_map_accepts_captured_reads_without_granting_motion() {
+    for source in [
+        "entry main(xs:[3]i32,other:[3]i32) []i32 =
+         map(|x:i32|other[x],filter(|x:i32|x>=0 && x<3,xs))",
         "def read(other:[3]i32,x:i32) i32 = other[x]
-         entry main(xs:[3]i32,other:[3]i32) []i32 = map(|x:i32|read(other,x),filter(|x:i32|x>0,xs))",
+         entry main(xs:[3]i32,other:[3]i32) []i32 = map(|x:i32|read(other,x),filter(|x:i32|x>=0 && x<3,xs))",
     ] {
         let program = optimized(imported(source));
-        assert_eq!(entry_ops(&program.ir).len(), 2, "{source}");
+        let ops = entry_ops(&program.ir);
+        assert_eq!(ops.len(), 1, "{source}");
+        assert!(matches!(program.ir.operations[ops[0]].kind, OperationKind::Filter { .. }));
+        assert!(!analyze(&program.ir).movable.contains(&ops[0]), "{source}");
     }
+}
+
+#[test]
+fn reading_post_map_cannot_interleave_with_writing_filter_callbacks() {
+    let program = optimized(imported(
+        "entry main(dest:*[1]i32,xs:[3]i32) []i32 =
+         let kept=filter(|x:i32|let updated=scatter(dest,[0],[x]) in updated[0]>0,xs) in
+         map(|x:i32|dest[0]+x,kept)",
+    ));
+    assert_eq!(entry_ops(&program.ir).len(), 2);
 }
 
 #[test]
@@ -310,6 +332,7 @@ fn opaque_barriers_prevent_stream_and_indexed_fusion_without_effect_tokens() {
         CHAIN,
         "entry indexed(xs: [4]i32, i: i32) i32 = let a=map(|x:i32|x+1,xs) in a[i]",
         "entry filtered(xs:[4]i32) []i32 = map(|x:i32|x*2,filter(|x:i32|x>0,xs))",
+        "entry filtered(xs:[4]i32,other:[4]i32) []i32 = map(|x:i32|other[x],filter(|x:i32|x>=0 && x<4,xs))",
     ] {
         let mut input = imported(source);
         let region = entry(&input.ir);
@@ -406,6 +429,11 @@ fn capture_dependencies_prevent_absorption() {
         (
             "entry captured(xs:[4]i32) []i32 =
              let a=filter(|x:i32|x>0,xs) in map(|x:i32|x+length(a),a)",
+            2,
+        ),
+        (
+            "entry captured(xs:[4]i32) []i32 =
+             let a=filter(|x:i32|x>0,xs) in map(|x:i32|x+a[0],a)",
             2,
         ),
         (

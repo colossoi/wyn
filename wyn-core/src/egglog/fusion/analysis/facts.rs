@@ -25,8 +25,9 @@ fn invoke<S: Sink>(
     }
 }
 
-/// Import local call/control-flow edges. Egglog proves the transitive closure;
-/// unknown calls, storage reads and authored writes have no scalar proof.
+/// Import local call/control-flow edges. Egglog proves the transitive closure.
+/// Storage reads have a separate read-only proof. Unknown calls and authored
+/// writes have neither proof; ordinary motion eligibility remains unchanged.
 pub(super) fn scalar_regions(
     data: &Ir,
     execution: &Dependencies,
@@ -42,6 +43,10 @@ pub(super) fn scalar_regions(
             }
             let kind = &data.operations[op].kind;
             let regions = match kind {
+                OperationKind::Index { .. } => {
+                    sink.scalar_read(op)?;
+                    continue;
+                }
                 OperationKind::Call { function, .. } => {
                     let callee = match &data.expressions[value_source(data, *function)].kind {
                         ExprKind::Global(symbol) | ExprKind::Closure { code: symbol, .. } => {
@@ -62,7 +67,7 @@ pub(super) fn scalar_regions(
                     vec![region]
                 }
                 OperationKind::If { .. } | OperationKind::Loop { .. } => kind.structured_regions(),
-                OperationKind::Screma { .. } => kind
+                OperationKind::Screma { .. } | OperationKind::Filter { .. } => kind
                     .callbacks()
                     .into_iter()
                     .filter_map(|body| match body {

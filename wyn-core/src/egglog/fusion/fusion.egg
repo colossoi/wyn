@@ -18,6 +18,26 @@
       ((PostMapPlan (Source op))) :ruleset fusion-dependencies)
 (rule ((MovablePlan plan) (ScremaPlan plan))
       ((PostMapPlan plan)) :ruleset fusion-dependencies)
+(rule ((PureScalarOperation op))
+      ((ReadOnlyScalarOperation op)) :ruleset fusion-dependencies)
+(rule ((ScalarRead op))
+      ((ReadOnlyScalarOperation op)) :ruleset fusion-dependencies)
+(rule ((= members (ScalarRegionMembers r)) (= members (ReadOnlyRegionMembers r)))
+      ((ReadOnlyScalarRegion r)) :ruleset fusion-dependencies)
+(rule ((ScalarCall op r) (ReadOnlyScalarRegion r))
+      ((set (ReadOnlyCallees op) (set-of r))) :ruleset fusion-dependencies)
+(rule ((= regions (ScalarCallees op)) (= regions (ReadOnlyCallees op)))
+      ((ReadOnlyScalarOperation op)) :ruleset fusion-dependencies)
+(rule ((ScalarMember r op) (ReadOnlyScalarOperation op))
+      ((set (ReadOnlyRegionMembers r) (set-of op))) :ruleset fusion-dependencies)
+(rule ((ScremaPlan (Source op)) (ReadOnlyScalarOperation op))
+      ((FilterPostMapPlan (Source op))) :ruleset fusion-dependencies)
+(rule ((PostMapPlan plan))
+      ((FilterPostMapPlan plan)) :ruleset fusion-dependencies)
+(rule ((FilterPlan (Source op)) (ReadOnlyScalarOperation op))
+      ((ReadOnlyFilterPlan (Source op))) :ruleset fusion-dependencies)
+(rule ((FilterPlan plan) (MovablePlan plan))
+      ((ReadOnlyFilterPlan plan)) :ruleset fusion-dependencies)
 ; Initialize only connected operations or operations sharing an iteration domain.
 (rule ((GroupUseFact p (To c role))) ((RelevantPair p c) (RelevantPair c p)) :ruleset fusion-dependencies)
 (rule ((GroupEdge p c)) ((RelevantPair p c) (RelevantPair c p)) :ruleset fusion-dependencies)
@@ -123,6 +143,10 @@
        (!= p c)
        (= (Scope a) (Scope b)))
       ((Pair n p a c b)) :ruleset fusion-candidates)
+(rule ((Pair n p a c b) (FilterPlan a) (PostMapPlan b))
+      ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
+(rule ((Pair n p a c b) (ReadOnlyFilterPlan a) (FilterPostMapPlan b))
+      ((FilterPostMapCompatible n p c)) :ruleset fusion-candidates)
 (relation ClearStream (i64 FusionGroup FusionGroup))
 (rule ((Pair n p a c b)
        (= (StreamBlocked p c) false)
@@ -234,10 +258,15 @@
 ; Length observers keep observing the same live count. Raw observers, slices,
 ; additional inputs, and intervening dependencies prevent this contraction.
 ; The filter may read captured storage: retain its ordering and safety summary.
-; Only the map needs a purity proof; the predicate stays in its own phase.
+; The map may read captured storage, but cannot write it or invoke unknown
+; effects. ClearStream forbids intervening dependencies/effect barriers, so
+; its reads stay on the same side of writes. Retain both groups' incoming and
+; outgoing edges; after construction ordinary analysis still sees these reads.
+; A reading post-map also requires read-only filter callbacks: serial compaction
+; must not interleave its reads with writes from later predicate invocations.
 (rule ((Pair n p a c b)
        (FilterPlan a)
-       (ScremaPlan b) (PostMapPlan b)
+       (ScremaPlan b) (FilterPostMapCompatible n p c)
        (= (HasScans b) false) (= (HasReductions b) false)
        (= (ArrayOutputs b) 1)
        (ClearStream n p c) (NoSlice n p c)
@@ -435,6 +464,9 @@
 (rule ((NewPlan n p c a b next) (Chosen n 6 p c)
        (ElementPlan a) (PostMapPlan b))
       ((ElementPlan next)) :ruleset fusion-commit)
+(rule ((NewPlan n p c a b next) (Chosen n 6 p c)
+       (ReadOnlyFilterPlan a) (FilterPostMapPlan b))
+      ((ReadOnlyFilterPlan next)) :ruleset fusion-commit)
 (relation HasLengthObservers (i64 bool))
 (rule ((Chosen n family p c)
        (= v0 (GroupLengths p))
@@ -502,6 +534,8 @@
       ((delete (Retained n p c))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-family chosen-producer chosen-consumer) (ClearStream n p c))
       ((delete (ClearStream n p c))) :ruleset fusion-clear-candidates)
+(rule ((Chosen n chosen-family chosen-producer chosen-consumer) (FilterPostMapCompatible n p c))
+      ((delete (FilterPostMapCompatible n p c))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-family chosen-producer chosen-consumer) (NoSlice n p c))
       ((delete (NoSlice n p c))) :ruleset fusion-clear-candidates)
 (rule ((Chosen n chosen-family chosen-producer chosen-consumer) (SliceAllowed n p c))

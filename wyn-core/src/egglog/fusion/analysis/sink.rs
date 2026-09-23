@@ -37,6 +37,7 @@ pub(in crate::egglog) trait Sink {
     fn operation(&mut self, id: OperationId, region: RegionId, fact: Operation) -> Result<(), Error>;
     fn scalar_region(&mut self, region: RegionId, operations: &[OperationId]) -> Result<(), Error>;
     fn scalar_operation(&mut self, operation: OperationId, regions: &[RegionId]) -> Result<(), Error>;
+    fn scalar_read(&mut self, operation: OperationId) -> Result<(), Error>;
     fn usage(
         &mut self,
         producer: OperationId,

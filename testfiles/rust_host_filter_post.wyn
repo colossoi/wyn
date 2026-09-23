@@ -2,10 +2,12 @@ type prop = { value: i32, weighted: i32 }
 
 def weight(value: i32, n: i32) i32 = value * 3 + n
 
-def make_prop(i: i32, n: i32) prop =
-  { value = i + 1, weighted = weight(i + 1, n) }
+-- The named helper reads captured storage after the survivor predicate.
+def make_prop(xs: []i32, i: i32, n: i32) prop =
+  let value = xs[i] in
+  { value = value, weighted = weight(value, n) }
 
 entry post_mapped(xs: []i32, n: i32) (i32, []prop) =
   let indices = filter(|i: i32| xs[i] > 0, iota(n)) in
-  let props = map(|i: i32| make_prop(i, n), indices) in
+  let props = map(|i: i32| make_prop(xs, i, n), indices) in
   (length(indices), props)

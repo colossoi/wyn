@@ -49,6 +49,16 @@
 (relation PureScalarRegion (RegionKey))
 (relation PureScalarOperation (OperationKey))
 (relation PostMapPlan (FusionPlan))
+; Read-only callbacks may attach to compaction when no dependency/effect lies
+; between the filter and map. They do not acquire general purity/motion proofs.
+(relation ScalarRead (OperationKey))
+(function ReadOnlyRegionMembers (RegionKey) OperationSet :merge (set-union old new))
+(function ReadOnlyCallees (OperationKey) ScalarRegions :merge (set-union old new))
+(relation ReadOnlyScalarRegion (RegionKey))
+(relation ReadOnlyScalarOperation (OperationKey))
+(relation FilterPostMapPlan (FusionPlan))
+(relation ReadOnlyFilterPlan (FusionPlan))
+(relation FilterPostMapCompatible (i64 FusionGroup FusionGroup))
 (relation Member (FusionGroup OperationKey))
 (function Members (FusionGroup) OperationSet :merge (set-union old new))
 (function DirectInputs (FusionGroup) InputSites :merge (set-union old new))

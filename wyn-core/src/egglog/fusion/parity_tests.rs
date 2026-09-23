@@ -247,6 +247,82 @@ fn filter_post_map_routes_duplicate_inputs() {
 }
 
 #[test]
+fn filter_post_map_reads_captured_slices_only_for_survivors() {
+    for n in [0, 1, 63, 64, 65, 137] {
+        check_args(
+            "def read(other:[]i32,i:i32) i32 = other[i]
+             entry main(indices:[]i32,other:[]i32) ([]i32,i32) =
+             let kept=filter(|i:i32|i>=0 && i<4,indices) in
+             (map(|i:i32|read(other[1..5],i),kept),length(kept))",
+            2,
+            || {
+                vec![
+                    Value::array((0..n).map(|i| i % 6 - 1)),
+                    Value::array([91, 20, 30, 40, 50, 92]),
+                ]
+            },
+        );
+    }
+}
+
+#[test]
+fn filter_post_map_keeps_mutations_before_between_and_after_its_reads() {
+    for (source, operations) in [
+        (
+            "entry main(other:*[4]i32) []i32 =
+          let updated=scatter(other,[0],[99]) in
+          let kept=filter(|i:i32|updated[i]>0,iota(4)) in
+          map(|i:i32|updated[i],kept)",
+            2,
+        ),
+        (
+            "entry main(other:*[4]i32) []i32 =
+          let kept=filter(|i:i32|other[i]>0,iota(4)) in
+          let updated=scatter(other,[0],[99]) in
+          map(|i:i32|updated[i],kept)",
+            3,
+        ),
+        (
+            "entry main(other:*[4]i32) ([]i32,[4]i32) =
+          let kept=filter(|i:i32|other[i]>0,iota(4)) in
+          let mapped=map(|i:i32|other[i],kept) in
+          let updated=scatter(other,[1],[99]) in (mapped,updated)",
+            2,
+        ),
+    ] {
+        check_args(source, operations, || vec![Value::array([-5, 20, -7, 40])]);
+    }
+}
+
+#[test]
+fn filter_post_map_preserves_a_produced_capture_dependency() {
+    check_args(
+        "entry main(other:[4]i32) []i32 =
+         let values=map(|x:i32|x*7,other) in
+         let kept=filter(|i:i32|i%2==0,iota(4)) in
+         map(|i:i32|values[i],kept)",
+        2,
+        || vec![Value::array([3, 5, 7, 11])],
+    );
+}
+
+#[test]
+fn filter_post_map_chains_keep_the_captured_read() {
+    for input in ["indices", "map(|i:i32|i+1,indices)"] {
+        check_args(
+            &format!(
+                "entry main(indices:[5]i32,other:[4]i32) []i32 =
+         let kept=filter(|i:i32|i>=0 && i<4,{input}) in
+         let values=map(|i:i32|other[i],kept) in
+         map(|x:i32|x*3+1,values)"
+            ),
+            1,
+            || vec![Value::array([3, -1, 1, 4, 0]), Value::array([2, 5, 11, 17])],
+        );
+    }
+}
+
+#[test]
 fn filter_post_map_keeps_multiple_array_outputs_materialized() {
     check(
         "entry main(xs:[]i32) ([]i32,[]i32) =

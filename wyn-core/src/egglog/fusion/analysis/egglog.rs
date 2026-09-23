@@ -92,6 +92,7 @@ impl Sink for Egglog<'_, '_> {
         let members = operations.iter().map(|&op| self.operation_key(op)).collect::<Result<Vec<_>, _>>()?;
         self.set("ScalarRegionMembers", region, members.iter().copied(), true)?;
         self.set("PureRegionMembers", region, [], true)?;
+        self.set("ReadOnlyRegionMembers", region, [], true)?;
         for op in members {
             self.state.add("ScalarMember", (region, op))?;
         }
@@ -102,9 +103,15 @@ impl Sink for Egglog<'_, '_> {
         let members = regions.iter().map(|&r| self.region_key(r)).collect::<Result<Vec<_>, _>>()?;
         self.set("ScalarCallees", operation, members.iter().copied(), true)?;
         self.set("PureCallees", operation, [], true)?;
+        self.set("ReadOnlyCallees", operation, [], true)?;
         for region in members {
             self.state.add("ScalarCall", (operation, region))?;
         }
+        Ok(())
+    }
+    fn scalar_read(&mut self, operation: OperationId) -> Result<(), Error> {
+        let operation = self.operation_key(operation)?;
+        self.state.add("ScalarRead", operation)?;
         Ok(())
     }
     fn operation(&mut self, id: OperationId, region: RegionId, fact: Operation) -> Result<(), Error> {
