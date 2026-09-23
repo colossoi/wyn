@@ -4,7 +4,7 @@ use super::blocks::{Control, Exit, Instruction, Storage, Value};
 use super::host::{self, Host};
 use super::names;
 use super::scalar::placement_index;
-use super::timing::span;
+use super::timing::{span, time};
 use super::{OptimizeError, PlacementSite};
 use crate::ast::Span;
 use crate::egglog::data::{BlockId, BufferId, ExprId, ExternId, OperationId, OperationKind, ParameterId};
@@ -40,12 +40,13 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             "TODO: runtime publication of conditional or repeated host dispatches ({root:?})"
         )));
     }
+    let _prepare = span("egglog to SSA / prepare");
     let mut origins = BTreeMap::new();
     for origin in data.origins.values().filter(|origin| origin.span.module().is_some()) {
         origins.entry(origin.expression).or_insert(origin.span);
     }
     let mut compiler = Compiler {
-        host: host::plan(data)?,
+        host: time("egglog to SSA / prepare / host plan", || host::plan(data))?,
         origins,
         placements: placement_index(&data.ir, &data.state.placements),
         data,
@@ -55,6 +56,8 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         active: HashSet::new(),
         used: BTreeSet::new(),
     };
+    drop(_prepare);
+    let _lower = span("egglog to SSA / lower entries");
     let roots = &data.state.abi.roots;
     let mut entries = vec![];
     for &(root, owner, size, finish) in roots {
@@ -123,8 +126,13 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
             span: Span::generated(),
         });
     }
-    let mut pipeline = super::publish::publish(data, &mut entries)?;
-    compiler.host.publish(&mut pipeline, &mut entries)?;
+    drop(_lower);
+    let mut pipeline = time("egglog to SSA / publish pipeline", || {
+        super::publish::publish(data, &mut entries)
+    })?;
+    time("egglog to SSA / publish host", || {
+        compiler.host.publish(&mut pipeline, &mut entries)
+    })?;
     Ok(
         ssa::Program::bare(compiler.functions, entries, vec![]).with_context::<ElaboratedTag, _>(
             BackendGlobal {

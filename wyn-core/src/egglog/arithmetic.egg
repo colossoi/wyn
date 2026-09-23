@@ -136,14 +136,16 @@
       ((union e (Typed t (Bool false)))) :ruleset arithmetic)
 
 ; Literal indexing is safe only in bounds and when element/result types agree.
-; Exclude the eliminated execution from extraction of its earlier input element.
+; Filter candidates before joining element and result types. Combining these
+; joins spends time on unrelated Typed rows even when no literal index matches.
+(relation LiteralIndexValue (OperationKey Expr))
 (rule ((IndexOperands op (Typed at (Vector xs)) index)
-       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
-       (= value (vec-get xs n)) (= value (Typed t node))
-       (= e (Typed t (OperationResult op))))
-      ((union e value) (subsume (Typed t (OperationResult op)))) :ruleset arithmetic)
+       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs)))
+      ((LiteralIndexValue op (vec-get xs n))) :ruleset arithmetic)
 (rule ((IndexOperands op (Typed at (ArrayValue (ArrayLiteral xs))) index)
-       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs))
-       (= value (vec-get xs n)) (= value (Typed t node))
+       (Literal index text) (= n (wyn-i64 text)) (>= n 0) (< n (vec-length xs)))
+      ((LiteralIndexValue op (vec-get xs n))) :ruleset arithmetic)
+; Exclude the eliminated execution from extraction of its earlier input element.
+(rule ((LiteralIndexValue op value) (= value (Typed t node))
        (= e (Typed t (OperationResult op))))
       ((union e value) (subsume (Typed t (OperationResult op)))) :ruleset arithmetic)

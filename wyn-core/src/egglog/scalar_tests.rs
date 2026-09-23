@@ -1,5 +1,5 @@
-use super::super::data::intern_type;
-use super::{intern_expr, Expressions, Placed, Program};
+use super::super::data::{intern_expr, intern_type};
+use super::{Expressions, Placed, Program};
 use crate::builtins::catalog;
 use crate::egglog::data::{
     BuiltinData, ExprId, ExprKind, Ir, OperationKind, PlacementSite, RegionId, SoacBody, TypeId,
@@ -509,6 +509,27 @@ fn capture_bounds_stop_at_the_loop_binding_that_varies() {
         );
     }
     wgsl(&c);
+}
+
+#[test]
+fn literal_indices_fold_after_the_index_becomes_constant() {
+    for algebra in [false, true] {
+        for source in [
+            "entry main(x:i32) i32 = [x,x+1][x-x+1]",
+            "entry main(x:i32) i32 = [[x,0],[0,x+1]][x-x+1][x-x+1]",
+        ] {
+            let c = super::simplify(input(source), algebra).unwrap();
+            assert!(
+                !matches!(c.expressions[result(&c)].kind, ExprKind::OperationResult(_)),
+                "constant indexing should select its element: {source}"
+            );
+            let c = schedule(super::place(c).unwrap(), PipelineTopologyPolicy::AllowGenerated).unwrap();
+            for x in [-7, 0, 9] {
+                assert_eq!(run(&c, vec![Value::Int(x)]), vec![Value::Int(x + 1)]);
+            }
+            wgsl(&c);
+        }
+    }
 }
 
 #[test]

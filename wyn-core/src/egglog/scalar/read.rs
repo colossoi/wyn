@@ -1,12 +1,14 @@
 //! Cost-based extraction of typed terms back into the interned sidecar DAG.
 use super::term::{app, key};
-use super::{error, intern_expr, OptimizeError};
-use crate::egglog::data::{Array, ExprId, ExprKind, Ir};
+use super::{error, OptimizeError};
+use crate::egglog::data::{Array, ExprData, ExprId, ExprKind, Ir};
+use crate::egglog::timing::{span, time};
 use egglog_engine::ast::Literal;
 use egglog_engine::extract::{CostModel, Extractor, TreeAdditiveCostModel};
-use egglog_engine::sort::S;
+use egglog_engine::sort::{VecContainer, S};
 use egglog_engine::{ArcSort, EGraph, Enode, Function, Term, TermDag, Value};
 use std::collections::BTreeMap;
+use wyn_base::InternIndex;
 
 struct Cost;
 impl CostModel<u64> for Cost {
@@ -27,43 +29,53 @@ impl CostModel<u64> for Cost {
     }
 }
 
-pub(super) fn extract(graph: &EGraph, data: &mut Ir) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
-    let Some(sort) = graph.get_sort_by_name("Expr") else {
-        return Err(error("missing expression sort"));
+pub(super) fn extract(
+    graph: &mut EGraph,
+    data: &mut Ir,
+) -> Result<BTreeMap<ExprId, ExprId>, OptimizeError> {
+    let Some(sort) = graph.get_sort_by_name("Exprs").cloned() else {
+        return Err(error("missing expression vector sort"));
     };
-    let extractor = Extractor::compute_costs_from_rootsorts(None, graph, Cost);
+    let mut roots = Vec::new();
+    graph.function_entries("SourceExpression", |entry| {
+        roots.push((graph.value_to_base::<i64>(entry.inputs[0]), entry.output));
+    })?;
+    // Egglog's reconstruction cache is local to one extraction call. Extract
+    // all roots as a vector so shared subgraphs are traversed only once.
+    let root = graph.container_to_value(VecContainer {
+        data: roots.iter().map(|(_, value)| *value).collect(),
+        do_rebuild: true,
+    });
+    let extractor = time("egglog arithmetic / extract / compute costs", || {
+        Extractor::compute_costs_from_rootsorts(None, graph, Cost)
+    });
+    let _read = span("egglog arithmetic / extract / read expressions");
     let mut dag = TermDag::default();
+    let Some((_, node)) = extractor.extract_best_with_sort(graph, &mut dag, root, sort) else {
+        return Err(error("no finite extraction for source expressions"));
+    };
+    let expressions = InternIndex::from_arena(&data.expressions);
     let mut reader = Reader {
         data,
         memo: BTreeMap::new(),
+        expressions,
     };
     let mut replacements = BTreeMap::new();
-    let mut result = Ok(());
-    graph.function_entries_while("SourceExpression", |entry| {
-        result = (|| {
-            let id = u32::try_from(graph.value_to_base::<i64>(entry.inputs[0]))
-                .map(ExprId::from)
-                .map_err(|_| error("invalid source expression ID"))?;
-            let Some((_, node)) =
-                extractor.extract_best_with_sort(graph, &mut dag, entry.output, sort.clone())
-            else {
-                return Err(error(&format!("no finite extraction for {id:?}")));
-            };
-            let value = reader.value(&dag, node)?;
-            if id != value {
-                replacements.insert(id, value);
-            }
-            Ok(())
-        })();
-        result.is_ok()
-    })?;
-    result?;
+    for ((id, _), &node) in roots.into_iter().zip(vector(&dag, node)?) {
+        let id = u32::try_from(id).map(ExprId::from).map_err(|_| error("invalid source expression ID"))?;
+        let value = reader.value(&dag, node)?;
+        if id != value {
+            replacements.insert(id, value);
+        }
+    }
+    drop(_read);
     Ok(replacements)
 }
 
 struct Reader<'a> {
     data: &'a mut Ir,
     memo: BTreeMap<usize, ExprId>,
+    expressions: InternIndex<ExprId, ExprData>,
 }
 impl Reader<'_> {
     fn value(&mut self, dag: &TermDag, id: usize) -> Result<ExprId, OptimizeError> {
@@ -117,7 +129,7 @@ impl Reader<'_> {
             ("ArrayValue", &[x]) => ExprKind::Array(self.array(dag, x)?),
             _ => return Err(error(&format!("unknown extracted node {tag}"))),
         };
-        let value = intern_expr(self.data, ty, kind);
+        let value = self.expressions.intern(&mut self.data.expressions, &ExprData { ty, kind });
         self.memo.insert(id, value);
         Ok(value)
     }

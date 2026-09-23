@@ -45,6 +45,7 @@ pub enum ConvertError {
 /// nor runs optimization or extraction.
 pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>, ConvertError> {
     let _timing = span("egglog from TLC");
+    let _convert = span("egglog from TLC / convert");
     let mut converter = Converter::default();
     converter.data.programs.alloc(ProgramData {
         next_auto_storage_binding: program.global_context.auto_storage_binding_ids.peek_id(),
@@ -132,6 +133,7 @@ pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>,
     converter.data.types = converter.types.into_arena();
     converter.data.expressions = converter.expressions.into_arena();
     converter.data.origins = converter.origins.into_arena();
+    drop(_convert);
 
     let graph = import(&converter.data).map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     Ok(Program {

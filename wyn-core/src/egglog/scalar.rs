@@ -1,8 +1,7 @@
 //! Simplify the expression DAG, then place shared and invariant computations.
-use super::data::intern_expr;
 use super::{term, Expressions, OptimizeError, Placed, Program, Simplified};
 use crate::egglog::rewrite::all;
-use crate::egglog::timing::span;
+use crate::egglog::timing::{span, time};
 
 mod fold;
 mod hoist;
@@ -20,19 +19,25 @@ pub fn simplify(
     let Expressions { mut graph } = program.state;
     // Keep alternatives in one e-graph throughout analysis and extraction.
     // Bound reassociation to avoid exponential exploration of long sums.
-    fold::register(&mut graph);
-    graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))?;
-    graph.update(|sink| fold::facts(data, sink))?;
-    graph.parse_and_run_program(
-        None,
-        if algebra {
-            "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
-        } else {
-            "(run-schedule (saturate (run arithmetic)))"
-        },
-    )?;
-    let replacements = read::extract(&graph, data)?;
-    all(data, &replacements);
+    time("egglog arithmetic / load rules", || {
+        fold::register(&mut graph);
+        graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))
+    })?;
+    time("egglog arithmetic / import facts", || {
+        graph.update(|sink| fold::facts(data, sink))
+    })?;
+    time("egglog arithmetic / run schedule", || {
+        graph.parse_and_run_program(
+            None,
+            if algebra {
+                "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
+            } else {
+                "(run-schedule (saturate (run arithmetic)))"
+            },
+        )
+    })?;
+    let replacements = time("egglog arithmetic / extract", || read::extract(&mut graph, data))?;
+    time("egglog arithmetic / rewrite", || all(data, &replacements));
     Ok(Program {
         ir: program.ir,
         state: Simplified,

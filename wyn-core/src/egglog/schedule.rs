@@ -11,7 +11,7 @@ use crate::egglog::data::{
     SoacBody,
 };
 use crate::egglog::dependencies::analyze;
-use crate::egglog::timing::span;
+use crate::egglog::timing::{span, time};
 use crate::interface::EntryKind;
 use crate::types::{Type, TypeName};
 use crate::PipelineTopologyPolicy;
@@ -40,48 +40,67 @@ pub fn schedule(
             ..Scheduled::default()
         },
     };
-    let summary = analyze(&converted);
-    let schedules = summary.schedules(&converted)?;
+    let summary = time("egglog scheduling / dependencies", || analyze(&converted));
+    let schedules = time("egglog scheduling / operation order", || {
+        summary.schedules(&converted)
+    })?;
     let entries: Vec<_> = converted.entries.iter().map(|(&id, e)| (id, e.definition)).collect();
     let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
-    converted.state.abi.inputs = super::abi::inputs(
-        &converted.entries,
-        &converted.entry_params,
-        &converted.input_bounds,
-        &converted.symbols,
-        &converted.regions,
-        &converted.definitions,
-        &converted.types,
-        &converted.parameters,
-    )?;
+    converted.state.abi.inputs = time("egglog scheduling / input ABI", || {
+        super::abi::inputs(
+            &converted.entries,
+            &converted.entry_params,
+            &converted.input_bounds,
+            &converted.symbols,
+            &converted.regions,
+            &converted.definitions,
+            &converted.types,
+            &converted.parameters,
+        )
+    })?;
     let mut host_inputs = vec![];
+    let _load = span("egglog scheduling / load rules");
     let mut graph = EGraph::default();
     graph.parse_and_run_program(Some("ids.egg".into()), include_str!("ids.egg"))?;
     graph.parse_and_run_program(None, KEYS)?;
     graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)?;
+    drop(_load);
+    let _facts = span("egglog scheduling / import facts");
     graph.update(|mut sink| {
-        let mut imported = outputs(&mut converted, &mut sink)?;
-        facts(
-            &converted,
-            &summary,
-            count_type,
-            topology,
-            &mut imported,
-            &mut sink,
-        )?;
-        super::execution::order_facts(&schedules, &mut sink)?;
-        abi::facts(
-            &converted.state.abi.inputs,
-            &converted.state.outputs,
-            &converted.entries,
-            &converted.types,
-            &imported.types,
-            &mut sink,
-            &mut host_inputs,
-        )
+        let mut imported = time("egglog scheduling / import facts / outputs", || {
+            outputs(&mut converted, &mut sink)
+        })?;
+        time("egglog scheduling / import facts / structure", || {
+            facts(
+                &converted,
+                &summary,
+                count_type,
+                topology,
+                &mut imported,
+                &mut sink,
+            )
+        })?;
+        time("egglog scheduling / import facts / order", || {
+            super::execution::order_facts(&schedules, &mut sink)
+        })?;
+        time("egglog scheduling / import facts / ABI", || {
+            abi::facts(
+                &converted.state.abi.inputs,
+                &converted.state.outputs,
+                &converted.entries,
+                &converted.types,
+                &imported.types,
+                &mut sink,
+                &mut host_inputs,
+            )
+        })
     })?;
-    graph.parse_and_run_program(None, RUN)?;
-    let resources = read(&graph, &mut converted)?;
+    drop(_facts);
+    time("egglog scheduling / run schedule", || {
+        graph.parse_and_run_program(None, RUN)
+    })?;
+    let resources = time("egglog scheduling / read plan", || read(&graph, &mut converted))?;
+    let _lower = span("egglog scheduling / lower blocks");
     let operation_values = converted
         .ir
         .expressions
@@ -117,25 +136,32 @@ pub fn schedule(
     if !planner.resources.stages.is_empty() {
         return Err(error("planned dispatches were not lowered"));
     }
-    let dispatch_order = validation::validate(planner.data, topology)?;
-    let roots = abi::read(
-        &graph,
-        planner.data,
-        &planner.resources.buffers,
-        &planner.resources.launches,
-        &entry_roots,
-        &host_inputs,
-    )?;
-    planner.output_copies()?;
-    planner.data.state.physical_kernels = publication::build_physical_kernel_graph(
-        &graph,
-        &roots,
-        &dispatch_order,
-        &mut planner.data.state.abi,
-        &planner.data.state.dispatches,
-        &planner.data.ir,
-        &planner.data.state.blocks,
-    )?;
+    drop(_lower);
+    let dispatch_order = time("egglog scheduling / validate", || {
+        validation::validate(planner.data, topology)
+    })?;
+    let roots = time("egglog scheduling / read ABI", || {
+        abi::read(
+            &graph,
+            planner.data,
+            &planner.resources.buffers,
+            &planner.resources.launches,
+            &entry_roots,
+            &host_inputs,
+        )
+    })?;
+    time("egglog scheduling / output copies", || planner.output_copies())?;
+    planner.data.state.physical_kernels = time("egglog scheduling / publish kernels", || {
+        publication::build_physical_kernel_graph(
+            &graph,
+            &roots,
+            &dispatch_order,
+            &mut planner.data.state.abi,
+            &planner.data.state.dispatches,
+            &planner.data.ir,
+            &planner.data.state.blocks,
+        )
+    })?;
     Ok(converted)
 }
 
