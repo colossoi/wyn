@@ -17,7 +17,10 @@
 (rule ((ScalarSite op)) ((OrderEdge (Start op) (End op))) :ruleset dispatch)
 (rule ((Before a b)) ((OrderEdge (At a) (At b))) :ruleset dispatch)
 (rule ((EffectInput gate op)) ((OrderEdge (End op) (Gate gate))) :ruleset dispatch)
-(rule ((EffectWait op gate)) ((OrderEdge (Gate gate) (Start op))) :ruleset dispatch)
+; A proven scalar join executes at its leader, whose incoming gates remain.
+; Its original gate may include the independent work it has moved ahead of.
+(rule ((EffectWait op gate) (= (ScalarJoined op) false))
+      ((OrderEdge (Gate gate) (Start op))) :ruleset dispatch)
 ; Preserve direct dependencies through scalar/control boundaries;
 ; SOAC-to-SOAC flow uses the actual component writer.
 (rule ((SourceDependency after before) (ScalarSite after) (Site after r) (Site before r))
@@ -131,8 +134,6 @@
 (rule ((AbiRootStorage root binding)) ((set (AbiAccess root binding) 1)) :ruleset abi-final)
 (rule ((= flags (Access stage value)) (AbiBufferBinding value binding))
       ((set (AbiAccess (KernelRoot stage) binding) flags)) :ruleset abi-final)
-(rule ((OutputOwner output entry) (CopyOutput output) (OutputBacking output value) (AbiBufferBinding value binding))
-      ((set (AbiAccess (EntryRoot entry) binding) 2)) :ruleset abi-final)
 ; Root environments use source values already present in the planning graph.
 (rule ((Phase stage r) (= stage (Stage op name)) (Operand op role (ExprId e)))
       ((AbiRootNeed (KernelRoot stage) (AbiExpr e))) :ruleset abi)

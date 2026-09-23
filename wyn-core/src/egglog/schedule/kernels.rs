@@ -8,7 +8,7 @@ use super::{
 };
 use crate::egglog::data::{BlockId, DispatchId, ExprId, OperationId, OperationKind};
 use crate::ssa::types::AtomicOp;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod filter;
 mod indexed;
@@ -25,7 +25,14 @@ struct Loop {
 
 impl Planner<'_> {
     pub(super) fn output_copies(&mut self) -> Result<(), OptimizeError> {
-        let outputs: Vec<_> = self.data.state.outputs.values().filter(|o| o.copy).cloned().collect();
+        let outputs: Vec<_> = self
+            .data
+            .state
+            .outputs
+            .iter()
+            .filter(|(_, o)| o.copy)
+            .map(|(&id, o)| (id, o.clone()))
+            .collect();
         let roots: Vec<_> = self
             .data
             .state
@@ -41,7 +48,20 @@ impl Planner<'_> {
                 _ => None,
             })
             .collect();
-        for (root, entry) in roots {
+        let mut copies = BTreeMap::<_, Vec<_>>::new();
+        for (id, output) in outputs {
+            let root = match self.resources.output_writers.get(&id) {
+                Some(&root) => root,
+                None => {
+                    let Some(&(root, _)) = roots.iter().find(|(_, entry)| *entry == output.entry) else {
+                        continue;
+                    };
+                    root
+                }
+            };
+            copies.entry(root).or_default().push(output);
+        }
+        for (root, outputs) in copies {
             let returns: Vec<_> = self
                 .data
                 .state
@@ -56,7 +76,7 @@ impl Planner<'_> {
                     unreachable!()
                 };
                 let values = self.data.state.bodies[original].results.clone();
-                for output in outputs.iter().filter(|o| o.entry == entry) {
+                for output in &outputs {
                     let Some(buffer) = output.buffer else {
                         return Err(error("copy output has no backing"));
                     };

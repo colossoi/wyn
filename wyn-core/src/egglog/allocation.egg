@@ -122,7 +122,6 @@
       ((AbiStorageAlias (AbiExpr e) (AbiExpr source))
        (AbiArrayLength (AbiExpr e) (AbiBinary "sub" (AbiExpr end) (AbiExpr start)))
        (AbiArrayBound (AbiExpr e) (AbiLength (AbiExpr source)))) :ruleset abi)
-(rule ((CopyOutput output) (OutputOwner output entry)) ((AbiCopyEntry entry)) :ruleset abi)
 
 ; Extents stay in the planning graph through physical-interface publication.
 (rule ((= v (AbiExtent n))) ((set (AbiBoundKnown v) false)) :ruleset abi)

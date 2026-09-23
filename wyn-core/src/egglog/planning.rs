@@ -41,11 +41,14 @@ pub(super) const RULES: &str = concat!(
     "\n",
     include_str!("dispatch.egg"),
     "\n",
+    include_str!("epilogues.egg"),
+    "\n",
 );
 pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKey (TypeId i64))\n";
 pub(super) const RUN: &str = r#"(run-schedule (seq
     (saturate (run structure))
     (saturate (run classify))
+    (saturate (run scalar-windows)) (run scalar-blockers) (saturate (run scalar-groups))
     (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))
     (saturate (run reuse)) (run reuse-blockers)
     (run reuse-owned-input) (run reuse-input) (saturate (run reuse-output))
@@ -53,6 +56,9 @@ pub(super) const RUN: &str = r#"(run-schedule (seq
     (saturate (seq (run residency) (run allocation) (run dispatch)))
     (run materialize-outputs) (run allocation) (run select-allocation)
     (saturate (run allocation))
+    (saturate (run output-candidates)) (run output-blockers)
+    (run output-select) (run output-fallback)
+    (saturate (seq (run residency) (run allocation) (run dispatch)))
     (saturate (run abi)) (saturate (run abi-final))
     (run readout)))"#;
 
@@ -70,6 +76,7 @@ pub(super) fn facts(
     for (&id, output) in &data.state.outputs {
         values.insert(output.expression);
         let e = sink.add("ExprId", i64::from(output.expression.as_u32()))?;
+        sink.add("OutputExpression", (i64::from(id.as_u32()), e))?;
         if !canonical_storage_buffer_ty(&data.types[data.expressions[output.expression].ty].ty).is_array() {
             let ty = sink.add(
                 "TypeId",

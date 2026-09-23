@@ -6,8 +6,13 @@ $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $outDir = Join-Path $workspace 'tmp/rust-host-gpu'
 $null = New-Item -ItemType Directory -Force -Path $outDir
 $wyn = if ($Compiler) { (Resolve-Path -LiteralPath $Compiler).Path } else { Join-Path $workspace 'target/debug/wyn.exe' }
-foreach ($fixture in @('batching', 'filter', 'filter_post')) {
-    $source = Join-Path $workspace "testfiles/rust_host_$fixture.wyn"
+foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'epilogues', 'capture')) {
+    $name = switch ($fixture) {
+        'epilogues' { 'scalar_epilogues' }
+        'capture' { 'tinyporto_capture_handoff' }
+        default { "rust_host_$fixture" }
+    }
+    $source = Join-Path $workspace "testfiles/$name.wyn"
     foreach ($format in @('spirv', 'wgsl')) {
         $suffix = if ($format -eq 'spirv') { 'spv' } else { 'wgsl' }
         & $wyn build -O --target $format --target-double rust-wgpu --max-warnings 0 $source -o (Join-Path $outDir "$($fixture)_$suffix.$suffix")

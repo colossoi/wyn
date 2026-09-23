@@ -68,6 +68,13 @@ fn length_queries_lower_without_materializing_array_elements() {
 }
 
 #[test]
+fn scalar_output_epilogues_lower_without_a_finish_entry() {
+    let module = compile(include_str!("../../../testfiles/scalar_epilogues.wyn"));
+    assert_eq!(module.entry_points.len(), 3);
+    assert!(module.entry_points.iter().all(|entry| !entry.name.ends_with("finish")));
+}
+
+#[test]
 fn filter_post_map_record_outputs_lower_in_three_filter_phases() {
     let module = compile(include_str!("../../../testfiles/rust_host_filter_post.wyn"));
     let entries: Vec<_> = module.entry_points.iter().map(|entry| entry.name.as_str()).collect();
@@ -76,8 +83,7 @@ fn filter_post_map_record_outputs_lower_in_three_filter_phases() {
         [
             "post_mapped_local_offsets",
             "post_mapped_offsets",
-            "post_mapped_compact",
-            "post_mapped_finish"
+            "post_mapped_compact"
         ]
     );
 }

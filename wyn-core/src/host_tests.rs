@@ -701,6 +701,37 @@ fn uniform_sized_maps_launch_from_their_domain_capacity() {
 }
 
 #[test]
+fn indirect_draw_waits_for_both_count_epilogue_and_compacted_vertices() {
+    let source = include_str!("../../testfiles/rust_host_indirect_epilogue.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let graph = &program.interface.frame_graph;
+        assert_eq!(graph.passes.len(), 4, "three filter phases and one draw");
+        let [indirect] = graph.indirect_draws.as_slice() else {
+            panic!("one indirect draw")
+        };
+        let writer = graph
+            .passes
+            .iter()
+            .position(|pass| pass.writes.iter().any(|w| w.resource == indirect.buffer_resource))
+            .unwrap();
+        let compact = graph.passes.iter().position(|pass| pass.name.ends_with("compact")).unwrap();
+        assert!(graph.passes[writer].name.ends_with("offsets"));
+        let draw = &graph.passes[indirect.draw_pass];
+        assert!(draw.depends_on.contains(&writer));
+        assert!(draw.depends_on.contains(&compact));
+        assert!(graph.passes[compact]
+            .writes
+            .iter()
+            .any(|w| draw.reads.iter().any(|r| r.resource == w.resource)));
+    }
+}
+
+#[test]
 fn texture_consumers_wait_for_draws_with_delayed_vertex_inputs() {
     let source = include_str!("../../testfiles/rust_host_draw_consumer_order.wyn");
     let control = source.replace(

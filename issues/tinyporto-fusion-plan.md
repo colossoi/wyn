@@ -35,8 +35,7 @@ Final validation:
 
 These are semantic/compiler and shader validation checks, not GPU benchmarks.
 
-Stage 1 was committed as `97d7da7b` and reviewed. Stage 3 and the optional
-profiling work have not started.
+Stage 1 was committed as `97d7da7b` and reviewed.
 
 Stage 1 artifacts: `tmp/tinyporto-fusion-recheck/stage1.{wgsl,spv,spvasm,mir}`;
 the test log is `tmp/tinyporto-fusion-recheck/stage1-final-tests.log`.
@@ -95,8 +94,107 @@ Artifacts and logs are under `tmp/tinyporto-fusion-recheck/`, including
 `stage2-final-tests.log`, `stage2-final-fusion-tests.log`, and
 `stage2-gpu-tests.log`. GPU execution above checks correctness, not performance.
 
-Stage 2 was reviewed and approved for commit. Stage 3 is the next conceptual
-stage; pause for review before committing it.
+Stage 2 was reviewed and committed as `773ecf04`.
+
+## Stage 3 review
+
+The existing scheduling egraph now joins scalar invocations across independent,
+effect-free operations in the same region. Stored dependencies must precede the
+join point; rematerialized dependencies use the ordinary source dependency
+edges. The leader retains its incoming effect gates. An operation moves only
+after the graph has completed the dependency and effect proofs.
+
+Output publication uses the same `References` summary. A copy can attach to a
+single-invocation producer when all its computed inputs are produced there,
+the producer belongs to the entry's own scope, and no referenced old contents
+are clobbered. Other outputs retain their finish kernel. Host-computable scalar
+work retains its existing host replacement path. Rust appends the ordinary
+copy/store builder to the selected root; it does not select the writer.
+
+On the frozen snapshot, Stage 3 reduces **25 entries to 22: 14 compute and
+8 graphics**. World updates have three compute entries, visibility three,
+AO/coarse depth three, and GI five. The visibility offsets phase writes the
+indirect command; the grouped world kernel writes the UI and stroke-head
+outputs. The serial event folds still execute once per call.
+
+GPU validation passes on the Radeon RX 580 Vulkan adapter with both WGSL and
+SPIR-V. In addition to the existing filter/post-map matrix, each backend checks
+40 indirect-command cases (including zero survivors), 27 scalar-epilogue cases
+with different seeds/loop counts/map sizes, and four shared array-state capture
+patterns. All outputs match CPU references.
+
+`cargo test -p wyn-core -p wyn --quiet` passes: 1,435 tests, 18 ignored
+(1,403 core unit tests, 27 CLI tests, and 5 integration/documentation tests).
+The draw regression checks both the count writer and compacted vertex writer
+as predecessors. Separate regressions cover intervening map dependencies,
+mutation, and old-state reads. Frozen tinyporto's WGSL and SPIR-V validate.
+
+Testfile validation passes: **110 SPIR-V**, **109 WGSL**, with the existing
+`miner` linked-SPIR-V skip. Formatting and whitespace checks pass. Test logs
+are `stage3-final-tests.log`, `stage3-gpu-tests.log`, and
+`stage3-testfiles-{spirv,wgsl}.log` under `tmp/tinyporto-fusion-recheck/`.
+Stage 3 was restored onto the native fusion importer in `0c28ed70`. The
+scheduling rules and output construction are unchanged. Revalidation passes:
+1,436 tests (18 ignored), 110 SPIR-V testfiles, 109 WGSL testfiles (the existing
+`miner` skip), and the generated Rust host GPU tests on the RX 580 Vulkan adapter.
+The frozen tinyporto source hashes match; both shader backends validate and
+retain 22 entries. MIR is byte-for-byte identical to the saved Stage 3 output;
+WGSL differs only in two local variable names, and the host program differs
+only in the shader filename. Revalidation artifacts use the `stage3-native`
+prefix under `tmp/tinyporto-fusion-recheck/`.
+
+Fine-grained timing instrumentation is a separate working-tree change and is
+excluded from the Stage 3 commit.
+
+### Compile-time comparison
+
+The historical HEAD labels below refer to `773ecf04`, before native fusion import.
+All versions use the identical frozen tinyporto source and package contents,
+release executables, WGSL, `--graphics --max-warnings 0 --verbose`, and
+`--output-mir`. No `-O` flag. Each number is the median of three separate
+compiler processes, with this task's builds/tests stopped during measurement.
+These are shader compilation times, excluding Cargo builds of the compiler.
+
+| Compiler | Total | Fusion | Arithmetic EqSat | Scheduling | Entries |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stage 3 working changes | 4.34 s | 428 ms | 1,259 ms | 972 ms | 22 |
+| `773ecf04` (HEAD, Stage 3 stashed) | 4.29 s | 412 ms | 1,254 ms | 944 ms | 25 |
+| `97d7da7b` (HEAD~1) | 4.14 s | 52 ms | 1,569 ms | 937 ms | 26 |
+| `ed2ff382` (HEAD~2) | 4.38 s | 53 ms | 1,651 ms | 961 ms | 30 |
+| `ed2ff382` (HEAD~2, repeated alongside HEAD~3) | 4.44 s | 52 ms | 1,733 ms | 967 ms | 30 |
+| `c4a8d66f` (HEAD~3) | 3.75 s | 52 ms | 1,608 ms | 372 ms | 35 |
+| `bd819cf2` (HEAD~4) | 3.61 s | 52 ms | 1,560 ms | 356 ms | 35 |
+
+Run ranges were 4.21–4.63 s, 4.25–4.32 s, 4.13–4.26 s, and 4.31–4.62 s
+respectively. The earlier 4.95 s measurement overlapped tests. The controlled
+comparison does not reproduce the reported two-second build at either older
+commit and does not attribute a doubling to these fusion stages. It does not
+establish why that earlier measurement was faster; matching its source and
+configuration would be necessary to resolve that discrepancy.
+
+Raw logs are `tmp/tinyporto-fusion-recheck/timing-{current,head,head1,head2}-{1,2,3}.log`;
+`timing-comparison.json` contains all samples. The Stage 3 stash was restored.
+
+A follow-up comparison measured `c4a8d66f` (HEAD~3), immediately before
+`ed2ff382` ("Generalize scalar scheduling and batch GPU submissions"). Three
+runs of each revision were interleaved, using the same source and options.
+The totals were 3.78/3.73/3.75 s and 4.40/4.45/4.44 s respectively.
+This identifies a measurable regression across `ed2ff382`: approximately
+0.69 s (18%) overall, with scheduling accounting for about 0.60 s of it.
+HEAD~3 still does not reproduce the reported two-second result. The new raw
+logs are `timing-{head3,head2-repeat}-{1,2,3}.log`, and the samples are appended
+to `timing-comparison.json`. The benchmark used an isolated build directory;
+the current compiler executable was verified unchanged.
+
+HEAD~4 (`bd819cf2`, "Hoist shared scalars and correct GPU host execution")
+took 3.61/3.64/3.60 s with the same frozen source and options. Its 3.61 s
+median is 0.14 s below HEAD~3, still above the reported two-second result.
+The intervening HEAD~3 commit changes generated host buffer names, not the
+shader optimizer; these separate batches do not establish that the small
+timing difference is caused by that commit. Logs are
+`timing-head4-{1,2,3}.log`; samples are in `timing-comparison.json`.
+The frozen source hashes and unchanged current compiler executable were
+verified again. The temporary compiler checkout was removed after measurement.
 
 ## Verified baseline
 

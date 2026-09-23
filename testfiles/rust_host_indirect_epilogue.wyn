@@ -1,0 +1,14 @@
+type command = { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 }
+type visibility = { vertices: []vec4f32, draw: command }
+
+def cull(values: []vec4f32) visibility =
+  let visible = filter(|v: vec4f32| v.w > 0.0, values) in
+  { vertices = visible,
+    draw = { vertex_count = 3u32, instance_count = u32(length(visible)),
+             first_vertex = 0u32, first_instance = 0u32 } }
+
+entry frame(values: []vec4f32, screen: render_target<vec4f32>) render_target<vec4f32> =
+  let visible = cull(values)
+  let covered = rasterize_triangles(indirect_draw(visible.draw),
+    |_: u32, instance: u32, _: u32| vertex_output(visible.vertices[i32(instance)], 0.0)) in
+  shade(screen, covered, |_, _, _, _, _| @[1.0, 0.0, 0.0, 1.0])

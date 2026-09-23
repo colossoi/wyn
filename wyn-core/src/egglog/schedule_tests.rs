@@ -145,6 +145,65 @@ fn consecutive_gpu_scalar_loops_share_one_kernel_and_keep_intermediates_local() 
 }
 
 #[test]
+fn scalar_epilogues_join_across_independent_maps_and_publish_once() {
+    let result = compile(include_str!("../../../testfiles/scalar_epilogues.wyn"));
+    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(result.state.abi.roots.len(), 3, "no finish kernel");
+    assert!(result.state.execution.groups.values().any(|group| group.len() == 2));
+    for n in [0, 1, 7] {
+        let a = 5 + n * (n - 1) / 2;
+        let b = a + n * (n - 1);
+        for xs in [vec![], vec![3], vec![-2; 65]] {
+            assert_eq!(
+                run(
+                    &result,
+                    vec![Value::array(xs.clone()), Value::array([5]), Value::Int(n)]
+                ),
+                [Value::Tuple(vec![
+                    Value::array(xs.iter().map(|x| x + a)),
+                    Value::array((0..3).map(|i| i * a)),
+                    Value::array([a, b]),
+                ])]
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_join_waits_for_intervening_map_results() {
+    let result = compile(
+        "entry main(xs:[]i32,n:i32) ([]i32,[1]i32) =
+         let a=loop acc=xs[0] for i<n do acc+i in
+         let ys=map(|x:i32|x+a,xs) in
+         let b=loop acc=ys[0] for i<n do acc+i*2 in (ys,[b])",
+    );
+    assert_eq!(kernel_count(&result), 3);
+    assert!(!result.state.execution.groups.values().any(|group| group.len() > 1));
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9]), Value::Int(4)]),
+        [Value::Tuple(vec![Value::array([16, 13, 20]), Value::array([28])])]
+    );
+}
+
+#[test]
+fn scalar_join_preserves_intervening_mutation_and_old_state_reads() {
+    let result = compile(
+        "entry main(xs:*[3]i32,n:i32) ([3]i32,[2]i32) =
+         let a=loop acc=xs[0] for i<n do acc+i in
+         let ys=scatter(xs,[0],[100]) in
+         let b=loop acc=ys[0] for i<n do acc+i*2 in (ys,[a,b])",
+    );
+    assert_eq!(kernel_count(&result), 3);
+    assert_eq!(
+        run(&result, vec![Value::array([5, 2, 9]), Value::Int(4)]),
+        [Value::Tuple(vec![
+            Value::array([100, 2, 9]),
+            Value::array([11, 112])
+        ])]
+    );
+}
+
+#[test]
 fn mutable_scalar_snapshot_stays_before_the_update() {
     let result = compile(
         "entry main(xs:*[3]i32) [3]i32 =

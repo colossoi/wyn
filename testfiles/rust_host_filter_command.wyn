@@ -1,0 +1,6 @@
+type command = { vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32 }
+
+entry command(xs: []i32, n: i32) ([1]command, []i32) =
+  let kept = filter(|x: i32| x > 0, xs[0..n]) in
+  ([{ vertex_count = 36u32, instance_count = u32(length(kept)),
+      first_vertex = 0u32, first_instance = 0u32 }], kept)

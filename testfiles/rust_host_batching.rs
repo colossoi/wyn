@@ -1,5 +1,23 @@
 // Copied beside compiler-generated modules by scripts/test_rust_host_gpu.ps1.
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "capture_spv.rs"]
+mod capture_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "capture_wgsl.rs"]
+mod capture_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "epilogues_spv.rs"]
+mod epilogues_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "epilogues_wgsl.rs"]
+mod epilogues_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "filter_command_spv.rs"]
+mod filter_command_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "filter_command_wgsl.rs"]
+mod filter_command_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "filter_post_spv.rs"]
 mod filter_post_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
@@ -20,7 +38,10 @@ mod wgsl;
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, spv, wgsl};
+    use super::{
+        capture_spv, capture_wgsl, epilogues_spv, epilogues_wgsl, filter_command_spv, filter_command_wgsl,
+        filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, spv, wgsl,
+    };
     use wgpu::util::DeviceExt;
 
     fn input(device: &wgpu::Device, values: &[i32]) -> wgpu::Buffer {
@@ -131,12 +152,84 @@ mod tests {
                 vec![5 + bias * bias, 2 + bias * bias, 9 + bias * bias]
             );
         }
+        let mut attached_spv = epilogues_spv::HostContext::new(&device).unwrap();
+        let mut attached_wgsl = epilogues_wgsl::HostContext::new(&device).unwrap();
+        for seed in [-7i32, 0, 5] {
+            for n in [0i32, 1, 7] {
+                for size in [1, 3, 65] {
+                    let values: Vec<_> = (0..size).map(|i| i - 2).collect();
+                    let xs = input(&device, &values);
+                    let parameters = input(&device, &[seed, n]);
+                    let a = seed + n * (n - 1) / 2;
+                    let b = a + n * (n - 1);
+                    let expected = vec![
+                        values.iter().map(|x| x + a).collect::<Vec<_>>(),
+                        vec![0, a, a * 2],
+                        vec![a, b],
+                    ];
+                    let output = epilogues_spv::host_attached(
+                        &mut attached_spv,
+                        &queue,
+                        &seed.to_le_bytes(),
+                        &n.to_le_bytes(),
+                        &xs,
+                    )
+                    .unwrap();
+                    let actual: Vec<_> =
+                        (0..3).map(|i| read(&device, &queue, buffer!(epilogues_spv, output, i))).collect();
+                    assert_eq!(actual, expected);
+                    let output =
+                        epilogues_wgsl::host_attached(&mut attached_wgsl, &queue, &xs, &parameters)
+                            .unwrap();
+                    let actual: Vec<_> =
+                        (0..3).map(|i| read(&device, &queue, buffer!(epilogues_wgsl, output, i))).collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        let mut capture_spv = capture_spv::HostContext::new(&device).unwrap();
+        let mut capture_wgsl = capture_wgsl::HostContext::new(&device).unwrap();
+        for pattern in 0..4 {
+            let events: Vec<_> = (0..32)
+                .map(|i| {
+                    if pattern == 0 || (pattern == 2 && i % 2 == 0) || (pattern == 3 && i % 7 == 0) {
+                        i + 1
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let mut state = 0;
+            let mut last = [0; 4];
+            for (i, &event) in events.iter().enumerate() {
+                if event > 0 {
+                    state += event;
+                    last[i % 4] = event;
+                }
+            }
+            let expected = vec![
+                (0..64).map(|i| last[i % 4]).collect::<Vec<_>>(),
+                (0..128).map(|i| i + state).collect(),
+                vec![state],
+            ];
+            let events = input(&device, &events);
+            let output = capture_spv::host_repro(&mut capture_spv, &queue, &events).unwrap();
+            let actual: Vec<_> =
+                (0..3).map(|i| read(&device, &queue, buffer!(capture_spv, output, i))).collect();
+            assert_eq!(actual, expected);
+            let output = capture_wgsl::host_repro(&mut capture_wgsl, &queue, &events).unwrap();
+            let actual: Vec<_> =
+                (0..3).map(|i| read(&device, &queue, buffer!(capture_wgsl, output, i))).collect();
+            assert_eq!(actual, expected);
+        }
         // Exercise every scan boundary, including padding lanes, empty input,
         // and changes in scratch allocation size between calls.
         let mut spv = filter_spv::HostContext::new(&device).unwrap();
         let mut wgsl = filter_wgsl::HostContext::new(&device).unwrap();
         let mut post_spv = filter_post_spv::HostContext::new(&device).unwrap();
         let mut post_wgsl = filter_post_wgsl::HostContext::new(&device).unwrap();
+        let mut command_spv = filter_command_spv::HostContext::new(&device).unwrap();
+        let mut command_wgsl = filter_command_wgsl::HostContext::new(&device).unwrap();
         for n in [0i32, 1, 63, 64, 65, 255, 256, 257, 4096, 39592] {
             for pattern in 0..4 {
                 let values: Vec<_> = (0..n.max(1))
@@ -167,10 +260,9 @@ mod tests {
                     expected
                 );
                 // WGSL publishes a uniform parameter block for each filter stage.
-                let output = filter_wgsl::host_filtered(
-                    &mut wgsl, &queue, &xs, &scalar, &scalar, &scalar, &scalar, &scalar,
-                )
-                .unwrap();
+                let output =
+                    filter_wgsl::host_filtered(&mut wgsl, &queue, &xs, &scalar, &scalar, &scalar, &scalar)
+                        .unwrap();
                 assert_eq!(
                     read(&device, &queue, buffer!(filter_wgsl, output, 0)),
                     vec![expected.len() as i32]
@@ -199,7 +291,6 @@ mod tests {
                     &scalar,
                     &scalar,
                     &scalar,
-                    &scalar,
                 )
                 .unwrap();
                 assert_eq!(
@@ -210,6 +301,34 @@ mod tests {
                     &read(&device, &queue, buffer!(filter_post_wgsl, output, 1))[..records.len()],
                     records,
                     "WGSL n={n}, pattern={pattern}"
+                );
+                let output =
+                    filter_command_spv::host_command(&mut command_spv, &queue, &n.to_le_bytes(), &xs)
+                        .unwrap();
+                assert_eq!(
+                    read(&device, &queue, buffer!(filter_command_spv, output, 0)),
+                    [36, expected.len() as i32, 0, 0]
+                );
+                assert_eq!(
+                    &read(&device, &queue, buffer!(filter_command_spv, output, 1))[..expected.len()],
+                    expected
+                );
+                let output = filter_command_wgsl::host_command(
+                    &mut command_wgsl,
+                    &queue,
+                    &xs,
+                    &scalar,
+                    &scalar,
+                    &scalar,
+                )
+                .unwrap();
+                assert_eq!(
+                    read(&device, &queue, buffer!(filter_command_wgsl, output, 0)),
+                    [36, expected.len() as i32, 0, 0]
+                );
+                assert_eq!(
+                    &read(&device, &queue, buffer!(filter_command_wgsl, output, 1))[..expected.len()],
+                    expected
                 );
             }
         }

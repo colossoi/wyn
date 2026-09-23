@@ -4,7 +4,7 @@ use crate::egglog::blocks::{
     BufferData, DispatchData, Function, FunctionKind, GridData, Instruction, Storage, Value,
 };
 use crate::egglog::data::{
-    BufferId, DispatchId, EntryId, ExprId, ExprKind, Ir, OperationId, OutputId, TypeId,
+    BlockId, BufferId, DispatchId, EntryId, ExprId, ExprKind, Ir, OperationId, OutputId, TypeId,
 };
 use crate::egglog::visit::Operand;
 use crate::egglog::{OptimizeError, Program, Scheduled};
@@ -33,6 +33,7 @@ pub(in crate::egglog) struct Readout {
     pub recipes: BTreeMap<OperationId, Recipe>,
     pub slots: BTreeMap<(OperationId, String, u32), Value>,
     pub stages: BTreeMap<(OperationId, String), DispatchId>,
+    pub output_writers: BTreeMap<OutputId, BlockId>,
 }
 
 pub(in crate::egglog) fn read(
@@ -363,6 +364,18 @@ pub(in crate::egglog) fn read(
         });
         data.state.abi.local_lengths.insert(id, capacity);
         result.local_slots.insert(key, id);
+        Ok(())
+    })?;
+    let mut roots = HashMap::new();
+    graph.constructor_enodes("KernelRoot", |node| {
+        if let Some(&dispatch) = stages.get(&node.children[0]) {
+            roots.insert(node.eclass, data.state.dispatches[dispatch].kernel);
+        }
+    })?;
+    rows(graph, "OutputWriter", |a| {
+        if let Some(&root) = roots.get(&a[1]) {
+            result.output_writers.insert(OutputId::from(number(graph, a[0])?), root);
+        }
         Ok(())
     })?;
     result.buffers = buffers;
