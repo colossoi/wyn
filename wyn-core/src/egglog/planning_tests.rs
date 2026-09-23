@@ -44,6 +44,28 @@ const MAP: &str = r#"
 "#;
 
 #[test]
+fn scalar_duplication_requires_both_legality_and_affordable_work() {
+    for (legal, cheap) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut g = graph(&format!(
+            "(Site (OperationId 0) (RegionId 0))
+             (ScalarCandidate (OperationId 0))
+             (ExecutionSummary (OperationId 0) true {legal} {cheap})"
+        ));
+        check(
+            &mut g,
+            &format!("(= (Rematerialize (OperationId 0)) {})", legal && cheap),
+        );
+        check(
+            &mut g,
+            &format!(
+                "(= (IsScalarGroupCandidate (OperationId 0)) {})",
+                !(legal && cheap)
+            ),
+        );
+    }
+}
+
+#[test]
 fn map_reuse_is_selected_only_after_all_old_value_uses_are_known() {
     for (extra, expected) in [
         ("", "(Reuse (ExprId 0))"),

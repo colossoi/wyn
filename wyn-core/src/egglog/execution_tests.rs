@@ -50,7 +50,7 @@ fn stored_results_and_metadata_keep_availability_without_repeating_producer_work
 }
 
 #[test]
-fn a_mutable_read_through_forwarded_aliases_exhausts_the_budget() {
+fn a_mutable_read_through_forwarded_aliases_blocks_duplication_independently_of_cost() {
     let mut source = evaluation(0, &[]);
     source.local.mutable = true;
     let mut alias = evaluation(0, &[2]);
@@ -59,7 +59,30 @@ fn a_mutable_read_through_forwarded_aliases_exhausts_the_budget() {
     read.reads.push(node(1));
     // The reader is visited before its aliases; changed facts must reach it.
     let evaluations = BTreeMap::from([(node(0), read), (node(1), alias), (node(2), source)]);
-    assert_eq!(summarize(&evaluations)[&node(0)].work, OVER_BUDGET);
+    let result = summarize(&evaluations);
+    assert_eq!(result[&node(0)].work, 1);
+    assert!(result[&node(0)].duplication_blocked);
+}
+
+#[test]
+fn cost_and_duplication_legality_propagate_independently() {
+    let mut restricted = evaluation(1, &[]);
+    restricted.local.duplication_blocked = true;
+    let mut stored = evaluation(0, &[0]);
+    stored.count_children = false;
+    let evaluations = BTreeMap::from([
+        (node(0), restricted),
+        (node(1), evaluation(1, &[0])),
+        (node(2), evaluation(OVER_BUDGET, &[])),
+        (node(3), stored),
+    ]);
+    let result = summarize(&evaluations);
+    assert_eq!(result[&node(1)].work, 2);
+    assert!(result[&node(1)].duplication_blocked);
+    assert_eq!(result[&node(2)].work, OVER_BUDGET);
+    assert!(!result[&node(2)].duplication_blocked);
+    assert_eq!(result[&node(3)].work, 0);
+    assert!(!result[&node(3)].duplication_blocked);
 }
 
 #[test]

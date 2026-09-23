@@ -55,6 +55,7 @@ struct Summary {
     work: u8,
     device: bool,
     mutable: bool,
+    duplication_blocked: bool,
 }
 
 struct Evaluation {
@@ -81,7 +82,12 @@ pub(super) fn facts(
                 let op = sink.add("OperationId", i64::from(op.as_u32()))?;
                 sink.add(
                     "ExecutionSummary",
-                    (op, properties.device, properties.work < OVER_BUDGET),
+                    (
+                        op,
+                        properties.device,
+                        !properties.duplication_blocked,
+                        properties.work < OVER_BUDGET,
+                    ),
                 )?;
             }
             _ => {}
@@ -185,6 +191,7 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                             None => {
                                 local.device = true;
                                 local.work = OVER_BUDGET;
+                                local.duplication_blocked = true;
                             }
                         }
                     }
@@ -192,9 +199,11 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                     ExprKind::Extern(_) => {
                         local.device = true;
                         local.work = OVER_BUDGET;
+                        local.duplication_blocked = true;
                     }
                     ExprKind::PureApp { .. } => {
-                        local.work = if total_node(data, e) { 1 } else { OVER_BUDGET };
+                        local.work = 1;
+                        local.duplication_blocked = !total_node(data, e);
                     }
                     ExprKind::If { .. } => local.work = 1,
                     _ => {}
@@ -240,6 +249,7 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                                 // Builtin applications with motion proofs use PureApp.
                                 local.work = OVER_BUDGET;
                                 local.device = true;
+                                local.duplication_blocked = true;
                             }
                         }
                     }
@@ -250,14 +260,19 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                             None => {
                                 local.device = true;
                                 local.work = OVER_BUDGET;
+                                local.duplication_blocked = true;
                             }
                         }
                     }
                     OperationKind::If { .. } => local.work = 1,
-                    OperationKind::Loop { .. } => local.work = OVER_BUDGET,
+                    OperationKind::Loop { .. } => {
+                        local.work = OVER_BUDGET;
+                        local.duplication_blocked = true;
+                    }
                     _ => {
                         local.device = true;
                         local.work = OVER_BUDGET;
+                        local.duplication_blocked = true;
                     }
                 }
             }
@@ -301,12 +316,13 @@ fn summarize(evaluations: &BTreeMap<Node, Evaluation>) -> BTreeMap<Node, Summary
         let mut next = evaluation.local;
         next.mutable |= evaluation.backings.iter().any(|n| summaries[n].mutable);
         if evaluation.reads.iter().any(|n| summaries[n].mutable) {
-            next.work = OVER_BUDGET;
+            next.duplication_blocked = true;
         }
         for child in &evaluation.children {
             next.device |= summaries[child].device;
             if evaluation.count_children {
                 next.work = (next.work + summaries[child].work).min(OVER_BUDGET);
+                next.duplication_blocked |= summaries[child].duplication_blocked;
             }
         }
         if summaries[&node] != next {
