@@ -18,8 +18,8 @@
       ((Allocation value n)) :ruleset allocation)
 
 ; Capacity describes allocation, while LiveLength describes the usable view.
-(rule ((ScalarValue op t))
-      ((ResultSlot op 0) (ElementType (Result op 0) t)
+(rule ((ScalarValue op))
+      ((ResultSlot op 0)
        (CapacityExtent (Result op 0) (Fixed 1)) (FreshValue (Result op 0))
        (BufferSlot op "scalar" 0 (Result op 0))) :ruleset allocation)
 (rule ((ArrayResult op i t) (InputDomain op n))
@@ -196,9 +196,9 @@
 (rule ((AbiLocalCapacity op name i n) (= size (AbiBoundConstant n)))
       ((AbiLocalLength op name i (max 1 size))) :ruleset abi)
 ; Resolve source binding constraints through the completed logical allocation.
-(rule ((AbiOutputBinding output set binding name) (OutputBacking output buffer))
-      ((AbiPinnedBinding buffer set binding name)) :ruleset abi)
-(rule ((AbiPinnedBinding buffer set binding name) (Allocation buffer n))
+(rule ((AbiOutputBinding output set binding) (OutputBacking output buffer))
+      ((AbiPinnedBinding buffer set binding output)) :ruleset abi)
+(rule ((AbiPinnedBinding buffer set binding output) (Allocation buffer n))
       ((union (ResourceBinding buffer) (InputBinding set binding))) :ruleset abi)
 (rule ((AbiCapacity buffer n stride) (= count (AbiBoundConstant n)) (> stride 0)
        (<= count (/ 9223372036854775807 stride)))

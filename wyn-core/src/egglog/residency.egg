@@ -5,16 +5,16 @@
 (rule ((Site child r) (= true (ContainsCollective child)) (Enters parent r))
       ((set (ContainsCollective parent) true)) :ruleset structure)
 (rule ((Site op r) (= true (ContainsCollective op))) ((SplitRegion r)) :ruleset structure)
-(rule ((ScalarCandidate op t) (= false (ContainsCollective op)))
+(rule ((ScalarCandidate op) (= false (ContainsCollective op)))
       ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((ScalarCandidate op t) (= false (ContainsCollective op)) (= (Rematerialize op) false))
-      ((ScalarValue op t)) :ruleset residency)
+(rule ((ScalarCandidate op) (= false (ContainsCollective op)) (= (Rematerialize op) false))
+      ((ScalarValue op)) :ruleset residency)
 ; Keep runtime control and its collectives in one device invocation. Nested
 ; SOACs use local serial recipes instead of conditional/repeated host launches.
-(rule ((ScalarCandidate op t) (SourceControl op))
+(rule ((ScalarCandidate op) (SourceControl op))
       ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((ScalarCandidate op t) (SourceControl op) (= (Rematerialize op) false))
-      ((ScalarValue op t)) :ruleset residency)
+(rule ((ScalarCandidate op) (SourceControl op) (= (Rematerialize op) false))
+      ((ScalarValue op)) :ruleset residency)
 (rule ((HostRoot entry r)) ((HostRegion r)) :ruleset residency)
 (rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
 (rule ((OwnedRegion entry r) (Site op r) (Enters op child))
@@ -90,8 +90,3 @@
 (rule ((Escapes value) (Produces producer value)) ((Materialize value)) :ruleset residency)
 (rule ((Requires (InOperation op) value) (Produces producer value))
       ((Materialize value)) :ruleset residency)
-
-; Every materialization has a reason. A cross-region use remains a host-control
-; handoff, never an unconditional edge between mutually exclusive launch sites.
-(rule ((Crossing a b value) (Phase a ra) (Phase b rb) (!= ra rb))
-      ((HostHandoff ra rb value)) :ruleset residency)

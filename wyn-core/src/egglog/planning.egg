@@ -24,13 +24,13 @@
 (relation EffectWait (OperationKey i64))
 (relation SourceDependency (OperationKey OperationKey))
 (relation ScalarSite (OperationKey))
-(relation ScalarCandidate (OperationKey TypeKey))
+(relation ScalarCandidate (OperationKey))
 (function ContainsCollective (OperationKey) bool :merge (or old new))
 (function ScalarBoundary (OperationKey) bool :merge (or old new))
 (function ParallelSafe (OperationKey) bool :merge (and old new))
 (function ParallelBodySafe (OperationKey) bool :merge (and old new))
 (relation SplitRegion (RegionKey))
-(relation ScalarValue (OperationKey TypeKey))
+(relation ScalarValue (OperationKey))
 (relation InputDomain (OperationKey Extent))
 ; Output components and collective components are semantic facts, before recipes.
 (relation ArrayResult (OperationKey i64 TypeKey))
@@ -45,8 +45,6 @@
 (relation BucketResult (OperationKey ExprKey))
 (relation CounterType (TypeKey))
 (relation ParameterValue (ExprKey))
-(relation SourceParameter (ExprKey))
-(function HasInputFields (ExprKey) bool :merge (or old new))
 (relation ResultTuple (ExprKey OperationKey))
 (relation DirectResult (ExprKey OperationKey i64))
 (relation FieldValue (ExprKey i64 ExprKey))
@@ -106,7 +104,6 @@
 (relation Before (StageKey StageKey))
 (relation Crossing (StageKey StageKey ValueKey))
 (relation Clobbers (StageKey ValueKey))
-(relation HostHandoff (RegionKey RegionKey ValueKey))
 ; Shared gates keep effect fan-in/fan-out linear in the imported graph.
 (datatype OrderKey (At StageKey) (Start OperationKey) (End OperationKey) (Gate i64))
 (relation OrderEdge (OrderKey OrderKey))
@@ -151,9 +148,6 @@
 (ruleset allocation)
 (ruleset dispatch)
 
-; Exposed tuple fields own input buffers; their parent tuple is only a container.
-(rule ((SourceParameter e) (= (HasInputFields e) false))
-      ((ParameterValue e)) :ruleset structure)
 ; ABI leaves accompany source import. Values describe sizes and aliases;
 ; physical identities are assigned only when reading the completed plan.
 (datatype AbiValue
@@ -206,8 +200,8 @@
 (function HasSourceGrid (i64) bool :merge (or old new))
 (relation AbiImage (AbiValue BindingKey))
 (function AbiHasImage (i64) bool :merge (or old new))
-(relation AbiOutputBinding (i64 i64 i64 String))
-(relation AbiPinnedBinding (ValueKey i64 i64 String))
+(relation AbiOutputBinding (i64 i64 i64))
+(relation AbiPinnedBinding (ValueKey i64 i64 i64))
 (function AbiHasLaunch (RegionKey) bool :merge (or old new))
 (relation AbiInvalidHost (i64))
 (relation AbiCopyEntry (i64))

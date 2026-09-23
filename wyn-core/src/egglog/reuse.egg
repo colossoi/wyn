@@ -124,7 +124,7 @@
 (rule ((FreshValue value))
       ((set (PinnedResult value) false) (set (HasReuseHint value) false)) :ruleset reuse)
 (rule ((ReusePermission op i e)) ((set (HasReuseHint (Result op i)) true)) :ruleset reuse)
-(rule ((AbiOutputBinding output set binding name) (ReturnArray output result) (ValueRef result value))
+(rule ((AbiOutputBinding output set binding) (ReturnArray output result) (ValueRef result value))
       ((set (PinnedResult value) true)) :ruleset reuse)
 
 ; Choose one safe owned input per element type before joining output slots.

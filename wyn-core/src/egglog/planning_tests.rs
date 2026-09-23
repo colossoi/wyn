@@ -53,7 +53,7 @@ fn map_reuse_is_selected_only_after_all_old_value_uses_are_known() {
         ("(Operand (OperationId 0) \"input\" (ExprId 3)) (SliceView (ExprId 3) (ExprId 0) (ExprId 4) (ExprId 5))", "(Allocate)"),
         ("(Operand (OperationId 0) \"input\" (ExprId 3)) (DirectResult (ExprId 3) (OperationId 1) 0) (UpdatedResult (OperationId 1) 0 (ExprId 0))", "(Allocate)"),
         ("(ExitValue (RegionId 0) (ExprId 0))", "(Allocate)"),
-        ("(AbiOutputBinding 0 0 7 \"out\") (ReturnArray 0 (ExprId 2))", "(Allocate)"),
+        ("(AbiOutputBinding 0 0 7) (ReturnArray 0 (ExprId 2))", "(Allocate)"),
         ("(Site (OperationId 1) (RegionId 0)) (CollectiveShape (OperationId 1) false false) (InputDomain (OperationId 1) (Fixed 4)) (Operand (OperationId 1) \"input\" (ExprId 0))", "(Allocate)"),
     ] {
         let mut g = graph(&format!("{MAP} {extra} (ReusePermission (OperationId 0) 0 (ExprId 0)) (ExitValue (RegionId 0) (ExprId 2))"));
@@ -68,7 +68,7 @@ fn fused_outputs_choose_one_eligible_owner_of_the_input() {
     for (extra, first, second) in [
         ("", "(Reuse (ExprId 0))", "(Allocate)"),
         (
-            "(AbiOutputBinding 0 0 7 \"out\") (ReturnArray 0 (ExprId 2))",
+            "(AbiOutputBinding 0 0 7) (ReturnArray 0 (ExprId 2))",
             "(Allocate)",
             "(Reuse (ExprId 0))",
         ),
@@ -485,7 +485,7 @@ fn independent_output_domains_stay_independent() {
 }
 
 #[test]
-fn repeated_launch_sites_retain_scope_and_cross_region_handoffs() {
+fn repeated_launch_sites_keep_cross_region_ordering_in_host_control() {
     let mut g = graph(&format!(
         r#"{MAP}
         (Site (OperationId 1) (RegionId 0)) (ScalarSite (OperationId 1))
@@ -503,7 +503,6 @@ fn repeated_launch_sites_retain_scope_and_cross_region_handoffs() {
         &mut g,
         r#"
         (Phase (Stage (OperationId 2) "elements") (RegionId 2))
-        (HostHandoff (RegionId 0) (RegionId 2) (Result (OperationId 0) 0))
     "#,
     );
     assert_eq!(count(&g, "Phase"), 2, "a device callback is not a host launch");
@@ -546,19 +545,22 @@ fn imported_source_plans_before_block_generation() {
         g.parse_and_run_program(None, KEYS).unwrap();
         g.parse_and_run_program(None, RULES).unwrap();
         g.update(|mut sink| {
-            outputs(&mut converted, &mut sink)?;
+            let mut imported = outputs(&mut converted, &mut sink)?;
             facts(
                 &converted,
                 &summary,
                 count_type,
                 crate::PipelineTopologyPolicy::AllowGenerated,
+                &mut imported,
                 &mut sink,
             )?;
+            super::super::execution::order_facts(&summary.schedules(&converted).unwrap(), &mut sink)?;
             abi::facts(
                 &converted.state.abi.inputs,
                 &converted.state.outputs,
                 &converted.entries,
                 &converted.types,
+                &imported.types,
                 &mut sink,
                 &mut uniforms,
             )
@@ -615,7 +617,7 @@ fn local_allocations_and_binding_aliases_are_resolved_without_backend_ids() {
         (TypeStride (TypeId 0) 4)
         (AbiArrayLength (AbiExpr 0) (AbiNumber 128))
         (OutputBacking 0 (Result (OperationId 0) 0))
-        (AbiOutputBinding 0 0 5 "result")
+        (AbiOutputBinding 0 0 5)
         (AbiRootNeed (KernelRoot (Stage (OperationId 0) "elements")) (AbiExpr 10))
         (AbiStorage (AbiExpr 10) (InputBinding 0 5) 4)
         (DeviceRegion (RegionId 1))
@@ -930,22 +932,56 @@ fn selecting_a_tuple_field_does_not_materialize_its_siblings() {
 }
 
 #[test]
-fn tuple_input_fields_replace_the_parent_buffer_independent_of_fact_order() {
-    for (first, second) in [(false, true), (true, false)] {
-        let mut g = graph(&format!(
-            r#"
-            (SourceParameter (ExprId 0))
-            (set (HasInputFields (ExprId 0)) {first})
-            (set (HasInputFields (ExprId 0)) {second})
-            (FieldValue (ExprId 0) 0 (ExprId 1))
-            (ChildValue (ExprId 0) (ExprId 1))
-            (ParameterValue (ExprId 1))
-            (SourceParameter (ExprId 2))
-            (set (HasInputFields (ExprId 2)) false)
-        "#
-        ));
-        check(&mut g, "(ParameterValue (ExprId 1)) (ParameterValue (ExprId 2))");
-        g.parse_and_run_program(None, "(fail (check (ParameterValue (ExprId 0))))").unwrap();
+fn tuple_input_import_exposes_fields_without_a_parent_buffer() {
+    let tlc = infer_input_slice_bounds(
+        compile_thru_tlc(
+            "entry main(pair: ([]i32, []i32)) []i32 = let (xs, ys) = pair in map(|x:i32|x+length(ys),xs)",
+        )
+        .unwrap(),
+    );
+    let mut converted = Program {
+        ir: from_tlc(&tlc).unwrap().ir,
+        state: Scheduled::default(),
+    };
+    let summary = analyze(&converted);
+    let count_type = intern_type(&mut converted.ir, Type::Constructed(TypeName::UInt(32), vec![]));
+    let mut g = EGraph::default();
+    g.parse_and_run_program(None, include_str!("ids.egg")).unwrap();
+    g.parse_and_run_program(None, KEYS).unwrap();
+    g.parse_and_run_program(None, RULES).unwrap();
+    let mut parents = vec![];
+    g.update(|mut sink| {
+        let mut imported = outputs(&mut converted, &mut sink)?;
+        parents.extend(imported.input_tuples.iter().copied());
+        facts(
+            &converted,
+            &summary,
+            count_type,
+            crate::PipelineTopologyPolicy::AllowGenerated,
+            &mut imported,
+            &mut sink,
+        )
+    })
+    .unwrap();
+    assert!(!parents.is_empty());
+    for parent in parents {
+        g.parse_and_run_program(
+            None,
+            &format!("(fail (check (ParameterValue (ExprId {}))))", parent.as_u32()),
+        )
+        .unwrap();
+        for index in 0..2 {
+            let field = converted
+                .expressions
+                .iter()
+                .find_map(|(&id, expression)| {
+                    matches!(expression.kind, super::ExprKind::Project { tuple, index: field }
+                    if tuple == parent && field == index)
+                    .then_some(id)
+                })
+                .unwrap();
+            check(&mut g, &format!("(ParameterValue (ExprId {}))", field.as_u32()));
+        }
     }
 }
 

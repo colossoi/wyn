@@ -5,8 +5,8 @@ use super::data::body_signature;
 use super::visit::{Operand, OperandRole};
 use crate::builtins::{by_id, Purity};
 use crate::egglog::data::{
-    is_slice, length_source, Array, ExprData, ExprKind, OperationKind, OutputData, SoacBody, TypeData,
-    TypeId,
+    is_slice, length_source, Array, ExprData, ExprId, ExprKind, OperationKind, OutputData, SoacBody,
+    TypeData, TypeId,
 };
 use crate::egglog::dependencies::Dependencies;
 use crate::egglog::{Program, Scheduled};
@@ -25,6 +25,19 @@ mod host_sizes;
 mod read;
 pub(super) use read::scalar_captures;
 pub(super) use read::{number, read, rows, Readout, Recipe};
+
+#[derive(Default)]
+pub(super) struct Import {
+    pub types: BTreeSet<TypeId>,
+    input_tuples: BTreeSet<ExprId>,
+}
+
+impl Import {
+    fn ty(&mut self, id: TypeId, sink: &mut FullState<'_, '_>) -> Result<Value, Error> {
+        self.types.insert(id);
+        sink.add("TypeId", i64::from(id.as_u32()))
+    }
+}
 
 pub(super) const RULES: &str = concat!(
     include_str!("planning.egg"),
@@ -67,10 +80,11 @@ pub(super) fn facts(
     summary: &Dependencies,
     count_type: TypeId,
     topology: PipelineTopologyPolicy,
+    imported: &mut Import,
     sink: &mut FullState<'_, '_>,
 ) -> Result<(), Error> {
     super::execution::facts(data, summary, sink)?;
-    let count_type = sink.add("TypeId", i64::from(count_type.as_u32()))?;
+    let count_type = imported.ty(count_type, sink)?;
     sink.add("CounterType", count_type)?;
     let mut values = BTreeSet::new();
     for (&id, output) in &data.state.outputs {
@@ -78,10 +92,7 @@ pub(super) fn facts(
         let e = sink.add("ExprId", i64::from(output.expression.as_u32()))?;
         sink.add("OutputExpression", (i64::from(id.as_u32()), e))?;
         if !canonical_storage_buffer_ty(&data.types[data.expressions[output.expression].ty].ty).is_array() {
-            let ty = sink.add(
-                "TypeId",
-                i64::from(data.expressions[output.expression].ty.as_u32()),
-            )?;
+            let ty = imported.ty(data.expressions[output.expression].ty, sink)?;
             sink.add("ReturnScalar", (i64::from(id.as_u32()), ty))?;
         } else {
             sink.add("ReturnArray", (i64::from(id.as_u32()), e))?;
@@ -132,8 +143,9 @@ pub(super) fn facts(
                 | OperationKind::BucketScatter { .. }
                 | OperationKind::ReduceByIndex { .. }
         );
-        sink.set("ContainsCollective", key, collective)?;
-        sink.set("ScalarBoundary", key, false)?;
+        if collective {
+            sink.set("ContainsCollective", key, true)?;
+        }
         let region = sink.add("RegionId", i64::from(op.region.as_u32()))?;
         sink.add("Site", (key, region))?;
         if let Some(array) = length_source(data, &op.kind) {
@@ -249,12 +261,12 @@ pub(super) fn facts(
                 let total_count = totals.clone().count();
                 sink.add("TotalCount", (key, total_count as i64))?;
                 for (i, e) in scans.enumerate() {
-                    let t = sink.add("TypeId", i64::from(data.expressions[*e].ty.as_u32()))?;
+                    let t = imported.ty(data.expressions[*e].ty, sink)?;
                     sink.add("Accumulator", (key, i as i64, t))?;
                     sink.add("ScanComponent", (key, i as i64, t))?;
                 }
                 for (i, e) in totals.enumerate() {
-                    let t = sink.add("TypeId", i64::from(data.expressions[*e].ty.as_u32()))?;
+                    let t = imported.ty(data.expressions[*e].ty, sink)?;
                     sink.add("Accumulator", (key, (scan_count + i) as i64, t))?;
                     sink.add("TotalResult", (key, i as i64, t))?;
                 }
@@ -268,13 +280,13 @@ pub(super) fn facts(
                             }
                         }
                     }
-                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    let t = imported.ty(t, sink)?;
                     sink.add("ArrayResult", (key, (total_count + i) as i64, t))?;
                 }
                 for (i, t) in
                     body_signature(&form.pre).1.into_iter().skip(scan_count + total_count).enumerate()
                 {
-                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    let t = imported.ty(t, sink)?;
                     sink.add("MappedComponent", (key, i as i64, t))?;
                 }
                 Some(inputs)
@@ -282,7 +294,7 @@ pub(super) fn facts(
             OperationKind::Filter { post, inputs, .. } => {
                 sink.add("FilterShape", key)?;
                 if let Some(t) = body_signature(post).1.first() {
-                    let t = sink.add("TypeId", i64::from(t.as_u32()))?;
+                    let t = imported.ty(*t, sink)?;
                     sink.add("FilterResult", (key, t))?;
                 }
                 Some(inputs)
@@ -331,7 +343,7 @@ pub(super) fn facts(
                 }
                 let destination_expr = sink.add("ExprId", i64::from(destination.value.as_u32()))?;
                 if matches!(op.kind, OperationKind::Scatter { initialize: true, .. }) {
-                    let ty = sink.add("TypeId", i64::from(destination.elem_ty.as_u32()))?;
+                    let ty = imported.ty(destination.elem_ty, sink)?;
                     let n = sink.add("Length", destination_expr)?;
                     sink.add("InitializedResult", (key, 0i64, ty, n))?;
                 } else {
@@ -349,8 +361,10 @@ pub(super) fn facts(
                 if data.types[op.ty].ty == bool_type()
                     || type_byte_size(&data.types[op.ty].ty).is_some_and(|n| n > 0)
                 {
-                    let t = sink.add("TypeId", i64::from(op.ty.as_u32()))?;
-                    sink.add("ScalarCandidate", (key, t))?;
+                    sink.add("ScalarCandidate", key)?;
+                    let t = imported.ty(op.ty, sink)?;
+                    let value = sink.add("Result", (key, 0i64))?;
+                    sink.add("ElementType", (value, t))?;
                 }
                 None
             }
@@ -456,8 +470,9 @@ pub(super) fn facts(
         let mut generic_children = false;
         match &value.kind {
             ExprKind::Parameter(_) => {
-                sink.add("SourceParameter", key)?;
-                sink.set("HasInputFields", key, false)?;
+                if !imported.input_tuples.contains(&e) {
+                    sink.add("ParameterValue", key)?;
+                }
             }
             ExprKind::OperationResult(op) => {
                 let operation = sink.add("OperationId", i64::from(op.as_u32()))?;
@@ -590,7 +605,11 @@ fn inner_dimension(array: &Array, axis: usize, data: &Program<Scheduled>) -> Opt
 
 /// Expose source result slots once; tuple projection is structural import, not
 /// an allocation decision. Use the same global identities for existing values.
-pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_>) -> Result<(), Error> {
+pub(super) fn outputs(
+    data: &mut Program<Scheduled>,
+    sink: &mut FullState<'_, '_>,
+) -> Result<Import, Error> {
+    let mut imported = Import::default();
     let mut types: HashMap<_, _> = data.types.iter().map(|(&id, t)| (t.ty.clone(), id)).collect();
     let mut expressions: HashMap<_, _> = data.expressions.iter().map(|(&id, e)| (e.clone(), id)).collect();
     let entries: Vec<_> =
@@ -652,7 +671,7 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
                         let element = *types
                             .entry(element.clone())
                             .or_insert_with(|| data.ir.types.alloc(TypeData { ty: element.clone() }));
-                        let element = sink.add("TypeId", i64::from(element.as_u32()))?;
+                        let element = imported.ty(element, sink)?;
                         let expression = sink.add("ExprId", i64::from(expression.as_u32()))?;
                         let length = sink.add("Length", expression)?;
                         sink.add(
@@ -682,7 +701,7 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
         .collect();
     for (tuple, ts) in parameters {
         let tuple_key = sink.add("ExprId", i64::from(tuple.as_u32()))?;
-        sink.set("HasInputFields", tuple_key, true)?;
+        imported.input_tuples.insert(tuple);
         for (index, field_type) in ts.into_iter().enumerate() {
             let field_ty = *types
                 .entry(field_type.clone())
@@ -700,7 +719,7 @@ pub(super) fn outputs(data: &mut Program<Scheduled>, sink: &mut FullState<'_, '_
             sink.add("Projection", (field, tuple_key, index as i64))?;
         }
     }
-    Ok(())
+    Ok(imported)
 }
 
 #[cfg(test)]

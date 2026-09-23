@@ -60,14 +60,22 @@ pub fn schedule(
     graph.parse_and_run_program(None, KEYS)?;
     graph.parse_and_run_program(Some("planning-rules.egg".into()), RULES)?;
     graph.update(|mut sink| {
-        outputs(&mut converted, &mut sink)?;
-        facts(&converted, &summary, count_type, topology, &mut sink)?;
+        let mut imported = outputs(&mut converted, &mut sink)?;
+        facts(
+            &converted,
+            &summary,
+            count_type,
+            topology,
+            &mut imported,
+            &mut sink,
+        )?;
         super::execution::order_facts(&schedules, &mut sink)?;
         abi::facts(
             &converted.state.abi.inputs,
             &converted.state.outputs,
             &converted.entries,
             &converted.types,
+            &imported.types,
             &mut sink,
             &mut host_inputs,
         )

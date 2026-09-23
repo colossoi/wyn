@@ -15,7 +15,6 @@ use crate::interface::{
 use crate::ssa::layout::{block_layout, storage_elem_stride, type_byte_size};
 use crate::types::{Type, TypeExt, TypeName};
 use crate::{BindingRef, ResourceAccess};
-use egglog_engine::sort::S;
 use egglog_engine::{EGraph, Error, FullState, Read, Value as EggValue, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use wyn_base::IdArena;
@@ -25,6 +24,7 @@ pub(in crate::egglog) fn facts(
     outputs: &IdArena<OutputId, OutputData>,
     entries: &IdArena<EntryId, EntryData>,
     types: &IdArena<TypeId, TypeData>,
+    used_types: &BTreeSet<TypeId>,
     sink: &mut FullState<'_, '_>,
     host_inputs: &mut Vec<HostSizeInput>,
 ) -> Result<(), Error> {
@@ -84,25 +84,16 @@ pub(in crate::egglog) fn facts(
         if let Some(Attribute::Storage { set, binding, .. }) =
             entries[output.entry].declaration.outputs.get(output.index).and_then(|o| o.attribute.as_ref())
         {
-            let name = format!(
-                "{}_output_{}",
-                entries[output.entry].declaration.name, output.index
-            );
             sink.add(
                 "AbiOutputBinding",
-                (
-                    i64::from(id.as_u32()),
-                    i64::from(*set),
-                    i64::from(*binding),
-                    name.as_str(),
-                ),
+                (i64::from(id.as_u32()), i64::from(*set), i64::from(*binding)),
             )?;
         }
     }
-    for (&id, ty) in types {
-        // Most source types are not buffer elements. Validate actual storage
-        // types at readout; only import layouts that have a physical form.
-        let Ok(ty) = storage_type(&ty.ty) else {
+    for &id in used_types {
+        // Only result and scratch element types need layouts in the plan.
+        // Validate actual storage types at readout.
+        let Ok(ty) = storage_type(&types[id].ty) else {
             continue;
         };
         if let Some(stride) = storage_elem_stride(&ty) {
@@ -192,7 +183,11 @@ pub(in crate::egglog) fn read(
     rows(graph, "AbiPinnedBinding", |a| {
         let id = buffers[&a[0]];
         let binding = BindingRef::new(number(graph, a[1])?, number(graph, a[2])?);
-        let name = graph.value_to_base::<S>(a[3]).to_string();
+        let output = &data.state.outputs[OutputId::from(number(graph, a[3])?)];
+        let name = format!(
+            "{}_output_{}",
+            data.entries[output.entry].declaration.name, output.index
+        );
         if pinned.insert(id, (binding, name)).is_some_and(|(old, _)| old != binding) {
             return Err(error(
                 "shared output requires copies to distinct declared bindings",

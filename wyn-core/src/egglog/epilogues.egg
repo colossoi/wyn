@@ -14,7 +14,7 @@
 (rule ((CopyOutput output)) ((set (OutputAttached output) false)) :ruleset output-candidates)
 (rule ((CopyOutput output) (OutputExpression output e) (References e (Contents value))
        (Produces stage value) (PhaseDomain stage (Fixed 1) 1)
-       (= stage (Stage (OperationId op) name)) (= (CpuBlocked (EvalOperation op)) true)
+       (= stage (Stage op name)) (ExecutionSummary op true cheap)
        (Phase stage r) (OutputOwner output entry) (SourceEntry entry r true))
       ((OutputCandidate output stage) (set (OutputBlocked output stage) false)) :ruleset output-candidates)
 (rule ((OutputCandidate output stage) (OutputExpression output e) (References e (Contents value)))
