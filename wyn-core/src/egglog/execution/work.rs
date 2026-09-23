@@ -17,9 +17,13 @@ enum Node {
     Length(ExprId),
 }
 
-pub(super) fn estimate(data: &Ir, live: &BTreeSet<OperationId>) -> BTreeMap<OperationId, u8> {
+pub(super) fn estimate(
+    data: &Ir,
+    live: &BTreeSet<OperationId>,
+    candidates: impl IntoIterator<Item = OperationId>,
+) -> BTreeMap<OperationId, u8> {
     let mut costs = Costs::new(data, live);
-    live.iter().map(|&op| (op, costs.count([Node::Operation(op)], WORK_BUDGET))).collect()
+    candidates.into_iter().map(|op| (op, costs.count([Node::Operation(op)], WORK_BUDGET))).collect()
 }
 
 struct Costs<'a> {

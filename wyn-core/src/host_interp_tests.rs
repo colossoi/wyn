@@ -22,6 +22,33 @@ fn interprets_emitted_size_calculation_before_allocating_and_dispatching() {
 }
 
 #[test]
+fn sliced_range_count_arithmetic_reaches_host_allocations() {
+    let program = generated("entry main(n:i32, xs:[]i32) []i32 = iota(length(xs[(n+1)..(n*2+3)])*2+1)");
+    let entry = program.entry("main").unwrap();
+    assert_eq!(entry.parameters.len(), 2);
+    for n in [0i32, 7, 33] {
+        let mut backend = Trace::default();
+        let arguments: Vec<_> = entry
+            .parameters
+            .iter()
+            .map(|parameter| {
+                backend.input(if parameter.source_name() == "xs" {
+                    vec![0; 512]
+                } else {
+                    n.to_le_bytes().to_vec()
+                })
+            })
+            .collect();
+        let result = program.run("main", &arguments, &mut backend).unwrap();
+        assert_eq!(
+            backend.buffers[&result.handle().unwrap()].len(),
+            (2 * n as usize + 5) * 4
+        );
+        assert!(!backend.dispatches.is_empty());
+    }
+}
+
+#[test]
 fn uses_input_buffer_capacity_and_preserves_returned_aliases() {
     let program = generated("entry main(xs:[]i32) []i32 = map(|x:i32|x+1,xs)");
     let mut backend = Trace::default();

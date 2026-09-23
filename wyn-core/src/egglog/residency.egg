@@ -7,21 +7,21 @@
 (rule ((Site op r) (= true (ContainsCollective op))) ((SplitRegion r)) :ruleset structure)
 (rule ((ScalarCandidate op) (= false (ContainsCollective op)))
       ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((ScalarCandidate op) (= false (ContainsCollective op)) (= (Rematerialize op) false))
+(rule ((HostRegion r) (Site op r) (ScalarCandidate op) (= false (ContainsCollective op)) (= (Rematerialize op) false))
       ((ScalarValue op)) :ruleset residency)
 ; Keep runtime control and its collectives in one device invocation. Nested
 ; SOACs use local serial recipes instead of conditional/repeated host launches.
 (rule ((ScalarCandidate op) (SourceControl op))
       ((set (ScalarBoundary op) true)) :ruleset classify)
-(rule ((ScalarCandidate op) (SourceControl op) (= (Rematerialize op) false))
+(rule ((HostRegion r) (Site op r) (ScalarCandidate op) (SourceControl op) (= (Rematerialize op) false))
       ((ScalarValue op)) :ruleset residency)
-(rule ((HostRoot entry r)) ((HostRegion r)) :ruleset residency)
+(rule ((HostRoot entry r)) ((HostRegion r)) :ruleset host-regions)
 (rule ((HostRoot entry r)) ((OwnedRegion entry r)) :ruleset residency)
 (rule ((OwnedRegion entry r) (Site op r) (Enters op child))
       ((OwnedRegion entry child)) :ruleset residency)
 (rule ((Phase stage r) (OwnedRegion entry r)) ((PhaseOwner stage entry)) :ruleset residency)
 (rule ((HostRegion r) (Site op r) (Enters op child) (= false (ScalarBoundary op)))
-      ((HostRegion child)) :ruleset residency)
+      ((HostRegion child)) :ruleset host-regions)
 
 ; Resolve component references without merging value or execution identities.
 (rule ((ArrayResult op i t)) ((ResultSlot op i)) :ruleset residency)
@@ -44,17 +44,25 @@
       ((ValueRef e value)) :ruleset residency)
 (rule ((SliceView e source start end) (ValueRef source value)) ((ValueRef e value)) :ruleset residency)
 
-; Summarize the shared expression DAG once, stopping at execution results. A
-; shared scalar chain must not be traversed again for every consuming stage.
-(rule ((ValueRef e value)) ((References e (Contents value))) :ruleset residency)
-(rule ((ChildValue e child) (References child value)) ((References e value)) :ruleset residency)
-(rule ((ForwardValue e child) (References child value)) ((References e value)) :ruleset residency)
-(rule ((Projection e tuple i) (ComputedValue tuple) (References tuple value))
+; Request shared reference summaries only for scheduling, reuse, and output
+; consumers. Propagate demand through scalar structure, stopping at results.
+(rule ((Demand site e)) ((ReferenceDemand e)) :ruleset residency)
+(rule ((OutputExpression output e)) ((ReferenceDemand e)) :ruleset residency)
+(rule ((Phase (Stage op name) r) (Operand op role e)) ((ReferenceDemand e)) :ruleset residency)
+(rule ((ReferenceDemand e) (ChildValue e child)) ((ReferenceDemand child)) :ruleset residency)
+(rule ((ReferenceDemand e) (ForwardValue e child)) ((ReferenceDemand child)) :ruleset residency)
+(rule ((ReferenceDemand e) (Projection e tuple i) (ComputedValue tuple)) ((ReferenceDemand tuple)) :ruleset residency)
+(rule ((ReferenceDemand e) (SliceView e source start end))
+      ((ReferenceDemand source) (ReferenceDemand start) (ReferenceDemand end)) :ruleset residency)
+(rule ((ReferenceDemand e) (ValueRef e value)) ((References e (Contents value))) :ruleset residency)
+(rule ((ReferenceDemand e) (ChildValue e child) (References child value)) ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (ForwardValue e child) (References child value)) ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (Projection e tuple i) (ComputedValue tuple) (References tuple value))
       ((References e value)) :ruleset residency)
-(rule ((ResultTuple e op) (ResultSlot op i)) ((References e (Contents (Result op i)))) :ruleset residency)
-(rule ((SliceView e source start end) (References source value)) ((References e value)) :ruleset residency)
-(rule ((SliceView e source start end) (References start value)) ((References e value)) :ruleset residency)
-(rule ((SliceView e source start end) (References end value)) ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (ResultTuple e op) (ResultSlot op i)) ((References e (Contents (Result op i)))) :ruleset residency)
+(rule ((ReferenceDemand e) (SliceView e source start end) (References source value)) ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (SliceView e source start end) (References start value)) ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (SliceView e source start end) (References end value)) ((References e value)) :ruleset residency)
 
 ; Only actual uses join those summaries; there is no stage x expression search.
 (rule ((PhaseInput stage op role) (Operand op role e)) ((Demand (InStage stage) e)) :ruleset residency)

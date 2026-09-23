@@ -47,10 +47,6 @@ pub(in crate::egglog) fn read(
             data.state.execution.rematerialized.insert(OperationId::from(operations[&entry.inputs[0]]));
         }
     })?;
-    rows(graph, "HostValue", |a| {
-        data.state.execution.host_values.insert(ExprId::from(number(graph, a[0])?));
-        Ok(())
-    })?;
     rows(graph, "HostOperation", |a| {
         data.state.execution.host_operations.insert(OperationId::from(number(graph, a[0])?));
         Ok(())

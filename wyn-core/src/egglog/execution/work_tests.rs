@@ -39,6 +39,34 @@ fn folded_constants_contribute_no_arithmetic_work() {
 }
 
 #[test]
+fn requesting_only_selected_costs_preserves_shared_callee_estimates() {
+    let tlc = crate::tlc::infer_input_slice_bounds(
+        crate::compile_thru_tlc(
+            "def setup(x:i32) i32=(x*x+1)*(x+2)
+         entry main(xs:[]i32) []i32=map(|x:i32|setup(x)+setup(x+1)+xs[0],xs)",
+        )
+        .unwrap(),
+    );
+    let data = crate::egglog::place(
+        simplify(
+            insert_expressions(fuse(from_tlc(&tlc).unwrap()).unwrap()).unwrap(),
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .ir;
+    let summary = analyze(&data);
+    assert!(summary.live.len() > 1);
+    let all = estimate(&data, &summary.live, summary.live.iter().copied());
+    for &op in &summary.live {
+        let selected = estimate(&data, &summary.live, [op]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[&op], all[&op]);
+    }
+}
+
+#[test]
 fn separate_helper_invocations_do_not_share_argument_bindings() {
     let mut body = "x".to_owned();
     for _ in 0..7 {
@@ -142,7 +170,7 @@ fn stored_loop_result_and_array_length_do_not_repeat_producer_work() {
         .find_map(|(&op, data)| length_source(&program.ir, &data.kind).map(|_| op))
         .unwrap();
     let summary = analyze(&program.ir);
-    assert_eq!(estimate(&program.ir, &summary.live)[&length], 1);
+    assert_eq!(estimate(&program.ir, &summary.live, [length])[&length], 1);
     let mut costs = Costs::new(&program.ir, &summary.live);
     let result = program
         .ir

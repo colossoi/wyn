@@ -21,6 +21,7 @@ use egglog_engine::{Error, FullState, RawValues, Value, Write};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub(super) mod abi;
+mod expressions;
 mod host_sizes;
 mod read;
 pub(super) use read::scalar_captures;
@@ -61,6 +62,7 @@ pub(super) const KEYS: &str = "(datatype ExprKey (ExprId i64))\n(datatype TypeKe
 pub(super) const RUN: &str = r#"(run-schedule (seq
     (saturate (run structure))
     (saturate (run classify))
+    (saturate (run host-regions))
     (saturate (run scalar-windows)) (run scalar-blockers) (saturate (run scalar-groups))
     (saturate (seq (run residency) (run schedule) (run allocation) (run dispatch)))
     (saturate (run reuse)) (run reuse-blockers)
@@ -76,7 +78,7 @@ pub(super) const RUN: &str = r#"(run-schedule (seq
     (run readout)))"#;
 
 pub(super) fn facts(
-    data: &Program<Scheduled>,
+    data: &mut Program<Scheduled>,
     summary: &Dependencies,
     count_type: TypeId,
     topology: PipelineTopologyPolicy,
@@ -398,7 +400,9 @@ pub(super) fn facts(
         sink.add("EffectWait", (op, gate as i64))?;
     }
 
-    // Visit each expression once, importing only structural edges and views.
+    // Scalar arithmetic contributes its dependency frontier. Field identities,
+    // views, and size proofs retain the structure needed by planning rules.
+    let mut expressions = expressions::Expressions::new(&data.ir);
     let mut pending: Vec<_> = values.iter().copied().collect();
     while let Some(e) = pending.pop() {
         let value = &data.expressions[e];
@@ -432,13 +436,13 @@ pub(super) fn facts(
                 let p = sink.add("AbiParameter", i64::from(p.as_u32()))?;
                 sink.add("AbiAlias", (abi_value, p))?;
             }
-            ExprKind::Int(n) => {
+            ExprKind::Int(n) if expressions.needs_size(e) => {
                 if let Some(n) = n.parse::<i64>().ok().filter(|&n| n >= 0) {
                     let n = sink.add("AbiNumber", n)?;
                     sink.add("AbiAlias", (abi_value, n))?;
                 }
             }
-            ExprKind::PureApp { function, args } if args.len() == 2 => {
+            ExprKind::PureApp { function, args } if args.len() == 2 && expressions.needs_size(e) => {
                 if let ExprKind::BinOp(op) = &data.expressions[*function].kind {
                     let operation = match op.as_str() {
                         "+" => Some("add"),
@@ -468,7 +472,9 @@ pub(super) fn facts(
             _ => {}
         }
         let mut generic_children = false;
+        let compact_vector = expressions.compact_vector(e);
         match &value.kind {
+            _ if compact_vector => generic_children = true,
             ExprKind::Parameter(_) => {
                 if !imported.input_tuples.contains(&e) {
                     sink.add("ParameterValue", key)?;
@@ -508,10 +514,13 @@ pub(super) fn facts(
             }
             _ => generic_children = true,
         }
-        if generic_children && !matches!(value.kind, ExprKind::Tuple(_) | ExprKind::Vector(_)) {
+        if generic_children
+            && (compact_vector || !matches!(value.kind, ExprKind::Tuple(_) | ExprKind::Vector(_)))
+        {
             sink.add("ComputedValue", key)?;
         }
-        for child in value.kind.children() {
+        let children = if generic_children { expressions.children(e) } else { value.kind.children() };
+        for child in children {
             if generic_children {
                 let child = sink.add("ExprId", i64::from(child.as_u32()))?;
                 sink.add("ChildValue", (key, child))?;

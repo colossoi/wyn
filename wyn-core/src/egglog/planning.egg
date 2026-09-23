@@ -19,6 +19,7 @@
 (relation HostRoot (i64 RegionKey))
 (relation Enters (OperationKey RegionKey))
 (relation ExitValue (RegionKey ExprKey))
+(relation OutputExpression (i64 ExprKey))
 (relation Operand (OperationKey String ExprKey))
 (relation EffectInput (i64 OperationKey))
 (relation EffectWait (OperationKey i64))
@@ -56,6 +57,7 @@
 (relation SliceView (ExprKey ExprKey ExprKey ExprKey))
 
 (relation HostRegion (RegionKey))
+(ruleset host-regions)
 (relation Phase (StageKey RegionKey))
 (relation FirstPhase (OperationKey StageKey))
 (relation LastPhase (OperationKey StageKey))
@@ -79,6 +81,7 @@
 ; requires the input binding without observing its mutable element contents.
 (datatype ValueReference (Contents ValueKey) (Descriptor ExprKey))
 (relation References (ExprKey ValueReference))
+(relation ReferenceDemand (ExprKey))
 (relation ResultSlot (OperationKey i64))
 (datatype UseKey (InStage StageKey) (InOperation OperationKey) (AtExit))
 (relation Demand (UseKey ExprKey))

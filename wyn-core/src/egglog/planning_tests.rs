@@ -47,7 +47,8 @@ const MAP: &str = r#"
 fn scalar_duplication_requires_both_legality_and_affordable_work() {
     for (legal, cheap) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut g = graph(&format!(
-            "(Site (OperationId 0) (RegionId 0))
+            "(HostRoot 0 (RegionId 0))
+             (Site (OperationId 0) (RegionId 0))
              (ScalarCandidate (OperationId 0))
              (ExecutionSummary (OperationId 0) true {legal} {cheap})"
         ));
@@ -571,7 +572,7 @@ fn imported_source_plans_before_block_generation() {
         g.update(|mut sink| {
             let mut imported = outputs(&mut converted, &mut sink)?;
             facts(
-                &converted,
+                &mut converted,
                 &summary,
                 count_type,
                 crate::PipelineTopologyPolicy::AllowGenerated,
@@ -934,6 +935,33 @@ fn shared_scalar_dag_is_summarized_once_across_many_stages() {
 }
 
 #[test]
+fn unused_scalar_expressions_do_not_get_reference_summaries() {
+    let mut g = graph(
+        "(ParameterValue (ExprId 0))
+         (ChildValue (ExprId 1) (ExprId 0))
+         (ChildValue (ExprId 2) (ExprId 0))
+         (Demand (AtExit) (ExprId 1))",
+    );
+    check(&mut g, "(References (ExprId 1) (Contents (Source (ExprId 0))))");
+    assert_eq!(count(&g, "References"), 2);
+}
+
+#[test]
+fn device_local_scalars_do_not_get_dispatch_groups_or_buffer_slots() {
+    let g = graph(
+        "(SourceEntry 0 (RegionId 0) false)
+         (DeviceRegion (RegionId 0))
+         (Site (OperationId 0) (RegionId 0))
+         (SourcePosition (OperationId 0) (RegionId 0) 0)
+         (ScalarCandidate (OperationId 0))
+         (ExecutionSummary (OperationId 0) true false false)",
+    );
+    for relation in ["ScalarGroupCandidate", "ScalarValue", "ScalarGroup", "BufferSlot"] {
+        assert_eq!(count(&g, relation), 0, "{relation}");
+    }
+}
+
+#[test]
 fn selecting_a_tuple_field_does_not_materialize_its_siblings() {
     let mut g = graph(&format!(
         r#"{MAP}
@@ -978,7 +1006,7 @@ fn tuple_input_import_exposes_fields_without_a_parent_buffer() {
         let mut imported = outputs(&mut converted, &mut sink)?;
         parents.extend(imported.input_tuples.iter().copied());
         facts(
-            &converted,
+            &mut converted,
             &summary,
             count_type,
             crate::PipelineTopologyPolicy::AllowGenerated,
@@ -1029,6 +1057,71 @@ fn whole_tuple_captures_publish_all_materialized_fields() {
         (AbiRootStorage (EntryRoot 101) (InputBinding 0 5)) (AbiRootStorage (EntryRoot 101) (InputBinding 0 6))
     "#,
     );
+}
+
+#[test]
+fn consuming_a_stored_result_does_not_bind_its_producers_inputs() {
+    for result in [
+        "(DirectResult (ExprId 1) (OperationId 0) 0)",
+        "(ResultTuple (ExprId 1) (OperationId 0)) (ResultSlot (OperationId 0) 0)",
+    ] {
+        let mut g = graph(&format!(
+            "{result}
+             (Operand (OperationId 0) \"input\" (ExprId 0))
+             (AbiStorage (AbiExpr 0) (InputBinding 0 0) 4)
+             (AbiStorage (AbiResource (Result (OperationId 0) 0)) (InputBinding 0 1) 4)
+             (AbiRootNeed (EntryRoot 0) (AbiExpr 1))"
+        ));
+        check(&mut g, "(AbiRootStorage (EntryRoot 0) (InputBinding 0 1))");
+        assert_eq!(count(&g, "AbiRootStorage"), 1);
+    }
+}
+
+#[test]
+fn invoked_code_still_binds_the_inputs_of_its_local_operations() {
+    let mut g = graph(
+        "(Site (OperationId 0) (RegionId 0))
+         (DirectResult (ExprId 1) (OperationId 0) 0)
+         (Operand (OperationId 0) \"input\" (ExprId 0))
+         (AbiStorage (AbiExpr 0) (InputBinding 0 0) 4)
+         (AbiInvokes (EntryRoot 0) (RegionId 0))
+         (AbiRootNeed (EntryRoot 0) (AbiExpr 1))",
+    );
+    check(&mut g, "(AbiRootStorage (EntryRoot 0) (InputBinding 0 0))");
+}
+
+#[test]
+fn shared_region_interfaces_deduplicate_operands_and_callees_before_root_expansion() {
+    let mut facts = String::from(
+        "(AbiStorage (AbiExpr 0) (InputBinding 0 0) 4)
+         (AbiStorage (AbiExpr 1) (InputBinding 0 1) 4)
+         (ExitValue (RegionId 1) (ExprId 1))",
+    );
+    for op in 0..64 {
+        writeln!(
+            facts,
+            "(Site (OperationId {op}) (RegionId 0))
+            (Operand (OperationId {op}) \"input\" (ExprId 0))
+            (Enters (OperationId {op}) (RegionId 1))"
+        )
+        .unwrap();
+    }
+    for root in 0..32 {
+        writeln!(facts, "(AbiInvokes (EntryRoot {root}) (RegionId 0))").unwrap();
+    }
+    let mut g = graph(&facts);
+    for root in 0..32 {
+        check(
+            &mut g,
+            &format!(
+                "(AbiRootStorage (EntryRoot {root}) (InputBinding 0 0))
+            (AbiRootStorage (EntryRoot {root}) (InputBinding 0 1))"
+            ),
+        );
+    }
+    assert_eq!(count(&g, "AbiRootStorage"), 64);
+    assert_eq!(count(&g, "AbiRegionValue"), 2);
+    assert_eq!(count(&g, "AbiRegionCall"), 1);
 }
 
 #[test]

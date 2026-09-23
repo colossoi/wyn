@@ -5,6 +5,7 @@ use super::data::{
 };
 use super::dependencies::Dependencies;
 use super::scalar::total_node;
+use super::timing::time;
 use super::visit::Operand;
 use super::{Program, Scheduled};
 use crate::builtins::{
@@ -12,8 +13,9 @@ use crate::builtins::{
     lowering::{BuiltinLowering, PrimOp},
 };
 use crate::interface::{EntryInputKind, StorageAccess};
+use crate::{LookupMap, LookupSet};
 use egglog_engine::{Error, FullState, Write};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 
 mod work;
 
@@ -28,7 +30,7 @@ pub(super) struct Execution {
     pub leaders: BTreeMap<OperationId, OperationId>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Node {
     Expr(ExprId),
     Operation(OperationId),
@@ -113,29 +115,37 @@ fn duplicable_node(data: &Program<Scheduled>, expression: ExprId) -> bool {
 }
 
 pub(super) fn facts(
-    data: &Program<Scheduled>,
+    data: &mut Program<Scheduled>,
     summary: &Dependencies,
     sink: &mut FullState<'_, '_>,
 ) -> Result<(), Error> {
-    let evaluations = evaluations(data, summary);
-    let summaries = summarize(&evaluations);
-    let scalar_work = work::estimate(data, &summary.live);
-    for (&node, properties) in &summaries {
+    let evaluations = time("egglog scheduling / execution / graph", || {
+        evaluations(data, summary)
+    });
+    let summaries = time("egglog scheduling / execution / summaries", || {
+        summarize(&evaluations)
+    });
+    // Cost cannot authorize duplication or change host availability. Estimate
+    // only operations for which the execution rules can use that decision.
+    let candidates = summary.live.iter().copied().filter(|&op| {
+        let properties = &summaries[&Node::Operation(op)];
+        properties.device && !properties.duplication_blocked
+    });
+    let scalar_work = time("egglog scheduling / execution / work", || {
+        work::estimate(data, &summary.live, candidates)
+    });
+    for &node in evaluations.keys() {
+        let properties = &summaries[&node];
         match node {
             Node::Expr(e) if !properties.device => {
-                sink.add("HostValue", i64::from(e.as_u32()))?;
+                data.state.execution.host_values.insert(e);
             }
             Node::Operation(op) if summary.live.contains(&op) => {
-                let work = scalar_work[&op];
+                let cheap = scalar_work.get(&op).is_some_and(|&work| work < OVER_BUDGET);
                 let op = sink.add("OperationId", i64::from(op.as_u32()))?;
                 sink.add(
                     "ExecutionSummary",
-                    (
-                        op,
-                        properties.device,
-                        !properties.duplication_blocked,
-                        work < OVER_BUDGET,
-                    ),
+                    (op, properties.device, !properties.duplication_blocked, cheap),
                 )?;
             }
             _ => {}
@@ -150,9 +160,9 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
     pending.extend(data.entries.values().map(|e| Node::Region(data.definitions[e.definition].body)));
     let mut evaluations = BTreeMap::new();
     while let Some(node) = pending.pop() {
-        if evaluations.contains_key(&node) {
+        let Entry::Vacant(entry) = evaluations.entry(node) else {
             continue;
-        }
+        };
         let mut children = vec![];
         let mut backings = vec![];
         let mut reads = vec![];
@@ -161,7 +171,8 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
         match node {
             Node::Expr(e) => {
                 let expression = &data.expressions[e];
-                children.extend(expression.kind.children().into_iter().map(Node::Expr));
+                let value_children = expression.kind.children();
+                children.extend(value_children.iter().copied().map(Node::Expr));
                 match &expression.kind {
                     ExprKind::Parameter(p) => {
                         if let Some(inputs) = data.state.abi.inputs.get(p) {
@@ -240,7 +251,7 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                             | ExprKind::Closure { .. }
                     )
                 {
-                    backings.extend(expression.kind.children().into_iter().map(Node::Expr));
+                    backings.extend(value_children.into_iter().map(Node::Expr));
                 }
             }
             Node::Operation(op) => {
@@ -296,33 +307,37 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
             }
         }
         pending.extend(children.iter().chain(&backings).copied());
-        evaluations.insert(
-            node,
-            Evaluation {
-                children,
-                backings,
-                reads,
-                local,
-                count_children,
-            },
-        );
+        entry.insert(Evaluation {
+            children,
+            backings,
+            reads,
+            local,
+            count_children,
+        });
     }
     evaluations
 }
 
-fn summarize(evaluations: &BTreeMap<Node, Evaluation>) -> BTreeMap<Node, Summary> {
-    let mut users = BTreeMap::<Node, Vec<Node>>::new();
+fn summarize(evaluations: &BTreeMap<Node, Evaluation>) -> LookupMap<Node, Summary> {
+    let mut users = LookupMap::<Node, Vec<Node>>::new();
     for (&node, evaluation) in evaluations {
         for &child in evaluation.children.iter().chain(&evaluation.backings).chain(&evaluation.reads) {
             users.entry(child).or_default().push(node);
         }
     }
-    let mut summaries: BTreeMap<_, _> = evaluations.keys().map(|&n| (n, Summary::default())).collect();
-    let mut pending: VecDeque<_> = evaluations.keys().copied().collect();
-    let mut queued: BTreeSet<_> = evaluations.keys().copied().collect();
+    let mut summaries: LookupMap<_, _> = evaluations.iter().map(|(&n, e)| (n, e.local)).collect();
+    // Propagation only adds properties. Local facts seed their readers; nodes
+    // with no path from such a fact already have their final all-false summary.
+    let mut queued = LookupSet::new();
+    let mut pending: VecDeque<_> = evaluations
+        .iter()
+        .filter(|(_, e)| e.local != Summary::default())
+        .flat_map(|(n, _)| users.get(n).into_iter().flatten().copied())
+        .filter(|&n| queued.insert(n))
+        .collect();
     // The finite lattice also handles recursive calls. Revisit only users of
-    // changed availability and safety summaries. Numeric work comes from
-    // placement and cannot grant permission to duplicate an evaluation.
+    // changed availability and safety summaries. Cost cannot grant permission
+    // to duplicate an evaluation.
     while let Some(node) = pending.pop_front() {
         queued.remove(&node);
         let evaluation = &evaluations[&node];

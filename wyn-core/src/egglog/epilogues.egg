@@ -1,7 +1,6 @@
 ; Publish an output where all its computed inputs are already available. Limit
 ; attachment to values available to lane zero in the entry's own scope; other
 ; outputs keep their finish kernel. References is the ordinary dependency summary.
-(relation OutputExpression (i64 ExprKey))
 (relation EpilogueValue (StageKey ValueKey))
 (relation OutputCandidate (i64 StageKey))
 (function OutputAvailable (StageKey ValueKey) bool :merge (or old new))

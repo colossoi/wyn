@@ -72,7 +72,7 @@ pub fn schedule(
         })?;
         time("egglog scheduling / import facts / structure", || {
             facts(
-                &converted,
+                &mut converted,
                 &summary,
                 count_type,
                 topology,

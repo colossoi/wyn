@@ -11,7 +11,6 @@
 (relation ViewExtent (ExprKey Extent))
 (relation QueryLength (ExprKey))
 (relation PlannedViewLength (i64 Extent))
-(relation HostValue (i64))
 (relation HostOperation (i64))
 ; Source order comes from the shared dependency scheduler. Scalar invocations
 ; may join across independent, effect-free work in the same source region.
@@ -37,10 +36,13 @@
       ((set (IsScalarGroupCandidate op) false)
        (set (ScalarJoined op) false)) :ruleset structure)
 (rule ((SourcePosition op r i)) ((set (GroupStart op) i)) :ruleset structure)
-(rule ((ScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
+; Only host operations can join into a generated scalar dispatch. Device-local
+; operations retain their source order inside the enclosing kernel.
+(rule ((HostRegion r) (Site (OperationId op) r)
+       (ScalarCandidate (OperationId op)) (= (ContainsCollective (OperationId op)) false)
        (= (ParallelSafe (OperationId op)) true)
        (ExecutionSummary (OperationId op) true legal cheap) (= (and legal cheap) false))
-      ((ScalarGroupCandidate (OperationId op)) (set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset classify)
+      ((ScalarGroupCandidate (OperationId op)) (set (IsScalarGroupCandidate (OperationId op)) true)) :ruleset scalar-windows)
 (rule ((ScalarGroupCandidate before) (Consecutive before after))
       ((ScalarWindow before after)) :ruleset scalar-windows)
 (rule ((ScalarWindow before middle) (= (IsScalarGroupCandidate middle) false)
@@ -48,7 +50,7 @@
       ((ScalarWindow before after)) :ruleset scalar-windows)
 (rule ((ScalarWindow before after) (ScalarGroupCandidate after))
       ((ScalarJoinCandidate before after) (set (ScalarJoinBlocked before after) false)) :ruleset scalar-windows)
-(rule ((SourceDependency after before)) ((ScalarDependency after before)) :ruleset scalar-windows)
+(rule ((ScalarGroupCandidate after) (SourceDependency after before)) ((ScalarDependency after before)) :ruleset scalar-windows)
 (rule ((ScalarDependency after middle) (= (Rematerialize middle) true) (SourceDependency middle before))
       ((ScalarDependency after before)) :ruleset scalar-windows)
 ; A rematerialized expression moves with its use. Every stored dependency must
@@ -60,7 +62,7 @@
 (rule ((ScalarJoinCandidate before after) (= (ScalarJoinBlocked before after) false)
        (= first (GroupStart before)))
       ((set (GroupStart after) first) (set (ScalarJoined after) true)) :ruleset scalar-groups)
-(rule ((Site op r) (= first (GroupStart op)) (SourcePosition leader r first))
+(rule ((HostRegion r) (Site op r) (= first (GroupStart op)) (SourcePosition leader r first))
       ((ScalarGroup op leader)) :ruleset residency)
 (rule ((Site op r)) ((set (Rematerialize op) false)) :ruleset structure)
 (rule ((Site op r)) ((set (ReadsLength op) false)) :ruleset structure)
@@ -92,7 +94,7 @@
 ; References/ChildValue propagation carries them through enclosing expressions.
 (rule ((ScalarResult e op) (= (Rematerialize op) true) (LengthOperation op array))
       ((LengthReference e array)) :ruleset residency)
-(rule ((LengthReference e array) (ValueRef array (Source source)))
+(rule ((ReferenceDemand e) (LengthReference e array) (ValueRef array (Source source)))
       ((References e (Descriptor source))) :ruleset residency)
 (rule ((LengthReference e array) (SliceView array source start end))
       ((ChildValue e start) (ChildValue e end)) :ruleset residency)
@@ -101,7 +103,7 @@
 (rule ((LengthReference e array) (ValueRef array value) (SameBacking value source))
       ((LengthReference e source)) :ruleset residency)
 (rule ((ReferencedExtent e (Length array))) ((LengthReference e array)) :ruleset residency)
-(rule ((ReferencedExtent e (Stored value))) ((References e (Contents value))) :ruleset residency)
+(rule ((ReferenceDemand e) (ReferencedExtent e (Stored value))) ((References e (Contents value))) :ruleset residency)
 (rule ((ReferencedExtent e (Scalar child))) ((ChildValue e child)) :ruleset residency)
 (rule ((ReferencedExtent e (ChunkCount n width))) ((ReferencedExtent e n)) :ruleset residency)
 (rule ((ReferencedExtent e (Product a b))) ((ReferencedExtent e a) (ReferencedExtent e b)) :ruleset residency)
@@ -123,5 +125,9 @@
 (rule ((ScalarResult (ExprId e) op) (LengthOperation op (ExprId array)))
       ((AbiAlias (AbiExpr e) (AbiLength (AbiExpr array)))) :ruleset residency)
 (rule ((= (Rematerialize op) true) (Enters op r)) ((DeviceRegion r)) :ruleset residency)
-(rule ((AbiRootNeed root (AbiExpr e)) (ScalarResult (ExprId e) op)
-       (= (Rematerialize op) true) (Enters op r)) ((AbiInvokes root r)) :ruleset abi)
+; Identify rematerialized callees before joining the roots that use them.
+(relation RematerializedCall (i64 RegionKey))
+(rule ((ScalarResult (ExprId e) op) (= (Rematerialize op) true) (Enters op r))
+      ((RematerializedCall e r)) :ruleset abi)
+(rule ((AbiRootNeed root (AbiExpr e)) (RematerializedCall e r))
+      ((AbiInvokes root r)) :ruleset abi)
