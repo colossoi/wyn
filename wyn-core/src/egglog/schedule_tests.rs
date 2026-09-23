@@ -124,6 +124,101 @@ fn dynamic_indices_and_small_helpers_rematerialize_in_consumers() {
 }
 
 #[test]
+fn projection_setup_record_is_computed_in_its_consumer() {
+    let result = compile(include_str!("../../../testfiles/scalar_setup.wyn"));
+    assert_eq!(kernel_count(&result), 1);
+    assert_eq!(result.state.abi.roots.len(), 1);
+    let ssa = super::super::to_ssa(&result, crate::CodegenTarget::Wgsl).unwrap();
+    let source = crate::lower_ssa_to_wgsl(ssa).unwrap();
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
+fn rematerialized_division_and_remainder_preserve_helper_guards() {
+    let result = compile(
+        "def setup(d:i32) (i32,i32) = if d==0 then (7,3) else (120/d,120%d)
+         entry main(seed:[1]i32,xs:[]i32) []i32 =
+         let c=setup(seed[0]) in map(|x:i32|x+c.0+c.1,xs)",
+    );
+    assert_eq!(kernel_count(&result), 1);
+    for d in [0, 7, -7] {
+        let bias = if d == 0 { 10 } else { 120 / d + 120 % d };
+        for n in [0, 1, 65] {
+            assert_eq!(
+                run(&result, vec![Value::array([d]), Value::array(0..n)]),
+                [Value::array((0..n).map(|x| x + bias))]
+            );
+        }
+    }
+}
+
+#[test]
+fn larger_recomputation_budget_preserves_mutable_snapshots_and_expensive_work() {
+    let snapshot = compile(
+        "def setup(x:i32) i32 = if x==0 then 7 else 120/x+120%x
+         entry main(xs:*[3]i32) [3]i32 = let old=setup(xs[0]) in
+         let updated=scatter(xs,[0],[100]) in map(|x:i32|x+old,updated)",
+    );
+    assert_eq!(kernel_count(&snapshot), 3);
+    assert_eq!(
+        run(&snapshot, vec![Value::array([7, 2, 9])]),
+        [Value::array([118, 20, 27])]
+    );
+    let mut terms: Vec<_> = (0..24).map(|i| format!("((x+{})*(x+{}))", i * 2 + 1, i * 2 + 2)).collect();
+    while terms.len() > 1 {
+        terms = terms
+            .chunks(2)
+            .map(|xs| if xs.len() == 2 { format!("({}+{})", xs[0], xs[1]) } else { xs[0].clone() })
+            .collect();
+    }
+    let body = &terms[0];
+    let expensive = compile(&format!(
+        "def expensive(x:i32) i32 = {body}
+         entry main(seed:[1]i32,xs:[]i32) []i32 =
+         let c=expensive(seed[0]) in map(|x:i32|x+c,xs)"
+    ));
+    assert_eq!(kernel_count(&expensive), 2);
+}
+
+#[test]
+fn shared_scalar_dag_rematerializes_without_exponential_use_counting() {
+    let mut body = "x".to_owned();
+    for _ in 0..7 {
+        body = format!("let y={body} in y*y%7+1");
+    }
+    let result = compile(&format!(
+        "def setup(x:i32) i32={body}
+         entry main(seed:[1]i32,xs:[]i32) []i32 =
+         let c=setup(seed[0]) in map(|x:i32|x+c,xs)"
+    ));
+    assert_eq!(kernel_count(&result), 1);
+    for seed in [-2, 0, 3] {
+        let expected = (0..7).fold(seed, |x, _| x * x % 7 + 1);
+        for n in [0, 1, 65] {
+            assert_eq!(
+                run(&result, vec![Value::array([seed]), Value::array(0..n)]),
+                [Value::array((0..n).map(|x| x + expected))]
+            );
+        }
+    }
+    let ssa = super::super::to_ssa(&result, crate::CodegenTarget::Wgsl).unwrap();
+    let source = crate::lower_ssa_to_wgsl(ssa).unwrap();
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+}
+
+#[test]
 fn consecutive_gpu_scalar_loops_share_one_kernel_and_keep_intermediates_local() {
     let result = compile(
         "entry main(xs:[]i32,n:i32) []i32 =

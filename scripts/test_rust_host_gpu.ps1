@@ -6,10 +6,11 @@ $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $outDir = Join-Path $workspace 'tmp/rust-host-gpu'
 $null = New-Item -ItemType Directory -Force -Path $outDir
 $wyn = if ($Compiler) { (Resolve-Path -LiteralPath $Compiler).Path } else { Join-Path $workspace 'target/debug/wyn.exe' }
-foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'epilogues', 'capture')) {
+foreach ($fixture in @('batching', 'filter', 'filter_post', 'filter_command', 'epilogues', 'capture', 'setup')) {
     $name = switch ($fixture) {
         'epilogues' { 'scalar_epilogues' }
         'capture' { 'tinyporto_capture_handoff' }
+        'setup' { 'scalar_setup' }
         default { "rust_host_$fixture" }
     }
     $source = Join-Path $workspace "testfiles/$name.wyn"

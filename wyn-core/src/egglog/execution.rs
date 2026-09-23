@@ -7,9 +7,15 @@ use super::dependencies::Dependencies;
 use super::scalar::total_node;
 use super::visit::Operand;
 use super::{Program, Scheduled};
+use crate::builtins::{
+    by_id,
+    lowering::{BuiltinLowering, PrimOp},
+};
 use crate::interface::{EntryInputKind, StorageAccess};
 use egglog_engine::{Error, FullState, Write};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+mod work;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Execution {
@@ -48,11 +54,16 @@ pub(super) fn order_facts(
     Ok(())
 }
 
-const OVER_BUDGET: u8 = 9;
+// Bound straight-line recomputation while allowing small uniform setup records
+// to travel into their consumers instead of requiring a dispatch and buffer.
+// A bounded DAG walk estimates shared work, including helper calls and arguments.
+// This is a heuristic code-growth cap, not a hardware latency break-even point:
+// it does not estimate consumer extent, call-site folding or hardware caches.
+const WORK_BUDGET: u8 = 64;
+const OVER_BUDGET: u8 = WORK_BUDGET + 1;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Summary {
-    work: u8,
     device: bool,
     mutable: bool,
     duplication_blocked: bool,
@@ -66,6 +77,41 @@ struct Evaluation {
     count_children: bool,
 }
 
+fn duplicable_node(data: &Program<Scheduled>, expression: ExprId) -> bool {
+    if total_node(data, expression) {
+        return true;
+    }
+    let ExprKind::PureApp { function, .. } = &data.expressions[expression].kind else {
+        return false;
+    };
+    // Rematerialization sinks an evaluation into its consumers and preserves
+    // the helper's branches. Division/remainder may be repeated with the same
+    // operands and guards, even though they must not be speculated onto new
+    // paths. Keep total_node (used for hoisting) deliberately more restrictive.
+    // Context-dependent builtins, unknown calls and mutable reads still need
+    // their existing independent proofs; this exception is arithmetic only.
+    match &data.expressions[*function].kind {
+        ExprKind::BinOp(op) => matches!(op.as_str(), "/" | "%"),
+        ExprKind::Builtin(id) => {
+            let builtin = &data.builtins[*id];
+            matches!(
+                by_id(builtin.builtin).overloads()[builtin.overload_idx].lowering,
+                BuiltinLowering::PrimOp(
+                    PrimOp::FDiv
+                        | PrimOp::FRem
+                        | PrimOp::FMod
+                        | PrimOp::SDiv
+                        | PrimOp::UDiv
+                        | PrimOp::SRem
+                        | PrimOp::SMod
+                        | PrimOp::UMod
+                )
+            )
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn facts(
     data: &Program<Scheduled>,
     summary: &Dependencies,
@@ -73,12 +119,14 @@ pub(super) fn facts(
 ) -> Result<(), Error> {
     let evaluations = evaluations(data, summary);
     let summaries = summarize(&evaluations);
+    let scalar_work = work::estimate(data, &summary.live);
     for (&node, properties) in &summaries {
         match node {
             Node::Expr(e) if !properties.device => {
                 sink.add("HostValue", i64::from(e.as_u32()))?;
             }
             Node::Operation(op) if summary.live.contains(&op) => {
+                let work = scalar_work[&op];
                 let op = sink.add("OperationId", i64::from(op.as_u32()))?;
                 sink.add(
                     "ExecutionSummary",
@@ -86,7 +134,7 @@ pub(super) fn facts(
                         op,
                         properties.device,
                         !properties.duplication_blocked,
-                        properties.work < OVER_BUDGET,
+                        work < OVER_BUDGET,
                     ),
                 )?;
             }
@@ -143,36 +191,13 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                                 }
                             });
                             let mut regions = kind.structured_regions();
-                            let called = match kind {
-                                OperationKind::Call { function, .. } => {
-                                    match data.expressions[*function].kind {
-                                        ExprKind::Lambda(r) => Some(r),
-                                        ExprKind::Global(s) | ExprKind::Closure { code: s, .. } => {
-                                            definitions.get(&s).copied()
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                                OperationKind::EvalGlobal(s) => definitions.get(s).copied(),
-                                _ => None,
-                            };
-                            regions.extend(called);
+                            regions.extend(kind.called_region(data, &definitions));
                             for region in regions {
                                 backings
                                     .extend(data.regions[region].results.iter().copied().map(Node::Expr));
                             }
                         }
-                        // Loop and collective results are stored once. Their
-                        // producer work is not duplicated by a later scalar use.
-                        count_children = !matches!(
-                            data.operations[*op].kind,
-                            OperationKind::Loop { .. }
-                                | OperationKind::Screma { .. }
-                                | OperationKind::Filter { .. }
-                                | OperationKind::Scatter { .. }
-                                | OperationKind::BucketScatter { .. }
-                                | OperationKind::ReduceByIndex { .. }
-                        );
+                        count_children = !data.operations[*op].kind.has_stored_result();
                         local.mutable = match &data.operations[*op].kind {
                             OperationKind::Screma { reuse_inputs, .. } => {
                                 reuse_inputs.iter().any(Option::is_some)
@@ -190,7 +215,6 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                             Some(&r) => children.push(Node::Region(r)),
                             None => {
                                 local.device = true;
-                                local.work = OVER_BUDGET;
                                 local.duplication_blocked = true;
                             }
                         }
@@ -198,14 +222,11 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                     ExprKind::Lambda(r) => children.push(Node::Region(*r)),
                     ExprKind::Extern(_) => {
                         local.device = true;
-                        local.work = OVER_BUDGET;
                         local.duplication_blocked = true;
                     }
                     ExprKind::PureApp { .. } => {
-                        local.work = 1;
-                        local.duplication_blocked = !total_node(data, e);
+                        local.duplication_blocked = !duplicable_node(data, e);
                     }
-                    ExprKind::If { .. } => local.work = 1,
                     _ => {}
                 }
                 let slice = matches!(expression.kind, ExprKind::PureApp { function, .. } if is_slice(data, function));
@@ -232,12 +253,10 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                 });
                 match &operation.kind {
                     OperationKind::Index { array, .. } => {
-                        local.work = 1;
                         local.device = true;
                         reads.push(Node::Expr(*array));
                     }
                     OperationKind::Call { function, args } => {
-                        local.work = 1;
                         if length_source(data, &operation.kind).is_some() {
                             // A view's length observes metadata, not its elements or
                             // the work that produced them. Availability still follows
@@ -247,31 +266,24 @@ fn evaluations(data: &Program<Scheduled>, summary: &Dependencies) -> BTreeMap<No
                             reads.extend(args.iter().copied().map(Node::Expr));
                             if matches!(data.expressions[*function].kind, ExprKind::Builtin(_)) {
                                 // Builtin applications with motion proofs use PureApp.
-                                local.work = OVER_BUDGET;
                                 local.device = true;
                                 local.duplication_blocked = true;
                             }
                         }
                     }
-                    OperationKind::EvalGlobal(symbol) => {
-                        local.work = 1;
-                        match definitions.get(symbol) {
-                            Some(&r) => children.push(Node::Region(r)),
-                            None => {
-                                local.device = true;
-                                local.work = OVER_BUDGET;
-                                local.duplication_blocked = true;
-                            }
+                    OperationKind::EvalGlobal(symbol) => match definitions.get(symbol) {
+                        Some(&r) => children.push(Node::Region(r)),
+                        None => {
+                            local.device = true;
+                            local.duplication_blocked = true;
                         }
-                    }
-                    OperationKind::If { .. } => local.work = 1,
+                    },
+                    OperationKind::If { .. } => {}
                     OperationKind::Loop { .. } => {
-                        local.work = OVER_BUDGET;
                         local.duplication_blocked = true;
                     }
                     _ => {
                         local.device = true;
-                        local.work = OVER_BUDGET;
                         local.duplication_blocked = true;
                     }
                 }
@@ -309,7 +321,8 @@ fn summarize(evaluations: &BTreeMap<Node, Evaluation>) -> BTreeMap<Node, Summary
     let mut pending: VecDeque<_> = evaluations.keys().copied().collect();
     let mut queued: BTreeSet<_> = evaluations.keys().copied().collect();
     // The finite lattice also handles recursive calls. Revisit only users of
-    // changed summaries; work saturates one above the duplication budget.
+    // changed availability and safety summaries. Numeric work comes from
+    // placement and cannot grant permission to duplicate an evaluation.
     while let Some(node) = pending.pop_front() {
         queued.remove(&node);
         let evaluation = &evaluations[&node];
@@ -321,7 +334,6 @@ fn summarize(evaluations: &BTreeMap<Node, Evaluation>) -> BTreeMap<Node, Summary
         for child in &evaluation.children {
             next.device |= summaries[child].device;
             if evaluation.count_children {
-                next.work = (next.work + summaries[child].work).min(OVER_BUDGET);
                 next.duplication_blocked |= summaries[child].duplication_blocked;
             }
         }

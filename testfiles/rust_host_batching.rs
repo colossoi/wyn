@@ -29,6 +29,12 @@ mod filter_spv;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
 #[path = "filter_wgsl.rs"]
 mod filter_wgsl;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "setup_spv.rs"]
+mod setup_spv;
+#[allow(dead_code, non_snake_case, unused_imports, unused_variables)]
+#[path = "setup_wgsl.rs"]
+mod setup_wgsl;
 #[allow(dead_code, non_snake_case, unused_imports, unused_variables, unused_mut)]
 #[path = "batching_spv.rs"]
 mod spv;
@@ -40,7 +46,7 @@ mod wgsl;
 mod tests {
     use super::{
         capture_spv, capture_wgsl, epilogues_spv, epilogues_wgsl, filter_command_spv, filter_command_wgsl,
-        filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, spv, wgsl,
+        filter_post_spv, filter_post_wgsl, filter_spv, filter_wgsl, setup_spv, setup_wgsl, spv, wgsl,
     };
     use wgpu::util::DeviceExt;
 
@@ -97,6 +103,54 @@ mod tests {
         }))
         .unwrap();
         eprintln!("GPU: {:?}", adapter.get_info());
+        let mut setup_spv_context = setup_spv::HostContext::new(&device).unwrap();
+        let mut setup_wgsl_context = setup_wgsl::HostContext::new(&device).unwrap();
+        for [w, h] in [[1.0f32, 1.0f32], [1920.0, 1080.0], [1080.0, 1920.0]] {
+            let viewport = input(&device, &[w.to_bits() as i32, h.to_bits() as i32]);
+            let viewport_bytes: Vec<_> = [w, h].into_iter().flat_map(f32::to_le_bytes).collect();
+            let pixel = [1.0 / w, 1.0 / h];
+            let tangent = [0.17632698 * (w / h), 0.17632698];
+            let multiplier = [tangent[0] * 2.0, tangent[1] * -2.0];
+            let offset = [-tangent[0], tangent[1]];
+            let depth = [(1000.0 * 0.1) / (1000.0 - 0.1), 1000.0 / (1000.0 - 0.1)];
+            for n in [1, 63, 64, 65, 257] {
+                let values: Vec<f32> = (0..n).map(|i| i as f32 * 0.25 - 7.0).collect();
+                let xs = input(
+                    &device,
+                    &values.iter().map(|v| v.to_bits() as i32).collect::<Vec<_>>(),
+                );
+                let expected: Vec<f32> = values
+                    .iter()
+                    .flat_map(|&x| {
+                        (0..2).map(move |i| {
+                            pixel[i] * x
+                                + depth[i]
+                                + tangent[i]
+                                + multiplier[i]
+                                + offset[i]
+                                + multiplier[i] * pixel[i]
+                        })
+                    })
+                    .collect();
+                let spv_output =
+                    setup_spv::host_setup(&mut setup_spv_context, &queue, &xs, &viewport_bytes).unwrap();
+                let wgsl_output =
+                    setup_wgsl::host_setup(&mut setup_wgsl_context, &queue, &xs, &viewport).unwrap();
+                for (backend, actual) in [
+                    ("SPIR-V", read(&device, &queue, buffer!(setup_spv, spv_output))),
+                    ("WGSL", read(&device, &queue, buffer!(setup_wgsl, wgsl_output))),
+                ] {
+                    assert_eq!(actual.len(), expected.len());
+                    for (bits, &expected) in actual.into_iter().zip(&expected) {
+                        let actual = f32::from_bits(bits as u32);
+                        assert!(
+                            (actual - expected).abs() <= 2.0e-6 * expected.abs().max(1.0),
+                            "{backend} setup {w}x{h} n={n}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
         let xs = input(&device, &[5, 2, 9]);
         let mut spv = spv::HostContext::new(&device).unwrap();
         // Every call reuses the same scratch slot. Uploads must appear between

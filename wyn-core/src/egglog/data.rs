@@ -4,7 +4,7 @@ use crate::builtins::catalog;
 use crate::host::BufferLen;
 use crate::interface::{EntryDecl, EntryParamBinding};
 use crate::types::{Diet, Type};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use wyn_base::IdArena;
 use wyn_module_graph::PackageId;
 
@@ -265,6 +265,39 @@ pub enum LoopKind {
     For(ExprId),
     ForRange(ExprId),
     While,
+}
+
+impl OperationKind {
+    /// Scalar uses consume these producers' stored results rather than
+    /// repeating their loop or collective computation.
+    pub(super) fn has_stored_result(&self) -> bool {
+        matches!(
+            self,
+            Self::Loop { .. }
+                | Self::Screma { .. }
+                | Self::Filter { .. }
+                | Self::Scatter { .. }
+                | Self::BucketScatter { .. }
+                | Self::ReduceByIndex { .. }
+        )
+    }
+
+    /// Resolve a direct scalar invocation without changing its argument bindings.
+    pub(super) fn called_region(
+        &self,
+        data: &Ir,
+        definitions: &BTreeMap<SymbolId, RegionId>,
+    ) -> Option<RegionId> {
+        match self {
+            Self::Call { function, .. } => match data.expressions[*function].kind {
+                ExprKind::Lambda(r) => Some(r),
+                ExprKind::Global(s) | ExprKind::Closure { code: s, .. } => definitions.get(&s).copied(),
+                _ => None,
+            },
+            Self::EvalGlobal(s) => definitions.get(s).copied(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

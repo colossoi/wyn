@@ -1,0 +1,19 @@
+-- Uniform projection setup should be recomputed by the map, without a scalar
+-- dispatch or intermediate record buffer. Keep all six fields observable.
+type projection = {
+  pixel: vec2f32, depth: vec2f32, tangent: vec2f32,
+  multiplier: vec2f32, offset: vec2f32, scaled: vec2f32,
+}
+
+def projection_setup(viewport: vec2f32, near: f32, far: f32) projection =
+  let pixel = @[1.0 / viewport.x, 1.0 / viewport.y]
+  let tangent = @[0.17632698 * (viewport.x / viewport.y), 0.17632698]
+  let multiplier = @[tangent.x * 2.0, tangent.y * -2.0] in
+  { pixel = pixel, depth = @[(far * near) / (far - near), far / (far - near)],
+    tangent = tangent, multiplier = multiplier,
+    offset = @[0.0 - tangent.x, tangent.y],
+    scaled = @[multiplier.x * pixel.x, multiplier.y * pixel.y] }
+
+entry setup(viewport: [2]f32, xs: []f32) []vec2f32 =
+  let c = projection_setup(@[viewport[0], viewport[1]], 0.1, 1000.0) in
+  map(|x| c.pixel * x + c.depth + c.tangent + c.multiplier + c.offset + c.scaled, xs)
