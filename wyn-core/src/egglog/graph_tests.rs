@@ -1,11 +1,11 @@
-use super::fusion::analysis::{emit, Egglog};
+use super::fusion::analysis::import;
 use super::{from_tlc, fuse, ExprId, Program, SoacBody};
 use crate::compile_thru_tlc;
 use crate::egglog::data::{
     Array, ExprData, ExprKind, ExternData, Ir, OperationData, OperationId, OperationKind, RegionId,
 };
 use crate::egglog::dependencies::analyze;
-use crate::egglog::{parse_program, Fused, Imported, OptimizeError};
+use crate::egglog::{Fused, Imported, OptimizeError};
 use crate::tlc::infer_input_slice_bounds;
 use egglog_engine::EGraph;
 
@@ -13,9 +13,7 @@ const CHAIN: &str = "entry chain(xs: [4]i32) [4]i32 =
     let a = map(|x: i32| x + 1, xs) in map(|x: i32| x * 2, a)";
 
 fn fuse_updated(mut input: Program<Imported>) -> Result<Program<Fused>, OptimizeError> {
-    let mut sink = Egglog::new();
-    emit(&input.ir, &mut sink)?;
-    input.state.facts = parse_program("test-fusion.egg", &sink.text)?;
+    input.state.graph = import(&input.ir)?;
     fuse(input)
 }
 
@@ -63,10 +61,7 @@ fn fusion_follows_dependencies_across_an_independent_reduction() {
         panic!("map")
     };
     assert!(matches!(form.pre, SoacBody::Compose { .. }));
-    let mut graph = EGraph::default();
-    let mut sink = Egglog::new();
-    emit(&result.ir, &mut sink).unwrap();
-    graph.parse_and_run_program(None, &sink.text).unwrap();
+    let mut graph = import(&result.ir).unwrap();
     graph
         .parse_and_run_program(
             None,
@@ -223,10 +218,7 @@ fn cyclic_execution_graphs_are_rejected() {
 
 /// Load only the fusion summary and its dependency rules for relation assertions.
 pub(super) fn fusion_dependencies(data: &Ir) -> EGraph {
-    let mut sink = Egglog::new();
-    emit(data, &mut sink).unwrap();
-    let mut graph = EGraph::default();
-    graph.parse_and_run_program(None, &sink.text).unwrap();
+    let mut graph = import(data).unwrap();
     graph.parse_and_run_program(None, include_str!("fusion/fusion.egg")).unwrap();
     graph.parse_and_run_program(None, "(run-schedule (saturate (run fusion-dependencies)))").unwrap();
     graph

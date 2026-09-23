@@ -26,20 +26,20 @@ type SoacBody = tlc::SoacBody<ExplicitClosurePayload, ExplicitCapturesPayload>;
 type Lambda = tlc::Lambda<ExplicitClosurePayload, ExplicitCapturesPayload>;
 
 fn text(converted: &Program<Imported>) -> String {
-    converted.state.facts.iter().map(|command| format!("{command}\n")).collect()
+    let graph = &converted.state.graph;
+    let mut rows = vec![];
+    for name in graph.get_function_names() {
+        let (inputs, outputs, dag) = graph.function_to_dag(&name, usize::MAX, true).unwrap();
+        for (input, output) in inputs.into_iter().zip(outputs.unwrap()) {
+            rows.push(format!("{} = {}", dag.to_string(input), dag.to_string(output)));
+        }
+    }
+    rows.sort();
+    rows.join("\n")
 }
 
 fn run(converted: &Program<Imported>) -> EGraph {
-    let mut graph = EGraph::default();
-    graph
-        .run_program(converted.state.facts.clone())
-        .expect("egglog must typecheck and execute the imported AST");
-    // Exercise the displayed form too: downstream callers can persist the AST
-    // with egglog's Display implementation without a Wyn-specific serializer.
-    EGraph::default()
-        .parse_and_run_program(None, &text(converted))
-        .expect("displayed AST must round-trip");
-    graph
+    converted.state.graph.clone()
 }
 
 fn source(source: &str) -> InputSliceBoundsInferred {
@@ -198,9 +198,9 @@ fn fusion_graph_does_not_grow_with_scalar_body_structure() {
         assert_eq!(small_rows.len(), large_rows.len(), "{relation}");
     }
     assert_eq!(
-        small.state.facts.len(),
-        large.state.facts.len(),
-        "no scalar facts are emitted"
+        small.state.graph.num_tuples(),
+        large.state.graph.num_tuples(),
+        "scalar expression structure does not add fusion facts"
     );
 }
 

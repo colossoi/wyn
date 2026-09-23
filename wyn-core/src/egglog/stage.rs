@@ -4,7 +4,6 @@ use crate::egglog::data::{
     BlockId, BodyId, BufferId, DispatchId, GridId, Ir, OutputData, OutputId, PlacementData, PlacementId,
 };
 use crate::kernel_graph::PhysicalKernelGraph;
-use egglog_engine::ast::Command;
 use egglog_engine::EGraph;
 use wyn_base::IdArena;
 
@@ -38,10 +37,10 @@ pub struct Program<State> {
     pub(super) state: State,
 }
 
-/// Normalized source IR and the facts needed for fusion.
-#[derive(Clone, Debug)]
+/// Normalized source IR and its native fusion fact graph.
+#[derive(Clone)]
 pub struct Imported {
-    pub(super) facts: Vec<Command>,
+    pub(super) graph: EGraph,
 }
 /// Fusion is complete and its decisions have been materialized in the IR.
 #[derive(Clone, Debug)]

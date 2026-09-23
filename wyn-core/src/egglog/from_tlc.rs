@@ -1,6 +1,6 @@
 //! Retain backend-ready TLC structure in arenas and emit its fusion summary.
 use super::data::body_signature;
-use super::fusion::analysis::{emit, Egglog};
+use super::fusion::analysis::import;
 use super::timing::span;
 use super::{Imported, Program};
 use crate::ast::Span;
@@ -18,7 +18,6 @@ use crate::tlc::{DefMeta, Lambda, VarRef};
 use crate::types::TypeExt;
 use crate::types::{array_elem, canonical_storage_buffer_ty, is_copy, tuple, SoacOwnership, Type};
 use crate::{builtins, tlc, LookupMap};
-use egglog_engine::ast::Parser;
 use wyn_base::Interner;
 
 type Term = tlc::Term<ExplicitClosurePayload, ExplicitCapturesPayload>;
@@ -134,14 +133,10 @@ pub fn from_tlc(program: &InputSliceBoundsInferred) -> Result<Program<Imported>,
     converter.data.expressions = converter.expressions.into_arena();
     converter.data.origins = converter.origins.into_arena();
 
-    let mut sink = Egglog::new();
-    emit(&converter.data, &mut sink).map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
-    let program = Parser::default()
-        .get_program_from_string(Some("wyn-from-tlc.egg".into()), &sink.text)
-        .map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
+    let graph = import(&converter.data).map_err(|error| ConvertError::InvalidProgram(error.to_string()))?;
     Ok(Program {
         ir: converter.data,
-        state: Imported { facts: program },
+        state: Imported { graph },
     })
 }
 

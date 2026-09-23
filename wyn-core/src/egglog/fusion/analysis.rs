@@ -4,8 +4,10 @@ use crate::egglog::data::{
     ScremaForm,
 };
 use crate::egglog::dependencies::{Analysis, References};
+use crate::egglog::timing::span;
 use crate::egglog::visit::{Operand, OperandRole};
-use crate::egglog::OptimizeError;
+use crate::egglog::{OptimizeError, SCHEMA};
+use egglog_engine::EGraph;
 use sink::{InputSite, Kind, Operation, Sink};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +16,21 @@ mod facts;
 mod sink;
 mod summary;
 pub(in crate::egglog) use egglog::Egglog;
+
+/// Load declarations once and insert all source facts in one native update.
+pub(in crate::egglog) fn import(data: &Ir) -> Result<EGraph, OptimizeError> {
+    let _timing = span("egglog fusion import");
+    let mut graph = EGraph::default();
+    {
+        let _schema = span("egglog fusion import / schema");
+        graph.parse_and_run_program(Some("fusion-schema.egg".into()), SCHEMA)?;
+    }
+    {
+        let _facts = span("egglog fusion import / facts");
+        graph.update(|state| Ok(emit(data, &mut Egglog::new(state)?)))??;
+    }
+    Ok(graph)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::egglog) enum Role {
@@ -35,7 +52,7 @@ impl From<OperandRole> for Role {
 /// Read the source once and send facts directly to the selected backend.
 pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), OptimizeError> {
     let mut analysis = Analysis::new(data);
-    facts::scalar_regions(data, &analysis.dependencies, sink);
+    facts::scalar_regions(data, &analysis.dependencies, sink)?;
     let mut schedules = analysis.dependencies.schedules(data)?;
     schedules.retain(|_, ops| {
         ops.iter().any(|id| {
@@ -48,22 +65,22 @@ pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), Opt
     let included = |op| {
         schedules.contains_key(&data.operations[op].region) && analysis.dependencies.live.contains(&op)
     };
-    facts::operations(data, &analysis.dependencies, &schedules, sink);
+    facts::operations(data, &analysis.dependencies, &schedules, sink)?;
     for (consumer, producer) in analysis.dependencies.dependencies() {
         if included(producer) && included(consumer) {
-            sink.dependency(producer, consumer);
+            sink.dependency(producer, consumer)?;
         }
     }
     for (gate, operations) in analysis.dependencies.effects.gates() {
         for &op in operations {
             if included(op) {
-                sink.effect_member(gate, op);
+                sink.effect_member(gate, op)?;
             }
         }
     }
     for (op, gate) in analysis.dependencies.effects.waits() {
         if included(op) {
-            sink.effect_wait(op, gate);
+            sink.effect_wait(op, gate)?;
         }
     }
     let visitor = &mut analysis.visitor;
@@ -91,7 +108,7 @@ pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), Opt
             for p in visitor.sets.iter(deps) {
                 let producer = OperationId::from(p);
                 if included(producer) {
-                    facts::usage(data, producer, consumer, role, included(consumer), sink);
+                    facts::usage(data, producer, consumer, role, included(consumer), sink)?;
                 }
             }
         }
@@ -99,7 +116,7 @@ pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), Opt
             for p in visitor.sets.iter(analysis.external[&region]) {
                 let producer = OperationId::from(p);
                 if included(producer) {
-                    facts::usage(data, producer, consumer, Role::Other, included(consumer), sink);
+                    facts::usage(data, producer, consumer, Role::Other, included(consumer), sink)?;
                 }
             }
         }
@@ -109,7 +126,7 @@ pub(in crate::egglog) fn emit(data: &Ir, sink: &mut impl Sink) -> Result<(), Opt
         for p in visitor.sets.iter(deps) {
             let producer = OperationId::from(p);
             if included(producer) {
-                sink.observed(producer);
+                sink.observed(producer)?;
             }
         }
     }

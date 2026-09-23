@@ -76,7 +76,7 @@ pub enum OptimizeError {
     Output(String),
 }
 
-/// Declarations included at the start of fusion fact programs (egglog 3.0).
+/// Declarations loaded before native fusion fact insertion (egglog 3.0).
 pub const SCHEMA: &str = concat!(include_str!("ids.egg"), "\n", include_str!("fusion/schema.egg"));
 
 #[cfg(test)]

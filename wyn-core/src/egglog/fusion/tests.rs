@@ -1,14 +1,14 @@
 use super::super::data::body_signature;
 use super::super::dependencies::analyze;
 use super::super::{from_tlc, fuse, Program};
-use super::analysis::{emit, Egglog};
+use super::analysis::import;
 use crate::ast::TypeName;
 use crate::compile_thru_tlc;
 use crate::egglog::data::{
     Array, ExprData, ExprKind, ExternData, Ir, OperationData, OperationId, OperationKind, RegionId,
     ScremaForm, SoacBody,
 };
-use crate::egglog::{parse_program, Fused, Imported, SCHEMA};
+use crate::egglog::{Fused, Imported, SCHEMA};
 use crate::tlc::infer_input_slice_bounds;
 use crate::types::Type;
 use egglog_engine::EGraph;
@@ -68,7 +68,7 @@ fn empty_planning_schedule_terminates_without_advancing() {
 
 #[test]
 fn source_import_emits_linear_facts_for_a_map_chain() {
-    let commands = |n: usize| {
+    let tuples = |n: usize| {
         // Build the execution graph directly, isolating fact import from TLC's
         // recursive processing of deeply nested source lets.
         let mut data = imported("entry chain(xs:[4]i32) [4]i32=map(|x:i32|x+1,xs)").ir;
@@ -104,12 +104,10 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
             });
         }
         data.regions[region].results = vec![previous];
-        let mut sink = Egglog::new();
-        emit(&data, &mut sink).unwrap();
-        parse_program("scaling.egg", &sink.text).unwrap().len()
+        import(&data).unwrap().num_tuples()
     };
-    let small = commands(32);
-    let large = commands(128);
+    let small = tuples(32);
+    let large = tuples(128);
     assert!(
         large <= 4 * small,
         "import grew faster than its source: {small} -> {large}"
@@ -119,9 +117,7 @@ fn source_import_emits_linear_facts_for_a_map_chain() {
 fn optimized(mut input: Program<Imported>) -> Program<Fused> {
     // Some tests modify the imported graph to introduce a precise effect/use,
     // before importing the modified dependency graph.
-    let mut sink = Egglog::new();
-    emit(&input.ir, &mut sink).unwrap();
-    input.state.facts = parse_program("test-fusion.egg", &sink.text).unwrap();
+    input.state.graph = import(&input.ir).unwrap();
     fuse(input).unwrap()
 }
 
@@ -237,7 +233,9 @@ fn saturation_fuses_a_chain_without_creating_a_dependency_cycle() {
     ));
     let again = optimized(Program {
         ir: result.ir.clone(),
-        state: Imported { facts: vec![] },
+        state: Imported {
+            graph: EGraph::default(),
+        },
     });
     assert_eq!(
         format!("{:?}", result.ir),
