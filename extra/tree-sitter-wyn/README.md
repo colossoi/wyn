@@ -26,8 +26,8 @@ npm run parse -- ../../testfiles/open_module_demo.wyn
 npm run test
 ```
 
-From the repository root, parse every `.wyn` file under `testfiles/` using
-the committed generated parser:
+From the repository root, parse every `.wyn` file under `testfiles/`, `pkg/`,
+and `tests/` using the committed generated parser:
 
 ```sh
 scripts/test-tree-sitter-testfiles.sh
@@ -35,6 +35,14 @@ scripts/test-tree-sitter-testfiles.sh
 
 This repository-wide check uses Cargo and does not require Node.js. It does
 not regenerate `src/parser.c`; use `npm run generate` after grammar changes.
+
+The compiler lexer/parser define the currently implemented surface syntax.
+When updating expression rules, preserve their grouping as well as accepting
+the same files: pipe binds below other binary operators, exponentiation is
+left associative, and ranges enclose complete binary expressions. Updates
+bind tightly on the left and consume a complete binary expression on the
+right; `a + b with [i] = c + d` groups as `a + (b with [i] = (c + d))`.
+The Rust tests cover these groupings and syntax used by the package sources.
 
 ## Helix setup
 

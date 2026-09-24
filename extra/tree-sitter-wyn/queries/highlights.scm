@@ -61,6 +61,7 @@
   ":>"
   "?"
   "="
+  "\\"
 ] @operator
 
 [
@@ -166,6 +167,11 @@
   name: (identifier) @variable.other.member)
 
 ; Functions
+(operator_expression) @function.operator
+
+(field_expression
+  field: (operator_name) @function.operator)
+
 (def_declaration
   name: (identifier) @function)
 
@@ -203,6 +209,15 @@
 (param
   (typed_pattern
     pattern: (identifier) @variable.parameter))
+
+(param
+  (attributed_pattern
+    pattern: (identifier) @variable.parameter))
+
+(param
+  (typed_pattern
+    pattern: (attributed_pattern
+      pattern: (identifier) @variable.parameter)))
 
 (entry_param
   name: (identifier) @variable.parameter)

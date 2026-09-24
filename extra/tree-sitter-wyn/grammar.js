@@ -16,17 +16,18 @@
  */
 
 const PREC = {
-  ASSIGN: 1,
-  TYPE_ASCRIPTION: 2,
-  TYPE_COERCION: 3,
-  OR: 4,
-  AND: 5,
-  COMPARE: 6,
-  BITWISE: 7,
-  SHIFT: 8,
-  ADD: 9,
-  MUL: 10,
-  PIPE: 11,
+  TYPE_ASCRIPTION: 1,
+  TYPE_COERCION: 1,
+  RANGE: 2,
+  ASSIGN: 3,
+  PIPE: 4,
+  OR: 5,
+  AND: 6,
+  COMPARE: 7,
+  BITWISE: 8,
+  SHIFT: 9,
+  ADD: 10,
+  MUL: 11,
   POWER: 12,
   UNARY: 13,
   POSTFIX: 14,
@@ -48,6 +49,7 @@ module.exports = grammar({
     [$.size_argument, $._literal],
     [$.size_argument, $._primary_expression],
     [$.binary_expression],
+    [$._expression, $._update_operand],
   ],
 
   rules: {
@@ -157,6 +159,7 @@ module.exports = grammar({
     ),
 
     type_declaration: $ => seq(
+      repeat($.attribute),
       field('lifting', choice('type', 'type~', 'type^')),
       field('name', $.identifier),
       optional($.generic_params),
@@ -166,6 +169,7 @@ module.exports = grammar({
 
     // `module NAME [: SIG] = BODY` — signature ascription is optional.
     module_declaration: $ => seq(
+      repeat($.attribute),
       'module',
       field('name', $.identifier),
       choice(
@@ -180,6 +184,7 @@ module.exports = grammar({
 
     // `module type NAME = MTE` — a named module-signature binding.
     module_type_declaration: $ => seq(
+      repeat($.attribute),
       'module',
       'type',
       field('name', $.identifier),
@@ -190,6 +195,7 @@ module.exports = grammar({
     // `functor NAME (params) [: SIG] = BODY` — signature ascription
     // is optional (applied to the body).
     functor_declaration: $ => seq(
+      repeat($.attribute),
       'functor',
       field('name', $.identifier),
       repeat1($.functor_param),
@@ -212,6 +218,7 @@ module.exports = grammar({
     ),
 
     _module_expression: $ => choice(
+      $.module_lambda,
       $.module_body,
       $.module_import,
       $.module_application,
@@ -222,6 +229,17 @@ module.exports = grammar({
     ),
 
     parenthesized_module_expression: $ => seq('(', $._module_expression, ')'),
+
+    // The compiler's outer parameter list contains parenthesized module
+    // parameters: `\((X: S), (Y: T)) -> BODY`.
+    module_lambda: $ => prec.right(seq(
+      '\\',
+      '(',
+      commaSep($.functor_param),
+      ')',
+      '->',
+      field('body', $._module_expression),
+    )),
 
     module_import: $ => seq('import', field('path', $.string_literal)),
 
@@ -291,6 +309,7 @@ module.exports = grammar({
     ),
 
     spec_sig: $ => seq(
+      repeat($.attribute),
       'sig',
       field('name', choice($.identifier, $.operator_name)),
       optional($.generic_params),
@@ -303,6 +322,7 @@ module.exports = grammar({
     // `type NAME [generic_params] [= TYPE]` — the `= TYPE` half is
     // optional (abstract type vs. concrete alias).
     spec_type: $ => seq(
+      repeat($.attribute),
       'type',
       field('name', $.identifier),
       optional($.generic_params),
@@ -310,6 +330,7 @@ module.exports = grammar({
     ),
 
     spec_module: $ => seq(
+      repeat($.attribute),
       'module',
       field('name', $.identifier),
       ':',
@@ -317,6 +338,7 @@ module.exports = grammar({
     ),
 
     spec_include: $ => seq(
+      repeat($.attribute),
       'include',
       field('source', $._module_type_expression),
     ),
@@ -324,11 +346,13 @@ module.exports = grammar({
     // `open` takes a module expression, which can be a qualified name
     // or a module-expression application.
     open_declaration: $ => seq(
+      repeat($.attribute),
       'open',
       field('module', $._module_expression),
     ),
 
     import_declaration: $ => seq(
+      repeat($.attribute),
       'import',
       field('path', $.string_literal),
     ),
@@ -487,7 +511,7 @@ module.exports = grammar({
     // Single element (type) is parsed as parenthesized_type
     tuple_type: $ => choice(
       seq('(', ')'),  // Unit type
-      seq('(', $._type, ',', commaSep($._type), ')'),  // 2+ elements
+      seq('(', $._type, ',', commaSep1($._type), ')'),  // 2+ elements
     ),
 
     record_type: $ => seq(
@@ -549,13 +573,28 @@ module.exports = grammar({
       $._primary_expression,
     ),
 
-    // `arr with [i] = v` — produces a copy of `arr` with element `i`
-    // set to `v`. Left-associative chains: `a with [i]=x with [j]=y`
-    // parses as `(a with [i]=x) with [j]=y`. Precedence sits below
-    // binary operators so `a with [i] = b + c` reads as
-    // `a with [i] = (b + c)`.
+    // Updates bind tightly on the left but consume a full binary expression
+    // on the right. Restricting the operand excludes an unparenthesized
+    // binary LHS: `a + b with [i] = c + d` means
+    // `a + (b with [i] = (c + d))`. Equal-precedence updates chain left.
+    _update_operand: $ => choice(
+      $.let_expression,
+      $.if_expression,
+      $.loop_expression,
+      $.match_expression,
+      $.lambda_expression,
+      $.array_with,
+      $.vec_with,
+      $.record_with,
+      $.unary_expression,
+      $.field_expression,
+      $.index_expression,
+      $.call_expression,
+      $._primary_expression,
+    ),
+
     array_with: $ => prec.left(PREC.ASSIGN, seq(
-      field('array', $._expression),
+      field('array', $._update_operand),
       'with',
       '[',
       field('index', $._expression),
@@ -567,7 +606,7 @@ module.exports = grammar({
     // Vector swizzle update, including the compound forms accepted by the
     // hand-written parser: `v with .xy = rhs` and `v with .xy *= rhs`.
     vec_with: $ => prec.left(PREC.ASSIGN, seq(
-      field('vector', $._expression),
+      field('vector', $._update_operand),
       'with',
       '.',
       field('swizzle', $.identifier),
@@ -579,7 +618,7 @@ module.exports = grammar({
     // Record updates omit the leading dot and may select a nested field:
     // `record with outer.inner = value`.
     record_with: $ => prec.left(PREC.ASSIGN, seq(
-      field('record', $._expression),
+      field('record', $._update_operand),
       'with',
       field('field', $.identifier),
       repeat(seq('.', field('field', $.identifier))),
@@ -678,7 +717,7 @@ module.exports = grammar({
     )),
 
     binary_expression: $ => choice(
-      // Logical OR (lowest precedence)
+      // Logical OR (above pipe and ranges)
       prec.left(PREC.OR, seq(
         field('left', $._expression),
         field('operator', '||'),
@@ -699,7 +738,7 @@ module.exports = grammar({
       // Bitwise
       prec.left(PREC.BITWISE, seq(
         field('left', $._expression),
-        field('operator', choice('&', '^')),
+        field('operator', choice('&', '^', '|')),
         field('right', $._expression),
       )),
       // Shift
@@ -726,22 +765,22 @@ module.exports = grammar({
         field('operator', '|>'),
         field('right', $._expression),
       )),
-      // Power (right associative)
-      prec.right(PREC.POWER, seq(
+      // Power is left associative, matching the compiler and specification.
+      prec.left(PREC.POWER, seq(
         field('left', $._expression),
         field('operator', '**'),
         field('right', $._expression),
       )),
       // Range operators: `start .. end`, `start ..< end`, `start ..> end`,
       // `start ..= end`, and the three-part `start .. step ..<end` form.
-      prec.left(PREC.COMPARE, seq(
+      prec.left(PREC.RANGE, seq(
         field('start', $._expression),
         '..',
         field('step', $._expression),
         field('end_op', choice('..<', '..>', '..=')),
         field('end', $._expression),
       )),
-      prec.left(PREC.COMPARE, seq(
+      prec.left(PREC.RANGE, seq(
         field('left', $._expression),
         field('operator', choice('..', '..<', '..>', '..=')),
         field('right', $._expression),
@@ -756,7 +795,7 @@ module.exports = grammar({
     field_expression: $ => prec.left(PREC.POSTFIX, seq(
       field('object', $._expression),
       '.',
-      field('field', choice($.identifier, $.integer_literal)),
+      field('field', choice($.identifier, $.integer_literal, $.operator_name)),
     )),
 
     // Index or slice expression
@@ -799,6 +838,7 @@ module.exports = grammar({
 
     _primary_expression: $ => choice(
       $.identifier,
+      $.operator_expression,
       $.constructor_expression,
       $._literal,
       $.array_literal,
@@ -811,6 +851,14 @@ module.exports = grammar({
     ),
 
     parenthesized_expression: $ => seq('(', $._expression, ')'),
+
+    // Only standalone primitive operators form expression sections. Module
+    // operator members and declaration names may use custom operator names.
+    operator_expression: $ => seq('(', choice(
+      '+', '-', '*', '/', '%', '**', '//', '%%',
+      '==', '!=', '<', '<=', '>', '>=', '&&', '||',
+      '&', '^', '<<', '>>', '>>>',
+    ), ')'),
 
     array_literal: $ => seq(
       '[',
@@ -832,7 +880,7 @@ module.exports = grammar({
       '(',
       $._expression,
       ',',
-      commaSep1($._expression),
+      commaSep($._expression),
       ')',
     ),
 
@@ -875,13 +923,13 @@ module.exports = grammar({
 
     // `#[attr] pat` — entry-point param attributes and similar.
     attributed_pattern: $ => seq(
-      $.attribute,
+      repeat1($.attribute),
       field('pattern', $._primary_pattern),
     ),
 
     // `pat : type` — type-annotated pattern.
     typed_pattern: $ => prec.left(1, seq(
-      field('pattern', $._primary_pattern),
+      field('pattern', choice($._primary_pattern, $.attributed_pattern)),
       ':',
       field('type', $._type),
     )),
@@ -910,7 +958,7 @@ module.exports = grammar({
       '(',
       $._pattern,
       ',',
-      commaSep1($._pattern),
+      commaSep($._pattern),
       ')',
     ),
 
@@ -977,8 +1025,8 @@ module.exports = grammar({
     integer_literal: $ => token(seq(
       choice(
         /[0-9][0-9_]*/,           // Decimal
-        /0[xX][0-9a-fA-F_]+/,     // Hexadecimal
-        /0[bB][01_]+/,            // Binary
+        /0[xX][0-9a-fA-F][0-9a-fA-F_]*/, // Hexadecimal
+        /0[bB][01][01_]*/,               // Binary
       ),
       optional(/[iu](8|16|32|64)/), // Type suffix
     )),
@@ -986,13 +1034,13 @@ module.exports = grammar({
     float_literal: $ => token(seq(
       choice(
         /[0-9][0-9_]*\.[0-9][0-9_]*/,                    // 3.14
-        /[0-9][0-9_]*[eE][+-]?[0-9]+/,                   // 1e10
-        /[0-9][0-9_]*\.[0-9][0-9_]*[eE][+-]?[0-9]+/,     // 1.5e-10
+        /[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*/,              // 1e1_0
+        /[0-9][0-9_]*\.[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*/, // 1.5e-10
       ),
       optional(/f(16|32|64)/), // Type suffix
     )),
 
-    string_literal: $ => /"[^"]*"/,
+    string_literal: $ => /"[^"\\\n]*"/,
 
     boolean_literal: $ => choice('true', 'false'),
 

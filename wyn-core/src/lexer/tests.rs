@@ -108,6 +108,27 @@ fn test_tokenize_with_comments() {
 }
 
 #[test]
+fn comments_end_at_newline_or_eof() {
+    for ending in ["", "\n", "\r\n"] {
+        for comment in ["--", "-- final comment", "-- λ: \"not a string"] {
+            assert!(tokens_only(&format!("{comment}{ending}")).is_empty());
+            let source = format!("def x = 1 {comment}{ending}");
+            assert_eq!(tokens_only(&source), tokens_only("def x = 1"), "{source:?}");
+        }
+    }
+    assert_eq!(tokens_only("1 -- ignored\n + 2"), tokens_only("1 + 2"));
+    assert_eq!(
+        tokens_only("1 - -2"),
+        vec![
+            Token::IntLiteral("1".into()),
+            Token::BinOp("-".into()),
+            Token::BinOp("-".into()),
+            Token::IntLiteral("2".into())
+        ],
+    );
+}
+
+#[test]
 fn test_tokenize_array_syntax() {
     let input = "[3][4]f32";
     let tokens = tokens_only(input);

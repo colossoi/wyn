@@ -5,7 +5,7 @@ mod tests;
 use crate::ast::Span;
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_until},
+    bytes::complete::{tag, take_till},
     character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1, one_of},
     combinator::{eof, map, peek, recognize, value},
     multi::many0,
@@ -203,7 +203,7 @@ pub enum Token {
 }
 
 fn parse_comment(input: &str) -> IResult<&str, Token> {
-    map(preceded(tag("--"), take_until("\n")), |s: &str| {
+    map(preceded(tag("--"), take_till(|c| c == '\n')), |s: &str| {
         Token::Comment(s.to_string())
     })(input)
 }

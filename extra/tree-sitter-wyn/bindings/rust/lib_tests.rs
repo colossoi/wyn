@@ -130,22 +130,18 @@ fn test_with_updates_remain_left_associative() {
 #[test]
 fn parse_all_repository_testfiles() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(repository_root) = manifest_dir.ancestors().nth(2) else {
-        panic!("Tree-sitter package is not nested under a repository root");
-    };
-    let testfiles_dir = repository_root.join("testfiles");
-
-    // The published crate does not contain the repository-level fixtures.
-    if !testfiles_dir.is_dir() {
+    // Both Cargo manifests share these tests, but have different depths.
+    // Published crates do not contain the repository-level fixtures.
+    let Some(repository_root) = manifest_dir.ancestors().find(|path| {
+        path.join("SPECIFICATION.md").is_file() && path.join("wyn-core/src/parser.rs").is_file()
+    }) else {
         return;
-    }
-
-    let files = wyn_files_below(&testfiles_dir);
-    assert!(
-        !files.is_empty(),
-        "no .wyn files found under {}",
-        testfiles_dir.display()
-    );
+    };
+    let files: Vec<_> = ["testfiles", "pkg", "tests"]
+        .into_iter()
+        .flat_map(|directory| wyn_files_below(&repository_root.join(directory)))
+        .collect();
+    assert!(!files.is_empty(), "no repository Wyn fixtures found");
 
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&LANGUAGE.into()).expect("Error loading Wyn grammar");
@@ -169,6 +165,133 @@ fn parse_all_repository_testfiles() {
         files.len(),
         failures.join("\n"),
     );
+}
+
+fn parse_source(source: &str) -> tree_sitter::Tree {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    assert!(
+        !tree.root_node().has_error(),
+        "{source}: {}",
+        tree.root_node().to_sexp()
+    );
+    tree
+}
+
+#[test]
+fn compiler_supported_forms_parse() {
+    for source in [
+        "def bits = 1 | 2 & 3 ^ 4",
+        "def add = (+)",
+        "def x = (+)(1, 2)",
+        "def x = M.(+)(1, 2)",
+        "def x = M.(+^)(1, 2)",
+        r"module F = \((X: S)) -> X",
+        r"module F = \((X: S), (Y: T)) -> { module Z = X }",
+        "def f(#[size_hint(4)] a: []i32) = a",
+        "def f(#[size_hint(4)] #[size_hint(8)] a: []i32) = a",
+        "def f = |#[size_hint(4)] a: []i32| a",
+        "#[size_hint(4)] type t = i32",
+        "#[size_hint(4)] module M = { let x = 1 }",
+        r#"module type S = { #[linked("foo")] sig f: i32 }"#,
+        "def x = 1e1_0",
+        "def x = 1.5e-1_0f64",
+        "def x = (1,)",
+        "def f((x,)) = x",
+        "def x = 1 -- comment without final newline",
+    ] {
+        parse_source(source);
+    }
+}
+
+#[test]
+fn malformed_literals_and_singleton_tuple_types_are_rejected() {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&LANGUAGE.into()).unwrap();
+    for source in [
+        "def x = 0x_FF",
+        "def x = 0b_10",
+        r#"#[linked("a\b")] extern f() i32"#,
+        "#[linked(\"a\nb\")] extern f() i32",
+        "type t = (i32,)",
+    ] {
+        let tree = parser.parse(source, None).unwrap();
+        assert!(tree.root_node().has_error(), "unexpectedly accepted {source:?}");
+    }
+}
+
+#[test]
+fn underscore_field_is_not_part_of_a_float() {
+    let tree = parse_source("def x = 1._2e3");
+    let body = tree.root_node().named_child(0).unwrap().child_by_field_name("body").unwrap();
+    assert_eq!(body.kind(), "field_expression");
+}
+
+fn expression_shape(node: tree_sitter::Node<'_>, source: &str) -> String {
+    let child = |field| expression_shape(node.child_by_field_name(field).unwrap(), source);
+    match node.kind() {
+        "binary_expression" => {
+            let operator =
+                node.child_by_field_name("operator").unwrap().utf8_text(source.as_bytes()).unwrap();
+            format!("({} {operator} {})", child("left"), child("right"))
+        }
+        "array_with" => format!(
+            "({} with [{}] = {})",
+            child("array"),
+            child("index"),
+            child("value")
+        ),
+        "vec_with" => format!(
+            "({} with .{} = {})",
+            child("vector"),
+            child("swizzle"),
+            child("value")
+        ),
+        "record_with" => format!(
+            "({} with {} = {})",
+            child("record"),
+            child("field"),
+            child("value")
+        ),
+        "type_ascription" => format!("({} : {})", child("expression"), child("type")),
+        "type_coercion" => format!("({} :> {})", child("expression"), child("type")),
+        "parenthesized_expression" => expression_shape(node.named_child(0).unwrap(), source),
+        _ => node.utf8_text(source.as_bytes()).unwrap().to_owned(),
+    }
+}
+
+#[test]
+fn expression_grouping_matches_the_compiler() {
+    for (expression, expected) in [
+        ("a + b |> f", "((a + b) |> f)"),
+        ("a |> f |> g", "((a |> f) |> g)"),
+        ("a | b & c", "((a | b) & c)"),
+        ("a ** b ** c", "((a ** b) ** c)"),
+        ("0 .. 2 < 3", "(0 .. (2 < 3))"),
+        ("0 ..= 2 |> f", "(0 ..= (2 |> f))"),
+        ("a + b with [i] = v", "(a + (b with [i] = v))"),
+        ("a + b with .xy = v", "(a + (b with .xy = v))"),
+        ("a + b with field = v", "(a + (b with field = v))"),
+        ("a with [i] = b + c", "(a with [i] = (b + c))"),
+        ("a with [i] = b |> f", "(a with [i] = (b |> f))"),
+        ("a with [i] = b .. c", "((a with [i] = b) .. c)"),
+        ("a with [i] = b : T", "((a with [i] = b) : T)"),
+        ("a with [i] = b :> T", "((a with [i] = b) :> T)"),
+        ("-a with [i] = b", "(-a with [i] = b)"),
+        ("a + b with [i] = c + d", "(a + (b with [i] = (c + d)))"),
+        ("(a + b) with [i] = v", "((a + b) with [i] = v)"),
+        ("a with [i] = x with [j] = y", "((a with [i] = x) with [j] = y)"),
+        (
+            "a with [i] = b + c with [j] = y",
+            "((a with [i] = (b + c)) with [j] = y)",
+        ),
+    ] {
+        let source = format!("def result = {expression}");
+        let tree = parse_source(&source);
+        let body = tree.root_node().named_child(0).unwrap().child_by_field_name("body").unwrap();
+        assert_eq!(expression_shape(body, &source), expected, "{source}");
+    }
 }
 
 #[test]

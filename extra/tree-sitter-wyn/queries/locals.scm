@@ -24,6 +24,8 @@
 
 (module_body) @local.scope
 
+(module_lambda) @local.scope
+
 ; ============================================
 ; Definitions
 ; ============================================
@@ -61,6 +63,15 @@
 (param
   (typed_pattern
     pattern: (identifier) @local.definition))
+
+(param
+  (attributed_pattern
+    pattern: (identifier) @local.definition))
+
+(param
+  (typed_pattern
+    pattern: (attributed_pattern
+      pattern: (identifier) @local.definition)))
 
 (entry_param
   name: (identifier) @local.definition)
