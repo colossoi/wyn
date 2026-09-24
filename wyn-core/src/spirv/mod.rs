@@ -114,9 +114,11 @@ struct Constructor {
     // Entry point interface tracking
     entry_point_interfaces: LookupMap<EntryId, Vec<spirv::Word>>,
 
-    /// Access-qualified storage-buffer globals. The same descriptor slot can
-    /// be writable in a compute prepass and read-only in a graphics entry.
-    storage_buffers: LookupMap<StorageBufferUse, StorageBufferInfo>,
+    /// Storage globals are qualified by both access and std430 element type.
+    /// Independent entries may reuse a descriptor slot for different types.
+    storage_buffers: LookupMap<(StorageBufferUse, spirv::Word), StorageBufferInfo>,
+    storage_buffer_types: LookupMap<(Option<EntryId>, BindingRef), spirv::Word>,
+    current_entry: Option<EntryId>,
     current_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     /// Per-entry bindings keyed by the SSA parameter they initialize.
     /// Names are emitted/debug metadata only; they are never identity here.
@@ -156,11 +158,6 @@ struct Constructor {
     /// Set during entry point setup, cleared at end. Used by OutputPtr lowering.
     current_entry_outputs: Vec<(spirv::Word, spirv::StorageClass)>,
 
-    /// buffer_id → (buffer_var, elem_spirv_type). The buffer_id is recovered
-    /// from a view's type via `array_view_buffer` → `get_or_assign_buffer_id`.
-    buffer_vars: Vec<(spirv::Word, spirv::Word)>,
-    /// (set, binding) → buffer_id, for deduplication in get_or_assign_buffer_id.
-    buffer_id_map: LookupMap<StorageBufferUse, u32>,
     /// Workgroup-shared arrays: id → (workgroup `OpVariable`, element type).
     /// Created in `lower_ssa_entry_point` by pre-scanning the body for
     /// `StorageView(Workgroup{id, count})` ops, so the var exists (and is in
@@ -193,6 +190,8 @@ impl Constructor {
             interface_block_cache: LookupMap::new(),
             entry_point_interfaces: LookupMap::new(),
             storage_buffers: LookupMap::new(),
+            storage_buffer_types: LookupMap::new(),
+            current_entry: None,
             current_storage_accesses: LookupMap::new(),
             current_functions: LookupMap::new(),
             emitted_functions: LookupMap::new(),
@@ -206,14 +205,17 @@ impl Constructor {
             linked_functions_by_linkage: LookupMap::new(),
             int_pow_functions: LookupMap::new(),
             current_entry_outputs: Vec::new(),
-            buffer_vars: Vec::new(),
             workgroup_vars: LookupMap::new(),
-            buffer_id_map: LookupMap::new(),
         }
     }
 
-    fn select_storage_accesses(&mut self, accesses: &LookupMap<BindingRef, ResourceAccess>) {
+    fn select_storage_accesses(
+        &mut self,
+        accesses: &LookupMap<BindingRef, ResourceAccess>,
+        entry: Option<EntryId>,
+    ) {
         self.current_storage_accesses.clone_from(accesses);
+        self.current_entry = entry;
     }
 
     fn storage_use(&self, binding: BindingRef) -> StorageBufferUse {
@@ -224,7 +226,8 @@ impl Constructor {
     }
 
     fn storage_buffer(&self, binding: BindingRef) -> Option<StorageBufferInfo> {
-        self.storage_buffers.get(&self.storage_use(binding)).copied()
+        let element = self.storage_buffer_types.get(&(self.current_entry, binding))?;
+        self.storage_buffers.get(&(self.storage_use(binding), *element)).copied()
     }
 
     fn select_functions(&mut self, functions: &LookupMap<FunctionId, FunctionEmissionId>) {
@@ -482,6 +485,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     // resolve them during lowering, even though they're lowered before entry points.
     for entry in &program.entry_points {
         let accesses = entry.spirv_storage_accesses();
+        constructor.select_storage_accesses(&accesses, Some(entry.id));
         for input in &entry.inputs {
             if let Some(br) = input.storage_binding() {
                 constructor.create_storage_buffer(&input.ty, br.set, br.binding, true)?;
@@ -502,6 +506,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     // partials/result intermediates) that aren't user-visible outputs.
     for entry in &program.entry_points {
         let accesses = entry.spirv_storage_accesses();
+        constructor.select_storage_accesses(&accesses, Some(entry.id));
         for sb in &entry.storage_bindings {
             constructor.create_storage_buffer_for_element(
                 &sb.elem_ty,
@@ -561,8 +566,10 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             continue;
         }
 
-        constructor
-            .select_storage_accesses(&function_variants.accesses_for(program, emission.entry_context));
+        constructor.select_storage_accesses(
+            &function_variants.accesses_for(program, emission.entry_context),
+            emission.entry_context,
+        );
         constructor.select_functions(function_variants.emissions_for_context(emission.entry_context));
         lower_ssa_function(&mut constructor, func, emission.id)?;
     }
@@ -571,7 +578,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
     // forward-declared IDs are already in `Constructor.functions`
     // (the loop above ran before any body lowering); now emit the
     // body so calls to `Global(name)` from other functions resolve.
-    constructor.select_storage_accesses(&function_variants.accesses_for(program, None));
+    constructor.select_storage_accesses(&function_variants.accesses_for(program, None), None);
     constructor.select_functions(function_variants.emissions_for_context(None));
     for constant in &program.constants {
         let return_type = constructor.polytype_to_spirv(&constant.body.return_ty)?;
@@ -603,7 +610,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         };
 
         entry_info.push((entry.id, entry.name.clone(), spirv_model, local_size));
-        constructor.select_storage_accesses(&entry.spirv_storage_accesses());
+        constructor.select_storage_accesses(&entry.spirv_storage_accesses(), Some(entry.id));
         constructor.select_functions(function_variants.emissions_for_entry(entry.id));
         entry::lower_ssa_entry_point(&mut constructor, entry)?;
     }
@@ -632,7 +639,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
             // entry points may have buffers this one doesn't reference.
             let entry = program.entry_points.iter().find(|e| e.id == *entry_id);
             if let Some(entry) = entry {
-                constructor.select_storage_accesses(&entry.spirv_storage_accesses());
+                constructor.select_storage_accesses(&entry.spirv_storage_accesses(), Some(entry.id));
                 for input in &entry.inputs {
                     if let Some(br) = input.storage_binding() {
                         if let Some(buffer) = constructor.storage_buffer(br) {

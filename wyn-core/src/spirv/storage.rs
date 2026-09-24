@@ -1,7 +1,6 @@
 //! `Constructor` methods that turn `#[storage]` / `#[uniform]`
 //! bindings into Block-decorated SPIR-V variables with ArrayStride
-//! and member-offset decorations, plus the `(set, binding) → buffer_id`
-//! map view-indexing uses to recover a buffer var.
+//! and member-offset decorations.
 
 use super::*;
 use crate::host;
@@ -10,21 +9,6 @@ use crate::ssa;
 use crate::types;
 
 impl Constructor {
-    /// Get or assign a sequential buffer_id for a (set, binding) pair.
-    /// Also registers the buffer_var in buffer_vars for later lookup.
-    pub(super) fn get_or_assign_buffer_id(&mut self, set: u32, binding: u32) -> u32 {
-        let use_key = self.storage_use(BindingRef::new(set, binding));
-        if let Some(&id) = self.buffer_id_map.get(&use_key) {
-            return id;
-        }
-        let id = self.buffer_vars.len() as u32;
-        let buffer =
-            self.storage_buffers.get(&use_key).expect("get_or_assign_buffer_id: storage buffer must exist");
-        self.buffer_vars.push((buffer.variable, buffer.element_type));
-        self.buffer_id_map.insert(use_key, id);
-        id
-    }
-
     /// Apply ArrayStride decorations for all nested fixed-size arrays in a type
     /// used inside a storage buffer. Uses layout::buffer_array_strides() for the
     /// stride values and walks nested arrays via the builder's
@@ -253,7 +237,7 @@ impl Constructor {
 
     /// Create a storage buffer variable for compute shaders.
     /// Returns the variable ID. Also registers it in storage_buffers for later lookup.
-    /// Idempotent: returns existing variable if already created for this (set, binding).
+    /// Idempotent for the same descriptor slot, element type, and access.
     pub(super) fn create_storage_buffer(
         &mut self,
         array_ty: &PolyType<TypeName>,
@@ -278,14 +262,18 @@ impl Constructor {
             binding: BindingRef::new(set, binding),
             writable,
         };
+        let elem_spirv = self.storage_polytype_to_spirv(elem_ty)?;
+        self.storage_buffer_types.insert((self.current_entry, use_key.binding), elem_spirv);
+        // Helpers without an entry context retain a module-level fallback.
+        self.storage_buffer_types.entry((None, use_key.binding)).or_insert(elem_spirv);
+        let key = (use_key, elem_spirv);
         // Return existing if already created
-        if let Some(buffer) = self.storage_buffers.get(&use_key) {
+        if let Some(buffer) = self.storage_buffers.get(&key) {
             return Ok(buffer.variable);
         }
         if types::contains_16_bit_scalar(elem_ty) {
             self.builder.enable_capability(spirv::Capability::StorageBuffer16BitAccess);
         }
-        let elem_spirv = self.storage_polytype_to_spirv(elem_ty)?;
 
         // The std430 array stride is the element size rounded up to the
         // element's alignment — a `vec3<T>` is 12 bytes but aligns to 16, so
@@ -335,7 +323,7 @@ impl Constructor {
 
         // Store for later lookup (ptr_type used for StorageView struct construction)
         self.storage_buffers.insert(
-            use_key,
+            key,
             StorageBufferInfo {
                 variable: var_id,
                 element_type: elem_spirv,

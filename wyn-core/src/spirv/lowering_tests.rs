@@ -9,6 +9,33 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn unrelated_entries_preserve_storage_buffer_element_types() {
+    let source = include_str!("../../../testfiles/graphics_compute_entry_buffer_types.wyn");
+    for source in [
+        source.to_string(),
+        source.replace("weights[0]", "weights[length(weights) - 1]"),
+        source
+            .replace("weights: []f32", "weights: []vec4f32")
+            .replace("weights[0]", "weights[0].x")
+            .replace("values: []vec4f32) []vec4f32", "values: []f32) []f32"),
+    ] {
+        let (draw, compute) = source.split_once("entry compute").unwrap();
+        let compute = format!("entry compute{compute}");
+        for source in [draw.to_string(), source.to_string(), format!("{compute}\n{draw}")] {
+            let words = compile_to_spirv(&source).unwrap();
+            let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn test_simple_constant() {
     let spirv = compile_to_spirv("def x = 42").unwrap();
     assert!(!spirv.is_empty());

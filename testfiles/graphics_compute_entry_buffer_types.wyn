@@ -1,0 +1,9 @@
+-- Entries reusing descriptor slots must retain their own buffer element types.
+-- Build: wyn build --graphics -O --target-double rust-wgpu --target spirv
+--   testfiles/graphics_compute_entry_buffer_types.wyn -o tmp/graphics_compute_entry_buffer_types.spv
+-- Check: spirv-val --target-env vulkan1.2 tmp/graphics_compute_entry_buffer_types.spv
+entry draw(weights: []f32, target: render_target<vec4f32>) render_target<vec4f32> =
+  let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ())) in
+  shade(target, fragments, |_, _, _, _, _| @[weights[0], 0.0, 0.0, 1.0])
+entry compute(values: []vec4f32) []vec4f32 = map(|v| v * 2.0, values)

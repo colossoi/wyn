@@ -250,18 +250,15 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 ty
             )
         })?;
-        let buf_id = self.constructor.get_or_assign_buffer_id(br.set, br.binding);
-        let (buffer_var, elem_ty) =
-            self.constructor.buffer_vars.get(buf_id as usize).copied().ok_or_else(|| {
-                err_spirv_at!(
-                    self.blame_span(),
-                    "view buffer (set={}, binding={}) → buffer_id {} not in buffer_vars",
-                    br.set,
-                    br.binding,
-                    buf_id
-                )
-            })?;
-        Ok((buffer_var, elem_ty))
+        let Some(buffer) = self.constructor.storage_buffer(br) else {
+            bail_spirv_at!(
+                self.blame_span(),
+                "view buffer (set={}, binding={}) has no storage declaration in this entry",
+                br.set,
+                br.binding
+            );
+        };
+        Ok((buffer.variable, buffer.element_type))
     }
 
     pub(super) fn lower_view_index(
