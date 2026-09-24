@@ -1,5 +1,9 @@
 //! WGSL backend unit tests.
 
+// Test assertions intentionally panic on unexpected errors; production code
+// retains the parent module's unwrap/expect bans.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use super::{uniquify_parameter_name, validate_wgsl_identifier, wgsl_mangle, TypeEmitter};
 use crate::ast::TypeName;
 use crate::compile_thru_ssa;

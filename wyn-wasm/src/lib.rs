@@ -244,6 +244,7 @@ fn error_location(source: &str, e: &CompilerError) -> Option<ErrorLocation> {
 
 fn format_error(e: &CompilerError) -> String {
     match e {
+        CompilerError::Host(err) => err.to_string(),
         CompilerError::ParseError(msg, _) => format!("Parse error: {}", msg),
         CompilerError::TypeError(msg, _) => format!("Type error: {}", msg),
         CompilerError::UndefinedVariable(name, _) => format!("Undefined variable: '{}'", name),

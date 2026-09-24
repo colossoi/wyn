@@ -1,3 +1,7 @@
+// Test assertions intentionally panic on unexpected errors; production code
+// retains the parent module's unwrap/expect bans.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use super::*;
 
 #[test]
