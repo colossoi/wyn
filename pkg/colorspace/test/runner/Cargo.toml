@@ -1,0 +1,16 @@
+[package]
+name = "colorspace-checks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+wyn-host-interp = { path = "../../../../wyn-host-interp", features = ["wgpu"] }
+wgpu = { version = "27", features = ["spirv"] }
+pollster = "0.3"
+
+[[test]]
+name = "reference"
+path = "reference.rs"

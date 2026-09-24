@@ -1,0 +1,75 @@
+-- Explicit, allocation-free colour math for shader code.
+-- RGB values are straight (unpremultiplied). Alpha is never transformed.
+-- Conversions preserve negative and HDR values; no implicit clipping, exposure,
+-- tone mapping or white-point adaptation. See README.md for domains and units.
+
+module colorspace = {
+  module srgb = {
+    -- IEC sRGB piecewise transfer, with the reflected extension in CSS Color 4.
+    -- Decode encoded sRGB to linear-light sRGB; this is not a gamma-2.2 power.
+    def decode_channel(encoded: f32) f32 =
+      let a = f32.abs(encoded) in
+      if a <= 0.04045f32 then encoded / 12.92f32
+      else f32.sign(encoded) * f32.pow((a + 0.055f32) / 1.055f32, 2.4f32)
+
+    def encode_channel(linear: f32) f32 =
+      let a = f32.abs(linear) in
+      if a <= 0.0031308f32 then linear * 12.92f32
+      else f32.sign(linear) * (1.055f32 * f32.pow(a, 1.0f32 / 2.4f32) - 0.055f32)
+
+    def decode(rgb: vec3f32) vec3f32 =
+      @[decode_channel(rgb.x), decode_channel(rgb.y), decode_channel(rgb.z)]
+
+    def encode(rgb: vec3f32) vec3f32 =
+      @[encode_channel(rgb.x), encode_channel(rgb.y), encode_channel(rgb.z)]
+  }
+
+  module linear_srgb = {
+    -- CIE XYZ, D65 white (x=.3127, y=.3290), relative Y=1 for RGB white=1.
+    -- Coefficients from the sRGB primaries; row dot products avoid ambiguity
+    -- about the matrix storage convention of a consuming renderer.
+    def to_xyz_d65(rgb: vec3f32) vec3f32 =
+      @[dot(rgb, @[0.4123907993f32, 0.3575843394f32, 0.1804807884f32]),
+        dot(rgb, @[0.2126390059f32, 0.7151686788f32, 0.0721923154f32]),
+        dot(rgb, @[0.0193308187f32, 0.1191947798f32, 0.9505321522f32])]
+
+    def from_xyz_d65(xyz: vec3f32) vec3f32 =
+      @[dot(xyz, @[3.2409699419f32, -1.5373831776f32, -0.4986107603f32]),
+        dot(xyz, @[-0.9692436363f32, 1.8759675015f32, 0.0415550574f32]),
+        dot(xyz, @[0.0556300797f32, -0.2039769589f32, 1.0569715142f32])]
+
+    -- Relative CIE Y, not encoded luma and not inherently a value in nits.
+    def luminance(rgb: vec3f32) f32 =
+      dot(rgb, @[0.2126390059f32, 0.7151686788f32, 0.0721923154f32])
+  }
+
+  module gamma = {
+    -- Generic signed power transfer. gamma must be finite and strictly positive.
+    -- Explicitly separate from sRGB: decode raises to gamma, encode to 1/gamma.
+    def decode_channel(encoded: f32, gamma: f32) f32 =
+      f32.sign(encoded) * f32.pow(f32.abs(encoded), gamma)
+
+    def encode_channel(linear: f32, gamma: f32) f32 =
+      f32.sign(linear) * f32.pow(f32.abs(linear), 1.0f32 / gamma)
+
+    def decode(rgb: vec3f32, gamma: f32) vec3f32 =
+      @[decode_channel(rgb.x, gamma), decode_channel(rgb.y, gamma), decode_channel(rgb.z, gamma)]
+
+    def encode(rgb: vec3f32, gamma: f32) vec3f32 =
+      @[encode_channel(rgb.x, gamma), encode_channel(rgb.y, gamma), encode_channel(rgb.z, gamma)]
+  }
+
+  module hdr = {
+    -- Scene-linear RGB; +1 stop doubles light. No clipping or display encoding.
+    def expose(rgb: vec3f32, stops: f32) vec3f32 = rgb * f32.exp2(stops)
+
+    -- Explicit reference-white scaling of linear RGB tristimulus values.
+    -- Luminance of the resulting RGB is in cd/m^2 (nits). White must be > 0.
+    -- These are unit conversions, not PQ/HLG encoders or HDR display transforms.
+    def relative_to_nits(rgb: vec3f32, reference_white_nits: f32) vec3f32 =
+      rgb * reference_white_nits
+
+    def nits_to_relative(rgb_nits: vec3f32, reference_white_nits: f32) vec3f32 =
+      rgb_nits / reference_white_nits
+  }
+}
