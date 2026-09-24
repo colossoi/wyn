@@ -162,7 +162,7 @@ fn inline_stage_helpers(
         active: LookupSet::new(),
     }
     .rewrite_owned(term);
-    normalize_static_resource_aggregates(term, term_ids)
+    normalize_stage_values(term, term_ids)
 }
 
 struct StageHelperInliner<'a> {
@@ -253,14 +253,15 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
     }
 }
 
-/// Scalar-replace structural aggregates containing compile-time-only resource
-/// leaves. Such leaves have no shader value representation, while sibling
-/// fields (for example an array view captured beside a render target) still do.
-/// Repeating to a fixed point also removes projections exposed by substitution.
-fn normalize_static_resource_aggregates(mut term: Term, term_ids: &mut TermIdSource) -> Term {
+/// Inline aliases and structural tuple/record packing before stage planning:
+/// naming or assembling existing arrays does not create a compute producer.
+/// Also scalar-replace aggregates containing compile-time-only resources, whose
+/// leaves have no shader representation. Keep projections of computed values
+/// bound so SOAC inputs retain symbols and producer provenance. Repeating to a
+/// fixed point folds projections exposed by substitution.
+fn normalize_stage_values(mut term: Term, term_ids: &mut TermIdSource) -> Term {
     loop {
-        let (rewritten, changed) =
-            StaticResourceAggregateNormalizer { term_ids }.rewrite_owned_tracked(term);
+        let (rewritten, changed) = StageValueNormalizer { term_ids }.rewrite_owned_tracked(term);
         term = rewritten;
         if !changed {
             return term;
@@ -268,11 +269,11 @@ fn normalize_static_resource_aggregates(mut term: Term, term_ids: &mut TermIdSou
     }
 }
 
-struct StaticResourceAggregateNormalizer<'a> {
+struct StageValueNormalizer<'a> {
     term_ids: &'a mut TermIdSource,
 }
 
-impl TermRewriter<data::Empty, data::Empty> for StaticResourceAggregateNormalizer<'_> {
+impl TermRewriter<data::Empty, data::Empty> for StageValueNormalizer<'_> {
     fn next_term_id(&mut self) -> super::TermId {
         self.term_ids.next_id()
     }
@@ -284,9 +285,9 @@ impl TermRewriter<data::Empty, data::Empty> for StaticResourceAggregateNormalize
                 name_ty,
                 rhs,
                 body,
-            } if !is_static_resource_type(&name_ty)
-                && contains_static_resource_type(&name_ty)
-                && is_structural_value(&rhs) =>
+            } if is_structural_value(&rhs)
+                && (matches!(&rhs.kind, TermKind::Var(_) | TermKind::Tuple(_))
+                    || (!is_static_resource_type(&name_ty) && contains_static_resource_type(&name_ty))) =>
             {
                 let replacement = *rhs;
                 let body = super::subst::substitute_with(
