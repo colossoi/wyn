@@ -6,22 +6,32 @@
 module colorspace = {
   module srgb = {
     -- IEC sRGB piecewise transfer, with the reflected extension in CSS Color 4.
-    -- Decode encoded sRGB to linear-light sRGB; this is not a gamma-2.2 power.
-    def decode_channel(encoded: f32) f32 =
+    -- Normalized encoded sRGB -> linear-light sRGB, with a scalar channel helper.
+    -- Conventional encoded values are 0..1; signed and HDR values are preserved.
+    def to_linear_channel(encoded: f32) f32 =
       let a = f32.abs(encoded) in
       if a <= 0.04045f32 then encoded / 12.92f32
       else f32.sign(encoded) * f32.pow((a + 0.055f32) / 1.055f32, 2.4f32)
 
-    def encode_channel(linear: f32) f32 =
+    def from_linear_channel(linear: f32) f32 =
       let a = f32.abs(linear) in
       if a <= 0.0031308f32 then linear * 12.92f32
       else f32.sign(linear) * (1.055f32 * f32.pow(a, 1.0f32 / 2.4f32) - 0.055f32)
 
-    def decode(rgb: vec3f32) vec3f32 =
-      @[decode_channel(rgb.x), decode_channel(rgb.y), decode_channel(rgb.z)]
+    -- Main RGB API. Primaries and white point stay the same; only encoding changes.
+    def to_linear(rgb: vec3f32) vec3f32 =
+      @[to_linear_channel(rgb.x), to_linear_channel(rgb.y), to_linear_channel(rgb.z)]
 
-    def encode(rgb: vec3f32) vec3f32 =
-      @[encode_channel(rgb.x), encode_channel(rgb.y), encode_channel(rgb.z)]
+    def from_linear(rgb: vec3f32) vec3f32 =
+      @[from_linear_channel(rgb.x), from_linear_channel(rgb.y), from_linear_channel(rgb.z)]
+
+    -- Straight RGBA only: convert RGB and copy alpha unchanged, without clipping.
+    -- These wrappers do not unpremultiply or premultiply the input/output.
+    def to_linear_rgba(rgba: vec4f32) vec4f32 =
+      let rgb = to_linear(rgba.xyz) in @[rgb.x, rgb.y, rgb.z, rgba.w]
+
+    def from_linear_rgba(rgba: vec4f32) vec4f32 =
+      let rgb = from_linear(rgba.xyz) in @[rgb.x, rgb.y, rgb.z, rgba.w]
   }
 
   module linear_srgb = {

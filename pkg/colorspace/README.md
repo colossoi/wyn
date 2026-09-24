@@ -7,14 +7,17 @@ after adding a `colorspace` dependency pointing to this package.
 The API keeps **primaries/white point**, **transfer function**, **exposure** and
 **display rendering** separate. An RGB triplet alone does not specify a colour.
 Function names and namespaces state the expected representation; values remain
-ordinary `vec3f32` so the package composes with existing shaders.
+ordinary `vec3f32`, with `vec4f32` convenience wrappers for straight RGBA.
 
 ## Implemented core
 
 | Function under `colorspace` | Input → output |
 | --- | --- |
-| `srgb.decode(rgb)` / `decode_channel(x)` | Encoded sRGB → linear-light sRGB |
-| `srgb.encode(rgb)` / `encode_channel(x)` | Linear-light sRGB → encoded sRGB |
+| `srgb.to_linear(rgb)` | Encoded sRGB `vec3f32` → linear-light sRGB `vec3f32` |
+| `srgb.from_linear(rgb)` | Linear-light sRGB `vec3f32` → encoded sRGB `vec3f32` |
+| `srgb.to_linear_rgba(rgba)` | Decode RGB in a straight `vec4f32`; copy alpha unchanged |
+| `srgb.from_linear_rgba(rgba)` | Encode RGB in a straight `vec4f32`; copy alpha unchanged |
+| `srgb.to_linear_channel(x)` / `from_linear_channel(x)` | Scalar `f32` transfer helpers for individual channels |
 | `linear_srgb.to_xyz_d65(rgb)` | Linear-light sRGB → CIE XYZ, D65 |
 | `linear_srgb.from_xyz_d65(xyz)` | CIE XYZ, D65 → linear-light sRGB |
 | `linear_srgb.luminance(rgb)` | Linear-light sRGB → relative CIE Y |
@@ -24,9 +27,23 @@ ordinary `vec3f32` so the package composes with existing shaders.
 | `hdr.relative_to_nits(rgb, reference_white_nits)` | Relative linear RGB → absolute linear RGB scaling |
 | `hdr.nits_to_relative(rgb, reference_white_nits)` | Inverse reference-white scaling |
 
-All RGB arguments/results are `vec3f32`; channel operations and luminance use
-`f32`. Alpha stays separate and unchanged. Nonlinear transfers expect straight,
-unpremultiplied RGB; unpremultiply first when working with premultiplied data.
+Use the `vec3f32` functions for RGB colors and light. Use the `vec4f32` wrappers
+for straight RGBA pixels: only RGB is transformed, and alpha is copied exactly,
+without encoding, decoding or clipping. RGB is still converted at alpha zero;
+the wrapper neither discards hidden color nor premultiplies it. The scalar helpers
+use normalized `f32` channels (for example, 128 in an 8-bit image is `128/255`).
+The float type alone does not identify the encoding. Other RGB functions take
+`vec3f32`; channel operations and luminance return `f32`.
+
+Nonlinear transfers expect straight, unpremultiplied RGB. If RGB was multiplied
+by alpha in the source representation, explicitly unpremultiply before conversion
+and premultiply afterward if the destination requires it. These wrappers do not
+handle that operation or its zero-alpha policy automatically. Channel independence
+applies to transfer curves; conversions such as RGB to XYZ mix channels.
+
+The initial `srgb.decode` / `encode` and their `_channel` names have been renamed
+to `to_linear` / `from_linear` and their `_channel` forms. There are no legacy
+aliases in this early API. The generic `gamma.decode` / `encode` names are unchanged.
 
 Inputs must be finite, gamma and reference white strictly positive, and magnitudes
 small enough that intermediate/results fit in `f32`. The shader functions do not
@@ -50,7 +67,11 @@ level, display peak or exposure.
 import "pkg:colorspace"
 
 def authored_color: vec3f32 =
-  colorspace.srgb.decode(@[0.30f32, 0.49f32, 0.69f32])
+  colorspace.srgb.to_linear(@[0.30f32, 0.49f32, 0.69f32])
+
+-- Decode RGB while keeping alpha at 0.5.
+def authored_pixel: vec4f32 =
+  colorspace.srgb.to_linear_rgba(@[0.30f32, 0.49f32, 0.69f32, 0.5f32])
 
 def adjust_light(rgb: vec3f32, stops: f32) vec3f32 =
   colorspace.hdr.expose(rgb, stops)
@@ -59,7 +80,7 @@ def adjust_light(rgb: vec3f32, stops: f32) vec3f32 =
 Lighting, blending and exposure happen in linear light. A renderer then applies
 its chosen tone/gamut mapping, followed by display encoding **once**. An sRGB
 texture sampler already decodes color textures. An sRGB output attachment already
-encodes linear output; do not also call `srgb.encode` there. Normal maps and
+encodes linear output; do not also call `srgb.from_linear` there. Normal maps and
 roughness are data, not encoded colours. This package does not install a renderer
 display transform or change its sky palette.
 
@@ -101,7 +122,8 @@ cargo test --manifest-path pkg/colorspace/test/runner/Cargo.toml -- --nocapture
 The runner compiles and executes the actual package through both SPIR-V and WGSL,
 using runtime input buffers. It checks an 8-bit ramp, both transfer knees and
 their signed counterparts, known gray/white/primary references, XYZ and transfer
-round trips, negative/HDR values, exposure stops and explicit reference-white
+round trips, agreement between RGB and RGBA conversion, exact alpha preservation
+(including zero, fractional and out-of-range values), negative/HDR values, exposure stops and explicit reference-white
 scaling against `f64` references. Tolerance is `2e-5 * max(1, abs(expected))`.
 Generated shader files go to the system temporary directory. For compile-only:
 

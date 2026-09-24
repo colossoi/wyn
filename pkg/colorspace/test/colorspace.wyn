@@ -2,11 +2,13 @@ import "../src/lib"
 
 -- Runtime arrays keep the checks on the GPU, including negative/HDR branches.
 entry transfer(xs: []f32) []vec4f32 =
-  map(|x| @[colorspace.srgb.decode_channel(x), colorspace.srgb.encode_channel(x),
+  map(|x| @[colorspace.srgb.to_linear_channel(x), colorspace.srgb.from_linear_channel(x),
             colorspace.gamma.decode_channel(x, 2.2f32), colorspace.gamma.encode_channel(x, 2.2f32)], xs)
 
-entry decode(xs: []vec3f32) []vec3f32 = map(colorspace.srgb.decode, xs)
-entry encode(xs: []vec3f32) []vec3f32 = map(colorspace.srgb.encode, xs)
+entry to_linear(xs: []vec3f32) []vec3f32 = map(colorspace.srgb.to_linear, xs)
+entry from_linear(xs: []vec3f32) []vec3f32 = map(colorspace.srgb.from_linear, xs)
+entry to_linear_rgba(xs: []vec4f32) []vec4f32 = map(colorspace.srgb.to_linear_rgba, xs)
+entry from_linear_rgba(xs: []vec4f32) []vec4f32 = map(colorspace.srgb.from_linear_rgba, xs)
 entry xyz(xs: []vec3f32) []vec3f32 = map(colorspace.linear_srgb.to_xyz_d65, xs)
 entry rgb(xs: []vec3f32) []vec3f32 = map(colorspace.linear_srgb.from_xyz_d65, xs)
 entry luminance(xs: []vec3f32) []f32 = map(colorspace.linear_srgb.luminance, xs)

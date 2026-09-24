@@ -145,7 +145,7 @@ fn reference_vectors_and_hdr_roundtrips_on_both_shader_targets() {
         }
 
         for (enc, dec, parameter) in [
-            ("encode", "decode", None),
+            ("from_linear", "to_linear", None),
             ("gamma_encode", "gamma_decode", Some(2.2)),
         ] {
             let encoded = run(&program, &mut gpu, enc, &rgb, parameter);
@@ -161,6 +161,48 @@ fn reference_vectors_and_hdr_roundtrips_on_both_shader_targets() {
             }
             let decoded = run(&program, &mut gpu, dec, &encoded, parameter);
             channels(&decoded, &rgb, "transfer roundtrip including negative/HDR");
+        }
+
+        // Straight RGBA: RGB follows the same reference curve even at alpha=0.
+        // Include fractional, signed-zero and out-of-range alpha to detect any
+        // transfer, clipping or premultiplication of the fourth component.
+        let rgba: Vec<f32> = rgb
+            .chunks_exact(4)
+            .zip([0., 1., 0.25, 0.5, 0.8, -0.0, -0.5, 1.5])
+            .flat_map(|(rgb, alpha)| [rgb[0], rgb[1], rgb[2], alpha])
+            .collect();
+        for (entry, rgb_entry, inverse, reference) in [
+            (
+                "to_linear_rgba",
+                "to_linear",
+                "from_linear_rgba",
+                decode as fn(f64) -> f64,
+            ),
+            (
+                "from_linear_rgba",
+                "from_linear",
+                "to_linear_rgba",
+                encode as fn(f64) -> f64,
+            ),
+        ] {
+            let converted = run(&program, &mut gpu, entry, &rgba, None);
+            let rgb_only = run(&program, &mut gpu, rgb_entry, &rgba, None);
+            channels(&converted, &rgb_only, "RGBA and RGB conversions agree");
+            for (input, actual) in rgba.chunks_exact(4).zip(converted.chunks_exact(4)) {
+                for i in 0..3 {
+                    close(actual[i], reference(f64::from(input[i])), entry);
+                }
+                assert_eq!(actual[3].to_bits(), input[3].to_bits(), "{entry}: alpha changed");
+            }
+            let recovered = run(&program, &mut gpu, inverse, &converted, None);
+            channels(&recovered, &rgba, "RGBA roundtrip including negative/HDR");
+            for (input, actual) in rgba.chunks_exact(4).zip(recovered.chunks_exact(4)) {
+                assert_eq!(
+                    actual[3].to_bits(),
+                    input[3].to_bits(),
+                    "RGBA roundtrip: alpha changed"
+                );
+            }
         }
         for stops in [-2., 0., 1., 2.5] {
             let exposed = run(&program, &mut gpu, "expose", &rgb, Some(stops));
@@ -188,6 +230,6 @@ fn reference_vectors_and_hdr_roundtrips_on_both_shader_targets() {
             let relative = run(&program, &mut gpu, "from_nits", &nits, Some(white));
             channels(&relative, &rgb, "nit roundtrip");
         }
-        println!("{target}: transfer thresholds, 8-bit ramp, D65/primaries, negative/HDR values, exposure and nit scaling passed");
+        println!("{target}: transfer thresholds, 8-bit ramp, RGB/RGBA agreement and unchanged alpha, D65/primaries, negative/HDR values, exposure and nit scaling passed");
     }
 }
