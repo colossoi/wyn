@@ -29,56 +29,159 @@ For package layout, manifests, dependencies, imports, and build commands, see
 
 ## Compiler Architecture
 
-The native CLI and WebAssembly compiler use the same typestate pipeline:
+The [native CLI](wyn/src/main.rs) and [WebAssembly compiler](wyn-wasm/src/lib.rs)
+use the same pass order: frontend → typed lambda calculus (TLC) → egglog → SSA →
+SPIR-V or WGSL. Typestate checkpoints enforce the order of the public passes.
 
-1. **Frontend** parses modules, resolves names and resources, and type checks
-   the source. Type holes are rejected unless the CLI requests default values.
-2. **TLC** specializes the typed functional program, extracts authored stages,
-   pins entry buffers, normalizes SOACs and array representations, monomorphizes,
-   inlines helpers, defunctionalizes, applies ownership, removes unreachable
-   definitions, and infers input slice bounds.
-3. **Egglog** imports TLC into typed sidecar arenas, fuses SOACs, inserts the
-   expression graph, simplifies scalar expressions, places computations, and
-   schedules physical kernels and resources.
-4. **SSA** receives scheduled blocks and the published shader interface,
-   optimizes and places pure instructions, and removes unreachable functions.
-5. **Backend** validates and legalizes SSA for SPIR-V or WGSL, then emits the
-   shader and its runtime contract.
+### Frontend
+
+[ParsedModules::load](wyn-core/src/frontend.rs) parses the source module graph
+and loads the compiler prelude. `ParsedModules::type_check` then resolves imports,
+elaborates modules, resolves names and resources, folds integer constants and
+static array dimensions, resolves type placeholders and `open` declarations,
+and runs type inference and stage-context validation. The resulting `TypeChecked`
+AST stores inferred types, definition schemes, resolved identifiers, and warnings.
+
+Before TLC lowering, `ast_type_holes::reject_type_holes` rejects source `???`
+expressions. CLI builds with `--fill-holes` instead use `fill_type_holes` to replace
+them with typed defaults where supported.
+
+### TLC passes
+
+These passes run in the order shown. SOACs are second-order array combinators,
+such as `map`, `reduce`, and `scan`; SoA means structure of arrays.
+
+| Pass (`tlc::`) | Responsibility |
+| --- | --- |
+| `lower_from_ast` | Lower the typed AST to polymorphic TLC, including pattern lowering, while retaining unified root entries and source ownership contracts. |
+| `validate_ownership` | Check source consumption and aliasing rules before evaluation or inlining can erase call boundaries. This includes graphics resource ownership. |
+| `partial_eval` | Evaluate known applications and constants, simplify their residual terms, and retain computations that depend on runtime values. |
+| `extract_stages` | Extract compute, vertex, and fragment entries and their interfaces from root orchestration, including graphics callbacks and the compute work feeding them. |
+| `pin_entry_buffers` | Substitute each storage parameter's assigned binding into its buffer-region type before specialization. |
+| `normalize_soacs` | Convert arrays of tuples to tuples of arrays, normalize multi-input map parameters, and turn standalone `zip` into tuple construction. |
+| `monomorphize` | Specialize intrinsic calls by type and instantiate reachable user definitions from entry points. Array representation specialization is a separate step. |
+| `rep_specialize` | Specialize callees with abstract-array parameters for known producer representations, including the bounded capacity of filter results. |
+| `inline_small` | Inline eligible small functions and constants. |
+| `force_inline_soac_helpers` | Repeatedly inline helpers containing SOACs, array producers, or length queries so fusion and dispatch planning can see that work in the caller. |
+| `renormalize_inlined_soa` | Repeat SoA and SOAC normalization for array structure exposed by inlining. |
+| `canonicalize_conditional_producers` | Rewrite supported array-valued conditionals into a pointwise map with the branch inside its callback. |
+| `normalize_soacs_to_anf` | Lift nested SOAC expressions into explicit let bindings, exposing producer/consumer edges for egglog. |
+| `float_runtime_index_nested_producers` | Move eligible runtime-indexed producers out of nested callbacks before defunctionalization, exposing the producer and gather separately. |
+| `defunctionalize` | Lift lambdas, make captures explicit, specialize higher-order functions, and lower closure applications to direct calls. |
+| `fold_generated_lambdas` | Inline applications of compiler-generated lifted lambdas and remove definitions made unreachable. |
+| `apply_ownership` | Promote eligible array updates to in-place updates and mark unique SOAC inputs. Egglog later decides storage reuse using the fused program. |
+| `filter_reachable` | Remove definitions not reachable from entry points. |
+| `infer_input_slice_bounds` | Attach minimum input-buffer sizes where every use of an input is a constant prefix slice. Other inputs still need sizes from their interface or runtime. |
+
+`--output-tlc` captures the `BuffersPinned` checkpoint, before SoA normalization
+and monomorphization. The TLC input to egglog is `InputSliceBoundsInferred`.
 
 ### Egglog checkpoints
 
+Screma is the combined scan/reduce/map representation used for collective fusion.
+
 | Transition | Output checkpoint | Responsibility |
 | --- | --- | --- |
-| `egglog::from_tlc` | `Imported` | Import normalized TLC, callable bodies, types, SOACs, and source ABI |
-| `egglog::fuse` | `Fused` | Derive fusion candidates and compose selected sidecar bodies |
-| `egglog::insert_expressions` | `Expressions` | Build typed expression DAGs, region uses, and dependencies |
-| `egglog::simplify` | `Simplified` | Fold constants and optionally apply algebraic rewrites (`-O`) |
-| `egglog::place` | `Placed` | Place expressions across branches and loops |
-| `egglog::schedule` | `Scheduled` | Plan stages, storage, scratch, dispatch domains, and dependencies |
-| `egglog::to_ssa` | SSA `Elaborated` | Emit scheduled blocks and publish the shader/runtime ABI |
+| `egglog::from_tlc` | `Imported` | Import normalized TLC, callable bodies, types, and source ABI into typed arenas; construct Scremas for map/reduce/scan and export structural fusion facts. |
+| `egglog::fuse` | `Fused` | Complete a deterministic greedy fusion plan on a persistent graph, then construct the selected bodies in the sidecar arenas. |
+| `egglog::insert_expressions` | `Expressions` | Insert a separate typed expression DAG, region interfaces and uses, structured control, and execution dependencies into egglog. |
+| `egglog::simplify` | `Simplified` | Fold constants and simplify scalar expressions in that graph; optionally explore algebraic rewrites with `-O`, then extract and apply replacements. |
+| `egglog::place` | `Placed` | Use Rust analysis to place safe shared and loop-invariant expressions in structured regions, including SOAC captures. Memory reads and opaque calls are not speculated. |
+| `egglog::schedule` | `Scheduled` | Derive execution recipes, host/device residency, storage allocation and reuse, output routes, scratch, dispatch domains, and dependencies; instantiate executable blocks. |
+| `egglog::to_ssa` | SSA `Elaborated` | Lower scheduled kernels for the selected target and publish source inputs, planned resources, outputs, and host computations through the shader/runtime ABI. |
 
-Each egglog pass owns its graph. Extracted expressions, types, scalar bodies,
-and scheduled blocks pass between checkpoints in typed sidecar arenas.
-Fusion sees SOAC layouts and producer/consumer, use, and effect constraints;
-scalar syntax and lambda bodies remain opaque to fusion.
+Types, expressions, bodies, control flow, and metadata remain in typed `IdArena`
+sidecars. Fusion, scalar simplification, and scheduling use separate egglog
+graphs; expression insertion hands its graph directly to scalar simplification.
+Interning expression syntax does not share runtime values across invocations:
+region-use facts and placement determine where values are evaluated, and operation
+identities keep effectful executions distinct. Dependency analysis works backward
+from results and required effects and orders only live operations; unused records
+can remain in the sidecar.
 
-Maps use elementwise kernels. Reductions use chunk and combine dispatches;
-scans add offset application, and filters use flags, offsets, and compaction.
-Nested array work becomes local device loops. Physical kernel metadata retains
-stable identities, dependencies, dispatch domains, and resource accesses.
-`PipelineTopologyPolicy::AuthoredOnly` (`--direct`) prevents compiler-generated
-host stages and intermediate resources.
+### Fusion
 
-### Backend boundary
+[fusion.egg](wyn-core/src/egglog/fusion/fusion.egg) plans over structural summaries:
+iteration domains, SOAC layouts, producer/consumer links, uses, scalar dependency
+summaries, and memory/effect constraints. Scalar expression syntax and callback
+bodies remain opaque to the fusion rules. Source facts are analyzed once; the
+planner contracts groups on a persistent graph and records the complete plan
+before Rust constructs the composed bodies.
 
-`lower_ssa_to_spirv` and `lower_ssa_to_wgsl_with_program_and_options` perform
-SSA optimization, expression placement, reachability filtering, and target
-preparation. The WGSL path also adapts push-constant contracts to storage
-parameter blocks. The compiler publishes a host program that records resource lifetimes, bindings,
-and dispatch order. See [HOST.md](HOST.md) for WHL and Rust/WGPU output.
+Supported cases include vertical producer/consumer fusion, horizontal fusion of
+compatible independent maps/scans/reductions, and retention of shared producer
+outputs. Maps can compose with filters and indexed operations; eligible filtered
+reductions become masked collectives, and indexed demands can compute selected
+map elements without materializing the whole array. Scan dependencies, captures,
+region boundaries, and memory/effect barriers constrain these transformations.
+For example, a scan followed by a map can fuse, while a reduction consuming the
+scan's prefix values still requires a separate operation.
 
-Tests can use `compile_thru_frontend`, `compile_thru_tlc`, `compile_thru_ssa`,
-and `compile_thru_spirv` to stop at shared pipeline checkpoints.
+### Scheduling and publication
+
+The scheduling graph combines the rules in `planning.egg`, `execution.egg`,
+`schedule.egg`, `residency.egg`, `allocation.egg`, `reuse.egg`, `dispatch.egg`, and
+`epilogues.egg`. It selects recipes and resources before Rust builds their control
+flow and scalar bodies. Scheduled executable blocks contain no SOAC operations.
+
+For top-level array work, the planner selects these
+[execution recipes](wyn-core/src/egglog/schedule.egg), falling back to ordered
+execution when the callback effects prevent parallel execution:
+
+| Work | Physical execution |
+| --- | --- |
+| Maps without collectives | Parallel elementwise kernels. |
+| Reductions without scans | A chunk dispatch followed by a combine dispatch using one 256-invocation workgroup and an ordered reduction tree. |
+| Scans, possibly fused with reductions | Chunk processing, a single-invocation combine dispatch, then parallel offset application and post-map work. |
+| Filters that still need compaction | One 64-invocation workgroup processes tiles in order, computes predicate prefixes in workgroup memory, writes stable compacted output, and publishes its length. |
+| Eligible indexed reductions | Parallel atomic updates, including compare/exchange where needed. |
+| Eligible bucket scatter | A count-clearing dispatch followed by parallel slot reservation and writes. |
+| Scatter and other work without a parallel-safe recipe | Ordered single-invocation kernels. |
+| Nested array work | Local device loops within the enclosing invocation. |
+
+Collective chunks contain 64 consecutive elements and preserve operand order.
+Grid-stride kernels cap launches at 65,535 workgroups. Empty inputs still initialize
+collective identities and result lengths.
+
+The planner derives CPU availability, bounded rematerialization costs, and scalar
+kernel groups. CPU-available scalar work can run on the host; GPU-dependent work
+stays on the GPU. Cheap immutable expressions can be recomputed at their consumers,
+and compatible consecutive GPU scalar operations can share a kernel, storing only
+results needed outside it. Mutable reads, effects, and unbounded work are excluded
+from rematerialization. Allocation and reuse decisions use post-fusion liveness,
+ownership candidates, and resource accesses.
+
+Physical kernel metadata retains stable identities, dependencies, dispatch domains,
+and resource accesses. The scheduled representation preserves host branches and
+loops, but `to_ssa` still diagnoses conditional or repeated host dispatches as
+unsupported. Published pipelines use static dispatch sites and explicit ordering.
+`PipelineTopologyPolicy::AuthoredOnly` (`--direct`) preserves authored stages and
+rejects programs requiring compiler-created prepasses or intermediate storage.
+
+### SSA and backends
+
+The [backend entry points](wyn-core/src/lib.rs), `lower_ssa_to_spirv` and
+`lower_ssa_to_wgsl_with_program_and_options`, run these passes after `egglog::to_ssa`:
+
+| Pass (`ssa::`) | Responsibility |
+| --- | --- |
+| `optimize` | Inline small helpers, fold constants, reuse dominating immutable expressions, and intern expressions that can safely move. |
+| `place_floating` | Assign reachable floating expressions to concrete control-flow blocks. |
+| `filter_reachable` | Prune functions and constants unreachable from entries. |
+| `prepare_spirv` / `prepare_wgsl` | Remove dead pure instructions, publish texture-sampling requirements, and reject unresolved type representations. SPIR-V also verifies buffer layouts; WGSL first promotes constants needing addressable storage. |
+
+SPIR-V emission lowers blocks and block parameters to SPIR-V control flow and phi
+nodes. WGSL emission structurizes the CFG into statements, branches, and loops,
+applies the selected `u64` policy, and adapts push-constant contracts to storage
+parameter blocks. Both return shader code and a host program recording resource
+lifetimes, bindings, and execution order. See [HOST.md](HOST.md) for WHL and
+Rust/WGPU output.
+
+`--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
+Constant folding and the normal pipeline run without `-O`; that flag enables
+additional egglog algebraic rewrites. Tests can use `compile_thru_frontend`,
+`compile_thru_tlc` (through TLC reachability), `compile_thru_ssa`, and
+`compile_thru_spirv` to stop at shared checkpoints.
 
 ## Example Program
 
@@ -111,8 +214,8 @@ cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl
 # Emit Rust/WGPU host code alongside WGSL
 cargo run --bin wyn -- build input.wyn --target-double rust-wgpu -o output.wgsl
 
-# Use the egglog route with WGSL output and an optional SSA dump
-cargo run --bin wyn -- build input.wyn --egglog -t wgsl -o output.wgsl --output-mir output.ssa
+# Compile to WGSL and dump SSA before backend cleanup
+cargo run --bin wyn -- build input.wyn -t wgsl -o output.wgsl --output-mir output.ssa
 
 # Compile a graphics program directly, without compiler-created prepasses
 cargo run --bin wyn -- build input.wyn -o output.spv --graphics --direct
@@ -121,7 +224,7 @@ cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --graphics --direc
 # Opt in to backend-local u64 emulation for WGSL
 cargo run --bin wyn -- build input.wyn -o output.wgsl -t wgsl --wgsl-emulate-u64
 
-# Type check without generating code (`--graphics` is required for graphics vocabulary)
+# Check types, ownership, and entry interfaces (`--graphics` enables graphics vocabulary)
 cargo run --bin wyn -- check input.wyn --graphics
 
 # Output intermediate representations
@@ -140,66 +243,12 @@ order. If recording fails, discard the encoder because it may contain partial
 commands. Entries requiring CPU readbacks submit the pending commands and readback
 copy together, then resume recording after the read completes.
 
-The egglog route constructs `map`, `reduce`, and `scan` as Scremas
-in `egglog::from_tlc`. Full expressions, types, bodies, argument values, control
-flow, and metadata are retained in `IdArena` sidecars. Fusion receives only a
-summary: SOAC layouts, producer/consumer links, uses, and dependency/effect
-constraints. Scalar expression syntax and lambda bodies are opaque to fusion.
-After fusion, `egglog::insert_expressions` adds a separate typed expression DAG,
-region parameters/results, call and structured-loop links, and data dependencies
-through `expressions.egg`. Region-use facts associate globally interned syntax
-with its use sites; they do not place computations or share runtime values across
-invocations. Operation identities keep effectful executions distinct.
-This route runs through scheduling and `egglog::to_ssa`, then uses the shared
-backend and file output. Egglog timing goes to stderr. Within each function,
-lowering walks backward from outputs and required effects, then topologically
-orders only reachable operations. Dead records can remain in the source sidecar.
-Each egglog pass owns its graph; extracted expressions and scheduled blocks pass
-between stages in the IR. Executable blocks contain no SOACs. Functions adorn
-entry blocks.
-A shared pass loop analyzes a complete graph, derives fusion candidates in
-`fusion.egg`, applies the selected composition to sidecar bodies, and repeats
-with fresh facts. Selection is
-deterministic and greedy. Fresh maps can fuse into single-input maps, scans, or
-reductions across independent operations, preserving captures and logical tuple
-elements. Shared live observers, effect barriers, and region boundaries prevent
-absorption. Horizontal fusion and fusion across scan barriers remain unimplemented.
-
-After expression insertion, `schedule.egg` selects execution recipes. Rust instantiates their
-CFGs and scalar payloads in sidecar arenas. Maps use parallel elementwise kernels;
-reductions use chunk and combine dispatches; scans add an offset application
-dispatch; filters evaluate predicates and local offsets together, then combine
-offsets and compact.
-Chunks contain 64 consecutive elements and preserve operator order. Combine
-dispatches use one invocation. Grid-stride loops cap launches at 65,535
-workgroups. Empty inputs still initialize collective identities and lengths.
-Nested array work becomes local device loops. Potentially colliding indexed
-writes and effectful bodies use ordered single-invocation kernels.
-
-The same scheduling egraph derives CPU availability, bounded rematerialization
-costs, and scalar kernel groups in its existing structure, classification, and
-residency passes. CPU-available scalar computations can run on the host; GPU
-dependencies remain on the GPU. Cheap, immutable scalar expressions can be
-evaluated by their consumers. Consecutive compatible GPU scalar operations share
-a kernel, with only escaping results stored in buffers. Mutable reads, effects,
-and unbounded work are excluded from rematerialization.
-
-The scaffold preserves host branches and loops, including conditional and
-repeated dispatch sites. A launch completes and makes its writes visible before
-host control continues; explicit dispatch dependencies describe stage ordering.
-Buffer element types and dynamic grid formulas remain in the sidecar.
-
-The SSA adapter publishes source inputs, planned storage, output bindings, and
-static dispatch order through the shader interface and host program. Conditional or repeated
-host dispatches still produce explicit unsupported-operation diagnostics.
-
 Graphics vocabulary is opt-in. Without `--graphics`, names such as
 `direct_draw`, `rasterize_triangles`, `shade`, and
 `render_target` are ordinary, unreserved identifiers: user code may define
 them, and otherwise receives the normal undefined-name diagnostic.
-`--direct` is a backend-neutral output policy. It preserves authored graphics
-stages and rejects programs that would require compiler-created prepass entry
-points or intermediate storage.
+
+Egglog timing goes to stderr; `--verbose` includes pass and sub-pass timings.
 
 ## Building and Testing
 
