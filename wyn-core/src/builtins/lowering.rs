@@ -50,6 +50,41 @@ pub enum BuiltinLowering {
 }
 
 impl BuiltinLowering {
+    /// Whether an already evaluated result can replace the same operation on
+    /// identical SSA operands at a dominated use. Catalog purity must also
+    /// hold. This permits partial math without permitting speculation, operand
+    /// reassociation, or reuse of memory/context-dependent results.
+    pub(crate) fn is_reusable(&self) -> bool {
+        use PrimOp::*;
+        self.is_speculatable()
+            || match self {
+                Self::PrimOp(GlslExt(ext)) | Self::ExtInstSplat { ext, .. } => {
+                    // Domain-sensitive trig, pow/log/sqrt, determinant/inverse,
+                    // clamp/smoothstep, ldexp, normalize, and refract. Do not
+                    // accept all GLSL instructions: Modf/Frexp write through
+                    // pointers, and interpolation depends on execution context.
+                    matches!(ext, 16 | 17 | 23..=26 | 28 | 30..=34 | 43..=45 | 49 | 53 | 69 | 72)
+                }
+                Self::PrimOp(
+                    FDiv
+                    | FRem
+                    | FMod
+                    | SDiv
+                    | UDiv
+                    | SRem
+                    | SMod
+                    | UMod
+                    | IntPow { .. }
+                    | ShiftLeftLogical
+                    | ShiftRightArithmetic
+                    | ShiftRightLogical
+                    | FPToSI
+                    | FPToUI,
+                ) => true,
+                _ => false,
+            }
+    }
+
     /// Whether this lowering may execute on a path that did not evaluate it
     /// before. Shared by Egglog placement and late SSA motion; catalog purity
     /// must also hold. Pure does not imply safe to speculate (e.g. derivatives,

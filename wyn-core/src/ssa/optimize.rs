@@ -162,13 +162,23 @@ fn reusable(data: &InstKind) -> bool {
     // Partial arithmetic is deterministic for the same SSA operands. Reusing
     // an already evaluated result needs no proof that it is safe to speculate.
     // Keep memory, opaque calls, and context-dependent intrinsics excluded.
-    matches!(
-        data,
+    match data {
         InstKind::Op {
-            tag: OpTag::BinOp(_),
+            tag: OpTag::Intrinsic { id, overload_idx },
             ..
+        } => {
+            let builtin = by_id(*id);
+            builtin.raw.purity == Purity::Pure
+                && builtin
+                    .overloads()
+                    .get(*overload_idx)
+                    .is_some_and(|overload| overload.lowering.is_reusable())
         }
-    ) || movable(data)
+        InstKind::Op {
+            tag: OpTag::BinOp(_), ..
+        } => true,
+        _ => movable(data),
+    }
 }
 
 fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {

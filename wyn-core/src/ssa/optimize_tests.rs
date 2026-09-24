@@ -183,27 +183,35 @@ fn assert_division_sites(source: &str, expected: usize) -> crate::ssa::stage::Pl
 }
 
 #[test]
-fn partial_arithmetic_is_reused_locally_but_not_from_a_sibling_or_into_a_merge() {
-    for operator in [
+fn partial_math_is_reused_locally_but_not_from_a_sibling_or_into_a_merge() {
+    let binary_cases = [
         BinaryOperator::Divide,
         BinaryOperator::Remainder,
         BinaryOperator::FloorDivide,
         BinaryOperator::FloorRemainder,
         BinaryOperator::Power,
-    ] {
+    ]
+    .into_iter()
+    .map(|operator| (OpTag::BinOp(operator), i32()));
+    let intrinsic_cases = [
+        (intrinsic("f32.sqrt"), crate::types::f32()),
+        (intrinsic("f32.log"), crate::types::f32()),
+        (intrinsic("normalize"), crate::types::vec(3, crate::types::f32())),
+    ];
+    for (tag, ty) in binary_cases.chain(intrinsic_cases) {
         let mut body = FuncBuilder::new(
             vec![
-                (i32(), "x".into()),
-                (i32(), "width".into()),
+                (ty.clone(), "x".into()),
+                (ty.clone(), "width".into()),
                 (bool_type(), "condition".into()),
             ],
-            i32(),
+            ty.clone(),
         )
         .finish_unchecked();
         let entry = body.inner.entry;
         // Allocate the merge first to make allocation order differ from dominance order.
         let merge = body.inner.create_block();
-        let joined = body.inner.add_block_param(merge, i32());
+        let joined = body.inner.add_block_param(merge, ty.clone());
         let left = body.inner.create_block();
         let right = body.inner.create_block();
         let x = body.inner.params[0].into();
@@ -215,15 +223,20 @@ fn partial_arithmetic_is_reused_locally_but_not_from_a_sibling_or_into_a_merge()
             else_target: right,
             else_args: vec![],
         };
+        let data = InstKind::Op {
+            tag: tag.clone(),
+            operands: if matches!(tag, OpTag::BinOp(_)) { vec![x, width] } else { vec![x] },
+        };
         for block in [left, right, merge] {
-            let a = body.inner.append_inst(block, binary(operator, x, width), i32());
-            let b = body.inner.append_inst(block, binary(operator, x, width), i32());
-            let sum = body.inner.append_inst(block, binary(BinaryOperator::Add, a.into(), b.into()), i32());
+            let a = body.inner.append_inst(block, data.clone(), ty.clone());
+            let b = body.inner.append_inst(block, data.clone(), ty.clone());
+            let sum =
+                body.inner.append_inst(block, binary(BinaryOperator::Add, a.into(), b.into()), ty.clone());
             body.inner.blocks[block].term = if block == merge {
                 let result = body.inner.append_inst(
                     block,
                     binary(BinaryOperator::Add, joined.into(), sum.into()),
-                    i32(),
+                    ty.clone(),
                 );
                 Terminator::Return(Some(result.into()))
             } else {
@@ -239,10 +252,10 @@ fn partial_arithmetic_is_reused_locally_but_not_from_a_sibling_or_into_a_merge()
         for block in [left, right, merge] {
             assert_eq!(
                 body.inner.blocks[block].insts.iter().filter(|&&id| {
-                    matches!(body.inner.insts[id].data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator)
+                    matches!(&body.inner.insts[id].data, InstKind::Op { tag: actual, .. } if *actual == tag)
                 }).count(),
                 1,
-                "{operator:?}: each arm and the merge must retain its own computation"
+                "{tag:?}: each arm and the merge must retain its own computation"
             );
         }
     }
@@ -420,6 +433,235 @@ fn intrinsic(name: &str) -> OpTag<BindingRef, FunctionId> {
     }
 }
 
+fn assert_partial_intrinsic_sites(source: &str, name: &str, expected: usize) -> crate::ssa::stage::Placed {
+    let ssa = crate::compile_thru_ssa(source).unwrap();
+    let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
+    let tag = intrinsic(name);
+    let sites = placed
+        .functions
+        .iter()
+        .flat_map(|f| f.body.inner.insts.values())
+        .filter(|node| matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag))
+        .count();
+    assert_eq!(sites, expected, "unexpected {name} count before backend lowering");
+    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    validate_shader(&module);
+    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap().spirv;
+    let bytes = spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+    validate_shader(&module);
+    placed
+}
+
+fn validate_shader(module: &naga::Module) {
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(module)
+    .unwrap();
+}
+
+#[test]
+fn intrinsic_reuse_excludes_pointer_and_context_operations() {
+    use crate::builtins::lowering::{BuiltinLowering, PrimOp};
+    // GLSL Modf/Frexp have output pointers; InterpolateAt* reads fragment context.
+    for ext in [35, 51, 76, 77, 78, u32::MAX] {
+        assert!(!BuiltinLowering::PrimOp(PrimOp::GlslExt(ext)).is_reusable());
+    }
+    for name in [
+        "_w_intrinsic_uninit",
+        "_w_intrinsic_storage_index",
+        "f32.d_fdx",
+        "f32.d_fdy",
+        "f32.fwidth",
+    ] {
+        assert!(
+            !reusable(&InstKind::Op {
+                tag: intrinsic(name),
+                operands: vec![]
+            }),
+            "{name}"
+        );
+    }
+    assert!(!BuiltinLowering::LinkedSpirv("unknown").is_reusable());
+}
+
+#[test]
+fn branch_clamp_reuses_normalization_and_dependent_projection() {
+    let source = r#"
+def clampi(v: i32, lo: i32, hi: i32) i32 =
+  if v < lo then lo else if v > hi then hi else v
+def pixel(p: vec3f32) vec2i32 =
+  let n = normalize(p)
+  let projected = n.xy / n.z in
+  @[clampi(i32(projected.x), 0, 63), clampi(i32(projected.y), 0, 63)]
+entry repro(points: []vec3f32) []vec2i32 = map(pixel, points)
+"#;
+    let placed = assert_partial_intrinsic_sites(source, "normalize", 1);
+    assert_eq!(
+        placed
+            .functions
+            .iter()
+            .flat_map(|f| f.body.inner.insts.values())
+            .filter(|node| {
+                matches!(
+                    node.data,
+                    InstKind::Op {
+                        tag: OpTag::BinOp(BinaryOperator::Divide),
+                        ..
+                    }
+                )
+            })
+            .count(),
+        1,
+        "the projection must share the retained normalization"
+    );
+    let spirv = crate::compile_thru_spirv(source).unwrap().spirv;
+    let module = wspirv::dr::load_words(&spirv).unwrap();
+    assert_eq!(
+        module.all_inst_iter().filter(|inst| inst.class.opcode == wspirv::spirv::Op::FDiv).count(),
+        1
+    );
+    assert_eq!(
+        module
+            .all_inst_iter()
+            .filter(|inst| {
+                inst.class.opcode == wspirv::spirv::Op::ExtInst
+                    && inst.operands.get(1) == Some(&wspirv::dr::Operand::LiteralExtInstInteger(69))
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn partial_intrinsics_reuse_guarded_producers_in_nested_branches() {
+    for (name, ty) in [
+        ("f32.sqrt", crate::types::f32()),
+        ("f32.log", crate::types::f32()),
+        ("normalize", crate::types::vec(3, crate::types::f32())),
+    ] {
+        let tag = intrinsic(name);
+        let mut body = FuncBuilder::new(
+            vec![(ty.clone(), "x".into()), (bool_type(), "condition".into())],
+            ty.clone(),
+        )
+        .finish_unchecked();
+        let entry = body.inner.entry;
+        let guarded = body.inner.create_block();
+        let skipped = body.inner.create_block();
+        let left = body.inner.create_block();
+        let right = body.inner.create_block();
+        let x = body.inner.params[0].into();
+        let cond = body.inner.params[1].into();
+        body.inner.blocks[entry].term = Terminator::CondBranch {
+            cond,
+            then_target: guarded,
+            then_args: vec![],
+            else_target: skipped,
+            else_args: vec![],
+        };
+        body.inner.blocks[guarded].term = Terminator::CondBranch {
+            cond,
+            then_target: left,
+            then_args: vec![],
+            else_target: right,
+            else_args: vec![],
+        };
+        body.inner.blocks[skipped].term = Terminator::Return(Some(x));
+        let data = InstKind::Op {
+            tag: tag.clone(),
+            operands: vec![x],
+        };
+        let producer = body.inner.append_inst(guarded, data.clone(), ty.clone());
+        for block in [left, right] {
+            let a = body.inner.append_inst(block, data.clone(), ty.clone());
+            let b = body.inner.append_inst(block, data.clone(), ty.clone());
+            let sum =
+                body.inner.append_inst(block, binary(BinaryOperator::Add, a.into(), b.into()), ty.clone());
+            body.inner.blocks[block].term = Terminator::Return(Some(sum.into()));
+        }
+        float_pure_values(&mut body);
+        crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
+        let sites = body
+            .inner
+            .insts
+            .values()
+            .filter(|node| matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag))
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 1, "{name}: reuse the guarded producer");
+        assert_eq!(sites[0].result, Some(producer));
+        assert_eq!(sites[0].placement.block(), Some(guarded));
+        assert!(body.inner.blocks[entry].insts.is_empty());
+        assert!(body.inner.blocks[skipped].insts.is_empty());
+        let sum = body
+            .inner
+            .insts
+            .values()
+            .find(|node| {
+                matches!(
+                    node.data,
+                    InstKind::Op {
+                        tag: OpTag::BinOp(BinaryOperator::Add),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(
+            matches!(&sum.data, InstKind::Op { operands, .. } if *operands == vec![producer.into(), producer.into()])
+        );
+    }
+}
+
+#[test]
+fn partial_intrinsic_reuse_respects_loop_scopes() {
+    for (source, expected) in [
+        (
+            r#"entry repro(xs: []f32) []f32 = map(|x|
+          let root = f32.sqrt(x) in
+          loop total = root for j < 2 do
+            loop inner = total for k < 2 do inner + f32.sqrt(x), xs)"#,
+            1,
+        ),
+        // A loop header dominates its merge, but its result is loop-local.
+        (
+            r#"entry repro(xs: []f32) []f32 = map(|x|
+          let total = loop total = 0.0 while total < f32.sqrt(x) do total + 1.0 in
+          total + f32.sqrt(x), xs)"#,
+            2,
+        ),
+        // The second sqrt's operand changes on every iteration.
+        (
+            r#"entry repro(xs: []f32) []f32 = map(|x|
+          loop total = f32.sqrt(x) for k < 2 do f32.sqrt(total), xs)"#,
+            2,
+        ),
+    ] {
+        assert_partial_intrinsic_sites(source, "f32.sqrt", expected);
+    }
+    let placed = assert_partial_intrinsic_sites(
+        r#"entry repro(xs: []f32, count: i32) []f32 =
+      map(|x| loop total = 0.0 for k < count do total + f32.sqrt(x), xs)"#,
+        "f32.sqrt",
+        1,
+    );
+    let sqrt = intrinsic("f32.sqrt");
+    for function in &placed.functions {
+        let scopes = LoopScopes::analyze(&function.body.inner);
+        for node in function.body.inner.insts.values() {
+            if matches!(&node.data, InstKind::Op { tag, .. } if *tag == sqrt) {
+                assert!(
+                    scopes.scope(node.placement.block().unwrap()).is_some(),
+                    "a possibly empty loop must keep its sqrt guarded"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
     let float = Type::Constructed(TypeName::Float(32), vec![]);
@@ -434,12 +676,29 @@ fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
         .unwrap();
     builder.push_void_inst(InstKind::Store { place, value: x }).unwrap();
     let child = builder.create_block();
-    let tags = [OpTag::Call(FunctionId::from(99)), intrinsic("f32.d_fdx")];
+    let tags = [
+        OpTag::Call(FunctionId::from(99)),
+        intrinsic("f32.d_fdx"),
+        intrinsic("f32.d_fdy"),
+        intrinsic("f32.fwidth"),
+    ];
     for block in [builder.entry(), child] {
         builder.switch_to_block_unchecked(block);
         let loaded = builder.push_inst(InstKind::Load { place }, float.clone()).unwrap();
         let divided =
             builder.push_inst(binary(BinaryOperator::Divide, loaded.into(), x), float.clone()).unwrap();
+        // Immutable operands can share across a store; separate loads cannot.
+        for operand in [x, loaded.into()] {
+            builder
+                .push_inst(
+                    InstKind::Op {
+                        tag: intrinsic("f32.sqrt"),
+                        operands: vec![operand],
+                    },
+                    float.clone(),
+                )
+                .unwrap();
+        }
         for tag in &tags {
             builder
                 .push_inst(
@@ -475,6 +734,16 @@ fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
     assert_eq!(
         body.inner.insts.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
         2
+    );
+    let sqrt = intrinsic("f32.sqrt");
+    assert_eq!(
+        body.inner
+            .insts
+            .values()
+            .filter(|node| { matches!(&node.data, InstKind::Op { tag, .. } if *tag == sqrt) })
+            .count(),
+        3,
+        "share sqrt(x), but retain sqrt of each mutable load"
     );
     for tag in tags.into_iter().chain([OpTag::BinOp(BinaryOperator::Divide)]) {
         assert_eq!(
