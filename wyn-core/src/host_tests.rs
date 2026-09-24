@@ -13,6 +13,71 @@ fn compile(source: &str) -> Program {
     lower_ssa_to_wgsl_with_program(compile_thru_ssa(source).unwrap()).unwrap().program
 }
 
+#[test]
+fn unrelated_compute_entries_preserve_graphics_inputs_and_resources() {
+    let source = include_str!("../../testfiles/graphics_compute_entry_bindings.wyn");
+    let (draw, compute) = source.split_once("entry compute").unwrap();
+    let compute = format!("entry compute{compute}");
+    // A one-input compute entry puts its output in colors' graphics slot;
+    // that collision must not turn colors into an allocated intermediate.
+    let output_collision = "entry compute(xs: []vec4f32) []vec4f32 = map(|x| x * 2.0, xs)";
+    for source in [
+        draw.to_string(),
+        source.to_string(),
+        format!("{compute}\n{draw}"),
+        format!("{draw}\n{output_collision}"),
+        format!("{output_collision}\n{draw}"),
+    ] {
+        for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+            let ssa = compile_thru_ssa(&source).unwrap();
+            let program = match format {
+                ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+                ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+            };
+            let entry = program.entries.iter().find(|entry| entry.name == "draw").unwrap();
+            let resources = &program.interface.frame_graph.resources;
+            let inputs: Vec<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
+            assert_eq!(inputs, ["positions", "colors", "target"], "{format:?}");
+            let rust = program.to_rust_wgpu("entry_bindings", format).unwrap();
+            let signature = rust.split_once("pub fn encode_draw(").unwrap().1.split_once(") ->").unwrap().0;
+            let signature: String = signature.split_whitespace().collect();
+            assert_eq!(signature, "context:&mutHostContext,encoder:&mutCommandEncoder,positions:&Buffer,colors:&Buffer,target:&Texture,");
+        }
+    }
+}
+
+#[test]
+fn graphics_compute_helpers_capture_computed_records_and_return_both_arrays() {
+    let source = include_str!("../../testfiles/graphics_computed_record_capture.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let [entry] = program.entries.as_slice() else {
+            panic!("one source entry")
+        };
+        let resources = &program.interface.frame_graph.resources;
+        let inputs: BTreeSet<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
+        assert_eq!(inputs, BTreeSet::from(["ui", "points", "target"]), "{format:?}");
+        assert_eq!(entry.results.len(), 3);
+        assert_ne!(entry.results[0], entry.results[1]);
+        for result in &entry.results[..2] {
+            assert!(
+                !entry.inputs.contains(result),
+                "computed result must not alias an input"
+            );
+            assert!(entry.allocations.iter().any(
+                |allocation| matches!(allocation, Allocation::Buffer { resource, .. } if resource == result)
+            ));
+        }
+        assert!(entry.operations.iter().any(|op| matches!(op, Operation::Dispatch { .. })));
+        assert!(entry.operations.iter().any(|op| matches!(op, Operation::Draw { .. })));
+        program.to_rust_wgpu("record_capture", format).unwrap();
+    }
+}
+
 fn check_whl(source: &str) {
     let mut depth = 0i32;
     let mut string = false;

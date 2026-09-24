@@ -218,6 +218,10 @@ impl TermRewriter<data::Empty, data::Empty> for StageHelperInliner<'_> {
                 for ((_, param_ty), argument) in params.iter().zip(&args) {
                     extend_type_substitution(param_ty, &argument.ty, &mut subst);
                 }
+                // Result-only size variables also belong to this call site.
+                // Normalize them throughout the body before removing the
+                // argument lets that carry the application's result type.
+                extend_type_substitution(&body.ty, &ty, &mut subst);
                 if !subst.is_empty() {
                     for (_, param_ty) in &mut params {
                         *param_ty = apply_type_substitution(param_ty, &subst);

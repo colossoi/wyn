@@ -254,7 +254,8 @@ pub(super) fn publish(
             entries[entry_indices[id]].pipeline_storage_accesses = union.clone();
         }
     }
-    // Graphics captures share the physical storage and capacity of their compute producer.
+    // Graphics captures share storage and capacity with compute stages from
+    // their source entry. Descriptor slots may be reused by unrelated entries.
     let compute_storage: BTreeMap<_, _> = pipeline
         .pipelines
         .iter()
@@ -262,10 +263,11 @@ pub(super) fn publish(
             let Pipeline::Compute(compute) = item else {
                 return None;
             };
-            Some(compute.bindings.iter())
+            let owner = &compute.stages.first()?.owner;
+            Some(compute.bindings.iter().map(move |binding| (owner.clone(), binding)))
         })
         .flatten()
-        .filter_map(|item| {
+        .filter_map(|(owner, item)| {
             let Binding::StorageBuffer {
                 set,
                 binding,
@@ -279,7 +281,7 @@ pub(super) fn publish(
                 return None;
             };
             Some((
-                BindingRef::new(*set, *binding),
+                (owner, BindingRef::new(*set, *binding)),
                 (
                     resource.as_ref().unwrap_or(name).clone(),
                     usage.clone(),
@@ -290,6 +292,9 @@ pub(super) fn publish(
         .collect();
     for item in &mut pipeline.pipelines {
         let Pipeline::Graphics(graphics) = item else {
+            continue;
+        };
+        let Some(stage) = graphics.stages.first() else {
             continue;
         };
         for binding in &mut graphics.bindings {
@@ -305,7 +310,9 @@ pub(super) fn publish(
                 continue;
             };
             let slot = BindingRef::new(*set, *binding);
-            if let Some((name, compute_usage, compute_length)) = compute_storage.get(&slot) {
+            if let Some((name, compute_usage, compute_length)) =
+                compute_storage.get(&(stage.owner.clone(), slot))
+            {
                 *resource = Some(name.clone());
                 *length = compute_length.clone();
                 *usage = if *compute_usage == BufferUsage::Input {

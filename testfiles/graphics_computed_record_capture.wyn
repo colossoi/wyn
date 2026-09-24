@@ -1,0 +1,18 @@
+-- A helper's map can capture a computed array through a record parameter.
+-- Build: wyn build --graphics -O --target-double rust-wgpu --target spirv
+--   testfiles/graphics_computed_record_capture.wyn -o tmp/graphics_computed_record_capture.spv
+type capture = { emitted: [16]vec2f32 }
+type world = { ui: []f32, points: []vec2f32 }
+def append(points: []vec2f32, cap: capture) []vec2f32 =
+  map(|i| cap.emitted[i % 16] + points[i], iota(1024))
+def update(previous: world) world =
+  let cap = { emitted = replicate(16, @[0.0, 0.0]) } in
+  { ui = [previous.ui[0], previous.ui[1]],
+    points = append(previous.points, cap) }
+entry reproduce(ui: []f32, points: []vec2f32, target: render_target<vec4f32>)
+    ([]f32, []vec2f32, render_target<vec4f32>) =
+  let next = update({ui = ui, points = points})
+  let fragments = rasterize_triangles(direct_draw(3u32, 1u32),
+    |_, _, _| vertex_output(@[0.0, 0.0, 0.0, 1.0], ()))
+  let image = shade(target, fragments, |_, _, _, _, _| @[1.0, 0.0, 0.0, 1.0]) in
+  (next.ui, next.points, image)
