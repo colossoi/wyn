@@ -64,6 +64,9 @@ pub(crate) fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let result = match (op, values.as_slice()) {
+                ("add", [a, b]) => a.wrapping_add(*b),
+                ("sub", [a, b]) => a.wrapping_sub(*b),
+                ("mul", [a, b]) => a.wrapping_mul(*b),
                 ("div", [a, b]) => {
                     let Some(n) = a.checked_div(*b) else {
                         return Err(invalid(name));
@@ -120,6 +123,9 @@ pub(crate) fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let result = match (op, values.as_slice()) {
+                ("add", [a, b]) => a + b,
+                ("sub", [a, b]) => a - b,
+                ("mul", [a, b]) => a * b,
                 ("div", [a, b]) => a / b,
                 ("rem", [a, b]) => a % b,
                 ("neg", [a]) => -a,

@@ -1,4 +1,5 @@
 //! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
+use super::select;
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
 use crate::constant_eval::{self, Constant};
@@ -154,7 +155,7 @@ pub(super) fn facts(data: &mut Ir, mut sink: FullState<'_, '_>) -> Result<(), Er
             sink.add("Bitcast", (value,))?;
         }
     }
-    Ok(())
+    select::facts(data, sink)
 }
 
 fn scalar_type(name: &str) -> Option<Type> {

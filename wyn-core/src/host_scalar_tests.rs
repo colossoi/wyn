@@ -68,8 +68,7 @@ fn shared_map_capture_is_computed_on_host() {
     )
     .unwrap();
     let whl = compiled.program.to_whl("test.wgsl", ShaderFormat::Wgsl).unwrap();
-    assert!(whl.contains("(* "), "{whl}");
-    assert!(!whl.contains("i32-mul"), "{whl}");
+    assert!(whl.contains("(wyn-i32-mul "), "{whl}");
     assert!(whl.find("gpu-write-scalar").unwrap() < whl.find("(gpu-dispatch ").unwrap());
     assert!(!compiled.wgsl.contains("_pc0.w_bias"), "{}", compiled.wgsl);
     let program = Program::parse(&whl).unwrap();
@@ -134,6 +133,41 @@ fn host_reads_packed_parameters_and_preserves_unsigned_comparisons() {
         &[u32::MAX.to_le_bytes().into_iter().chain(1u32.to_le_bytes()).collect()],
     );
     assert_eq!(u32::from_le_bytes(bytes.try_into().unwrap()), u32::MAX - 1);
+}
+
+#[test]
+fn host_eager_select_arms_preserve_native_arithmetic_at_boundaries() {
+    for (expression, input, expected) in [
+        ("if n>0 then n-1 else n+1", i32::MAX, i32::MAX - 1),
+        ("if n>0 then n-1 else n*n", i32::MAX, i32::MAX - 1),
+        ("if n<0 then n+1 else n-1", i32::MIN, i32::MIN + 1),
+        ("n+1", i32::MAX, i32::MIN),
+        ("n*n", i32::MAX, 1),
+    ] {
+        let bytes = scalar(
+            &format!("entry main(n:i32) i32={expression}"),
+            &[input.to_le_bytes().to_vec()],
+        );
+        assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), expected);
+    }
+    for (expression, input, expected) in [
+        ("if n>0.0 then n else n+n", f32::MAX, f32::MAX),
+        ("n+n", f32::MAX, f32::INFINITY),
+        ("n*n", f32::INFINITY, f32::INFINITY),
+    ] {
+        let bytes = scalar(
+            &format!("entry main(n:f32) f32={expression}"),
+            &[input.to_le_bytes().to_vec()],
+        );
+        assert_eq!(f32::from_le_bytes(bytes.try_into().unwrap()), expected);
+    }
+    let compiled = lower_ssa_to_wgsl_with_program(
+        compile_thru_ssa("entry main(n:i32) i32=if n>0 then n-1 else n*n").unwrap(),
+    )
+    .unwrap();
+    let rust = compiled.program.to_rust_wgpu("test.wgsl", ShaderFormat::Wgsl).unwrap();
+    assert!(rust.contains("wrapping_mul"), "{rust}");
+    assert!(rust.contains("wrapping_sub"), "{rust}");
 }
 
 #[test]

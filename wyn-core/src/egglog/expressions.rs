@@ -6,6 +6,7 @@ use crate::egglog::data::{
     Array, ExprId, ExprKind, Ir, LoopKind, OperationId, OperationKind, RegionId, SoacBody, SymbolId,
 };
 use crate::egglog::dependencies::{analyze, Dependencies};
+use crate::egglog::scalar::select;
 use crate::egglog::timing::{span, time};
 use egglog_engine::sort::VecContainer;
 use egglog_engine::{Core, EGraph, FullState, RawValues, Value, Write};
@@ -17,8 +18,9 @@ pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 /// Read typed expressions, region interfaces, structured control, and data-flow
 /// facts directly into egglog. The graph and its source-root table pass to
 /// scalar simplification without an intervening textual or command representation.
-pub fn insert_expressions(program: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
+pub fn insert_expressions(mut program: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
     let _timing = span("egglog insert expressions");
+    select::form(&mut program.ir);
     let _dependencies = span("egglog insert expressions / dependencies");
     let dependencies = analyze(&program.ir);
     dependencies.schedules(&program.ir)?;

@@ -19,12 +19,7 @@ impl Program {
             ScalarExpr::Apply { op, ty, args } => {
                 let args =
                     args.iter().map(|a| self.whl_scalar(pipeline, a)).collect::<Result<Vec<_>, _>>()?;
-                let function = match op.as_str() {
-                    "add" => "+".into(),
-                    "sub" => "-".into(),
-                    "mul" => "*".into(),
-                    _ => format!("wyn-{}-{op}", ty.name()),
-                };
+                let function = format!("wyn-{}-{op}", ty.name());
                 format!("({function} {})", args.join(" "))
             }
             ScalarExpr::If { condition, yes, no } => format!(
@@ -186,17 +181,12 @@ fn rust_operation(op: &str, ty: ScalarType, args: &[TokenStream]) -> Result<Toke
             if condition { yes } else { no }
         }),
         ("add" | "sub" | "mul", [a, b]) if integer => {
-            let method = format_ident!("checked_{op}");
-            quote!({let Some(value) = (#a).#method(#b) else {return Err(HostError::Invalid("scalar arithmetic overflow".into()));}; value})
+            let method = format_ident!("wrapping_{op}");
+            quote!((#a).#method(#b))
         }
-        ("add" | "sub" | "mul", [a, b]) => {
-            let value = match op {
-                "add" => quote!((#a) + (#b)),
-                "sub" => quote!((#a) - (#b)),
-                _ => quote!((#a) * (#b)),
-            };
-            quote!({let value = #value; if !value.is_finite() {return Err(HostError::Invalid("non-finite scalar arithmetic".into()));} value})
-        }
+        ("add", [a, b]) => quote!((#a) + (#b)),
+        ("sub", [a, b]) => quote!((#a) - (#b)),
+        ("mul", [a, b]) => quote!((#a) * (#b)),
         ("div" | "rem", [a, b]) if integer => {
             let method = format_ident!("checked_{op}");
             quote!({let Some(value) = (#a).#method(#b) else {return Err(HostError::Invalid("invalid scalar division".into()));}; value})

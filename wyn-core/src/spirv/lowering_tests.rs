@@ -180,7 +180,12 @@ entry repro(surface: render_target<output>) render_target<output> =
         .flat_map(|block| &block.instructions)
         .filter(|inst| inst.class.opcode == Op::FunctionCall)
         .count();
-    assert_eq!(calls, 1, "the fragment must evaluate its helper only once");
+    assert!(calls <= 1, "the fragment must not duplicate its helper");
+    let predicates = module.all_inst_iter().filter(|inst| inst.class.opcode == Op::FOrdLessThan).count();
+    assert_eq!(
+        predicates, 1,
+        "the helper's predicate must be evaluated once, even when inlined"
+    );
 }
 
 #[test]
@@ -218,15 +223,15 @@ entry repro(surface: render_target<f32>) render_target<f32> =
         .iter()
         .find(|function| function.def.as_ref().unwrap().result_id == Some(vertex_id))
         .unwrap();
-    let selections = vertex
+    let predicates = vertex
         .blocks
         .iter()
         .flat_map(|block| &block.instructions)
-        .filter(|inst| matches!(inst.class.opcode, Op::Select | Op::SelectionMerge))
+        .filter(|inst| inst.class.opcode == Op::FOrdLessThan)
         .count();
     assert_eq!(
-        selections, 1,
-        "varying projections must share the conditional result"
+        predicates, 1,
+        "varying projections must share the predicate even when selecting lanes separately"
     );
 }
 

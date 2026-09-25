@@ -6,6 +6,7 @@ use crate::egglog::timing::{span, time};
 mod fold;
 mod hoist;
 mod read;
+pub(super) mod select;
 pub(super) use hoist::index as placement_index;
 pub(super) use hoist::total_node;
 
@@ -18,10 +19,12 @@ pub fn simplify(
     let _timing = span("egglog arithmetic EqSat");
     let Expressions { mut graph } = program.state;
     // Keep alternatives in one e-graph throughout analysis and extraction.
-    // Bound reassociation to avoid exponential exploration of long sums.
+    // Bound reassociation and select alternatives: e-class equalities may
+    // contain cycles even when the source expression graph is acyclic.
     time("egglog arithmetic / load rules", || {
         fold::register(&mut graph);
-        graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))
+        graph.parse_and_run_program(Some("arithmetic.egg".into()), include_str!("arithmetic.egg"))?;
+        graph.parse_and_run_program(Some("select.egg".into()), include_str!("scalar/select.egg"))
     })?;
     time("egglog arithmetic / import facts", || {
         graph.update(|sink| fold::facts(data, sink))
@@ -30,9 +33,18 @@ pub fn simplify(
         graph.parse_and_run_program(
             None,
             if algebra {
-                "(run-schedule (seq (saturate (run arithmetic)) (repeat 4 (seq (run algebra) (saturate (run arithmetic))))))"
+                "(run-schedule
+                    (seq
+                        (saturate (run arithmetic))
+                        (repeat 4 (seq (run select) (saturate (run arithmetic))))
+                        (repeat 4 (seq (run algebra) (run select) (saturate (run arithmetic))))
+                    ))"
             } else {
-                "(run-schedule (saturate (run arithmetic)))"
+                "(run-schedule
+                    (seq
+                        (saturate (run arithmetic))
+                        (repeat 4 (seq (run select) (saturate (run arithmetic))))
+                    ))"
             },
         )
     })?;

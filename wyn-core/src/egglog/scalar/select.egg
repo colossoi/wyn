@@ -1,0 +1,81 @@
+(ruleset select)
+; Eager choices retain their catalog identity as ordinary PureApp nodes.
+; TotalSelectValue proves the entire source DAG may be discarded. These rules
+; never infer global equalities from assumptions local to a branch use.
+(relation SelectFunction (TypeKey Expr))
+(relation TotalSelectValue (Expr))
+(relation ValueSelect (Expr TypeKey Expr Expr Expr Expr))
+(relation BooleanNot (Expr))
+; The typed builtin signature already fixes operand types. Joining every Typed
+; alternative of all three operand e-classes would create a Cartesian product.
+(rule ((SelectFunction t f) (= e (Typed t (PureApp f xs))) (= (vec-length xs) 3)
+       (= no (vec-get xs 0)) (= yes (vec-get xs 1)) (= c (vec-get xs 2)))
+      ((ValueSelect e t f no yes c)) :ruleset arithmetic)
+
+(rule ((ValueSelect e t f no yes (Typed ct (Bool true))) (TotalSelectValue e))
+      ((union e yes)) :ruleset select)
+(rule ((ValueSelect e t f no yes (Typed ct (Bool false))) (TotalSelectValue e))
+      ((union e no)) :ruleset select)
+(rule ((ValueSelect e t f x x c) (TotalSelectValue e))
+      ((union e x)) :ruleset select)
+(rule ((ValueSelect e t f (Typed t (Bool false)) (Typed t (Bool true)) c) (TotalSelectValue e))
+      ((union e c)) :ruleset select)
+; Reuse the existing typed boolean unary function when negating a predicate.
+(rule ((ValueSelect e t f (Typed t (Bool true)) (Typed t (Bool false)) c)
+       (TotalSelectValue e) (BooleanNot not))
+      ((union e (Typed t (PureApp not (vec-of c))))) :ruleset select)
+
+; Remove predicate negation from a select, making complementary spellings share.
+(rule ((ValueSelect e t f no yes negated) (TotalSelectValue e)
+       (Unary negated ct (Typed ft (UnOp "!")) c) (ScalarType ct "bool"))
+      ((union e (Typed t (PureApp f (vec-of yes no c))))) :ruleset select)
+
+; A repeated predicate picks only one alternative of the nested choice.
+; Unchosen eager computations can disappear only under the whole-DAG proof.
+(rule ((ValueSelect e t f no inner c) (ValueSelect inner t g a b c) (TotalSelectValue e))
+      ((union e (Typed t (PureApp f (vec-of no b c))))) :ruleset select)
+(rule ((ValueSelect e t f inner yes c) (ValueSelect inner t g a b c) (TotalSelectValue e))
+      ((union e (Typed t (PureApp f (vec-of a yes c))))) :ruleset select)
+
+; Integer addition/multiplication of complementary choices is independent of c.
+; Floating-point operations are excluded (including their NaN bit patterns).
+(relation SelectCommutativeInteger (String))
+(SelectCommutativeInteger "+")
+(SelectCommutativeInteger "*")
+(rule ((Binary e t op left right) (= op (Typed ft (BinOp name)))
+       (IntegerType t) (SelectCommutativeInteger name)
+       (ValueSelect left t f a b c) (ValueSelect right t g b a c)
+       (TotalSelectValue left) (TotalSelectValue right))
+      ((union e (Typed t (PureApp op (vec-of a b))))) :ruleset select)
+
+; A comparison can be constant even though the selected value is not. Evaluate
+; both literal alternatives with the existing typed evaluator, preserving its
+; integer widths and floating-point comparison semantics.
+(relation SelectComparison (String))
+(SelectComparison "==")
+(SelectComparison "!=")
+(SelectComparison "<")
+(SelectComparison "<=")
+(SelectComparison ">")
+(SelectComparison ">=")
+(rule ((Binary e t (Typed ft (BinOp op)) choice rhs) (SelectComparison op)
+       (ValueSelect choice it f no yes c) (TotalSelectValue choice)
+       (ScalarType it input) (ScalarType t output)
+       (Literal no nv) (Literal yes yv) (Literal rhs rv)
+       (= value (wyn-binary op input output nv rv))
+       (= value (wyn-binary op input output yv rv)))
+      ((Literal e value)) :ruleset select)
+(rule ((Binary e t (Typed ft (BinOp op)) lhs choice) (SelectComparison op)
+       (ValueSelect choice it f no yes c) (TotalSelectValue choice)
+       (ScalarType it input) (ScalarType t output)
+       (Literal no nv) (Literal yes yv) (Literal lhs lv)
+       (= value (wyn-binary op input output lv nv))
+       (= value (wyn-binary op input output lv yv)))
+      ((Literal e value)) :ruleset select)
+
+; Extraction retains this alternative only when selecting the consumed lane
+; is cheaper than selecting the entire vector.
+(rule ((= e (Typed t (Project choice i))) (ValueSelect choice vt vf no yes c)
+       (TotalSelectValue e) (SelectFunction t f))
+      ((union e (Typed t (PureApp f (vec-of (Typed t (Project no i)) (Typed t (Project yes i)) c)))))
+      :ruleset select)

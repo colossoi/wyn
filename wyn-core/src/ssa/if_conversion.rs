@@ -5,24 +5,18 @@
 use super::ir::{InstPlacement, Substitutions};
 use super::optimize::is_speculatable;
 use super::types::{BlockId, ControlHeader, FuncBody, InstId, InstKind, Terminator, ValueId, ValueRef};
-use crate::builtins::{
-    by_id,
-    lowering::{BuiltinLowering, PrimOp},
-    select,
-};
+use crate::builtins::{by_id, lowering::BuiltinLowering, select};
 use crate::op::OpTag;
 use crate::types::{bool_type, TypeExt};
 use crate::LookupSet;
 use wyn_graph::DominatorTree;
-
-const ADDED_WORK_LIMIT: usize = 4;
 
 #[cfg(test)]
 #[path = "if_conversion_tests.rs"]
 mod tests;
 
 pub(super) fn run(body: &mut FuncBody) {
-    convert(body, ADDED_WORK_LIMIT);
+    convert(body, select::ADDED_WORK_LIMIT);
 }
 
 fn convert(body: &mut FuncBody, budget: usize) {
@@ -231,42 +225,7 @@ fn cheap_cost(body: &FuncBody, instruction: InstId) -> Option<usize> {
             let BuiltinLowering::PrimOp(prim) = &by_id(*id).overloads().get(*overload_idx)?.lowering else {
                 return None;
             };
-            if !matches!(
-                prim,
-                PrimOp::Select
-                    | PrimOp::FAdd
-                    | PrimOp::FSub
-                    | PrimOp::FMul
-                    | PrimOp::IAdd
-                    | PrimOp::ISub
-                    | PrimOp::IMul
-                    | PrimOp::FOrdEqual
-                    | PrimOp::FOrdNotEqual
-                    | PrimOp::FOrdLessThan
-                    | PrimOp::FOrdGreaterThan
-                    | PrimOp::FOrdLessThanEqual
-                    | PrimOp::FOrdGreaterThanEqual
-                    | PrimOp::IEqual
-                    | PrimOp::INotEqual
-                    | PrimOp::SLessThan
-                    | PrimOp::ULessThan
-                    | PrimOp::SGreaterThan
-                    | PrimOp::UGreaterThan
-                    | PrimOp::SLessThanEqual
-                    | PrimOp::ULessThanEqual
-                    | PrimOp::SGreaterThanEqual
-                    | PrimOp::UGreaterThanEqual
-                    | PrimOp::BitwiseAnd
-                    | PrimOp::BitwiseOr
-                    | PrimOp::BitwiseXor
-                    | PrimOp::Not
-                    | PrimOp::Bitcast
-                    | PrimOp::SIToFP
-                    | PrimOp::UIToFP
-                    | PrimOp::SConvert
-                    | PrimOp::UConvert
-                    | PrimOp::FPConvert
-            ) {
+            if !select::cheap_primop(prim) {
                 return None;
             }
         }

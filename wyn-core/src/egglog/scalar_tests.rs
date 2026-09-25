@@ -399,7 +399,10 @@ fn nested_loop_invariants_refresh_on_each_outer_iteration() {
 #[test]
 fn common_if_and_zero_trip_safety() {
     let c = compile("entry main(flag:bool, x:i32) i32 = if flag then x*x+1 else x*x+2");
-    assert!(c.state.placements.values().any(|p| matches!(p.before, PlacementSite::Expression(_))));
+    assert_eq!(
+        c.ir.conditional_value(result(&c.ir)).unwrap().1,
+        crate::egglog::data::Evaluation::Eager
+    );
     let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(
         run(&c, vec![Value::Bool(true), Value::Int(7)]),
@@ -432,6 +435,21 @@ fn common_if_and_zero_trip_safety() {
     assert!(c.state.placements.is_empty(), "division must not be speculated");
     let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
     assert_eq!(run(&c, vec![Value::Int(0), Value::Int(0)]), vec![Value::Int(0)]);
+}
+
+#[test]
+fn early_select_keeps_shared_predicate_facts_local_to_the_choice() {
+    let c = compile(
+        "entry choose(c:bool,x:i32,y:i32) (i32,i32)=\nlet s=if c then x else y\nin (if c then s else 0,s)",
+    );
+    let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
+    for (condition, expected) in [(true, (7, 7)), (false, (0, 9))] {
+        assert_eq!(
+            run(&c, vec![Value::Bool(condition), Value::Int(7), Value::Int(9)]),
+            vec![Value::Tuple(vec![Value::Int(expected.0), Value::Int(expected.1)])]
+        );
+    }
+    wgsl(&c);
 }
 
 #[test]

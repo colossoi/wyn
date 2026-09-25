@@ -99,9 +99,10 @@ fn separate_helper_invocations_do_not_share_argument_bindings() {
 }
 
 #[test]
-fn branches_conservatively_count_shared_work_in_each_arm() {
-    // Both arms pay for their arithmetic, regardless of later hoisting.
-    assert_eq!(cost("entry main(x:i32,c:bool) i32=if c then x*x+1 else x*x+2"), 5);
+fn choices_count_eager_shared_work_once_and_lazy_arms_separately() {
+    // Safe arithmetic becomes an eager select; its shared multiply counts once.
+    assert_eq!(cost("entry main(x:i32,c:bool) i32=if c then x*x+1 else x*x+2"), 4);
+    // Guarded division retains two lazy arms, each with its own work estimate.
     assert_eq!(
         cost("entry main(x:i32,d:i32,c:bool) i32=if c then x/d+1 else x/d+2"),
         5

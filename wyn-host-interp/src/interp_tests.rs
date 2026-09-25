@@ -27,6 +27,32 @@ fn select_is_eager_and_preserves_operand_order() {
 }
 
 #[test]
+fn wyn_scalar_arithmetic_wraps_and_preserves_nonfinite_floats() {
+    for (source, expected) in [
+        ("(wyn-i32-add (i32 2147483647) (i32 1))", Number::I32(i32::MIN)),
+        ("(wyn-i32-sub (i32 -2147483648) (i32 1))", Number::I32(i32::MAX)),
+        ("(wyn-i32-mul (i32 2147483647) (i32 2))", Number::I32(-2)),
+        ("(wyn-u32-add (u32 4294967295) (u32 1))", Number::U32(0)),
+        ("(wyn-u32-sub (u32 0) (u32 1))", Number::U32(u32::MAX)),
+        (
+            "(wyn-u32-mul (u32 4294967295) (u32 2))",
+            Number::U32(u32::MAX - 1),
+        ),
+        (
+            "(wyn-f32-add (f32 3.4e38) (f32 3.4e38))",
+            Number::F32(f32::INFINITY),
+        ),
+    ] {
+        assert_eq!(expression(source).unwrap(), Value::Number(expected), "{source}");
+    }
+    let value = expression("(wyn-f32-sub (wyn-f32-bits (u32 2139095040)) (wyn-f32-bits (u32 2139095040)))")
+        .unwrap();
+    assert!(matches!(value, Value::Number(Number::F32(n)) if n.is_nan()));
+    // General WHL arithmetic still checks capacities and other host bookkeeping.
+    assert!(expression("(+ (u32 4294967295) (u32 1))").is_err());
+}
+
+#[test]
 fn lexical_bindings_short_circuit_and_parallel_loop_steps() {
     assert_eq!(
         expression("(let ((x 4)) (let ((x 7) (y x)) (+ x y)))").unwrap(),

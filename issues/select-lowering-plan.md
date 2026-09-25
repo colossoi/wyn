@@ -9,7 +9,7 @@ Backend preparation converts private scalar/vector diamonds when all additional
 work is safe to speculate and fits a four-operation budget. Unsafe and expensive
 arms remain guarded. Both shader backends emit their native select operation.
 
-The default local tinyporto SPIR-V build contains 500 `OpSelect`, 679
+At commit `309cf8e4`, the default local tinyporto SPIR-V build contained 500 `OpSelect`, 679
 `OpBranchConditional`, 603 `OpSelectionMerge`, and 827 `OpPhi` instructions across
 37 entry points; the 638,068-byte module passes Vulkan 1.3 validation. These are
 code-generation counts, not a measured GPU speedup.
@@ -23,15 +23,68 @@ All 24 cases pass, including division guarded against zero. Direct compilation
 is checked separately with scalar output because dynamic invocation-local array
 allocation is unsupported by the direct path.
 
-The tracked shader corpus validates with 115 SPIR-V passes and 114 WGSL passes;
+The initial tracked shader corpus validated with 115 SPIR-V passes and 114 WGSL passes;
 WGSL skips the existing `miner.wyn` fixture because it links SPIR-V helpers.
 Workspace and standalone Wasm tests cover the remaining compiler/host paths.
-The final core run passes 1,482 unit tests (16 existing ignores), its package
+That core run passed 1,482 unit tests (16 existing ignores), its package
 integration test, and four compile-fail documentation tests. The remaining
 workspace crates, CLI integration tests, and three standalone Wasm tests pass.
 
-Public syntax, vector masks, aggregate/wide types, earlier conversion, and
-profitability tuning based on GPU timings remain follow-up work.
+Public syntax, vector masks, aggregate/wide types, and profitability tuning based
+on GPU timings remain follow-up work.
+
+## Early formation and select simplification
+
+Safe value conditionals become the durable intrinsic during expression import,
+after fusion and before scalar EqSat and placement. Both early and late
+conversion use the same native-type contract, cheap primitive whitelist, and
+four-operation budget. Early conversion proves the whole newly eager arm DAG,
+counts shared computations once, and admits only literals and parameters as
+leaves. Memory/execution results require availability proofs and remain opaque
+to this early pass; the late SSA pass still handles additional opportunities.
+
+Select-specific EqSat rules simplify boolean choices, negated predicates,
+repeated predicates in nested choices, and projections through vector choices.
+Complementary integer choices such as `(if c then a else b) + (if c then b else a)`
+reduce to `a + b`. Typed comparisons whose two literal alternatives agree can
+become constant even when the selected value is dynamic. Thus choosing 4 or 8
+and testing for zero exposes an unreachable branch to the existing SSA cleanup
+introduced in `bab89169`, including loops inside that branch.
+
+Rules which remove eager operands require an unconditional proof that the whole
+expression can be discarded. Facts from one branch use are never installed as
+global equalities for a shared expression. Partial operands and partial
+condition computations retain their evaluation. Correlated arithmetic rules
+are restricted to integers; floating-point operand order is preserved.
+
+Select alternatives run for four rounds alongside saturated constant folding;
+optional algebra has four additional rounds. This bounds exploration through
+cyclic e-classes. Extraction decides whether projection alternatives are cheaper.
+The GPU fixture exercises correlated choices, an unreachable loop, and guarded
+division together, with algebra enabled and disabled on both shader targets.
+
+Host scalar arithmetic uses the same wrapping integer and IEEE floating-point
+semantics as device arithmetic. Its typed WHL operations and generated Rust
+therefore tolerate overflow in a newly eager, unchosen arm. General WHL capacity
+arithmetic remains checked.
+
+Select recognition uses the typed builtin signature without joining all typed
+representations of each operand e-class. Those redundant joins caused a
+Cartesian-product slowdown during scalar saturation; a regression exercises
+256 equivalent terms per operand. Compile-time comparisons use separate compiler
+binaries with their optimization behavior checked against the select fixture.
+The fixed tinyporto control input, compiled in release mode with graphics,
+algebra, SPIR-V and Rust host output enabled, took 4.24/4.10 seconds versus
+4.92/5.26 seconds at `bab89169` in alternating runs. Arithmetic saturation took
+289/322 milliseconds. Its validated SPIR-V changed from 491 to 336 selects,
+640 to 601 conditional branches, and 616,792 to 517,180 bytes. These are local
+compile-time and code-size measurements, not GPU timing results.
+
+Validation passes for the release workspace suite (1,496 core unit tests, 16
+existing ignores, the package integration test, and four compile-fail doc tests),
+three standalone Wasm tests, and all 24 GPU cases. The tracked shader corpus
+passes 116 SPIR-V and 115 WGSL validations; WGSL retains the existing `miner.wyn`
+skip for its linked SPIR-V helpers.
 
 Introduce an explicitly eager, durable select intrinsic, then use it to replace
 eligible value-producing conditionals in shared SSA. Preserve conditional-result
@@ -222,5 +275,6 @@ without retaining unnecessary selects.
 
 The implementation includes durable intrinsic and analysis/backend support,
 boolean conversion, zero-additional-work SSA conversion, and budgeted arm
-speculation. Broader aggregates, vector masks, public syntax, and earlier
-if-conversion require additional eligibility and evaluation tests.
+speculation, plus early expression conversion and select-aware EqSat. Broader
+aggregates, vector masks, and public syntax require additional eligibility and
+evaluation tests.

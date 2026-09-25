@@ -40,7 +40,7 @@ foreach ($target in @('spirv', 'wgsl')) {
                 $x = $values[$i]
                 $chosen = if ($x -lt 0) { -$x } else { $x + 10 }
                 $guarded = if ($x -ne 0) { [int][Math]::Truncate(120.0 / $x) } else { 7 }
-                if ($actual[$i] -ne $chosen + $guarded) {
+                if ($actual[$i] -ne $chosen + $guarded + 2 * $x) {
                     throw "Wrong output: $target, optimized=$optimize, n=$length, index=$i"
                 }
             }
@@ -48,4 +48,4 @@ foreach ($target in @('spirv', 'wgsl')) {
         }
     }
 }
-Write-Output "$cases GPU select cases passed, including guarded division at zero."
+Write-Output "$cases GPU select cases passed, including correlated choices, an unreachable loop, and guarded division at zero."

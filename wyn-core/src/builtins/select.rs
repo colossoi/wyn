@@ -1,7 +1,51 @@
 //! Shared select operand and type contract. Evaluating operand expressions is
 //! separate from selecting between their already computed values.
 
+use super::lowering::PrimOp;
 use crate::types::{Type, TypeExt, TypeName};
+
+pub(crate) const ADDED_WORK_LIMIT: usize = 4;
+
+/// Cheap primitive operations admitted by both early and late if-conversion.
+/// The caller must also prove speculation safety and account for vector width.
+pub(crate) fn cheap_primop(prim: &PrimOp) -> bool {
+    matches!(
+        prim,
+        PrimOp::Select
+            | PrimOp::FAdd
+            | PrimOp::FSub
+            | PrimOp::FMul
+            | PrimOp::IAdd
+            | PrimOp::ISub
+            | PrimOp::IMul
+            | PrimOp::FOrdEqual
+            | PrimOp::FOrdNotEqual
+            | PrimOp::FOrdLessThan
+            | PrimOp::FOrdGreaterThan
+            | PrimOp::FOrdLessThanEqual
+            | PrimOp::FOrdGreaterThanEqual
+            | PrimOp::IEqual
+            | PrimOp::INotEqual
+            | PrimOp::SLessThan
+            | PrimOp::ULessThan
+            | PrimOp::SGreaterThan
+            | PrimOp::UGreaterThan
+            | PrimOp::SLessThanEqual
+            | PrimOp::ULessThanEqual
+            | PrimOp::SGreaterThanEqual
+            | PrimOp::UGreaterThanEqual
+            | PrimOp::BitwiseAnd
+            | PrimOp::BitwiseOr
+            | PrimOp::BitwiseXor
+            | PrimOp::Not
+            | PrimOp::Bitcast
+            | PrimOp::SIToFP
+            | PrimOp::UIToFP
+            | PrimOp::SConvert
+            | PrimOp::UConvert
+            | PrimOp::FPConvert
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Selection<T> {
