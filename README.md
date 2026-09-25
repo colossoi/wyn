@@ -93,7 +93,7 @@ definitions; type checking verifies expressions and interfaces. It also loads th
 prelude and imported modules, so later stages receive a complete typed program
 with diagnostics tied to the original source.
 
-The [frontend pipeline](wyn-core/src/frontend.rs) runs these passes in order:
+The frontend pipeline runs these passes in order:
 
 | Pass | Responsibility |
 | --- | --- |
