@@ -439,6 +439,36 @@ fn partial_source_body(source: &str, name: &str) -> Term<Empty, Empty> {
 }
 
 #[test]
+fn vector_arithmetic_exposes_palette_constants_with_f32_rounding() {
+    let source = r#"
+def palette: vec3f32 =
+  mix((@[0.7, 0.2, 0.1] + @[0.6, 0.3, 0.2]) * 0.5, @[0.9, 0.89, 0.87], 0.12)
+entry e(x: f32) vec3f32 = palette
+"#;
+    let body = partial_source_body(source, "e");
+    let TermKind::VecLit(parts) = body.kind else {
+        panic!("palette was not folded")
+    };
+    for (part, (a, b, c)) in
+        parts.iter().zip([(0.7f32, 0.6f32, 0.9f32), (0.2, 0.3, 0.89), (0.1, 0.2, 0.87)])
+    {
+        let TermKind::FloatLit(actual) = part.kind else {
+            panic!("nonconstant palette lane")
+        };
+        let expected = ((a + b) * 0.5) * (1.0 - 0.12) + c * 0.12;
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+    // Evaluating the whole tree in f64 and rounding only its final result
+    // would incorrectly retain the additions of one in these lanes.
+    assert_float_vector(&partial_source_body(
+        "entry e(x:f32) vec2f32 = (@[16777216.0, 33554432.0] + @[1.0, 1.0]) - @[16777216.0, 33554432.0]", "e"), &[0.0, 0.0]);
+    assert_float_vector(
+        &partial_source_body("entry e(x:f32) vec2f32 = 8.0 / (@[1.0, 3.0] + 1.0)", "e"),
+        &[4.0, 2.0],
+    );
+}
+
+#[test]
 fn vector_math_folds_source_constants_chains_and_scalar_broadcasts() {
     for (expression, expected) in [
         ("vec.sin(@[0.0, 0.0])", vec![0.0, 0.0]),

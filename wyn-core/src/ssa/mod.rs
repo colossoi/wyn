@@ -18,6 +18,7 @@
 pub mod addressable_constants;
 pub mod backend_validation;
 pub mod builder;
+mod constant_folding;
 pub mod ir;
 pub mod layout;
 mod optimize;

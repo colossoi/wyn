@@ -12,17 +12,15 @@ use super::{
 };
 use crate::ast::{BinaryOp, Span, TypeName, UnaryOp};
 use crate::builtins;
-use crate::builtins::lowering::PrimOp;
 use crate::builtins::{by_id, Purity};
+use crate::constant_eval::{self, Constant};
 use crate::op::BinaryOperator;
-use crate::scalar_eval::{self, wrap_int, Scalar};
+use crate::scalar_eval::{self, Scalar};
 use crate::types::TypeExt;
 use crate::LookupMap;
 use crate::LookupSet;
 use crate::SymbolId;
 use polytype::Type;
-
-mod builtin;
 
 /// TLC after partial evaluation.
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +105,20 @@ fn parse_integer_value(spelling: &str, ty: &Type<TypeName>) -> Result<i64, Strin
 }
 
 impl Value {
+    fn as_constant(&self) -> Option<Constant> {
+        match self {
+            Self::Vector(values) => Some(Constant::Vector(values.clone())),
+            _ => self.as_scalar().map(Constant::from_scalar),
+        }
+    }
+    fn from_constant(value: Constant) -> Self {
+        match value {
+            Constant::Vector(values) => Self::Vector(values),
+            Constant::Int(value) => Self::Int(value),
+            Constant::Float(value) => Self::Float(value),
+            Constant::Bool(value) => Self::Bool(value),
+        }
+    }
     fn is_constant(&self) -> bool {
         matches!(
             self,
@@ -619,9 +631,9 @@ impl<'a> PartialEvaluator<'a> {
     /// result matches runtime semantics (e.g. u32 multiply is mod 2^32). The
     /// fold is done in `i128` to avoid overflowing before the wrap.
     fn eval_binop(&self, op: &BinaryOp, lhs: &Value, rhs: &Value, ty: &Type<TypeName>) -> Option<Value> {
-        if let (Some(lhs), Some(rhs)) = (lhs.as_scalar(), rhs.as_scalar()) {
-            if let Some(result) = scalar_eval::binary(op.op, lhs, rhs, ty) {
-                return Some(Value::from_scalar(result));
+        if let (Some(lhs), Some(rhs)) = (lhs.as_constant(), rhs.as_constant()) {
+            if let Some(result) = constant_eval::binary(op.op, &lhs, &rhs, ty) {
+                return Some(Value::from_constant(result));
             }
         }
 
@@ -655,6 +667,8 @@ impl<'a> PartialEvaluator<'a> {
         if def.raw.purity != Purity::Pure || args.iter().any(|(v, _)| !v.is_known()) {
             return None;
         }
+        let constants =
+            args.iter().map(|(v, ty)| Some((v.as_constant()?, ty.clone()))).collect::<Option<Vec<_>>>()?;
         let lowering = &def.overloads().get(overload_idx)?.lowering;
         // Partial evaluation precedes intrinsic specialization. Resolve generic
         // numeric operations here as well, without losing broadcast metadata.
@@ -663,10 +677,11 @@ impl<'a> PartialEvaluator<'a> {
             if let Some(specialized) =
                 builtins::catalog().specialized_numeric_lowering(id, overload_idx, scalar)
             {
-                return builtin::fold(&specialized, args, result_ty);
+                return constant_eval::builtin(&specialized, &constants, result_ty)
+                    .map(Value::from_constant);
             }
         }
-        builtin::fold(lowering, args, result_ty)
+        constant_eval::builtin(lowering, &constants, result_ty).map(Value::from_constant)
     }
 
     fn literal_value(&self, term: &Term<Empty, Empty>) -> Option<Value> {
@@ -1025,118 +1040,6 @@ fn is_duplicable(v: &Value) -> bool {
         // see the lambda value in the env to apply it — binding the name to
         // `Var(name)` instead would make `apply_var` self-alias and recurse.
         Value::Unknown(t) => matches!(t.kind, TermKind::Var(_) | TermKind::UnitLit | TermKind::Lambda(_)),
-    }
-}
-
-fn fold_scalar_conversion(
-    prim: &PrimOp,
-    args: &[(Value, Type<TypeName>)],
-    result_ty: &Type<TypeName>,
-) -> Option<Value> {
-    let (arg, arg_ty) = args.first()?;
-    match prim {
-        PrimOp::FPToSI => {
-            let Value::Float(v) = arg else { return None };
-            let Type::Constructed(TypeName::Int(bits), _) = result_ty else {
-                return None;
-            };
-            let truncated = v.trunc();
-            let (min, max) = signed_float_bounds(*bits)?;
-            (v.is_finite() && truncated >= min && truncated <= max)
-                .then(|| Value::Int(wrap_int(truncated as i128, result_ty)))
-        }
-        PrimOp::FPToUI => {
-            let Value::Float(v) = arg else { return None };
-            let Type::Constructed(TypeName::UInt(bits), _) = result_ty else {
-                return None;
-            };
-            let truncated = v.trunc();
-            let max = unsigned_float_max(*bits)?;
-            (v.is_finite() && truncated >= 0.0 && truncated <= max)
-                .then(|| Value::Int(wrap_int(truncated as i128, result_ty)))
-        }
-        PrimOp::SIToFP => {
-            let Value::Int(v) = arg else { return None };
-            int_to_float(*v as i128, result_ty).map(Value::Float)
-        }
-        PrimOp::UIToFP => {
-            let Value::Int(v) = arg else { return None };
-            int_to_float(*v as u64 as i128, result_ty).map(Value::Float)
-        }
-        PrimOp::FPConvert => {
-            let Value::Float(v) = arg else { return None };
-            match result_ty {
-                Type::Constructed(TypeName::Float(32), _) => Some(Value::Float((*v as f32) as f64)),
-                Type::Constructed(TypeName::Float(64), _) => Some(Value::Float(*v)),
-                _ => None,
-            }
-        }
-        PrimOp::SConvert | PrimOp::UConvert => {
-            let Value::Int(v) = arg else { return None };
-            Some(Value::Int(wrap_int(*v as i128, result_ty)))
-        }
-        PrimOp::Bitcast => fold_scalar_bitcast(arg, arg_ty, result_ty),
-        _ => None,
-    }
-}
-
-fn int_to_float(v: i128, ty: &Type<TypeName>) -> Option<f64> {
-    match ty {
-        Type::Constructed(TypeName::Float(32), _) => Some((v as f32) as f64),
-        Type::Constructed(TypeName::Float(64), _) => Some(v as f64),
-        _ => None,
-    }
-}
-
-fn signed_float_bounds(bits: usize) -> Option<(f64, f64)> {
-    match bits {
-        8 => Some((i8::MIN as f64, i8::MAX as f64)),
-        16 => Some((i16::MIN as f64, i16::MAX as f64)),
-        32 => Some((i32::MIN as f64, i32::MAX as f64)),
-        64 => Some((i64::MIN as f64, i64::MAX as f64)),
-        _ => None,
-    }
-}
-
-fn unsigned_float_max(bits: usize) -> Option<f64> {
-    match bits {
-        8 => Some(u8::MAX as f64),
-        16 => Some(u16::MAX as f64),
-        32 => Some(u32::MAX as f64),
-        64 => Some(u64::MAX as f64),
-        _ => None,
-    }
-}
-
-fn fold_scalar_bitcast(arg: &Value, arg_ty: &Type<TypeName>, result_ty: &Type<TypeName>) -> Option<Value> {
-    match (arg, arg_ty, result_ty) {
-        (v, a, b) if a == b => Some(v.clone()),
-        (
-            Value::Float(v),
-            Type::Constructed(TypeName::Float(32), _),
-            Type::Constructed(TypeName::Int(32), _),
-        ) => Some(Value::Int((*v as f32).to_bits() as i32 as i64)),
-        (
-            Value::Float(v),
-            Type::Constructed(TypeName::Float(32), _),
-            Type::Constructed(TypeName::UInt(32), _),
-        ) => Some(Value::Int((*v as f32).to_bits() as i64)),
-        (
-            Value::Int(v),
-            Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _),
-            Type::Constructed(TypeName::Float(32), _),
-        ) => Some(Value::Float(f32::from_bits(*v as u32) as f64)),
-        (
-            Value::Int(v),
-            Type::Constructed(TypeName::Int(32), _),
-            Type::Constructed(TypeName::UInt(32), _),
-        )
-        | (
-            Value::Int(v),
-            Type::Constructed(TypeName::UInt(32), _),
-            Type::Constructed(TypeName::Int(32), _),
-        ) => Some(Value::Int(*v)),
-        _ => None,
     }
 }
 

@@ -44,9 +44,10 @@ fn static_array_length(ty: &Type) -> Option<usize> {
 }
 
 impl Body<'_, '_> {
-    pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
-        if let Some(value) = self.environment.parameters.get(&id) {
-            return Ok(value.clone());
+    /// Preserve the physical interface without emitting runtime setup.
+    pub(super) fn declare_input(&mut self, id: ParameterId) -> Result<(), OptimizeError> {
+        if self.declared_inputs.contains_key(&id) {
+            return Ok(());
         }
         if self.entry.is_none() {
             return Err(error(format!("unbound helper parameter {id:?}")));
@@ -54,22 +55,32 @@ impl Body<'_, '_> {
         let Some(inputs) = self.compiler.data.state.abi.inputs.get(&id).cloned() else {
             return Err(error(format!("no source ABI for parameter {id:?}")));
         };
-        let mut values = vec![];
+        let mut declared = vec![];
         for input in inputs {
-            let (ty, binding) = if let Some(binding) = input.storage_binding() {
+            let ty = if let Some(binding) = input.storage_binding() {
                 let Some(element) = input.ty.elem_type() else {
                     return Err(error("storage input element"));
                 };
-                let element = storage_type(element)?;
-                (
-                    view_array_of(&element, buffer_tag(binding)),
-                    Some((binding, element)),
-                )
+                view_array_of(&storage_type(element)?, buffer_tag(binding))
             } else {
-                (concrete(&input.ty)?, None)
+                concrete(&input.ty)?
             };
-            let id = self.builder.func_mut().add_function_param(ty.clone(), input.name.clone());
-            let value = if let Some((binding, element)) = binding {
+            let value = self.builder.func_mut().add_function_param(ty.clone(), input.name.clone()).into();
+            self.inputs.push(input.clone());
+            declared.push((input, Typed { value, ty }));
+        }
+        self.declared_inputs.insert(id, declared);
+        Ok(())
+    }
+
+    pub(super) fn input(&mut self, id: ParameterId) -> Result<Typed, OptimizeError> {
+        if let Some(value) = self.environment.parameters.get(&id) {
+            return Ok(value.clone());
+        }
+        self.declare_input(id)?;
+        let mut values = vec![];
+        for (input, parameter) in self.declared_inputs[&id].clone() {
+            let value = if let Some(binding) = input.storage_binding() {
                 let length = if let Some(Type::Constructed(TypeName::Size(n), _)) = input.ty.array_size() {
                     Self::number(u32::try_from(*n).map_err(|_| error("array size exceeds u32"))?)
                 } else {
@@ -82,11 +93,13 @@ impl Body<'_, '_> {
                         u32_type(),
                     )?
                 };
-                self.view(binding, element, length)?
+                let Some(element) = input.ty.elem_type() else {
+                    return Err(error("storage input element"));
+                };
+                self.view(binding, storage_type(element)?, length)?
             } else {
-                Typed { value: id.into(), ty }
+                parameter
             };
-            self.inputs.push(input);
             values.push(value);
         }
         let value = if values.len() == 1 { values.remove(0) } else { self.tuple(values)? };
@@ -133,6 +146,11 @@ impl Body<'_, '_> {
             Value::Discarded => Err(error("unused result has no value")),
             Value::Int(n) => Ok(Self::number(*n)),
             Value::Local(name) => {
+                if !self.environment.locals.contains_key(name) {
+                    if let Some(&parameter) = self.input_locals.get(name) {
+                        return self.input(parameter);
+                    }
+                }
                 let Some(value) = self.environment.locals.get(name).cloned() else {
                     return Err(error(format!("unbound scaffold local {name}")));
                 };

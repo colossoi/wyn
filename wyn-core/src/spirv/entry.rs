@@ -6,6 +6,7 @@ use crate::interface;
 use crate::op;
 use crate::ssa;
 use crate::types;
+use crate::LookupSet;
 
 /// SPIR-V does not permit perspective interpolation for integer fragment
 /// inputs. Apply `Flat` to both ends of an integer scalar/vector varying so
@@ -17,6 +18,9 @@ fn requires_flat_interpolation(ty: &PolyType<TypeName>) -> bool {
 /// Lower an SSA entry point to SPIR-V.
 pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &EntryPoint) -> Result<()> {
     let body = &entry.body;
+    let uses = ssa::ValueUses::analyze(&body.inner);
+    let used_places: LookupSet<_> =
+        body.inner.insts.values().flat_map(|node| node.data.place_uses()).collect();
     let params: Vec<ValueId> = body.params().map(|(id, _, _)| id).collect();
     // A parameter can expand to multiple physical inputs (for example, a tuple
     // of storage views). Only one-to-one parameter/input associations enter the
@@ -26,8 +30,14 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     let mut input_places = vec![None; entry.inputs.len()];
     for (parameter_index, slots) in entry.parameter_inputs.iter().enumerate() {
         if slots.len() == 1 {
-            input_params[slots[0]] = Some(params[parameter_index]);
-            input_places[slots[0]] = body.parameter_place(parameter_index);
+            let parameter = params[parameter_index];
+            let place = body.parameter_place(parameter_index);
+            // Interface declarations survive even when their runtime values
+            // have no users. Addressable parameters are used through places.
+            if uses.count(parameter) != 0 || place.is_some_and(|p| used_places.contains(&p)) {
+                input_params[slots[0]] = Some(parameter);
+                input_places[slots[0]] = place;
+            }
         }
     }
     let is_compute = entry.execution_model.is_compute();
@@ -512,6 +522,9 @@ pub(super) fn lower_ssa_entry_point(constructor: &mut Constructor, entry: &Entry
     // Load push constant members via AccessChain from the push constant variable.
     if let Some(pc_var_id) = pc_var {
         for (member_idx, &(input_idx, _offset)) in pc_inputs.iter().enumerate() {
+            if input_params[input_idx].is_none() {
+                continue;
+            }
             let input = &entry.inputs[input_idx];
             let member_type = constructor.storage_polytype_to_spirv(&input.ty)?;
             let member_ptr_type =

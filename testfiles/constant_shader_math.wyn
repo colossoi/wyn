@@ -1,0 +1,30 @@
+-- Constant projection/depth/color math and unused shader inputs.
+type settings = { viewport: vec2f32, gain: f32, unused: vec4f32 }
+
+def projected(p: vec3f32, viewport: vec2f32, fov: f32, near: f32, far: f32) vec3f32 =
+  let scale = 1.0 / f32.tan(f32.radians(fov) * 0.5)
+  let depth = 1.0 / (near - far)
+  let c = @[p.x * scale / (viewport.x / viewport.y), p.y * scale,
+            p.z * far * depth + far * near * depth] in c
+
+def palette: vec3f32 =
+  mix((@[0.7, 0.2, 0.1] + @[0.6, 0.3, 0.2]) * 0.5, @[0.9, 0.89, 0.87], 0.12)
+
+def vertex_fn(colors: []vec3f32, vertex_index: u32,
+              _instance_index: u32, _draw_index: u32) vertex<vec3f32> =
+  let p = colors[i32(vertex_index)] in
+  vertex_output(@[p.x, p.y, 0.5, 1.0], p)
+
+entry constant_math(points: []vec3f32, extra: []f32, config: settings) ([]vec3f32, []f32) =
+  let colors = map(|p|
+    let q = projected(p, config.viewport, 20.0, 0.1, 1000.0) in
+    q * config.gain + palette, points)
+  let secondary = map(|x| x + 1.0, extra) in
+  (colors, secondary)
+
+entry unused_inputs(points: []vec3f32, extra: []f32, config: settings,
+                     target: render_target<vec4f32>) ([]f32, render_target<vec4f32>) =
+  let secondary = map(|x| x * config.gain, extra)
+  let triangles = rasterize_triangles(direct_draw(3u32, 1u32), vertex_fn(points, _, _, _))
+  let image = shade(target, triangles, |color, _, _, _, _| @[color.x, color.y, color.z, 1.0]) in
+  (secondary, image)

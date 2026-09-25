@@ -69,15 +69,15 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         lower.finish_outputs = finish && compute;
         lower.graphics_outputs = !compute;
         for parameter in lower.compiler.host.inputs.get(&root).cloned().unwrap_or_default() {
-            lower.input(parameter)?;
+            lower.declare_input(parameter)?;
         }
         // Root parameters are source ABI values. Kernel captures are resolved
         // lazily, so a combine phase does not declare unused input arrays.
         if finish {
             for instruction in &data.state.bodies[data.state.blocks[root].body].instructions {
                 if let Instruction::BindParameter(p, Value::Local(name)) = instruction {
-                    let value = lower.input(*p)?;
-                    lower.environment.locals.insert(name.clone(), value);
+                    lower.declare_input(*p)?;
+                    lower.input_locals.insert(name.clone(), *p);
                 }
             }
         }
@@ -229,6 +229,8 @@ struct Body<'a, 'b> {
     finish_outputs: bool,
     graphics_outputs: bool,
     inputs: Vec<EntryInput>,
+    declared_inputs: BTreeMap<ParameterId, Vec<(EntryInput, Typed)>>,
+    input_locals: BTreeMap<String, ParameterId>,
 }
 impl<'a, 'b> Body<'a, 'b> {
     fn new(
@@ -281,6 +283,8 @@ impl<'a, 'b> Body<'a, 'b> {
             finish_outputs: false,
             graphics_outputs: false,
             inputs: vec![],
+            declared_inputs: BTreeMap::new(),
+            input_locals: BTreeMap::new(),
         })
     }
     fn finish(self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
@@ -444,6 +448,11 @@ impl<'a, 'b> Body<'a, 'b> {
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), OptimizeError> {
         match instruction {
             Instruction::BindParameter(id, value) => {
+                // Source ABI parameters are declarations. Resolve their values
+                // only when the live expression graph actually references them.
+                if matches!(value, Value::Local(name) if self.input_locals.get(name) == Some(id)) {
+                    return Ok(());
+                }
                 let v = self.value(value)?;
                 let ty = &self.compiler.data.types[self.compiler.data.parameters[*id].ty].ty;
                 let v = self.cast(v, ty)?;

@@ -2,10 +2,9 @@
 //! computations can be reused; only total ones may move across control boundaries.
 use super::ir::{inline_single_block, LoopScopes, Substitutions};
 use super::stage::{Elaborated, Optimized};
-use super::types::{BlockId, ConstantValue, FuncBody, InstId, InstKind, ValueId, ValueRef, WynFunction};
+use super::types::{BlockId, FuncBody, InstId, InstKind, ValueId, ValueRef, WynFunction};
 use crate::builtins::{by_id, Purity};
 use crate::op::{BinaryOperator, OpTag};
-use crate::scalar_eval::{binary, Scalar};
 use crate::types::{is_array_variant_view, is_virtual_array, Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
@@ -226,62 +225,6 @@ fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
     replacements.finish(function);
 }
 
-fn integer(function: &WynFunction, value: ValueRef) -> Option<i64> {
-    match value {
-        ValueRef::Const(ConstantValue::I32(n)) => Some(i64::from(n)),
-        ValueRef::Const(ConstantValue::U32(n)) => Some(i64::from(n)),
-        ValueRef::Ssa(id) => match &function.insts[function.inst_of_value(id)?].data {
-            InstKind::Op {
-                tag: OpTag::Int(s) | OpTag::Uint(s),
-                ..
-            } => s.parse().ok(),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn fold_integer_binary(
-    function: &mut WynFunction,
-    instruction: InstId,
-    replacements: &mut Substitutions,
-) -> bool {
-    let (
-        Some(result),
-        InstKind::Op {
-            tag: OpTag::BinOp(operator),
-            operands,
-        },
-    ) = (
-        function.insts[instruction].result,
-        &function.insts[instruction].data,
-    )
-    else {
-        return false;
-    };
-    let [left, right] = operands.as_slice() else {
-        return false;
-    };
-    let ty = &function.values[result].ty;
-    if !matches!(ty, Type::Constructed(TypeName::Int(32) | TypeName::UInt(32), _)) {
-        return false;
-    }
-    let Some(Scalar::Int(value)) = integer(function, *left)
-        .zip(integer(function, *right))
-        .and_then(|(left, right)| binary(*operator, Scalar::Int(left), Scalar::Int(right), ty))
-    else {
-        return false;
-    };
-    let constant = if matches!(ty, Type::Constructed(TypeName::UInt(32), _)) {
-        ConstantValue::U32(value as u32)
-    } else {
-        ConstantValue::I32(value as i32)
-    };
-    replacements.insert(result, ValueRef::Const(constant));
-    function.insts.remove(instruction);
-    true
-}
-
 fn materialize_dynamic_index(
     function: &mut WynFunction,
     loop_scopes: &LoopScopes,
@@ -379,6 +322,7 @@ fn float_or_share_instruction(
 }
 
 fn float_pure_values(body: &mut FuncBody) {
+    super::constant_folding::fold(body);
     let loop_scopes = LoopScopes::analyze(&body.inner);
     reuse_dominating_expressions(body, &loop_scopes);
     let mut replacements = Substitutions::default();
@@ -387,12 +331,6 @@ fn float_pure_values(body: &mut FuncBody) {
     for block in blocks {
         for instruction in std::mem::take(&mut body.inner.blocks[block].insts) {
             body.inner.insts[instruction].data.substitute_values(&mut |value| replacements.resolve(value));
-            // Inlining can expose integer constants after egglog has finished.
-            // Evaluate with Wyn's width/wrapping semantics before WGSL's stricter
-            // constant-expression checker sees an overflowing literal operation.
-            if fold_integer_binary(&mut body.inner, instruction, &mut replacements) {
-                continue;
-            }
             // A materialization is itself interned, so every immutable source
             // has one addressable representation in the final legal scope.
             materialize_dynamic_index(

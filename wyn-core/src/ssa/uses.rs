@@ -9,7 +9,7 @@ use crate::LookupMap;
 /// Remove recursively dead, side-effect-free SSA instructions.
 ///
 /// Recognizes structural operations and explicitly discardable intrinsics.
-/// Calls, opaque intrinsics, storage operations, and place operations remain.
+/// Calls, opaque intrinsics, memory accesses, and place operations remain.
 /// Discardability does not grant permission to move or speculate an operation.
 pub fn eliminate_dead_pure_instructions(body: &mut FuncBody) {
     let uses = ValueUses::analyze(&body.inner);
@@ -64,10 +64,14 @@ fn is_discardable(instruction: &InstKind) -> bool {
             BuiltinLowering::PrimOp(_) | BuiltinLowering::ExtInstSplat { .. } => true,
             // Catalog purity alone is insufficient: array_with, for example,
             // can write through a storage view. Only allow known read-only
-            // texture operations from the opaque backend dispatch family.
+            // texture operations and length metadata from the opaque backend
+            // dispatch family.
             BuiltinLowering::ByBuiltinId => {
                 let known = catalog().known();
-                *id == known.texture_load || *id == known.texture_sample
+                *id == known.texture_load
+                    || *id == known.texture_sample
+                    || *id == known.storage_len
+                    || *id == known.length
             }
             BuiltinLowering::LinkedSpirv(_) | BuiltinLowering::NotLowered => false,
         };
@@ -92,7 +96,9 @@ fn is_discardable(instruction: &InstKind) -> bool {
                 | OpTag::Index
                 | OpTag::Materialize
                 | OpTag::AddressableConstant(_)
-                | OpTag::DynamicExtract,
+                | OpTag::DynamicExtract
+                | OpTag::StorageView(_)
+                | OpTag::StorageViewLen,
             ..
         }
     )

@@ -4,6 +4,7 @@ pub mod ast_renumber;
 pub mod ast_type_holes;
 pub mod binding_layout;
 pub mod builtins;
+mod constant_eval;
 pub mod diags;
 mod elaborate_modules;
 pub mod error;

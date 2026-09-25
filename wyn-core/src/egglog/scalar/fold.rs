@@ -1,6 +1,7 @@
 //! Typed scalar primitives. Egglog owns matching, propagation, and saturation.
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::builtins::{by_id, Purity};
+use crate::constant_eval::{self, Constant};
 use crate::egglog::data::{intern_type, ExprId, ExprKind, Ir};
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::scalar_eval::{binary, unary, wrap_int, Scalar};
@@ -214,32 +215,26 @@ fn evaluate_unary(op: &str, input: &str, output: &str, text: &str) -> Option<Str
     if let Ok(op) = UnaryOperator::try_from(op) {
         return encode(&output, unary(op, value, &input)?);
     }
-    encode(&output, conversion(op, &output, value)?)
+    encode(&output, conversion(op, &input, &output, value)?)
 }
-fn conversion(op: &str, result: &Type, value: Scalar) -> Option<Scalar> {
-    Some(match (op, result, value) {
-        ("floor", _, Scalar::Float(v)) => Scalar::Float((v as f32).floor() as f64),
-        ("ceil", _, Scalar::Float(v)) => Scalar::Float((v as f32).ceil() as f64),
-        ("fptosi", Type::Constructed(TypeName::Int(32), _), Scalar::Float(v))
-            if v.is_finite() && v.trunc() >= -2147483648.0 && v.trunc() < 2147483648.0 =>
-        {
-            Scalar::Int(v.trunc() as i64)
-        }
-        ("fptoui", Type::Constructed(TypeName::UInt(32), _), Scalar::Float(v))
-            if v.is_finite() && v.trunc() >= 0.0 && v.trunc() < 4294967296.0 =>
-        {
-            Scalar::Int(v.trunc() as i64)
-        }
-        ("sitofp", Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
-            Scalar::Float(v as f32 as f64)
-        }
-        ("uitofp", Type::Constructed(TypeName::Float(32), _), Scalar::Int(v)) => {
-            Scalar::Float((v as u64) as f32 as f64)
-        }
-        ("int-convert", _, Scalar::Int(v)) => Scalar::Int(wrap_int(v as i128, result)),
-        ("float-convert", Type::Constructed(TypeName::Float(32), _), Scalar::Float(v)) => Scalar::Float(v),
+fn conversion(op: &str, input: &Type, result: &Type, value: Scalar) -> Option<Scalar> {
+    let prim = match op {
+        "floor" => PrimOp::GlslExt(8),
+        "ceil" => PrimOp::GlslExt(9),
+        "fptosi" => PrimOp::FPToSI,
+        "fptoui" => PrimOp::FPToUI,
+        "sitofp" => PrimOp::SIToFP,
+        "uitofp" => PrimOp::UIToFP,
+        "int-convert" => PrimOp::SConvert,
+        "float-convert" => PrimOp::FPConvert,
         _ => return None,
-    })
+    };
+    constant_eval::builtin(
+        &BuiltinLowering::PrimOp(prim),
+        &[(Constant::from_scalar(value), input.clone())],
+        result,
+    )?
+    .as_scalar()
 }
 
 pub(super) fn lowering(data: &Ir, f: ExprId) -> Option<&BuiltinLowering> {
