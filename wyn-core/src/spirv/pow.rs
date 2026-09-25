@@ -2,7 +2,7 @@
 //!
 //! GLSL.std.450's `Pow` (op 26) is float-only — `exp(y * log(x))`,
 //! transcendental. Wyn supports `i32 ** i32` and `u32 ** u32` by
-//! emitting one helper function per signedness at module setup time,
+//! emitting one helper function per required signedness,
 //! implementing [exponentiation by squaring]:
 //!
 //! ```text
@@ -18,8 +18,8 @@
 //!
 //! Each `**` use site lowers to a single `OpFunctionCall` against the
 //! cached helper; the function id lives in `Constructor::int_pow_functions`.
-//! Two functions are emitted unconditionally (~30 instructions each);
-//! driver dead-code elimination drops them when unused.
+//! Call sites reserve helper ids on demand. Their bodies are emitted after
+//! source functions and entries, once the required variants are known.
 //!
 //! Signed vs unsigned differ only in the loop-exit comparison
 //! (`OpSGreaterThan` vs `OpUGreaterThan`) and the right-shift
@@ -39,24 +39,33 @@ use wspirv::spirv;
 use super::Constructor;
 use crate::error::Result;
 
-/// Emit both helper functions (`signed` and `unsigned`) and cache their
-/// ids in `Constructor::int_pow_functions`. Called once per module,
-/// after function forward declarations and before any function body is
-/// emitted.
+impl Constructor {
+    /// Reserve a helper only when a surviving integer-power call needs it.
+    pub(super) fn int_pow_function(&mut self, signed: bool) -> spirv::Word {
+        if let Some(&id) = self.int_pow_functions.get(&signed) {
+            return id;
+        }
+        let id = self.reserve_function();
+        self.int_pow_functions.insert(signed, id);
+        id
+    }
+}
+
+/// Emit the requested variants in stable order after all call sites are lowered.
 pub(super) fn emit_int_pow_helpers(c: &mut Constructor) -> Result<()> {
-    let signed_id = emit_one(c, /* signed = */ true)?;
-    c.int_pow_functions.insert(true, signed_id);
-    let unsigned_id = emit_one(c, /* signed = */ false)?;
-    c.int_pow_functions.insert(false, unsigned_id);
+    for signed in [true, false] {
+        if let Some(&id) = c.int_pow_functions.get(&signed) {
+            emit_one(c, signed, id)?;
+        }
+    }
     Ok(())
 }
 
-/// Emit one variant. Returns the SPIR-V function id, which the caller
-/// stores under the appropriate `signed` key.
-fn emit_one(c: &mut Constructor, signed: bool) -> Result<spirv::Word> {
+/// Fill the reserved function id with the requested variant.
+fn emit_one(c: &mut Constructor, signed: bool, id: spirv::Word) -> Result<()> {
     let int_ty = if signed { c.i32_type } else { c.u32_type };
 
-    let (func_id, param_ids, _code_block) = c.begin_function(None, &[int_ty, int_ty], int_ty)?;
+    let (_, param_ids, _code_block) = c.begin_function(Some(id), &[int_ty, int_ty], int_ty)?;
     let param_base = param_ids[0];
     let param_exp = param_ids[1];
 
@@ -150,5 +159,5 @@ fn emit_one(c: &mut Constructor, signed: bool) -> Result<spirv::Word> {
     c.builder.ret_value(final_r)?;
 
     c.end_function()?;
-    Ok(func_id)
+    Ok(())
 }

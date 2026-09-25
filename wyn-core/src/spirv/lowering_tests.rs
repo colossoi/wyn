@@ -9,6 +9,106 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn repeated_scan_builds_emit_identical_phi_order() {
+    let source = include_str!("../../../testfiles/scan_compute.wyn");
+    let expected = compile_to_spirv(source).unwrap();
+    let module = wspirv::dr::load_words(&expected).unwrap();
+    assert!(module.functions.iter().flat_map(|f| &f.blocks).any(|block| block
+        .instructions
+        .iter()
+        .filter(|i| i.class.opcode == spirv::Op::Phi)
+        .count()
+        >= 2));
+    for _ in 0..12 {
+        assert_eq!(compile_to_spirv(source).unwrap(), expected);
+    }
+}
+
+#[test]
+fn integer_power_helpers_are_emitted_only_for_used_signedness() {
+    let signed = "entry signed(x:i32, y:i32) i32 = x ** y";
+    let unsigned = "entry unsigned(x:u32, y:u32) u32 = x ** y";
+    for (source, helpers) in [
+        ("entry plain(x:i32) i32 = x + 1".to_string(), 0),
+        (signed.to_string(), 1),
+        (unsigned.to_string(), 1),
+        (format!("{signed}\n{unsigned}"), 2),
+        (
+            format!("{signed}\n{}", signed.replace("signed(", "also_signed(")),
+            1,
+        ),
+        ("entry folded(x:i32) i32 = x + 2 ** 3".to_string(), 0),
+    ] {
+        let words = compile_to_spirv(&source).unwrap();
+        let module = wspirv::dr::load_words(&words).unwrap();
+        assert_eq!(
+            module.functions.len(),
+            module.entry_points.len() + helpers,
+            "{source}"
+        );
+        let bytes = words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
+        let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+}
+
+#[test]
+fn literal_composite_indices_do_not_emit_unused_constant_ids() {
+    let positive = ["x"; 48].join(", ");
+    let negative = ["-x"; 48].join(", ");
+    let source = format!(
+        "def values(x:f32) [48]f32 = if x > 0.0 then [{positive}] else [{negative}]\n\
+         entry at(x:f32) f32 = values(x)[38]"
+    );
+    let module = wspirv::dr::load_words(compile_to_spirv(&source).unwrap()).unwrap();
+    assert!(
+        module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| i
+            .class
+            .opcode
+            == spirv::Op::CompositeExtract
+            && i.operands.last() == Some(&wspirv::dr::Operand::LiteralBit32(38)))
+    );
+    assert!(!module
+        .types_global_values
+        .iter()
+        .any(|i| i.class.opcode == spirv::Op::Constant
+            && i.operands == [wspirv::dr::Operand::LiteralBit32(38)]));
+}
+
+#[test]
+fn storage_length_descriptors_do_not_emit_unused_constant_ids() {
+    let params = (0..39).map(|i| format!("a{i}: []f32")).collect::<Vec<_>>().join(", ");
+    let source = format!("entry last_buffer({params}) []f32 = map(|x| x + 1.0, a38)");
+    let module = wspirv::dr::load_words(compile_to_spirv(&source).unwrap()).unwrap();
+    let buffers: Vec<_> = module
+        .annotations
+        .iter()
+        .filter_map(|inst| match inst.operands.as_slice() {
+            [wspirv::dr::Operand::IdRef(id), wspirv::dr::Operand::Decoration(spirv::Decoration::Binding), wspirv::dr::Operand::LiteralBit32(38)] => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(!buffers.is_empty(), "input keeps its declared binding");
+    assert!(
+        module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).any(|i| i
+            .class
+            .opcode
+            == spirv::Op::ArrayLength
+            && matches!(i.operands.first(), Some(wspirv::dr::Operand::IdRef(id)) if buffers.contains(id)))
+    );
+    assert!(!module
+        .types_global_values
+        .iter()
+        .any(|i| i.class.opcode == spirv::Op::Constant
+            && i.operands == [wspirv::dr::Operand::LiteralBit32(38)]));
+}
+
+#[test]
 fn unrelated_entries_preserve_storage_buffer_element_types() {
     let source = include_str!("../../../testfiles/graphics_compute_entry_buffer_types.wyn");
     for source in [

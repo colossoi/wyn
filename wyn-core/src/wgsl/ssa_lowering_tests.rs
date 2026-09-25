@@ -337,6 +337,30 @@ fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
 }
 
 #[test]
+fn unrelated_entries_preserve_storage_buffer_element_types() {
+    let source = include_str!("../../../testfiles/graphics_compute_entry_buffer_types.wyn");
+    let helper = "def pick(xs: []f32) f32 =\n\
+        let first = xs[0] let last = xs[length(xs) - 1] in\n\
+        if first > last then first else last\n";
+    for source in [
+        source.to_string(),
+        source.replace("weights[0]", "weights[length(weights) - 1]"),
+        source
+            .replace("weights: []f32", "weights: []vec4f32")
+            .replace("weights[0]", "weights[0].x")
+            .replace("values: []vec4f32) []vec4f32", "values: []f32) []f32"),
+        format!("{helper}{}", source.replace("weights[0]", "pick(weights)")),
+    ] {
+        let (draw, compute) = source.split_once("entry compute").unwrap();
+        let compute = format!("entry compute{compute}");
+        for source in [draw.to_string(), source.to_string(), format!("{compute}\n{draw}")] {
+            let wgsl = compile_to_wgsl(&source).unwrap();
+            validate_wgsl(&wgsl);
+        }
+    }
+}
+
+#[test]
 fn constant_rng_seed_folds_with_wrapping_arithmetic() {
     let source = "entry seed() u32 =
        let s = 2326157778u32 in

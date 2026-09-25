@@ -334,12 +334,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         result_ty: spirv::Word,
         signed: bool,
     ) -> Result<spirv::Word> {
-        let func_id = self
-            .constructor
-            .int_pow_functions
-            .get(&signed)
-            .copied()
-            .ok_or_else(|| err_spirv!("int_pow helper not emitted (signed={})", signed))?;
+        let func_id = self.constructor.int_pow_function(signed);
         Ok(self.constructor.builder.function_call(result_ty, None, func_id, vec![lhs, rhs])?)
     }
 
@@ -434,14 +429,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                 if arg_ids.len() != 2 {
                     bail_spirv!("int_pow requires 2 args");
                 }
-                // Function id was cached by `spirv::pow::emit_int_pow_helpers`
-                // during module setup; missing means a backend-init bug.
-                let func_id = self
-                    .constructor
-                    .int_pow_functions
-                    .get(signed)
-                    .copied()
-                    .ok_or_else(|| err_spirv!("int_pow helper not emitted (signed={})", signed))?;
+                let func_id = self.constructor.int_pow_function(*signed);
                 Ok(self.constructor.builder.function_call(result_ty, None, func_id, arg_ids.to_vec())?)
             }
             PrimOp::Dot => {

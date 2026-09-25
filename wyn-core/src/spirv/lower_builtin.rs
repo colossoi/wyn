@@ -7,16 +7,50 @@ use crate::builtins;
 use crate::err_spirv;
 
 impl<'a, 'b> LowerCtx<'a, 'b> {
+    fn lower_storage_len(&mut self, values: &[ValueRef], result_ty: spirv::Word) -> Result<spirv::Word> {
+        let [set, binding] = values else {
+            bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
+        };
+        let mut descriptor = |value: ValueRef, name: &str| -> Result<u32> {
+            if let Some(ConstantValue::U32(value)) = value.as_const() {
+                return Ok(value);
+            }
+            let id = self.get_value_ref(value)?;
+            let Some(value) = self.constructor.get_const_u32_value(id) else {
+                bail_spirv!("_w_storage_len: {} must be a u32 constant", name);
+            };
+            Ok(value)
+        };
+        let set = descriptor(*set, "set")?;
+        let binding = descriptor(*binding, "binding")?;
+        let Some(buffer) = self.constructor.storage_buffer(BindingRef::new(set, binding)) else {
+            bail_spirv!("Storage buffer not found for set={}, binding={}", set, binding);
+        };
+        let len =
+            self.constructor.builder.array_length(self.constructor.u32_type, None, buffer.variable, 0)?;
+        if result_ty == self.constructor.u32_type {
+            Ok(len)
+        } else {
+            Ok(self.constructor.builder.bitcast(result_ty, None, len)?)
+        }
+    }
+
     pub(super) fn lower_builtin_call(
         &mut self,
         id: builtins::BuiltinId,
         builtin: &BuiltinLowering,
         dispatch_name: &str,
         value_refs: &[ValueRef],
-        arg_ids: &[spirv::Word],
         result_ty: spirv::Word,
         inst: &WynInstNode,
     ) -> Result<spirv::Word> {
+        // Storage descriptors identify a module resource; they are not runtime
+        // operands of OpArrayLength and need no SPIR-V constant ids.
+        if matches!(builtin, BuiltinLowering::ByBuiltinId) && id == catalog().known().storage_len {
+            return self.lower_storage_len(value_refs, result_ty);
+        }
+        let arg_ids = value_refs.iter().map(|v| self.get_value_ref(*v)).collect::<Result<Vec<_>>>()?;
+        let arg_ids = arg_ids.as_slice();
         match builtin {
             BuiltinLowering::PrimOp(prim_op) => self.lower_primop(prim_op, value_refs, arg_ids, result_ty),
             BuiltinLowering::LinkedSpirv(linkage_name) => {
@@ -400,39 +434,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                         }
                     } else {
                         self.slice_composite(arr, start_id, end_id, result_ty)
-                    }
-                } else if id == known.storage_len {
-                    if arg_ids.len() != 2 {
-                        bail_spirv!("_w_storage_len requires 2 arguments (set, binding)");
-                    }
-                    let set = match value_refs[0].as_const() {
-                        Some(ConstantValue::U32(v)) => v,
-                        _ => self
-                            .constructor
-                            .get_const_u32_value(arg_ids[0])
-                            .ok_or_else(|| err_spirv!("_w_storage_len: set must be a u32 constant"))?,
-                    };
-                    let binding = match value_refs[1].as_const() {
-                        Some(ConstantValue::U32(v)) => v,
-                        _ => self
-                            .constructor
-                            .get_const_u32_value(arg_ids[1])
-                            .ok_or_else(|| err_spirv!("_w_storage_len: binding must be a u32 constant"))?,
-                    };
-                    let buffer =
-                        self.constructor.storage_buffer(BindingRef::new(set, binding)).ok_or_else(
-                            || err_spirv!("Storage buffer not found for set={}, binding={}", set, binding),
-                        )?;
-                    let len_u32 = self.constructor.builder.array_length(
-                        self.constructor.u32_type,
-                        None,
-                        buffer.variable,
-                        0,
-                    )?;
-                    if result_ty == self.constructor.u32_type {
-                        Ok(len_u32)
-                    } else {
-                        Ok(self.constructor.builder.bitcast(result_ty, None, len_u32)?)
                     }
                 } else if id == known.thread_id || id == known.thread_id_y || id == known.thread_id_z {
                     let gid_var = self

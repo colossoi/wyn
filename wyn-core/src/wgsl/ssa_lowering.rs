@@ -696,6 +696,8 @@ struct LowerCtx<'a> {
     current_function_names: LookupMap<FunctionId, String>,
     current_storage_accesses: LookupMap<BindingRef, ResourceAccess>,
     storage_access_variants: LookupMap<BindingRef, (bool, bool)>,
+    current_entry: Option<EntryId>,
+    storage_names: LookupMap<(Option<EntryId>, BindingRef, bool), String>,
     atomic_bindings: LookupSet<BindingRef>,
     type_emitter: TypeEmitter,
     lowered: LookupSet<String>,
@@ -776,6 +778,8 @@ impl<'a> LowerCtx<'a> {
             current_function_names: LookupMap::new(),
             current_storage_accesses,
             storage_access_variants,
+            current_entry: None,
+            storage_names: LookupMap::new(),
             atomic_bindings,
             type_emitter: TypeEmitter::with_options(options),
             lowered: LookupSet::new(),
@@ -910,6 +914,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_program(&mut self) -> Result<String> {
+        let storage_declarations = self.storage_buffer_declarations()?;
         // Body: emit referenced functions + entry points into `code`, then
         // prepend accumulated tuple struct declarations and bindings.
         let mut code = String::new();
@@ -917,6 +922,7 @@ impl<'a> LowerCtx<'a> {
         // Emit storage-dependent helpers once per distinct entry access
         // signature; ordinary helpers still have exactly one emission.
         for emission in self.function_variants.emissions().to_vec() {
+            self.current_entry = emission.entry_context;
             self.current_storage_accesses =
                 self.function_variants.accesses_for(self.program, emission.entry_context);
             self.current_function_names = emission
@@ -1072,19 +1078,28 @@ impl<'a> LowerCtx<'a> {
             writeln!(output)?;
         }
 
-        // Compiler-introduced storage bindings + entry-level storage-
-        // backed I/O. WGSL needs these at module scope; dedupe by
-        // (set, binding) and coalesce access modes so an (in, out) pair
-        // on the same slot becomes `read_write`.
-        let mut synth: LookupMap<(BindingRef, bool), String> = LookupMap::new();
-        // Key → (elem_ty_str, module_name, has_read, has_write).
+        output.push_str(&storage_declarations);
+
+        self.emit_remaining_declarations(&mut output)?;
+        output.push_str(&code);
+        Ok(output)
+    }
+
+    /// Share globals only when binding, access, and element type agree. Entries
+    /// may reuse a descriptor slot with different types; their bodies and helper
+    /// variants select the declaration belonging to their entry context.
+    fn storage_buffer_declarations(&mut self) -> Result<String> {
+        let mut synth: LookupMap<(BindingRef, bool, String), Vec<EntryId>> = LookupMap::new();
         for entry in &self.program.entry_points {
             let accesses = entry.shader_storage_accesses();
             // Explicit compiler-inserted bindings (e.g. parallelize's
             // partial-sum buffer).
             for sb in &entry.storage_bindings {
                 let ty_str = self.type_emitter.type_to_wgsl(&sb.elem_ty)?;
-                synth.entry((sb.binding, accesses[&sb.binding].writes())).or_insert(ty_str);
+                synth
+                    .entry((sb.binding, accesses[&sb.binding].writes(), ty_str))
+                    .or_default()
+                    .push(entry.id);
             }
             // Entry inputs marked with storage_binding — compute shader
             // runtime-sized array parameters. The element type is the
@@ -1100,7 +1115,7 @@ impl<'a> LowerCtx<'a> {
                         })?
                         .clone();
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    synth.entry((br, accesses[&br].writes())).or_insert(ty_str);
+                    synth.entry((br, accesses[&br].writes(), ty_str)).or_default().push(entry.id);
                 }
             }
             // Entry outputs likewise. For scalar-valued compute outputs
@@ -1119,14 +1134,20 @@ impl<'a> LowerCtx<'a> {
                         None => out.ty.clone(),
                     };
                     let ty_str = self.type_emitter.type_to_wgsl(&elem_ty)?;
-                    synth.entry((br, accesses[&br].writes())).or_insert(ty_str);
+                    synth.entry((br, accesses[&br].writes(), ty_str)).or_default().push(entry.id);
                 }
             }
         }
         // Sort for determinism.
         let mut synth_sorted: Vec<_> = synth.into_iter().collect();
-        synth_sorted.sort_by_key(|((br, writable), _)| (br.set, br.binding, *writable));
-        for ((br, writable), elem_ty) in synth_sorted {
+        synth_sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let mut type_counts = LookupMap::new();
+        for ((br, writable, _), _) in &synth_sorted {
+            *type_counts.entry((*br, *writable)).or_insert(0) += 1;
+        }
+        let mut type_indices = LookupMap::new();
+        let mut output = String::new();
+        for ((br, writable, elem_ty), entries) in synth_sorted {
             let (set, binding) = (br.set, br.binding);
             let access = if writable { "read_write" } else { "read" };
             let elem_ty =
@@ -1135,7 +1156,24 @@ impl<'a> LowerCtx<'a> {
                 .storage_access_variants
                 .get(&br)
                 .is_some_and(|(read_only, read_write)| *read_only && *read_write);
-            let name = storage_buffer_name(br, writable, mixed);
+            let mut name = storage_buffer_name(br, writable, mixed);
+            if type_counts[&(br, writable)] > 1 {
+                let index = type_indices.entry((br, writable)).or_insert(0);
+                name = format!("{name}_type_{index}");
+                *index += 1;
+            }
+            for entry in entries {
+                let key = (Some(entry), br, writable);
+                if self.storage_names.get(&key).is_some_and(|previous| previous != &name) {
+                    return Err(err_wgsl!(
+                        "entry {:?} has conflicting storage types at {}",
+                        entry,
+                        br
+                    ));
+                }
+                self.storage_names.insert(key, name.clone());
+            }
+            self.storage_names.entry((None, br, writable)).or_insert_with(|| name.clone());
             writeln!(
                 output,
                 "@group({}) @binding({}) var<storage, {}> {}: array<{}>;",
@@ -1143,7 +1181,10 @@ impl<'a> LowerCtx<'a> {
             )?;
             writeln!(output)?;
         }
+        Ok(output)
+    }
 
+    fn emit_remaining_declarations(&mut self, output: &mut String) -> Result<()> {
         // Workgroup-shared arrays (phase2 tree reduce): one module-scope
         // `var<workgroup> _wg_<id>: array<T, count>` per distinct id, found by
         // pre-scanning every entry body for `StorageView(Workgroup{id,count})`.
@@ -1295,8 +1336,7 @@ impl<'a> LowerCtx<'a> {
             writeln!(output)?;
         }
 
-        output.push_str(&code);
-        Ok(output)
+        Ok(())
     }
 
     fn lower_function(&mut self, func: &Function, emitted_name: &str, output: &mut String) -> Result<()> {
@@ -1348,6 +1388,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn lower_entry_point(&mut self, entry: &EntryPoint, output: &mut String) -> Result<()> {
+        self.current_entry = Some(entry.id);
         self.current_storage_accesses = entry.shader_storage_accesses();
         let body = &entry.body;
 
@@ -2027,20 +2068,9 @@ impl<'a, 'b> BodyLowerCtx<'a, 'b> {
 
     fn storage_name(&self, set: u32, binding: u32) -> Result<String> {
         let br = BindingRef::new(set, binding);
-        for entry in &self.ctx.program.entry_points {
-            if entry.storage_bindings.iter().any(|sb| sb.binding == br)
-                || entry.inputs.iter().any(|i| i.storage_binding() == Some(br))
-                || entry.outputs.iter().any(|o| o.storage_binding() == Some(br))
-            {
-                let writable =
-                    self.ctx.current_storage_accesses.get(&br).is_none_or(|access| access.writes());
-                let mixed = self
-                    .ctx
-                    .storage_access_variants
-                    .get(&br)
-                    .is_some_and(|(read_only, read_write)| *read_only && *read_write);
-                return Ok(storage_buffer_name(br, writable, mixed));
-            }
+        let writable = self.ctx.current_storage_accesses.get(&br).is_none_or(|access| access.writes());
+        if let Some(name) = self.ctx.storage_names.get(&(self.ctx.current_entry, br, writable)) {
+            return Ok(name.clone());
         }
         Err(err_wgsl_at!(
             self.blame_span(),

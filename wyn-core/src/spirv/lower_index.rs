@@ -108,12 +108,12 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
     ) -> Result<spirv::Word> {
         let base_ty = self.get_value_type_ref(base);
         let base_id = self.get_value_ref(base)?;
-        let index_id = self.get_value_ref(index)?;
 
         // Dispatch based on the base type
         match base_ty {
             PolyType::Constructed(TypeName::Pointer, ptr_args) => {
                 // Pointer indexing: access_chain + load
+                let index_id = self.get_value_ref(index)?;
                 let sc = ptr_args
                     .get(1)
                     .map(Constructor::resolve_storage_class)
@@ -143,9 +143,11 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                     let Some(base_ssa) = base.as_ssa() else {
                         bail_spirv!("view index base must be an SSA value");
                     };
+                    let index_id = self.get_value_ref(index)?;
                     self.lower_view_index(base_ssa, base_id, index_id, result_ty, elem)
                 } else if types::is_array_variant_virtual(variant) {
                     // Virtual variant: {start, step, len} - computed array
+                    let index_id = self.get_value_ref(index)?;
                     self.lower_virtual_index(base_id, index_id, result_ty)
                 } else if types::is_array_variant_bounded(variant) {
                     // Bounded variant: {buffer: [N]T, len: u32} struct.
@@ -184,6 +186,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                                 types::no_buffer(),
                             ],
                         );
+                        let index_id = self.get_value_ref(index)?;
                         self.lower_composite_index(buf_id, index_id, result_ty, &composite_ty)
                     }
                 } else {
@@ -197,6 +200,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             [const_idx],
                         )?)
                     } else {
+                        let index_id = self.get_value_ref(index)?;
                         self.lower_composite_index(base_id, index_id, result_ty, &base_ty)
                     }
                 }
@@ -204,6 +208,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
             // Vec types - use vector_extract_dynamic
             PolyType::Constructed(TypeName::Vec, _) => {
+                let index_id = self.get_value_ref(index)?;
                 Ok(self.constructor.builder.vector_extract_dynamic(result_ty, None, base_id, index_id)?)
             }
 

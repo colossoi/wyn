@@ -4,47 +4,14 @@ use crate::builtins::{by_id, catalog, BuiltinLowering, Purity};
 use crate::op::OpTag;
 pub use crate::ssa::ir::{UseSite, ValueUses};
 use crate::ssa::types::{FuncBody, InstKind};
-use crate::LookupMap;
 
-/// Remove recursively dead, side-effect-free SSA instructions.
+/// Remove dead instructions, block parameters, and empty selections.
 ///
 /// Recognizes structural operations and explicitly discardable intrinsics.
 /// Calls, opaque intrinsics, memory accesses, and place operations remain.
 /// Discardability does not grant permission to move or speculate an operation.
 pub fn eliminate_dead_pure_instructions(body: &mut FuncBody) {
-    let uses = ValueUses::analyze(&body.inner);
-    let mut counts: LookupMap<_, _> = uses.counts().collect();
-    let mut pending: Vec<_> = body
-        .inner
-        .insts
-        .iter()
-        .filter_map(|(id, node)| {
-            (counts.get(&node.result?).copied().unwrap_or(0) == 0 && is_discardable(&node.data))
-                .then_some(id)
-        })
-        .collect();
-    while let Some(id) = pending.pop() {
-        let Some(node) = body.inner.insts.remove(id) else {
-            continue;
-        };
-        for operand in node.data.ssa_uses() {
-            let count = counts.entry(operand).or_default();
-            *count -= 1;
-            if *count == 0 {
-                if let Some(id) = body.inner.inst_of_value(operand) {
-                    if is_discardable(&body.inner.insts[id].data) {
-                        pending.push(id);
-                    }
-                }
-            }
-        }
-        if let Some(result) = node.result {
-            body.inner.values.remove(result);
-        }
-    }
-    for block in body.inner.blocks.values_mut() {
-        block.insts.retain(|id| body.inner.insts.contains_key(*id));
-    }
+    super::ir::eliminate_dead_values(&mut body.inner, is_discardable);
 }
 
 fn is_discardable(instruction: &InstKind) -> bool {

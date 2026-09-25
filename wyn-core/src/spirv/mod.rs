@@ -149,9 +149,8 @@ struct Constructor {
     linked_functions_by_linkage: LookupMap<String, spirv::Word>,
 
     /// Compiler-generated integer-pow helpers (see `spirv::pow`), keyed
-    /// by `signed`. Emitted once per module after function forward
-    /// declarations; `PrimOp::IntPow` lowers to `OpFunctionCall` against
-    /// the cached id.
+    /// by `signed`. Calls reserve ids on demand; the requested bodies are
+    /// emitted after source functions and entries.
     int_pow_functions: LookupMap<bool, spirv::Word>,
 
     /// Output places for the current entry point being lowered.
@@ -474,12 +473,6 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         }
     }
 
-    // Emit compiler-generated helpers. Integer `**` lowers to an
-    // OpFunctionCall against one of these (see `spirv::pow`); emitting
-    // both signedness variants unconditionally is ~60 instructions of
-    // module overhead and drivers DCE them when unused.
-    pow::emit_int_pow_helpers(&mut constructor)?;
-
     // Pre-create storage buffers for all entry point bindings so that
     // buffer-specialized functions (which reference set/binding directly) can
     // resolve them during lowering, even though they're lowered before entry points.
@@ -709,6 +702,7 @@ fn lower_ssa_program_impl(program: &ssa::stage::SpirvReady) -> Result<Vec<u32>> 
         }
     }
 
+    pow::emit_int_pow_helpers(&mut constructor)?;
     Ok(constructor.builder.into_module().assemble())
 }
 

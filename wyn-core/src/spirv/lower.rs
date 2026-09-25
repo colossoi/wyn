@@ -5,6 +5,7 @@ use super::*;
 use crate::builtins;
 use crate::op;
 use crate::ssa;
+use crate::StableMap;
 
 /// Per-function SSA → SPIR-V lowering state. Fields are
 /// `pub(super)` so sibling-file `impl LowerCtx` blocks
@@ -422,8 +423,6 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
                 op::OpTag::Intrinsic { id, overload_idx } => {
                     let args: Vec<ValueRef> = operands.clone();
-                    let arg_ids: Vec<_> =
-                        args.iter().map(|v| self.get_value_ref(*v)).collect::<Result<_>>()?;
                     let def = builtins::by_id(*id);
                     let lowering = &def.overloads()[*overload_idx].lowering;
                     // Variants with a structural arm in `lower_builtin_call`
@@ -451,15 +450,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
                             || *id == known.texture_load
                             || *id == known.texture_sample));
                     if typed_dispatch {
-                        self.lower_builtin_call(
-                            *id,
-                            lowering,
-                            def.dispatch_name(),
-                            &args,
-                            &arg_ids,
-                            result_ty,
-                            inst,
-                        )?
+                        self.lower_builtin_call(*id, lowering, def.dispatch_name(), &args, result_ty, inst)?
                     } else {
                         bail_spirv!(
                             "OpTag::Intrinsic with no SPIR-V backend dispatch: '{}' \
@@ -1014,7 +1005,7 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
 
     pub(super) fn insert_phi_nodes(&mut self) -> Result<()> {
         // Group phi inputs by (target_block, param_idx)
-        let mut phi_map: LookupMap<(BlockId, usize), Vec<(spirv::Word, spirv::Word)>> = LookupMap::new();
+        let mut phi_map: StableMap<(BlockId, usize), Vec<(spirv::Word, spirv::Word)>> = StableMap::new();
 
         for (target_block, param_idx, value, source_block) in &self.phi_inputs {
             phi_map.entry((*target_block, *param_idx)).or_default().push((*value, *source_block));
