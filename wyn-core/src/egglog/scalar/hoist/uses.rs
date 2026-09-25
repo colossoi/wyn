@@ -7,6 +7,7 @@ use wyn_base::persistent_sets::{Set, Sets, EMPTY};
 pub(super) struct Dag {
     pub sets: Sets,
     pub descendants: BTreeMap<ExprId, Set>,
+    pub required: BTreeMap<ExprId, Set>,
     pub lambdas: BTreeMap<ExprId, Set>,
     pub order: Vec<ExprId>,
     pub roots: BTreeSet<ExprId>,
@@ -21,15 +22,28 @@ impl Dag {
         );
         for e in order {
             let mut set = self.sets.singleton(e.as_u32());
+            let mut required = set;
             let mut lambdas = match data.expressions[e].kind {
                 ExprKind::Lambda(r) => self.sets.singleton(r.as_u32()),
                 _ => EMPTY,
             };
             for child in data.expressions[e].kind.children() {
                 set = self.sets.union(set, self.descendants[&child]);
+                required = self.sets.union(required, self.required[&child]);
                 lambdas = self.sets.union(lambdas, self.lambdas[&child]);
             }
             self.descendants.insert(e, set);
+            if let ExprKind::If {
+                condition,
+                then_value,
+                else_value,
+            } = data.expressions[e].kind
+            {
+                let arms = self.sets.intersection(self.required[&then_value], self.required[&else_value]);
+                required = self.sets.union(self.required[&condition], arms);
+                required = self.sets.insert(required, e.as_u32());
+            }
+            self.required.insert(e, required);
             self.lambdas.insert(e, lambdas);
             self.order.push(e);
         }

@@ -665,6 +665,43 @@ fn structured_if_hoists_shared_work_out_of_both_loop_bodies() {
 }
 
 #[test]
+fn already_evaluated_division_is_reused_without_ssa_cleanup() {
+    for (expression, expected) in [
+        (
+            "if n==0 then 7 else if 100/n>2 then 100/n+1 else 100/n+2",
+            vec![7, 11, 3],
+        ),
+        (
+            "if n==0 then 7 else loop a=100/n for i<2 do a+100/n",
+            vec![7, 30, 3],
+        ),
+    ] {
+        let c = compile(&format!("entry main(xs:[]i32) []i32=map(|n|{expression},xs)"));
+        let c = schedule(c, PipelineTopologyPolicy::AllowGenerated).unwrap();
+        assert_eq!(run(&c, vec![Value::array([0, 10, 100])])[0].ints(), expected);
+        let ssa = to_ssa(&c, CodegenTarget::Wgsl).unwrap();
+        let divisions = ssa
+            .functions
+            .iter()
+            .map(|f| &f.body)
+            .chain(ssa.entry_points.iter().map(|e| &e.body))
+            .flat_map(|body| body.inner.insts.values())
+            .filter(|node| {
+                matches!(
+                    node.data,
+                    InstKind::Op {
+                        tag: OpTag::BinOp(BinaryOperator::Divide),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(divisions, 1, "reuse must happen before SSA optimization");
+        wgsl(&c);
+    }
+}
+
+#[test]
 fn read_occurrences_and_partial_branch_expressions_are_not_speculated() {
     let c = compile("entry main(xs:[]i32, n:i32) i32 = loop a=0 for i<n do a+xs[0]*xs[0]");
     assert!(c.state.placements.is_empty());

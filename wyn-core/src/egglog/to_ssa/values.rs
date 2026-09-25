@@ -7,7 +7,7 @@ use crate::builtins::{catalog, select};
 use crate::egglog::abi::storage_type;
 use crate::egglog::data::is_slice;
 use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
-use crate::flow::{BlockId, ControlHeader};
+use crate::flow::ControlHeader;
 use crate::op::{BinaryOperator, UnaryOperator};
 use crate::ssa::builder::FuncBuilder;
 use crate::ssa::types::{ConstantValue, Function, PlaceId, Terminator, ValueRef};
@@ -19,10 +19,10 @@ use crate::types::{
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
 
-// One evaluation of an expression or argument list. Block keys prevent a value
-// emitted in one conditional arm from escaping into its sibling or the join.
-// The cache is dropped before subsequent bindings or memory effects.
-type ExpressionCache = HashMap<(Option<BlockId>, ExprId), Typed>;
+// One evaluation of an expression or argument list. Branches inherit evaluated
+// values, but discard their own additions at the join. The cache is dropped
+// before subsequent bindings or memory effects.
+type ExpressionCache = HashMap<ExprId, Typed>;
 
 fn static_array_length(ty: &Type) -> Option<usize> {
     let ty = strip_existentials(ty);
@@ -238,8 +238,7 @@ impl Body<'_, '_> {
                 return self.length_cached(first, cache);
             }
             Value::Source(id)
-                if !self.environment.expressions.contains_key(id)
-                    && !cache.contains_key(&(self.builder.current_block(), *id)) =>
+                if !self.environment.expressions.contains_key(id) && !cache.contains_key(id) =>
             {
                 if let Some(length) = self.compiler.data.state.execution.view_lengths.get(id) {
                     return self.value_cached(length, cache);
@@ -282,16 +281,13 @@ impl Body<'_, '_> {
         match array {
             Value::Source(id) => {
                 let expression = &self.compiler.data.expressions[*id];
-                let bound = self
-                    .environment
-                    .expressions
-                    .get(id)
-                    .or_else(|| cache.get(&(self.builder.current_block(), *id)))
-                    .or_else(|| match expression.kind {
+                let bound = self.environment.expressions.get(id).or_else(|| cache.get(id)).or_else(|| {
+                    match expression.kind {
                         ExprKind::Parameter(id) => self.environment.parameters.get(&id),
                         ExprKind::OperationResult(id) => self.environment.operations.get(&id),
                         _ => None,
-                    });
+                    }
+                });
                 Some(bound.map_or(&self.compiler.data.types[expression.ty].ty, |value| &value.ty))
             }
             Value::Local(name) => self.environment.locals.get(name).map(|value| &value.ty),
@@ -341,7 +337,7 @@ impl Body<'_, '_> {
         if let Some(value) = self.environment.expressions.get(&id) {
             return Ok(value.clone());
         }
-        if let Some(value) = cache.get(&(self.builder.current_block(), id)) {
+        if let Some(value) = cache.get(&id) {
             return Ok(value.clone());
         }
         if let Some(binding) = self.compiler.host.captures.get(&(self.root, id)).copied() {
@@ -366,9 +362,15 @@ impl Body<'_, '_> {
                         .iter()
                         .map(|&e| self.expression_cached(e, cache))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let id =
-                        self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
-                    self.op(OpTag::Call(id), args, ty)
+                    if let Some(values) = self.inline_call(*function, args.clone())? {
+                        let value = self.pack(values)?;
+                        self.cast(value, &ty)
+                    } else {
+                        let id = self
+                            .compiler
+                            .function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
+                        self.op(OpTag::Call(id), args, ty)
+                    }
                 } else {
                     let Some(value) = data.state.materialized.get(op) else {
                         return Err(error(format!("unmaterialized capture {op:?}")));
@@ -444,6 +446,7 @@ impl Body<'_, '_> {
                 }
                 let c = self.expression_cached(*condition, cache)?;
                 let saved = self.environment.clone();
+                let evaluated = cache.clone();
                 let Some(start) = self.builder.current_block() else {
                     return Err(error("no current block"));
                 };
@@ -471,6 +474,7 @@ impl Body<'_, '_> {
                     .map_err(builder_error)?;
                 self.builder.switch_to_block_unchecked(no);
                 self.environment = saved.clone();
+                *cache = evaluated.clone();
                 let b = self.expression_cached(*else_value, cache)?;
                 let b = self.cast(b, &a.ty)?;
                 self.builder
@@ -481,6 +485,7 @@ impl Body<'_, '_> {
                     .map_err(builder_error)?;
                 self.builder.switch_to_block_unchecked(end);
                 self.environment = saved;
+                *cache = evaluated;
                 Ok(Typed {
                     value: p.into(),
                     ty: a.ty,
@@ -496,7 +501,7 @@ impl Body<'_, '_> {
                 body.insts[inst].span.get_or_insert(span);
             }
         }
-        cache.insert((self.builder.current_block(), id), result.clone());
+        cache.insert(id, result.clone());
         Ok(result)
     }
     fn projection(
@@ -506,9 +511,7 @@ impl Body<'_, '_> {
         cache: &mut ExpressionCache,
     ) -> Result<Typed, OptimizeError> {
         let data = self.compiler.data;
-        if !self.environment.expressions.contains_key(&tuple)
-            && !cache.contains_key(&(self.builder.current_block(), tuple))
-        {
+        if !self.environment.expressions.contains_key(&tuple) && !cache.contains_key(&tuple) {
             if let ExprKind::OperationResult(op) = data.expressions[tuple].kind {
                 if !self.environment.operations.contains_key(&op) {
                     // Split results may contain discarded slots. Resolve only

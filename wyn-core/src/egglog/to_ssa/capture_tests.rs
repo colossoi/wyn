@@ -76,6 +76,7 @@ impl Capture {
 
     fn compiler(&self) -> super::Compiler<'_> {
         super::Compiler {
+            inline: Default::default(),
             host: Default::default(),
             data: &self.data,
             origins: Default::default(),
@@ -341,8 +342,11 @@ fn capture_reads_stay_in_their_conditional_arm_or_merge() {
     });
     let mut compiler = capture.compiler();
     let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
-    body.values(&[Value::Source(conditional), Value::Source(capture.fields[0])]).unwrap();
-    let function = body.builder.func();
+    let values = body.values(&[Value::Source(conditional), Value::Source(capture.fields[0])]).unwrap();
+    let result = body.pack(values).unwrap();
+    body.builder.terminate(crate::ssa::types::Terminator::Return(Some(result.value))).unwrap();
+    let (body, _) = body.finish().unwrap();
+    let function = &body.inner;
     let load_blocks: std::collections::HashSet<_> = function
         .insts
         .values()

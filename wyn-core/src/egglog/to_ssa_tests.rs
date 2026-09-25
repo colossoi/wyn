@@ -830,6 +830,7 @@ fn shared_helper_reuses_its_emitted_body_and_storage_requirements() {
     };
     data.state.bodies[returns].results.push(Value::op("index", [Value::Buffer(buffer), Value::Int(0)]));
     let mut compiler = super::Compiler {
+        inline: Default::default(),
         host: Default::default(),
         origins: Default::default(),
         placements: Default::default(),

@@ -3,51 +3,12 @@ use crate::ssa::builder::FuncBuilder;
 use crate::ssa::eliminate_dead_pure_instructions;
 use crate::ssa::types::{ConstantValue, Terminator};
 use crate::types::{bool_type, i32, sized_array};
+use crate::{BindingRef, FunctionId};
 
 fn binary(op: BinaryOperator, a: ValueRef, b: ValueRef) -> InstKind {
     InstKind::Op {
         tag: OpTag::BinOp(op),
         operands: vec![a, b],
-    }
-}
-
-#[test]
-fn common_branch_work_moves_to_its_operand_dominator_but_division_stays_guarded() {
-    let mut body = FuncBuilder::new(
-        vec![(i32(), "x".into()), (bool_type(), "condition".into())],
-        i32(),
-    )
-    .finish_unchecked();
-    let entry = body.inner.entry;
-    let x = body.inner.params[0].into();
-    let condition = body.inner.params[1].into();
-    let left = body.inner.create_block();
-    let right = body.inner.create_block();
-    body.inner.blocks[entry].term = Terminator::CondBranch {
-        cond: condition,
-        then_target: left,
-        then_args: vec![],
-        else_target: right,
-        else_args: vec![],
-    };
-    for block in [left, right] {
-        let doubled = body.inner.append_inst(block, binary(BinaryOperator::Add, x, x), i32());
-        let divided =
-            body.inner.append_inst(block, binary(BinaryOperator::Divide, doubled.into(), x), i32());
-        body.inner.blocks[block].term = Terminator::Return(Some(divided.into()));
-    }
-    float_pure_values(&mut body);
-    crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
-    assert_eq!(body.inner.blocks[entry].insts.len(), 1);
-    for block in [left, right] {
-        assert_eq!(body.inner.blocks[block].insts.len(), 1);
-        assert!(matches!(
-            body.inner.insts[body.inner.blocks[block].insts[0]].data,
-            InstKind::Op {
-                tag: OpTag::BinOp(BinaryOperator::Divide),
-                ..
-            }
-        ));
     }
 }
 
@@ -138,13 +99,24 @@ fn division_and_remainder_in_a_possibly_empty_loop_stay_inside_it() {
 }
 
 fn assert_division_sites(source: &str, expected: usize) -> crate::ssa::stage::Placed {
-    let ssa = crate::compile_thru_ssa(source).unwrap();
+    let mut ssa = crate::compile_thru_ssa(source).unwrap();
+    // Exercise the retained SSA pass explicitly; it is outside the production pipeline.
+    for body in ssa
+        .functions
+        .iter_mut()
+        .map(|f| &mut f.body)
+        .chain(ssa.entry_points.iter_mut().map(|e| &mut e.body))
+    {
+        reuse_dominating_expressions(body);
+    }
     let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
     for operator in [BinaryOperator::Divide, BinaryOperator::Remainder] {
         let sites = placed
             .functions
             .iter()
-            .flat_map(|f| f.body.inner.insts.values())
+            .map(|f| &f.body)
+            .chain(placed.entry_points.iter().map(|e| &e.body))
+            .flat_map(|body| body.inner.insts.values())
             .filter(
                 |node| matches!(node.data, InstKind::Op { tag: OpTag::BinOp(op), .. } if op == operator),
             )
@@ -246,7 +218,7 @@ fn partial_math_is_reused_locally_but_not_from_a_sibling_or_into_a_merge() {
                 }
             };
         }
-        float_pure_values(&mut body);
+        reuse_dominating_expressions(&mut body);
         crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
         assert!(body.inner.blocks[entry].insts.is_empty());
         for block in [left, right, merge] {
@@ -293,7 +265,7 @@ fn division_reuse_distinguishes_loop_carried_operands() {
         target: loop_body,
         args: vec![next.into()],
     };
-    float_pure_values(&mut body);
+    reuse_dominating_expressions(&mut body);
     crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
     let divisions: Vec<_> = body
         .inner
@@ -350,7 +322,7 @@ fn dynamic_array_materialization_is_shared_outside_the_loop() {
         target: loop_body,
         args: vec![sum.into()],
     };
-    float_pure_values(&mut body);
+    prepare_values(&mut body);
     crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
     let materialized: Vec<_> = body
         .inner
@@ -384,48 +356,6 @@ fn dynamic_array_materialization_is_shared_outside_the_loop() {
     );
 }
 
-#[test]
-fn helper_substitution_does_not_confuse_distinct_value_arenas() {
-    let mut helper =
-        FuncBuilder::new(vec![(i32(), "a".into()), (i32(), "b".into())], i32()).finish_unchecked();
-    let sum = helper.inner.append_inst(
-        helper.inner.entry,
-        binary(
-            BinaryOperator::Subtract,
-            helper.inner.params[0].into(),
-            helper.inner.params[1].into(),
-        ),
-        i32(),
-    );
-    helper.inner.blocks[helper.inner.entry].term = Terminator::Return(Some(sum.into()));
-    let mut caller =
-        FuncBuilder::new(vec![(i32(), "x".into()), (i32(), "y".into())], i32()).finish_unchecked();
-    let result = caller.inner.append_inst(
-        caller.inner.entry,
-        InstKind::Op {
-            tag: OpTag::Call(FunctionId::from(0)),
-            operands: vec![caller.inner.params[1].into(), caller.inner.params[0].into()],
-        },
-        i32(),
-    );
-    caller.inner.blocks[caller.inner.entry].term = Terminator::Return(Some(result.into()));
-    inline_small_helpers(&mut caller, |_| Some(&helper));
-    let [id] = caller.inner.blocks[caller.inner.entry].insts.as_slice() else {
-        panic!("single inlined instruction")
-    };
-    let InstKind::Op {
-        tag: OpTag::BinOp(BinaryOperator::Subtract),
-        operands,
-    } = &caller.inner.insts[*id].data
-    else {
-        panic!("subtraction")
-    };
-    assert_eq!(
-        *operands,
-        vec![caller.inner.params[1].into(), caller.inner.params[0].into()]
-    );
-}
-
 fn intrinsic(name: &str) -> OpTag<BindingRef, FunctionId> {
     OpTag::Intrinsic {
         id: crate::builtins::catalog().lookup_by_any_name(name).unwrap().id,
@@ -434,13 +364,24 @@ fn intrinsic(name: &str) -> OpTag<BindingRef, FunctionId> {
 }
 
 fn assert_partial_intrinsic_sites(source: &str, name: &str, expected: usize) -> crate::ssa::stage::Placed {
-    let ssa = crate::compile_thru_ssa(source).unwrap();
+    let mut ssa = crate::compile_thru_ssa(source).unwrap();
+    // Exercise the retained SSA pass explicitly; it is outside the production pipeline.
+    for body in ssa
+        .functions
+        .iter_mut()
+        .map(|f| &mut f.body)
+        .chain(ssa.entry_points.iter_mut().map(|e| &mut e.body))
+    {
+        reuse_dominating_expressions(body);
+    }
     let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
     let tag = intrinsic(name);
     let sites = placed
         .functions
         .iter()
-        .flat_map(|f| f.body.inner.insts.values())
+        .map(|f| &f.body)
+        .chain(placed.entry_points.iter().map(|e| &e.body))
+        .flat_map(|body| body.inner.insts.values())
         .filter(|node| matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag))
         .count();
     assert_eq!(sites, expected, "unexpected {name} count before backend lowering");
@@ -504,7 +445,9 @@ entry repro(points: []vec3f32) []vec2i32 = map(pixel, points)
         placed
             .functions
             .iter()
-            .flat_map(|f| f.body.inner.insts.values())
+            .map(|f| &f.body)
+            .chain(placed.entry_points.iter().map(|e| &e.body))
+            .flat_map(|body| body.inner.insts.values())
             .filter(|node| {
                 matches!(
                     node.data,
@@ -583,7 +526,7 @@ fn partial_intrinsics_reuse_guarded_producers_in_nested_branches() {
                 body.inner.append_inst(block, binary(BinaryOperator::Add, a.into(), b.into()), ty.clone());
             body.inner.blocks[block].term = Terminator::Return(Some(sum.into()));
         }
-        float_pure_values(&mut body);
+        reuse_dominating_expressions(&mut body);
         crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
         let sites = body
             .inner
@@ -729,7 +672,7 @@ fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
         }
     }
     let mut body = builder.finish().unwrap();
-    float_pure_values(&mut body);
+    reuse_dominating_expressions(&mut body);
     crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
     assert_eq!(
         body.inner.insts.values().filter(|node| matches!(node.data, InstKind::Load { .. })).count(),
@@ -759,237 +702,6 @@ fn dominance_reuse_preserves_loads_calls_and_context_dependent_intrinsics() {
 }
 
 #[test]
-fn inlining_preserves_guards_on_partial_math_and_context_dependent_intrinsics() {
-    let float = Type::Constructed(TypeName::Float(32), vec![]);
-    for tag in [
-        OpTag::BinOp(BinaryOperator::Divide),
-        intrinsic("f32.sqrt"),
-        intrinsic("f32.log"),
-        intrinsic("f32.d_fdx"),
-        OpTag::Call(FunctionId::from(99)),
-    ] {
-        let mut helper =
-            FuncBuilder::new(vec![(float.clone(), "x".into())], float.clone()).finish_unchecked();
-        let x = helper.inner.params[0].into();
-        let sum = helper.inner.append_inst(
-            helper.inner.entry,
-            binary(BinaryOperator::Add, x, x),
-            float.clone(),
-        );
-        let operands = if matches!(tag, OpTag::BinOp(_)) { vec![sum.into(), x] } else { vec![sum.into()] };
-        let value = helper.inner.append_inst(
-            helper.inner.entry,
-            InstKind::Op {
-                tag: tag.clone(),
-                operands,
-            },
-            float.clone(),
-        );
-        helper.inner.blocks[helper.inner.entry].term = Terminator::Return(Some(value.into()));
-        // Exercise the production order: simplify callees before their callers.
-        float_pure_values(&mut helper);
-        let mut caller = FuncBuilder::new(
-            vec![(float.clone(), "x".into()), (bool_type(), "condition".into())],
-            float.clone(),
-        )
-        .finish_unchecked();
-        let entry = caller.inner.entry;
-        let taken = caller.inner.create_block();
-        let skipped = caller.inner.create_block();
-        caller.inner.blocks[entry].term = Terminator::CondBranch {
-            cond: caller.inner.params[1].into(),
-            then_target: taken,
-            then_args: vec![],
-            else_target: skipped,
-            else_args: vec![],
-        };
-        let value = caller.inner.append_inst(
-            taken,
-            InstKind::Op {
-                tag: OpTag::Call(FunctionId::from(0)),
-                operands: vec![caller.inner.params[0].into()],
-            },
-            float.clone(),
-        );
-        caller.inner.blocks[taken].term = Terminator::Return(Some(value.into()));
-        caller.inner.blocks[skipped].term =
-            Terminator::Return(Some(ValueRef::Const(ConstantValue::from_f32(0.0))));
-        inline_small_helpers(&mut caller, |_| Some(&helper));
-        float_pure_values(&mut caller);
-        crate::ssa::ir::schedule_floating(&mut caller.inner).unwrap();
-        assert_eq!(
-            caller.num_insts(),
-            2,
-            "{tag:?}: helper must be expanded exactly once"
-        );
-        assert!(
-            caller.inner.insts.values().any(|node| {
-                matches!(&node.data, InstKind::Op { tag: actual, .. } if *actual == tag)
-                    && node.placement.block() == Some(taken)
-            }),
-            "{tag:?}: inlining must preserve the original guard"
-        );
-        assert!(caller.inner.blocks[skipped].insts.is_empty());
-    }
-}
-
-#[test]
-fn rotate_helper_is_inlined_and_trig_is_placed_before_the_march_loop() {
-    let source = r#"
-def rotate(p: vec2f32, angle: f32) vec2f32 =
-  let c = f32.cos(angle)
-  let s = f32.sin(angle) in
-  @[c * p.x - s * p.y, s * p.x + c * p.y]
-def march(p: vec2f32, angle: f32) vec2f32 =
-  loop total = @[0.0, 0.0] for k < 20 do
-    total + rotate(p + @[f32(k) * 0.06, 0.0], angle)
-entry repro(points: []vec2f32, angle: f32) []vec2f32 =
-  map(|p| march(p, angle), points)
-"#;
-    let ssa = crate::compile_thru_ssa(source).unwrap();
-    let sin = intrinsic("f32.sin");
-    let cos = intrinsic("f32.cos");
-    let rotate = ssa
-        .functions
-        .iter()
-        .find(|f| {
-            f.body
-                .inner
-                .insts
-                .values()
-                .any(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == sin))
-        })
-        .unwrap()
-        .id;
-    let march = ssa
-        .functions
-        .iter()
-        .find(|f| {
-            f.body.inner.insts.values().any(
-                |node| matches!(&node.data, InstKind::Op { tag: OpTag::Call(id), .. } if *id == rotate),
-            )
-        })
-        .unwrap()
-        .id;
-    let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
-    let body = &placed.functions.iter().find(|f| f.id == march).unwrap().body;
-    for expected in [sin, cos] {
-        let nodes = body
-            .inner
-            .insts
-            .values()
-            .filter(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == expected))
-            .collect::<Vec<_>>();
-        assert_eq!(nodes.len(), 1, "{expected:?} must be computed once");
-        assert_eq!(nodes[0].placement.block(), Some(body.inner.entry));
-    }
-    assert!(!body
-        .inner
-        .insts
-        .values()
-        .any(|node| { matches!(node.data, InstKind::Op { tag: OpTag::Call(id), .. } if id == rotate) }));
-    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap();
-    let bytes = spirv.spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
-    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-}
-
-#[test]
-fn camera_helper_above_old_inline_limit_is_placed_before_the_march_loop() {
-    let source = r#"
-def camera_term(angle: f32) f32 =
-  let a = f32.sin(f32.sin(f32.sin(f32.sin(angle))))
-  let b = f32.sin(f32.sin(f32.sin(f32.sin(a))))
-  let c = f32.sin(f32.sin(f32.sin(f32.sin(b))))
-  let d = f32.sin(f32.sin(f32.sin(f32.sin(c)))) in
-  f32.cos(d)
-def march(angle: f32) f32 =
-  loop total = 0.0 for k < 20 do
-    total + camera_term(angle) * f32(k)
-entry repro(angles: []f32) []f32 = map(march, angles)
-"#;
-    let ssa = crate::compile_thru_ssa(source).unwrap();
-    let sin = intrinsic("f32.sin");
-    let cos = intrinsic("f32.cos");
-    let camera = ssa
-        .functions
-        .iter()
-        .find(|f| {
-            f.body
-                .inner
-                .insts
-                .values()
-                .any(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == sin))
-        })
-        .unwrap();
-    assert_eq!(
-        camera.body.num_insts(),
-        17,
-        "must exceed the old late-inline limit"
-    );
-    let march = ssa
-        .functions
-        .iter()
-        .find(|f| {
-            f.body.inner.insts.values().any(
-                |node| matches!(&node.data, InstKind::Op { tag: OpTag::Call(id), .. } if *id == camera.id),
-            )
-        })
-        .unwrap()
-        .id;
-    let placed = crate::ssa::place_floating(optimize(ssa.clone())).unwrap();
-    let body = &placed.functions.iter().find(|f| f.id == march).unwrap().body;
-    for (expected, count) in [(sin, 16), (cos, 1)] {
-        let nodes = body
-            .inner
-            .insts
-            .values()
-            .filter(|node| matches!(&node.data, InstKind::Op { tag, .. } if *tag == expected))
-            .collect::<Vec<_>>();
-        assert_eq!(nodes.len(), count);
-        assert!(
-            nodes.iter().all(|node| node.placement.block() == Some(body.inner.entry)),
-            "{expected:?} must be computed before the march loop"
-        );
-    }
-    assert!(!body
-        .inner
-        .insts
-        .values()
-        .any(|node| matches!(node.data, InstKind::Op { tag: OpTag::Call(id), .. } if id == camera.id)));
-    let wgsl = crate::lower_ssa_to_wgsl(ssa.clone()).unwrap();
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-    let spirv = crate::lower_ssa_to_spirv(ssa).unwrap();
-    let bytes = spirv.spirv.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>();
-    let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap();
-}
-
-#[test]
 fn dead_instruction_worklist_removes_long_chains() {
     let mut body = FuncBuilder::new(vec![(i32(), "x".into())], i32()).finish_unchecked();
     let x = body.inner.params[0].into();
@@ -1001,26 +713,4 @@ fn dead_instruction_worklist_removes_long_chains() {
     body.inner.blocks[body.inner.entry].term = Terminator::Return(Some(x));
     eliminate_dead_pure_instructions(&mut body);
     assert_eq!(body.num_insts(), 0);
-}
-
-#[test]
-fn newly_exposed_integer_constants_wrap_at_the_declared_width() {
-    use crate::types::Type;
-    let ty = Type::Constructed(crate::types::TypeName::UInt(32), vec![]);
-    let mut body = FuncBuilder::new(vec![], ty.clone()).finish_unchecked();
-    let value = body.inner.append_inst(
-        body.inner.entry,
-        binary(
-            BinaryOperator::Multiply,
-            ValueRef::Const(ConstantValue::U32(2654435769)),
-            ValueRef::Const(ConstantValue::U32(747796405)),
-        ),
-        ty,
-    );
-    body.inner.blocks[body.inner.entry].term = Terminator::Return(Some(value.into()));
-    float_pure_values(&mut body);
-    crate::ssa::ir::schedule_floating(&mut body.inner).unwrap();
-    assert!(
-        matches!(body.inner.blocks[body.inner.entry].term, Terminator::Return(Some(ValueRef::Const(ConstantValue::U32(n)))) if n == 2654435769u32.wrapping_mul(747796405))
-    );
 }

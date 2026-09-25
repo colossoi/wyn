@@ -180,11 +180,11 @@ graphs; expression insertion hands its graph directly to scalar simplification.
 | --- | --- | --- |
 | `egglog::from_tlc` | `Imported` | Import normalized TLC, callable bodies, types, and source ABI into typed arenas; construct Scremas for map/reduce/scan and export structural fusion facts. |
 | `egglog::fuse` | `Fused` | Complete a deterministic greedy fusion plan on a persistent graph, then construct the selected bodies in the sidecar arenas. |
-| `egglog::insert_expressions` | `Expressions` | Insert a separate typed expression DAG, region interfaces and uses, structured control, and execution dependencies into egglog. |
+| `egglog::insert_expressions` | `Expressions` | Form eligible selects, then insert typed expressions, region uses, structured control, and execution dependencies into egglog. |
 | `egglog::simplify` | `Simplified` | Fold constants and simplify scalar expressions in that graph; optionally explore algebraic rewrites with `-O`, then extract and apply replacements. |
-| `egglog::place` | `Placed` | Use Rust analysis to place safe shared and loop-invariant expressions in structured regions, including SOAC captures. Memory reads and opaque calls are not speculated. |
+| `egglog::place` | `Placed` | Place safe shared and loop-invariant expressions in structured regions, including SOAC captures. Reuse expressions already evaluated by conditions, loop initializers, and call arguments without speculating partial operations, memory reads, or opaque calls. |
 | `egglog::schedule` | `Scheduled` | Derive execution recipes, host/device residency, storage allocation and reuse, output routes, scratch, dispatch domains, and dependencies; instantiate executable blocks. |
-| `egglog::to_ssa` | SSA `Elaborated` | Lower scheduled kernels for the selected target and publish source inputs, planned resources, outputs, and host computations through the shader/runtime ABI. |
+| `egglog::to_ssa` | SSA `Elaborated` | Inline small scheduled helpers, including generated callbacks; reuse evaluated DAG nodes across conditionals and place newly exposed safe arithmetic with SSA's floating-instruction scheduler. Lower kernels for the selected target and publish the shader/runtime ABI. |
 
 Dependency analysis works backward from results and required effects and orders
 only live operations. Operation identities keep effectful executions distinct,
@@ -267,14 +267,33 @@ needed, and establish the representation invariants required by code generation.
 
 The [shared SSA pipeline](wyn-core/src/ssa/mod.rs) runs these passes:
 
-| Pass (`ssa::`) | Responsibility |
-| --- | --- |
-| `optimize` | Inline small helpers, fold constants, reuse dominating immutable expressions, and intern expressions that can safely move. |
-| `place_floating` | Assign reachable floating expressions to concrete control-flow blocks. |
-| `filter_reachable` | Prune functions and constants unreachable from entries. |
-| `prepare_spirv` / `prepare_wgsl` | Remove dead pure instructions, publish texture-sampling requirements, and reject unresolved type representations. SPIR-V also verifies buffer layouts; WGSL first promotes constants needing addressable storage. |
+The orchestration passes group the subpasses below, listed in execution order.
+Names are relative to `ssa::` unless otherwise qualified.
+
+| Orchestration pass | Subpass | Responsibility |
+| --- | --- | --- |
+| `optimize` | `materialize_dynamic_index` | Introduce and share addressable storage for dynamic array indexing. |
+| `place_floating` | `ir::schedule_floating` | Assign the generated array materializations to concrete control-flow blocks. |
+| `filter_reachable` | Reachability walk | Prune functions and constants unreachable from entries. |
+| `prepare_wgsl` | `promote_addressable_constants` | Promote constants needing addressable storage. |
+| `prepare_*` | `eliminate_dead_pure_instructions` | Remove unused pure computations. |
+| `prepare_*` | `if_conversion::convert` | Convert eligible control-flow diamonds to selects, processing inner selections first. |
+| `prepare_*` → `if_conversion` | `constant_folding::fold` | Fold generated constants and simplify constant selections. |
+| `prepare_*` → `if_conversion` | `eliminate_dead_pure_instructions` | Remove computations made unused by conversion and folding. |
+| `prepare_*` | `ir::eliminate_single_input_params` | Replace single-input block parameters with their dominating incoming values. |
+| `prepare_*` | `texture_sampling::publish_texture_sampling` | Publish texture-sampling requirements. |
+| `prepare_*` | `backend_validation::verify_no_abstract_types` | Reject unresolved type representations. |
+| `prepare_spirv` | `spirv::verify_buffer_layouts` | Verify concrete buffer layouts. |
+
+Helper inlining runs after scheduling, during Egglog's SSA handoff. Expression
+interning and source placement run in Egglog; arithmetic exposed during the
+handoff uses the shared SSA placement routine. The later `place_floating` pass
+places storage materializations introduced by SSA preparation.
 
 `--output-mir` dumps `Elaborated` SSA before these cleanup and backend passes.
+SSA expression reuse and early SSA constant folding are temporarily disabled
+for the Egglog port. Egglog scalar folding and the folding performed during
+backend preparation remain enabled.
 Constant folding and the normal pipeline run without `-O`; that flag enables
 additional egglog algebraic rewrites. Tests can use `compile_thru_frontend`,
 `compile_thru_tlc` (through TLC reachability), `compile_thru_ssa`, and

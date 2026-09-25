@@ -47,7 +47,8 @@ fn named_constant_branches_remove_only_unreachable_loops() {
 fn constant_shader_math_folds_after_inlining_and_preserves_dynamic_depth_order() {
     let program = crate::compile_thru_ssa(FIXTURE).unwrap();
     let placed = ssa::place_floating(ssa::optimize(program.clone())).unwrap();
-    let entry = placed.entry_points.iter().find(|e| e.name == "constant_math_compute").unwrap();
+    let prepared = ssa::prepare_spirv(ssa::filter_reachable(placed)).unwrap();
+    let entry = prepared.entry_points.iter().find(|e| e.name == "constant_math_compute").unwrap();
     let function = &entry.body.inner;
     let depth = ValueRef::Const(ConstantValue::from_f32(1.0 / (0.1f32 - 1000.0)));
     let first = function
