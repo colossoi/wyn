@@ -5,6 +5,7 @@ use crate::egglog::timing::{span, time};
 
 mod fold;
 mod hoist;
+pub(super) mod inline;
 mod read;
 pub(super) mod select;
 pub(super) use hoist::index as placement_index;

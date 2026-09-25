@@ -482,7 +482,7 @@ pub mod stage {
     pub enum ElaboratedTag {}
     pub type Elaborated = Program<ElaboratedTag, BackendGlobal>;
 
-    /// SSA whose freely movable pure expressions are interned and floating.
+    /// SSA with dynamic array accesses materialized.
     #[derive(Clone, Copy, Debug)]
     pub enum OptimizedTag {}
     pub type Optimized = Program<OptimizedTag, BackendGlobal>;

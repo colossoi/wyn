@@ -58,6 +58,15 @@ impl Analysis {
         let mut coverage: BTreeMap<usize, Vec<(usize, Set)>> = BTreeMap::new();
         let mut active: Vec<(usize, Set)> = vec![];
         for (point, op) in operations {
+            // These operands are evaluated at this site already. Their pure
+            // subexpressions can be reused below it even when they are partial.
+            let operands = match &data.operations[op].kind {
+                OperationKind::If { condition, .. } => std::slice::from_ref(condition),
+                OperationKind::Loop { init, .. } => std::slice::from_ref(init),
+                OperationKind::Call { args, .. } => args.as_slice(),
+                _ => &[],
+            };
+            let evaluated = operands.iter().fold(EMPTY, |set, e| dag.sets.union(set, dag.required[e]));
             while available_events.first_key_value().is_some_and(|(&p, _)| p <= point) {
                 if let Some((_, events)) = available_events.pop_first() {
                     for (e, add) in events {
@@ -94,12 +103,24 @@ impl Analysis {
                     else_region,
                     ..
                 } => dag.sets.intersection(self.uses.scopes[&then_region], self.uses.scopes[&else_region]),
-                _ => continue,
+                _ => EMPTY,
             };
-            let possible = dag.sets.intersection(candidates, available);
+            let mut possible = dag.sets.intersection(candidates, available);
+            let mut uses = if matches!(data.operations[op].kind, OperationKind::Call { .. }) {
+                evaluated
+            } else {
+                EMPTY
+            };
+            for r in data.operations[op].kind.structured_regions() {
+                uses = dag.sets.union(uses, self.uses.scopes[&r]);
+            }
+            let evaluated = dag.sets.intersection(evaluated, uses);
+            possible = dag.sets.union(possible, evaluated);
             let selected = dag.sets.difference(possible, active.last().map_or(EMPTY, |&(_, s)| s));
             for e in dag.sets.iter(selected).map(ExprId::from) {
-                placements.insert(PlacementSite::Operation(op), e);
+                if computation(data, e) {
+                    placements.insert(PlacementSite::Operation(op), e);
+                }
             }
             if selected == EMPTY {
                 continue;
@@ -121,6 +142,7 @@ impl Analysis {
         for &e in dag.order.iter().rev() {
             let mut covered = incoming.get(&e).copied().unwrap_or(EMPTY);
             if let ExprKind::If {
+                condition,
                 then_value,
                 else_value,
                 ..
@@ -129,9 +151,14 @@ impl Analysis {
                 let common =
                     dag.sets.intersection(dag.descendants[&then_value], dag.descendants[&else_value]);
                 let common = dag.sets.intersection(common, safe);
+                let arms = dag.sets.union(dag.descendants[&then_value], dag.descendants[&else_value]);
+                let evaluated = dag.sets.intersection(dag.required[&condition], arms);
+                let common = dag.sets.union(common, evaluated);
                 let selected = dag.sets.difference(common, covered);
                 for value in dag.sets.iter(selected).map(ExprId::from) {
-                    placements.insert(PlacementSite::Expression(e), value);
+                    if computation(data, value) {
+                        placements.insert(PlacementSite::Expression(e), value);
+                    }
                 }
                 covered = dag.sets.union(covered, selected);
             }

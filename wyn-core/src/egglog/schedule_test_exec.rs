@@ -361,7 +361,8 @@ impl Machine<'_> {
                 if let [Code::Source(id)] = args.as_slice() {
                     // A captured array already carries its live length. Its
                     // producer's size operands need not be captured as well.
-                    if !frame.expressions.contains_key(id) {
+                    // Discarded captures still need the separately tracked extent.
+                    if matches!(frame.expressions.get(id), None | Some(Value::Discarded)) {
                         if let Some(length) = self.data.state.execution.view_lengths.get(id) {
                             return self.value(length, frame);
                         }

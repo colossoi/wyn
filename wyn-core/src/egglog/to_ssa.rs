@@ -49,6 +49,7 @@ pub fn to_ssa(data: &Program<Scheduled>, target: CodegenTarget) -> Result<Elabor
         host: time("egglog to SSA / prepare / host plan", || host::plan(data))?,
         origins,
         placements: placement_index(&data.ir, &data.state.placements),
+        inline: super::scalar::inline::run(data),
         data,
         functions: vec![],
         externs: BTreeMap::new(),
@@ -155,6 +156,7 @@ struct Compiler<'a> {
     host: Host,
     origins: BTreeMap<ExprId, Span>,
     placements: BTreeMap<PlacementSite, Vec<ExprId>>,
+    inline: BTreeSet<BlockId>,
     data: &'a Program<Scheduled>,
     functions: Vec<Function>,
     externs: BTreeMap<ExternId, FunctionId>,
@@ -290,6 +292,7 @@ impl<'a, 'b> Body<'a, 'b> {
     fn finish(self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
         let types = self.return_types.unwrap_or_default();
         let mut body = self.builder.finish().map_err(builder_error)?;
+        crate::ssa::ir::schedule_floating(&mut body.inner).map_err(|e| error(e.to_string()))?;
         body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
         Ok((body, types))
     }
@@ -445,6 +448,45 @@ impl<'a, 'b> Body<'a, 'b> {
             values.into_iter().map(|v| v.value).collect(),
         ))
     }
+    fn inline_call(
+        &mut self,
+        function: BlockId,
+        args: Vec<Typed>,
+    ) -> Result<Option<Vec<Typed>>, OptimizeError> {
+        if !self.compiler.inline.contains(&function) {
+            return Ok(None);
+        }
+        if !self.compiler.active.insert(function) {
+            return Err(error("recursive device helper"));
+        }
+        let data = self.compiler.data;
+        let block = &data.state.blocks[function];
+        let Exit::Return(result) = block.exit else {
+            unreachable!("selected single-block helper")
+        };
+        if block.parameters.len() != args.len() {
+            return Err(error("inlined call argument arity"));
+        }
+        // Each invocation gets its own bindings and expression cache. Only its
+        // returned values escape; the caller's scope and guards remain intact.
+        let caller = std::mem::replace(
+            &mut self.environment,
+            Environment {
+                locals: block.parameters.iter().cloned().zip(args).collect(),
+                ..Environment::default()
+            },
+        );
+        let finish_outputs = std::mem::replace(&mut self.finish_outputs, false);
+        for instruction in &data.state.bodies[block.body].instructions {
+            self.instruction(instruction)?;
+        }
+        let values = self.values(&data.state.bodies[result].results)?;
+        self.finish_outputs = finish_outputs;
+        self.environment = caller;
+        self.compiler.active.remove(&function);
+        Ok(Some(values))
+    }
+
     fn instruction(&mut self, instruction: &Instruction) -> Result<(), OptimizeError> {
         match instruction {
             Instruction::BindParameter(id, value) => {
@@ -481,6 +523,13 @@ impl<'a, 'b> Body<'a, 'b> {
                 results,
             } => {
                 let args = self.values(arguments)?;
+                if let Some(values) = self.inline_call(*function, args.clone())? {
+                    if values.len() != results.len() {
+                        return Err(error("inlined call result arity"));
+                    }
+                    self.environment.locals.extend(results.iter().cloned().zip(values));
+                    return Ok(());
+                }
                 let id = self.compiler.function(*function, args.iter().map(|v| v.ty.clone()).collect())?;
                 let ty = self.compiler.functions[id.0 as usize].body.return_ty.clone();
                 if self.compiler.data.state.blocks[*function]
@@ -608,16 +657,16 @@ impl<'a, 'b> Body<'a, 'b> {
         args: Vec<Typed>,
         ty: Type,
     ) -> Result<Typed, OptimizeError> {
-        let value = self
-            .builder
-            .push_inst(
-                InstKind::Op {
-                    tag,
-                    operands: args.into_iter().map(|v| v.value).collect(),
-                },
-                ty.clone(),
-            )
-            .map_err(builder_error)?;
+        let instruction = InstKind::Op {
+            tag,
+            operands: args.into_iter().map(|v| v.value).collect(),
+        };
+        // Inlining can expose invariant arithmetic after source placement.
+        let value = if crate::ssa::is_speculatable(&instruction) {
+            self.builder.func_mut().append_floating_inst(instruction, ty.clone())
+        } else {
+            self.builder.push_inst(instruction, ty.clone()).map_err(builder_error)?
+        };
         Ok(Typed {
             value: value.into(),
             ty,

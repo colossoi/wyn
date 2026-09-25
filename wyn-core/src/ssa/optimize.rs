@@ -1,17 +1,12 @@
-//! Late scalar cleanup shared by both compiler routes. Dominating immutable
-//! computations can be reused; only total ones may move across control boundaries.
-use super::ir::{inline_single_block, LoopScopes, Substitutions};
+//! Concrete array storage preparation shared by both compiler routes.
+use super::ir::{LoopScopes, Substitutions, ValueDef};
 use super::stage::{Elaborated, Optimized};
 use super::types::{BlockId, FuncBody, InstId, InstKind, ValueId, ValueRef, WynFunction};
 use crate::builtins::{by_id, Purity};
 use crate::op::{BinaryOperator, OpTag};
 use crate::types::{is_array_variant_view, is_virtual_array, Type, TypeExt, TypeName};
-use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
-use wyn_base::split_one_mut;
-use wyn_graph::{topo_sort_by_dependencies, DominatorTree};
-
-const SMALL_HELPER_INSTRUCTION_LIMIT: usize = 128;
+use wyn_graph::DominatorTree;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ExpressionScope {
@@ -19,101 +14,22 @@ enum ExpressionScope {
     Block(BlockId),
 }
 
-type ExpressionKey = (
-    ExpressionScope,
-    Type,
-    OpTag<BindingRef, FunctionId>,
-    Vec<ValueRef>,
-);
-
-/// Inline small helpers, reuse dominating expressions, fold constants, and
-/// intern movable expressions.
-/// A separate pass assigns floating expressions to blocks before lowering.
+/// Prepare concrete storage introduced during SSA lowering.
+/// Source helper expansion, folding, expression sharing and hoisting belong to Egglog.
 pub fn optimize(mut program: Elaborated) -> Optimized {
-    let indices: HashMap<_, _> = program.functions.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
-    // Callees are simplified first, so a small forwarding helper can disappear
-    // in the same traversal. Recursive helpers are left for backend validation.
-    if let Ok(order) = topo_sort_by_dependencies(0..program.functions.len(), |i, out| {
-        for node in program.functions[i].body.inner.insts.values() {
-            if let InstKind::Op {
-                tag: OpTag::Call(id), ..
-            } = node.data
-            {
-                out.extend(indices.get(&id).copied());
-            }
-        }
-    }) {
-        for i in order {
-            let (current, other_functions) = split_one_mut(&mut program.functions, i);
-            inline_small_helpers(&mut current.body, |id| {
-                let helper = other_functions(*indices.get(&id)?)?;
-                helper.linkage_name.is_none().then_some(&helper.body)
-            });
-            float_pure_values(&mut current.body);
-        }
-    }
     for body in program
-        .entry_points
+        .functions
         .iter_mut()
-        .map(|e| &mut e.body)
+        .map(|f| &mut f.body)
+        .chain(program.entry_points.iter_mut().map(|e| &mut e.body))
         .chain(program.constants.iter_mut().map(|c| &mut c.body))
     {
-        inline_small_helpers(body, |id| {
-            let f = &program.functions[*indices.get(&id)?];
-            f.linkage_name.is_none().then_some(&f.body)
-        });
-        float_pure_values(body);
+        prepare_values(body);
     }
     program.retag()
 }
 
-fn inline_small_helpers<'a>(body: &mut FuncBody, lookup: impl Fn(FunctionId) -> Option<&'a FuncBody>) {
-    let mut replacements = Substitutions::default();
-    let blocks: Vec<_> = body.inner.blocks.keys().collect();
-    for block in blocks {
-        for id in std::mem::take(&mut body.inner.blocks[block].insts) {
-            body.inner.insts[id].data.substitute_values(&mut |value| replacements.resolve(value));
-            let candidate = match &body.inner.insts[id].data {
-                InstKind::Op {
-                    tag: OpTag::Call(function),
-                    operands,
-                } => body.inner.insts[id].result.and_then(|result| {
-                    lookup(*function)
-                        .filter(|helper| is_small_inline_candidate(helper, operands.len()))
-                        .map(|helper| (result, operands.clone(), helper))
-                }),
-                _ => None,
-            };
-            let Some((result, operands, helper)) = candidate else {
-                body.inner.blocks[block].insts.push(id);
-                continue;
-            };
-            let Some(returned) = inline_single_block(&mut body.inner, block, &helper.inner, &operands)
-            else {
-                body.inner.blocks[block].insts.push(id);
-                continue;
-            };
-            replacements.insert(result, returned);
-            body.inner.insts.remove(id);
-        }
-    }
-    replacements.finish(&mut body.inner);
-}
-
-fn is_small_inline_candidate(helper: &FuncBody, argument_count: usize) -> bool {
-    helper.num_blocks() == 1
-        && helper.num_insts() <= SMALL_HELPER_INSTRUCTION_LIMIT
-        && helper.inner.params.len() == argument_count
-        // Cloning at the call site preserves execution and instruction order;
-        // it does not require permission to speculate. Op instructions contain
-        // only value operands. Place-bearing instructions need a place remapper
-        // and are deliberately excluded from this single-block inliner.
-        && helper.inner.insts.values().all(|node| {
-            node.result.is_some() && matches!(node.data, InstKind::Op { .. })
-        })
-}
-
-pub(super) fn is_speculatable(data: &InstKind) -> bool {
+pub(crate) fn is_speculatable(data: &InstKind) -> bool {
     match data {
         InstKind::Op {
             tag: OpTag::Intrinsic { id, overload_idx },
@@ -183,6 +99,7 @@ fn reusable(data: &InstKind) -> bool {
     }
 }
 
+#[allow(dead_code)] // Kept for comparison; disabled during the pure Egglog port.
 fn reuse_dominating_expressions(body: &mut FuncBody) {
     let function = &mut body.inner;
     let dominators = DominatorTree::build(function.entry, |block, successors| {
@@ -224,7 +141,7 @@ fn materialize_dynamic_index(
     loop_scopes: &LoopScopes,
     original_block: BlockId,
     instruction: InstId,
-    expressions: &mut HashMap<ExpressionKey, ValueId>,
+    expressions: &mut HashMap<(ExpressionScope, ValueId), ValueId>,
 ) {
     let InstKind::Op {
         tag: OpTag::Index,
@@ -233,9 +150,20 @@ fn materialize_dynamic_index(
     else {
         return;
     };
-    let [ValueRef::Ssa(array), ValueRef::Ssa(_)] = operands.as_slice() else {
+    let [ValueRef::Ssa(array), ValueRef::Ssa(index)] = operands.as_slice() else {
         return;
     };
+    if let ValueDef::Inst { inst } = function.values[*index].def {
+        if matches!(
+            function.insts[inst].data,
+            InstKind::Op {
+                tag: OpTag::Int(_) | OpTag::Uint(_),
+                ..
+            }
+        ) {
+            return;
+        }
+    }
     let ty = &function.values[*array].ty;
     let is_scalar_array = ty.is_array()
         && ty.elem_type().is_some_and(|element| {
@@ -259,7 +187,7 @@ fn materialize_dynamic_index(
     } else {
         ExpressionScope::Floating
     };
-    let key = (scope, ty.clone(), tag.clone(), materialize_operands.clone());
+    let key = (scope, array);
     let materialized = *expressions.entry(key).or_insert_with(|| {
         let data = InstKind::Op {
             tag,
@@ -276,57 +204,14 @@ fn materialize_dynamic_index(
     }
 }
 
-fn float_or_share_instruction(
-    function: &mut WynFunction,
-    loop_scopes: &LoopScopes,
-    original_block: BlockId,
-    instruction: InstId,
-    expressions: &mut HashMap<ExpressionKey, ValueId>,
-    replacements: &mut Substitutions,
-) -> bool {
-    let node = &function.insts[instruction];
-    let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) else {
-        return false;
-    };
-    if !is_speculatable(&node.data) {
-        return false;
-    }
-    let scope = if operands.iter().any(|operand| loop_scopes.value_varies(function, *operand)) {
-        ExpressionScope::Block(original_block)
-    } else {
-        ExpressionScope::Floating
-    };
-    let key = (
-        scope,
-        function.values[result].ty.clone(),
-        tag.clone(),
-        operands.clone(),
-    );
-    if let Some(&previous) = expressions.get(&key) {
-        replacements.insert(result, previous.into());
-        function.insts.remove(instruction);
-        return true;
-    }
-    expressions.insert(key, result);
-    if matches!(scope, ExpressionScope::Floating) {
-        function.float_inst(instruction);
-        return true;
-    }
-    false
-}
-
-fn float_pure_values(body: &mut FuncBody) {
-    super::constant_folding::fold(body);
+fn prepare_values(body: &mut FuncBody) {
+    // SSA reuse and early folding are disabled for the pure Egglog port.
+    // Backend preparation still folds generated control flow.
     let loop_scopes = LoopScopes::analyze(&body.inner);
-    reuse_dominating_expressions(body);
-    let mut replacements = Substitutions::default();
     let mut expressions = HashMap::new();
     let blocks = body.inner.blocks.keys().collect::<Vec<_>>();
     for block in blocks {
         for instruction in std::mem::take(&mut body.inner.blocks[block].insts) {
-            body.inner.insts[instruction].data.substitute_values(&mut |value| replacements.resolve(value));
-            // A materialization is itself interned, so every immutable source
-            // has one addressable representation in the final legal scope.
             materialize_dynamic_index(
                 &mut body.inner,
                 &loop_scopes,
@@ -334,19 +219,9 @@ fn float_pure_values(body: &mut FuncBody) {
                 instruction,
                 &mut expressions,
             );
-            if !float_or_share_instruction(
-                &mut body.inner,
-                &loop_scopes,
-                block,
-                instruction,
-                &mut expressions,
-                &mut replacements,
-            ) {
-                body.inner.blocks[block].insts.push(instruction);
-            }
+            body.inner.blocks[block].insts.push(instruction);
         }
     }
-    replacements.finish(&mut body.inner);
 }
 
 #[cfg(test)]

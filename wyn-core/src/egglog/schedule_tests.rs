@@ -90,6 +90,8 @@ fn mapped_array_length_does_not_require_its_discarded_elements() {
             "entry main(xs:[]i32) []i32 = let ys=map(|x:i32|x+1,xs) in
              map(|i|i,iota(length({view})))",
         ));
+        let ssa = super::super::to_ssa(&result, crate::CodegenTarget::Wgsl).unwrap();
+        crate::lower_ssa_to_wgsl(ssa).unwrap();
         for n in [0, 1, 65].into_iter().filter(|&n| n >= start) {
             assert_eq!(
                 run(&result, vec![Value::array(0..n)]),
