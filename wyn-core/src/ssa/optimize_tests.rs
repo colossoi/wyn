@@ -101,16 +101,16 @@ fn division_and_remainder_are_reused_from_enclosing_loop_scopes() {
 }
 
 #[test]
-fn loop_header_division_and_remainder_do_not_escape_to_the_merge() {
-    // The header dominates the merge, but WGSL declares its results inside
-    // the loop. The post-loop computations must keep their own definitions.
+fn loop_header_division_and_remainder_are_reused_after_the_loop() {
+    // The header dominates the merge. WGSL declares these results outside
+    // the loop while evaluating them at their original header positions.
     assert_division_sites(
         r#"entry repro(indices: []i32, width: i32) []i32 =
   map(|i|
     let total = loop total = 0 while total < i / width + i % width do total + 1 in
     total + i / width + i % width,
     indices)"#,
-        2,
+        1,
     );
 }
 
@@ -617,7 +617,7 @@ fn partial_intrinsics_reuse_guarded_producers_in_nested_branches() {
 }
 
 #[test]
-fn partial_intrinsic_reuse_respects_loop_scopes() {
+fn partial_intrinsic_reuse_respects_dominance_and_loop_carried_operands() {
     for (source, expected) in [
         (
             r#"entry repro(xs: []f32) []f32 = map(|x|
@@ -626,12 +626,12 @@ fn partial_intrinsic_reuse_respects_loop_scopes() {
             loop inner = total for k < 2 do inner + f32.sqrt(x), xs)"#,
             1,
         ),
-        // A loop header dominates its merge, but its result is loop-local.
+        // A loop header dominates its merge, so its result can be reused.
         (
             r#"entry repro(xs: []f32) []f32 = map(|x|
           let total = loop total = 0.0 while total < f32.sqrt(x) do total + 1.0 in
           total + f32.sqrt(x), xs)"#,
-            2,
+            1,
         ),
         // The second sqrt's operand changes on every iteration.
         (

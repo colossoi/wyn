@@ -183,7 +183,7 @@ fn reusable(data: &InstKind) -> bool {
     }
 }
 
-fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
+fn reuse_dominating_expressions(body: &mut FuncBody) {
     let function = &mut body.inner;
     let dominators = DominatorTree::build(function.entry, |block, successors| {
         successors.extend(function.blocks[block].term.successors());
@@ -196,18 +196,10 @@ fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
             let node = &function.insts[instruction];
             if let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) {
                 if reusable(&node.data) {
-                    // Enclosing values are visible inside a loop. WGSL keeps
-                    // loop-local results inside it, so never search child or
-                    // sibling scopes, even if their blocks dominate this use.
-                    let mut key = (
-                        loop_scopes.scope(block),
-                        function.values[result].ty.clone(),
-                        tag.clone(),
-                        operands.clone(),
-                    );
-                    let previous = loop_scopes.enclosing_scopes(block).find_map(|scope| {
-                        key.0 = scope;
-                        let &(producer, previous) = expressions.get(&key)?;
+                    // SSA dominance decides reuse. Textual backends own their
+                    // lexical declarations, including values used after loops.
+                    let key = (function.values[result].ty.clone(), tag.clone(), operands.clone());
+                    let previous = expressions.get(&key).and_then(|&(producer, previous)| {
                         dominators.dominates(producer, block).then_some(previous)
                     });
                     if let Some(previous) = previous {
@@ -218,7 +210,6 @@ fn reuse_dominating_expressions(body: &mut FuncBody, loop_scopes: &LoopScopes) {
                     // In dominator preorder a candidate outside the current
                     // subtree is no longer needed. Never move the retained
                     // instruction, including when it is guarded or in a loop.
-                    key.0 = loop_scopes.scope(block);
                     expressions.insert(key, (block, result));
                 }
             }
@@ -327,7 +318,7 @@ fn float_or_share_instruction(
 fn float_pure_values(body: &mut FuncBody) {
     super::constant_folding::fold(body);
     let loop_scopes = LoopScopes::analyze(&body.inner);
-    reuse_dominating_expressions(body, &loop_scopes);
+    reuse_dominating_expressions(body);
     let mut replacements = Substitutions::default();
     let mut expressions = HashMap::new();
     let blocks = body.inner.blocks.keys().collect::<Vec<_>>();

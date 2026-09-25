@@ -56,17 +56,16 @@ pub fn place_floating(mut program: stage::Optimized) -> error::Result<stage::Pla
 }
 
 fn simplify_values(program: &mut stage::Reachable) {
-    for function in &mut program.functions {
-        eliminate_dead_pure_instructions(&mut function.body);
-        if_conversion::run(&mut function.body);
-    }
-    for entry in &mut program.entry_points {
-        eliminate_dead_pure_instructions(&mut entry.body);
-        if_conversion::run(&mut entry.body);
-    }
-    for constant in &mut program.constants {
-        eliminate_dead_pure_instructions(&mut constant.body);
-        if_conversion::run(&mut constant.body);
+    for body in program
+        .functions
+        .iter_mut()
+        .map(|function| &mut function.body)
+        .chain(program.entry_points.iter_mut().map(|entry| &mut entry.body))
+        .chain(program.constants.iter_mut().map(|constant| &mut constant.body))
+    {
+        eliminate_dead_pure_instructions(body);
+        if_conversion::run(body);
+        ir::eliminate_single_input_params(&mut body.inner);
     }
 }
 

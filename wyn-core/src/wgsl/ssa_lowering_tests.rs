@@ -331,6 +331,175 @@ fn compile_to_wgsl(source: &str) -> error::Result<String> {
     lower_ssa_to_wgsl(program)
 }
 
+#[test]
+fn wgsl_scope_tree_owns_loop_exports_and_preserves_state_swaps() {
+    use crate::ast::Span;
+    use crate::flow::ControlHeader;
+    use crate::op::{BinaryOperator, OpTag};
+    use crate::ssa::builder::FuncBuilder;
+    use crate::ssa::types::{ConstantValue, InstKind, Terminator, ValueRef};
+    use crate::structured::{self, Node};
+
+    let int = types::i32();
+    let number = |n| ValueRef::Const(ConstantValue::I32(n));
+    let binary = |op, a, b| InstKind::Op {
+        tag: OpTag::BinOp(op),
+        operands: vec![a, b],
+    };
+    let mut builder = FuncBuilder::new(
+        vec![
+            (types::bool_type(), "condition".into()),
+            (int.clone(), "limit".into()),
+        ],
+        int.clone(),
+    );
+    let yes = builder.create_block();
+    let no = builder.create_block();
+    let merge = builder.create_block();
+    let result = builder.add_block_param(merge, int.clone());
+    let header = builder.create_block();
+    let a = builder.add_block_param(header, int.clone());
+    let b = builder.add_block_param(header, int.clone());
+    let i = builder.add_block_param(header, int.clone());
+    let step = builder.create_block();
+    let continuing = builder.create_block();
+    let next = (0..3).map(|_| builder.add_block_param(continuing, int.clone())).collect::<Vec<_>>();
+    let exit = builder.create_block();
+    builder.set_control_header(builder.entry(), ControlHeader::Selection { merge });
+    builder
+        .terminate(Terminator::CondBranch {
+            cond: builder.get_param(0).into(),
+            then_target: yes,
+            then_args: vec![],
+            else_target: no,
+            else_args: vec![],
+        })
+        .unwrap();
+    builder.switch_to_block(yes).unwrap();
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: vec![number(1), number(2), number(0)],
+        })
+        .unwrap();
+    builder.switch_to_block(header).unwrap();
+    builder.set_control_header(
+        header,
+        ControlHeader::Loop {
+            merge: exit,
+            continue_block: continuing,
+        },
+    );
+    let exported =
+        builder.push_inst(binary(BinaryOperator::Subtract, a.into(), b.into()), int.clone()).unwrap();
+    let condition = builder
+        .push_inst(
+            binary(BinaryOperator::Less, i.into(), builder.get_param(1).into()),
+            types::bool_type(),
+        )
+        .unwrap();
+    builder
+        .terminate(Terminator::CondBranch {
+            cond: condition.into(),
+            then_target: step,
+            then_args: vec![],
+            else_target: exit,
+            else_args: vec![],
+        })
+        .unwrap();
+    builder.switch_to_block(step).unwrap();
+    let increment =
+        builder.push_inst(binary(BinaryOperator::Add, i.into(), number(1)), int.clone()).unwrap();
+    builder
+        .terminate(Terminator::Branch {
+            target: continuing,
+            args: vec![b.into(), a.into(), increment.into()],
+        })
+        .unwrap();
+    builder.switch_to_block(continuing).unwrap();
+    builder
+        .terminate(Terminator::Branch {
+            target: header,
+            args: next.iter().copied().map(Into::into).collect(),
+        })
+        .unwrap();
+    builder.switch_to_block(exit).unwrap();
+    builder
+        .terminate(Terminator::Branch {
+            target: merge,
+            args: vec![exported.into()],
+        })
+        .unwrap();
+    builder.switch_to_block(no).unwrap();
+    builder
+        .terminate(Terminator::Branch {
+            target: merge,
+            args: vec![number(0)],
+        })
+        .unwrap();
+    builder.switch_to_block(merge).unwrap();
+    builder.terminate(Terminator::Return(Some(result.into()))).unwrap();
+    let mut body = builder.finish().unwrap();
+    ssa::ir::eliminate_single_input_params(&mut body.inner);
+    assert!(body.inner.blocks[continuing].params.is_empty());
+
+    let mut tree = structured::structurize(&body);
+    super::super::bindings::place_bindings(&body, &mut tree);
+    assert_eq!(tree.root.declarations, vec![result]);
+    let Node::If {
+        then_body, else_body, ..
+    } = &tree.root.nodes[0]
+    else {
+        panic!("selection")
+    };
+    assert!(else_body.declarations.is_empty());
+    assert_eq!(then_body.declarations.len(), 4);
+    for value in [a, b, i, exported] {
+        assert!(then_body.declarations.contains(&value));
+    }
+    let loop_body = then_body
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            Node::Loop { body } => Some(body),
+            _ => None,
+        })
+        .unwrap();
+    assert!(loop_body.declarations.is_empty());
+    assert!(
+        loop_body
+            .nodes
+            .iter()
+            .any(|node| matches!(node, Node::Inst(id) if body.get_inst(*id).result == Some(exported))),
+        "moving a declaration must not move its calculation"
+    );
+
+    let program = ssa::types::Program::<ssa::stage::WgslReadyTag, _>::from_parts(
+        vec![],
+        vec![],
+        vec![],
+        ssa::context::BackendGlobal {
+            pipeline: Default::default(),
+            target: CodegenTarget::Wgsl,
+            physical_kernels: Default::default(),
+        },
+    );
+    let mut ctx = super::LowerCtx::new(&program, Default::default());
+    let mut emitter = super::BodyLowerCtx::new(&mut ctx, &body, Span::generated());
+    let mut wgsl = "fn test(w_condition: bool, w_limit: i32) -> i32 {\n".to_owned();
+    let returned = emitter.lower(&mut wgsl).unwrap();
+    wgsl.push_str(&format!("return {returned};\n}}\n"));
+    validate_wgsl(&wgsl);
+    let save_b = wgsl.find(&format!("let _copy3: i32 = {};", super::wgsl_var(b))).unwrap();
+    let save_a = wgsl.find(&format!("let _copy4: i32 = {};", super::wgsl_var(a))).unwrap();
+    let write_a = wgsl.find(&format!("{} = _copy3;", super::wgsl_var(a))).unwrap();
+    let write_b = wgsl.find(&format!("{} = _copy4;", super::wgsl_var(b))).unwrap();
+    assert!(
+        save_a < write_a && save_a < write_b && save_b < write_a && save_b < write_b,
+        "both original loop values must be read before either is overwritten:\n{wgsl}"
+    );
+}
+
 fn compile_to_wgsl_with_u64_emulation(source: &str) -> error::Result<String> {
     let program = compile_thru_ssa(source).map_err(|e| err_spirv!("{}", e))?;
     lower_ssa_to_wgsl_with_options(program, wgsl::WgslOptions::U64_EMULATION)

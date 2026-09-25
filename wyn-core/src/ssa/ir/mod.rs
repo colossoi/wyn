@@ -18,6 +18,7 @@ mod dce;
 mod inline;
 mod rewrite;
 mod schedule;
+mod trivial_params;
 mod uses;
 pub(crate) use control_flow::fold_constant_selections;
 pub(crate) use dce::eliminate_dead_values;
@@ -25,6 +26,7 @@ pub(crate) use inline::inline_single_block;
 pub(crate) use rewrite::Substitutions;
 pub use rewrite::VisitValues;
 pub(crate) use schedule::{schedule_floating, LoopScopes};
+pub(crate) use trivial_params::eliminate_single_input_params;
 pub use uses::{UseSite, ValueUses};
 
 new_key_type! {

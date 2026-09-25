@@ -36,5 +36,8 @@ fn sibling_selections_do_not_accumulate_recursion_depth() {
     }
     builder.terminate(Terminator::Return(None)).unwrap();
     let nodes = structurize(&builder.finish().unwrap());
-    assert_eq!(nodes.iter().filter(|n| matches!(n, Node::If { .. })).count(), 128);
+    assert_eq!(
+        nodes.root.nodes.iter().filter(|n| matches!(n, Node::If { .. })).count(),
+        128
+    );
 }

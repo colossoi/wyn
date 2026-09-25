@@ -11,6 +11,45 @@ use crate::ssa::ir::InstId;
 use crate::ssa::types::{FuncBody, Terminator, ValueId, ValueRef};
 use crate::LookupSet;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScopeId(pub usize);
+
+/// A lexical block. A loop's test and body share one scope.
+#[derive(Debug)]
+pub struct Scope {
+    pub id: ScopeId,
+    /// Mutable bindings owned by this lexical block, filled before emission.
+    pub declarations: Vec<ValueId>,
+    pub nodes: Vec<Node>,
+}
+
+#[derive(Debug)]
+pub struct Body {
+    pub root: Scope,
+    pub parents: Vec<Option<ScopeId>>,
+}
+
+impl Body {
+    pub fn contains(&self, ancestor: ScopeId, mut scope: ScopeId) -> bool {
+        loop {
+            if ancestor == scope {
+                return true;
+            }
+            let Some(parent) = self.parents[scope.0] else {
+                return false;
+            };
+            scope = parent;
+        }
+    }
+
+    pub fn common_scope(&self, mut a: ScopeId, b: ScopeId) -> ScopeId {
+        while !self.contains(a, b) {
+            a = self.parents[a.0].expect("scopes share the function root");
+        }
+        a
+    }
+}
+
 /// A node in the structured control flow tree.
 #[derive(Debug)]
 pub enum Node {
@@ -18,60 +57,77 @@ pub enum Node {
     Inst(InstId),
 
     /// `if (cond) { then_body } else { else_body }`
-    /// `merge_params` are declared before the if; each branch assigns to them.
     If {
         cond: ValueRef,
-        then_body: Vec<Node>,
-        then_args: Vec<ValueRef>,
-        else_body: Vec<Node>,
-        else_args: Vec<ValueRef>,
-        merge_params: Vec<ValueId>,
+        then_body: Scope,
+        else_body: Scope,
     },
 
-    /// `state = init; while (cond) { body; state = continue_values; }`
+    /// Initial and back-edge copies are explicit nodes; declarations are
+    /// planned separately from control flow and instruction execution.
     Loop {
-        /// Header block params (the loop state variables).
-        state_vars: Vec<ValueId>,
-        /// Initial values for state vars (from the branch into the loop).
-        init_args: Vec<ValueRef>,
-        /// Code evaluated on every test, including conditional expressions.
-        header: Vec<Node>,
-        /// The condition value.
+        body: Scope,
+    },
+
+    BreakIf {
         cond: ValueRef,
-        /// Whether the condition is "continue when true" (false = invert).
-        cond_is_continue: bool,
-        /// The loop body.
-        body: Vec<Node>,
+        when_true: bool,
     },
 
     /// `return expr;`
     Return(Option<ValueRef>),
 
-    /// Assign a value to a variable (used for loop state updates, etc.).
-    Assign {
-        target: ValueId,
-        value: ValueRef,
-    },
+    /// Read every source before overwriting any destination. SSA edge
+    /// arguments are simultaneous, including loop-carried permutations.
+    ParallelCopy(Vec<(ValueId, ValueRef)>),
+}
+
+fn copy_params(params: &[ValueId], args: &[ValueRef], nodes: &mut Vec<Node>) {
+    let copies: Vec<_> = params
+        .iter()
+        .copied()
+        .zip(args.iter().copied())
+        .filter(|(param, arg)| ValueRef::Ssa(*param) != *arg)
+        .collect();
+    if !copies.is_empty() {
+        nodes.push(Node::ParallelCopy(copies));
+    }
 }
 
 /// Convert an SSA function body into structured control flow nodes.
-pub fn structurize(body: &FuncBody) -> Vec<Node> {
+pub fn structurize(body: &FuncBody) -> Body {
     let ctx = StructCtx {
         body,
         depth: std::cell::Cell::new(0),
+        parents: std::cell::RefCell::new(vec![None]),
     };
-    ctx.lower_from(body.inner.entry, &[])
+    let root = Scope {
+        id: ScopeId(0),
+        declarations: vec![],
+        nodes: ctx.lower_from(body.inner.entry, &[], ScopeId(0)),
+    };
+    Body {
+        root,
+        parents: ctx.parents.into_inner(),
+    }
 }
 
 struct StructCtx<'a> {
     body: &'a FuncBody,
     depth: std::cell::Cell<usize>,
+    parents: std::cell::RefCell<Vec<Option<ScopeId>>>,
 }
 
 impl<'a> StructCtx<'a> {
+    fn child_scope(&self, parent: ScopeId) -> ScopeId {
+        let mut parents = self.parents.borrow_mut();
+        let id = ScopeId(parents.len());
+        parents.push(Some(parent));
+        id
+    }
     /// Lower starting from a block, producing a sequence of nodes.
     /// `args` are the values to bind to the block's params.
-    fn lower_from(&self, block_id: BlockId, args: &[ValueRef]) -> Vec<Node> {
+    fn lower_from(&self, block_id: BlockId, args: &[ValueRef], scope: ScopeId) -> Vec<Node> {
         let mut nodes = Vec::new();
         let mut current = block_id;
         let mut current_args: Vec<ValueRef> = args.to_vec();
@@ -86,16 +142,7 @@ impl<'a> StructCtx<'a> {
             }
             let block = &self.body.inner.blocks[current];
 
-            // Bind block params from args (emit as Assign for non-entry blocks).
-            // Textual emitters handle these: first occurrence declares, later assigns.
-            for (param, arg) in block.params.iter().zip(current_args.iter()) {
-                if ValueRef::Ssa(*param) != *arg {
-                    nodes.push(Node::Assign {
-                        target: *param,
-                        value: *arg,
-                    });
-                }
-            }
+            copy_params(&block.params, &current_args, &mut nodes);
 
             // Emit instructions
             for &inst_id in &block.insts {
@@ -115,7 +162,7 @@ impl<'a> StructCtx<'a> {
                     {
                         let merge = *merge;
 
-                        self.emit_loop(*target, args, merge, &mut nodes);
+                        self.emit_loop(*target, args, merge, scope, &mut nodes);
                         // Continue from the merge block
                         current = merge;
                         // Merge block params are set by the loop exit
@@ -144,6 +191,7 @@ impl<'a> StructCtx<'a> {
                             *else_target,
                             else_args,
                             merge_id,
+                            scope,
                             &mut nodes,
                         );
                         // Continue from the merge block
@@ -169,28 +217,44 @@ impl<'a> StructCtx<'a> {
         else_target: BlockId,
         else_args: &[ValueRef],
         merge_id: BlockId,
+        scope: ScopeId,
         nodes: &mut Vec<Node>,
     ) {
         let merge_block = &self.body.inner.blocks[merge_id];
         let merge_params: Vec<ValueId> = merge_block.params.clone();
 
         // Lower each arm — stops when it reaches the merge block
-        let (then_body, then_exit_args) = self.lower_arm(then_target, then_args, merge_id);
-        let (else_body, else_exit_args) = self.lower_arm(else_target, else_args, merge_id);
+        let then_scope = self.child_scope(scope);
+        let else_scope = self.child_scope(scope);
+        let (mut then_body, then_exit_args) = self.lower_arm(then_target, then_args, merge_id, then_scope);
+        let (mut else_body, else_exit_args) = self.lower_arm(else_target, else_args, merge_id, else_scope);
+        copy_params(&merge_params, &then_exit_args, &mut then_body);
+        copy_params(&merge_params, &else_exit_args, &mut else_body);
 
         nodes.push(Node::If {
             cond,
-            then_body,
-            then_args: then_exit_args,
-            else_body,
-            else_args: else_exit_args,
-            merge_params,
+            then_body: Scope {
+                id: then_scope,
+                declarations: vec![],
+                nodes: then_body,
+            },
+            else_body: Scope {
+                id: else_scope,
+                declarations: vec![],
+                nodes: else_body,
+            },
         });
     }
 
     /// Lower a branch arm, stopping when we reach `stop_at` block.
     /// Returns the body nodes and the args passed to the stop block.
-    fn lower_arm(&self, start: BlockId, args: &[ValueRef], stop_at: BlockId) -> (Vec<Node>, Vec<ValueRef>) {
+    fn lower_arm(
+        &self,
+        start: BlockId,
+        args: &[ValueRef],
+        stop_at: BlockId,
+        scope: ScopeId,
+    ) -> (Vec<Node>, Vec<ValueRef>) {
         let mut nodes = Vec::new();
         let mut current = start;
         let mut current_args: Vec<ValueRef> = args.to_vec();
@@ -214,15 +278,7 @@ impl<'a> StructCtx<'a> {
 
             let block = &self.body.inner.blocks[current];
 
-            // Bind block params
-            for (param, arg) in block.params.iter().zip(current_args.iter()) {
-                if ValueRef::Ssa(*param) != *arg {
-                    nodes.push(Node::Assign {
-                        target: *param,
-                        value: *arg,
-                    });
-                }
-            }
+            copy_params(&block.params, &current_args, &mut nodes);
 
             // Emit instructions
             for &inst_id in &block.insts {
@@ -241,7 +297,7 @@ impl<'a> StructCtx<'a> {
                     {
                         let merge = *merge;
 
-                        self.emit_loop(*target, args, merge, &mut nodes);
+                        self.emit_loop(*target, args, merge, scope, &mut nodes);
                         current = merge;
                         current_args = Vec::new();
                         continue;
@@ -267,6 +323,7 @@ impl<'a> StructCtx<'a> {
                             *else_target,
                             else_args,
                             merge_id,
+                            scope,
                             &mut nodes,
                         );
                         current = merge_id;
@@ -293,10 +350,13 @@ impl<'a> StructCtx<'a> {
         header_id: BlockId,
         init_args: &[ValueRef],
         merge_id: BlockId,
+        scope: ScopeId,
         nodes: &mut Vec<Node>,
     ) {
         let header = &self.body.inner.blocks[header_id];
         let state_vars: Vec<ValueId> = header.params.clone();
+        copy_params(&state_vars, init_args, nodes);
+        let loop_scope = self.child_scope(scope);
         // A loop test can contain selections or nested loops before reaching
         // the conditional exit. Follow their merges to find that exit block.
         let mut test = header_id;
@@ -318,11 +378,9 @@ impl<'a> StructCtx<'a> {
                 },
             };
         }
-        let (mut header_nodes, test_args) = self.lower_arm(header_id, &[], test);
+        let (mut header_nodes, test_args) = self.lower_arm(header_id, &[], test, loop_scope);
         let condition = &self.body.inner.blocks[test];
-        for (&target, &value) in condition.params.iter().zip(&test_args) {
-            header_nodes.push(Node::Assign { target, value });
-        }
+        copy_params(&condition.params, &test_args, &mut header_nodes);
         header_nodes.extend(condition.insts.iter().copied().map(Node::Inst));
         let Terminator::CondBranch {
             cond,
@@ -340,33 +398,27 @@ impl<'a> StructCtx<'a> {
         } else {
             (*else_target, else_args, then_args)
         };
-        let (mut body, continue_args) = self.lower_arm(body_target, body_args, header_id);
+        let (mut body, continue_args) = self.lower_arm(body_target, body_args, header_id, loop_scope);
 
         // Add state variable updates from the back-edge args
-        for (state_var, arg) in state_vars.iter().zip(continue_args.iter()) {
-            body.push(Node::Assign {
-                target: *state_var,
-                value: *arg,
-            });
-        }
+        copy_params(&state_vars, &continue_args, &mut body);
+        header_nodes.push(Node::BreakIf {
+            cond: *cond,
+            when_true: !cond_is_continue,
+        });
+        header_nodes.extend(body);
 
         nodes.push(Node::Loop {
-            state_vars,
-            init_args: init_args.to_vec(),
-            header: header_nodes,
-            cond: *cond,
-            cond_is_continue,
-            body,
+            body: Scope {
+                id: loop_scope,
+                declarations: vec![],
+                nodes: header_nodes,
+            },
         });
 
         // Set merge block params from loop exit args (after the loop).
         let merge_block = &self.body.inner.blocks[merge_id];
-        for (param, arg) in merge_block.params.iter().zip(exit_args.iter()) {
-            nodes.push(Node::Assign {
-                target: *param,
-                value: *arg,
-            });
-        }
+        copy_params(&merge_block.params, exit_args, nodes);
     }
 
     /// Find the merge block for an if-else.

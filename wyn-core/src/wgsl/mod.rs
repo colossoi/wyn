@@ -12,6 +12,7 @@
 //! entry-point emission) is WGSL-specific and written against the WGSL
 //! spec.
 
+mod bindings;
 mod int64_emulation;
 pub mod ssa_lowering;
 
