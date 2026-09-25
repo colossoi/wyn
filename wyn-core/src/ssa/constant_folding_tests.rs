@@ -10,6 +10,40 @@ use wspirv::dr;
 const FIXTURE: &str = include_str!("../../../testfiles/constant_shader_math.wyn");
 
 #[test]
+fn named_constant_branches_remove_only_unreachable_loops() {
+    for (expression, loops, selections, sin) in [
+        ("if ACONST < 7 then loop v = x for k < 8 do f32.sin(v) else x", 1, 0, false),
+        ("if ACONST >= 7 then x else loop v = x for k < 8 do f32.sin(v)", 1, 0, false),
+        // The inner choice becomes constant during late if-conversion.
+        ("if (if x < 0.0 then ACONST < 7 else ACONST < 6) then loop v = x for k < 8 do f32.sin(v) else x", 1, 0, false),
+        ("loop a = x for j < 3 do if ACONST < 7 then loop v = a for k < 8 do f32.sin(v) else a + 1.0", 2, 0, false),
+        ("if ACONST >= 7 then loop v = x for k < 8 do f32.sin(v) else x", 2, 0, true),
+        ("if x < 7.0 then loop v = x for k < 8 do f32.sin(v) else x", 2, 1, true),
+    ] {
+        let source = format!(
+            "def ACONST: i32 = 8\nentry repro(xs: []f32) []f32 = map(|x| {expression}, xs)"
+        );
+        let program = crate::compile_thru_ssa(&source).unwrap();
+        let lowered = crate::lower_ssa_to_spirv(program.clone()).unwrap();
+        let module = dr::load_words(&lowered.spirv).unwrap();
+        let count = |opcode| module.all_inst_iter().filter(|inst| inst.class.opcode == opcode).count();
+        // Each source needs the map dispatch loop in addition to any live
+        // authored loops. The original repro must have no selection or Sin.
+        assert_eq!(count(spirv::Op::LoopMerge), loops, "{source}");
+        assert_eq!(count(spirv::Op::SelectionMerge), selections, "{source}");
+        assert_eq!(count(spirv::Op::BranchConditional), loops + selections, "{source}");
+        assert_eq!(module.all_inst_iter().any(|inst|
+            inst.class.opcode == spirv::Op::ExtInst
+                && inst.operands.get(1) == Some(&dr::Operand::LiteralExtInstInteger(spirv::GLOp::Sin as u32))), sin, "{source}");
+        let bytes = lowered.spirv.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>();
+        validate(naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap());
+        let wgsl = crate::lower_ssa_to_wgsl(program).unwrap();
+        assert_eq!(wgsl.contains("sin("), sin, "{source}");
+        validate(naga::front::wgsl::parse_str(&wgsl).unwrap());
+    }
+}
+
+#[test]
 fn constant_shader_math_folds_after_inlining_and_preserves_dynamic_depth_order() {
     let program = crate::compile_thru_ssa(FIXTURE).unwrap();
     let placed = ssa::place_floating(ssa::optimize(program.clone())).unwrap();

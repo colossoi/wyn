@@ -104,6 +104,9 @@ pub(super) fn fold(body: &mut FuncBody) {
     for block in function.blocks.values_mut() {
         block.insts.retain(|id| function.insts.contains_key(*id));
     }
+    // Folding includes eager selects introduced by if-conversion. Their results
+    // can expose constant conditions in otherwise unconvertible selections.
+    super::ir::fold_constant_selections(function);
 }
 
 fn operand(value: ValueRef, constants: &HashMap<ValueId, Constant>) -> Option<Constant> {

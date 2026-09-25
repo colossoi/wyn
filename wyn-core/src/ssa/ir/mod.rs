@@ -13,11 +13,13 @@ use std::hash::Hash;
 use crate::ast::Span;
 use crate::flow::{ControlHeader, Terminator as FlowTerminator};
 
+mod control_flow;
 mod dce;
 mod inline;
 mod rewrite;
 mod schedule;
 mod uses;
+pub(crate) use control_flow::fold_constant_selections;
 pub(crate) use dce::eliminate_dead_values;
 pub(crate) use inline::inline_single_block;
 pub(crate) use rewrite::Substitutions;
