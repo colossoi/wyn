@@ -217,7 +217,7 @@ impl Reader<'_, '_, '_> {
                 let condition = self.expression(*condition)?;
                 let then_value = self.expression(*then_value)?;
                 let else_value = self.expression(*else_value)?;
-                self.sink.add("Select", (condition, then_value, else_value))?
+                self.sink.add("IfThenElse", (condition, then_value, else_value))?
             }
             ExprKind::Array(array) => {
                 let array = self.array(array)?;

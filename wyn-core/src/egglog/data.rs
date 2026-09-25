@@ -1,6 +1,6 @@
 //! Complete program structure retained outside the egglog fusion graph.
 use crate::ast::Span;
-use crate::builtins::catalog;
+use crate::builtins::{catalog, select::Selection};
 use crate::host::BufferLen;
 use crate::interface::{EntryDecl, EntryParamBinding};
 use crate::types::{Diet, Type};
@@ -143,6 +143,44 @@ pub enum ExprKind {
     Extern(ExternId),
     /// A value dependency on one particular execution.
     OperationResult(OperationId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Evaluation {
+    Lazy,
+    Eager,
+}
+
+impl Ir {
+    /// Value-choice facts shared by lazy conditionals and eager select. The
+    /// evaluation mode must be respected by control-flow and motion analyses.
+    pub(crate) fn conditional_value(&self, expression: ExprId) -> Option<(Selection<ExprId>, Evaluation)> {
+        match &self.expressions[expression].kind {
+            ExprKind::If {
+                condition,
+                then_value,
+                else_value,
+            } => Some((
+                Selection {
+                    condition: *condition,
+                    yes: *then_value,
+                    no: *else_value,
+                },
+                Evaluation::Lazy,
+            )),
+            ExprKind::PureApp { function, args } => {
+                let ExprKind::Builtin(id) = self.expressions[*function].kind else {
+                    return None;
+                };
+                let builtin = &self.builtins[id];
+                if builtin.builtin != catalog().known().select || builtin.overload_idx != 0 {
+                    return None;
+                }
+                Some((Selection::from_operands(args)?, Evaluation::Eager))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

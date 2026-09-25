@@ -21,8 +21,13 @@
 //! construction and backend lowering.
 
 use crate::ast::TypeName;
+use crate::builtins::{
+    catalog,
+    select::{self, Selection},
+};
 use crate::error::{CompilerError, Result};
-use crate::ssa::types::{FuncBody, Program};
+use crate::op::OpTag;
+use crate::ssa::types::{FuncBody, InstKind, Program};
 use crate::types;
 use polytype::Type;
 
@@ -45,6 +50,30 @@ pub fn verify_no_abstract_types<Tag, GlobalContext>(program: &Program<Tag, Globa
 }
 
 fn check_body(scope: &str, body: &FuncBody) -> Result<()> {
+    for node in body.inner.insts.values() {
+        if let InstKind::Op {
+            tag: OpTag::Intrinsic { id, overload_idx },
+            operands,
+        } = &node.data
+        {
+            if *id != catalog().known().select {
+                continue;
+            }
+            let valid = Selection::from_operands(operands).zip(node.result).is_some_and(|(s, result)| {
+                let ty = body.get_value_type(result);
+                *overload_idx == 0
+                    && select::supported_type(ty)
+                    && body.value_ref_type(s.condition) == types::bool_type()
+                    && body.value_ref_type(s.yes) == *ty
+                    && body.value_ref_type(s.no) == *ty
+            });
+            if !valid {
+                return Err(CompilerError::TypeError(format!(
+                    "invalid select in {scope}: expected same-typed scalar/vector values and a scalar bool condition"
+                ), node.span));
+            }
+        }
+    }
     // Params first — the most common failure surface (a non-inlined
     // size-poly helper carrying an Abstract param).
     for (i, (_, ty, name)) in body.params().enumerate() {

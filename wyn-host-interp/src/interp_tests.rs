@@ -14,6 +14,19 @@ fn expression(body: &str) -> Result<Value> {
 }
 
 #[test]
+fn select_is_eager_and_preserves_operand_order() {
+    for (condition, expected) in [("t", 9), ("nil", 3)] {
+        assert_eq!(
+            expression(&format!("(wyn-i32-select (i32 3) (i32 9) {condition})")).unwrap(),
+            Value::Number(Number::I32(expected))
+        );
+    }
+    assert!(expression("(wyn-i32-select (/ 1 0) (i32 9) t)").is_err());
+    assert!(expression("(wyn-i32-select (i32 3) (/ 1 0) nil)").is_err());
+    assert_eq!(expression("(wyn-bool-select nil t t)").unwrap(), Value::True);
+}
+
+#[test]
 fn lexical_bindings_short_circuit_and_parallel_loop_steps() {
     assert_eq!(
         expression("(let ((x 4)) (let ((x 7) (y x)) (+ x y)))").unwrap(),

@@ -17,6 +17,10 @@ use crate::types::{Type, TypeName};
 use crate::{BindingRef, EntryId};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;
+
 #[derive(Default)]
 pub(super) struct Host {
     pub captures: BTreeMap<(BlockId, ExprId), BindingRef>,
@@ -576,6 +580,7 @@ fn apply(op: &str, ty: ScalarType, args: Vec<ScalarExpr>) -> ScalarExpr {
 }
 fn builtin_op(lowering: &BuiltinLowering, result: ScalarType) -> Option<&'static str> {
     Some(match lowering {
+        BuiltinLowering::PrimOp(PrimOp::Select) => "select",
         BuiltinLowering::PrimOp(PrimOp::GlslExt(ext)) => match ext {
             1 => "round",
             2 => "round-even",

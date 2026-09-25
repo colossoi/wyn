@@ -116,7 +116,7 @@ impl Reader<'_> {
                 tuple: self.value(dag, x)?,
                 index: usize::try_from(integer(dag, i)?).map_err(|_| error("field index"))?,
             },
-            ("Select", &[c, a, b]) => ExprKind::If {
+            ("IfThenElse", &[c, a, b]) => ExprKind::If {
                 condition: self.value(dag, c)?,
                 then_value: self.value(dag, a)?,
                 else_value: self.value(dag, b)?,

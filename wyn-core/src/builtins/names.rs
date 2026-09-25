@@ -6,6 +6,9 @@
 // (e.g. the float<→int conversion table) intentionally don't have
 // constants — there's no place to use them.
 
+/// Eager value choice: `[false_value, true_value, condition]`.
+pub const INTRINSIC_SELECT: &str = "_w_intrinsic_select";
+
 // ---------------------------------------------------------------------------
 // Array manipulation
 // ---------------------------------------------------------------------------

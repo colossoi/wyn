@@ -119,6 +119,7 @@ impl BuiltinDef {
 /// here, but we surface it via `expect()` in the named accessors).
 #[derive(Debug)]
 pub struct KnownBuiltinIds {
+    pub select: BuiltinId,
     pub uninit: BuiltinId,
     pub array_with: BuiltinId,
     pub array_with_in_place: BuiltinId,
@@ -202,6 +203,7 @@ impl BuiltinCatalog {
         };
         use crate::builtins::names as N;
         let known = KnownBuiltinIds {
+            select: resolve(N::INTRINSIC_SELECT),
             uninit: resolve(N::INTRINSIC_UNINIT),
             array_with: resolve(N::INTRINSIC_ARRAY_WITH),
             array_with_in_place: resolve(N::INTRINSIC_ARRAY_WITH_INPLACE),

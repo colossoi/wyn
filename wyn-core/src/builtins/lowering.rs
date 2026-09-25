@@ -107,7 +107,7 @@ impl BuiltinLowering {
                 | FOrdGreaterThanEqual | IEqual | INotEqual | SLessThan | ULessThan | SGreaterThan
                 | UGreaterThan | SLessThanEqual | ULessThanEqual | SGreaterThanEqual | UGreaterThanEqual
                 | BitwiseAnd | BitwiseOr | BitwiseXor | Not | IsNan | IsInf | Bitcast | SIToFP | UIToFP
-                | SConvert | UConvert | FPConvert,
+                | SConvert | UConvert | FPConvert | Select,
             ) => true,
             _ => false,
         }
@@ -117,6 +117,8 @@ impl BuiltinLowering {
 /// Core primitive operations that map fairly directly to SPIR-V/backend ops.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrimOp {
+    /// Eager choice between same-typed values: `[false_value, true_value, bool]`.
+    Select,
     // GLSL.std.450 extended instructions
     GlslExt(u32),
 

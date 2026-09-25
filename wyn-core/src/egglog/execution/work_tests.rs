@@ -19,6 +19,22 @@ fn cost(source: &str) -> u8 {
 }
 
 #[test]
+fn select_work_includes_both_operands_and_shared_work_once() {
+    let program = crate::egglog::select_tests::eager_program(
+        "entry choose(c:bool,x:i32) i32=if c then x*x+1 else x*x+2",
+    );
+    let data =
+        crate::egglog::place(simplify(insert_expressions(program).unwrap(), false).unwrap()).unwrap().ir;
+    let summary = analyze(&data);
+    let root = data.definitions[data.entries.values().next().unwrap().definition].body;
+    // One multiply, two additions, and one eager select.
+    assert_eq!(
+        Costs::new(&data, &summary.live).count([Node::Region(root)], WORK_BUDGET),
+        4
+    );
+}
+
+#[test]
 fn shared_arithmetic_counts_once_and_distinct_work_saturates() {
     let mut body = "x".to_owned();
     for _ in 0..7 {

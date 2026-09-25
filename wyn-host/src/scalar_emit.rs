@@ -181,6 +181,10 @@ impl Program {
 fn rust_operation(op: &str, ty: ScalarType, args: &[TokenStream]) -> Result<TokenStream, HostError> {
     let integer = matches!(ty, ScalarType::I32 | ScalarType::U32);
     Ok(match (op, args) {
+        ("select", [no, yes, condition]) => quote!({
+            let (no, yes, condition) = (#no, #yes, #condition);
+            if condition { yes } else { no }
+        }),
         ("add" | "sub" | "mul", [a, b]) if integer => {
             let method = format_ident!("checked_{op}");
             quote!({let Some(value) = (#a).#method(#b) else {return Err(HostError::Invalid("scalar arithmetic overflow".into()));}; value})

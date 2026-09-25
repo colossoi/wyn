@@ -12,6 +12,7 @@ pub mod lowering;
 pub mod names;
 pub mod overload;
 pub mod scheme;
+pub(crate) mod select;
 
 use crate::ast;
 pub use catalog::{BuiltinCatalog, BuiltinDef, BuiltinId, BuiltinKind, BuiltinOverload, Purity};

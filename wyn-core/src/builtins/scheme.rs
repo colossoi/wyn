@@ -94,6 +94,12 @@ pub fn scalar_binary(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     quantify(arrow_chain(&[a.clone(), a.clone()], a))
 }
 
+/// `forall a. a -> a -> bool -> a`; shader type support is validated before emission.
+pub fn select(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
+    let a = ctx.new_variable();
+    quantify(arrow_chain(&[a.clone(), a.clone(), types::bool_type()], a))
+}
+
 /// `∀a. a -> a -> a -> a`
 pub fn scalar_ternary(ctx: &mut dyn TypeVarGenerator) -> TypeScheme {
     let a = ctx.new_variable();

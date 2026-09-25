@@ -19,6 +19,7 @@ pub mod addressable_constants;
 pub mod backend_validation;
 pub mod builder;
 mod constant_folding;
+mod if_conversion;
 pub mod ir;
 pub mod layout;
 mod optimize;
@@ -54,15 +55,18 @@ pub fn place_floating(mut program: stage::Optimized) -> error::Result<stage::Pla
     Ok(program.retag())
 }
 
-fn eliminate_dead_values(program: &mut stage::Reachable) {
+fn simplify_values(program: &mut stage::Reachable) {
     for function in &mut program.functions {
         eliminate_dead_pure_instructions(&mut function.body);
+        if_conversion::run(&mut function.body);
     }
     for entry in &mut program.entry_points {
         eliminate_dead_pure_instructions(&mut entry.body);
+        if_conversion::run(&mut entry.body);
     }
     for constant in &mut program.constants {
         eliminate_dead_pure_instructions(&mut constant.body);
+        if_conversion::run(&mut constant.body);
     }
 }
 
@@ -74,7 +78,7 @@ pub fn prepare_spirv(mut program: stage::Reachable) -> error::Result<stage::Spir
             "SSA was scheduled for WGSL and cannot be lowered as SPIR-V"
         ));
     }
-    eliminate_dead_values(&mut program);
+    simplify_values(&mut program);
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     spirv::verify_buffer_layouts::verify_buffer_layouts(&program)?;
@@ -90,7 +94,7 @@ pub fn prepare_wgsl(mut program: stage::Reachable) -> error::Result<stage::WgslR
         ));
     }
     promote_addressable_constants(&mut program);
-    eliminate_dead_values(&mut program);
+    simplify_values(&mut program);
     texture_sampling::publish_texture_sampling(&mut program);
     backend_validation::verify_no_abstract_types(&program)?;
     Ok(program.retag())

@@ -41,6 +41,8 @@ mod scalar;
 mod schedule;
 mod stage;
 pub use stage::{Expressions, Fused, Imported, Placed, Program, Scheduled, Simplified};
+#[cfg(test)]
+mod select_tests;
 mod term;
 mod timing;
 mod to_ssa;

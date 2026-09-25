@@ -3,11 +3,11 @@
 
 use super::ir::Substitutions;
 use super::types::{ConstantValue, FuncBody, InstKind, ValueId, ValueRef, WynFunction};
-use crate::builtins::{by_id, Purity};
+use crate::builtins::{by_id, catalog, select, Purity};
 use crate::constant_eval::{self, Constant};
 use crate::op::OpTag;
 use crate::scalar_eval::{self, Scalar};
-use crate::types::{Type, TypeExt, TypeName};
+use crate::types::{bool_type, Type, TypeExt, TypeName};
 use crate::{BindingRef, FunctionId};
 use std::collections::HashMap;
 use wyn_graph::topo_sort_by_dependencies;
@@ -30,11 +30,36 @@ pub(super) fn fold(body: &mut FuncBody) {
     let mut constants = HashMap::new();
     let mut replacements = Substitutions::default();
     for id in order {
+        function.insts[id].data.substitute_values(&mut |value| replacements.resolve(value));
         let node = &function.insts[id];
         let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) else {
             continue;
         };
         let ty = &function.values[result].ty;
+        if matches!(tag, OpTag::Intrinsic { id, overload_idx: 0 } if *id == catalog().known().select)
+            && select::supported_type(ty)
+        {
+            if let Some(choice) = select::Selection::from_operands(operands) {
+                let chosen = if choice.yes == choice.no {
+                    Some(choice.yes)
+                } else if let Some(Constant::Bool(condition)) = operand(choice.condition, &constants) {
+                    Some(if condition { choice.yes } else { choice.no })
+                } else {
+                    None
+                };
+                if let Some(chosen) = chosen.filter(|_| {
+                    operand_type(function, choice.yes) == *ty
+                        && operand_type(function, choice.no) == *ty
+                        && operand_type(function, choice.condition) == bool_type()
+                }) {
+                    // Operand producers remain in the instruction graph; DCE
+                    // separately decides whether their evaluation is discardable.
+                    replacements.insert(result, chosen);
+                    function.insts.remove(id);
+                    continue;
+                }
+            }
+        }
         let Some(mut value) = evaluate(function, tag, operands, ty, &constants) else {
             continue;
         };

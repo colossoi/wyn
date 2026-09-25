@@ -408,6 +408,17 @@ impl<'a, 'b> LowerCtx<'a, 'b> {
         let operands: Vec<Operand> = arg_ids.iter().map(|&id| Operand::IdRef(id)).collect();
 
         match prim_op {
+            PrimOp::Select => {
+                let &[no, yes, condition] = arg_ids else {
+                    bail_spirv!("select requires false value, true value, and condition");
+                };
+                Ok(*self.constructor.builder.select_value(
+                    builder::TypeId::new(result_ty),
+                    builder::ValueId::new(condition),
+                    builder::ValueId::new(yes),
+                    builder::ValueId::new(no),
+                )?)
+            }
             PrimOp::FloatBound { negative } => {
                 if arg_ids.len() != 1 {
                     bail_spirv!("float bound requires one precision witness");

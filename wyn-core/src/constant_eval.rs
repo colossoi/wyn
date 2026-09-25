@@ -4,7 +4,7 @@
 use crate::builtins::lowering::{BuiltinLowering, PrimOp};
 use crate::op::BinaryOperator;
 use crate::scalar_eval::{self, wrap_int, Scalar};
-use crate::types::{Type, TypeExt, TypeName};
+use crate::types::{bool_type, Type, TypeExt, TypeName};
 use spirv::GLOp;
 
 /// Scalar or small componentwise vector value, independent of any compiler IR.
@@ -78,6 +78,15 @@ pub(crate) fn builtin(
     args: &[(Constant, Type)],
     result_ty: &Type,
 ) -> Option<Constant> {
+    if matches!(lowering, BuiltinLowering::PrimOp(PrimOp::Select)) {
+        let [(no, no_ty), (yes, yes_ty), (Constant::Bool(condition), condition_ty)] = args else {
+            return None;
+        };
+        if no_ty != result_ty || yes_ty != result_ty || *condition_ty != bool_type() {
+            return None;
+        }
+        return Some(if *condition { yes } else { no }.clone());
+    }
     let (prim, splat_args) = match lowering {
         BuiltinLowering::PrimOp(prim) => (prim.clone(), &[][..]),
         BuiltinLowering::ExtInstSplat { ext, splat_args } => (PrimOp::GlslExt(*ext), *splat_args),

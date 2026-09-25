@@ -43,6 +43,50 @@ fn empty_program() -> ssa::stage::Bare {
     Program::bare(Vec::new(), Vec::new(), Vec::new())
 }
 
+#[test]
+fn select_validation_rejects_wrong_condition_value_types_arity_and_aggregates() {
+    use crate::ssa::types::{InstKind, ValueRef};
+    for case in 0..6 {
+        let mut builder = FuncBuilder::new(
+            vec![
+                (types::bool_type(), "c".into()),
+                (types::i32(), "x".into()),
+                (types::f32(), "y".into()),
+                (types::sized_array(3, types::i32()), "a".into()),
+            ],
+            types::i32(),
+        );
+        let c = builder.get_param(0).into();
+        let x = builder.get_param(1).into();
+        let y = builder.get_param(2).into();
+        let a = builder.get_param(3).into();
+        let (mut inst, ty) = match case {
+            0 => (InstKind::select(x, x, c), types::i32()),
+            1 => (InstKind::select(x, y, c), types::i32()),
+            2 => (InstKind::select(x, x, x), types::i32()),
+            3 => (InstKind::select(a, a, c), types::sized_array(3, types::i32())),
+            _ => (InstKind::select(x, x, c), types::i32()),
+        };
+        if let InstKind::Op { tag, operands } = &mut inst {
+            if case == 4 {
+                operands.pop();
+            }
+            if case == 5 {
+                *tag = crate::op::OpTag::Intrinsic {
+                    id: crate::builtins::catalog().known().select,
+                    overload_idx: 1,
+                };
+            }
+        }
+        let result = builder.push_inst(inst, ty).unwrap();
+        builder.terminate(ssa::types::Terminator::Return(Some(ValueRef::Ssa(result)))).unwrap();
+        assert_eq!(
+            super::check_body("select test", &builder.finish_unchecked()).is_ok(),
+            case == 0
+        );
+    }
+}
+
 fn function_with(params: Vec<(Type<TypeName>, String)>, return_ty: Type<TypeName>) -> Function {
     let builder = FuncBuilder::new(params, return_ty);
     Function {

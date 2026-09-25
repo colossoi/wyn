@@ -11,6 +11,29 @@ pub(crate) fn evaluate(name: &str, args: &[Value]) -> Result<Value> {
     let Some((ty, op)) = name.strip_prefix("wyn-").and_then(|s| s.split_once('-')) else {
         return Err(invalid(name));
     };
+    // Function arguments have already been evaluated eagerly by the caller.
+    if op == "select" {
+        let [no, yes, condition] = args else {
+            return Err(invalid(name));
+        };
+        let correct_type = |value: &Value| {
+            matches!(
+                (ty, value),
+                ("bool", Value::True | Value::Nil)
+                    | ("i32", Value::Number(Number::I32(_)))
+                    | ("u32", Value::Number(Number::U32(_)))
+                    | ("f32", Value::Number(Number::F32(_)))
+            )
+        };
+        if !correct_type(no) || !correct_type(yes) {
+            return Err(invalid(name));
+        }
+        return match condition {
+            Value::True => Ok(yes.clone()),
+            Value::Nil => Ok(no.clone()),
+            _ => Err(invalid(name)),
+        };
+    }
     if ty == "bool" {
         let values = args
             .iter()

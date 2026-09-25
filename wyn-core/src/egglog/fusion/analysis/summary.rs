@@ -14,6 +14,20 @@ fn scalar<S: Sink>(
     if let Some(&v) = memo.get(&id) {
         return Ok(Some(v));
     }
+    // This summary describes result dependencies, not execution. Both modes
+    // retain their condition and alternatives without losing field structure.
+    if let Some((choice, _)) = data.conditional_value(id) {
+        let (Some(c), Some(a), Some(b)) = (
+            scalar(data, choice.condition, parameters, memo, sink)?,
+            scalar(data, choice.yes, parameters, memo, sink)?,
+            scalar(data, choice.no, parameters, memo, sink)?,
+        ) else {
+            return Ok(None);
+        };
+        let v = sink.choice(c, a, b)?;
+        memo.insert(id, v);
+        return Ok(Some(v));
+    }
     let v = match &data.expressions[id].kind {
         ExprKind::Parameter(p) => parameters.get(p).copied().unwrap_or_else(|| sink.independent()),
         ExprKind::Project { tuple, index } => {
@@ -36,22 +50,6 @@ fn scalar<S: Sink>(
                 sink.all(&vs)?
             }
         }
-        ExprKind::If {
-            condition,
-            then_value,
-            else_value,
-        } => {
-            let Some(c) = scalar(data, *condition, parameters, memo, sink)? else {
-                return Ok(None);
-            };
-            let Some(a) = scalar(data, *then_value, parameters, memo, sink)? else {
-                return Ok(None);
-            };
-            let Some(b) = scalar(data, *else_value, parameters, memo, sink)? else {
-                return Ok(None);
-            };
-            sink.choice(c, a, b)?
-        }
         ExprKind::Coerce(v) => {
             let Some(v) = scalar(data, *v, parameters, memo, sink)? else {
                 return Ok(None);
@@ -67,6 +65,10 @@ fn scalar<S: Sink>(
     memo.insert(id, v);
     Ok(Some(v))
 }
+
+#[cfg(test)]
+#[path = "summary_tests.rs"]
+mod tests;
 
 pub(super) fn invoke<S: Sink>(
     data: &Ir,

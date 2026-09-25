@@ -7,14 +7,14 @@ use crate::builtins::names::{
     INTRINSIC_COS, INTRINSIC_CROSS, INTRINSIC_DETERMINANT, INTRINSIC_DISTANCE, INTRINSIC_DOT,
     INTRINSIC_FLOOR, INTRINSIC_FRACT, INTRINSIC_IMAGE_LOAD, INTRINSIC_IMAGE_WITH, INTRINSIC_INVERSE,
     INTRINSIC_LENGTH, INTRINSIC_LOCAL_ID, INTRINSIC_MAGNITUDE, INTRINSIC_MIX, INTRINSIC_NORMALIZE,
-    INTRINSIC_NUM_WORKGROUPS, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SLICE,
-    INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN, INTRINSIC_STORAGE_STORE,
-    INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE, INTRINSIC_THREAD_ID, INTRINSIC_THREAD_ID_Y,
-    INTRINSIC_THREAD_ID_Z, INTRINSIC_UNINIT,
+    INTRINSIC_NUM_WORKGROUPS, INTRINSIC_OUTER, INTRINSIC_REFLECT, INTRINSIC_REFRACT, INTRINSIC_SELECT,
+    INTRINSIC_SLICE, INTRINSIC_SMOOTHSTEP, INTRINSIC_STORAGE_INDEX, INTRINSIC_STORAGE_LEN,
+    INTRINSIC_STORAGE_STORE, INTRINSIC_TEXTURE_LOAD, INTRINSIC_TEXTURE_SAMPLE, INTRINSIC_THREAD_ID,
+    INTRINSIC_THREAD_ID_Y, INTRINSIC_THREAD_ID_Z, INTRINSIC_UNINIT,
 };
 use crate::builtins::scheme::{
     array_to_i32, image_load_scheme, image_with_scheme, mat_square_to_mat, mat_square_to_scalar, mat_x_mat,
-    mat_x_vec, scalar_unary, texture_load_scheme, texture_sample_scheme, unit_to_t, vec3f32_binary,
+    mat_x_vec, scalar_unary, select, texture_load_scheme, texture_sample_scheme, unit_to_t, vec3f32_binary,
     vec_binary_same, vec_binary_to_scalar, vec_clamp_scalar_lohi, vec_mix_scalar_interp,
     vec_scalar_edge_to_vec, vec_smoothstep_scalar_edges, vec_ternary_same, vec_to_scalar, vec_unary_same,
     vec_vec_outer, vec_vec_scalar_to_vec, vec_x_mat,
@@ -132,6 +132,17 @@ pub fn all_builtins() -> Vec<BuiltinDefRaw> {
 }
 
 static STATIC_BUILTINS: &[BuiltinDefRaw] = &[
+    BuiltinDefRaw {
+        surface_name: INTRINSIC_SELECT,
+        intrinsic_source_names: &[],
+        impl_source_names: &[],
+        kind: BuiltinKind::InternalIntrinsic,
+        purity: Purity::Pure,
+        overloads: &[BuiltinOverload {
+            scheme: Some(select),
+            lowering: BuiltinLowering::PrimOp(PrimOp::Select),
+        }],
+    },
     // Keep bounds distinct from authored infinities through constant folding.
     BuiltinDefRaw {
         surface_name: "_w_intrinsic_float_highest",

@@ -28,6 +28,7 @@
 //! inspection of phi nodes to understand where values come from.
 
 use crate::ast::{Span, TypeName};
+use crate::builtins::catalog;
 use crate::interface::{self, StorageAccess};
 use crate::op::{AddressableConstantId, OpTag};
 use crate::ssa;
@@ -176,6 +177,17 @@ pub enum InstKind<R = BindingRef> {
 }
 
 impl<R: Clone> InstKind<R> {
+    /// Eager select over values already available at this instruction.
+    pub(crate) fn select(no: ValueRef, yes: ValueRef, condition: ValueRef) -> Self {
+        Self::Op {
+            tag: OpTag::Intrinsic {
+                id: catalog().known().select,
+                overload_idx: 0,
+            },
+            operands: vec![no, yes, condition],
+        }
+    }
+
     /// Return all ValueRefs referenced by this instruction (read-only).
     /// Place operands (see `place_uses`) are traversed separately.
     pub fn value_uses(&self) -> Vec<ValueRef> {
@@ -343,6 +355,17 @@ impl FuncBody {
     /// Get the type of a value.
     pub fn get_value_type(&self, value: ValueId) -> &Type<TypeName> {
         self.inner.value_type(value)
+    }
+
+    pub(crate) fn value_ref_type(&self, value: ValueRef) -> Type<TypeName> {
+        let name = match value {
+            ValueRef::Ssa(value) => return self.get_value_type(value).clone(),
+            ValueRef::Const(ConstantValue::I32(_)) => TypeName::Int(32),
+            ValueRef::Const(ConstantValue::U32(_)) => TypeName::UInt(32),
+            ValueRef::Const(ConstantValue::F32(_)) => TypeName::Float(32),
+            ValueRef::Const(ConstantValue::Bool(_)) => TypeName::Bool,
+        };
+        Type::Constructed(name, vec![])
     }
 
     /// Get a block by ID.

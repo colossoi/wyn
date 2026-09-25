@@ -51,9 +51,9 @@
       ((union e x)) :ruleset arithmetic)
 
 ; Known selections and projections have no runtime work.
-(rewrite (Typed t (Select (Typed ct (Bool true)) yes no)) yes :ruleset arithmetic)
-(rewrite (Typed t (Select (Typed ct (Bool false)) yes no)) no :ruleset arithmetic)
-(rewrite (Typed t (Select c x x)) x :ruleset arithmetic)
+(rewrite (Typed t (IfThenElse (Typed ct (Bool true)) yes no)) yes :ruleset arithmetic)
+(rewrite (Typed t (IfThenElse (Typed ct (Bool false)) yes no)) no :ruleset arithmetic)
+(rewrite (Typed t (IfThenElse c x x)) x :ruleset arithmetic)
 (rewrite (Typed t (Project (Typed tt (Tuple xs)) i)) (vec-get xs i)
   :when ((>= i 0) (< i (vec-length xs))) :ruleset arithmetic)
 (rewrite (Typed t (Project (Typed tt (Vector xs)) i)) (vec-get xs i)

@@ -911,6 +911,19 @@ impl Default for SpirvBuilder {
     }
 }
 
+impl SpirvBuilder {
+    /// Select an already evaluated value with a scalar boolean condition.
+    pub fn select_value(
+        &mut self,
+        ty: TypeId,
+        condition: ValueId,
+        yes: ValueId,
+        no: ValueId,
+    ) -> Result<ValueId, dr::Error> {
+        self.inner.select(*ty, None, *condition, *yes, *no).map(ValueId::new)
+    }
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

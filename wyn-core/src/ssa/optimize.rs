@@ -113,7 +113,7 @@ fn is_small_inline_candidate(helper: &FuncBody, argument_count: usize) -> bool {
         })
 }
 
-fn movable(data: &InstKind) -> bool {
+pub(super) fn is_speculatable(data: &InstKind) -> bool {
     match data {
         InstKind::Op {
             tag: OpTag::Intrinsic { id, overload_idx },
@@ -136,6 +136,9 @@ fn movable(data: &InstKind) -> bool {
                 | BinaryOperator::FloorDivide
                 | BinaryOperator::FloorRemainder
                 | BinaryOperator::Power
+                | BinaryOperator::ShiftLeft
+                | BinaryOperator::ShiftRight
+                | BinaryOperator::ShiftRightLogical
         ),
         InstKind::Op {
             tag:
@@ -176,7 +179,7 @@ fn reusable(data: &InstKind) -> bool {
         InstKind::Op {
             tag: OpTag::BinOp(_), ..
         } => true,
-        _ => movable(data),
+        _ => is_speculatable(data),
     }
 }
 
@@ -294,7 +297,7 @@ fn float_or_share_instruction(
     let (Some(result), InstKind::Op { tag, operands }) = (node.result, &node.data) else {
         return false;
     };
-    if !movable(&node.data) {
+    if !is_speculatable(&node.data) {
         return false;
     }
     let scope = if operands.iter().any(|operand| loop_scopes.value_varies(function, *operand)) {

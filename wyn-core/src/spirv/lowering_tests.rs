@@ -222,7 +222,7 @@ entry repro(surface: render_target<f32>) render_target<f32> =
         .blocks
         .iter()
         .flat_map(|block| &block.instructions)
-        .filter(|inst| inst.class.opcode == Op::SelectionMerge)
+        .filter(|inst| matches!(inst.class.opcode, Op::Select | Op::SelectionMerge))
         .count();
     assert_eq!(
         selections, 1,

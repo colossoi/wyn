@@ -3625,6 +3625,10 @@ fn glsl_std450_wgsl_name(n: u32) -> Option<&'static str> {
 fn lower_primop_wgsl(prim_op: &PrimOp, args: &[String]) -> Option<String> {
     use PrimOp::*;
     match prim_op {
+        Select => {
+            let [no, yes, condition] = args else { return None };
+            Some(format!("select({no}, {yes}, {condition})"))
+        }
         // GLSL.std.450 ops with direct WGSL builtin equivalents.
         // Numbers come from the GLSL.std.450 extended-instruction set;
         // WGSL spells most of them identically (sin/cos/floor/…) and

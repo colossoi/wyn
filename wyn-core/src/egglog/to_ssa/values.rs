@@ -3,7 +3,7 @@ use super::{
     PureViewSource, Storage, Type, TypeExt, TypeName, Typed, Value,
 };
 use crate::ast::Span;
-use crate::builtins::catalog;
+use crate::builtins::{catalog, select};
 use crate::egglog::abi::storage_type;
 use crate::egglog::data::is_slice;
 use crate::egglog::{Array, ExprId, ExprKind, PlacementSite};
@@ -767,6 +767,17 @@ impl Body<'_, '_> {
         self.op(OpTag::BinOp(op), vec![a, b], ty)
     }
     fn select(&mut self, c: Typed, a: Typed, b: Typed) -> Result<Typed, OptimizeError> {
+        if a.ty == b.ty && select::supported_type(&a.ty) {
+            let ty = a.ty.clone();
+            return self.op(
+                OpTag::Intrinsic {
+                    id: catalog().known().select,
+                    overload_idx: 0,
+                },
+                vec![b, a, c],
+                ty,
+            );
+        }
         let Some(start) = self.builder.current_block() else {
             return Err(error("no selection block"));
         };

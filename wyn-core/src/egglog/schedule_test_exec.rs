@@ -505,6 +505,13 @@ fn field(tuple: Value, index: usize) -> Value {
 
 fn primitive(name: &str, args: Vec<Value>) -> Value {
     match name {
+        crate::builtins::names::INTRINSIC_SELECT => {
+            if args[2].boolean() {
+                args[1].clone()
+            } else {
+                args[0].clone()
+            }
+        }
         "length" => Value::Int(match &args[0] {
             Value::LengthOnly(n) => *n as i64,
             value => value.elements().len() as i64,
