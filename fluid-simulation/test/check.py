@@ -1,14 +1,9 @@
 """Compare the GPU solver with a scalar reference of the upstream equations."""
-import json
 import math
 from pathlib import Path
-import subprocess
 import tempfile
-import shutil
+from gpu import ROOT, run
 
-ROOT = Path(__file__).resolve().parents[2]
-WYN = Path(shutil.which('wyn'))
-VIZ = ROOT / 'extra/viz/target/release/viz'
 P = [[5.,5.,5.,.35],[5.7,5.,5.,.35],[.35,.36,.35,.35],[15.65,11.64,9.65,.35]]
 V = [[1.,0.,0.],[-1.,0.,0.],[-2.,-3.,-4.],[2.,3.,4.]]
 DT, H = 1/90, 1.7
@@ -45,21 +40,11 @@ def reference():
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory(prefix='wyn-fluid-test-') as temp:
         temp = Path(temp)
-        for target, extension in [('spirv','spv'),('wgsl','wgsl')]:
-            # Shader-root integration is tested separately from numerical solver fixtures.
-            shader = temp/f'step.{extension}'
-            subprocess.run([str(WYN),'build',str(ROOT/'fluid-simulation/test/step.wyn'),'-t',target,'-o',str(shader)],check=True)
-            files = [temp/'positions.json',temp/'velocities.json']
-            desc = json.loads(shader.with_suffix('.json').read_text())
-            args = [str(VIZ),'pipeline',str(shader)]
-            for result in desc['source_results']:
-                binding = next(b for b in desc['pipelines'][result['pipeline_index']]['bindings']
-                               if b.get('set')==result['set'] and b.get('binding')==result['binding'])
-                args += ['--output',f"{binding['name']}:{files[result['result']]}"]
-            subprocess.run(args,check=True,stdout=subprocess.DEVNULL,timeout=120)
-            for file, expected in zip(files,reference()):
-                actual = json.loads(file.read_text())
+        for target in ['spirv', 'wgsl']:
+            outputs = run(ROOT/'fluid-simulation/test/step.wyn', temp, target)
+            assert len(outputs) == 2
+            for actual, expected in zip(outputs, reference()):
                 assert len(actual)==len(expected)
                 for i,(a,e) in enumerate(zip(actual,expected)):
-                    assert math.isfinite(a) and math.isclose(a,e,rel_tol=2e-4,abs_tol=2e-4),(target,file.name,i,a,e)
+                    assert math.isfinite(a) and math.isclose(a,e,rel_tol=2e-4,abs_tol=2e-4),(target,i,a,e)
             print(f'{target}: GPU step matches reference, including both wall collisions')

@@ -1,30 +1,7 @@
-"""GPU readbacks for the Wyn spatial primitives (uses installed wyn)."""
-import json
+"""GPU readbacks for the Wyn spatial primitives (uses the checkout compiler)."""
 from pathlib import Path
-import shutil
-import struct
-import subprocess
 import tempfile
-
-ROOT = Path(__file__).resolve().parents[2]
-WYN = shutil.which('wyn')
-VIZ = ROOT/'extra/viz/target/release/viz'
-
-
-def run(source, directory, target='spirv'):
-    shader = directory/(source.stem+('.spv' if target=='spirv' else '.wgsl'))
-    subprocess.run([WYN,'build',str(source),'-t',target,'-o',str(shader)],check=True)
-    desc = json.loads(shader.with_suffix('.json').read_text())
-    args = [str(VIZ),'pipeline',str(shader)]
-    files = []
-    for r in desc['source_results']:
-        bindings = desc['pipelines'][r['pipeline_index']]['bindings']
-        b = next(b for b in bindings if b.get('set')==r['set'] and b.get('binding')==r['binding'])
-        file = directory/f'{source.stem}-{r["result"]}.json'
-        args += ['--output',f'{b["name"]}:{file}']
-        files.append(file)
-    subprocess.run(args,check=True,stdout=subprocess.DEVNULL,timeout=120)
-    return [[(struct.unpack('<I',struct.pack('<f',v))[0] if v is not None else 0xffffffff) for v in json.loads(f.read_text())] for f in files]
+from gpu import ROOT, run
 
 
 def encode(p):

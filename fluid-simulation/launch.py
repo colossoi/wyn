@@ -1,6 +1,5 @@
-"""Allocate descriptor-published scratch buffers before running viz."""
+"""Run the generated WHL host program with persistent fluid feedback."""
 import argparse
-import json
 from pathlib import Path
 import subprocess
 
@@ -8,32 +7,18 @@ ROOT = Path(__file__).resolve().parent
 
 
 def command(shader):
-    descriptor = json.loads(shader.with_suffix('.json').read_text())
-    config = json.loads((ROOT / 'fluid.viz.json').read_text())
-    feedback_slots = set()
-    for pair in config['feedback']:
-        matches = [s for s in descriptor['source_results']
-                   if s['entry'] == pair['entry'] and s['result'] == pair['result']]
-        if len(matches) != 1:
-            raise ValueError('Compiler stage layout changed; update fluid.viz.json')
-        result = matches[0]
-        feedback_slots.add((result['set'], result['binding']))
-    args = [str(ROOT.parent / 'extra/viz/target/release/viz'), 'pipeline', str(shader),
-            '--config', str(ROOT / 'fluid.viz.json'), '--size', '640x480']
-    buffers = {}
-    for pipeline in descriptor['pipelines']:
-        for binding in pipeline['bindings']:
-            if binding['type'] != 'storage_buffer' or binding['access'] == 'read_only':
-                continue
-            if (binding['set'], binding['binding']) in feedback_slots:
-                continue
-            length = binding.get('length') or {}
-            if length.get('kind') != 'fixed':
-                raise ValueError(f"Missing static buffer size: {binding['name']}")
-            buffers[binding['name']] = length['bytes']
-    for name, size in buffers.items():
-        args += ['--buffer-init', f'{name}:0', '--storage-bytes', f'{name}:{size}']
-    return args
+    host = shader.with_suffix('.wynhost')
+    if not host.is_file():
+        raise FileNotFoundError(f'Missing generated host program: {host}')
+    # Keep these capacities in sync with count/tree_capacity in src/main.wyn.
+    # The host program allocates intermediate buffers; only feedback inputs
+    # need caller-provided storage on the first frame.
+    return [str(ROOT.parent / 'extra/viz/target/release/viz'),
+            'pipeline', str(shader), '--entry', 'fluid',
+            '--config', str(ROOT / 'fluid.viz.json'), '--size', '640x480',
+            '--storage-bytes', f'previous_positions:{4320 * 16}',
+            '--storage-bytes', f'previous_velocities:{4320 * 16}',
+            '--storage-bytes', f'previous_tree:{4097 * 4}']
 
 
 if __name__ == '__main__':
@@ -48,10 +33,10 @@ if __name__ == '__main__':
     options, extra = parser.parse_known_args()
     args = command(options.shader.resolve())
     preset = ['colliding-blocks', 'double-dam-break', 'rotating-block'].index(options.preset)
-    args += ['--uniform', f'preset:i32x4={preset},0,0,0',
-             '--uniform', f'running:i32x4={int(options.running)},0,0,0']
+    args += ['--uniform', f'preset:i32={preset}',
+             '--uniform', f'running:i32={int(options.running)}']
     if options.prepare_only:
-        print('Compiled and validated launch configuration; no window opened.')
+        print('Compiled shader and host program; no window opened.')
     else:
         print(f'Preset: {options.preset}; starts {"running" if options.running else "paused"}. '
               'Space: pause/resume. R: reset. Left mouse: orbit.', flush=True)

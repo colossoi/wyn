@@ -14,8 +14,9 @@ bash fluid-simulation/run.sh --skip-build --compile-only
 ```
 
 Requires Rust/Cargo, Python 3, and a GPU supported by `extra/viz`. The launcher
-follows `scripts/play.sh`, but permits generated compute stages and allocates
-their scratch buffers from the compiler's descriptor. Artifacts go under
+runs the generated `.wynhost` program, which allocates intermediate buffers
+and schedules compute stages. The launcher supplies initial feedback storage.
+Artifacts go under
 `tmp/fluid-simulation`. Extra arguments are forwarded to `viz pipeline`.
 
 Space toggles simulation; R resets; holding the left mouse button adjusts the
@@ -41,9 +42,12 @@ The explicit index array preserves static intermediate buffer sizes.
 ## Scope and differences
 
 This is a small reference port, not the upstream million-particle implementation.
-It uses exact O(N²) neighbor scans instead of the Vulkan Hilbert sort/octree and
-ray/sphere rendering instead of mesh shaders. Default count is 4,320 particles;
-edit `count` and `bounds` in `src/main.wyn` together for larger scenes. Rendering
+The viewer uses Hilbert sorting, a persistent cornerstone octree, and capped
+neighbor lists; the small reference fixture also retains the all-pairs solver.
+Rendering uses ray/sphere intersections instead of mesh shaders.
+Default count is 4,320 particles;
+keep `count`, `tree_capacity`, and `bounds` in `src/main.wyn` consistent with
+the feedback storage sizes in `launch.py` when changing the scene. Rendering
 also scales with particle count per pixel. No upstream performance claim applies.
 
 The pass ordering and default one iteration per pressure solve match upstream.
@@ -51,18 +55,24 @@ The timestep is fixed at 1/90 second per rendered frame, so wall-clock playback
 speed depends on frame rate. Pausing preserves state but still evaluates the
 compute passes. Camera pan and wheel zoom are not implemented.
 
-Current compiler descriptors expose generated entry names for feedback;
-`fluid.viz.json` references the final position and velocity passes. The launcher
-checks that these entries exist. Revisit the sidecar if changing root stage order.
+`fluid.viz.json` refers to the authored `fluid` entry and its position, velocity,
+and tree results. Generated stage names are managed by the host program.
+Revisit the sidecar if changing the authored result order.
 
 ## Validation
 
 ```bash
 python3 fluid-simulation/test/check.py
+python3 fluid-simulation/test/check_neighbors_step.py
+python3 fluid-simulation/test/spatial_check.py
 ```
 
 Builds both shader targets and compares a headless GPU step with a Python
 reference, including interacting particles and collisions at both bounds.
-The 432-particle viewer was also exercised interactively after fixing its
-buffer allocation and startup uniform configuration. The current 4,320-particle
-configuration compiles; its interactive performance has not been measured.
+The 4,320-particle viewer also completed a three-frame headless smoke test at
+64×48 with finite particle positions, exercising startup and cross-frame
+feedback. Its interactive performance has not been measured.
+
+The checks use this checkout's release compiler and viewer by default. Set
+`WYN` and `VIZ` to test alternate builds (for example, `target/debug/wyn` and
+`extra/viz/target/debug/viz`). Readbacks use the host program's typed results.
