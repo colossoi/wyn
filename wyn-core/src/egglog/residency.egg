@@ -39,8 +39,8 @@
 (rule ((Projection e tuple i) (ForwardValue tuple inner))
       ((Projection e inner i)) :ruleset residency)
 ; A field reads its containing value, but does not alias the whole buffer.
-(rule ((Projection e tuple i) (ValueRef tuple value))
-      ((References e value)) :ruleset residency)
+(rule ((ReferenceDemand e) (Projection e tuple i) (ValueRef tuple value))
+      ((References e (Contents value))) :ruleset residency)
 (rule ((ForwardValue e source) (ValueRef source value))
       ((ValueRef e value)) :ruleset residency)
 (rule ((SliceView e source start end) (ValueRef source value)) ((ValueRef e value)) :ruleset residency)

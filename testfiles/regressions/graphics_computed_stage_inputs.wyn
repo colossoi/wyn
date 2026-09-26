@@ -1,0 +1,11 @@
+-- Intermediate compute results belong to the authored host entry, not its caller.
+entry staged(xs: []i32, target: render_target<vec4f32>)
+    ([4]i32, render_target<vec4f32>) =
+  let selected = xs[1..5] in
+  let ys = map(|x| x + 1, selected) in
+  let (zs, any) = (map(|x| x * 2, ys), reduce(|a,b| a || b, false, map(|x| x > 0, ys))) in
+  let output = map(|x| if any then x + ys[0] else x, zs) in
+  let fragments = rasterize_triangles(direct_draw(3u32,1u32),
+    |_,_,_| vertex_output(@[0.0,0.0,0.0,1.0], ())) in
+  let image = shade(target,fragments,|_,_,_,_,_| @[f32(output[0]),0.0,0.0,1.0]) in
+  (output,image)

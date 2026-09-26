@@ -254,8 +254,10 @@ pub(super) fn publish(
             entries[entry_indices[id]].pipeline_storage_accesses = union.clone();
         }
     }
-    // Graphics captures share storage and capacity with compute stages from
-    // their source entry. Descriptor slots may be reused by unrelated entries.
+    // Generated compute and graphics captures share storage and capacity with
+    // their producer in the same source entry. Only compiler-owned bindings
+    // establish that identity; a consumer's input must not override it.
+    // Descriptor slots may be reused by unrelated source entries.
     let compute_storage: BTreeMap<_, _> = pipeline
         .pipelines
         .iter()
@@ -280,6 +282,9 @@ pub(super) fn publish(
             else {
                 return None;
             };
+            if *usage == BufferUsage::Input {
+                return None;
+            }
             Some((
                 (owner, BindingRef::new(*set, *binding)),
                 (
@@ -291,13 +296,18 @@ pub(super) fn publish(
         })
         .collect();
     for item in &mut pipeline.pipelines {
-        let Pipeline::Graphics(graphics) = item else {
-            continue;
+        let (owner, bindings) = match item {
+            Pipeline::Compute(compute) => (
+                compute.stages.first().map(|stage| &stage.owner),
+                &mut compute.bindings,
+            ),
+            Pipeline::Graphics(graphics) => (
+                graphics.stages.first().map(|stage| &stage.owner),
+                &mut graphics.bindings,
+            ),
         };
-        let Some(stage) = graphics.stages.first() else {
-            continue;
-        };
-        for binding in &mut graphics.bindings {
+        let Some(owner) = owner else { continue };
+        for binding in bindings {
             let Binding::StorageBuffer {
                 set,
                 binding,
@@ -310,16 +320,14 @@ pub(super) fn publish(
                 continue;
             };
             let slot = BindingRef::new(*set, *binding);
-            if let Some((name, compute_usage, compute_length)) =
-                compute_storage.get(&(stage.owner.clone(), slot))
+            if let Some((name, _compute_usage, compute_length)) =
+                compute_storage.get(&(owner.clone(), slot))
             {
                 *resource = Some(name.clone());
                 *length = compute_length.clone();
-                *usage = if *compute_usage == BufferUsage::Input {
-                    BufferUsage::Input
-                } else {
-                    BufferUsage::Intermediate
-                };
+                if *usage == BufferUsage::Input {
+                    *usage = BufferUsage::Intermediate;
+                }
             }
         }
     }

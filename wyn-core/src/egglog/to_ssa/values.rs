@@ -102,7 +102,12 @@ impl Body<'_, '_> {
                 let Some(element) = input.ty.elem_type() else {
                     return Err(error("storage input element"));
                 };
-                self.view(binding, storage_type(element)?, length, static_array_length(&input.ty))?
+                self.view(
+                    binding,
+                    storage_type(element)?,
+                    length,
+                    static_array_length(&input.ty),
+                )?
             } else {
                 parameter
             };

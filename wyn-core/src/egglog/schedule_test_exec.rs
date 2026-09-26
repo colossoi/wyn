@@ -359,8 +359,12 @@ impl Machine<'_> {
             Code::Primitive("local_id", _) => Value::Int(i64::from(self.invocation % self.width)),
             Code::Primitive("length", args) => {
                 if let [Code::Source(id)] = args.as_slice() {
-                    if let Some(length) = self.data.state.execution.view_lengths.get(id) {
-                        return self.value(length, frame);
+                    // A captured array already carries its live length. Its
+                    // producer's size operands need not be captured as well.
+                    if !frame.expressions.contains_key(id) {
+                        if let Some(length) = self.data.state.execution.view_lengths.get(id) {
+                            return self.value(length, frame);
+                        }
                     }
                 }
                 primitive("length", args.iter().map(|v| self.value(v, frame)).collect())

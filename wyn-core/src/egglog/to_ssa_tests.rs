@@ -1073,7 +1073,8 @@ fn materialized_tuple_projections_reach_both_backends() {
     compile(source);
     let output = crate::compile_thru_spirv(source).unwrap();
     let outputs = output
-        .program.interface
+        .program
+        .interface
         .pipelines
         .iter()
         .flat_map(|pipeline| match pipeline {
@@ -1090,9 +1091,10 @@ fn materialized_tuple_projections_reach_both_backends() {
         })
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 2);
-    assert!(outputs
-        .iter()
-        .all(|length| matches!(length, Some(crate::host::interface::BufferLen::Fixed { bytes: 64 }))));
+    assert!(outputs.iter().all(|length| matches!(
+        length,
+        Some(crate::host::interface::BufferLen::Fixed { bytes: 64 })
+    )));
     let bytes: Vec<_> = output.spirv.iter().flat_map(|word| word.to_le_bytes()).collect();
     let module = naga::front::spv::parse_u8_slice(&bytes, &Default::default()).unwrap();
     naga::valid::Validator::new(

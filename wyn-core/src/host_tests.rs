@@ -78,6 +78,27 @@ fn graphics_compute_helpers_capture_computed_records_and_return_both_arrays() {
     }
 }
 
+#[test]
+fn generated_compute_captures_are_allocated_by_the_authored_host_entry() {
+    let source = include_str!("../../testfiles/regressions/graphics_computed_stage_inputs.wyn");
+    for format in [ShaderFormat::Spirv, ShaderFormat::Wgsl] {
+        let ssa = compile_thru_ssa(source).unwrap();
+        let program = match format {
+            ShaderFormat::Spirv => lower_ssa_to_spirv(ssa).unwrap().program,
+            ShaderFormat::Wgsl => lower_ssa_to_wgsl_with_program(ssa).unwrap().program,
+        };
+        let [entry] = program.entries.as_slice() else {
+            panic!("one authored entry")
+        };
+        let resources = &program.interface.frame_graph.resources;
+        let inputs: BTreeSet<_> = entry.inputs.iter().map(|id| resources[id.0].name.as_str()).collect();
+        assert_eq!(inputs, BTreeSet::from(["xs", "target"]), "{format:?}");
+        assert!(!entry.inputs.contains(&entry.results[0]));
+        assert!(entry.allocations.iter().any(|a| a.resource() == entry.results[0]));
+        WhlProgram::parse(&program.to_whl("staged", format).unwrap()).unwrap();
+    }
+}
+
 fn check_whl(source: &str) {
     let mut depth = 0i32;
     let mut string = false;

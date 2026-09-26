@@ -81,9 +81,11 @@ pub(in crate::egglog) fn facts(
         }
     }
     for (&id, output) in outputs {
+        sink.set("OutputPinned", i64::from(id.as_u32()), false)?;
         if let Some(Attribute::Storage { set, binding, .. }) =
             entries[output.entry].declaration.outputs.get(output.index).and_then(|o| o.attribute.as_ref())
         {
+            sink.set("OutputPinned", i64::from(id.as_u32()), true)?;
             sink.add(
                 "AbiOutputBinding",
                 (i64::from(id.as_u32()), i64::from(*set), i64::from(*binding)),

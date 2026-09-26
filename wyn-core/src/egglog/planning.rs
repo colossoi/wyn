@@ -475,6 +475,22 @@ pub(super) fn facts(
             };
             sink.add(relation, (abi_value, n))?;
         }
+        // Filter stores tuple-valued elements in one logical array. Its
+        // projected components share the live extent without aliasing the
+        // aggregate's storage. Ordinary tuples can contain unequal arrays.
+        if let ExprKind::Project { tuple, .. } = value.kind {
+            if matches!(data.expressions[tuple].kind, ExprKind::OperationResult(op)
+                if matches!(data.operations[op].kind, OperationKind::Filter { .. }))
+                && crate::types::as_soa_tuple(strip_existentials(
+                    &data.types[data.expressions[tuple].ty].ty,
+                ))
+                .is_some()
+            {
+                let tuple = sink.add("AbiExpr", i64::from(tuple.as_u32()))?;
+                let length = sink.add("AbiLength", tuple)?;
+                sink.add("AbiArrayLength", (abi_value, length))?;
+            }
+        }
         match &value.kind {
             ExprKind::Parameter(p) => {
                 let p = sink.add("AbiParameter", i64::from(p.as_u32()))?;

@@ -154,6 +154,9 @@ fn size_values(data: &Ir) -> LookupSet<ExprId> {
         }
     }
     for operation in data.operations.values() {
+        if let Some(length) = crate::egglog::data::scratch_source(data, &operation.kind) {
+            pending.push(length);
+        }
         match &operation.kind {
             OperationKind::Screma { inputs, .. }
             | OperationKind::Filter { inputs, .. }

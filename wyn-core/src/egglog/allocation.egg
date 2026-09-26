@@ -80,9 +80,15 @@
       ((ElementType (Output output) t) (CapacityExtent (Output output) n)
        (FreshValue (Output output)) (Materialize (Output output))
        (OutputBacking output (Output output)) (CopyOutput output)) :ruleset materialize-outputs)
-(rule ((ReturnArray output e) (ValueRef e value) (= storage (Backing value)))
+(rule ((ReturnArray output e) (= (OutputPinned output) false)
+       (ValueRef e value) (= storage (Backing value)))
       ((OutputBacking output storage)) :ruleset allocation)
-(rule ((ReturnArray output e) (ValueRef e (Source source)))
+; A compiler allocation can take the declared output binding. A borrowed
+; input/view must instead be copied, including its slice offset and length.
+(rule ((ReturnArray output e) (ValueRef e value) (= storage (Backing value))
+       (Allocation storage n))
+      ((OutputBacking output storage)) :ruleset allocation)
+(rule ((ReturnArray output e) (= (OutputPinned output) false) (ValueRef e (Source source)))
       ((set (Backing (Source source)) (Source source)) (OutputBacking output (Source source))) :ruleset allocation)
 (rule ((TotalResult op i t)) ((BufferSlot op "total" i (Result op i))) :ruleset allocation)
 (rule ((ArrayResult op i t) (TotalCount op n))

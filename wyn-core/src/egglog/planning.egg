@@ -225,3 +225,6 @@
 (relation AbiInvokes (RootKey RegionKey))
 
 (relation UninitializedResult (OperationKey i64 TypeKey Extent))
+
+; Explicit output bindings cannot be satisfied by borrowing an input buffer.
+(function OutputPinned (i64) bool :merge (or old new))

@@ -1263,8 +1263,8 @@ fn scratch_annotation_drops_replicate_and_supports_runtime_shape() {
     let result = compile(
         "entry main(xs: []i32) []i32 = scatter((#[scratch] replicate(length(xs),7i32)),0..<length(xs),xs)",
     );
-    // Two existing scalar length publications plus the scatter; no fill or copy.
-    assert_eq!(kernel_count(&result), 3);
+    // Length metadata is rematerialized; only scatter launches, with no fill or copy.
+    assert_eq!(kernel_count(&result), 1);
     for n in [0, 1, 65, 137] {
         let values: Vec<_> = (0..n).collect();
         assert_eq!(run(&result, vec![Value::array(values.clone())])[0].ints(), values);
