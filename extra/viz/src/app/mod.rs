@@ -18,10 +18,12 @@ pub struct App {
 }
 
 struct State {
-    window: Arc<Window>,
-    surface: Surface<'static>,
-    config: SurfaceConfiguration,
+    // Fields drop in declaration order: release the runner's surface textures
+    // before destroying the surface, and keep the window alive until last.
     runner: Runner,
+    surface: Surface<'static>,
+    window: Arc<Window>,
+    config: SurfaceConfiguration,
     started: Instant,
     previous: Instant,
     frame: Frame,
@@ -240,6 +242,11 @@ fn key_code(key: &Key) -> Option<usize> {
 }
 
 impl ApplicationHandler for App {
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        // Tear down GPU/window resources while the event loop is still alive.
+        self.state.take();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
