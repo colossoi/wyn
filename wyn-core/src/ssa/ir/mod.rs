@@ -15,14 +15,12 @@ use crate::flow::{ControlHeader, Terminator as FlowTerminator};
 
 mod control_flow;
 mod dce;
-mod inline;
 mod rewrite;
 mod schedule;
 mod trivial_params;
 mod uses;
 pub(crate) use control_flow::fold_constant_selections;
 pub(crate) use dce::eliminate_dead_values;
-pub(crate) use inline::inline_single_block;
 pub(crate) use rewrite::Substitutions;
 pub use rewrite::VisitValues;
 pub(crate) use schedule::{schedule_floating, LoopScopes};
@@ -273,18 +271,6 @@ impl<I, T> Function<I, T> {
             unreachable!("value-producing instruction {inst:?} has no result")
         };
         (inst, value)
-    }
-
-    /// Remove a placed instruction from its block and leave its value floating.
-    pub(crate) fn float_inst(&mut self, inst: InstId) {
-        assert!(
-            self.insts[inst].result.is_some(),
-            "cannot float resultless instruction {inst:?}"
-        );
-        if let InstPlacement::Block(block) = self.insts[inst].placement {
-            self.blocks[block].insts.retain(|&candidate| candidate != inst);
-        }
-        self.insts[inst].placement = InstPlacement::Floating;
     }
 
     pub fn append_void_inst(&mut self, block: BlockId, data: I) -> InstId {

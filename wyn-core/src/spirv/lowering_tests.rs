@@ -9,6 +9,16 @@ fn compile_to_spirv(source: &str) -> Result<Vec<u32>> {
 }
 
 #[test]
+fn generated_map_length_reuses_the_storage_view_length() {
+    let words = compile_to_spirv("entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)").unwrap();
+    let module = wspirv::dr::load_words(&words).unwrap();
+    // Both the loop bound and the output view reuse the input's length:
+    // two extracts and four signedness casts disappear from the 84-instruction baseline.
+    assert_eq!(module.all_inst_iter().count(), 78, "{}", disasm(&words));
+    assert!(!module.all_inst_iter().any(|i| i.class.opcode == spirv::Op::Bitcast));
+}
+
+#[test]
 fn trivial_loop_phis_are_removed_without_losing_loop_state_or_wgsl_scope() {
     for source in [
         "entry repro(xs: []f32) []f32 = map(|x| x + 1.0, xs)",

@@ -3,6 +3,7 @@ use super::{term, Expressions, OptimizeError, Placed, Program, Simplified};
 use crate::egglog::rewrite::all;
 use crate::egglog::timing::{span, time};
 
+pub(super) mod expand;
 mod fold;
 mod hoist;
 mod read;

@@ -217,6 +217,47 @@ fn fixed_array_types_supply_lengths_without_reading_captured_values() {
 }
 
 #[test]
+fn constructed_view_lengths_forward_the_live_unsigned_operand() {
+    use super::u32_type as u32;
+    use crate::op::{OpTag, PureViewSource};
+    use crate::ssa::types::{ConstantValue, ValueRef};
+    use crate::types::{no_buffer, view_array_of};
+
+    let capture = Capture::new();
+    let mut compiler = capture.compiler();
+    let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
+    let runtime = body.builder.func_mut().add_function_param(u32(), "length".into());
+    for length in [
+        ValueRef::Const(ConstantValue::U32(0)),
+        ValueRef::Const(ConstantValue::U32(u32::MAX)),
+        runtime.into(),
+    ] {
+        let view = body
+            .op(
+                OpTag::StorageView(PureViewSource::Storage(crate::BindingRef::new(0, 0))),
+                vec![
+                    super::Typed {
+                        value: ValueRef::Const(ConstantValue::U32(0)),
+                        ty: u32(),
+                    },
+                    super::Typed {
+                        value: length,
+                        ty: u32(),
+                    },
+                ],
+                view_array_of(&crate::types::i32(), no_buffer()),
+            )
+            .unwrap();
+        body.environment.locals.insert("view".into(), view);
+        let before = body.builder.func().insts.len();
+        let result = body.value(&Value::op("length", [Value::Local("view".into())])).unwrap();
+        assert_eq!(result.value, length);
+        assert_eq!(result.ty, u32());
+        assert_eq!(body.builder.func().insts.len(), before);
+    }
+}
+
+#[test]
 fn bounded_capture_types_do_not_turn_capacity_into_length() {
     use crate::builtins::catalog;
     use crate::op::OpTag;
@@ -341,8 +382,11 @@ fn capture_reads_stay_in_their_conditional_arm_or_merge() {
     });
     let mut compiler = capture.compiler();
     let mut body = super::Body::new(&mut compiler, capture.root, &[], 1).unwrap();
-    body.values(&[Value::Source(conditional), Value::Source(capture.fields[0])]).unwrap();
-    let function = body.builder.func();
+    let values = body.values(&[Value::Source(conditional), Value::Source(capture.fields[0])]).unwrap();
+    let result = body.pack(values).unwrap();
+    body.builder.terminate(crate::ssa::types::Terminator::Return(Some(result.value))).unwrap();
+    let (body, _) = body.finish().unwrap();
+    let function = &body.inner;
     let load_blocks: std::collections::HashSet<_> = function
         .insts
         .values()

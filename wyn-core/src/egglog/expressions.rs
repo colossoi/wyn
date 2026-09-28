@@ -20,6 +20,7 @@ pub(super) const RUN: &str = "(run-schedule (saturate (run expressions)))";
 /// scalar simplification without an intervening textual or command representation.
 pub fn insert_expressions(mut program: Program<Fused>) -> Result<Program<Expressions>, OptimizeError> {
     let _timing = span("egglog insert expressions");
+    super::scalar::expand::run(&mut program.ir);
     select::form(&mut program.ir);
     let _dependencies = span("egglog insert expressions / dependencies");
     let dependencies = analyze(&program.ir);

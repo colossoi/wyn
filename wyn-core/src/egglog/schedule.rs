@@ -116,6 +116,7 @@ pub fn schedule(
         )
         .collect();
     let mut planner = Planner {
+        rewrite: super::rewrite::Rewriter::new(&converted.ir),
         placements: placement_index(&converted.ir, &converted.state.placements),
         data: &mut converted,
         schedules,
@@ -170,6 +171,7 @@ fn error(message: &str) -> OptimizeError {
 }
 
 struct Planner<'a> {
+    rewrite: super::rewrite::Rewriter,
     placements: BTreeMap<PlacementSite, Vec<ExprId>>,
     data: &'a mut Program<Scheduled>,
     schedules: BTreeMap<RegionId, Vec<OperationId>>,
@@ -613,9 +615,42 @@ impl Planner<'_> {
                 results,
                 ..
             } => {
-                let target = self.region(*region, true)?;
                 let mut args = arguments;
                 args.extend(captures.iter().copied().map(Value::Source));
+                if super::scalar::expand::small(&self.data.ir, *region) {
+                    let parameters = self.data.regions[*region].parameters.clone();
+                    let mut substitutions = BTreeMap::new();
+                    for (parameter, argument) in parameters.into_iter().zip(args.iter()) {
+                        let record = self.data.parameters[parameter].clone();
+                        let source = self.rewrite.intern(
+                            &mut self.data.ir,
+                            record.ty,
+                            ExprKind::Parameter(parameter),
+                        );
+                        let replacement = if let Value::Source(value) = argument {
+                            if self.data.expressions[*value].ty == record.ty {
+                                *value
+                            } else {
+                                self.rewrite.intern(&mut self.data.ir, record.ty, ExprKind::Coerce(*value))
+                            }
+                        } else {
+                            let ty = record.ty;
+                            let fresh = self.data.ir.parameters.alloc(record);
+                            self.emit(block, Instruction::BindParameter(fresh, argument.clone()));
+                            self.rewrite.intern(&mut self.data.ir, ty, ExprKind::Parameter(fresh))
+                        };
+                        substitutions.insert(source, replacement);
+                    }
+                    return Ok(self.data.regions[*region]
+                        .results
+                        .clone()
+                        .into_iter()
+                        .map(|e| {
+                            Value::Source(self.rewrite.value(&mut self.data.ir, e, &mut substitutions))
+                        })
+                        .collect());
+                }
+                let target = self.region(*region, true)?;
                 let names: Vec<_> = (0..results.len()).map(|i| format!("{prefix}{i}")).collect();
                 self.emit(
                     block,

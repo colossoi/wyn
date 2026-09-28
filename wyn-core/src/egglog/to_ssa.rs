@@ -290,6 +290,7 @@ impl<'a, 'b> Body<'a, 'b> {
     fn finish(self) -> Result<(FuncBody, Vec<Type>), OptimizeError> {
         let types = self.return_types.unwrap_or_default();
         let mut body = self.builder.finish().map_err(builder_error)?;
+        crate::ssa::ir::schedule_floating(&mut body.inner).map_err(|e| error(e.to_string()))?;
         body.return_ty = if self.graphics_outputs { unit() } else { result_type(&types) };
         Ok((body, types))
     }
@@ -608,16 +609,16 @@ impl<'a, 'b> Body<'a, 'b> {
         args: Vec<Typed>,
         ty: Type,
     ) -> Result<Typed, OptimizeError> {
-        let value = self
-            .builder
-            .push_inst(
-                InstKind::Op {
-                    tag,
-                    operands: args.into_iter().map(|v| v.value).collect(),
-                },
-                ty.clone(),
-            )
-            .map_err(builder_error)?;
+        let instruction = InstKind::Op {
+            tag,
+            operands: args.into_iter().map(|v| v.value).collect(),
+        };
+        // Inlining can expose invariant arithmetic after source placement.
+        let value = if crate::ssa::is_speculatable(&instruction) {
+            self.builder.func_mut().append_floating_inst(instruction, ty.clone())
+        } else {
+            self.builder.push_inst(instruction, ty.clone()).map_err(builder_error)?
+        };
         Ok(Typed {
             value: value.into(),
             ty,
