@@ -9,7 +9,6 @@ open f32
 ------------------------------------------------------------
 def epsilon: f32 = 0.001
 def max_dist: f32 = 100.0
-def num_spheres: i32 = 12
 
 def MAX_REFLECTION_BOUNCES: i32 = 3
 
@@ -181,8 +180,8 @@ def intersect_scene(ro: vec3f32, rd: vec3f32) (f32, i32, vec3f32) =
   let closest_sphere = find_closest_hit(sphere_hits) in
 
   -- Return closer of ground or sphere hit
-  let (t_ground, m_ground, n_ground) = ground_hit in
-  let (t_sphere, m_sphere, n_sphere) = closest_sphere in
+  let (t_ground, _, _) = ground_hit in
+  let (t_sphere, _, _) = closest_sphere in
   if t_ground < t_sphere then ground_hit else closest_sphere
 
 ------------------------------------------------------------
@@ -219,7 +218,7 @@ def get_sky_color(rd: vec3f32) vec3f32 =
 
 def in_shadow(hit_point: vec3f32, light_dir: vec3f32) f32 =
   let shadow_ro = hit_point + light_dir * epsilon * 10.0 in
-  let (t, mat_id, unused_n) = intersect_scene(shadow_ro, light_dir) in
+  let (_, mat_id, _) = intersect_scene(shadow_ro, light_dir) in
   if mat_id > 0 then 0.3 else 1.0
 
 ------------------------------------------------------------
