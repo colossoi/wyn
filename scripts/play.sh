@@ -80,7 +80,7 @@ fi
 
 name=$(basename -- "$source_path" .wyn)
 spv_path="$artifact_directory/$name.spv"
-descriptor_path="$artifact_directory/$name.json"
+host_path="$artifact_directory/$name.wynhost"
 source_directory=$(dirname -- "$source_path")
 viz_config="$source_directory/$name.viz.json"
 wyn_binary="$workspace/target/release/wyn"
@@ -130,7 +130,7 @@ echo "Compiling $source_path"
 cleanup
 prepared_source=''
 
-for artifact in "$spv_path" "$descriptor_path"; do
+for artifact in "$spv_path" "$host_path"; do
     [[ -f $artifact ]] || { echo "Compiler did not produce expected artifact: $artifact" >&2; exit 1; }
 done
 
@@ -139,7 +139,7 @@ viz_arguments=(pipeline "$spv_path")
 ((max_frames > 0)) && viz_arguments+=("--max-frames=$max_frames")
 
 echo "SPIR-V:     $spv_path"
-echo "Descriptor: $descriptor_path"
+echo "Host:       $host_path"
 echo "Running $name..."
 printf '%q ' "$viz_binary" "${viz_arguments[@]}"
 printf '\n'
