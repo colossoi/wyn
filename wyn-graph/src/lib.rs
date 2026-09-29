@@ -305,88 +305,83 @@ where
         let reachable = reachable_from_ordered([entry], order, |node, out| successors(node, out));
         let reachable_set: HashSet<N> = reachable.iter().copied().collect();
 
-        let mut predecessors: HashMap<N, Vec<N>> =
-            reachable.iter().map(|&node| (node, Vec::new())).collect();
+        let indices: HashMap<_, _> = reachable.iter().enumerate().map(|(i, &node)| (node, i)).collect();
+        let mut predecessors = vec![Vec::new(); reachable.len()];
+        let mut outgoing = vec![Vec::new(); reachable.len()];
         let mut next = Vec::new();
-        for &node in &reachable {
+        for (i, &node) in reachable.iter().enumerate() {
             next.clear();
             successors(node, &mut next);
             for successor in next.iter().copied() {
-                if reachable_set.contains(&successor) {
-                    predecessors.entry(successor).or_default().push(node);
-                }
+                let j = indices[&successor];
+                outgoing[i].push(j);
+                predecessors[j].push(i);
             }
         }
 
-        let mut doms: HashMap<N, HashSet<N>> = HashMap::new();
-        for &node in &reachable {
-            if node == entry {
-                doms.insert(node, [entry].into_iter().collect());
-            } else {
-                doms.insert(node, reachable_set.clone());
+        // Reverse postorder makes the immediate-dominator iteration converge
+        // quickly, including for loops. Keep the requested discovery order for
+        // the public children/preorder contract below.
+        let root = indices[&entry];
+        let mut visited = vec![false; reachable.len()];
+        let mut pending = vec![(root, false)];
+        let mut reverse_postorder = Vec::with_capacity(reachable.len());
+        while let Some((node, exiting)) = pending.pop() {
+            if exiting {
+                reverse_postorder.push(node);
+            } else if !visited[node] {
+                visited[node] = true;
+                pending.push((node, true));
+                pending.extend(outgoing[node].iter().rev().map(|&child| (child, false)));
             }
         }
-
-        // `predecessors` and `doms` are keyed by exactly `reachable`, so every
-        // lookup below is total. Skipping a missing predecessor would widen the
-        // intersection and yield a wrong tree, so index rather than guard.
+        reverse_postorder.reverse();
+        let mut rank = vec![0; reachable.len()];
+        for (i, &node) in reverse_postorder.iter().enumerate() {
+            rank[node] = i;
+        }
+        // Only discovered nodes have parents. The root points to itself while
+        // intersecting paths; it is omitted from the final public idom map.
+        let mut parents = vec![None; reachable.len()];
+        parents[root] = Some(root);
         loop {
             let mut changed = false;
-            for &node in &reachable {
-                if node == entry {
-                    continue;
-                }
-
-                let mut predecessor_sets =
-                    predecessors[&node].iter().map(|predecessor| doms[predecessor].clone());
-                let Some(mut new_set) = predecessor_sets.next() else {
-                    // Reachability discovery records the edge that first found
-                    // every non-entry node. Keep the conservative initial set
-                    // if a future traversal implementation violates that
-                    // contract, rather than panicking in graph analysis.
+            for &node in reverse_postorder.iter().skip(1) {
+                let mut incoming = predecessors[node].iter().copied().filter(|&p| parents[p].is_some());
+                let Some(mut parent) = incoming.next() else {
                     continue;
                 };
-                for predecessor_set in predecessor_sets {
-                    new_set = new_set.intersection(&predecessor_set).copied().collect();
+                for mut other in incoming {
+                    while parent != other {
+                        if rank[parent] > rank[other] {
+                            let Some(next) = parents[parent] else {
+                                unreachable!("known dominator chain must reach entry");
+                            };
+                            parent = next;
+                        } else {
+                            let Some(next) = parents[other] else {
+                                unreachable!("known dominator chain must reach entry");
+                            };
+                            other = next;
+                        }
+                    }
                 }
-                new_set.insert(node);
-
-                if doms[&node] != new_set {
-                    doms.insert(node, new_set);
+                if parents[node] != Some(parent) {
+                    parents[node] = Some(parent);
                     changed = true;
                 }
             }
-
             if !changed {
                 break;
             }
         }
-
-        // A node's dominators form a chain, so the strict dominator with the
-        // largest dominator set is the immediate one, and no two can tie.
-        let mut idom = HashMap::new();
-        for &node in &reachable {
-            if node == entry {
-                continue;
-            }
-
-            let mut best = None;
-            let mut best_depth = 0;
-            for &dominator in &doms[&node] {
-                if dominator == node {
-                    continue;
-                }
-                let depth = doms[&dominator].len();
-                if depth > best_depth {
-                    best = Some(dominator);
-                    best_depth = depth;
-                }
-            }
-
-            if let Some(parent) = best {
-                idom.insert(node, parent);
-            }
-        }
+        let idom: HashMap<N, N> = parents
+            .into_iter()
+            .enumerate()
+            .filter_map(|(node, parent)| {
+                parent.filter(|_| node != root).map(|parent| (reachable[node], reachable[parent]))
+            })
+            .collect();
 
         let mut children: HashMap<N, Vec<N>> = reachable.iter().map(|&node| (node, Vec::new())).collect();
         for &node in &reachable {

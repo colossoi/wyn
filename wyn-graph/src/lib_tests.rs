@@ -187,3 +187,35 @@ fn dominator_walk_order_selects_child_and_preorder_order() {
         assert!(!tree.dominates(1, 3));
     }
 }
+
+#[test]
+fn dominators_match_path_removal_for_all_small_graphs() {
+    // Removing a dominator must disconnect its dominated nodes from entry.
+    // Enumerate cycles, irreducible control flow, and unreachable components.
+    let edges: Vec<_> = (0..4).flat_map(|a| (0..4).filter(move |&b| a != b).map(move |b| (a, b))).collect();
+    for mask in 0..(1 << edges.len()) {
+        let mut graph = vec![Vec::new(); 4];
+        for (bit, &(a, b)) in edges.iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                graph[a].push(b);
+            }
+        }
+        for order in [WalkOrder::DepthFirst, WalkOrder::BreadthFirst] {
+            let tree = DominatorTree::build_ordered(0, order, |node, out| out.extend(&graph[node]));
+            for candidate in 0..4 {
+                let surviving =
+                    reachable_from_ordered((candidate != 0).then_some(0), order, |node, out| {
+                        out.extend(graph[node].iter().copied().filter(|&next| next != candidate));
+                    });
+                for node in 0..4 {
+                    let expected = tree.is_reachable(node) && !surviving.contains(&node);
+                    assert_eq!(
+                        tree.dominates(candidate, node),
+                        expected,
+                        "graph {mask}, {candidate} -> {node}"
+                    );
+                }
+            }
+        }
+    }
+}
